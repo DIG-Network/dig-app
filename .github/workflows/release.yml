@@ -1,0 +1,77 @@
+# STABLE binary release. On a `vX.Y.Z` tag (cut ONLY by the nightly-release orchestrator's stable
+# job on a MANUAL `workflow_dispatch` — never auto-cut by the cron; CLAUDE.md §3.6-A), this builds
+# the `dig-app` agent/tray binary + the `dign` CLI for every OS/arch (via the reusable build
+# workflow) and publishes them to a STABLE GitHub Release (`prerelease: false`, `latest`). The
+# changelog is already inside the tag (the orchestrator committed it before tagging).
+#
+# Tag-ONLY: merges to main do NOT build or release here (releases batch to the nightly cron +
+# manual dispatch, §3.6-A). A `workflow_dispatch` is a manual "does main still build?" canary — it
+# builds but does not publish (publish is gated on a tag ref).
+name: Release (stable)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: v
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=g$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build
+    needs: meta
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      version: ${{ needs.meta.outputs.version }}
+      ref: ""
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Flatten
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release
+      - name: Create / update the STABLE release and attach binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          # A stable release moves `latest`; nightlies are always prerelease + never latest.
+          prerelease: false
+          make_latest: "true"
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -1,0 +1,22 @@
+# The headless per-user identity-agent CORE (epic dig_ecosystem#908). Everything identity-specific
+# lives here — key management, DID/profiles, wallet host, per-user encrypted AppData, the
+# identity-authenticated IPC session to the engine, and the CLI/RPC gateway. The tray/CLI binaries
+# in the sibling `dig-app` crate are thin shells over this library, so all logic + its test coverage
+# is centralized here.
+#
+# U1 (this WU) delivers the module skeleton + the small set of pure, fully-tested helpers the
+# architecture needs day one (form-factor detection, per-OS AppData paths, IPC channel paths). The
+# security-critical subsystems (keystore/profiles/session) are doc-commented stubs U4/U5/U6 implement
+# to the SPEC.
+[package]
+name = "dig-app-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The DIG user-app identity-agent core: key management, DID/profiles, wallet, per-user encrypted AppData, identity-authenticated engine IPC, and the CLI/RPC gateway. The identity half of the engine/identity split (dig_ecosystem#908)."
+
+[dependencies]
+thiserror.workspace = true

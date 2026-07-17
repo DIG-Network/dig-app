@@ -19,3 +19,25 @@ identity agent + the `dign` CLI, no tray.
 
 Architecture + design: DIG-Network/dig_ecosystem#908 (epic). Boundary invariant: the node is the
 identity-agnostic engine; dig-app is the identity + user interaction.
+
+## Workspace layout
+
+- `crates/dig-app-core` — the headless per-user identity-agent **library** (identity/keys/profiles/
+  wallet/storage/IPC/gateway). All logic + test coverage lives here.
+- `crates/dig-app` — the thin binaries: `dig-app` (the branded tray/menu-bar agent shell) and `dign`
+  (the DIG user CLI).
+
+## Build & test
+
+```sh
+cargo build --workspace
+cargo test --workspace
+cargo llvm-cov nextest --workspace --fail-under-lines 80   # the CI coverage gate
+```
+
+## Spec & status
+
+`SPEC.md` is the normative contract (the identity split, the IPC contract, NC-2/NC-3, release
+engineering). U1 (this work) ships the spec + the gated scaffold + the apps-repo release pipeline
+(nightlies + manual stable, uniform with dig-node); the identity/keys/profiles/session subsystems are
+implemented by later work units (see the SPEC appendix). Architecture + DAG: DIG-Network/dig_ecosystem#908.

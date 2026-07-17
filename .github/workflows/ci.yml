@@ -1,0 +1,77 @@
+# PR quality gates for the dig-app Rust workspace: formatting, linting, tests, and a GATED
+# coverage report (>=80% lines, CLAUDE.md §2.3/§2.4a). Runs on every PR to main and on pushes to
+# main so the default branch stays green. Job `name:`s are stable — they are the required-check
+# contexts wired on the protected branch.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+# Least privilege: CI only reads the checked-out repo (GHAS/CodeQL requirement).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: Test + coverage (>=80% lines, gated)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      # `cargo llvm-cov nextest` runs the flaky-aware nextest runner UNDER coverage instrumentation
+      # (one combined invocation — separate steps collect zero coverage). The gate fails the build
+      # below the 80% line floor.
+      - name: Run tests with 80% line-coverage gate
+        run: cargo llvm-cov nextest --workspace --all-features --locked --fail-under-lines 80 --retries 2
+      # nextest does not run doctests; run them explicitly so a doc example can never rot.
+      - name: Run doctests
+        run: cargo test --doc --workspace --all-features
+      - name: Check documentation builds
+        run: cargo doc --no-deps --workspace --all-features
