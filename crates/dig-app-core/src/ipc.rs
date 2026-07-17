@@ -14,12 +14,12 @@ use crate::Os;
 
 /// The endpoint prefixes are canonical — a second implementation (the engine side, the `dign`
 /// client) must resolve the SAME address for a given user.
-const WINDOWS_PIPE_PREFIX: &str = r"\.\pipe\dignetwork-";
+const WINDOWS_PIPE_PREFIX: &str = r"\\.\pipe\dignetwork-";
 const UNIX_SOCKET_NAME: &str = "dignetwork.sock";
 
 /// Resolve the per-user IPC endpoint address for `os` and the current `user` identifier.
 ///
-/// - Windows — a named pipe `\.\pipe\dignetwork-<user>`.
+/// - Windows — a named pipe `\\.\pipe\dignetwork-<user>`.
 /// - macOS / Linux — a Unix domain socket `<runtime_dir>/dignetwork.sock`, where `runtime_dir` is
 ///   the caller-supplied per-user runtime directory (`$XDG_RUNTIME_DIR` on Linux, a per-user path
 ///   on macOS). On Windows `runtime_dir` is ignored (the pipe namespace carries the user).
@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn windows_endpoint_is_a_per_user_named_pipe() {
         let ep = channel_endpoint(Os::Windows, "alice", "");
-        assert_eq!(ep, r"\.\pipe\dignetwork-alice");
+        assert_eq!(ep, r"\\.\pipe\dignetwork-alice");
     }
 
     #[test]
