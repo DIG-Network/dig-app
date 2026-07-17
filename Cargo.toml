@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -25,3 +25,13 @@ authors = ["DIG Network"]
 [workspace.dependencies]
 dig-app-core = { path = "crates/dig-app-core" }
 thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+# Cross-platform desktop tray / menu-bar shell (Windows system tray · macOS menu-bar · Linux
+# AppIndicator/StatusNotifier). `tao` provides the platform event loop the tray icon needs to pump
+# its events; the native menu comes from `tray-icon`'s re-exported `muda`. The tray is the `dig-app`
+# crate's default `tray` feature; disable it (`--no-default-features`) to build the pure headless
+# agent with no desktop stack.
+tray-icon = "0.19"
+tao = "0.30"

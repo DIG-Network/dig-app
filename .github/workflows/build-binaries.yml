@@ -55,6 +55,9 @@ jobs:
           rustup toolchain install stable --component rustfmt --component clippy
           rustup default stable
           rustc --version
+      # The default `tray` feature links the desktop tray stack (GTK + libxdo on Linux).
+      - name: Install tray build deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -95,6 +98,11 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
           rustc --version
+      # The default `tray` feature links the desktop tray stack (GTK + libxdo on Linux). macOS +
+      # Windows carry their tray stack in the OS SDK, so only Linux needs extra dev libraries.
+      - name: Install tray build deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}

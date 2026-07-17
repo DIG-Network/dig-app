@@ -28,5 +28,14 @@ path = "src/bin/dig-app.rs"
 name = "dign"
 path = "src/bin/dign.rs"
 
+[features]
+# The desktop tray / menu-bar shell is on by default (release builds ship it), and degrades to the
+# headless agent at runtime when no display is present. Build `--no-default-features` for a pure
+# headless agent binary with no desktop (GTK/tao) dependency — e.g. a Linux server image.
+default = ["tray"]
+tray = ["dep:tray-icon", "dep:tao"]
+
 [dependencies]
 dig-app-core.workspace = true
+tray-icon = { workspace = true, optional = true }
+tao = { workspace = true, optional = true }

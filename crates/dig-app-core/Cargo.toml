@@ -20,3 +20,8 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
