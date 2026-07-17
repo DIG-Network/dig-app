@@ -278,10 +278,22 @@ day one; the security-critical subsystems are implemented by later work units to
 | `form_factor` | tray-vs-headless detection (`FormFactor::detect`) | U1 |
 | `storage` | per-OS AppData layout (`brand_data_dir`, `profile_dir`) — NC-2/NC-3 | U1 (paths) |
 | `ipc` | per-user IPC endpoint resolution (`channel_endpoint`) | U1 (addressing) |
+| `environment` | resolved per-user host facts (`AppEnvironment`) all boot decisions derive from | U3 |
+| `config` | the agent's non-secret on-disk runtime settings (`AgentConfig`, AppData; plaintext pre-U4) | U3 |
+| `engine` | engine connection state + reachability probe (`EngineConnector`, `EngineState`) | U3 (probe; real session U6) |
+| `shutdown` | the cooperative shutdown latch (`Shutdown`) that stops the run loop promptly | U3 |
+| `agent` | the per-user agent lifecycle: start/stop, reconcile run loop, live `AgentStatus` | U3 |
 | `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation | U4 (stub) |
 | `profiles` | multi-DID create/select/edit via dig-identity | U5 (stub) |
 | `wallet` | per-profile wallet host | U4 (stub) |
 | `gateway` | authenticate callers + route (local vs proxy-to-engine) | U7 (stub) |
+
+The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows system tray · macOS
+menu-bar · Linux AppIndicator) and **degrades headless** (§4) when no display is present or the tray
+cannot mount; the tray is the crate's default `tray` feature, so a headless build omits the desktop
+stack entirely. U3 delivers `environment`/`config`/`engine`/`shutdown`/`agent` + the shell; the
+agent reaches the engine through the `EngineConnector` seam so U6 slots in the real
+identity-authenticated session without reshaping the run loop.
 
 The engine-side of the IPC contract (the `control.session.*` methods + the `sign` callback) is
 implemented in the dig-node repo (U2/U6), not here.

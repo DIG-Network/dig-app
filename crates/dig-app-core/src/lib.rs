@@ -16,18 +16,32 @@
 //! - [`identity`] — the two-identity model (transport peer-identity vs the user identity).
 //! - [`form_factor`] — headless agent core vs optional GUI tray shell.
 //!
-//! The normative contract for all of the above is the repo `SPEC.md`. U1 (this work unit) ships the
-//! module skeleton + the small set of pure helpers the architecture needs from day one; the
-//! security-critical subsystems are stubbed for U4–U7 to implement to the SPEC.
+//! The agent lifecycle that binds these together (U3) lives in:
+//!
+//! - [`agent`] — the per-user agent: start/stop, the reconcile run loop, and the live status.
+//! - [`environment`] — the resolved per-user host facts every boot decision derives from.
+//! - [`config`] — the agent's non-secret on-disk runtime settings (AppData, plaintext pre-U4).
+//! - [`engine`] — the connection state + reachability probe to the identity-agnostic engine.
+//! - [`shutdown`] — the cooperative shutdown latch that stops the run loop promptly.
+//!
+//! The normative contract for all of the above is the repo `SPEC.md`. U1 shipped the module skeleton
+//! plus the pure helpers; U3 adds the agent lifecycle and tray shell. The security-critical
+//! subsystems — [`keystore`] (U4), [`profiles`] (U5), the identity-authenticated session (U6), and
+//! [`gateway`] (U7) — remain stubbed to the SPEC.
 //!
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 
+pub mod agent;
+pub mod config;
+pub mod engine;
+pub mod environment;
 pub mod form_factor;
 pub mod gateway;
 pub mod identity;
 pub mod ipc;
 pub mod keystore;
 pub mod profiles;
+pub mod shutdown;
 pub mod storage;
 pub mod wallet;
 
@@ -44,8 +58,8 @@ pub enum Os {
     Linux,
 }
 
-/// Errors surfaced by the identity-agent core. Variants are added by the U4–U7 subsystems; U1
-/// defines the type so the public API shape is stable from the first release.
+/// Errors surfaced by the identity-agent core. Further variants are added by the U4–U7 subsystems;
+/// the type is defined here so the public API shape is stable from the first release.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A per-user path could not be resolved because a required environment variable was absent.
@@ -56,6 +70,14 @@ pub enum Error {
         /// The environment variable that was expected but missing.
         var: &'static str,
     },
+
+    /// An I/O error while reading or writing the agent's on-disk state (e.g. the config file).
+    #[error("agent I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// The agent's config file could not be (de)serialized — a malformed config file.
+    #[error("agent config is malformed: {0}")]
+    Config(#[from] serde_json::Error),
 }
 
 /// The crate result type.
