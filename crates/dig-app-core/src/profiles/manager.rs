@@ -67,6 +67,54 @@ impl<S: ProfileSealer> ProfileManager<S> {
         Ok(self.load_registry()?.active)
     }
 
+    /// The DID of the profile presented by DEFAULT — the user's persisted preferred identity (the one
+    /// the social selector and "primary identity" surfaces default to).
+    ///
+    /// Resolves in a fixed precedence so a caller always gets a sensible answer while any profile
+    /// exists:
+    ///
+    /// 1. the explicitly-configured default, IF it still names a known profile (a stale default —
+    ///    e.g. the chosen profile was since removed — is ignored, never returned);
+    /// 2. otherwise the active profile, if one is selected and known;
+    /// 3. otherwise the first profile in creation order;
+    /// 4. `None` only when no profile exists at all.
+    pub fn default_did(&self) -> Result<Option<String>> {
+        let registry = self.load_registry()?;
+        Ok(Self::resolve_default(&registry))
+    }
+
+    /// Resolves the default DID from a loaded registry (the precedence documented on
+    /// [`default_did`](Self::default_did)), pure so the fallback logic is directly testable.
+    fn resolve_default(registry: &ProfileRegistry) -> Option<String> {
+        registry
+            .default
+            .as_deref()
+            .filter(|did| registry.find(did).is_some())
+            .or(registry
+                .active
+                .as_deref()
+                .filter(|did| registry.find(did).is_some()))
+            .map(str::to_string)
+            .or_else(|| registry.profiles.first().map(|p| p.did.clone()))
+    }
+
+    /// Sets `did` as the user's configured default profile and persists it.
+    ///
+    /// The DID MUST name an existing profile — setting a default the user cannot present would be a
+    /// silent no-op, so an unknown DID is rejected with [`ProfileError::NotFound`] and nothing is
+    /// written.
+    pub fn set_default_did(&self, did: &str) -> Result<()> {
+        let mut registry = self.load_registry()?;
+        if registry.find(did).is_none() {
+            tracing::warn!(did, "set default rejected: no such profile");
+            return Err(ProfileError::NotFound(did.to_string()));
+        }
+        registry.default = Some(did.to_string());
+        self.save_registry(&registry)?;
+        tracing::info!(did, "default profile changed");
+        Ok(())
+    }
+
     /// Creates a new profile: provisions an identity (mint DID + generate keys via the seam),
     /// persists that identity sealed at rest and unlocks it, seals its initial [`ProfileData`] under
     /// the new profile's DEK, records it, and — when it is the first profile — makes it active.

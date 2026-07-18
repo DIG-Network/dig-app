@@ -56,6 +56,7 @@ pub mod identity;
 pub mod ipc;
 pub mod keystore;
 pub mod loopback;
+pub mod onboarding;
 pub mod pairing;
 pub mod profiles;
 pub mod session;
@@ -117,6 +118,11 @@ pub enum Error {
     /// state, or the engine seam — see [`wallet::WalletError`]).
     #[error(transparent)]
     Wallet(#[from] wallet::WalletError),
+
+    /// The dig-peer is not yet usable because onboarding is incomplete — a wallet or a profile is
+    /// still required (see [`onboarding::OnboardingError`]).
+    #[error(transparent)]
+    Onboarding(#[from] onboarding::OnboardingError),
 }
 
 /// The crate result type.

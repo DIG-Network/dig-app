@@ -97,6 +97,15 @@ pub struct ProfileRegistry {
     /// The DID of the active profile, if one is selected.
     #[serde(default)]
     pub active: Option<String>,
+    /// The DID of the user's configured DEFAULT profile — the identity presented by default (in the
+    /// social selector, as the primary identity). Distinct from [`active`](Self::active): "active" is
+    /// the profile currently loaded in memory, while "default" is the user's persisted preferred
+    /// identity. `None` until the user sets one, in which case callers fall back (active, then first).
+    ///
+    /// A DID is public (it already appears in each [`ProfileRecord`]), so this pointer lives in the
+    /// plaintext registry alongside `active` — no sealing is required for a non-secret selection.
+    #[serde(default)]
+    pub default: Option<String>,
     /// Every known profile, in creation order.
     #[serde(default)]
     pub profiles: Vec<ProfileRecord>,

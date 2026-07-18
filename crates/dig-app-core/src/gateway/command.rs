@@ -82,6 +82,14 @@ pub enum ProfilesAction {
         /// The `did:chia:` DID of the profile to activate.
         did: String,
     },
+    /// Show the configured default profile — the identity presented by default.
+    ShowDefault,
+    /// Set the default profile (by DID) — the identity presented by default in the social selector
+    /// and as the primary identity.
+    SetDefault {
+        /// The `did:chia:` DID of the profile to make the default.
+        did: String,
+    },
 }
 
 /// `dign wallet` sub-actions. With none, shows the address.
