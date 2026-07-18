@@ -194,6 +194,37 @@ is delegated to the keystore + wallet/engine, and the on-chain DID mint itself r
 dig-identity #771. Editing a profile updates the sealed metadata and recomputes the canonical
 dig-identity SMT root; broadcasting that root on-chain (chip35 delegation) is a wallet/engine operation.
 
+**Default profile (configurable).** In addition to the *active* profile (the one currently loaded in
+memory), the registry records an optional user-configured **default profile** DID — the identity
+presented by default (in the social selector, as the primary identity). Because a DID is public, the
+default pointer lives in the plaintext registry alongside the active pointer; no sealing is required.
+Resolving the default follows a fixed precedence so a caller always gets a sensible answer while any
+profile exists: (1) the explicitly-configured default IF it still names a known profile (a stale
+default — the chosen profile was removed — is ignored, never returned); (2) otherwise the active
+profile, if selected and known; (3) otherwise the first profile in creation order; (4) `None` only
+when no profile exists. Setting the default MUST reject a DID that names no existing profile, so the
+persisted default always points at a presentable identity.
+
+### 3.2a Onboarding gate (wallet → profile → ready)
+
+The dig-peer — the social / profile-exchange surfaces (epic dig_ecosystem#986) — is UNUSABLE until the
+user has completed onboarding, in a strictly ordered sequence: a **wallet first**, then **at least one
+profile**. This is modelled as a single onboarding state with three values:
+
+- **NeedsWallet** — no wallet has been imported or created; the first, blocking step. Every downstream
+  social/peer operation is refused.
+- **NeedsProfile** — a wallet exists but no profile does; the second, blocking step. Creating a profile
+  mints a `did:chia:` DID, which is gated on the on-chain mint spend (the DID-mint seam, held on
+  dig-identity #771): the wizard step exists now, but the mint returns an explicit held error until
+  #771 lands — the flow is wired and MUST NOT fake a mint.
+- **Ready** — a wallet and ≥1 profile exist; the dig-peer is usable.
+
+The state is a pure function of two observed facts — whether a wallet exists and how many profiles
+exist — so it is fully determined without I/O. The app observes wallet presence through a seam and the
+profile count from the profile registry (§3.2). Downstream peer operations MUST consult the gate
+(`require_ready`) and, when not ready, surface the specific next required step (wallet vs profile)
+rather than a generic error, so the UI can route the user to it.
+
 ### 3.3 Wallet
 
 The wallet is user-identity state and lives in dig-app (migrated out of the engine). It is a

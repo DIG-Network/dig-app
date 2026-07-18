@@ -138,6 +138,12 @@ mod tests {
         fn select_profile(&self, _: &str) -> Result<(), GatewayError> {
             unreachable!("not exercised")
         }
+        fn default_profile(&self) -> Result<Option<String>, GatewayError> {
+            unreachable!("not exercised")
+        }
+        fn set_default_profile(&self, _: &str) -> Result<(), GatewayError> {
+            unreachable!("not exercised")
+        }
         fn wallet_address(&self) -> Result<String, GatewayError> {
             unreachable!("not exercised")
         }

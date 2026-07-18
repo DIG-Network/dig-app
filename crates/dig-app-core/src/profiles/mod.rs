@@ -532,6 +532,89 @@ mod tests {
         assert_eq!(mgr.list().unwrap().len(), 1);
     }
 
+    // --- configurable default profile (#986 SG-0) ------------------------------------------------
+
+    #[test]
+    fn default_did_falls_back_to_the_first_profile_when_unset() {
+        // Unset default → the first profile (creation order) is the sensible fallback, even before
+        // the user selects an active one.
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _s) = harness(dir.path());
+        let prov = provisioner();
+        let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        mgr.create_profile(&prov, named("Bob"), root()).unwrap();
+
+        assert_eq!(mgr.default_did().unwrap(), Some(a.did));
+    }
+
+    #[test]
+    fn default_did_is_none_with_no_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = manager(dir.path());
+        assert_eq!(mgr.default_did().unwrap(), None);
+    }
+
+    #[test]
+    fn set_default_did_persists_and_round_trips_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (b_did, a_did) = {
+            let (mgr, _s) = harness(dir.path());
+            let prov = provisioner();
+            let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+            let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
+            // Default to Bob even though Ada is active + first — the user's choice wins.
+            mgr.set_default_did(&b.did).unwrap();
+            assert_eq!(mgr.default_did().unwrap().as_ref(), Some(&b.did));
+            (b.did, a.did)
+        };
+
+        // A restarted app (fresh manager over the same dir) still reports the persisted default,
+        // without any profile being unlocked (the default lives in the plaintext registry).
+        let (restarted, _s) = harness(dir.path());
+        assert_eq!(restarted.default_did().unwrap(), Some(b_did));
+        assert_eq!(restarted.active_did().unwrap(), Some(a_did));
+    }
+
+    #[test]
+    fn set_default_did_rejects_an_unknown_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _s) = harness(dir.path());
+        mgr.create_profile(&provisioner(), named("Ada"), root())
+            .unwrap();
+        let missing = canonical_did([7; 32]);
+        assert!(matches!(
+            mgr.set_default_did(&missing).unwrap_err(),
+            ProfileError::NotFound(_)
+        ));
+        // The rejected set left no default behind (it falls back, not to the bad DID).
+        assert_ne!(
+            mgr.default_did().unwrap().as_deref(),
+            Some(missing.as_str())
+        );
+    }
+
+    #[test]
+    fn a_stale_default_falls_back_instead_of_returning_a_gone_profile() {
+        // If the configured default no longer names a known profile (e.g. hand-edited registry or a
+        // future removal), resolution ignores it and falls back rather than returning a dangling DID.
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _s) = harness(dir.path());
+        let a = mgr
+            .create_profile(&provisioner(), named("Ada"), root())
+            .unwrap();
+
+        // Point the default at a DID that was never created, by editing the plaintext registry on
+        // disk directly (a hand-edit / a future removal that stranded the pointer).
+        let ghost = canonical_did([42; 32]);
+        let registry_path = dir.path().join("profiles").join("registry.json");
+        let mut registry: ProfileRegistry =
+            serde_json::from_slice(&std::fs::read(&registry_path).unwrap()).unwrap();
+        registry.default = Some(ghost.clone());
+        std::fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
+        // The stale default is ignored; the fallback (the only real profile) is returned.
+        assert_eq!(mgr.default_did().unwrap(), Some(a.did));
+    }
+
     // --- edit ------------------------------------------------------------------------------------
 
     #[test]

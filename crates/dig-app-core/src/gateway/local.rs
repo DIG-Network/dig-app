@@ -43,6 +43,11 @@ pub trait LocalIdentity {
     fn create_profile(&self, name: &str) -> Result<ProfileSummary, GatewayError>;
     /// Make the profile identified by `did` the active one.
     fn select_profile(&self, did: &str) -> Result<(), GatewayError>;
+    /// The DID of the configured default profile (the identity presented by default), if any profile
+    /// exists.
+    fn default_profile(&self) -> Result<Option<String>, GatewayError>;
+    /// Set the profile identified by `did` as the default profile.
+    fn set_default_profile(&self, did: &str) -> Result<(), GatewayError>;
     /// The active profile's wallet receive address.
     fn wallet_address(&self) -> Result<String, GatewayError>;
     /// The active profile's confirmed balance, in mojos.
@@ -108,6 +113,21 @@ fn handle_profiles(
             Ok(Outcome::new(
                 format!("active profile is now {did}"),
                 json!({ "active_did": did }),
+            ))
+        }
+        ProfilesAction::ShowDefault => {
+            let default = identity.default_profile()?;
+            let summary = match &default {
+                Some(did) => format!("default profile: {did}"),
+                None => "no default profile (create one first)".to_string(),
+            };
+            Ok(Outcome::new(summary, json!({ "default_did": default })))
+        }
+        ProfilesAction::SetDefault { did } => {
+            identity.set_default_profile(did)?;
+            Ok(Outcome::new(
+                format!("default profile is now {did}"),
+                json!({ "default_did": did }),
             ))
         }
     }
@@ -225,6 +245,7 @@ mod tests {
     struct FakeIdentity {
         profiles: Vec<ProfileSummary>,
         selected: RefCell<Option<String>>,
+        default: RefCell<Option<String>>,
         locked: bool,
     }
 
@@ -241,6 +262,17 @@ mod tests {
         }
         fn select_profile(&self, did: &str) -> Result<(), GatewayError> {
             *self.selected.borrow_mut() = Some(did.into());
+            Ok(())
+        }
+        fn default_profile(&self) -> Result<Option<String>, GatewayError> {
+            Ok(self
+                .default
+                .borrow()
+                .clone()
+                .or_else(|| self.profiles.first().map(|p| p.did.clone())))
+        }
+        fn set_default_profile(&self, did: &str) -> Result<(), GatewayError> {
+            *self.default.borrow_mut() = Some(did.into());
             Ok(())
         }
         fn wallet_address(&self) -> Result<String, GatewayError> {
@@ -326,6 +358,38 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn show_default_reports_the_configured_default() {
+        let identity = FakeIdentity {
+            profiles: vec![one_active("alice")],
+            ..Default::default()
+        };
+        let out = handle_local(
+            &Command::Profiles(ProfilesAction::ShowDefault),
+            &identity,
+            &approving(),
+        )
+        .unwrap();
+        assert_eq!(out.result["default_did"], json!("did:chia:alice"));
+    }
+
+    #[test]
+    fn set_default_forwards_the_did_and_persists_it() {
+        let identity = FakeIdentity {
+            profiles: vec![one_active("alice"), one_active("bob")],
+            ..Default::default()
+        };
+        handle_local(
+            &Command::Profiles(ProfilesAction::SetDefault {
+                did: "did:chia:bob".into(),
+            }),
+            &identity,
+            &approving(),
+        )
+        .unwrap();
+        assert_eq!(*identity.default.borrow(), Some("did:chia:bob".to_string()));
     }
 
     #[test]

@@ -104,6 +104,12 @@ pub enum ProfilesVerb {
         /// The `did:chia:` DID.
         did: String,
     },
+    /// Show the default profile, or set it by passing a DID. The default is the identity presented
+    /// by default (in the social selector, as the primary identity).
+    Default {
+        /// The `did:chia:` DID to make the default. Omit to show the current default.
+        did: Option<String>,
+    },
 }
 
 /// `dign wallet` verbs.
@@ -250,6 +256,10 @@ impl CliCommand {
                 Some(ProfilesVerb::List) => ProfilesAction::List,
                 Some(ProfilesVerb::Create { name }) => ProfilesAction::Create { name },
                 Some(ProfilesVerb::Select { did }) => ProfilesAction::Select { did },
+                Some(ProfilesVerb::Default { did: None }) => ProfilesAction::ShowDefault,
+                Some(ProfilesVerb::Default { did: Some(did) }) => {
+                    ProfilesAction::SetDefault { did }
+                }
             }),
             CliCommand::Wallet { action } => Command::Wallet(match action {
                 None | Some(WalletVerb::Address) => WalletAction::Address,
