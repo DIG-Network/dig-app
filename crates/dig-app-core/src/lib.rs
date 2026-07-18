@@ -97,6 +97,11 @@ pub enum Error {
     /// A profile-management failure (create / select / edit / seal — see [`profiles::ProfileError`]).
     #[error(transparent)]
     Profiles(#[from] profiles::ProfileError),
+
+    /// A wallet-host failure (key/address derivation, spend build, local signing, sealed wallet
+    /// state, or the engine seam — see [`wallet::WalletError`]).
+    #[error(transparent)]
+    Wallet(#[from] wallet::WalletError),
 }
 
 /// The crate result type.

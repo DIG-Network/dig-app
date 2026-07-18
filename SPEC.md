@@ -195,9 +195,57 @@ dig-identity SMT root; broadcasting that root on-chain (chip35 delegation) is a 
 
 ### 3.3 Wallet
 
-The wallet is user-identity state and lives in dig-app (migrated out of the engine). Spend bundles
-are built via the canonical wasm spend builders / chip35 delegation and **signed locally**; the
-finished bundle is handed to the engine to broadcast. Wallet state is DIGOP1-sealed per profile.
+The wallet is user-identity state and lives in dig-app (migrated out of the engine). It is a
+**focused host**, not a port of the engine's wallet tree: it holds the wallet key, builds and signs
+spends locally, caches the per-profile wallet view, and delegates network I/O to the engine.
+
+**Wallet key.** A profile's wallet key is a Chia BLS key rooted at a 32-byte seed. The on-chain
+spending key is the canonical Chia standard wallet child —
+`master_to_wallet_unhardened(master, 0).derive_synthetic()` — whose public half curries the standard
+puzzle; that puzzle's tree hash is the wallet's `xch1…` receive address. The key is held in memory
+only while the profile is unlocked, and its seed is the ONLY serialized form — always DIGOP1-sealed
+(§3.4) before it touches disk. The seed is never exposed to callers and never crosses the IPC
+boundary to the engine.
+
+**Spend building — chip35 only.** Every `$DIG` spend bundle is constructed by the canonical chip35
+spend builder (`chip35_dl_coin::build_dig_store_payment`); dig-app MUST NOT hand-roll a spend bundle.
+The per-capsule DIG payment pays the dynamic, USD-pegged amount (an input, never a hardcoded
+constant) to the canonical DIG treasury (`DIG_TREASURY_INNER_PUZZLE_HASH`, reused byte-identical from
+chip35 — never a placeholder). Minting a store is free of `$DIG`; only a capsule (commit) pays.
+
+**Local signing.** The unsigned coin spends are signed **in-process** with the synthetic wallet key
+against the Chia mainnet `AGG_SIG_ME` constants (the `chia-wallet-sdk` signer extracts each required
+signature and the wallet aggregates them). The finished `SpendBundle` — **signed bytes only** — is
+serialized to hex and handed to the engine to broadcast. The engine never receives the wallet private
+key (the same custody boundary as the §2.3 session `sign` callback). A required signature for a key
+the wallet does not hold is skipped, so an incomplete bundle fails closed at the network rather than
+being silently forged.
+
+**Wallet state at rest.** The per-profile wallet view — receive addresses and the last-known
+spendable coins (per asset) used for display + coin selection between chain reads — is DIGOP1-sealed
+under that profile's own DEK (§3.4), in the profile's directory (`wallet-state.seal`), alongside the
+separately-sealed key seed (`wallet-key.seal`). Both are cryptographically isolated per profile: one
+profile's DEK cannot open another's wallet blobs (fail-closed). The `.dig` content cache is NOT
+wallet data and is exempt from sealing (§3.4).
+
+**Engine seam — the `control.wallet.*` contract (NODE-1, [dig_ecosystem#910]).** The two things the
+wallet cannot do itself — broadcasting a signed bundle and reading chain state — cross the §5.3 IPC
+session as a small, **byte-identical cross-repo method set the engine implements** (the same
+contract-first pattern as the §5.3 session methods). The engine's chain access is chia-query-backed
+(the canonical coinset layer):
+
+- `control.wallet.broadcast` — `{ signed_bundle_hex }` → `{ accepted, transaction_id? }`. The engine
+  forwards the signed bundle to the network and reports mempool acceptance; it sees only signed bytes.
+- `control.wallet.coins` — `{ address, asset }` → `{ coins: [{ coin_id, asset, amount }] }`. The
+  address's spendable coins for the asset.
+- `control.wallet.balance` — `{ address, asset }` → `{ balance }`. The address's spendable balance in
+  the asset's base unit.
+
+`asset` is the lowercase wire enum `"xch" | "dig"`. dig-app depends only on the `WalletEngine` trait
+seam, so it compiles + tests standalone; the real IPC-session transport (the §5.3 `SessionClient`)
+drops in as the production implementation without touching the wallet logic.
+
+[dig_ecosystem#910]: https://github.com/DIG-Network/dig_ecosystem/issues/910
 
 ### 3.4 Per-user data at rest (NC-2 / NC-3)
 

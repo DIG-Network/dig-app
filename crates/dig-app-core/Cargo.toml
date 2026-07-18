@@ -40,6 +40,19 @@ base64.workspace = true
 dig-identity.workspace = true
 hex.workspace = true
 
+# Wallet host (U8) — the canonical chip35 DIG spend builder + the Chia types it works in. NO spend
+# bundle is hand-rolled; the DIG treasury constant is reused from chip35 (see the `canonical` skill).
+chip35-dl-coin.workspace = true
+chia-bls.workspace = true
+chia-protocol.workspace = true
+chia-puzzle-types.workspace = true
+chia-sdk-driver.workspace = true
+chia-sdk-signer.workspace = true
+chia-sdk-utils.workspace = true
+chia-traits.workspace = true
+clvmr.workspace = true
+hex-literal.workspace = true
+
 # The OS credential store is the custody PRIMARY on Windows + macOS only (per-application access
 # gating). It is deliberately NOT a dependency on Linux: keyutils is same-UID-readable + volatile, so
 # Linux uses the passphrase-sealed file as its custody primary instead (see `keystore`). Gating the
@@ -50,8 +63,9 @@ keyring.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rand_chacha.workspace = true
-chia-sdk-utils.workspace = true
 # Capturing subscriber for the never-log regression tests (#934, dig-logging SPEC §7): a `fmt` layer
 # writing into an in-memory buffer so a test can assert emitted records never contain secret values
 # (a passphrase, a raw identity key). Pinned to the same 0.3 line `dig-logging` builds on.
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+# Test-only: build a real standard-layer coin spend to exercise local signing end-to-end.
+chia-sdk-types.workspace = true
