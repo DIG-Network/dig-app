@@ -267,11 +267,17 @@ impl ProfileVault {
         // Create the profile directory, setting mode 0o700 on Unix (owner rwx only).
         #[cfg(unix)]
         {
-            use std::os::unix::fs::DirBuilderExt;
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .recursive(true)
                 .create(&self.profile_dir)?;
+            // `DirBuilder`'s mode only applies to directories it actually CREATES. When the profile
+            // dir already exists (a re-`create`, or a parent the OS/an earlier component made under a
+            // 0o755 umask), the create call is a no-op and the stale, laxer mode would stand. Force
+            // 0o700 unconditionally so the dir holding the sealed identity is always owner-only —
+            // belt-and-suspenders, mirroring the sealed file's create-with-mode + post-set below.
+            std::fs::set_permissions(&self.profile_dir, std::fs::Permissions::from_mode(0o700))?;
         }
         #[cfg(not(unix))]
         std::fs::create_dir_all(&self.profile_dir)?;
