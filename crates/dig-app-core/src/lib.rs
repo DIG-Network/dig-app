@@ -44,6 +44,7 @@ pub mod identity;
 pub mod ipc;
 pub mod keystore;
 pub mod profiles;
+pub mod session;
 pub mod shutdown;
 pub mod storage;
 pub mod wallet;
