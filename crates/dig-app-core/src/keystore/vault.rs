@@ -312,7 +312,10 @@ impl ProfileVault {
 
         // On Unix, set mode 0o600 on the final file as well (belt-and-suspenders against umask).
         #[cfg(unix)]
-        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))?;
+        }
 
         // fsync the parent directory so the rename (the directory entry) is itself durable. Only
         // meaningful (and only permitted) on Unix — Windows cannot open a directory handle for
