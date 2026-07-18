@@ -360,8 +360,10 @@ lock the tray triggers is the lock the signer sees): the "Lock now" menu item ca
 refresh tick calls `poll_idle` (interaction notes activity), and the `ScreenLockSource` callback —
 wrapped so a panic cannot unwind across the OS `extern "system"` boundary — calls `on_screen_locked`.
 The `sign.request` path consults the lock through a `SignReauthGate` immediately before it signs: when
-a re-auth is owed it re-unlocks the session (via the §3.1 unlock path) and, on failure, refuses the
-sign with `LOCKED` rather than signing on a dropped key. Reads never consult the gate.
+a re-auth is owed it re-unlocks ONLY the signing (active) profile's identity — never every profile's
+DEK — via the §3.1 single-profile unlock path, so the re-auth restores the smallest key residency that
+authorizes the sign and leaves all other profiles locked. On failure it refuses the sign with `LOCKED`
+rather than signing on a dropped key. Reads never consult the gate.
 
 ---
 

@@ -299,6 +299,70 @@ mod tests {
         );
     }
 
+    // --- single-profile re-unlock (the sign-path re-auth, dig_ecosystem#973) --------------------
+
+    #[test]
+    fn unlock_profile_reopens_only_the_named_profile_leaving_the_others_locked() {
+        // The sign-path re-auth re-unlocks ONLY the profile about to sign, so a re-auth for A must
+        // NOT repopulate B's DEK — B stays absent from the session (residency reduction, #973).
+        let dir = tempfile::tempdir().unwrap();
+        let (a_did, b_did) = {
+            let (mgr, _s) = harness(dir.path());
+            let prov = provisioner();
+            let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+            let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
+            (a.did, b.did)
+        };
+
+        // Restart: a fresh manager + empty session over the same directory, nothing unlocked yet.
+        let (restarted, session) = harness(dir.path());
+        assert!(!session.is_unlocked(&a_did) && !session.is_unlocked(&b_did));
+
+        // Re-unlock ONLY A — A opens, B stays locked.
+        restarted.unlock_profile(&a_did, root()).unwrap();
+        assert!(session.is_unlocked(&a_did), "the named profile is unlocked");
+        assert!(
+            !session.is_unlocked(&b_did),
+            "the other profile stays locked — its DEK is never repopulated"
+        );
+        // A's own sealed data opens; B's still cannot (its key was never derived).
+        assert!(restarted.select_profile(&a_did).is_ok());
+        assert!(restarted.select_profile(&b_did).is_err());
+    }
+
+    #[test]
+    fn unlock_profile_of_an_unknown_did_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, _s) = harness(dir.path());
+        mgr.create_profile(&provisioner(), named("Ada"), root())
+            .unwrap();
+        assert!(matches!(
+            mgr.unlock_profile("did:chia:absent", root()),
+            Err(ProfileError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn unlock_profile_with_a_wrong_root_unlock_fails_closed() {
+        // A failed single-profile re-unlock leaves the profile locked (fail-closed → LOCKED, #973).
+        let dir = tempfile::tempdir().unwrap();
+        let did = {
+            let (mgr, _s) = harness(dir.path());
+            mgr.create_profile(&provisioner(), named("Ada"), root())
+                .unwrap()
+                .did
+        };
+        let (restarted, session) = harness(dir.path());
+        assert!(matches!(
+            restarted.unlock_profile(&did, RootUnlock::Passphrase("wrong")),
+            Err(ProfileError::Persist(_))
+        ));
+        assert!(
+            !session.is_unlocked(&did),
+            "a failed re-unlock leaves the profile locked"
+        );
+    }
+
     #[test]
     fn unlock_all_with_a_wrong_root_unlock_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
