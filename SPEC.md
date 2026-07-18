@@ -390,7 +390,209 @@ relay see only ciphertext. Sealing is the app's responsibility, never the engine
 
 ### 5.6 The extension ↔ dig-app paired-loopback signing channel (APP-SIGN)
 
-> **Contract-freeze stub (SIGN-0, [dig_ecosystem#950]).** Full content lands in this same work unit.
+The §5.3 pipe/UDS session is the ENGINE's path to dig-app. Browsers cannot speak that channel, so a
+**second, browser-reachable front door** exists for the identity path: a web dapp reaches dig-app
+**through the DIG browser extension**, which relays over a paired loopback WebSocket. This is the
+identity channel (connect / sign); it is distinct from the extension ↔ dig-node **content** channel
+(`chia://` resolution), which is unrelated and untouched.
+
+This section is the byte-level contract the extension (SIGN-4) and any in-process browser equivalent
+build against. It reuses — never re-derives — the §3 domain-separation invariant, the `DIGNET-SIGN-v1`
+construction (§5.3, `session.rs::sign_callback_message`), and the §5.3 `SignPolicy` custody seam.
+
+#### 5.6.1 Topology and trust model
+
+```
+web dapp ──(window.chia provider)──▶ DIG browser extension ──(paired ws://127.0.0.1:9779)──▶ dig-app
+   (untrusted origin)                 (trusted-once mediator)          (holds keys; native confirm; signs)
+```
+
+The authorization is **layered**; no single layer is sufficient, and the transport is explicitly NOT
+the authorization:
+
+1. **Loopback is reachable by any local process** (including malware running as the user). The
+   loopback-only bind, the Host-header allowlist, the `Origin` pin, and the per-frame pairing-token
+   MAC only narrow **who may talk on the channel** — they are NOT permission to sign.
+2. **The paired extension is a trusted-once MEDIATOR, not an authority.** Pairing (a one-time native
+   confirm, §5.6.3) makes exactly one extension a recognized relay. The extension supplies the dapp's
+   **true committed tab origin** (browser-supplied, unspoofable by the page) and MAY REQUEST a connect
+   or a sign on the dapp's behalf. It can **never approve** either. dig-app trusts exactly this one
+   paired client on the loopback surface — not every local process — which is what closes the "loopback
+   cannot authenticate the caller" gap.
+3. **The OS-native confirm + biometric is the ONLY authorization to sign** (and to first-connect a
+   dapp). Every sign — and every un-whitelisted connect — raises a real OS-drawn foreground window
+   owned by the dig-app tray process, showing the human-decoded transaction plus the vouched origin;
+   the user authenticates via Windows Hello / macOS Touch ID / Linux polkit-or-fprintd, with a
+   passphrase fallback everywhere. There is **no auto-approve and no bypass**. The user private key
+   never leaves the dig-app process (§5.6.6).
+
+**Headless degrade (MUST).** The loopback identity endpoint is hosted by the tray shell, which holds
+the desktop session. On a host with no desktop session (§4 headless degrade) the endpoint MUST fail
+closed: it either does not bind, or every `sign`/first-connect request returns `SIGN_NO_CONFIRMER`
+(§5.6.7). A headless build MUST NOT sign without a native confirm.
+
+#### 5.6.2 Transport
+
+| Property | Value |
+|---|---|
+| Protocol | WebSocket (`ws://`) over loopback TCP |
+| Address | `127.0.0.1:9779` (IPv4 loopback) and `[::1]:9779` (IPv6 loopback) |
+| Bind | loopback interfaces ONLY — never `0.0.0.0` / a routable address |
+| Frames | JSON-RPC 2.0 text frames (one JSON-RPC message per WS message) |
+| Directionality | bidirectional — the async native-confirm outcome is pushed back on the same socket |
+
+WebSocket (not plain HTTP request/response) is REQUIRED because the native-confirm outcome arrives
+seconds later and dig-app pushes it back without the client polling; it also matches the existing
+extension ↔ dig-node WS pattern, and the extension MV3 manifest already CSP-allows `ws://127.0.0.1:*`
+and `ws://[::1]:*` in `connect-src`.
+
+`9779` is the canonical dig-app **identity** loopback port. It is distinct from the dig-node control
+port `9778` and the node dual-transport ports `9257`/`9778`; it carries identity/signing only, never
+content. (Recorded in the `canonical` skill + `SYSTEM.md` ports.)
+
+**Per-connection guards (all MUST hold, checked before any frame is honoured):**
+
+- **Bind loopback-only** — the listener binds `127.0.0.1` and `[::1]` exclusively.
+- **Host-header allowlist (anti-DNS-rebinding)** — the WS upgrade `Host` MUST be exactly one of
+  `127.0.0.1:9779`, `[::1]:9779`, or `localhost:9779`; any other value ⇒ the upgrade is rejected
+  (403, connection closed). This is the same guard the dig-node control server uses.
+- **`Origin` pin** — the WS upgrade `Origin` MUST equal `chrome-extension://<pinned-ext-id>` (the
+  pinned DIG extension id; `SYSTEM.md`/canonical hold the value). A missing or mismatched `Origin` ⇒
+  the upgrade is rejected. (Browsers set `Origin` on a WS handshake and a page cannot forge another
+  extension's id.)
+- **Pairing-token MAC** — after pairing (§5.6.3) every request frame carries an `auth` object the
+  server verifies before dispatch (§5.6.3). An unpaired or MAC-invalid frame ⇒ `AUTH_REQUIRED` /
+  `AUTH_BAD_MAC` and no side effect.
+
+**App not running.** A refused connection to `127.0.0.1:9779` means dig-app is not running; the
+extension MUST surface a deep-link to launch/install dig-app rather than failing silently.
+
+#### 5.6.3 Extension ↔ dig-app pairing handshake
+
+Pairing establishes the one trusted mediator ONCE, like pairing a hardware device. It is a native
+confirm, never silent.
+
+1. **`pair.begin`** (extension → app) — params: `{ ext_id, ext_label?, requested_at }`. The app
+   verifies `ext_id` equals the pinned extension id (matching the `Origin` guard), then raises a
+   native modal: *"Pair this browser extension with your DIG identity?"* gated on the user's
+   biometric/passphrase. On approve the app:
+   - generates a **32-byte CSPRNG channel token** (the `channel_secret`),
+   - persists a pairing record — `{ pairing_id (uuid), ext_id, channel_secret, created_at }` — sealed
+     at rest with DIGOP1 under the active profile (§3.1, NC-2), and
+   - returns `{ pairing_id, channel_token_b64 }` (`channel_token_b64` = base64 of the 32-byte secret).
+   On deny/timeout ⇒ `PAIR_DENIED` / `PAIR_TIMEOUT` and no record.
+2. **Token storage.** The extension stores `{ pairing_id, channel_token_b64 }` in `chrome.storage.local`.
+   The token grants **channel access only** — it is never sign authority (the terminal native confirm
+   still binds every sign).
+3. **Per-frame authentication.** Every subsequent request frame (`connect.request`, `sign.request`,
+   `session.*`) carries:
+
+   ```
+   "auth": { "pairing_id": <uuid>, "nonce": <u64>, "mac_b64": <base64> }
+   ```
+
+   where `mac_b64 = base64( HMAC-SHA256( channel_secret, canonical_frame_bytes ) )` and
+   `canonical_frame_bytes = utf8( nonce_decimal ) ‖ 0x00 ‖ utf8(method) ‖ 0x00 ‖ canonical_json(params) )`.
+   `nonce` is a **strictly monotonic** per-pairing `u64` (the app rejects any `nonce` ≤ the last
+   accepted one), which bars replay. The app looks up `channel_secret` by `pairing_id`, recomputes the
+   MAC, and rejects a mismatch (`AUTH_BAD_MAC`) or a non-increasing nonce (`AUTH_REPLAY`) before any
+   dispatch.
+4. **Revocation.** dig-app exposes an "unpair" surface (lists paired extensions); unpairing deletes
+   the sealed pairing record, after which every frame from that `pairing_id` fails `AUTH_REQUIRED`.
+
+The pairing token is defense-in-depth on the channel, not the sign gate. Token theft (by a same-user
+attacker who can already read `chrome.storage.local` or the sealed record) still cannot produce a
+signature without the human at the native biometric prompt (§5.6.5).
+
+#### 5.6.4 dapp connect / whitelist protocol
+
+Before a dapp origin may request a sign, it MUST be connected (whitelisted) for the active profile.
+
+- **`connect.request`** (extension → app) — params:
+  `{ origin, dapp_name?, dapp_icon_url?, requested_permissions? }`. `origin` is the dapp's TRUE
+  committed tab origin, supplied by the extension (browser-sourced). If `(origin, active_profile)` is
+  already whitelisted, the app MAY return the connection handle without a modal (convenience). Otherwise
+  the app raises a native modal — *"`<origin>` wants to connect to your DIG identity"* — listing the
+  requested scope, gated on Allow/Deny. On Allow the app persists a **whitelist entry**
+  `{ origin, profile_did, granted_permissions, connected_at }`, DIGOP1-sealed per profile (NC-2), and
+  returns `{ granted: true, profile_did, addresses[], pubkeys[] }` per the `window.chia` connect
+  contract. On Deny/timeout ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`.
+- **Sign gating.** A `sign.request` whose `origin` is NOT whitelisted for the active profile ⇒
+  `CONNECT_REQUIRED` (the extension MUST run `connect.request` first). Whitelisting is connect-time
+  convenience memory only; it NEVER waives the per-sign native confirm (§5.6.5). A "sign without
+  per-transaction prompt" scope, if ever offered at connect, MUST default OFF and be clearly labelled
+  dangerous.
+- **`connect.revoke`** (extension → app) and a dig-app UI surface both delete a whitelist entry; a
+  revoked origin returns to `CONNECT_REQUIRED`.
+
+#### 5.6.5 sign request
+
+- **`sign.request`** (extension → app) — params:
+  `{ origin, payload_type, payload_b64, decode_hint?, context? }`.
+  - `origin` — the vouched dapp origin (MUST be whitelisted, §5.6.4).
+  - `payload_type` — an ASCII tag naming what is being signed (e.g. `spend`, `chip35.smt-write`); it
+    selects the decoder and the allowlist and is bound into the signed message.
+  - `payload_b64` — base64 of the raw payload bytes to be signed (e.g. the spend-bundle hash).
+  - `decode_hint?` — optional decoder input (e.g. the full spend bundle to render).
+- **Decoded-transaction display (MUST).** The confirm window MUST present the transaction in **human
+  terms**, never raw-bytes-only: for a spend, the coins spent, the amount **per asset** with its ticker
+  ($DIG / XCH / CAT), the recipient rendered as a bech32m address, and the fee — decoded via the
+  canonical wallet decode path (`chip35-dl-coin-wasm` / `chia-wallet-sdk`; DID ops via `chia-wallet-sdk`
+  per canonical). The window also shows the vouched `origin` and that the request arrived *via the
+  paired extension*.
+- **Allowlist (MUST fail closed).** `payload_type` MUST be on the known-decoder allowlist. An unknown
+  `payload_type` ⇒ `SIGN_UNKNOWN_TYPE`; a known type whose payload does not decode ⇒ `SIGN_BAD_PAYLOAD`.
+  dig-app MUST NEVER present "sign these opaque bytes?" — a blind-sign request is refused.
+- **Native confirm + biometric.** The app raises the OS foreground confirm window and requires an
+  explicit biometric/passphrase action: **Windows Hello** (WinRT `UserConsentVerifier`) / **macOS Touch
+  ID** (`LocalAuthentication` `LAContext`) / **Linux** (polkit or fprintd via PAM), passphrase fallback
+  everywhere. If the active profile is locked, this action doubles as the §3.1 vault unlock (one user
+  action authorizes and unlocks).
+- **Domain-separated signing (MUST — reuse, do not re-derive).** On approval the app signs, with the
+  in-memory slot `0x0010` key, NOT `payload_b64` but the §5.3 domain-separated message:
+
+  ```
+  "DIGNET-SIGN-v1" ‖ len16(payload_type) ‖ payload_type ‖ payload
+  ```
+
+  (constructed by `session.rs::sign_callback_message`; `len16` = big-endian `u16` byte length of
+  `payload_type`). This is the identical construction the engine `sign` callback uses, so a signature
+  minted here is bound to its `payload_type` and cannot be replayed as a session attach (§5.3), a
+  differently-typed spend, or any other `0x0010` signature (§3 domain-separation invariant).
+- **Response.** `{ signature_b64, pubkey_hex }` — the 64-byte detached Ed25519 signature over the
+  message above, and the signing public key. **Only the signature returns; the private key never
+  leaves dig-app.** A deny/timeout/decoder-failure ⇒ the matching §5.6.7 error. The JSON-RPC `id`
+  correlates the response with its request across the async confirm.
+
+#### 5.6.6 Key custody (this path)
+
+Identical to §2.3 / §5.3: dig-app signs in-process with the in-memory unlocked slot `0x0010` key and
+returns only the signature. Both callers — the §5.3 engine `sign` callback AND this loopback
+`sign.request` — funnel through **one** `SignPolicy` custody gate (§5.3), so there is a single sign
+authorization point with no divergence: the production policy is the native-confirm policy; the
+`AllowAll`/`DenyAll` policies (`session.rs`) remain test doubles only.
+
+#### 5.6.7 Error-code taxonomy
+
+Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off these, not off prose):
+
+| Code | Meaning |
+|---|---|
+| `AUTH_REQUIRED` | no valid pairing for this frame (unpaired / revoked) |
+| `AUTH_BAD_MAC` | pairing-token MAC verification failed |
+| `AUTH_REPLAY` | frame nonce not strictly greater than the last accepted |
+| `PAIR_DENIED` / `PAIR_TIMEOUT` | user denied / did not answer the pairing confirm |
+| `CONNECT_REQUIRED` | the `origin` is not whitelisted for the active profile |
+| `CONNECT_DENIED` / `CONNECT_TIMEOUT` | user denied / did not answer the connect modal |
+| `SIGN_DENIED` / `SIGN_TIMEOUT` | user denied / did not answer the sign confirm |
+| `SIGN_UNKNOWN_TYPE` | `payload_type` not on the decoder allowlist (blind-sign refused) |
+| `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
+| `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
+| `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
+
+This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
+browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both
+sides.
 
 ---
 
@@ -437,6 +639,29 @@ When a work unit satisfies an NC item, it MUST update that item's "Satisfied by"
   - **Accepted (out of scope):** malware running AS U1 can drive dig-app / read U1's decrypted
     in-memory data; a live-session SYSTEM compromise sees that session's in-memory key while attached.
     These are the-user-is-the-user / SYSTEM-dominates cases.
+
+### 7.1 The paired-loopback signing channel (§5.6)
+
+The loopback identity endpoint is a wallet-drain surface, so its authorization is layered (§5.6.1) and
+the native confirm is the terminal, un-bypassable gate. Threats and their mitigations:
+
+| Threat | Mitigation |
+|---|---|
+| **Auto-sign** — a local process silently drives a sign | The native confirm + biometric is mandatory on every sign (the production `SignPolicy`; no default-allow); loopback-only bind + Host/`Origin`/token-MAC guards reject an unpaired caller. |
+| **Clickjack / spoofed confirm** — the page overlays or synthesizes a click on the confirm | The confirm is a real OS-drawn foreground window owned by the tray process, outside the browser DOM; it requires an explicit biometric/passphrase action (not an injectable keypress) and is rate-limited. |
+| **Blind-sign / cross-protocol oracle** | Sign ONLY the domain-separated `DIGNET-SIGN-v1` message (§5.6.5), never raw bytes; unknown/undecodable `payload_type` ⇒ refuse (`SIGN_UNKNOWN_TYPE`/`SIGN_BAD_PAYLOAD`); the decoded tx is displayed. |
+| **Origin spoof** — loopback cannot authenticate the caller | The extension supplies the browser-committed true origin over the paired channel; only the one paired extension is trusted; the confirm shows the vouched origin. |
+| **DNS-rebinding** | Loopback bind + strict `Host` allowlist + `Origin` pin (§5.6.2). |
+| **Rogue extension self-pairs** | Pairing is a one-time native confirm gated on biometric; the `Origin`/`ext_id` is pinned to the DIG extension id; no silent self-pair. |
+| **Token theft / replay** | 32-byte CSPRNG channel token, sealed at rest (DIGOP1) + in `chrome.storage.local`; every frame is HMAC'd over a strictly-monotonic nonce (bars replay); the token grants channel access only — the terminal native confirm still binds every sign; revocable via unpair. |
+
+**Accepted (out of scope), in addition to §7's cases:**
+- A **compromised paired extension** can send truthful-looking requests with arbitrary payloads, and
+  could lie about the origin — it is trusted-once to vouch for origin. It still cannot sign without the
+  human confirm; the mitigation is fully decoding the tx + showing "via paired extension" so the human
+  catches a mismatch.
+- A user who **physically approves a malicious prompt** at the biometric gate. dig-app defends against
+  silent/auto sign, not against a user who reads the decoded tx + origin and approves anyway.
 
 ---
 
