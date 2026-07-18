@@ -687,6 +687,27 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   device-owner identity*; it is distinct from the vault passphrase (the key unlock stays in the keystore
   path). **Never blind-sign (defense-in-depth):** a sign prompt whose `decoded_tx` is absent is denied
   WITHOUT raising a window, independently of the §5.6.5 dispatch allowlist.
+- **Plain-language summary (default view, MUST derive from the signed bytes).** The confirm body leads
+  with a plain-language, XCH-denominated summary of the decoded spend — one line per created output
+  (`Send <amount> XCH to <recipient>`, recipients shown in full) plus the network fee — with the precise
+  mojo-level decode kept below under a `Details:` section. The summary is rendered ENTIRELY from the
+  `DecodedTx` the policy produced from the exact bytes that will be signed (there is no second decode
+  source), and it lists EVERY output the decode enumerated (never a lossy subset), so the human sees the
+  full effect they authorize. It is plain text and adds no markup (the per-OS confirmers neutralize
+  markup-significant characters). A net-effect preview (what leaves vs returns from local coin state) is
+  a future addition gated on the engine's coin-state.
+- **Non-XCH assets MUST fail closed — never a fabricated amount (MUST).** A `payload_type = "spend"`
+  bundle may spend a CAT (e.g. $DIG — 3 decimals, `1 $DIG = 1000 CAT-mojos`) or an unrecognized puzzle;
+  its `CREATE_COIN` amounts are NOT XCH mojos and its recipients are NOT plain XCH addresses. The
+  decoder classifies each coin spend by its outer puzzle (recognizing ONLY the canonical standard-p2
+  mod hash as native XCH) and enumerates XCH amounts/`xch1…` recipients ONLY for native-XCH spends. When
+  any spent coin is non-XCH, the transaction is flagged (`DecodedTx::all_inputs_native_xch = false`), the
+  XCH fee is suppressed, and the summary shows an explicit warning ("Non-XCH asset (e.g. a CAT / $DIG
+  token) — its amount and recipient CANNOT be verified in this view…") instead of a number. Rendering a
+  CAT amount with the XCH divisor would show a CONFIDENTLY-FALSE figure (a million-$DIG drain reading as
+  dust XCH), so the summary MUST NEVER do so. Full $DIG-aware rendering (recognize the canonical DIG
+  asset id; show `$DIG` + the correct 3-decimal amount + the CAT-wrapped address) is a follow-up CAT
+  decoder that will replace the warning for recognized assets.
 - **Domain-separated signing (MUST — reuse, do not re-derive).** On approval the app signs, with the
   in-memory slot `0x0010` key, NOT `payload_b64` but the §5.3 domain-separated message:
 

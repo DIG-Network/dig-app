@@ -22,6 +22,7 @@
 //! signed. The allowlist is exactly the set of `payload_type`s this module can render.
 
 use chia_protocol::SpendBundle;
+use chia_sdk_driver::{Layer, Puzzle, StandardLayer};
 use chia_sdk_types::{run_puzzle, Condition};
 use chia_sdk_utils::Address;
 use chia_traits::Streamable;
@@ -55,28 +56,55 @@ pub struct DecodedOutput {
 
 /// A transaction decoded into the human terms the sign-confirm window displays (§5.6.5): the outputs
 /// it creates, the total it spends, and the fee. Rendered directly from the bytes that are signed.
+///
+/// **Only native-XCH sends are decoded to amounts.** A `payload_type = "spend"` bundle may spend a CAT
+/// (e.g. $DIG — 3 decimals, `1 $DIG = 1000 CAT-mojos`) or an unrecognized puzzle. Those amounts are NOT
+/// XCH mojos and their recipients are NOT plain XCH addresses, so rendering them with the XCH divisor +
+/// an `xch1…` recipient would show a CONFIDENTLY-FALSE figure (a million-$DIG drain reading as dust XCH).
+/// To stay honest, [`outputs`](Self::outputs) enumerates ONLY the outputs of native-XCH standard-p2
+/// coin spends; when the bundle also spends a non-XCH coin, [`all_inputs_native_xch`](Self::all_inputs_native_xch)
+/// is `false` and the summary fails closed with a warning instead of a fabricated amount (WSEC-B). The
+/// full CAT/$DIG-aware rendering is a separate follow-up (#958's CAT decoder).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedTx {
-    /// The coins the spend creates (`CREATE_COIN` outputs), in the order they appear.
+    /// The native-XCH coins the spend creates (`CREATE_COIN` outputs of standard-p2 spends), in order.
+    /// Non-XCH (CAT / unrecognized) outputs are deliberately NOT included — they cannot be verified as
+    /// XCH (see [`all_inputs_native_xch`](Self::all_inputs_native_xch)).
     pub outputs: Vec<DecodedOutput>,
-    /// The total input the spend consumes, in mojos (the sum of the spent coins' amounts).
+    /// The total input the spend consumes, in mojos (the sum of the spent coins' amounts). This is the
+    /// raw coin amount regardless of asset, so for a CAT coin it is a CAT-mojo count, not XCH.
     pub total_input: u64,
-    /// The network fee, in mojos (`total_input − total_created`).
+    /// The network fee, in mojos (`total_input − total_created`). Only meaningful — and only shown as an
+    /// XCH figure — when [`all_inputs_native_xch`](Self::all_inputs_native_xch) is `true`; a mixed/CAT
+    /// bundle makes this arithmetic meaningless, so it is `0` and the summary suppresses it.
     pub fee: u64,
+    /// `true` iff EVERY spent coin is a native-XCH standard-p2 coin. When `false` the bundle spends a
+    /// CAT (e.g. $DIG) or an unrecognized puzzle whose amounts/recipients cannot be safely rendered as
+    /// XCH; the summary then refuses to print a figure for the non-XCH portion (WSEC-B, fail-closed).
+    pub all_inputs_native_xch: bool,
 }
 
 impl DecodedTx {
-    /// A human summary for the confirm window (one fact per line): each recipient + amount, then the
-    /// fee and the total spent. Denominated in mojos (1 XCH = 1_000_000_000_000 mojos).
+    /// The raw, mojo-level decode for the confirm window's details section (one fact per line): each
+    /// native-XCH recipient + amount, a note when a non-XCH asset is also spent, then the fee and total.
+    /// Denominated in mojos (1 XCH = 1_000_000_000_000 mojos).
     pub fn summary(&self) -> String {
-        let mut lines = Vec::with_capacity(self.outputs.len() + 2);
+        let mut lines = Vec::with_capacity(self.outputs.len() + 3);
         for output in &self.outputs {
             lines.push(format!(
                 "Send {} mojos to {}",
                 output.amount, output.recipient
             ));
         }
-        lines.push(format!("Fee: {} mojos", self.fee));
+        if self.all_inputs_native_xch {
+            lines.push(format!("Fee: {} mojos", self.fee));
+        } else {
+            lines.push(
+                "Also spends a non-XCH asset (e.g. a CAT / $DIG token); its amounts and recipients \
+                 are not shown, and the XCH fee cannot be derived."
+                    .to_string(),
+            );
+        }
         lines.push(format!("Total spent: {} mojos", self.total_input));
         lines.join("\n")
     }
@@ -103,34 +131,71 @@ fn decode_spend(payload: &[u8]) -> Result<DecodedTx, DecodeReject> {
     let mut outputs = Vec::new();
     let mut total_input: u64 = 0;
     let mut total_created: u64 = 0;
+    let mut all_inputs_native_xch = true;
 
     for spend in &bundle.coin_spends {
         total_input = total_input.saturating_add(spend.coin.amount);
-        for output in run_coin_spend(&mut allocator, spend)? {
-            total_created = total_created.saturating_add(output.amount);
-            outputs.push(output);
+        match native_xch_outputs(&mut allocator, spend)? {
+            Some(spend_outputs) => {
+                for output in spend_outputs {
+                    total_created = total_created.saturating_add(output.amount);
+                    outputs.push(output);
+                }
+            }
+            // A CAT / unrecognized coin: its outputs are not XCH and are deliberately not rendered.
+            None => all_inputs_native_xch = false,
         }
     }
+
+    // The XCH fee is only derivable when every input is native XCH; a mixed bundle leaves it at 0 and
+    // the summary suppresses it rather than showing a meaningless figure (WSEC-B, fail-closed).
+    let fee = if all_inputs_native_xch {
+        total_input.saturating_sub(total_created)
+    } else {
+        0
+    };
 
     Ok(DecodedTx {
         outputs,
         total_input,
-        fee: total_input.saturating_sub(total_created),
+        fee,
+        all_inputs_native_xch,
     })
 }
 
-/// Run one coin spend and collect its `CREATE_COIN` outputs. A puzzle that does not evaluate, or
-/// conditions that do not parse, fail the whole decode closed.
-fn run_coin_spend(
+/// Classify one coin spend and, if it is a native-XCH standard-p2 spend, run it and collect its
+/// `CREATE_COIN` outputs. Returns:
+///
+/// - `Ok(Some(outputs))` — a standard-p2 (native XCH) spend; the outputs are real XCH sends.
+/// - `Ok(None)` — a CAT or otherwise unrecognized outer puzzle: NOT native XCH. The puzzle is
+///   deliberately NOT run (we neither trust nor render its CAT-denominated outputs), so the caller
+///   flags the whole transaction as non-native and the summary fails closed with a warning (WSEC-B).
+/// - `Err(BadPayload)` — a standard puzzle whose bytes/conditions do not decode; fail the whole decode.
+///
+/// The classification uses [`StandardLayer::parse_puzzle`], which recognizes ONLY the canonical
+/// standard-p2 (`p2_delegated_puzzle_or_hidden_puzzle`) mod hash — a CAT's outer puzzle has a different
+/// mod hash and is rejected, so a CAT can never be mistaken for a plain XCH send.
+fn native_xch_outputs(
     allocator: &mut Allocator,
     spend: &chia_protocol::CoinSpend,
-) -> Result<Vec<DecodedOutput>, DecodeReject> {
-    let puzzle = node_from_bytes(allocator, spend.puzzle_reveal.as_ref())
+) -> Result<Option<Vec<DecodedOutput>>, DecodeReject> {
+    let puzzle_ptr = node_from_bytes(allocator, spend.puzzle_reveal.as_ref())
         .map_err(|_| DecodeReject::BadPayload)?;
+
+    // Is the outer puzzle the canonical standard-p2 (native XCH) layer? Anything else — a CAT ($DIG),
+    // NFT, or unknown puzzle — is not a verifiable XCH send.
+    if StandardLayer::parse_puzzle(allocator, Puzzle::parse(allocator, puzzle_ptr))
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return Ok(None);
+    }
+
     let solution = node_from_bytes(allocator, spend.solution.as_ref())
         .map_err(|_| DecodeReject::BadPayload)?;
     let conditions =
-        run_puzzle(allocator, puzzle, solution).map_err(|_| DecodeReject::BadPayload)?;
+        run_puzzle(allocator, puzzle_ptr, solution).map_err(|_| DecodeReject::BadPayload)?;
     let conditions =
         Vec::<NodePtr>::from_clvm(allocator, conditions).map_err(|_| DecodeReject::BadPayload)?;
 
@@ -145,7 +210,7 @@ fn run_coin_spend(
             });
         }
     }
-    Ok(outputs)
+    Ok(Some(outputs))
 }
 
 /// Render a coin's puzzle hash as the `xch1…` bech32m address the confirm window shows, falling back
@@ -160,10 +225,11 @@ fn render_recipient(puzzle_hash: chia_protocol::Bytes32) -> String {
 mod tests {
     use super::*;
     use chia_bls::{PublicKey, SecretKey, Signature};
-    use chia_protocol::{Bytes32, Coin};
+    use chia_protocol::{Bytes32, Coin, CoinSpend};
+    use chia_puzzle_types::cat::CatArgs;
     use chia_puzzle_types::standard::StandardArgs;
     use chia_puzzle_types::{DeriveSynthetic, Memos};
-    use chia_sdk_driver::{SpendContext, StandardLayer};
+    use chia_sdk_driver::{Layer, SpendContext, StandardLayer};
     use chia_sdk_types::conditions::CreateCoin;
     use chia_sdk_types::Conditions;
     use chip35_dl_coin::master_to_wallet_unhardened;
@@ -199,6 +265,63 @@ mod tests {
             .expect("streamable spend bundle")
     }
 
+    /// Build a spend bundle whose one coin is a CAT (e.g. $DIG): the standard p2 puzzle wrapped in the
+    /// CAT outer layer. Its outer mod hash is the CAT puzzle, NOT standard-p2, so the decoder must
+    /// classify it as non-native-XCH. The amount (`1_000_000_000` CAT-mojos = 1,000,000 $DIG) is the
+    /// exact drain that would misrender as a dust "0.000001 XCH" if treated as XCH.
+    fn cat_spend_bundle_bytes(spender: u8, cat_mojos: u64) -> Vec<u8> {
+        let pk = synthetic_pk(spender);
+        let mut ctx = SpendContext::new();
+        let inner_puzzle = StandardLayer::new(pk)
+            .construct_puzzle(&mut ctx)
+            .expect("standard inner puzzle");
+        let asset_id = Bytes32::new([7u8; 32]);
+        let outer_puzzle = ctx
+            .curry(CatArgs::new(asset_id, inner_puzzle))
+            .expect("CAT outer puzzle");
+        let coin = Coin {
+            parent_coin_info: Bytes32::new([1u8; 32]),
+            puzzle_hash: ctx.tree_hash(outer_puzzle).into(),
+            amount: cat_mojos,
+        };
+        // A nil solution — the decoder classifies the CAT by its puzzle and never runs it, so the
+        // solution is irrelevant to the assertion (it is only rendered for native-XCH spends).
+        let coin_spend = CoinSpend::new(
+            coin,
+            ctx.serialize(&outer_puzzle).expect("serialize CAT puzzle"),
+            ctx.serialize(&NodePtr::NIL)
+                .expect("serialize nil solution"),
+        );
+        SpendBundle::new(vec![coin_spend], Signature::default())
+            .to_bytes()
+            .expect("streamable CAT spend bundle")
+    }
+
+    #[test]
+    fn a_cat_spend_is_flagged_non_native_and_never_rendered_as_xch() {
+        // 1_000_000 $DIG (1e9 CAT-mojos). As XCH this would read as a reassuring "0.000001 XCH" — the
+        // exact blind-sign trap WSEC-B closes. The decoder must NOT claim any XCH output for it.
+        let bytes = cat_spend_bundle_bytes(3, 1_000_000_000);
+        let decoded =
+            decode(SPEND_PAYLOAD_TYPE, &bytes).expect("a CAT bundle decodes structurally");
+
+        assert!(
+            !decoded.all_inputs_native_xch,
+            "a CAT spend must be flagged as non-native XCH"
+        );
+        assert!(
+            decoded.outputs.is_empty(),
+            "no XCH output amount/recipient may be claimed for a CAT spend, got {:?}",
+            decoded.outputs
+        );
+        assert_eq!(
+            decoded.fee, 0,
+            "the XCH fee is suppressed for a non-native bundle"
+        );
+        // The raw details name the non-XCH asset instead of a fabricated figure.
+        assert!(decoded.summary().contains("non-XCH asset"));
+    }
+
     #[test]
     fn an_unknown_payload_type_is_rejected_as_a_blind_sign() {
         assert_eq!(
@@ -222,6 +345,10 @@ mod tests {
 
         let decoded = decode(SPEND_PAYLOAD_TYPE, &bytes).expect("a real bundle decodes");
 
+        assert!(
+            decoded.all_inputs_native_xch,
+            "a standard-p2 spend is native XCH"
+        );
         assert_eq!(decoded.total_input, 1_000);
         assert_eq!(decoded.fee, 200, "fee is input minus created");
         assert_eq!(decoded.outputs.len(), 1);
