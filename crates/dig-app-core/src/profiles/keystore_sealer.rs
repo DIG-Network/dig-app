@@ -60,6 +60,21 @@ impl UnlockedIdentities {
         self.lock_map().remove(did);
     }
 
+    /// Drops EVERY unlocked identity from memory (a whole-session lock), erasing all profile keys and
+    /// locking all profile data again. This is the primitive a session-lock event
+    /// ([`crate::session_lock`]) drives on idle timeout / OS screen lock / one-tap lock-now: the
+    /// `IdentitySecrets` values are zeroized on drop, so clearing the map re-seals the session.
+    pub fn lock_all(&self) {
+        self.lock_map().clear();
+    }
+
+    /// Whether any profile is currently unlocked in this session. A session-lock controller reads this
+    /// to know whether a lock event actually has key material to drop, and to gate whether the next
+    /// signing needs re-authentication.
+    pub fn is_any_unlocked(&self) -> bool {
+        !self.lock_map().is_empty()
+    }
+
     /// Whether `did`'s identity is currently unlocked in this session (its data can be sealed/opened).
     pub fn is_unlocked(&self, did: &str) -> bool {
         self.lock_map().contains_key(did)
@@ -193,6 +208,36 @@ mod tests {
             matches!(sealer.open(A, &blob), Err(SealError::Seal(_))),
             "a locked profile can no longer open its own data"
         );
+    }
+
+    #[test]
+    fn lock_all_drops_every_unlocked_identity() {
+        let identities = UnlockedIdentities::new();
+        identities.unlock(A, IdentitySecrets::generate());
+        identities.unlock(B, IdentitySecrets::generate());
+        assert!(identities.is_any_unlocked());
+
+        identities.lock_all();
+
+        assert!(
+            !identities.is_any_unlocked(),
+            "a whole-session lock drops all DEKs"
+        );
+        assert!(!identities.is_unlocked(A));
+        assert!(!identities.is_unlocked(B));
+    }
+
+    #[test]
+    fn is_any_unlocked_tracks_the_session() {
+        let identities = UnlockedIdentities::new();
+        assert!(
+            !identities.is_any_unlocked(),
+            "a fresh session has nothing unlocked"
+        );
+        identities.unlock(A, IdentitySecrets::generate());
+        assert!(identities.is_any_unlocked());
+        identities.lock_profile(A);
+        assert!(!identities.is_any_unlocked());
     }
 
     #[test]

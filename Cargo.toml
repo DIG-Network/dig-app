@@ -125,10 +125,20 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Security_Credentials_UI",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
     "Win32_UI_WindowsAndMessaging",
 ] }
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSError",
+    "NSNotification",
+    "NSDistributedNotificationCenter",
+    "NSOperation",
+    "block2",
+] }
 objc2-app-kit = { version = "0.3", features = [
     "NSAlert",
     "NSApplication",
