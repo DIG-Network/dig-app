@@ -11,7 +11,9 @@
 //! - [`profiles`] — multi-DID profiles via `dig-identity`; create / select / edit the active one.
 //! - [`wallet`] — the per-profile wallet host (spend building + signing stays local).
 //! - [`storage`] — per-user AppData layout, DIGOP1-sealed at rest (NC-2 / NC-3).
-//! - [`ipc`] — the identity-authenticated session channel to the engine (named pipe / Unix socket).
+//! - [`ipc`] — the per-user IPC endpoint address (named pipe / Unix socket) the session dials.
+//! - [`session`] — the identity-authenticated engine session over that channel: the begin→attach
+//!   handshake, the engine→app `sign` callback, detach, and re-attach.
 //! - [`gateway`] — the CLI/RPC front door: authenticate callers, proxy engine work.
 //! - [`identity`] — the two-identity model (transport peer-identity vs the user identity).
 //! - [`form_factor`] — headless agent core vs optional GUI tray shell.
@@ -29,8 +31,9 @@
 //! (identity key generation / unlock / sign, DIGOP1 at-rest sealing, OS-credential-store primary +
 //! sealed-file fallback, rotation); U5 implemented [`profiles`] (multi-DID create/select/list/edit
 //! with per-profile sealed AppData), consuming U4's DEK sealing through the
-//! [`profiles::ProfileSealer`] seam. The remaining security-critical subsystems — the
-//! identity-authenticated session (U6) and [`gateway`] (U7) — remain stubbed to the SPEC.
+//! [`profiles::ProfileSealer`] seam. U6 implemented [`session`] (the identity-authenticated engine
+//! session: begin→attach handshake, the `sign` callback, detach, re-attach, multi-session). The
+//! remaining security-critical subsystem — [`gateway`] (U7) — remains stubbed to the SPEC.
 //!
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 
