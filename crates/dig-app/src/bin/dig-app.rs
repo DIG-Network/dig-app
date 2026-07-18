@@ -16,10 +16,15 @@
 //! (U4/U5) and the `dign` gateway (U7) remain stubs.
 
 use dig_app_core::agent::Agent;
+use dig_app_core::confirm::native_confirmer;
 use dig_app_core::engine::NullConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
-use dig_app_core::Os;
+use dig_app_core::profiles::{
+    did_hash, IdentityStore, KeystoreSealer, ProfileManager, RootUnlock, UnlockedIdentities,
+};
+use dig_app_core::{sign_service, storage, Os};
+use std::sync::Arc;
 
 fn main() {
     // Install the shared logging stack FIRST, before anything else can emit an event that would
@@ -46,7 +51,12 @@ fn main() {
     );
 
     match env.form_factor() {
-        FormFactor::Tray => run_tray_or_headless(agent),
+        FormFactor::Tray => {
+            // A desktop session is present, so the terminal native-confirm gate is available — bring
+            // the APP-SIGN extension↔dig-app signing channel live (best-effort; see the fn's docs).
+            start_sign_service(&env);
+            run_tray_or_headless(agent)
+        }
         FormFactor::Headless => {
             tracing::info!("no desktop display — running as headless agent (no tray)");
             eprintln!("dig-app: no desktop display — running as headless agent (no tray)");
@@ -73,6 +83,63 @@ fn run_tray_or_headless(agent: Agent<NullConnector>) {
         eprintln!("dig-app: built without the tray feature — running as headless agent");
         agent.run();
     }
+}
+
+/// Bring the APP-SIGN loopback signing channel live on boot (dig_ecosystem#958, `SPEC.md` §5.6).
+///
+/// The signing channel needs TWO things a headless / locked host cannot provide, so this is
+/// deliberately best-effort and fail-closed — it starts the server only when both hold, and simply
+/// logs + returns otherwise (never blocks or crashes the shell):
+///
+/// 1. **An unlocked active profile** — the signer + the sealed-store DEK resolve the identity from
+///    the unlocked session. Only Windows/macOS can unlock zero-prompt via the OS credential store;
+///    Linux needs a user passphrase (a UX not yet wired), so the channel defers there.
+/// 2. **A desktop session** — guaranteed here because this runs only on the [`FormFactor::Tray`] path,
+///    so the per-OS [`native_confirmer`] can raise a real biometric confirm.
+///
+/// When both hold it assembles the [`FrameRouter`](dig_app_core::loopback::FrameRouter) over the
+/// active profile, restores any persisted pairings/whitelist/nonce ledger, and serves the two
+/// loopback listeners on a background thread (the OS event loop keeps the main thread).
+fn start_sign_service(env: &AppEnvironment) {
+    // Zero-prompt unlock is only available where the OS credential store is the custody primary.
+    if !matches!(env.os, Os::Windows | Os::MacOs) {
+        tracing::info!("APP-SIGN loopback deferred: no zero-prompt profile unlock on this OS yet");
+        return;
+    }
+    let Ok(brand_dir) = env.brand_dir() else {
+        tracing::warn!("APP-SIGN loopback not started: could not resolve the AppData directory");
+        return;
+    };
+
+    // Unlock the user's profiles via the OS credential store, then pick the active one.
+    let session = UnlockedIdentities::new();
+    let manager = ProfileManager::new(
+        brand_dir.clone(),
+        KeystoreSealer::new(session.clone()),
+        IdentityStore::production(session.clone()),
+    );
+    if let Err(e) = manager.unlock_all(RootUnlock::OsKeychain) {
+        tracing::warn!(error = %e, "APP-SIGN loopback not started: profile unlock failed");
+        return;
+    }
+    let Ok(Some(active_did)) = manager.active_did() else {
+        tracing::info!("APP-SIGN loopback not started: no active profile yet");
+        return;
+    };
+
+    let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&active_did));
+    let confirmer: Arc<dyn dig_app_core::confirm::NativeConfirmer> = Arc::from(native_confirmer());
+    let router = sign_service::build_router(session, &active_did, &profile_dir, confirmer);
+
+    std::thread::Builder::new()
+        .name("dig-app-sign".to_string())
+        .spawn(move || {
+            if let Err(e) = sign_service::serve_blocking(router) {
+                tracing::error!(error = %e, "APP-SIGN loopback server exited");
+            }
+        })
+        .map(|_| tracing::info!("APP-SIGN loopback signing channel started on port 9779"))
+        .unwrap_or_else(|e| tracing::error!(error = %e, "could not spawn the APP-SIGN thread"));
 }
 
 /// Resolve the real per-user host facts the agent boots from. This is the impure process edge; the

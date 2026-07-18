@@ -167,6 +167,16 @@ pub trait SessionSigner {
     /// Sign `message` with the in-memory identity key, returning only the detached signature.
     fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN];
 
+    /// Sign `message`, or return `None` when the identity is currently unavailable (e.g. the active
+    /// profile is locked). A caller that must NOT frame a bogus/all-zero signature into a success
+    /// response uses this instead of [`sign`](Self::sign) and maps `None` to a `LOCKED` error.
+    ///
+    /// The default assumes an always-available signer (`Some(self.sign(...))`); the profile-backed
+    /// [`ProfileSessionSigner`] overrides it to return `None` on a locked profile.
+    fn try_sign(&self, message: &[u8]) -> Option<[u8; SIGNATURE_LEN]> {
+        Some(self.sign(message))
+    }
+
     /// The signing public key as lowercase hex — the form carried on the wire (`signing_pubkey_hex`,
     /// `pubkey_hex`).
     fn signing_public_key_hex(&self) -> String {
@@ -183,6 +193,66 @@ impl SessionSigner for IdentitySecrets {
 
     fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
         IdentitySecrets::sign(self, message)
+    }
+}
+
+/// A [`SessionSigner`] bound to the ACTIVE profile's unlocked identity in the shared
+/// [`UnlockedIdentities`](crate::profiles::UnlockedIdentities) session, addressed by DID.
+///
+/// This is the production signer the APP-SIGN loopback [`FrameRouter`](crate::loopback::FrameRouter)
+/// signs approved `sign.request`s with: it delegates every signature to the session's
+/// [custody-preserving seam](crate::profiles::UnlockedIdentities::sign), so the identity private key
+/// stays owned by the session and is never copied into the router. It signs whatever
+/// domain-separated message it is handed (the router builds the `DIGNET-SIGN-v1` message); it never
+/// signs raw caller bytes.
+///
+/// **Fail-closed when the profile is locked.** If the active profile is locked (its identity absent
+/// from the session), there is no key to sign with, so [`try_sign`](SessionSigner::try_sign) returns
+/// `None` — the router maps that to a `LOCKED` error rather than framing a bogus signature into a
+/// success response. The infallible [`sign`](SessionSigner::sign) still returns an all-zero
+/// (non-verifying) signature as a last-resort fail-safe for any caller that ignores `try_sign`, so a
+/// locked profile can never produce a forgery. In production the router only serves while the profile
+/// is unlocked; this guards the mid-session lock edge.
+pub struct ProfileSessionSigner {
+    identities: crate::profiles::UnlockedIdentities,
+    profile_did: String,
+}
+
+impl ProfileSessionSigner {
+    /// Bind a signer to `profile_did`'s identity in the shared session `identities`.
+    pub fn new(
+        identities: crate::profiles::UnlockedIdentities,
+        profile_did: impl Into<String>,
+    ) -> Self {
+        Self {
+            identities,
+            profile_did: profile_did.into(),
+        }
+    }
+}
+
+impl SessionSigner for ProfileSessionSigner {
+    fn signing_public_key(&self) -> [u8; 32] {
+        self.identities
+            .signing_public_key(&self.profile_did)
+            .unwrap_or([0u8; 32])
+    }
+
+    fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
+        self.try_sign(message).unwrap_or_else(|| {
+            // The profile locked between service start and this infallible-sign call — fail safe with
+            // a non-verifying zero signature rather than a forgery. Callers on the custody path use
+            // `try_sign` and surface `LOCKED` instead of ever framing this. (NEVER log the message.)
+            tracing::warn!(
+                profile_did = %self.profile_did,
+                "sign requested for a locked profile — returning a non-verifying signature"
+            );
+            [0u8; SIGNATURE_LEN]
+        })
+    }
+
+    fn try_sign(&self, message: &[u8]) -> Option<[u8; SIGNATURE_LEN]> {
+        self.identities.sign(&self.profile_did, message)
     }
 }
 

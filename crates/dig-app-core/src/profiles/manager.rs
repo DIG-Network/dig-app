@@ -12,7 +12,7 @@
 //! under that profile's own DEK, so profiles are cryptographically isolated from one another on disk
 //! and stay isolated across a restart (SPEC §3.1/§3.2, §10 tests 2–3).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use dig_identity::Did;
 
@@ -236,14 +236,14 @@ impl<S: ProfileSealer> ProfileManager<S> {
     fn seal_and_write(&self, did: &str, hash: &str, data: &ProfileData) -> Result<()> {
         let dir = self.profile_dir(hash);
         std::fs::create_dir_all(&dir)?;
-        restrict_to_owner(&dir)?;
+        crate::storage::restrict_to_owner(&dir)?;
 
         let plaintext = serde_json::to_vec(data)?;
         let ciphertext = self.sealer.seal(did, &plaintext)?;
         let path = dir.join(SEAL_FILE);
         let temp_path = path.with_extension("tmp");
         crate::storage::write_durably(&path, &temp_path, &ciphertext)?;
-        restrict_to_owner(&path)?;
+        crate::storage::restrict_to_owner(&path)?;
         Ok(())
     }
 
@@ -296,23 +296,6 @@ fn decode_key(hex_key: &str) -> Result<[u8; 32]> {
     bytes
         .try_into()
         .map_err(|_| ProfileError::Identity("public key is not 32 bytes".to_string()))
-}
-
-/// Restricts a profile path to the owning user (mode `0700`/`0600` on Unix).
-///
-/// On Windows the per-user ACL is applied by the OS-integration layer (U4/installer); the
-/// `%LOCALAPPDATA%` root is already per-user, so this is a no-op there.
-#[cfg(unix)]
-fn restrict_to_owner(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = if path.is_dir() { 0o700 } else { 0o600 };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn restrict_to_owner(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

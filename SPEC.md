@@ -590,6 +590,22 @@ confirm, never silent.
    delivered.
 4. **Revocation.** dig-app exposes an "unpair" surface (lists paired extensions); unpairing deletes
    the sealed pairing record, after which every frame from that `pairing_id` fails `AUTH_REQUIRED`.
+5. **Restart durability + cross-restart replay.** The sealed pairing record persists to the active
+   profile's AppData (NC-3) and is restored on boot, so a paired extension keeps working across a
+   dig-app restart without re-pairing. The per-pairing nonce high-water mark is persisted ALONGSIDE the
+   record — a **plaintext, UNauthenticated** monotonic counter (`nonces.json`); nothing MACs or seals
+   it. On boot the restored ledger is re-seeded from it, and the mark only ever RISES, so an ordinary
+   restart cannot replay a captured frame (the restored ledger rejects any `nonce ≤` the last one
+   accepted pre-restart). **Fail-closed on a missing mark:** a restored pairing with NO persisted mark
+   (a deleted/absent ledger, or a pairing that never authenticated a frame) is DROPPED — requiring a
+   fresh re-pair — rather than restored with an empty ledger that would accept any nonce.
+   **Threat limit (honest):** because the ledger is unauthenticated, a same-user attacker with write
+   access to the profile's AppData can reset / roll back / swap it, reopening a replay window at the
+   channel layer. That residual is mitigated ONLY by the terminal native confirm — every replayed
+   `sign.request` still requires a fresh biometric/passphrase confirm (§5.6.5), so no signature is
+   produced without a human at the gate. Binding the high-water mark INTO the sealed, MAC'd pairing
+   record (so it cannot be reset/rolled-back/swapped) is the robust closure and remains outstanding
+   (dig_ecosystem#956).
 
 The pairing token is defense-in-depth on the channel, not the sign gate. Token theft (by a same-user
 attacker who can already read `chrome.storage.local` or the sealed record) still cannot produce a
@@ -607,7 +623,9 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   requested scope, gated on Allow/Deny. On Allow the app persists a **whitelist entry**
   `{ origin, profile_did, granted_permissions, connected_at }`, DIGOP1-sealed per profile (NC-2), and
   returns `{ granted: true, profile_did, addresses[], pubkeys[] }` per the `window.chia` connect
-  contract. On Deny/timeout ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`.
+  contract. On Deny/timeout ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`. The sealed whitelist entry persists
+  to the profile's AppData and is restored on boot (a connected dapp survives a restart); `connect.revoke`
+  deletes the at-rest record, so the revocation is durable too.
 - **Sign gating.** A `sign.request` whose `origin` is NOT whitelisted for the active profile ⇒
   `CONNECT_REQUIRED` (the extension MUST run `connect.request` first). Whitelisting is connect-time
   convenience memory only; it NEVER waives the per-sign native confirm (§5.6.5). A "sign without

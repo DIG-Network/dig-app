@@ -71,6 +71,17 @@ impl UnlockedIdentities {
         self.with_identity(did, |identity| identity.signing_public_key())
     }
 
+    /// Sign `message` with `did`'s unlocked Ed25519 identity key (slot `0x0010`), returning only the
+    /// detached signature, or `None` if that profile is locked. The private key never leaves the
+    /// session — the caller receives a signature, never the key — so this is the custody-preserving
+    /// seam a [`crate::session::SessionSigner`] over the active profile delegates to.
+    ///
+    /// The caller is responsible for domain-separating `message` (every 0x0010 signature carries a
+    /// unique per-purpose tag); this method signs exactly the bytes it is given.
+    pub fn sign(&self, did: &str, message: &[u8]) -> Option<[u8; crate::keystore::SIGNATURE_LEN]> {
+        self.with_identity(did, |identity| identity.sign(message))
+    }
+
     /// Runs `f` against the unlocked identity for `did`, or returns `None` if that profile is locked.
     fn with_identity<T>(&self, did: &str, f: impl FnOnce(&IdentitySecrets) -> T) -> Option<T> {
         self.lock_map().get(did).map(f)

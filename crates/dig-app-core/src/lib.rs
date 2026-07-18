@@ -61,6 +61,7 @@ pub mod profiles;
 pub mod session;
 pub mod shutdown;
 pub mod sign_policy;
+pub mod sign_service;
 pub mod storage;
 pub mod wallet;
 pub mod whitelist;
