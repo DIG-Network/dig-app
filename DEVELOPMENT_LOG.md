@@ -47,3 +47,40 @@ Sharp edges that cost time here:
   ID / polkit, each with its own password fallback) — user presence + device-owner identity. The DIG
   key unlock is separate (keystore/dispatch). Keeping the confirmer free of key material keeps its
   boundary clean.
+
+## APP-SIGN tray-wiring — going live + cross-restart replay (SIGN, #958/#956)
+
+Turning the SIGN-1/2/3 seams into a running server is `sign_service::build_router` + `serve_blocking`
+(assemble over the active profile → restore sealed state → serve), called from the tray shell's
+`start_sign_service`. The shell gate is fail-closed: it starts ONLY on a desktop session (Tray form
+factor) with an unlocked active profile. Zero-prompt unlock is Windows/macOS-only (OS credential
+store `RootUnlock::OsKeychain`); Linux needs a passphrase UX not yet wired, so the channel defers
+there rather than start keyless.
+
+Sharp edges that cost time here:
+- **The router used to DISCARD `sealed_record`.** `PairingStore::pair`/`WhitelistStore::grant` compute
+  the sealed bytes, but `FrameRouter` dropped them — nothing survived a restart. The fix is a
+  `SealedRecordStore` seam (default `NullSealedStore`, production `FileSealedStore`) the router persists
+  through on grant/revoke, plus `FrameRouter::restore()` on boot. Added via a `with_persistence(...)`
+  builder so the SIGN-1/2 unit tests (which construct the router without persistence) keep compiling.
+- **Cross-restart replay (#956) — PARTIAL: normal-restart replay is closed; the rollback/swap variants
+  are not.** `restore_sealed` re-inserts a pairing with `last_nonce: None`, so a captured pre-restart
+  frame would replay. The nonce is a monotonic COUNTER (not key material), so it persists in a small
+  PLAINTEXT `nonces.json` written on each accepted frame — cheap, unlike a per-frame Argon2 re-seal — and
+  the router re-seeds it on boot via `PairingStore::seed_last_nonce` (only ever RAISES the mark). Two
+  load-bearing subtleties: (a) **fail-closed** — a restored pairing with NO persisted mark is DROPPED
+  (require re-pair), never restored with an empty ledger that accepts any nonce (that empty-ledger case
+  fully reopens the window). (b) **`nonces.json` is UNauthenticated** — nothing MACs or seals it (do NOT
+  claim MAC coverage). A same-user attacker with AppData write can reset/roll-back/swap it, reopening a
+  channel-layer replay window; that residual is backstopped ONLY by the native-confirm re-gate (every
+  replayed sign still needs a fresh biometric). Folding the mark INTO the sealed, MAC'd pairing record is
+  the robust closure and stays open as #956's remaining work.
+- **Locked-profile sign must be a `LOCKED` error, not an ok zero-sig.** `ProfileSessionSigner::sign` is
+  infallible (returns an all-zero non-verifying signature when locked), so `handle_sign` must NOT frame
+  its output blindly — it uses the fallible `SessionSigner::try_sign` and emits `SignErrorCode::Locked`
+  on `None`, never a success envelope carrying zeros.
+- **Custody-preserving signer.** The loopback signs with the active profile's `0x0010` key via
+  `ProfileSessionSigner`, which delegates to `UnlockedIdentities::sign(did, msg)` — the key never leaves
+  the session. A locked profile yields an all-zero (non-verifying) signature, never a forgery.
+- **Windows MAX_PATH:** building under the deep agent-worktree path trips libz-sys's CMake (260-char
+  limit). Build with a short `CARGO_TARGET_DIR` (e.g. `C:\dt`).

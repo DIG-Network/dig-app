@@ -18,6 +18,7 @@
 
 pub mod dispatch;
 pub mod guard;
+pub mod persist;
 
 use std::sync::Arc;
 
@@ -35,6 +36,7 @@ use crate::profiles::sealer::ProfileSealer;
 
 pub use dispatch::{FrameRouter, ProfileConnectInfo, RequestFrame, SignErrorCode};
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
+pub use persist::{FileSealedStore, NullSealedStore, PersistedSignState, SealedRecordStore};
 
 /// The loopback identity server. Owns the shared [`FrameRouter`] (behind an `Arc`, one per active
 /// profile's endpoint) and the connection [`ConnectionGuard`], and serves the two loopback listeners.

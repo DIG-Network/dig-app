@@ -118,6 +118,25 @@ pub fn write_durably(final_path: &Path, temp_path: &Path, bytes: &[u8]) -> std::
     Ok(())
 }
 
+/// Restrict `path` to the owning user: `0700` for a directory, `0600` for a file, on Unix. This is
+/// the ONE place the per-user restriction policy lives, shared by every security-critical directory
+/// or file dig-app creates (the sealed profile blobs, the APP-SIGN persistence dirs).
+///
+/// On Windows it is a no-op: the `%LOCALAPPDATA%` root is already per-user ACL'd, and the per-user
+/// ACL is applied by the OS-integration layer (installer) rather than by a mode bit.
+#[cfg(unix)]
+pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if path.is_dir() { 0o700 } else { 0o600 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// No-op owner restriction on non-Unix targets — see the Unix variant's docs.
+#[cfg(not(unix))]
+pub fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

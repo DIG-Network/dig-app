@@ -269,6 +269,23 @@ impl<S: ProfileSealer> PairingStore<S> {
         Ok(pairing_id)
     }
 
+    /// Seed the monotonic-nonce high-water mark for an already-restored pairing (`SPEC.md` §5.6.3,
+    /// closes dig_ecosystem#956). Called right after [`restore_sealed`](Self::restore_sealed) on boot
+    /// with the `last_nonce` that was persisted alongside the sealed record, so a frame captured
+    /// before the restart cannot replay into the new session: the restored ledger already rejects any
+    /// nonce `<= last_nonce`. A no-op if the pairing is not live (nothing to seed).
+    ///
+    /// The seed only ever RAISES the mark (`max`): a stale/rolled-back persisted value can never lower
+    /// a mark the live session has already advanced past, so seeding is safe to call unconditionally.
+    pub fn seed_last_nonce(&self, pairing_id: &str, last_nonce: u64) {
+        if let Some(pairing) = self.lock().get_mut(pairing_id) {
+            let seeded = pairing
+                .last_nonce
+                .map_or(last_nonce, |cur| cur.max(last_nonce));
+            pairing.last_nonce = Some(seeded);
+        }
+    }
+
     /// Verify a request frame's `auth` before it is dispatched: the MAC must match the pairing's
     /// channel secret (constant-time) AND the nonce must be strictly greater than the last accepted
     /// one. On success the nonce ledger advances and `Ok(())` is returned; on any failure the ledger
@@ -547,6 +564,71 @@ mod tests {
             store.verify_frame(&out.pairing_id, n(1), "m", &params, &mac),
             Err(AuthFailure::NotPaired)
         );
+    }
+
+    #[test]
+    fn seeding_the_nonce_ledger_rejects_a_pre_restart_frame_replay() {
+        // dig_ecosystem#956: a frame captured before a restart must not replay after restore. The
+        // persisted high-water mark is re-seeded onto the freshly-restored (empty) ledger, so a nonce
+        // at or below it is rejected as a replay — exactly as if the session had never restarted.
+        // One identity session (same DEK) shared across the "restart" — a fresh store over the SAME
+        // identity models a restarted app that re-unlocked the profile.
+        let identities = UnlockedIdentities::new();
+        identities.unlock(DID, IdentitySecrets::generate());
+        let store_of = || {
+            PairingStore::new(
+                KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+                DID,
+            )
+        };
+
+        let first = store_of();
+        let out = first.pair(EXT, 1).unwrap();
+        let params = json!({});
+        let mac = client_mac(&out.channel_token_b64, n(5), "m", &params);
+        assert!(first
+            .verify_frame(&out.pairing_id, n(5), "m", &params, &mac)
+            .is_ok());
+
+        // Simulate a restart: a fresh store restores the sealed pairing (empty ledger) and re-seeds
+        // the persisted high-water mark n(5).
+        let restarted = store_of();
+        let restored = restarted.restore_sealed(&out.sealed_record).unwrap();
+        restarted.seed_last_nonce(&restored, n(5));
+
+        // The captured n(5) frame replayed post-restart is now rejected …
+        assert_eq!(
+            restarted.verify_frame(&restored, n(5), "m", &params, &mac),
+            Err(AuthFailure::Replay)
+        );
+        // … while a strictly-greater nonce still advances.
+        let mac6 = client_mac(&out.channel_token_b64, n(6), "m", &params);
+        assert!(restarted
+            .verify_frame(&restored, n(6), "m", &params, &mac6)
+            .is_ok());
+    }
+
+    #[test]
+    fn seeding_never_lowers_an_already_advanced_ledger() {
+        let store = store();
+        let out = store.pair(EXT, 1).unwrap();
+        let params = json!({});
+        let mac6 = client_mac(&out.channel_token_b64, n(6), "m", &params);
+        assert!(store
+            .verify_frame(&out.pairing_id, n(6), "m", &params, &mac6)
+            .is_ok());
+        // A stale persisted mark below the live one must not reopen a replay window.
+        store.seed_last_nonce(&out.pairing_id, n(3));
+        let mac4 = client_mac(&out.channel_token_b64, n(4), "m", &params);
+        assert_eq!(
+            store.verify_frame(&out.pairing_id, n(4), "m", &params, &mac4),
+            Err(AuthFailure::Replay)
+        );
+    }
+
+    #[test]
+    fn seeding_a_missing_pairing_is_a_noop() {
+        store().seed_last_nonce("no-such-pairing", 42);
     }
 
     #[test]

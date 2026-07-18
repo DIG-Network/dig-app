@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
+use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{AuthFailure, PairingStore};
 use crate::profiles::sealer::ProfileSealer;
 use crate::session::{sign_callback_message, SessionSigner};
@@ -217,6 +218,11 @@ pub struct FrameRouter<S: ProfileSealer> {
     connect_info: ProfileConnectInfo,
     /// The extension ids permitted to `pair.begin` — the same pinned set the `Origin` guard enforces.
     allowed_ext_ids: Vec<String>,
+    /// The at-rest persistence sink: seals the sealed pairing/whitelist bytes + nonce high-water marks
+    /// to disk so they survive a restart (#958/#956). Defaults to the no-op [`NullSealedStore`]; the
+    /// tray boot injects a [`FileSealedStore`](crate::loopback::FileSealedStore) via
+    /// [`with_persistence`](Self::with_persistence).
+    persist: Arc<dyn SealedRecordStore>,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
@@ -241,7 +247,63 @@ impl<S: ProfileSealer> FrameRouter<S> {
             signer,
             connect_info,
             allowed_ext_ids: allowed_ext_ids.into_iter().collect(),
+            persist: Arc::new(NullSealedStore),
         }
+    }
+
+    /// Attach a durable [`SealedRecordStore`] so granted pairings, connected origins, and nonce
+    /// high-water marks are written at rest and survive a restart (#958/#956). Without this the router
+    /// keeps every record in memory only (the pre-wiring behaviour + the unit-test default).
+    pub fn with_persistence(mut self, persist: Arc<dyn SealedRecordStore>) -> Self {
+        self.persist = persist;
+        self
+    }
+
+    /// Restore persisted pairings + connected origins + the nonce ledger on boot, so a paired
+    /// extension and its connected dapps keep working across a restart WITHOUT a fresh pairing, and a
+    /// pre-restart frame cannot replay (#956). Sealed records that this profile's DEK cannot open (a
+    /// foreign/corrupt record) are skipped. Returns `(pairings, origins)` restored, for the boot log.
+    ///
+    /// **Fail-closed on a missing nonce mark (#956).** A restored pairing whose replay high-water mark
+    /// is absent from the (plaintext, unauthenticated) nonce ledger — because the ledger file was
+    /// deleted, or the pairing had never authenticated a frame before the restart — is DROPPED rather
+    /// than restored with an empty (`None`) ledger. An empty ledger would accept ANY nonce and so
+    /// reopen the full replay window; dropping the pairing forces a fresh re-pair instead. Only a
+    /// pairing WITH a known high-water mark is re-seeded and kept live.
+    ///
+    /// Call once, before the server begins accepting frames.
+    pub fn restore(&self) -> (usize, usize) {
+        let state = self.persist.load();
+        let mut pairings = 0;
+        for sealed in &state.pairings {
+            match self.pairings.restore_sealed(sealed) {
+                Ok(pairing_id) => match state.nonces.get(&pairing_id) {
+                    // Re-seed the replay high-water mark so a captured frame cannot replay (#956).
+                    Some(&last_nonce) => {
+                        self.pairings.seed_last_nonce(&pairing_id, last_nonce);
+                        pairings += 1;
+                    }
+                    // No trustworthy high-water mark — fail closed: drop the pairing (require re-pair)
+                    // rather than accept any nonce against an empty ledger.
+                    None => {
+                        self.pairings.unpair(&pairing_id);
+                        tracing::warn!(
+                            "dropped a restored pairing with no persisted nonce mark — re-pair required"
+                        );
+                    }
+                },
+                Err(_) => tracing::warn!("skipped a pairing record this profile cannot open"),
+            }
+        }
+        let mut origins = 0;
+        for sealed in &state.whitelist {
+            match self.whitelist.restore_sealed(sealed) {
+                Ok(_) => origins += 1,
+                Err(_) => tracing::warn!("skipped a whitelist record this profile cannot open"),
+            }
+        }
+        tracing::info!(pairings, origins, "restored APP-SIGN state from disk");
+        (pairings, origins)
     }
 
     /// Route one request frame to its JSON-RPC response `Value`. Never panics on caller input — a
@@ -274,13 +336,19 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
 
         match self.pairings.pair(&params.ext_id, now_epoch_secs()) {
-            Ok(outcome) => ok(
-                id,
-                json!({
-                    "pairing_id": outcome.pairing_id,
-                    "channel_token_b64": outcome.channel_token_b64,
-                }),
-            ),
+            Ok(outcome) => {
+                // Persist the sealed record so the pairing survives a restart (#958). Best-effort:
+                // a failed write is logged inside the store and never fails the pairing.
+                self.persist
+                    .persist_pairing(&outcome.pairing_id, &outcome.sealed_record);
+                ok(
+                    id,
+                    json!({
+                        "pairing_id": outcome.pairing_id,
+                        "channel_token_b64": outcome.channel_token_b64,
+                    }),
+                )
+            }
             // Sealing fails only when the active profile is locked — surface it as LOCKED.
             Err(_) => error(id, SignErrorCode::Locked),
         }
@@ -322,7 +390,12 @@ impl<S: ProfileSealer> FrameRouter<S> {
                     params.requested_permissions,
                     now_epoch_secs(),
                 ) {
-                    Ok(_) => ok(id, self.connect_result()),
+                    Ok(outcome) => {
+                        // Persist the sealed grant so the connected origin survives a restart (#958).
+                        self.persist
+                            .persist_whitelist(&params.origin, &outcome.sealed_record);
+                        ok(id, self.connect_result())
+                    }
                     // Sealing fails only when the active profile is locked — surface it as LOCKED.
                     Err(_) => error(id, SignErrorCode::Locked),
                 }
@@ -340,6 +413,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, SignErrorCode::ConnectDenied);
         };
         let revoked = self.whitelist.revoke(&params.origin);
+        if revoked {
+            // Drop the at-rest record too, so the revocation survives a restart (#958).
+            self.persist.remove_whitelist(&params.origin);
+        }
         ok(id, json!({ "revoked": revoked }))
     }
 
@@ -376,18 +453,20 @@ impl<S: ProfileSealer> FrameRouter<S> {
 
         // Approved: sign the domain-separated, length-prefixed message (never the raw bytes). A
         // `payload_type` longer than the length prefix allows is refused rather than signed ambiguously.
-        match sign_callback_message(&params.payload_type, &payload) {
-            Some(message) => {
-                let signature = self.signer.sign(&message);
-                ok(
-                    id,
-                    json!({
-                        "signature_b64": BASE64.encode(signature),
-                        "pubkey_hex": self.signer.signing_public_key_hex(),
-                    }),
-                )
-            }
-            None => error(id, SignErrorCode::SignBadPayload),
+        let Some(message) = sign_callback_message(&params.payload_type, &payload) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+        // Sign fallibly: a locked profile (no identity in the session) yields `None`, which MUST become
+        // a `LOCKED` error — NEVER a success envelope carrying a bogus/all-zero signature (SPEC §5.6.7).
+        match self.signer.try_sign(&message) {
+            Some(signature) => ok(
+                id,
+                json!({
+                    "signature_b64": BASE64.encode(signature),
+                    "pubkey_hex": self.signer.signing_public_key_hex(),
+                }),
+            ),
+            None => error(id, SignErrorCode::Locked),
         }
     }
 
@@ -417,7 +496,12 @@ impl<S: ProfileSealer> FrameRouter<S> {
                 AuthFailure::NotPaired => SignErrorCode::AuthRequired,
                 AuthFailure::BadMac => SignErrorCode::AuthBadMac,
                 AuthFailure::Replay => SignErrorCode::AuthReplay,
-            })
+            })?;
+        // The nonce advanced — persist the new high-water mark so a frame captured before a restart
+        // cannot replay into the next session (#956). Best-effort: a lost write only risks a one-frame
+        // replay window across a crash, and every sign still re-gates on the native confirm.
+        self.persist.persist_nonce(&auth.pairing_id, auth.nonce);
+        Ok(())
     }
 
     /// The pairing store, for the async server to restore sealed pairings at startup and expose the
@@ -879,6 +963,191 @@ mod tests {
         let auth = signed_auth(&token, &pairing_id, n(1), "wallet.mystery", &params);
         let resp = router.handle(&request("wallet.mystery", params, Some(auth)));
         assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    /// Build a router over an explicit shared identity session + persistence store, so a test can
+    /// stand up a SECOND router over the SAME profile DEK + the SAME on-disk store to model a restart.
+    fn router_persisting(
+        identities: UnlockedIdentities,
+        store: Arc<dyn crate::loopback::persist::SealedRecordStore>,
+    ) -> FrameRouter<KeystoreSealer> {
+        let pairings = PairingStore::new(
+            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+            DID,
+        );
+        let whitelist = WhitelistStore::new(
+            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+            DID,
+        );
+        let signer = crate::session::ProfileSessionSigner::new(identities.clone(), DID);
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec!["xch1testaddress".to_string()],
+            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        };
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(signer),
+            connect_info,
+            [EXT.to_string()],
+        )
+        .with_persistence(store)
+    }
+
+    #[test]
+    fn pairings_connects_and_nonces_survive_a_simulated_restart_and_replay_is_rejected() {
+        use crate::loopback::persist::FileSealedStore;
+        // A shared profile identity (its DEK is what opens the sealed records) + a shared on-disk
+        // store, so the "restarted" router re-derives the same DEK and reads the same files.
+        let dir = tempfile::tempdir().unwrap();
+        let identities = UnlockedIdentities::new();
+        identities.unlock(DID, IdentitySecrets::generate());
+        let store: Arc<dyn crate::loopback::persist::SealedRecordStore> =
+            Arc::new(FileSealedStore::new(dir.path()));
+        let origin = "https://dapp.example";
+
+        // --- First session: pair, connect, and authenticate a frame at nonce n(5). ---
+        let (pairing_id, token) = {
+            let router = router_persisting(identities.clone(), Arc::clone(&store));
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            // A sign at n(5) advances (and persists) the nonce ledger.
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(5), "sign.request", &params);
+            assert!(
+                router.handle(&request("sign.request", params, Some(auth)))["result"]
+                    ["signature_b64"]
+                    .is_string()
+            );
+            (pairing_id, token)
+        };
+
+        // --- Restart: a brand-new router (fresh in-memory stores) over the same DEK + files. ---
+        let restarted = router_persisting(identities, store);
+        let (restored_pairings, restored_origins) = restarted.restore();
+        assert_eq!(restored_pairings, 1, "the pairing is restored from disk");
+        assert_eq!(restored_origins, 1, "the connected origin is restored");
+        assert!(restarted.pairings().is_paired(&pairing_id));
+
+        // The connected origin still signs WITHOUT re-pairing/re-connecting — at a fresh nonce.
+        let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let auth = signed_auth(&token, &pairing_id, n(6), "sign.request", &params);
+        assert!(
+            restarted.handle(&request("sign.request", params, Some(auth)))["result"]
+                ["signature_b64"]
+                .is_string(),
+            "a restored connect + pairing signs post-restart"
+        );
+
+        // #956: a frame captured pre-restart (nonce n(5)) replayed post-restart is rejected.
+        let replay_params = json!({ "origin": origin, "payload_type": "spend" });
+        let replay = signed_auth(&token, &pairing_id, n(5), "sign.request", &replay_params);
+        assert_eq!(
+            restarted.handle(&request("sign.request", replay_params, Some(replay)))["error"]
+                ["message"],
+            "AUTH_REPLAY",
+            "a pre-restart nonce must not replay after restore"
+        );
+    }
+
+    #[test]
+    fn a_sign_on_a_locked_profile_returns_locked_not_an_ok_zero_signature() {
+        // A profile that locks mid-session (its identity dropped from the session) must NOT frame a
+        // success response carrying the ProfileSessionSigner's all-zero fallback signature — the sign
+        // MUST fail with LOCKED (SPEC §5.6.7).
+        use crate::loopback::persist::NullSealedStore;
+        let identities = UnlockedIdentities::new();
+        identities.unlock(DID, IdentitySecrets::generate());
+        let router = router_persisting(identities.clone(), Arc::new(NullSealedStore));
+
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        // Lock the profile, then request a sign.
+        identities.lock_profile(DID);
+        let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        assert_eq!(resp["error"]["message"], "LOCKED");
+        assert!(
+            resp.get("result").is_none(),
+            "a locked sign must never frame a success envelope"
+        );
+    }
+
+    #[test]
+    fn a_restored_pairing_with_no_persisted_nonce_is_dropped_not_accepted() {
+        use crate::loopback::persist::FileSealedStore;
+        // #956 fail-closed: if the nonce ledger has no mark for a restored pairing (deleted/rolled-back
+        // nonces.json, or a pairing that never authenticated a frame pre-restart), the pairing MUST be
+        // dropped — NOT restored with an empty ledger that would accept any nonce.
+        let dir = tempfile::tempdir().unwrap();
+        let identities = UnlockedIdentities::new();
+        identities.unlock(DID, IdentitySecrets::generate());
+        let store: Arc<dyn crate::loopback::persist::SealedRecordStore> =
+            Arc::new(FileSealedStore::new(dir.path()));
+
+        // Session 1: pair ONLY (pair.begin is not an authenticated frame, so no nonce is persisted).
+        let (pairing_id, token) = {
+            let router = router_persisting(identities.clone(), Arc::clone(&store));
+            pair(&router)
+        };
+
+        // Restart: a fresh router over the same DEK + files restores state.
+        let restarted = router_persisting(identities, store);
+        let (restored_pairings, _) = restarted.restore();
+        assert_eq!(
+            restored_pairings, 0,
+            "a nonce-less pairing must not be kept"
+        );
+        assert!(!restarted.pairings().is_paired(&pairing_id));
+
+        // A frame from that dropped pairing is refused (re-pair required) — the replay window stays shut.
+        let params = json!({ "origin": "https://dapp.example" });
+        let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+        let resp = restarted.handle(&request("connect.request", params, Some(auth)));
+        assert_eq!(resp["error"]["message"], "AUTH_REQUIRED");
+    }
+
+    #[test]
+    fn an_approved_connect_signs_with_the_profile_identity_key() {
+        // The ProfileSessionSigner signs with the active profile's identity key; the signature must
+        // verify against that key over the domain-separated DIGNET-SIGN-v1 message (never raw bytes).
+        use crate::keystore::verify_signature;
+        use crate::loopback::persist::NullSealedStore;
+        use crate::session::sign_callback_message;
+
+        let identities = UnlockedIdentities::new();
+        identities.unlock(DID, IdentitySecrets::generate());
+        let pubkey = identities.signing_public_key(DID).unwrap();
+        let router = router_persisting(identities, Arc::new(NullSealedStore));
+
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+        let payload_b64 = spend_payload_b64();
+        let params =
+            json!({ "origin": origin, "payload_type": "spend", "payload_b64": payload_b64 });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        let sig: [u8; 64] = BASE64
+            .decode(resp["result"]["signature_b64"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let payload = BASE64.decode(&payload_b64).unwrap();
+        let message = sign_callback_message("spend", &payload).unwrap();
+        assert!(
+            verify_signature(&pubkey, &message, &sig),
+            "the signature verifies against the active profile identity key"
+        );
+        assert!(
+            !verify_signature(&pubkey, &payload, &sig),
+            "and NOT over the raw payload — it is domain-separated"
+        );
+        assert_eq!(resp["result"]["pubkey_hex"], hex::encode(pubkey));
     }
 
     #[test]
