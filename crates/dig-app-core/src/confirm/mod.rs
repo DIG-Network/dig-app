@@ -257,6 +257,10 @@ pub(crate) enum VerifyOutcome {
     /// The user cancelled the authentication prompt.
     Declined,
     /// Authentication ran but failed (wrong credential, too many attempts) — treated as a denial.
+    /// Only the backends that distinguish this from a plain cancel construct it (Windows Hello's
+    /// `RetriesExhausted`, a polkit error exit); macOS collapses it into `Declined`, so it is
+    /// permitted dead on that target.
+    #[allow(dead_code)]
     Failed,
     /// No authenticator is available or enrolled — fail closed.
     Unavailable,
