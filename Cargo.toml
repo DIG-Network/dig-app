@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -39,6 +39,9 @@ dig-keystore = "0.3"
 ed25519-dalek = { version = "2", features = ["zeroize", "rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 hkdf = "0.12"
+# sha256 — the per-profile DEK HKDF (U4) and the per-profile AppData directory key (U5, a hash of the
+# profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
+# slot-key derivation.
 sha2 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -55,6 +58,14 @@ keyring = { version = "3", default-features = false, features = [
     "windows-native",
     "apple-native",
 ] }
+# The canonical DIG decentralized-identity profile FORMAT (dig_ecosystem#771): the `did:chia:` DID +
+# the additive sparse-merkle-tree of profile slots. dig-app CONSUMES this format for profile
+# metadata (never reinvents the SMT/slots); pinned release-first to the v0.1.0 tag.
+dig-identity = { git = "https://github.com/DIG-Network/dig-identity", tag = "v0.1.0" }
+# Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
+hex = "0.4"
+# Test-only: construct canonical `did:chia:` bech32m strings for the profile-management unit tests.
+chia-sdk-utils = "0.30"
 # Cross-platform desktop tray / menu-bar shell (Windows system tray · macOS menu-bar · Linux
 # AppIndicator/StatusNotifier). `tao` provides the platform event loop the tray icon needs to pump
 # its events; the native menu comes from `tray-icon`'s re-exported `muda`. The tray is the `dig-app`

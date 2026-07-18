@@ -144,6 +144,23 @@ profile** selected at a time; it creates (mint DID + paired store via chip35 del
 edits (write SMT slots), and reads profiles — always through `dig-identity`, never a reinvented
 format (release-first: the format ships in dig-identity, then dig-app consumes it).
 
+On disk the profile set splits into two tiers: a **plaintext registry** (`<brand-dir>/profiles/registry.json`
+— the active-profile pointer plus a non-secret record per profile: its DID, its two public keys, the
+paired store id, and a cached display name) so the app can list profiles and restore the active one
+*before any profile is unlocked*; and a **sealed per-profile blob**
+(`<brand-dir>/profiles/<did-hash>/identity.seal` — the persona metadata cache, subscriptions, and
+per-profile prefs), DIGOP1-sealed under that profile's own DEK. Every per-profile secret blob is sealed
+with the owning profile's key and no other, so opening one profile's blob under a different profile's
+DEK MUST fail — profiles are cryptographically isolated on disk. Because each profile's DEK is
+HKDF-derived from that profile's own freshly generated identity key (§3.1), the isolation holds by the
+cipher, not by directory layout. The registry is the sole pointer to every profile's directory, so it
+MUST be written durably and atomically (temp file → fsync → rename), the same way the sealed identity
+blob is (§3.1); a torn write can never strand a profile's data. dig-app holds no private key while doing
+this: sealing is delegated to the key-management layer (§3.1), and minting the DID + generating the keys
+is delegated to the keystore + wallet/engine. Editing a profile updates the sealed metadata and
+recomputes the canonical dig-identity SMT root; broadcasting that root on-chain (chip35 delegation) is a
+wallet/engine operation.
+
 ### 3.3 Wallet
 
 The wallet is user-identity state and lives in dig-app (migrated out of the engine). Spend bundles
@@ -326,8 +343,8 @@ day one; the security-critical subsystems are implemented by later work units to
 | `shutdown` | the cooperative shutdown latch (`Shutdown`) that stops the run loop promptly | U3 |
 | `agent` | the per-user agent lifecycle: start/stop, reconcile run loop, live `AgentStatus` | U3 |
 | `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
-| `profiles` | multi-DID create/select/edit via dig-identity | U5 (stub) |
-| `wallet` | per-profile wallet host | post-U4 (stub) |
+| `profiles` | multi-DID create/select/list/edit via dig-identity; per-profile sealed AppData | U5 |
+| `wallet` | per-profile wallet host | post-U5 (stub) |
 | `gateway` | authenticate callers + route (local vs proxy-to-engine) | U7 (stub) |
 
 The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows system tray · macOS

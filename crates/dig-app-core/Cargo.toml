@@ -31,6 +31,10 @@ sha2.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
+# Profiles (U5) — the canonical `did:chia:` profile FORMAT (consumed, never reinvented) + hex
+# encoding for the human-readable registry.
+dig-identity.workspace = true
+hex.workspace = true
 
 # The OS credential store is the custody PRIMARY on Windows + macOS only (per-application access
 # gating). It is deliberately NOT a dependency on Linux: keyutils is same-UID-readable + volatile, so
@@ -42,3 +46,4 @@ keyring.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rand_chacha.workspace = true
+chia-sdk-utils.workspace = true
