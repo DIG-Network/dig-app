@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.10.0] - Unreleased
+
+### Added
+
+- **APP-SIGN loopback transport + pairing + auth foundation (SIGN-1, epic #908, #950).** The
+  browser-reachable identity channel dig-app exposes for the extension: a loopback WebSocket server
+  binding `[::1]:9779` (IPv6-first) and `127.0.0.1:9779`, guarding every upgrade with the `Host`
+  allowlist + pinned-`Origin` check (anti-DNS-rebinding, SPEC §5.6.2); the `pair.begin` handshake that
+  mints a 32-byte CSPRNG channel token and seals the pairing record DIGOP1 per-profile (NC-2); and
+  per-frame authentication — a constant-time HMAC-SHA256 over the canonical frame bytes plus a
+  strictly-monotonic nonce (replay barred; a bad MAC never perturbs the ledger, SPEC §5.6.3). Ships
+  the `NativeConfirmer` seam (the sole authorization to pair/connect/sign) with a fail-closed headless
+  stub; `connect.request`/`sign.request` are transport-only stubs returning the honest §5.6.7 code —
+  the dapp whitelist (SIGN-2) and per-OS native confirm (SIGN-3) build on this foundation. SPEC §5.6.3
+  now pins `canonical_json` as a normative byte-for-byte form so the extension (SIGN-4) matches.
+
 ## [0.9.1] - Unreleased
 
 ### Added

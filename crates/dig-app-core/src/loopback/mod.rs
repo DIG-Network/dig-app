@@ -63,12 +63,18 @@ impl<S: ProfileSealer + Send + Sync + 'static> LoopbackServer<S> {
     pub async fn serve(self) -> std::io::Result<()> {
         let v6 = TcpListener::bind(("::1", LOOPBACK_PORT)).await;
         let v4 = TcpListener::bind(("127.0.0.1", LOOPBACK_PORT)).await;
-        if v6.is_err() && v4.is_err() {
-            return Err(v4.unwrap_err());
+        // Tolerate a single-family bind failure, but if NEITHER loopback family binds there is no
+        // endpoint to serve — surface the IPv4 error (the more universally expected family).
+        let bound: Vec<TcpListener> = [v6, v4].into_iter().filter_map(Result::ok).collect();
+        if bound.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "neither loopback address could be bound on the identity port",
+            ));
         }
 
         let mut tasks = Vec::new();
-        for listener in [v6, v4].into_iter().flatten() {
+        for listener in bound {
             let router = Arc::clone(&self.router);
             let guard = Arc::clone(&self.guard);
             tasks.push(tokio::spawn(accept_loop(listener, router, guard)));
@@ -118,6 +124,10 @@ async fn accept_loop<S: ProfileSealer + Send + Sync + 'static>(
 
 /// Run the WebSocket upgrade, applying the [`ConnectionGuard`] to the handshake headers. A rejected
 /// upgrade returns `403` to the caller and surfaces as [`LoopbackError::Rejected`].
+///
+// The header callback's `Result<Response, ErrorResponse>` is tungstenite's mandated signature; the
+// large `Err` variant (an `http::Response`) is not ours to box, so the lint is allowed here.
+#[allow(clippy::result_large_err)]
 async fn accept_guarded<IO>(
     io: IO,
     guard: &ConnectionGuard,
@@ -238,7 +248,10 @@ mod tests {
     fn router() -> FrameRouter<KeystoreSealer> {
         let identities = UnlockedIdentities::new();
         identities.unlock(DID, IdentitySecrets::generate());
-        let store = PairingStore::new(KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST), DID);
+        let store = PairingStore::new(
+            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
+            DID,
+        );
         FrameRouter::new(store, Box::new(Approver), [EXT.to_string()])
     }
 
@@ -331,7 +344,9 @@ mod tests {
         )
         .await
         .unwrap();
-        ws.send(Message::Text("not json".to_string())).await.unwrap();
+        ws.send(Message::Text("not json".to_string()))
+            .await
+            .unwrap();
         let resp = loop {
             match ws.next().await.unwrap().unwrap() {
                 Message::Text(t) => break serde_json::from_str::<serde_json::Value>(&t).unwrap(),

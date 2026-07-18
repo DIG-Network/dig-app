@@ -1,7 +1,7 @@
 //! The JSON-RPC frame router for the APP-SIGN loopback channel (SIGN-1, `SPEC.md` §5.6,
 //! **security-critical**).
 //!
-//! This is the pure, synchronous core the async [`super::server`] feeds parsed frames into: given a
+//! This is the pure, synchronous core the async [`super::LoopbackServer`] feeds parsed frames into: given a
 //! request frame it applies the per-frame authentication (§5.6.3) and returns the JSON-RPC response.
 //! Keeping it transport-free is what makes the security-critical logic — the auth gate, the pairing
 //! handshake, the error taxonomy — exhaustively unit-testable without a socket.
@@ -327,15 +327,14 @@ mod tests {
     fn pairing_store() -> PairingStore<KeystoreSealer> {
         let identities = UnlockedIdentities::new();
         identities.unlock(DID, IdentitySecrets::generate());
-        PairingStore::new(KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST), DID)
+        PairingStore::new(
+            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
+            DID,
+        )
     }
 
     fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<KeystoreSealer> {
-        FrameRouter::new(
-            pairing_store(),
-            Box::new(confirmer),
-            [EXT.to_string()],
-        )
+        FrameRouter::new(pairing_store(), Box::new(confirmer), [EXT.to_string()])
     }
 
     fn request(method: &str, params: Value, auth: Option<FrameAuth>) -> RequestFrame {
@@ -361,7 +360,13 @@ mod tests {
         )
     }
 
-    fn signed_auth(token_b64: &str, pairing_id: &str, nonce: u64, method: &str, params: &Value) -> FrameAuth {
+    fn signed_auth(
+        token_b64: &str,
+        pairing_id: &str,
+        nonce: u64,
+        method: &str,
+        params: &Value,
+    ) -> FrameAuth {
         let secret = BASE64.decode(token_b64).unwrap();
         let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
         mac.update(&frame_mac_input(nonce, method, params));
@@ -443,7 +448,13 @@ mod tests {
         let (pairing_id, token) = pair(&router);
         let params = json!({ "origin": "https://dapp.example" });
         // MAC computed over different params than the frame actually carries.
-        let auth = signed_auth(&token, &pairing_id, 1, "sign.request", &json!({ "origin": "https://evil" }));
+        let auth = signed_auth(
+            &token,
+            &pairing_id,
+            1,
+            "sign.request",
+            &json!({ "origin": "https://evil" }),
+        );
         let resp = router.handle(&request("sign.request", params, Some(auth)));
         assert_eq!(resp["error"]["message"], "AUTH_BAD_MAC");
     }

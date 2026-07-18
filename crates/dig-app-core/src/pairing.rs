@@ -320,11 +320,19 @@ mod tests {
     fn store() -> PairingStore<KeystoreSealer> {
         let identities = UnlockedIdentities::new();
         identities.unlock(DID, IdentitySecrets::generate());
-        PairingStore::new(KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST), DID)
+        PairingStore::new(
+            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
+            DID,
+        )
     }
 
     /// Compute the client-side MAC the extension would send for a frame.
-    fn client_mac(secret_b64: &str, nonce: u64, method: &str, params: &serde_json::Value) -> String {
+    fn client_mac(
+        secret_b64: &str,
+        nonce: u64,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> String {
         let secret = BASE64.decode(secret_b64).unwrap();
         let mut mac = HmacSha256::new_from_slice(&secret).unwrap();
         mac.update(&frame_mac_input(nonce, method, params));
@@ -347,15 +355,9 @@ mod tests {
         // Moving a byte across the method/params boundary changes the input (the 0x00 separators
         // prevent (method="a", params concat) from colliding with (method="ab", …)).
         let p = json!({});
-        assert_ne!(
-            frame_mac_input(1, "a", &p),
-            frame_mac_input(1, "ab", &p)
-        );
+        assert_ne!(frame_mac_input(1, "a", &p), frame_mac_input(1, "ab", &p));
         // The nonce is bound too.
-        assert_ne!(
-            frame_mac_input(1, "m", &p),
-            frame_mac_input(2, "m", &p)
-        );
+        assert_ne!(frame_mac_input(1, "m", &p), frame_mac_input(2, "m", &p));
     }
 
     #[test]
@@ -421,7 +423,12 @@ mod tests {
         let params = json!({"amount": 5});
         let good = client_mac(&out.channel_token_b64, 1, "sign.request", &params);
         // Forge by signing DIFFERENT params — the MAC no longer matches the frame.
-        let tampered = client_mac(&out.channel_token_b64, 1, "sign.request", &json!({"amount": 500}));
+        let tampered = client_mac(
+            &out.channel_token_b64,
+            1,
+            "sign.request",
+            &json!({"amount": 500}),
+        );
         assert_ne!(good, tampered);
         assert_eq!(
             store.verify_frame(&out.pairing_id, 1, "sign.request", &params, &tampered),
@@ -448,7 +455,9 @@ mod tests {
         let out = store.pair(EXT, 1).unwrap();
         let params = json!({});
         let mac5 = client_mac(&out.channel_token_b64, 5, "m", &params);
-        assert!(store.verify_frame(&out.pairing_id, 5, "m", &params, &mac5).is_ok());
+        assert!(store
+            .verify_frame(&out.pairing_id, 5, "m", &params, &mac5)
+            .is_ok());
 
         // Replaying nonce 5 is rejected.
         assert_eq!(
@@ -463,7 +472,9 @@ mod tests {
         );
         // A strictly-greater nonce advances.
         let mac6 = client_mac(&out.channel_token_b64, 6, "m", &params);
-        assert!(store.verify_frame(&out.pairing_id, 6, "m", &params, &mac6).is_ok());
+        assert!(store
+            .verify_frame(&out.pairing_id, 6, "m", &params, &mac6)
+            .is_ok());
     }
 
     #[test]
@@ -479,7 +490,9 @@ mod tests {
         );
         // A subsequent VALID low nonce still authenticates — the ledger was untouched.
         let good = client_mac(&out.channel_token_b64, 1, "m", &params);
-        assert!(store.verify_frame(&out.pairing_id, 1, "m", &params, &good).is_ok());
+        assert!(store
+            .verify_frame(&out.pairing_id, 1, "m", &params, &good)
+            .is_ok());
     }
 
     #[test]

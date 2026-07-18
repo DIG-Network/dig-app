@@ -544,7 +544,18 @@ confirm, never silent.
    `nonce` is a **strictly monotonic** per-pairing `u64` (the app rejects any `nonce` ≤ the last
    accepted one), which bars replay. The app looks up `channel_secret` by `pairing_id`, recomputes the
    MAC, and rejects a mismatch (`AUTH_BAD_MAC`) or a non-increasing nonce (`AUTH_REPLAY`) before any
-   dispatch.
+   dispatch. The MAC is verified in **constant time**; a MAC failure never advances the nonce ledger
+   (a forged or replayed frame can neither pass nor perturb the monotonic counter).
+
+   **`canonical_json` (normative — both sides MUST match byte-for-byte).** `canonical_json(params)` is
+   the UTF-8 JSON serialization of `params` where: every object's keys are sorted lexicographically by
+   their UTF-16 code-unit / Unicode-scalar order at EVERY nesting level; there is NO insignificant
+   whitespace (no spaces after `:` or `,`); arrays keep their element order; and each scalar (string,
+   number, boolean, null) uses the standard compact JSON rendering with control characters escaped.
+   Because control characters are escaped, a raw `0x00` can never appear inside `canonical_json`, so it
+   cannot collide with the `0x00` field separators in `canonical_frame_bytes`. The extension (SIGN-4)
+   and dig-app derive identical bytes from equal `params`, regardless of the key order the transport
+   delivered.
 4. **Revocation.** dig-app exposes an "unpair" surface (lists paired extensions); unpairing deletes
    the sealed pairing record, after which every frame from that `pairing_id` fails `AUTH_REQUIRED`.
 
