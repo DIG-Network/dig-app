@@ -11,6 +11,14 @@ use serde_json::json;
 
 use super::command::{Command, ProfilesAction, WalletAction};
 use super::outcome::{ErrorCode, GatewayError, Outcome};
+use crate::confirm::{ConfirmDecision, NativeConfirmer, SignPrompt};
+use crate::session::user_sign_message;
+
+/// The `payload_type` label the local `dign sign` path presents at the native confirm. Unlike the
+/// engine/dapp `sign` paths — which name a decodable transaction type (`spend`, …) — this is the
+/// user signing their OWN arbitrary message, so it carries no transaction decoder; the confirm shows
+/// the message text verbatim.
+const USER_SIGN_PAYLOAD_TYPE: &str = "user-message";
 
 /// A one-line view of a profile for the CLI: its DID, display name, and whether it is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,12 +59,13 @@ pub trait LocalIdentity {
 pub fn handle_local(
     command: &Command,
     identity: &dyn LocalIdentity,
+    confirmer: &dyn NativeConfirmer,
 ) -> Result<Outcome, GatewayError> {
     tracing::debug!(action = command.action(), "routing command locally");
     let result = match command {
         Command::Profiles(action) => handle_profiles(action, identity),
         Command::Wallet(action) => handle_wallet(action, identity),
-        Command::Sign { message } => handle_sign(message, identity),
+        Command::Sign { message } => handle_sign(message, identity, confirmer),
         other => Err(GatewayError::new(
             ErrorCode::Usage,
             format!("{} is not a local command", other.action()),
@@ -127,9 +136,58 @@ fn handle_wallet(
     }
 }
 
-/// Serve `sign`: sign the message bytes with the active identity key, returning a hex signature.
-fn handle_sign(message: &str, identity: &dyn LocalIdentity) -> Result<Outcome, GatewayError> {
-    let signature = identity.sign(message.as_bytes())?;
+/// Serve `sign`: gate on the native confirm, then sign the DOMAIN-SEPARATED user-sign message with
+/// the active identity key, returning a hex signature.
+///
+/// Two custody guards, both mandatory (SPEC §3.5, security fix #959):
+///
+/// 1. **Confirm gate.** The local gateway holds the custody key, so a local process could otherwise
+///    obtain an identity-key signature silently. Every `dign sign` is gated on the terminal native
+///    confirm ([`NativeConfirmer::confirm_sign`], the SIGN-1 seam) — the same human authorization the
+///    engine (§5.3) and dapp (§5.6) sign paths require, so all three signing paths funnel through a
+///    human gate with no silent-signing divergence. A declined / timed-out / headless confirm yields
+///    [`ErrorCode::Denied`] and NEVER touches the key.
+/// 2. **Domain separation.** On approval the key signs [`user_sign_message`] (the `DIGNET-USER-SIGN-v1`
+///    tag ‖ the message) — NEVER the raw `message.as_bytes()`. This closes the cross-protocol signing
+///    oracle: because the tag is distinct from every other 0x0010 purpose, a `dign sign` signature can
+///    never be replayed as a session attach or a spend/callback authorization, even if the caller
+///    shapes `message` to look like one of those bodies.
+fn handle_sign(
+    message: &str,
+    identity: &dyn LocalIdentity,
+    confirmer: &dyn NativeConfirmer,
+) -> Result<Outcome, GatewayError> {
+    // The user is signing their own message; show it verbatim at the confirm — there is no
+    // transaction to decode, so `decoded_tx` carries the plaintext being signed.
+    let decision = confirmer.confirm_sign(&SignPrompt {
+        origin: "",
+        payload_type: USER_SIGN_PAYLOAD_TYPE,
+        decoded_tx: Some(message),
+    });
+    match decision {
+        ConfirmDecision::Approve => {}
+        ConfirmDecision::Deny => {
+            return Err(GatewayError::new(
+                ErrorCode::Denied,
+                "signing was declined at the confirm prompt",
+            ))
+        }
+        ConfirmDecision::Timeout => {
+            return Err(GatewayError::new(
+                ErrorCode::Denied,
+                "the sign confirm was not answered in time",
+            ))
+        }
+        ConfirmDecision::Unavailable => {
+            return Err(GatewayError::new(
+                ErrorCode::Denied,
+                "no native confirmer is available to authorize signing",
+            )
+            .with_hint("signing requires a desktop session with the dig-app confirm prompt"))
+        }
+    }
+
+    let signature = identity.sign(&user_sign_message(message.as_bytes()))?;
     let hex = hex::encode(signature);
     Ok(Outcome::new(
         format!("signature: {hex}"),
@@ -207,13 +265,53 @@ mod tests {
         }
     }
 
+    /// A native-confirm double returning a fixed decision — the SIGN-3 confirmer stand-in for the
+    /// gateway's local sign gate.
+    struct ScriptedConfirmer(ConfirmDecision);
+    impl NativeConfirmer for ScriptedConfirmer {
+        fn confirm_pair(&self, _: &crate::confirm::PairPrompt<'_>) -> ConfirmDecision {
+            self.0
+        }
+        fn confirm_connect(&self, _: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            self.0
+        }
+        fn confirm_sign(&self, _: &SignPrompt<'_>) -> ConfirmDecision {
+            self.0
+        }
+    }
+
+    /// A confirmer that approves every prompt (for the non-sign commands, which never consult it).
+    fn approving() -> ScriptedConfirmer {
+        ScriptedConfirmer(ConfirmDecision::Approve)
+    }
+
+    /// Serve a `dign sign` of `message` against `identity`, gated by a confirmer scripted to `decision`.
+    fn sign(
+        identity: &FakeIdentity,
+        message: &str,
+        decision: ConfirmDecision,
+    ) -> Result<Outcome, GatewayError> {
+        handle_local(
+            &Command::Sign {
+                message: message.into(),
+            },
+            identity,
+            &ScriptedConfirmer(decision),
+        )
+    }
+
     #[test]
     fn list_reports_every_profile() {
         let identity = FakeIdentity {
             profiles: vec![one_active("alice")],
             ..Default::default()
         };
-        let out = handle_local(&Command::Profiles(ProfilesAction::List), &identity).unwrap();
+        let out = handle_local(
+            &Command::Profiles(ProfilesAction::List),
+            &identity,
+            &approving(),
+        )
+        .unwrap();
         assert_eq!(out.result["profiles"].as_array().unwrap().len(), 1);
         assert_eq!(out.result["profiles"][0]["did"], json!("did:chia:alice"));
     }
@@ -221,7 +319,12 @@ mod tests {
     #[test]
     fn show_errors_not_found_when_no_active_profile() {
         let identity = FakeIdentity::default();
-        let err = handle_local(&Command::Profiles(ProfilesAction::Show), &identity).unwrap_err();
+        let err = handle_local(
+            &Command::Profiles(ProfilesAction::Show),
+            &identity,
+            &approving(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotFound);
     }
 
@@ -233,38 +336,47 @@ mod tests {
                 did: "did:chia:bob".into(),
             }),
             &identity,
+            &approving(),
         )
         .unwrap();
         assert_eq!(identity.selected.borrow().as_deref(), Some("did:chia:bob"));
     }
 
     #[test]
-    fn sign_returns_a_hex_signature() {
+    fn sign_of_an_approved_message_is_domain_separated_not_the_raw_bytes() {
         let identity = FakeIdentity::default();
-        let out = handle_local(
-            &Command::Sign {
-                message: "hi".into(),
-            },
-            &identity,
-        )
-        .unwrap();
-        // The fake echoes the message bytes; "hi" == 0x6869.
-        assert_eq!(out.result["signature"], json!("6869"));
+        let out = sign(&identity, "hi", ConfirmDecision::Approve).unwrap();
+        // The fake echoes the bytes it was asked to sign, so the returned hex proves the key signed
+        // the DOMAIN-SEPARATED `DIGNET-USER-SIGN-v1 ‖ "hi"` message — NEVER the raw "hi" (0x6869).
+        let expected = hex::encode(user_sign_message(b"hi"));
+        assert_eq!(out.result["signature"], json!(expected));
+        assert_ne!(out.result["signature"], json!("6869"));
     }
 
     #[test]
-    fn sign_surfaces_a_locked_identity_as_locked() {
+    fn sign_is_refused_without_a_native_confirm_and_never_touches_the_key() {
+        let identity = FakeIdentity::default();
+        for declined in [
+            ConfirmDecision::Deny,
+            ConfirmDecision::Timeout,
+            ConfirmDecision::Unavailable,
+        ] {
+            let err = sign(&identity, "hi", declined).unwrap_err();
+            assert_eq!(
+                err.code,
+                ErrorCode::Denied,
+                "a non-approved confirm ({declined:?}) must refuse signing"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_surfaces_a_locked_identity_as_locked_after_the_confirm() {
         let identity = FakeIdentity {
             locked: true,
             ..Default::default()
         };
-        let err = handle_local(
-            &Command::Sign {
-                message: "hi".into(),
-            },
-            &identity,
-        )
-        .unwrap_err();
+        let err = sign(&identity, "hi", ConfirmDecision::Approve).unwrap_err();
         assert_eq!(err.code, ErrorCode::Locked);
     }
 
@@ -274,9 +386,19 @@ mod tests {
             profiles: vec![one_active("a")],
             ..Default::default()
         };
-        let addr = handle_local(&Command::Wallet(WalletAction::Address), &identity).unwrap();
+        let addr = handle_local(
+            &Command::Wallet(WalletAction::Address),
+            &identity,
+            &approving(),
+        )
+        .unwrap();
         assert_eq!(addr.result["address"], json!("xch1testaddr"));
-        let bal = handle_local(&Command::Wallet(WalletAction::Balance), &identity).unwrap();
+        let bal = handle_local(
+            &Command::Wallet(WalletAction::Balance),
+            &identity,
+            &approving(),
+        )
+        .unwrap();
         assert_eq!(bal.result["balance_mojos"], json!(1_234));
     }
 
@@ -288,6 +410,7 @@ mod tests {
                 name: "carol".into(),
             }),
             &identity,
+            &approving(),
         )
         .unwrap();
         assert_eq!(out.result["profile"]["name"], json!("carol"));
@@ -296,7 +419,7 @@ mod tests {
     #[test]
     fn an_engine_command_passed_locally_is_a_usage_bug_not_a_panic() {
         let identity = FakeIdentity::default();
-        let err = handle_local(&Command::Info, &identity).unwrap_err();
+        let err = handle_local(&Command::Info, &identity, &approving()).unwrap_err();
         assert_eq!(err.code, ErrorCode::Usage);
     }
 }

@@ -109,7 +109,8 @@ material is serialized nowhere else.
 carry a unique per-purpose ASCII domain-separation tag as the first bytes of the signed message; no
 purpose ever signs un-prefixed caller/peer bytes. Distinct purposes MUST use distinct tags (e.g.
 `DIGNET-SESSION-v1` for the session-attach challenge §5.3, `DIGNET-SIGN-v1` for the engine `sign`
-callback §5.3). This makes a signature minted for one purpose provably non-verifiable for any other,
+callback §5.3, `DIGNET-USER-SIGN-v1` for the local `dign sign` §3.5). This makes a signature minted
+for one purpose provably non-verifiable for any other,
 closing cross-protocol signing oracles (a signature obtained for purpose A cannot be replayed as a
 valid signature for purpose B — including an attach challenge, a spend hash, or an SMT write). Each
 verifier reconstructs the identical tagged byte string; the construction is byte-identical across the
@@ -289,11 +290,33 @@ codes.
 `dign` is its OWN binary crate (a thin IPC client); the routing lives in `dig_app_core::gateway`,
 which the running dig-app hosts. The gateway classifies every command as `Route::UserApp` (served
 locally with the held user identity — profiles / wallet / sign) or `Route::Engine` (proxied to the
-engine), and dispatches over three seams: `EngineProxy` (forwards the canonical `control.*` call over
-the session), `LocalIdentity` (serves the local identity ops), and `LinkOpener` (validates + opens a
-DIG link — only `chia://` / `urn:dig:chia:` are accepted, the security boundary). Failures carry a
-stable `ErrorCode` (symbolic name + numeric exit code); the `--json` envelopes match the engine CLI's
-shape so the DIG command line is one consistent surface.
+engine), and dispatches over four seams: `EngineProxy` (forwards the canonical `control.*` call over
+the session), `LocalIdentity` (serves the local identity ops), `LinkOpener` (validates + opens a
+DIG link — only `chia://` / `urn:dig:chia:` are accepted, the security boundary), and the
+`NativeConfirmer` (§5.6.1) that gates `dign sign`. Failures carry a stable `ErrorCode` (symbolic name
++ numeric exit code); the `--json` envelopes match the engine CLI's shape so the DIG command line is
+one consistent surface.
+
+**`dign sign` — domain-separated + confirm-gated (MUST, custody).** The local `sign` command holds the
+custody key, so it enforces the two invariants every 0x0010 signing path enforces:
+
+- **Domain separation.** It signs the length-unambiguous message
+
+  ```text
+  "DIGNET-USER-SIGN-v1" ‖ message
+  ```
+
+  (the `USER_SIGN_DOMAIN` tag ‖ the caller's message; `message` is the single trailing field, so no
+  length prefix is required for an unambiguous parse), **never the raw `message` bytes**. This is a
+  THIRD purpose tag, distinct from `DIGNET-SESSION-v1` (§5.3 session attach) and `DIGNET-SIGN-v1` (§5.3
+  engine callback / §5.6.5 dapp sign). Because the tags differ at a fixed leading position, a
+  `dign sign` signature can NEVER be replayed as a session attach or a spend/callback authorization,
+  even when the caller crafts `message` to look like one of those bodies — closing the cross-protocol
+  signing oracle (§3 domain-separation invariant).
+- **Confirm gate.** `dign sign` funnels through the same terminal `NativeConfirmer` (§5.6.1) the engine
+  (§5.3) and dapp (§5.6.5) sign paths use, so no local process obtains an identity-key signature
+  without an explicit human approval. A declined / timed-out / no-confirmer (headless) outcome returns
+  the `DENIED` error code and never touches the key.
 
 ---
 
