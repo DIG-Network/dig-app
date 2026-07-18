@@ -168,6 +168,30 @@ impl<S: ProfileSealer> ProfileManager<S> {
         Ok(unlocked)
     }
 
+    /// Re-unlocks a SINGLE profile's persisted identity into the session — the sign-path re-auth
+    /// path (dig_ecosystem#973), which needs ONLY the profile about to sign, not every profile's DEK.
+    ///
+    /// Unlike [`unlock_all`](Self::unlock_all), this re-derives just the identity for `did` from its
+    /// sealed material under `root`, leaving every other profile locked (its DEK stays absent from the
+    /// session) — the smallest key residency that authorizes the sign. Fails closed (the profile stays
+    /// locked) on a bad root unlock, a tampered blob, or a DID no profile owns.
+    pub fn unlock_profile(&self, did: &str, root: RootUnlock<'_>) -> Result<()> {
+        let registry = self.load_registry()?;
+        let record = registry
+            .find(did)
+            .ok_or_else(|| ProfileError::NotFound(did.to_string()))?;
+        let profile_dir = self.profile_dir(&record.did_hash);
+        self.identities
+            .unlock_persisted(&record.did, &record.did_hash, &profile_dir, root)
+            .map_err(|e| {
+                // NEVER log the root unlock secret — only which profile failed to re-unlock.
+                tracing::warn!(did = %record.did, error = %e, "single-profile re-unlock failed");
+                e
+            })?;
+        tracing::info!(did = %record.did, "single-profile re-unlock complete");
+        Ok(())
+    }
+
     /// Selects `did` as the active profile and loads its sealed data into memory.
     ///
     /// The blob is opened *before* the active pointer is persisted, so a profile whose DEK cannot

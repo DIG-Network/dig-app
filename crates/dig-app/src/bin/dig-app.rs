@@ -155,7 +155,12 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
 
     let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&active_did));
     let confirmer: Arc<dyn dig_app_core::confirm::NativeConfirmer> = Arc::from(native_confirmer());
-    let reauth_gate = build_reauth_gate(Arc::clone(&lock), brand_dir.clone(), session.clone());
+    let reauth_gate = build_reauth_gate(
+        Arc::clone(&lock),
+        brand_dir.clone(),
+        session.clone(),
+        active_did.clone(),
+    );
     let router = sign_service::build_router(session, &active_did, &profile_dir, confirmer)
         .with_reauth_gate(reauth_gate);
 
@@ -183,21 +188,35 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     })
 }
 
-/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the profiles from the OS
-/// credential store (the keystore's job) before the signature proceeds. Re-derives a fresh
-/// [`ProfileManager`] per re-unlock so nothing but the shared session outlives this call.
+/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks ONLY the signing
+/// profile (`active_did`) from the OS credential store (the keystore's job) before the signature
+/// proceeds — never every profile's DEK, since only the active profile signs (dig_ecosystem#973).
+/// Re-derives a fresh [`ProfileManager`] per re-unlock so nothing but the shared session outlives
+/// this call.
 fn build_reauth_gate(
     lock: TraySessionLock,
     brand_dir: std::path::PathBuf,
     session: UnlockedIdentities,
+    active_did: String,
 ) -> Arc<dyn SignReauthGate> {
     Arc::new(SessionReauthGate::new(lock, move || {
-        unlock_profiles(&brand_dir, &session).is_ok()
+        reunlock_signing_profile(&brand_dir, &session, &active_did).is_ok()
     }))
 }
 
-/// Re-unlock every profile's identity into `session` from the OS credential store (the zero-prompt
-/// custody primary on Windows/macOS).
+/// Re-unlock JUST the signing profile's identity into `session` from the OS credential store (the
+/// zero-prompt custody primary on Windows/macOS), leaving every other profile locked.
+fn reunlock_signing_profile(
+    brand_dir: &std::path::Path,
+    session: &UnlockedIdentities,
+    did: &str,
+) -> Result<(), dig_app_core::profiles::ProfileError> {
+    profile_manager(brand_dir, session).unlock_profile(did, RootUnlock::OsKeychain)
+}
+
+/// Re-unlock every profile's identity into `session` from the OS credential store — the BOOT-time
+/// re-unlock (a restarted app must reopen ALL of its profiles), distinct from the sign-path re-auth
+/// which re-unlocks only the signing profile ([`reunlock_signing_profile`]).
 fn unlock_profiles(
     brand_dir: &std::path::Path,
     session: &UnlockedIdentities,
