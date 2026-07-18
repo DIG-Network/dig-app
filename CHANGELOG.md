@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.6.0] - Unreleased
+
+### Added
+
+- **Identity-authenticated engine session (U6, security-critical).** The new `session` module
+  implements the app side of the per-user IPC channel to the identity-agnostic engine (`SPEC.md`
+  §5.3): the `control.session.begin` → `attach` challenge/response handshake (the app signs a
+  domain-separated challenge, `DIGNET-SESSION-v1` ‖ nonce ‖ profile DID, with the in-memory Ed25519
+  identity key), `control.session.detach`, and re-attach after a dropped pipe or engine restart. The
+  engine→app `sign` callback signs engine-initiated operations — over a domain-separated,
+  length-prefixed message (`DIGNET-SIGN-v1` ‖ len16(payload_type) ‖ payload_type ‖ payload), never
+  the raw payload, so a signature can never be replayed across purposes — in process behind a
+  mandatory `SignPolicy` custody gate, and returns only the signature + public key. The private key
+  never crosses the boundary. IPC frames are size-capped and the callback loop is bounded against a
+  hostile local engine. Multi-session aware (one session per active profile) via `SessionRegistry`.
+  The signing seam (`SessionSigner`) and the newline-delimited JSON-RPC transport (`FrameTransport`
+  / `LineTransport`) keep the protocol logic pure and fully unit-tested.
+
 ## [0.5.0] - Unreleased
 
 ### Added

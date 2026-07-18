@@ -103,7 +103,17 @@ profile's blobs in one transaction (DIGOP1 is versioned; a store-version header 
 signing key (slot `0x0010`) and an **X25519** encryption key (slot `0x0011`). Both are generated
 from the OS CSPRNG, held in memory only while unlocked, and zeroized on drop. Their at-rest form is
 a fixed 64-byte layout `signing_seed(32) || encryption_scalar(32)` that DIGOP1 seals; the private
-material is serialized nowhere else. Signing is Ed25519 over the caller's payload.
+material is serialized nowhere else.
+
+**Domain-separation invariant (MUST).** Every signature the slot `0x0010` identity key produces MUST
+carry a unique per-purpose ASCII domain-separation tag as the first bytes of the signed message; no
+purpose ever signs un-prefixed caller/peer bytes. Distinct purposes MUST use distinct tags (e.g.
+`DIGNET-SESSION-v1` for the session-attach challenge §5.3, `DIGNET-SIGN-v1` for the engine `sign`
+callback §5.3). This makes a signature minted for one purpose provably non-verifiable for any other,
+closing cross-protocol signing oracles (a signature obtained for purpose A cannot be replayed as a
+valid signature for purpose B — including an attach challenge, a spend hash, or an SMT write). Each
+verifier reconstructs the identical tagged byte string; the construction is byte-identical across the
+app and every counterpart (the engine, a reimplementation).
 
 **At-rest storage precedence (bootstrap unlock).** The precedence is PLATFORM-DEPENDENT, because an
 OS credential store is only a safe custody primary where its access gate is per-application:
@@ -309,10 +319,22 @@ profile's slot `0x0010` signing key before any session opens.
 
 **`sign` callback** (engine → dig-app, over the same connection) — params: `session_id`, `op_id`,
 `payload_type`, `payload_b64`, `context`. The engine requests a signature for an engine-initiated
-operation (§2.3 case 2). dig-app **policy-checks** the request, signs `payload_b64` with the
-in-memory profile key, and returns `signature_b64` + `pubkey_hex`. **The engine NEVER receives the
-private key.** A timeout or a user-deny ⇒ a JSON-RPC error; `op_id` correlates the request with its
-response.
+operation (§2.3 case 2). dig-app **policy-checks** the request, then signs — **NOT** the raw
+`payload_b64` bytes, but the domain-separated, length-prefixed message:
+
+```
+"DIGNET-SIGN-v1" || len16(payload_type) || payload_type || payload
+```
+
+(the ASCII `DIGNET-SIGN-v1` tag, the big-endian `u16` byte length of `payload_type`, the
+`payload_type` bytes, then the raw `payload` decoded from `payload_b64`). The `len16` prefix makes
+the `payload_type || payload` boundary unambiguous; the `DIGNET-SIGN-v1` tag (distinct from the
+`DIGNET-SESSION-v1` attach-challenge tag) is what enforces the §3 domain-separation invariant — a
+malicious engine cannot choose a `payload` whose signature verifies as an attach challenge (or any
+other identity-key signature). The engine reconstructs this identical byte string to verify. dig-app
+returns `signature_b64` (over that message) + `pubkey_hex`; **the engine NEVER receives the private
+key.** A denied request, a `payload_type` longer than `u16::MAX`, an un-decodable payload, a timeout,
+or a user-deny ⇒ a JSON-RPC error; `op_id` correlates the request with its response.
 
 **Multi-session.** The engine keeps a map `session_id → { profile_did, pubkey, subscriptions }`.
 Concurrent sessions for different users coexist; a `sign` callback routes to the connection that owns
