@@ -596,21 +596,28 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
 #### 5.6.5 sign request
 
 - **`sign.request`** (extension → app) — params:
-  `{ origin, payload_type, payload_b64, decode_hint?, context? }`.
+  `{ origin, payload_type, payload_b64, context? }`.
   - `origin` — the vouched dapp origin (MUST be whitelisted, §5.6.4).
-  - `payload_type` — an ASCII tag naming what is being signed (e.g. `spend`, `chip35.smt-write`); it
-    selects the decoder and the allowlist and is bound into the signed message.
-  - `payload_b64` — base64 of the raw payload bytes to be signed (e.g. the spend-bundle hash).
-  - `decode_hint?` — optional decoder input (e.g. the full spend bundle to render).
+  - `payload_type` — an ASCII tag naming what is being signed; it selects the decoder + the allowlist
+    and is bound into the signed message. The shipped allowlist is `spend` (a Chia spend bundle);
+    additional types (e.g. `chip35.smt-write`) are added together with their decoder.
+  - `payload_b64` — base64 of the **exact bytes that are signed**, which are ALSO the exact bytes the
+    decoder renders — display binds to what is signed, so no separate hint can disagree with the
+    signed payload (the display-vs-signed signing-oracle gap is closed by construction). For
+    `payload_type = "spend"` the bytes are the streamable `SpendBundle`.
+  - `context?` — optional engine/extension-supplied context; advisory only, never a substitute for the
+    decode.
 - **Decoded-transaction display (MUST).** The confirm window MUST present the transaction in **human
-  terms**, never raw-bytes-only: for a spend, the coins spent, the amount **per asset** with its ticker
-  ($DIG / XCH / CAT), the recipient rendered as a bech32m address, and the fee — decoded via the
-  canonical wallet decode path (`chip35-dl-coin-wasm` / `chia-wallet-sdk`; DID ops via `chia-wallet-sdk`
-  per canonical). The window also shows the vouched `origin` and that the request arrived *via the
-  paired extension*.
+  terms**, never raw-bytes-only, decoded from the signed `payload_b64` itself: for a `spend`, the
+  `CREATE_COIN` outputs (each recipient rendered as a bech32m `xch1…` address + its amount in mojos)
+  and the fee (`total_input − total_created`), via the canonical Chia decode path (`chia-sdk-types`
+  `run_puzzle` + `Condition` parsing; DID ops via `chia-wallet-sdk` per canonical). The window also
+  shows the vouched `origin` and that the request arrived *via the paired extension*.
 - **Allowlist (MUST fail closed).** `payload_type` MUST be on the known-decoder allowlist. An unknown
   `payload_type` ⇒ `SIGN_UNKNOWN_TYPE`; a known type whose payload does not decode ⇒ `SIGN_BAD_PAYLOAD`.
-  dig-app MUST NEVER present "sign these opaque bytes?" — a blind-sign request is refused.
+  dig-app MUST NEVER present "sign these opaque bytes?" — a blind-sign request is refused. The
+  connect gate runs BEFORE the decode: an un-whitelisted `origin` ⇒ `CONNECT_REQUIRED` regardless of
+  the payload (the origin is never revealed to the decoder or the key until it is connected).
 - **Native confirm + biometric.** The app raises the OS foreground confirm window and requires an
   explicit biometric/passphrase action: **Windows Hello** (WinRT `UserConsentVerifier`) / **macOS Touch
   ID** (`LocalAuthentication` `LAContext`) / **Linux** (polkit or fprintd via PAM), passphrase fallback

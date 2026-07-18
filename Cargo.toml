@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -88,6 +88,7 @@ chia-sdk-driver = "0.30"
 chia-sdk-signer = "0.30"
 chia-sdk-types = "0.30"
 chia-traits = "0.26"
+clvm-traits = "0.26"
 clvmr = "0.14"
 hex-literal = "0.4"
 # Canonical `xch1…`/`did:chia:` bech32m address encoding (wallet receive address; also the

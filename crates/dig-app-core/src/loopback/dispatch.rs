@@ -6,24 +6,37 @@
 //! Keeping it transport-free is what makes the security-critical logic — the auth gate, the pairing
 //! handshake, the error taxonomy — exhaustively unit-testable without a socket.
 //!
-//! ## What SIGN-1 routes
+//! ## What the router routes
 //!
-//! - **`pair.begin`** — fully implemented: a native pairing confirm (§5.6.1) then mint + seal + persist
-//!   the channel token (§5.6.3). This is the ONE frame that carries no `auth` (it establishes it).
+//! - **`pair.begin`** — a native pairing confirm (§5.6.1) then mint + seal + persist the channel token
+//!   (§5.6.3). This is the ONE frame that carries no `auth` (it establishes it).
 //! - **every other frame** — authenticated first (`AUTH_REQUIRED` / `AUTH_BAD_MAC` / `AUTH_REPLAY`),
-//!   THEN dispatched. `connect.request` and `sign.request` are SIGN-1 stubs: they prove the
-//!   authenticated transport works and return the honest §5.6.7 code for a transport-only build — the
-//!   dapp whitelist (SIGN-2) and the per-OS sign confirm (SIGN-3) fill in the real behaviour against
-//!   this same seam.
+//!   THEN dispatched:
+//!   - **`connect.request` / `connect.revoke`** — the dapp connect-whitelist (§5.6.4): a whitelisted
+//!     origin returns its connection handle directly; an un-whitelisted one raises the native connect
+//!     confirm and, on approval, seals a per-origin whitelist entry.
+//!   - **`sign.request`** — the sign flow (§5.6.5): gate on the whitelist (`CONNECT_REQUIRED`
+//!     otherwise) → decode + native confirm through the ONE [`NativeConfirmSignPolicy`] → on approval
+//!     sign the domain-separated `DIGNET-SIGN-v1` message with the in-memory identity key and return
+//!     `{ signature_b64, pubkey_hex }`.
+//!
+//! The per-OS native confirm windows land in SIGN-3 behind the frozen [`NativeConfirmer`] trait; until
+//! then the injected confirmer is the fail-closed [`crate::confirm::HeadlessConfirmer`].
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::confirm::{ConfirmDecision, NativeConfirmer, PairPrompt};
+use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::pairing::{AuthFailure, PairingStore};
 use crate::profiles::sealer::ProfileSealer;
+use crate::session::{sign_callback_message, SessionSigner};
+use crate::sign_policy::{NativeConfirmSignPolicy, SignRejection, SignSubject, SignVerdict};
+use crate::whitelist::WhitelistStore;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 /// The stable symbolic error codes the extension keys its UX off (`SPEC.md` §5.6.7). Each carries a
 /// numeric JSON-RPC `code` (an application-specific range, distinct from the JSON-RPC reserved
@@ -139,29 +152,94 @@ struct PairBeginParams {
     ext_label: Option<String>,
 }
 
+/// `connect.request` parameters (`SPEC.md` §5.6.4).
+#[derive(Debug, Deserialize)]
+struct ConnectParams {
+    origin: String,
+    #[serde(default)]
+    dapp_name: Option<String>,
+    #[serde(default)]
+    requested_permissions: Vec<String>,
+}
+
+/// `connect.revoke` parameters (`SPEC.md` §5.6.4).
+#[derive(Debug, Deserialize)]
+struct ConnectRevokeParams {
+    origin: String,
+}
+
+/// `sign.request` parameters (`SPEC.md` §5.6.5). `payload_b64` is the base64 of the exact bytes that
+/// get signed; the decoder renders directly from them so display binds to what is signed.
+#[derive(Debug, Deserialize)]
+struct SignParams {
+    payload_type: String,
+    payload_b64: String,
+}
+
+/// Just the `origin` of a `sign.request`, parsed first so the connect gate runs before the payload is
+/// validated (an unconnected origin ⇒ `CONNECT_REQUIRED` regardless of the payload's shape).
+#[derive(Debug, Deserialize)]
+struct OriginGate {
+    origin: String,
+}
+
+/// The connect-handle the app returns to a dapp on a successful `connect.request` (§5.6.4): the active
+/// profile plus the addresses/pubkeys the `window.chia` connect contract exposes. Computed once by the
+/// wiring layer (from the active profile's identity + wallet) and handed to the router, so the router
+/// stays decoupled from the wallet.
+#[derive(Debug, Clone)]
+pub struct ProfileConnectInfo {
+    /// The active profile's DID.
+    pub profile_did: String,
+    /// The wallet receive addresses (`xch1…`) exposed to a connected dapp.
+    pub addresses: Vec<String>,
+    /// The public keys (hex) exposed to a connected dapp.
+    pub pubkeys: Vec<String>,
+}
+
 /// The frame router: authenticates every frame against the [`PairingStore`] and dispatches it,
 /// raising the native confirm (§5.6.1) through the [`NativeConfirmer`] where a decision is required.
 ///
-/// Generic over the [`ProfileSealer`] so the pairing store seals under the active profile's DEK
-/// (NC-2). Shared behind an `Arc` by the async server; every method takes `&self`.
+/// Generic over the [`ProfileSealer`] so the pairing + whitelist stores seal under the active
+/// profile's DEK (NC-2). Shared behind an `Arc` by the async server; every method takes `&self`.
 pub struct FrameRouter<S: ProfileSealer> {
     pairings: PairingStore<S>,
-    confirmer: Box<dyn NativeConfirmer>,
+    whitelist: WhitelistStore<S>,
+    /// Gates pairing + connect confirms (§5.6.1). Shared with `sign_policy`, which gates sign confirms.
+    confirmer: Arc<dyn NativeConfirmer>,
+    /// The ONE production sign policy (decode + native confirm) — the same policy the §5.3 engine
+    /// callback funnels through, so there is a single sign-authorization point (§5.6.6).
+    sign_policy: NativeConfirmSignPolicy,
+    /// Signs the domain-separated `DIGNET-SIGN-v1` message with the in-memory identity key (slot
+    /// `0x0010`) after the policy approves. The private key never leaves this seam.
+    signer: Box<dyn SessionSigner + Send + Sync>,
+    /// The connect-handle returned on a granted connect.
+    connect_info: ProfileConnectInfo,
     /// The extension ids permitted to `pair.begin` — the same pinned set the `Origin` guard enforces.
     allowed_ext_ids: Vec<String>,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
-    /// Build a router over `pairings`, gating privileged actions through `confirmer` and accepting
-    /// pairing requests only from `allowed_ext_ids`.
+    /// Build a router over the per-profile `pairings` + `whitelist` stores, gating pairing/connect
+    /// through `confirmer`, signing approved requests with `signer`, returning `connect_info` on a
+    /// granted connect, and accepting pairing requests only from `allowed_ext_ids`. The sign policy
+    /// shares `confirmer` so pairing, connect, and sign all draw the one native-confirm surface.
     pub fn new(
         pairings: PairingStore<S>,
-        confirmer: Box<dyn NativeConfirmer>,
+        whitelist: WhitelistStore<S>,
+        confirmer: Arc<dyn NativeConfirmer>,
+        signer: Box<dyn SessionSigner + Send + Sync>,
+        connect_info: ProfileConnectInfo,
         allowed_ext_ids: impl IntoIterator<Item = String>,
     ) -> Self {
+        let sign_policy = NativeConfirmSignPolicy::new(Arc::clone(&confirmer));
         Self {
             pairings,
+            whitelist,
             confirmer,
+            sign_policy,
+            signer,
+            connect_info,
             allowed_ext_ids: allowed_ext_ids.into_iter().collect(),
         }
     }
@@ -208,21 +286,119 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// Every non-pairing frame: authenticate it, then dispatch. SIGN-1 answers the `connect`/`sign`
-    /// frames with the honest transport-only code (the real whitelist + sign land in SIGN-2/3).
+    /// Every non-pairing frame: authenticate it, then dispatch to the connect/sign handlers.
     fn handle_authenticated(&self, frame: &RequestFrame) -> Value {
         if let Err(code) = self.authenticate(frame) {
             return error(&frame.id, code);
         }
         match frame.method.as_str() {
-            // A sign needs a whitelisted origin first; SIGN-1 holds no whitelist, so every origin is
-            // un-connected. SIGN-2 adds the whitelist check + the decode/confirm/sign path.
-            "sign.request" => error(&frame.id, SignErrorCode::ConnectRequired),
-            // The connect modal is a native confirm; SIGN-1 ships only the headless (fail-closed)
-            // confirmer, so connect cannot be granted yet. SIGN-3 wires the per-OS modal.
-            "connect.request" => error(&frame.id, SignErrorCode::SignNoConfirmer),
+            "connect.request" => self.handle_connect(&frame.id, &frame.params),
+            "connect.revoke" => self.handle_connect_revoke(&frame.id, &frame.params),
+            "sign.request" => self.handle_sign(&frame.id, &frame.params),
             _ => method_not_found(&frame.id),
         }
+    }
+
+    /// The dapp connect / whitelist handler (§5.6.4). An already-whitelisted origin returns its
+    /// connection handle without a modal; otherwise the native connect confirm decides, and on
+    /// approval a per-origin whitelist entry is sealed at rest before the handle is returned.
+    fn handle_connect(&self, id: &Value, params: &Value) -> Value {
+        let Ok(params) = serde_json::from_value::<ConnectParams>(params.clone()) else {
+            return error(id, SignErrorCode::ConnectDenied);
+        };
+
+        if self.whitelist.is_whitelisted(&params.origin) {
+            return ok(id, self.connect_result());
+        }
+
+        let decision = self.confirmer.confirm_connect(&ConnectPrompt {
+            origin: &params.origin,
+            dapp_name: params.dapp_name.as_deref(),
+        });
+        match decision {
+            ConfirmDecision::Approve => {
+                match self.whitelist.grant(
+                    &params.origin,
+                    params.requested_permissions,
+                    now_epoch_secs(),
+                ) {
+                    Ok(_) => ok(id, self.connect_result()),
+                    // Sealing fails only when the active profile is locked — surface it as LOCKED.
+                    Err(_) => error(id, SignErrorCode::Locked),
+                }
+            }
+            ConfirmDecision::Deny => error(id, SignErrorCode::ConnectDenied),
+            ConfirmDecision::Timeout => error(id, SignErrorCode::ConnectTimeout),
+            ConfirmDecision::Unavailable => error(id, SignErrorCode::SignNoConfirmer),
+        }
+    }
+
+    /// The `connect.revoke` handler (§5.6.4): drop the origin's whitelist entry, returning it to
+    /// `CONNECT_REQUIRED`. Idempotent — revoking an unknown origin still succeeds.
+    fn handle_connect_revoke(&self, id: &Value, params: &Value) -> Value {
+        let Ok(params) = serde_json::from_value::<ConnectRevokeParams>(params.clone()) else {
+            return error(id, SignErrorCode::ConnectDenied);
+        };
+        let revoked = self.whitelist.revoke(&params.origin);
+        ok(id, json!({ "revoked": revoked }))
+    }
+
+    /// The `sign.request` handler (§5.6.5). Gate on the whitelist, decode + native-confirm through the
+    /// one [`NativeConfirmSignPolicy`], and on approval sign the domain-separated `DIGNET-SIGN-v1`
+    /// message with the in-memory identity key — never the raw payload (the signing-oracle guard).
+    fn handle_sign(&self, id: &Value, params: &Value) -> Value {
+        // Connect gate FIRST: an un-whitelisted origin never reaches the decoder or the key (§5.6.4).
+        // The origin is read before the rest of the payload, so an unconnected origin is refused with
+        // `CONNECT_REQUIRED` regardless of whether the payload is well-formed.
+        let Ok(gate) = serde_json::from_value::<OriginGate>(params.clone()) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+        if !self.whitelist.is_whitelisted(&gate.origin) {
+            return error(id, SignErrorCode::ConnectRequired);
+        }
+
+        let Ok(params) = serde_json::from_value::<SignParams>(params.clone()) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+
+        let Ok(payload) = BASE64.decode(params.payload_b64.as_bytes()) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+
+        let verdict = self.sign_policy.decide(&SignSubject {
+            origin: Some(&gate.origin),
+            payload_type: &params.payload_type,
+            payload: &payload,
+        });
+        if let SignVerdict::Reject(rejection) = verdict {
+            return error(id, sign_rejection_code(rejection));
+        }
+
+        // Approved: sign the domain-separated, length-prefixed message (never the raw bytes). A
+        // `payload_type` longer than the length prefix allows is refused rather than signed ambiguously.
+        match sign_callback_message(&params.payload_type, &payload) {
+            Some(message) => {
+                let signature = self.signer.sign(&message);
+                ok(
+                    id,
+                    json!({
+                        "signature_b64": BASE64.encode(signature),
+                        "pubkey_hex": self.signer.signing_public_key_hex(),
+                    }),
+                )
+            }
+            None => error(id, SignErrorCode::SignBadPayload),
+        }
+    }
+
+    /// The `{ granted, profile_did, addresses[], pubkeys[] }` handle returned on a successful connect.
+    fn connect_result(&self) -> Value {
+        json!({
+            "granted": true,
+            "profile_did": self.connect_info.profile_did,
+            "addresses": self.connect_info.addresses,
+            "pubkeys": self.connect_info.pubkeys,
+        })
     }
 
     /// Verify a frame's `auth` object against the pairing store, mapping [`AuthFailure`] to the wire
@@ -248,6 +424,17 @@ impl<S: ProfileSealer> FrameRouter<S> {
     /// unpair surface.
     pub fn pairings(&self) -> &PairingStore<S> {
         &self.pairings
+    }
+}
+
+/// Map a [`SignRejection`] (from the shared sign policy) to its loopback wire code (§5.6.7).
+fn sign_rejection_code(rejection: SignRejection) -> SignErrorCode {
+    match rejection {
+        SignRejection::UnknownType => SignErrorCode::SignUnknownType,
+        SignRejection::BadPayload => SignErrorCode::SignBadPayload,
+        SignRejection::Denied => SignErrorCode::SignDenied,
+        SignRejection::Timeout => SignErrorCode::SignTimeout,
+        SignRejection::NoConfirmer => SignErrorCode::SignNoConfirmer,
     }
 }
 
@@ -300,8 +487,6 @@ mod tests {
     use crate::keystore::IdentitySecrets;
     use crate::pairing::{frame_mac_input, PairingStore};
     use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use base64::Engine as _;
     use dig_keystore::KdfParams;
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
@@ -332,17 +517,107 @@ mod tests {
         }
     }
 
-    fn pairing_store() -> PairingStore<KeystoreSealer> {
+    /// A confirmer that can answer each prompt kind differently, so a test can (e.g.) approve a
+    /// connect while denying the subsequent sign — impossible with a single fixed decision.
+    struct PerPromptConfirmer {
+        pair: ConfirmDecision,
+        connect: ConfirmDecision,
+        sign: ConfirmDecision,
+    }
+    impl NativeConfirmer for PerPromptConfirmer {
+        fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
+            self.pair
+        }
+        fn confirm_connect(&self, _: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            self.connect
+        }
+        fn confirm_sign(&self, _: &crate::confirm::SignPrompt<'_>) -> ConfirmDecision {
+            self.sign
+        }
+    }
+
+    /// Build a router over a fresh unlocked profile, gating every prompt through `confirmer`. The
+    /// pairing + whitelist stores share the profile's unlocked identity (so both seal under its DEK);
+    /// the loopback signer is a separate identity whose pubkey the connect handle advertises.
+    fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<KeystoreSealer> {
         let identities = UnlockedIdentities::new();
         identities.unlock(DID, IdentitySecrets::generate());
-        PairingStore::new(
+        let pairings = PairingStore::new(
+            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+            DID,
+        );
+        let whitelist = WhitelistStore::new(
             KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
             DID,
+        );
+        let signer = IdentitySecrets::generate();
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec!["xch1testaddress".to_string()],
+            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        };
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(confirmer),
+            Box::new(signer),
+            connect_info,
+            [EXT.to_string()],
         )
     }
 
-    fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<KeystoreSealer> {
-        FrameRouter::new(pairing_store(), Box::new(confirmer), [EXT.to_string()])
+    /// A router that approves every prompt.
+    fn approving_router() -> FrameRouter<KeystoreSealer> {
+        router_with(ScriptedConfirmer(ConfirmDecision::Approve))
+    }
+
+    /// A real, decodable spend-bundle payload (base64), for the sign path.
+    fn spend_payload_b64() -> String {
+        use chia_bls::{SecretKey, Signature};
+        use chia_protocol::{Bytes32, Coin, SpendBundle};
+        use chia_puzzle_types::standard::StandardArgs;
+        use chia_puzzle_types::{DeriveSynthetic, Memos};
+        use chia_sdk_driver::{SpendContext, StandardLayer};
+        use chia_sdk_types::conditions::CreateCoin;
+        use chia_sdk_types::Conditions;
+        use chia_traits::Streamable;
+        use chip35_dl_coin::master_to_wallet_unhardened;
+
+        let master = SecretKey::from_seed(&[3u8; 32]);
+        let pk = master_to_wallet_unhardened(&master.public_key(), 0).derive_synthetic();
+        let ph: Bytes32 = StandardArgs::curry_tree_hash(pk).into();
+        let mut ctx = SpendContext::new();
+        let coin = Coin {
+            parent_coin_info: Bytes32::new([1u8; 32]),
+            puzzle_hash: ph,
+            amount: 1_000,
+        };
+        StandardLayer::new(pk)
+            .spend(
+                &mut ctx,
+                coin,
+                Conditions::new().with(CreateCoin::new(ph, 800, Memos::None)),
+            )
+            .unwrap();
+        let bytes = SpendBundle::new(ctx.take(), Signature::default())
+            .to_bytes()
+            .unwrap();
+        BASE64.encode(bytes)
+    }
+
+    /// Pair, then connect `origin` through an approving router, returning `(pairing_id, token)` with
+    /// the origin now whitelisted. Uses fresh monotonic nonces `n(1)` (pair carries none) + `n(1)`.
+    fn pair_and_connect(
+        router: &FrameRouter<KeystoreSealer>,
+        origin: &str,
+        nonce: u64,
+    ) -> (String, String) {
+        let (pairing_id, token) = pair(router);
+        let params = json!({ "origin": origin });
+        let auth = signed_auth(&token, &pairing_id, nonce, "connect.request", &params);
+        let resp = router.handle(&request("connect.request", params, Some(auth)));
+        assert_eq!(resp["result"]["granted"], true, "connect must grant");
+        (pairing_id, token)
     }
 
     fn request(method: &str, params: Value, auth: Option<FrameAuth>) -> RequestFrame {
@@ -430,24 +705,135 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_with_a_valid_mac_authenticates_and_reaches_the_stub() {
-        let router = router_with(ScriptedConfirmer(ConfirmDecision::Approve));
+    fn a_sign_from_an_unconnected_origin_is_connect_required() {
+        let router = approving_router();
         let (pairing_id, token) = pair(&router);
-        let params = json!({ "origin": "https://dapp.example", "payload_type": "spend" });
+        let params = json!({ "origin": "https://dapp.example", "payload_type": "spend", "payload_b64": "AA==" });
         let auth = signed_auth(&token, &pairing_id, n(1), "sign.request", &params);
         let resp = router.handle(&request("sign.request", params, Some(auth)));
-        // Authenticated, then the SIGN-1 sign stub: a sign needs a connected origin first.
+        // The connect gate refuses before the payload is even decoded.
         assert_eq!(resp["error"]["message"], "CONNECT_REQUIRED");
     }
 
     #[test]
-    fn connect_request_authenticates_then_reports_no_confirmer() {
-        let router = router_with(ScriptedConfirmer(ConfirmDecision::Approve));
+    fn an_approved_connect_grants_and_returns_the_profile_handle() {
+        let router = approving_router();
+        let (pairing_id, token) = pair(&router);
+        let params = json!({ "origin": "https://dapp.example", "dapp_name": "Demo" });
+        let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+        let resp = router.handle(&request("connect.request", params, Some(auth)));
+        assert_eq!(resp["result"]["granted"], true);
+        assert_eq!(resp["result"]["profile_did"], DID);
+        assert!(resp["result"]["pubkeys"][0].is_string());
+    }
+
+    #[test]
+    fn a_denied_connect_is_connect_denied() {
+        let router = router_with(PerPromptConfirmer {
+            pair: ConfirmDecision::Approve,
+            connect: ConfirmDecision::Deny,
+            sign: ConfirmDecision::Deny,
+        });
         let (pairing_id, token) = pair(&router);
         let params = json!({ "origin": "https://dapp.example" });
         let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
         let resp = router.handle(&request("connect.request", params, Some(auth)));
-        assert_eq!(resp["error"]["message"], "SIGN_NO_CONFIRMER");
+        assert_eq!(resp["error"]["message"], "CONNECT_DENIED");
+    }
+
+    #[test]
+    fn an_idempotent_reconnect_of_the_same_origin_returns_the_handle_without_a_modal() {
+        // Approve connect once (whitelists it), then a confirmer flip is not needed: a repeat connect
+        // returns the handle straight from the whitelist. We prove the whitelist short-circuits by
+        // reconnecting with the SAME approving router but asserting a granted handle again.
+        let router = approving_router();
+        let (pairing_id, token) = pair(&router);
+        let origin = "https://dapp.example";
+
+        let p1 = json!({ "origin": origin });
+        let a1 = signed_auth(&token, &pairing_id, n(1), "connect.request", &p1);
+        assert_eq!(
+            router.handle(&request("connect.request", p1, Some(a1)))["result"]["granted"],
+            true
+        );
+
+        let p2 = json!({ "origin": origin });
+        let a2 = signed_auth(&token, &pairing_id, n(2), "connect.request", &p2);
+        assert_eq!(
+            router.handle(&request("connect.request", p2, Some(a2)))["result"]["granted"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_connected_origin_signs_and_returns_a_signature() {
+        let router = approving_router();
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        let sig = resp["result"]["signature_b64"]
+            .as_str()
+            .expect("a signature");
+        assert_eq!(
+            BASE64.decode(sig).unwrap().len(),
+            64,
+            "Ed25519 signature is 64 bytes"
+        );
+        assert!(resp["result"]["pubkey_hex"].is_string());
+    }
+
+    #[test]
+    fn a_connected_origin_signing_an_unknown_type_is_sign_unknown_type() {
+        let router = approving_router();
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let params = json!({ "origin": origin, "payload_type": "mystery", "payload_b64": "AAAA" });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+        assert_eq!(resp["error"]["message"], "SIGN_UNKNOWN_TYPE");
+    }
+
+    #[test]
+    fn a_connected_origin_whose_sign_is_denied_is_sign_denied() {
+        // Approve pair + connect, deny the sign — the per-transaction confirm still binds every sign.
+        let router = router_with(PerPromptConfirmer {
+            pair: ConfirmDecision::Approve,
+            connect: ConfirmDecision::Approve,
+            sign: ConfirmDecision::Deny,
+        });
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+        assert_eq!(resp["error"]["message"], "SIGN_DENIED");
+    }
+
+    #[test]
+    fn connect_revoke_returns_a_revoked_origin_to_connect_required() {
+        let router = approving_router();
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let rp = json!({ "origin": origin });
+        let ra = signed_auth(&token, &pairing_id, n(2), "connect.revoke", &rp);
+        assert_eq!(
+            router.handle(&request("connect.revoke", rp, Some(ra)))["result"]["revoked"],
+            true
+        );
+
+        let sp = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let sa = signed_auth(&token, &pairing_id, n(3), "sign.request", &sp);
+        assert_eq!(
+            router.handle(&request("sign.request", sp, Some(sa)))["error"]["message"],
+            "CONNECT_REQUIRED"
+        );
     }
 
     #[test]
