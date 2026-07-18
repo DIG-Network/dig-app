@@ -33,6 +33,7 @@
 //! [`crate::profiles`]), and the app calls [`SessionLock::note_resumed`] once a re-unlock succeeds to
 //! clear the owed re-auth and restart the idle clock.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -213,6 +214,24 @@ pub trait ScreenLockSource {
 
 /// An opaque handle that keeps an OS screen-lock subscription alive; dropping it unsubscribes.
 pub trait ScreenLockGuard: Send {}
+
+/// Wrap a lock callback so a panic inside it degrades to a logged no-op instead of unwinding.
+///
+/// The OS listeners deliver lock events through an `extern "system"` callback (the Windows window
+/// procedure), and a panic that unwinds across that FFI boundary is undefined behaviour — in practice
+/// a process abort. Containing the panic HERE — before the callback is handed to
+/// [`ScreenLockSource::start`] — means a screen lock can never take the whole app down: the worst a
+/// broken lock trigger can do is fail to lock (logged), which the idle poll + one-tap lock-now still
+/// cover. (WSEC-D adversarial hardening, dig_ecosystem#967.)
+pub fn panic_safe_lock_callback(
+    on_lock: impl Fn() + Send + 'static,
+) -> Box<dyn Fn() + Send + 'static> {
+    Box::new(move || {
+        if catch_unwind(AssertUnwindSafe(&on_lock)).is_err() {
+            tracing::error!("a screen-lock callback panicked; ignoring it (session left as-is)");
+        }
+    })
+}
 
 /// The Windows screen-lock listener (`WTSRegisterSessionNotification` → `WM_WTSSESSION_CHANGE` with
 /// `WTS_SESSION_LOCK`), delivering a lock event through the [`ScreenLockSource`] seam.
@@ -752,6 +771,35 @@ mod tests {
         assert!(
             !keys.is_any_unlocked(),
             "the source callback dropped the DEK"
+        );
+        assert!(lock.reauth_required());
+    }
+
+    #[test]
+    fn a_panic_in_the_lock_callback_is_swallowed_not_propagated() {
+        // A screen-lock callback that panics must NOT unwind (across the OS extern-"system" boundary
+        // it would abort the process). The panic-safe wrapper contains it, so calling the wrapped
+        // callback returns normally.
+        let wrapped = panic_safe_lock_callback(|| panic!("the OS lock handler blew up"));
+        wrapped(); // must not panic / abort
+    }
+
+    #[test]
+    fn the_panic_safe_wrapper_still_runs_a_well_behaved_callback() {
+        // The containment must be transparent to a callback that does NOT panic — it still fires and
+        // drives the lock exactly as an unwrapped callback would.
+        let keys = FakeKeys::unlocked();
+        let lock = Arc::new(lock_with(keys.clone(), ManualClock::default()));
+        let lock_for_cb = Arc::clone(&lock);
+
+        let wrapped = panic_safe_lock_callback(move || {
+            lock_for_cb.on_screen_locked();
+        });
+        wrapped();
+
+        assert!(
+            !keys.is_any_unlocked(),
+            "the wrapped callback still locked the session"
         );
         assert!(lock.reauth_required());
     }

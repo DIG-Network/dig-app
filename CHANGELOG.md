@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.18.0] - Unreleased
+
+### Added
+
+- **Wire the session-lock into the running tray + gate the sign path on re-auth (WSEC-D,
+  dig_ecosystem#967).** The session-lock lifecycle (#965) is now USER-REACHABLE: the tray shell
+  constructs a `SessionLock` over the live `UnlockedIdentities` session the APP-SIGN signer holds, so
+  every trigger acts on the same session. A new tray **"Lock now"** menu item drops the DEK on one tap;
+  the tray tick calls `poll_idle` for idle auto-lock (any tray interaction is noted as activity); and
+  the per-OS `ScreenLockSource` (Windows / macOS; Linux deferred #962) is started onto the held session,
+  its callback wrapped by the new `panic_safe_lock_callback` so a panic can never unwind across the OS
+  `extern "system"` boundary. The `sign.request` path now consults a `SignReauthGate` (production
+  `SessionReauthGate`) immediately before signing: after a lock it re-unlocks the session (the keystore's
+  job, via the OS credential store) and notes the resume, and a failed re-unlock refuses the sign with
+  `LOCKED` rather than signing on a dropped key. Reads never consult the gate (frictionless consumption,
+  §6.0). `FrameRouter` gains `with_reauth_gate` (defaulting to the always-authorize `OpenSignGate`, the
+  pre-hookup behaviour). SPEC §3.6.
+
 ## [0.17.0] - Unreleased
 
 ### Added

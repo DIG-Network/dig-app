@@ -34,7 +34,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::profiles::sealer::ProfileSealer;
 
-pub use dispatch::{FrameRouter, ProfileConnectInfo, RequestFrame, SignErrorCode};
+pub use dispatch::{
+    FrameRouter, OpenSignGate, ProfileConnectInfo, RequestFrame, SignErrorCode, SignReauthGate,
+};
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
 pub use persist::{FileSealedStore, NullSealedStore, PersistedSignState, SealedRecordStore};
 

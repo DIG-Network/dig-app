@@ -198,6 +198,36 @@ pub struct ProfileConnectInfo {
     pub pubkeys: Vec<String>,
 }
 
+/// The session-lock re-auth gate the sign path consults immediately before it uses the identity key
+/// (WSEC-D, `SPEC.md` §5.6, dig_ecosystem#967).
+///
+/// A profile stays unlocked only while its DEK lives in the in-memory session; the session-lock
+/// lifecycle drops that DEK on idle / OS screen-lock / one-tap lock-now. When it has, the next
+/// signature must RE-AUTHENTICATE (re-unlock the DEK) before it can proceed. This seam is how the
+/// transport-free router asks "is a re-auth owed, and if so did it succeed?" without depending on the
+/// session-lock controller or the keystore directly.
+///
+/// **Reads never consult this** — a lock gates the identity key, not content, so browsing/reads keep
+/// flowing untouched (§6.0). Only [`handle_sign`](FrameRouter::handle_sign) calls it.
+pub trait SignReauthGate: Send + Sync {
+    /// Authorize the next signature. Returns `true` when signing may proceed — either the session was
+    /// never locked, or a re-unlock just succeeded — and `false` when the session is locked and could
+    /// not be re-unlocked, in which case the sign is refused with `LOCKED` rather than attempted on a
+    /// dropped key.
+    fn authorize_sign(&self) -> bool;
+}
+
+/// The default gate: signing is always authorized. This preserves the pre-tray-hookup behaviour where
+/// the only lock enforcement is the signer's own DEK-drop hard barrier (a locked session yields no
+/// signature → `LOCKED`). The tray boot injects a session-lock-backed gate over this default.
+pub struct OpenSignGate;
+
+impl SignReauthGate for OpenSignGate {
+    fn authorize_sign(&self) -> bool {
+        true
+    }
+}
+
 /// The frame router: authenticates every frame against the [`PairingStore`] and dispatches it,
 /// raising the native confirm (§5.6.1) through the [`NativeConfirmer`] where a decision is required.
 ///
@@ -223,6 +253,11 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// tray boot injects a [`FileSealedStore`](crate::loopback::FileSealedStore) via
     /// [`with_persistence`](Self::with_persistence).
     persist: Arc<dyn SealedRecordStore>,
+    /// The session-lock re-auth gate consulted before every signature (§5.6, WSEC-D). Defaults to the
+    /// always-authorize [`OpenSignGate`]; the tray boot injects a session-lock-backed gate via
+    /// [`with_reauth_gate`](Self::with_reauth_gate) so a locked session forces a re-unlock before it
+    /// signs. Reads never consult it.
+    reauth_gate: Arc<dyn SignReauthGate>,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
@@ -248,7 +283,17 @@ impl<S: ProfileSealer> FrameRouter<S> {
             connect_info,
             allowed_ext_ids: allowed_ext_ids.into_iter().collect(),
             persist: Arc::new(NullSealedStore),
+            reauth_gate: Arc::new(OpenSignGate),
         }
+    }
+
+    /// Inject the session-lock re-auth gate consulted before every signature (WSEC-D, #967). Without
+    /// this the router uses the always-authorize [`OpenSignGate`] (the unit-test default + pre-hookup
+    /// behaviour); the tray boot supplies a gate backed by the live session-lock so a locked session
+    /// re-authenticates before it signs.
+    pub fn with_reauth_gate(mut self, reauth_gate: Arc<dyn SignReauthGate>) -> Self {
+        self.reauth_gate = reauth_gate;
+        self
     }
 
     /// Attach a durable [`SealedRecordStore`] so granted pairings, connected origins, and nonce
@@ -456,6 +501,13 @@ impl<S: ProfileSealer> FrameRouter<S> {
         let Some(message) = sign_callback_message(&params.payload_type, &payload) else {
             return error(id, SignErrorCode::SignBadPayload);
         };
+
+        // Session-lock re-auth gate (WSEC-D, §6.0): if the session locked since the last sign, the
+        // user must re-authenticate (re-unlock the DEK) before this signature. A denied/failed re-auth
+        // refuses the sign with `LOCKED` — never signs on a dropped key. Reads never reach this gate.
+        if !self.reauth_gate.authorize_sign() {
+            return error(id, SignErrorCode::Locked);
+        }
         // Sign fallibly: a locked profile (no identity in the session) yields `None`, which MUST become
         // a `LOCKED` error — NEVER a success envelope carrying a bogus/all-zero signature (SPEC §5.6.7).
         match self.signer.try_sign(&message) {
@@ -870,6 +922,81 @@ mod tests {
             "Ed25519 signature is 64 bytes"
         );
         assert!(resp["result"]["pubkey_hex"].is_string());
+    }
+
+    /// A re-auth gate scripted to a fixed answer, so the sign path's WSEC-D gate consult is exercised
+    /// without a live session-lock. `authorize_sign` also records that it was consulted, so a test can
+    /// prove reads never reach it.
+    struct ScriptedReauthGate {
+        authorize: bool,
+        consulted: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ScriptedReauthGate {
+        fn new(authorize: bool) -> Self {
+            Self {
+                authorize,
+                consulted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+    }
+    impl SignReauthGate for ScriptedReauthGate {
+        fn authorize_sign(&self) -> bool {
+            self.consulted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.authorize
+        }
+    }
+
+    #[test]
+    fn a_sign_refused_by_the_reauth_gate_is_locked() {
+        // The session locked since the last sign and the re-unlock failed/was denied: the sign is
+        // refused with LOCKED rather than signed on a dropped key (WSEC-D, #967).
+        let router = approving_router().with_reauth_gate(Arc::new(ScriptedReauthGate::new(false)));
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        assert_eq!(
+            resp["error"]["message"],
+            SignErrorCode::Locked.symbol(),
+            "a re-auth the gate refused must be LOCKED, never a signature"
+        );
+    }
+
+    #[test]
+    fn a_sign_authorized_by_the_reauth_gate_still_signs() {
+        // The gate re-authenticated (or was never locked): the sign proceeds to a real signature.
+        let router = approving_router().with_reauth_gate(Arc::new(ScriptedReauthGate::new(true)));
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        assert!(
+            resp["result"]["signature_b64"].is_string(),
+            "an authorized re-auth still yields a signature"
+        );
+    }
+
+    #[test]
+    fn a_read_style_frame_never_consults_the_reauth_gate() {
+        // The re-auth gate is the SIGN path's alone (§6.0): a connect (the closest non-sign
+        // authenticated frame) must return its handle without ever touching the gate, so reads/
+        // browsing keep flowing untouched after a lock.
+        let gate = Arc::new(ScriptedReauthGate::new(false));
+        let router = approving_router().with_reauth_gate(gate.clone());
+        let origin = "https://dapp.example";
+        let (_pairing_id, _token) = pair_and_connect(&router, origin, n(1));
+
+        assert!(
+            !gate.consulted.load(std::sync::atomic::Ordering::SeqCst),
+            "connect (a non-sign frame) must never consult the sign re-auth gate"
+        );
     }
 
     #[test]
