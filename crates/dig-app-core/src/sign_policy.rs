@@ -23,6 +23,7 @@ use std::sync::Arc;
 use crate::confirm::{ConfirmDecision, NativeConfirmer, SignPrompt};
 use crate::decode::{decode, DecodeReject};
 use crate::session::{SignDecision, SignPolicy, SignRequest};
+use crate::spend_summary;
 
 /// Why the policy refused to authorize a signature. Each maps to a stable §5.6.7 symbol so both the
 /// loopback wire codes and the engine `SignDecision::Deny` reason derive from one place.
@@ -99,11 +100,13 @@ impl NativeConfirmSignPolicy {
             Err(DecodeReject::BadPayload) => return SignVerdict::Reject(SignRejection::BadPayload),
         };
 
-        let summary = decoded.summary();
+        // The confirm shows a plain-language summary as the default view, with the precise mojo-level
+        // decode kept below as details — both derived from the same decoded bytes (WSEC-B, §5.6.5).
+        let body = spend_summary::confirm_body(&decoded);
         let decision = self.confirmer.confirm_sign(&SignPrompt {
             origin: subject.origin.unwrap_or_default(),
             payload_type: subject.payload_type,
-            decoded_tx: Some(&summary),
+            decoded_tx: Some(&body),
         });
 
         match decision {
@@ -234,6 +237,55 @@ mod tests {
     fn an_undecodable_known_type_is_refused_before_any_confirm() {
         let verdict = policy(ConfirmDecision::Approve).decide(&subject("spend", b"not a bundle"));
         assert_eq!(verdict, SignVerdict::Reject(SignRejection::BadPayload));
+    }
+
+    /// A confirmer that records the `decoded_tx` body it was shown, to assert what the human sees.
+    struct RecordingConfirmer(std::sync::Mutex<Option<String>>);
+    impl NativeConfirmer for RecordingConfirmer {
+        fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Approve
+        }
+        fn confirm_connect(&self, _: &ConnectPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Approve
+        }
+        fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision {
+            *self.0.lock().unwrap() = prompt.decoded_tx.map(str::to_string);
+            ConfirmDecision::Approve
+        }
+    }
+
+    #[test]
+    fn the_confirm_shows_a_plain_language_summary_derived_from_the_signed_bytes() {
+        // spend_payload creates one 800-mojo output from a 1_000-mojo coin (a 200-mojo fee). The
+        // confirm body must lead with the human XCH summary and keep the raw mojo decode as details —
+        // both from the SAME bytes handed to the decoder (display-binds).
+        let payload = spend_payload();
+        let recorder = Arc::new(RecordingConfirmer(std::sync::Mutex::new(None)));
+        let policy = NativeConfirmSignPolicy::new(recorder.clone());
+
+        let verdict = policy.decide(&subject("spend", &payload));
+        assert_eq!(verdict, SignVerdict::Approve);
+
+        let shown = recorder
+            .0
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a body was shown");
+        assert!(
+            shown.contains("Send 0.0000000008 XCH to xch1"),
+            "plain-language XCH summary is the default view, got: {shown}"
+        );
+        assert!(shown.contains("Network fee: 0.0000000002 XCH"));
+        assert!(
+            shown.contains("Details:") && shown.contains("800 mojos"),
+            "the raw mojo decode is kept as details"
+        );
+        assert_eq!(
+            &shown,
+            &spend_summary::confirm_body(&decode("spend", &payload).unwrap()),
+            "the shown body is exactly the summary of the decoded signed bytes"
+        );
     }
 
     #[test]
