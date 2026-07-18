@@ -224,6 +224,12 @@ affordance. On a GUI-less host the app runs as the agent core + the `dign` CLI, 
 Windows/macOS Server), dig-app runs as the agent core + `dign` only; the tray is not mounted. The
 form-factor decision is a single point (`dig_app_core::form_factor`).
 
+**Autostart artifacts:** the macOS LaunchAgent plist and the Linux systemd user unit are rendered
+and installed by `dig_app::autostart` (`crates/dig-app/src/autostart.rs`) — pure content generation
++ path resolution, unit-tested without a real service manager; loading the unit
+(`launchctl`/`systemctl --user`) is the installer's/first-run helper's job. Windows per-user logon
+autostart is dig-installer's own packaging concern (U8) and is out of this crate's scope.
+
 **Multi-user (MUST):** one engine daemon serves the whole machine; **each logged-in user runs their
 own dig-app instance** with its own profiles/keys. The engine holds no per-user state, so it keeps a
 map of attached sessions keyed by profile; content serve is profile-agnostic (public); authenticated

@@ -4,10 +4,16 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
-## [0.4.0] - Unreleased
+## [0.5.0] - Unreleased
 
 ### Added
 
+- **Per-user autostart artifacts (form-factor shell residual, epic #908).** `dig-app`'s
+  `autostart` module renders + installs the two residual per-user autostart mechanisms called out
+  in SPEC §4: a macOS `launchd` LaunchAgent plist (`~/Library/LaunchAgents`) and a Linux systemd
+  **user** unit (`$XDG_CONFIG_HOME/systemd/user`, falling back to `~/.config/systemd/user`).
+  Windows autostart remains dig-installer's job (U8); this closes the macOS/Linux residual so the
+  shell can start itself at login on every desktop OS the SPEC promises.
 - **Profiles (U5, multi-DID).** The `profiles` module implements multi-profile identity management:
   create (provision a `did:chia:` DID + keys, then seal the profile's initial data), select the
   active profile, list profiles, and edit persona metadata. Each profile's secret-bearing state is
