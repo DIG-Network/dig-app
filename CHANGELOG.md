@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.9.1] - Unreleased
+
+### Added
+
+- **APP-SIGN paired-loopback signing contract (SPEC §5.6, #950).** New normative SPEC section
+  freezing the extension ↔ dig-app paired-loopback identity channel: the WebSocket loopback transport
+  (`ws://127.0.0.1:9779`, Host/Origin/token-guarded), the one-time pairing handshake, the dapp
+  connect/whitelist protocol, the domain-separated `sign` request/response (reusing `DIGNET-SIGN-v1`),
+  the decoded-transaction display requirement, the layered threat model (SPEC §7 addition), and the
+  error-code taxonomy. Documentation only — the byte-identical cross-repo contract the per-OS
+  confirm lanes and the extension consumer build against.
+
 ## [0.9.0] - Unreleased
 
 ### Added

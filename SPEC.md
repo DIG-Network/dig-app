@@ -388,6 +388,10 @@ that the engine RELAYS onward: dig-app seals such content to the recipient's dig
 key (slot `0x0011`) **before** handing the bytes to the engine, so the engine and any downstream
 relay see only ciphertext. Sealing is the app's responsibility, never the engine's.
 
+### 5.6 The extension ↔ dig-app paired-loopback signing channel (APP-SIGN)
+
+> **Contract-freeze stub (SIGN-0, [dig_ecosystem#950]).** Full content lands in this same work unit.
+
 ---
 
 ## 6. NC compliance (the MUST-DO ledger)
@@ -574,3 +578,4 @@ the work units that implement their subsystems.
 [dig_ecosystem#771]: https://github.com/DIG-Network/dig_ecosystem/issues/771
 [dig_ecosystem#856]: https://github.com/DIG-Network/dig_ecosystem/issues/856
 [dig_ecosystem#906]: https://github.com/DIG-Network/dig_ecosystem/issues/906
+[dig_ecosystem#950]: https://github.com/DIG-Network/dig_ecosystem/issues/950
