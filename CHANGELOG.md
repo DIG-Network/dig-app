@@ -4,6 +4,34 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.7.0] - Unreleased
+
+### Added
+
+- **Cross-session profile persistence (U6).** A profile's identity is now persisted **sealed at
+  rest** (U4 `ProfileVault`: DIGOP1 under the user's root unlock, in per-user AppData — NC-2/NC-3) at
+  creation, and a new boot path (`ProfileManager::unlock_all`) re-derives every profile's identity
+  from its sealed material once the user unlocks. So a restarted app reopens all of its profiles'
+  sealed data — closing the U5 gap where a generated identity lived only in the in-memory session and
+  vanished on exit. The new `IdentityStore` collaborator + `VaultFactory` seam bridge the on-disk
+  vault to the shared `UnlockedIdentities` session; cross-profile isolation stays cryptographic and
+  is proven to hold across a restart + re-unlock. Both the sealed identity blob and the profile
+  registry are written through the shared `crate::storage::write_durably` crash-safe helper (F-4).
+
+### Changed / Fixed (U5 triple-gate follow-ups)
+
+- **F-1 — a duplicate DID can no longer clobber an existing profile.** Provisioning is now
+  side-effect-free: it returns the generated identity to the manager, which validates + dedup-checks
+  the DID BEFORE persisting or unlocking it. A duplicate/invalid DID is a pure no-op (its secret
+  material is dropped + zeroized), never overwriting a live profile's in-session identity or sealed
+  data. Profile creation is now all-or-nothing (rolls the identity back if a later step fails).
+- **F-3 — decrypted profile data is zeroized.** `ProfileSealer::open` returns the plaintext in a
+  `Zeroizing` buffer, so a profile's decrypted content is scrubbed from memory on drop rather than
+  lingering in freed heap.
+- **DidMinter seam wired; on-chain mint held on #771.** The production provisioner composes cleanly
+  around the `DidMinter` seam via `HeldDidMinter`, which fails loudly until dig-identity #771 ships
+  the mint spend builder — so a released build cannot appear to mint a DID it cannot anchor.
+
 ## [0.6.0] - Unreleased
 
 ### Added

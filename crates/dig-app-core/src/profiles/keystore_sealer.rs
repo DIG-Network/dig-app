@@ -60,6 +60,17 @@ impl UnlockedIdentities {
         self.lock_map().remove(did);
     }
 
+    /// Whether `did`'s identity is currently unlocked in this session (its data can be sealed/opened).
+    pub fn is_unlocked(&self, did: &str) -> bool {
+        self.lock_map().contains_key(did)
+    }
+
+    /// The Ed25519 signing public key of `did`'s unlocked identity, or `None` if it is locked. The
+    /// private key never leaves the session — only its public half is exposed.
+    pub fn signing_public_key(&self, did: &str) -> Option<[u8; 32]> {
+        self.with_identity(did, |identity| identity.signing_public_key())
+    }
+
     /// Runs `f` against the unlocked identity for `did`, or returns `None` if that profile is locked.
     fn with_identity<T>(&self, did: &str, f: impl FnOnce(&IdentitySecrets) -> T) -> Option<T> {
         self.lock_map().get(did).map(f)
@@ -105,13 +116,17 @@ impl ProfileSealer for KeystoreSealer {
             .map_err(|e| SealError::Seal(e.to_string()))
     }
 
-    fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Vec<u8>, SealError> {
+    fn open(
+        &self,
+        profile_did: &str,
+        ciphertext: &[u8],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, SealError> {
         // A locked profile cannot attempt an open; an unlocked profile whose DEK did not seal these
-        // bytes fails the AEAD tag and surfaces `Open` — the cross-profile isolation signal.
+        // bytes fails the AEAD tag and surfaces `Open` — the cross-profile isolation signal. The
+        // plaintext stays in the zeroizing buffer U4 returns (F-3) — no `to_vec()` copy escapes it.
         self.identities
             .with_identity(profile_did, |identity| identity.open_data(ciphertext))
             .ok_or_else(|| SealError::Seal(format!("profile {profile_did} is locked")))?
-            .map(|plaintext| plaintext.to_vec())
             .map_err(|_| SealError::Open)
     }
 }
@@ -137,7 +152,7 @@ mod tests {
         let sealer = sealer_with(&[A]);
         let blob = sealer.seal(A, b"subscriptions").unwrap();
         assert_ne!(blob, b"subscriptions", "data must be ciphertext at rest");
-        assert_eq!(sealer.open(A, &blob).unwrap(), b"subscriptions");
+        assert_eq!(&sealer.open(A, &blob).unwrap()[..], b"subscriptions");
     }
 
     #[test]
@@ -176,6 +191,6 @@ mod tests {
         identities.unlock(A, IdentitySecrets::generate());
         let sealer = KeystoreSealer::new(identities);
         let blob = sealer.seal(A, b"prod").unwrap();
-        assert_eq!(sealer.open(A, &blob).unwrap(), b"prod");
+        assert_eq!(&sealer.open(A, &blob).unwrap()[..], b"prod");
     }
 }

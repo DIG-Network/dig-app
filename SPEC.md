@@ -154,22 +154,44 @@ profile** selected at a time; it creates (mint DID + paired store via chip35 del
 edits (write SMT slots), and reads profiles — always through `dig-identity`, never a reinvented
 format (release-first: the format ships in dig-identity, then dig-app consumes it).
 
-On disk the profile set splits into two tiers: a **plaintext registry** (`<brand-dir>/profiles/registry.json`
-— the active-profile pointer plus a non-secret record per profile: its DID, its two public keys, the
-paired store id, and a cached display name) so the app can list profiles and restore the active one
-*before any profile is unlocked*; and a **sealed per-profile blob**
-(`<brand-dir>/profiles/<did-hash>/identity.seal` — the persona metadata cache, subscriptions, and
-per-profile prefs), DIGOP1-sealed under that profile's own DEK. Every per-profile secret blob is sealed
-with the owning profile's key and no other, so opening one profile's blob under a different profile's
-DEK MUST fail — profiles are cryptographically isolated on disk. Because each profile's DEK is
-HKDF-derived from that profile's own freshly generated identity key (§3.1), the isolation holds by the
-cipher, not by directory layout. The registry is the sole pointer to every profile's directory, so it
-MUST be written durably and atomically (temp file → fsync → rename), the same way the sealed identity
-blob is (§3.1); a torn write can never strand a profile's data. dig-app holds no private key while doing
-this: sealing is delegated to the key-management layer (§3.1), and minting the DID + generating the keys
-is delegated to the keystore + wallet/engine. Editing a profile updates the sealed metadata and
-recomputes the canonical dig-identity SMT root; broadcasting that root on-chain (chip35 delegation) is a
-wallet/engine operation.
+On disk the profile set splits into three tiers per profile: a **plaintext registry**
+(`<brand-dir>/profiles/registry.json` — the active-profile pointer plus a non-secret record per
+profile: its DID, its two public keys, the paired store id, and a cached display name) so the app
+can list profiles and restore the active one *before any profile is unlocked*; a **sealed identity
+blob** (`<brand-dir>/profiles/<did-hash>/identity.digop1`, or the OS credential store — the profile's
+private key material, DIGOP1-sealed under the user's root unlock, §3.1); and a **sealed per-profile
+data blob** (`<brand-dir>/profiles/<did-hash>/identity.seal` — the persona metadata cache,
+subscriptions, and per-profile prefs), DIGOP1-sealed under that profile's own DEK. Every per-profile
+data blob is sealed with the owning profile's key and no other, so opening one profile's blob under a
+different profile's DEK MUST fail — profiles are cryptographically isolated on disk. Because each
+profile's DEK is HKDF-derived from that profile's own freshly generated identity key (§3.1), the
+isolation holds by the cipher, not by directory layout, and MUST continue to hold after a restart +
+re-unlock (below). The registry is the sole pointer to every profile's directory, so it MUST be
+written durably and atomically (temp file → fsync → rename), the same way the sealed blobs are (§3.1);
+a torn write can never strand a profile's data.
+
+**Cross-session persistence + boot re-unlock.** Each profile's identity is persisted **sealed at
+rest** (via the §3.1 vault) at creation, so a restarted app can recover it. On boot, after the user
+supplies the root unlock, the app re-derives every profile's identity from its sealed material and
+holds it in the in-memory session, making that profile's DEK — and therefore its sealed data —
+available again. A profile whose identity is not unlocked this session is *locked*: its data cannot
+be opened (fail-closed). Before the root unlock, only the plaintext registry is readable (list +
+restore-active); no sealed data opens.
+
+**Creation ordering (security-critical).** Provisioning an identity (mint DID + generate keys) MUST
+be free of side effects: it neither persists nor unlocks the identity. The manager validates the
+minted DID (canonical + not already owned) and only THEN commits it — seals it at rest and registers
+it unlocked. So a duplicate or invalid DID can never clobber an existing profile's live in-session
+identity or its sealed data; a rejected DID drops the freshly generated secret material untouched
+(zeroized). If a later creation step fails, the just-committed identity is rolled back (sealed
+material removed + session locked) so no half-created profile is left behind. Decrypted profile data
+is returned in a zeroizing buffer, so a profile's plaintext content is scrubbed from memory after use.
+
+dig-app never *retains* a private key while doing this: provisioned secret material passes straight
+through the manager into the sealing/persistence layer (§3.1); minting the DID + generating the keys
+is delegated to the keystore + wallet/engine, and the on-chain DID mint itself remains a seam gated on
+dig-identity #771. Editing a profile updates the sealed metadata and recomputes the canonical
+dig-identity SMT root; broadcasting that root on-chain (chip35 delegation) is a wallet/engine operation.
 
 ### 3.3 Wallet
 
