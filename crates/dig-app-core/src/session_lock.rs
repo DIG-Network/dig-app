@@ -438,8 +438,10 @@ mod platform {
 
     impl Drop for MacGuard {
         fn drop(&mut self) {
+            // `removeObserver:` is typed `&AnyObject`; the observer token is a `ProtocolObject`, so go
+            // through `msg_send!` (which accepts any `Message`) rather than fight the deref chain.
             unsafe {
-                self.center.removeObserver(&self.observer);
+                let _: () = objc2::msg_send![&self.center, removeObserver: &*self.observer];
             }
         }
     }
@@ -767,7 +769,7 @@ mod tests {
     #[cfg(all(not(windows), not(target_os = "macos")))]
     #[test]
     fn platform_noop_source_registers_nothing_and_drops_cleanly() {
-        let source = PlatformScreenLockSource::default();
+        let source = PlatformScreenLockSource::new();
         let guard = source.start(Box::new(|| panic!("the no-op source must never fire")));
         drop(guard);
     }
