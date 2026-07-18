@@ -9,7 +9,9 @@
 #
 # Both entrypoints stay intentionally minimal — they parse the invocation and hand off to
 # `dig-app-core` — so coverage of real logic is measured in the core library. The release build
-# ships BOTH binaries (per the #908 form factors).
+# ships BOTH binaries (per the #908 form factors). The one exception is `autostart` (src/lib.rs):
+# the per-user autostart artifacts belong to the SHELL, not the identity-agent core, so they're
+# unit-tested here directly.
 [package]
 name = "dig-app"
 version.workspace = true
@@ -39,3 +41,6 @@ tray = ["dep:tray-icon", "dep:tao"]
 dig-app-core.workspace = true
 tray-icon = { workspace = true, optional = true }
 tao = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

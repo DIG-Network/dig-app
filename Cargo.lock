@@ -680,16 +680,17 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "dig-app-core",
  "tao",
+ "tempfile",
  "tray-icon",
 ]
 
 [[package]]
 name = "dig-app-core"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "base64",
  "chia-sdk-utils",
