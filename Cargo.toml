@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "0.9.1"
+version = "0.9.2"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -75,7 +75,23 @@ keyring = { version = "3", default-features = false, features = [
 dig-identity = { git = "https://github.com/DIG-Network/dig-identity", tag = "v0.1.0" }
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
-# Test-only: construct canonical `did:chia:` bech32m strings for the profile-management unit tests.
+# Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.
+# All pinned to the same chia-* 0.26 / chia-sdk-* 0.30 line chip35 itself uses, so the types are
+# byte-compatible. NO spend bundle is hand-rolled: every $DIG spend is built by chip35 (the canonical
+# CHIP-0035 spend builder), signed locally with the chia-wallet-sdk signer, and the DIG treasury
+# constant reused from chip35 — never a placeholder.
+chip35-dl-coin = "0.8"
+chia-bls = "0.26"
+chia-protocol = "0.26"
+chia-puzzle-types = "0.26"
+chia-sdk-driver = "0.30"
+chia-sdk-signer = "0.30"
+chia-sdk-types = "0.30"
+chia-traits = "0.26"
+clvmr = "0.14"
+hex-literal = "0.4"
+# Canonical `xch1…`/`did:chia:` bech32m address encoding (wallet receive address; also the
+# profile-management test helper).
 chia-sdk-utils = "0.30"
 # Cross-platform desktop tray / menu-bar shell (Windows system tray · macOS menu-bar · Linux
 # AppIndicator/StatusNotifier). `tao` provides the platform event loop the tray icon needs to pump
