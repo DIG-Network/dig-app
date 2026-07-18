@@ -325,6 +325,36 @@ custody key, so it enforces the two invariants every 0x0010 signing path enforce
   without an explicit human approval. A declined / timed-out / no-confirmer (headless) outcome returns
   the `DENIED` error code and never touches the key.
 
+### 3.6 Session lock (idle · OS-screen-lock · lock-now · tiered re-auth)
+
+An unlocked profile keeps its data-encryption key (DEK) resident in the in-memory session (§3.1).
+dig-app MUST drop that DEK — re-sealing the session — on any of three triggers, so key material never
+outlives the user's presence at the machine:
+
+1. **Idle auto-lock.** After a configurable idle window with no noted activity
+   (`DEFAULT_IDLE_TIMEOUT` = 5 minutes) the session locks. The shell drives the check from its refresh
+   tick; noting activity resets the window.
+2. **OS screen lock.** When the OS session/screen locks, the session locks. The platform event is
+   observed natively per OS — Windows `WM_WTSSESSION_CHANGE`/`WTS_SESSION_LOCK` (via
+   `WTSRegisterSessionNotification`) and macOS `com.apple.screenIsLocked` (distributed notification) —
+   behind a single `ScreenLockSource` seam. The Linux logind lock signal is deferred with the Linux
+   unlock UX (dig_ecosystem#962); until then Linux relies on idle auto-lock + lock-now.
+3. **One-tap lock-now.** An explicit lock action (a tray item) locks IMMEDIATELY, with NO confirmation
+   prompt.
+
+All three drop the SAME key material: every unlocked profile DEK, via a whole-session lock.
+
+**Tiered re-authentication (MUST — frictionless consumption, §6.0).** A lock gates the KEY, not
+content. Reading/browsing DIG content never touches the identity key, so a lock MUST NOT interrupt or
+prompt a read. Only the NEXT **signing** operation after a lock re-authenticates (biometric /
+passphrase, via the §3.1 unlock path); the lock exposes a `reauth_required` predicate that ONLY the
+signing paths consult. Once a re-unlock succeeds the owed re-auth clears and the idle window restarts.
+
+The lifecycle is a pure, seamed controller (`session_lock::SessionLock` over a `SessionKeys` DEK-drop
+seam — implemented by `UnlockedIdentities` — and a `MonotonicClock`), so every trigger + the tiered
+re-auth is unit-tested without a real keystore or OS; the native `ScreenLockSource` listeners are thin
+adapters validated behind the seam.
+
 ---
 
 ## 4. Form factors

@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
-## [0.15.0] - Unreleased
+## [0.17.0] - Unreleased
 
 ### Added
 
@@ -20,6 +20,15 @@ This project adheres to [Semantic Versioning](https://semver.org) and
   read via `history()`, `recent_recipients(limit)` (distinct, most-recent first), and
   `total_sent(asset)`. Public metadata only — the substrate for the connected-wallet UX (address-book
   suggestions, adaptive spend-confirm friction). Sealed at rest alongside the rest of the wallet state.
+- **Session-lock lifecycle (WSEC-D, dig_ecosystem#965).** A new `session_lock` module drops the
+  in-memory profile DEK — re-sealing the session — on three triggers: idle auto-lock (a 5-minute
+  default idle window), OS screen lock (Windows `WM_WTSSESSION_CHANGE` / macOS
+  `com.apple.screenIsLocked`, behind a `ScreenLockSource` seam; Linux logind deferred to
+  dig_ecosystem#962), and a one-tap lock-now (no confirmation). Re-authentication is TIERED: reading
+  and browsing never touch the key and are never prompted, so only the NEXT signing after a lock
+  re-authenticates (§6.0). `UnlockedIdentities` gains `lock_all` + `is_any_unlocked` as the DEK-drop
+  primitives. The lifecycle is a pure, seamed controller (`SessionLock` over `SessionKeys` +
+  `MonotonicClock`), exhaustively unit-tested. SPEC §3.6.
 
 ## [0.13.0] - Unreleased
 
