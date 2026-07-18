@@ -25,9 +25,10 @@
 //! - [`shutdown`] — the cooperative shutdown latch that stops the run loop promptly.
 //!
 //! The normative contract for all of the above is the repo `SPEC.md`. U1 shipped the module skeleton
-//! plus the pure helpers; U3 adds the agent lifecycle and tray shell. The security-critical
-//! subsystems — [`keystore`] (U4), [`profiles`] (U5), the identity-authenticated session (U6), and
-//! [`gateway`] (U7) — remain stubbed to the SPEC.
+//! plus the pure helpers; U3 added the agent lifecycle and tray shell; U4 implemented [`keystore`]
+//! (identity key generation / unlock / sign, DIGOP1 at-rest sealing, OS-credential-store primary +
+//! sealed-file fallback, rotation). The remaining security-critical subsystems — [`profiles`] (U5),
+//! the identity-authenticated session (U6), and [`gateway`] (U7) — remain stubbed to the SPEC.
 //!
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 
@@ -78,6 +79,13 @@ pub enum Error {
     /// The agent's config file could not be (de)serialized — a malformed config file.
     #[error("agent config is malformed: {0}")]
     Config(#[from] serde_json::Error),
+
+    /// A key-management failure (unlock, sealing, rotation, or the OS credential store). See
+    /// [`keystore::KeystoreError`] for the specific cause. Deliberately opaque about *why* an
+    /// unlock failed so a wrong-passphrase attempt never leaks whether the ciphertext or the
+    /// password was at fault.
+    #[error("key management error: {0}")]
+    Keystore(#[from] keystore::KeystoreError),
 }
 
 /// The crate result type.
