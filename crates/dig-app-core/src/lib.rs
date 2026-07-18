@@ -59,6 +59,7 @@ pub mod loopback;
 pub mod pairing;
 pub mod profiles;
 pub mod session;
+pub mod session_lock;
 pub mod shutdown;
 pub mod sign_policy;
 pub mod sign_service;
