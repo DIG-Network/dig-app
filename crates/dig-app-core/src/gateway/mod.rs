@@ -8,12 +8,14 @@
 //! - **[`Route::Engine`]** — proxied over the identity-authenticated session to the identity-agnostic
 //!   engine (info / config / cache / stores / sync / subscriptions / peers / pair / open).
 //!
-//! The gateway owns only the routing + dispatch; the work behind each route lives behind three
+//! The gateway owns only the routing + dispatch; the work behind each route lives behind four
 //! seams so the routing is unit-tested and the subsystems stay independently owned:
 //!
 //! - [`EngineProxy`] — forwards a `control.*` call over the session (the IPC layer, APP-1).
 //! - [`LocalIdentity`] — serves local commands over the U4 keystore + U5 profile store.
 //! - [`LinkOpener`] — resolves + opens a validated DIG link (the shared URN resolver).
+//! - [`crate::confirm::NativeConfirmer`] — the terminal human gate every local `dign sign` funnels
+//!   through, so the custody key never signs without an explicit approval (SPEC §3.5, #959).
 //!
 //! The `dig-node` binary retains ONLY machine service-lifecycle subcommands
 //! (install / start / stop / status / uninstall / run-service); every user/identity subcommand is
@@ -41,25 +43,30 @@ pub trait LinkOpener {
 }
 
 /// The gateway front door: it routes a [`Command`] to the local identity or the engine and returns
-/// a uniform [`Outcome`]. It borrows its three seams, so the binary owns the concrete session,
-/// identity, and opener and the gateway stays a pure router.
+/// a uniform [`Outcome`]. It borrows its four seams, so the binary owns the concrete session,
+/// identity, opener, and confirmer and the gateway stays a pure router.
 pub struct Gateway<'a> {
     proxy: &'a dyn EngineProxy,
     identity: &'a dyn LocalIdentity,
     opener: &'a dyn LinkOpener,
+    confirmer: &'a dyn crate::confirm::NativeConfirmer,
 }
 
 impl<'a> Gateway<'a> {
-    /// Build a gateway over the three seams.
+    /// Build a gateway over its four seams. The `confirmer` is the terminal human gate every local
+    /// `dign sign` funnels through (the SIGN-1 seam), so the custody key never signs without an
+    /// explicit human approval (SPEC §3.5, #959).
     pub fn new(
         proxy: &'a dyn EngineProxy,
         identity: &'a dyn LocalIdentity,
         opener: &'a dyn LinkOpener,
+        confirmer: &'a dyn crate::confirm::NativeConfirmer,
     ) -> Self {
         Gateway {
             proxy,
             identity,
             opener,
+            confirmer,
         }
     }
 
@@ -68,7 +75,7 @@ impl<'a> Gateway<'a> {
         let route = command.route();
         tracing::debug!(action = command.action(), route = ?route, "gateway routing decision");
         match route {
-            Route::UserApp => handle_local(command, self.identity),
+            Route::UserApp => handle_local(command, self.identity, self.confirmer),
             Route::Engine => self.dispatch_engine(command),
         }
     }
@@ -154,12 +161,37 @@ mod tests {
         }
     }
 
+    /// An approving native-confirm double: the gateway's local sign gate is exercised in the
+    /// `local.rs` unit tests, so here it simply never blocks the routing under test.
+    struct ApprovingConfirmer;
+    impl crate::confirm::NativeConfirmer for ApprovingConfirmer {
+        fn confirm_pair(
+            &self,
+            _: &crate::confirm::PairPrompt<'_>,
+        ) -> crate::confirm::ConfirmDecision {
+            crate::confirm::ConfirmDecision::Approve
+        }
+        fn confirm_connect(
+            &self,
+            _: &crate::confirm::ConnectPrompt<'_>,
+        ) -> crate::confirm::ConfirmDecision {
+            crate::confirm::ConfirmDecision::Approve
+        }
+        fn confirm_sign(
+            &self,
+            _: &crate::confirm::SignPrompt<'_>,
+        ) -> crate::confirm::ConfirmDecision {
+            crate::confirm::ConfirmDecision::Approve
+        }
+    }
+
     fn gateway<'a>(
         proxy: &'a SpyProxy,
         identity: &'a UnusedIdentity,
         opener: &'a SpyOpener,
+        confirmer: &'a ApprovingConfirmer,
     ) -> Gateway<'a> {
-        Gateway::new(proxy, identity, opener)
+        Gateway::new(proxy, identity, opener, confirmer)
     }
 
     #[test]
@@ -168,8 +200,9 @@ mod tests {
             result: json!({ "cap_bytes": 64 }),
             ..Default::default()
         };
-        let (identity, opener) = (UnusedIdentity, SpyOpener::default());
-        let out = gateway(&proxy, &identity, &opener)
+        let (identity, opener, confirmer) =
+            (UnusedIdentity, SpyOpener::default(), ApprovingConfirmer);
+        let out = gateway(&proxy, &identity, &opener, &confirmer)
             .dispatch(&Command::Cache(CacheAction::SetCap { bytes: 64 }))
             .unwrap();
         assert_eq!(proxy.calls.borrow()[0].0, "control.cache.setCap");
@@ -180,8 +213,9 @@ mod tests {
     #[test]
     fn local_command_never_touches_the_engine_proxy() {
         let proxy = SpyProxy::default();
-        let (identity, opener) = (UnusedIdentity, SpyOpener::default());
-        gateway(&proxy, &identity, &opener)
+        let (identity, opener, confirmer) =
+            (UnusedIdentity, SpyOpener::default(), ApprovingConfirmer);
+        gateway(&proxy, &identity, &opener, &confirmer)
             .dispatch(&Command::Sign {
                 message: "hi".into(),
             })
@@ -195,8 +229,9 @@ mod tests {
     #[test]
     fn open_validates_the_scheme_before_delegating_to_the_opener() {
         let proxy = SpyProxy::default();
-        let (identity, opener) = (UnusedIdentity, SpyOpener::default());
-        let gw = gateway(&proxy, &identity, &opener);
+        let (identity, opener, confirmer) =
+            (UnusedIdentity, SpyOpener::default(), ApprovingConfirmer);
+        let gw = gateway(&proxy, &identity, &opener, &confirmer);
 
         gw.dispatch(&Command::Open {
             link: "chia://store/path".into(),
@@ -220,8 +255,9 @@ mod tests {
                 Err(GatewayError::new(ErrorCode::NotConnected, "no session"))
             }
         }
-        let (identity, opener) = (UnusedIdentity, SpyOpener::default());
-        let err = Gateway::new(&FailingProxy, &identity, &opener)
+        let (identity, opener, confirmer) =
+            (UnusedIdentity, SpyOpener::default(), ApprovingConfirmer);
+        let err = Gateway::new(&FailingProxy, &identity, &opener, &confirmer)
             .dispatch(&Command::Info)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotConnected);

@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.13.0] - Unreleased
+
+### Fixed
+
+- **Close the `dign sign` identity-key signing oracle (SIGN-2 audit finding, dig_ecosystem#959).**
+  The local `dign sign` gateway path (`gateway/local.rs`) signed the RAW caller message with the
+  slot-0x0010 identity key — no domain tag, no confirm — so a caller could obtain a signature
+  byte-identical to a confirm-gated `DIGNET-SIGN-v1` spend or a `DIGNET-SESSION-v1` session attach (a
+  cross-protocol signing oracle). `dign sign` now (1) signs the domain-separated
+  `DIGNET-USER-SIGN-v1 ‖ message` (a third distinct purpose tag, in `session.rs::user_sign_message`),
+  never the raw bytes, so its signature can never be replayed in another context; and (2) funnels
+  through the terminal `NativeConfirmer` — the same human gate as the §5.3 engine and §5.6 dapp sign
+  paths — returning the new `DENIED` error code when not human-approved, so no local process signs
+  silently. `LocalIdentity` has no production impl yet, so this was a latent contract bug fixed before
+  the real signer is wired. SPEC §3.5 documents the construction.
+
 ## [0.10.0] - Unreleased
 
 ### Added

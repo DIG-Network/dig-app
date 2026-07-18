@@ -29,6 +29,9 @@ pub enum ErrorCode {
     Locked,
     /// 10 — the referenced object (profile, store) does not exist.
     NotFound,
+    /// 11 — the user did not authorize the action at the native confirm (declined, timed out, or no
+    /// confirmer is available on a headless host). A `dign sign` that is not human-approved fails here.
+    Denied,
 }
 
 impl ErrorCode {
@@ -42,6 +45,7 @@ impl ErrorCode {
             ErrorCode::EngineError => 8,
             ErrorCode::Locked => 9,
             ErrorCode::NotFound => 10,
+            ErrorCode::Denied => 11,
         }
     }
 
@@ -55,6 +59,7 @@ impl ErrorCode {
             ErrorCode::EngineError => "ENGINE_ERROR",
             ErrorCode::Locked => "LOCKED",
             ErrorCode::NotFound => "NOT_FOUND",
+            ErrorCode::Denied => "DENIED",
         }
     }
 
@@ -68,6 +73,7 @@ impl ErrorCode {
             ErrorCode::EngineError,
             ErrorCode::Locked,
             ErrorCode::NotFound,
+            ErrorCode::Denied,
         ]
     }
 }

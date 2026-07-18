@@ -63,6 +63,14 @@ pub const SESSION_CHALLENGE_DOMAIN: &[u8] = b"DIGNET-SESSION-v1";
 /// reconstructs the identical byte string to verify.
 pub const SIGN_CALLBACK_DOMAIN: &[u8] = b"DIGNET-SIGN-v1";
 
+/// The domain separator for a user-initiated `dign sign` (the §3.5 local gateway path): a signature
+/// the user explicitly requests over their OWN message with the active profile's identity key. It is a
+/// THIRD distinct purpose tag, separate from both [`SESSION_CHALLENGE_DOMAIN`] and
+/// [`SIGN_CALLBACK_DOMAIN`], so a `dign sign` signature can NEVER be replayed as a session attach or an
+/// engine/dapp spend-callback authorization. Canonical: any verifier reconstructs the identical byte
+/// string via [`user_sign_message`].
+pub const USER_SIGN_DOMAIN: &[u8] = b"DIGNET-USER-SIGN-v1";
+
 /// The largest single IPC frame [`LineTransport`] will read (1 MiB). Session-control frames and a
 /// detached signature are tiny; even a spend/SMT payload in a `sign` callback is far under this. The
 /// cap bounds a compromised local engine's ability to OOM the app with a newline-less giant frame.
@@ -123,6 +131,29 @@ pub fn sign_callback_message(payload_type: &str, payload: &[u8]) -> Option<Vec<u
     message.extend_from_slice(payload_type.as_bytes());
     message.extend_from_slice(payload);
     Some(message)
+}
+
+/// Builds the exact bytes the identity key signs for a user-initiated `dign sign`:
+///
+/// ```text
+/// USER_SIGN_DOMAIN ‖ message
+/// ```
+///
+/// `message` is the single trailing field, so — unlike [`sign_callback_message`], which joins two
+/// variable fields and therefore length-prefixes the first — no length prefix is needed here: the
+/// [`USER_SIGN_DOMAIN`] tag is a fixed-length constant and everything after it is the message,
+/// an unambiguous parse. The tag is what closes the cross-protocol signing oracle: because it differs
+/// from every other 0x0010 purpose tag at a fixed leading position, no crafted `message` can make this
+/// output equal a session-attach challenge ([`challenge_message`]) or an engine/dapp callback message
+/// ([`sign_callback_message`]) — so a `dign sign` signature can never be replayed in those contexts.
+///
+/// Pure and canonical — any verifier reconstructs the identical byte string, so all producers and
+/// verifiers MUST agree on this construction byte-for-byte.
+pub fn user_sign_message(message: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(USER_SIGN_DOMAIN.len() + message.len());
+    out.extend_from_slice(USER_SIGN_DOMAIN);
+    out.extend_from_slice(message);
+    out
 }
 
 /// The signing capability the session client needs from the unlocked identity, without holding the
@@ -1023,6 +1054,51 @@ mod tests {
         assert!(a.starts_with(SIGN_CALLBACK_DOMAIN));
         // A callback message can never equal an attach challenge (different domain tags).
         assert!(!a.starts_with(SESSION_CHALLENGE_DOMAIN));
+    }
+
+    #[test]
+    fn user_sign_message_is_domain_separated_and_cannot_collide_with_the_other_purposes() {
+        let m = user_sign_message(b"attest this");
+        // Tagged with its own domain, and NOT with any sibling tag.
+        assert!(m.starts_with(USER_SIGN_DOMAIN));
+        assert!(!m.starts_with(SESSION_CHALLENGE_DOMAIN));
+        assert!(!m.starts_with(SIGN_CALLBACK_DOMAIN));
+        // Deterministic, and the message is preserved after the tag.
+        assert_eq!(m, user_sign_message(b"attest this"));
+        assert_eq!(&m[USER_SIGN_DOMAIN.len()..], b"attest this");
+        // The three purpose tags are pairwise distinct at a fixed leading position, so NO crafted
+        // user message can produce a byte string that also parses as a session attach or a callback.
+        assert_ne!(USER_SIGN_DOMAIN, SESSION_CHALLENGE_DOMAIN);
+        assert_ne!(USER_SIGN_DOMAIN, SIGN_CALLBACK_DOMAIN);
+    }
+
+    #[test]
+    fn a_user_sign_of_a_forged_session_or_callback_body_is_not_valid_in_those_contexts() {
+        // A caller crafts a `dign sign` message that is BYTE-FOR-BYTE a valid session-attach challenge
+        // (and, separately, a valid callback body), hoping the returned signature can be replayed to
+        // attach a session or authorize a spend. Domain separation must defeat both.
+        let id = signer();
+        let pubkey = id.signing_public_key();
+
+        let forged_attach = challenge_message(&nonce(), DID);
+        let sig_over_attach = id.sign(&user_sign_message(&forged_attach));
+        assert!(
+            !verify_signature(&pubkey, &forged_attach, &sig_over_attach),
+            "a dign-sign signature must NOT verify as a session-attach challenge signature"
+        );
+
+        let forged_callback = sign_callback_message("spend", b"bundle").unwrap();
+        let sig_over_callback = id.sign(&user_sign_message(&forged_callback));
+        assert!(
+            !verify_signature(&pubkey, &forged_callback, &sig_over_callback),
+            "a dign-sign signature must NOT verify as an engine/dapp callback signature"
+        );
+        // It IS a valid signature over the domain-separated user-sign message (proves it really signed).
+        assert!(verify_signature(
+            &pubkey,
+            &user_sign_message(&forged_attach),
+            &sig_over_attach
+        ));
     }
 
     #[test]
