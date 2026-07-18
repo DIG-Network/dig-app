@@ -113,3 +113,29 @@ tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hmac = "0.12"
 uuid = { version = "1", features = ["v4"] }
+
+# Per-OS native confirm window + biometric (SIGN-3, dig_ecosystem#950, SPEC §5.6.5). Each is a
+# TARGET-SPECIFIC dependency gated in the crate manifest, so it is compiled ONLY on its own platform
+# and never taxes the other builds. On Windows the `windows` crate provides the WinRT
+# `UserConsentVerifier` (Windows Hello) + the Win32 `MessageBoxW` foreground consent window. On macOS
+# `objc2` + AppKit draw the floating `NSAlert` and `objc2-local-authentication` drives Touch ID via
+# `LAContext`; `block2` bridges the async `evaluatePolicy` reply block to a blocking call. Linux uses
+# no native crate — it drives the desktop dialog helper + polkit `pkcheck` as subprocesses.
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Security_Credentials_UI",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSView",
+] }
+objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
+block2 = "0.6"

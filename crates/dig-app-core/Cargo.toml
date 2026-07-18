@@ -75,6 +75,20 @@ uuid.workspace = true
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 keyring.workspace = true
 
+# The per-OS native confirmer (SIGN-3, SPEC §5.6.5) — the foreground consent window + biometric that
+# is the ONLY authorization to sign. Each backend is gated to its own target so it never taxes the
+# other platforms' builds. Linux needs no native crate (it drives desktop-dialog + polkit `pkcheck`
+# subprocesses), so only Windows + macOS pull dependencies here.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-app-kit.workspace = true
+objc2-local-authentication.workspace = true
+block2.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 rand_chacha.workspace = true

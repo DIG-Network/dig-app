@@ -84,3 +84,28 @@ jobs:
         run: cargo test --doc --workspace --all-features
       - name: Check documentation builds
         run: cargo doc --no-deps --workspace --all-features
+
+  # The ubuntu jobs above compile only the Linux `#[cfg(target_os = "linux")]` code, so the Windows +
+  # macOS native confirmers (SIGN-3: Windows Hello / Touch ID FFI, `src/confirm/{windows,macos}.rs`)
+  # would otherwise never be built or linted. These native runners compile, lint (-D warnings), and run
+  # the per-OS unit tests so a platform backend can never rot undetected on the ubuntu-only gate.
+  native-backends:
+    name: Native confirmer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+      # `dig-app-core` holds the per-OS confirmer; the tray shell's GUI stack is not needed to build it.
+      - name: cargo clippy -D warnings (dig-app-core)
+        run: cargo clippy -p dig-app-core --all-targets --all-features --locked -- -D warnings
+      - name: cargo test (dig-app-core)
+        run: cargo test -p dig-app-core --all-features --locked
