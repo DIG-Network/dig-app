@@ -47,10 +47,33 @@ pub struct CoinRecord {
     pub amount: u64,
 }
 
-/// A profile's wallet view — its receive addresses and its last-known spendable coins. This is the
-/// cached, user-facing state; it is authoritative for display + coin selection between chain reads,
-/// and is refreshed from the engine's chain-read seam ([`super::engine`]). It holds NO private key
-/// (the key lives sealed separately, [`WalletStore::save_key`]).
+/// A record of an outbound spend the wallet broadcast — the public metadata the wallet-security
+/// wave-2 lanes read (address-book auto-populate #963, adaptive step-up on prior spend history, and
+/// the net-effect coin-state view #964). It holds **only public metadata** — recipient, asset,
+/// amount, time, and the on-chain transaction id — never key material and never the bundle bytes, so
+/// exposing it never crosses the custody boundary.
+///
+/// Appended additively (`#[serde(default)]` on the owning [`WalletState::history`]) so an older
+/// sealed state without history still deserializes to an empty log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendRecord {
+    /// The recipient `xch1…` address the spend paid.
+    pub recipient: String,
+    /// The asset that was sent.
+    pub asset: Asset,
+    /// The amount sent, in the asset's base unit (mojos for XCH, base units for DIG).
+    pub amount: u64,
+    /// Unix seconds when the spend was broadcast.
+    pub broadcast_at: u64,
+    /// The broadcast transaction id (spend-bundle name), lowercase hex.
+    pub transaction_id: String,
+}
+
+/// A profile's wallet view — its receive addresses, its last-known spendable coins, and its
+/// outbound spend history. This is the cached, user-facing state; it is authoritative for display +
+/// coin selection between chain reads, and is refreshed from the engine's chain-read seam
+/// ([`super::engine`]). It holds NO private key (the key lives sealed separately,
+/// [`WalletStore::save_key`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletState {
     /// The profile's receive addresses (`xch1…`). The first is the primary / change address.
@@ -59,6 +82,9 @@ pub struct WalletState {
     /// The wallet's last-known spendable coins across all held assets.
     #[serde(default)]
     pub coins: Vec<CoinRecord>,
+    /// The wallet's outbound spends, oldest first — the substrate the wave-2 security lanes read.
+    #[serde(default)]
+    pub history: Vec<SpendRecord>,
 }
 
 impl WalletState {
@@ -68,6 +94,46 @@ impl WalletState {
             .iter()
             .filter(|c| c.asset == asset)
             .map(|c| c.amount)
+            .sum()
+    }
+
+    /// Append an outbound spend to the history log. History is kept oldest-first, so the read
+    /// helpers ([`recent_recipients`](Self::recent_recipients)) treat the tail as most-recent.
+    pub fn record_spend(&mut self, record: SpendRecord) {
+        self.history.push(record);
+    }
+
+    /// The outbound spend history, oldest first.
+    pub fn history(&self) -> &[SpendRecord] {
+        &self.history
+    }
+
+    /// The distinct recipient addresses this wallet has paid, most-recent first, capped at `limit`.
+    ///
+    /// The substrate WSEC-A (#963) auto-populates the address book from: a recipient paid more
+    /// recently ranks ahead of one paid earlier, and each address appears once (its most-recent
+    /// send wins its position).
+    pub fn recent_recipients(&self, limit: usize) -> Vec<&str> {
+        let mut seen = std::collections::HashSet::new();
+        let mut recipients = Vec::new();
+        for record in self.history.iter().rev() {
+            if recipients.len() == limit {
+                break;
+            }
+            if seen.insert(record.recipient.as_str()) {
+                recipients.push(record.recipient.as_str());
+            }
+        }
+        recipients
+    }
+
+    /// The total amount of `asset` this wallet has sent across all recorded spends, in base units —
+    /// the substrate WSEC-G's adaptive step-up reads to size a confirm against spend history.
+    pub fn total_sent(&self, asset: Asset) -> u64 {
+        self.history
+            .iter()
+            .filter(|s| s.asset == asset)
+            .map(|s| s.amount)
             .sum()
     }
 }
@@ -233,9 +299,83 @@ mod tests {
                     amount: 7,
                 },
             ],
+            history: Vec::new(),
         };
         assert_eq!(state.balance(Asset::Dig), 150);
         assert_eq!(state.balance(Asset::Xch), 7);
+    }
+
+    /// A spend to `recipient` for `amount` DIG at time `at` — a compact fixture for the history API.
+    fn dig_spend(recipient: &str, amount: u64, at: u64) -> SpendRecord {
+        SpendRecord {
+            recipient: recipient.into(),
+            asset: Asset::Dig,
+            amount,
+            broadcast_at: at,
+            transaction_id: format!("{at:064x}"),
+        }
+    }
+
+    #[test]
+    fn recorded_spends_accumulate_oldest_first() {
+        let mut state = WalletState::default();
+        state.record_spend(dig_spend("xch1alice", 10, 1));
+        state.record_spend(dig_spend("xch1bob", 20, 2));
+        assert_eq!(state.history().len(), 2);
+        assert_eq!(state.history()[0].recipient, "xch1alice");
+        assert_eq!(state.history()[1].recipient, "xch1bob");
+    }
+
+    #[test]
+    fn recent_recipients_are_most_recent_first_deduped_and_capped() {
+        let mut state = WalletState::default();
+        state.record_spend(dig_spend("xch1alice", 10, 1));
+        state.record_spend(dig_spend("xch1bob", 20, 2));
+        // A second send to alice — her most-recent send moves her ahead of bob.
+        state.record_spend(dig_spend("xch1alice", 30, 3));
+        state.record_spend(dig_spend("xch1carol", 40, 4));
+
+        assert_eq!(
+            state.recent_recipients(10),
+            vec!["xch1carol", "xch1alice", "xch1bob"],
+            "distinct recipients, most-recent first"
+        );
+        assert_eq!(
+            state.recent_recipients(2),
+            vec!["xch1carol", "xch1alice"],
+            "capped at the limit"
+        );
+    }
+
+    #[test]
+    fn recent_recipients_of_an_empty_history_is_empty() {
+        assert!(WalletState::default().recent_recipients(5).is_empty());
+    }
+
+    #[test]
+    fn total_sent_sums_only_the_requested_asset() {
+        let mut state = WalletState::default();
+        state.record_spend(dig_spend("xch1alice", 100, 1));
+        state.record_spend(dig_spend("xch1bob", 50, 2));
+        state.record_spend(SpendRecord {
+            asset: Asset::Xch,
+            ..dig_spend("xch1carol", 7, 3)
+        });
+        assert_eq!(state.total_sent(Asset::Dig), 150);
+        assert_eq!(state.total_sent(Asset::Xch), 7);
+    }
+
+    #[test]
+    fn history_round_trips_through_the_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), &[DID_A]);
+        let mut state = WalletState {
+            addresses: vec!["xch1primary".into()],
+            ..WalletState::default()
+        };
+        state.record_spend(dig_spend("xch1recipient", 42, 99));
+        store.save_state(DID_A, &state).unwrap();
+        assert_eq!(store.load_state(DID_A).unwrap(), state);
     }
 
     #[test]
@@ -249,6 +389,7 @@ mod tests {
                 asset: Asset::Dig,
                 amount: 42,
             }],
+            history: Vec::new(),
         };
         store.save_state(DID_A, &state).unwrap();
         assert_eq!(store.load_state(DID_A).unwrap(), state);
