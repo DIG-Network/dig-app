@@ -27,8 +27,10 @@
 //! The normative contract for all of the above is the repo `SPEC.md`. U1 shipped the module skeleton
 //! plus the pure helpers; U3 added the agent lifecycle and tray shell; U4 implemented [`keystore`]
 //! (identity key generation / unlock / sign, DIGOP1 at-rest sealing, OS-credential-store primary +
-//! sealed-file fallback, rotation). The remaining security-critical subsystems — [`profiles`] (U5),
-//! the identity-authenticated session (U6), and [`gateway`] (U7) — remain stubbed to the SPEC.
+//! sealed-file fallback, rotation); U5 implemented [`profiles`] (multi-DID create/select/list/edit
+//! with per-profile sealed AppData), consuming U4's DEK sealing through the
+//! [`profiles::ProfileSealer`] seam. The remaining security-critical subsystems — the
+//! identity-authenticated session (U6) and [`gateway`] (U7) — remain stubbed to the SPEC.
 //!
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 
@@ -86,6 +88,10 @@ pub enum Error {
     /// password was at fault.
     #[error("key management error: {0}")]
     Keystore(#[from] keystore::KeystoreError),
+
+    /// A profile-management failure (create / select / edit / seal — see [`profiles::ProfileError`]).
+    #[error(transparent)]
+    Profiles(#[from] profiles::ProfileError),
 }
 
 /// The crate result type.
