@@ -16,7 +16,7 @@
 //! config / profile-metadata are sealed under this layout.
 
 use crate::{Error, Os, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The canonical brand directory segment shared across every OS (never drift this literal — it is
 /// the on-disk namespace every DIG user-app install shares).
@@ -60,6 +60,62 @@ pub fn brand_data_dir(os: Os, env_root: &str) -> Result<PathBuf> {
 /// per-profile subdir keyed by the DID hash keeps each profile's sealed blobs isolated on disk.
 pub fn profile_dir(brand_dir: &std::path::Path, did_hash: &str) -> PathBuf {
     brand_dir.join("profiles").join(did_hash)
+}
+
+/// Writes `bytes` to `final_path` durably and atomically: create `temp_path` (a sibling temp file
+/// the caller names), write + flush + `fsync` it, rename it over `final_path`, then `fsync` the
+/// parent directory so the rename itself is durable.
+///
+/// This is the ONE crash-safe write idiom for every security-critical file dig-app persists (the
+/// keystore's sealed identity blob, the profile registry, a sealed profile data blob) — the two
+/// call sites used to duplicate it byte-for-byte before this extraction. The contract:
+///
+/// - **Atomicity** — the rename means a concurrent reader, or a process recovering after a crash,
+///   only ever observes the complete previous file or the complete new one, never a half-written
+///   or truncated mix.
+/// - **Durability** — the two `fsync`s put the bytes (and, via the parent-dir fsync, the rename's
+///   directory-entry update) on stable storage before the call returns, so the write survives a
+///   crash/power-loss immediately after.
+/// - **Confidentiality of the write-in-progress** — on Unix the temp file is created with mode
+///   `0600` (owner-only) from the moment it exists, so the window between "temp file created" and
+///   "renamed into place" never exposes a world/group-readable copy of security-critical bytes
+///   (identity keys, sealed profile data). `final_path`'s own permissions are unaffected by the
+///   rename and remain the caller's responsibility to set/assert.
+///
+/// Parent-directory `fsync` is skipped on Windows: it cannot open a directory handle for `fsync`,
+/// and rename-metadata durability there is handled by the filesystem itself.
+pub fn write_durably(final_path: &Path, temp_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    #[cfg(unix)]
+    let mut temp = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(temp_path)?
+    };
+    #[cfg(not(unix))]
+    let mut temp = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(temp_path)?;
+
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    temp.sync_all()?;
+    drop(temp);
+
+    std::fs::rename(temp_path, final_path)?;
+
+    #[cfg(unix)]
+    if let Some(parent) = final_path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -110,5 +166,41 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.ends_with("did-aaa"));
         assert!(a.starts_with(&brand));
+    }
+
+    /// The shared crash-safe write: atomic replace, no temp file left behind, and (on Unix) the
+    /// temp file is owner-only for its entire lifetime — never briefly world/group-readable while
+    /// security-critical bytes are in flight.
+    #[test]
+    fn write_durably_replaces_atomically_with_no_temp_left_and_owner_only_temp_perms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sealed.blob");
+        let temp_path = path.with_extension("tmp");
+
+        write_durably(&path, &temp_path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        assert!(
+            !temp_path.exists(),
+            "the temp file must be renamed away, not left behind"
+        );
+
+        // Overwriting fully replaces the previous content (no torn append / stale tail) and again
+        // leaves no temp file — the property that keeps a crash mid-save from stranding a profile
+        // or the sealed identity blob.
+        write_durably(&path, &temp_path, b"second-longer-then-shorter").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second-longer-then-shorter");
+        write_durably(&path, &temp_path, b"third").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"third");
+        assert!(!temp_path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "the temp file's owner-only mode must carry through the rename"
+            );
+        }
     }
 }

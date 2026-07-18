@@ -253,17 +253,16 @@ impl ProfileVault {
         }
     }
 
-    /// Write the sealed blob to the fallback file durably AND atomically: write a temp file in the
-    /// same directory, fsync it, rename it over the final path, then fsync the parent directory. The
-    /// rename gives atomicity (a reader never sees a half-written blob); the two fsyncs give
-    /// durability — on Linux the sealed file is the custody PRIMARY, so the identity must survive a
+    /// Write the sealed blob to the fallback file durably AND atomically, via the shared
+    /// [`crate::storage::write_durably`] helper (temp file → fsync → rename → parent-dir fsync) —
+    /// on Linux the sealed file is the custody PRIMARY, so the identity must survive a
     /// crash/power-loss immediately after `create`/`rotate`, not linger only in the page cache.
     ///
-    /// On Unix the profile directory is created with mode 0o700 and the sealed file with mode 0o600,
-    /// restricting visibility to the owning user (defense-in-depth on the file's DIGOP1 ciphertext).
+    /// On Unix the profile directory is created with mode 0o700 and the sealed file ends up mode
+    /// 0o600 (the helper's temp file is already owner-only; this re-asserts it on the final path
+    /// as belt-and-suspenders against umask), restricting visibility to the owning user
+    /// (defense-in-depth on the file's DIGOP1 ciphertext).
     fn write_sealed_file(&self, blob: &[u8]) -> Result<(), KeystoreError> {
-        use std::io::Write;
-
         // Create the profile directory, setting mode 0o700 on Unix (owner rwx only).
         #[cfg(unix)]
         {
@@ -284,37 +283,7 @@ impl ProfileVault {
 
         let final_path = self.sealed_file();
         let temp_path = final_path.with_extension("digop1.tmp");
-
-        // Write + flush + fsync the temp file so its bytes are on stable storage before the rename.
-        // On Unix set mode 0o600 so only the owner can read the sealed ciphertext.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut temp = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temp_path)?;
-            temp.write_all(blob)?;
-            temp.flush()?;
-            temp.sync_all()?;
-            drop(temp);
-        }
-        #[cfg(not(unix))]
-        {
-            let mut temp = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&temp_path)?;
-            temp.write_all(blob)?;
-            temp.flush()?;
-            temp.sync_all()?;
-            drop(temp);
-        }
-
-        std::fs::rename(&temp_path, &final_path)?;
+        crate::storage::write_durably(&final_path, &temp_path, blob)?;
 
         // On Unix, set mode 0o600 on the final file as well (belt-and-suspenders against umask).
         #[cfg(unix)]
@@ -322,12 +291,6 @@ impl ProfileVault {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))?;
         }
-
-        // fsync the parent directory so the rename (the directory entry) is itself durable. Only
-        // meaningful (and only permitted) on Unix — Windows cannot open a directory handle for
-        // fsync, and its rename metadata durability is handled by the filesystem.
-        #[cfg(unix)]
-        std::fs::File::open(&self.profile_dir)?.sync_all()?;
         Ok(())
     }
 
