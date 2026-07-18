@@ -24,3 +24,26 @@
 
 Verifying U3 tray/headless shell + adding the residual per-user autostart artifacts (macOS
 LaunchAgent, Linux systemd user unit) called out in SPEC §4. Tracked under epic #908.
+
+## SIGN-3: per-OS native confirmer (#950)
+
+The three OS confirmers reduce to one shared, unit-tested policy (`confirm::gated_consent`): a
+`ForegroundWindow` shows the decoded tx, then a `BiometricVerifier` re-authenticates; approve iff
+both succeed, everything else fails closed. Each backend only implements those two thin adapters —
+so the security logic lives in ONE place and can't drift per platform.
+
+Sharp edges that cost time here:
+- **Cross-platform dead-code:** `WindowIntent::{Timeout,Unavailable}` are only CONSTRUCTED by the
+  Linux backend (dialog `--timeout`, missing helper); the modal Windows/macOS dialogs never produce
+  them, so clippy `-D warnings` flags them dead on those hosts. Fix = `#[allow(dead_code)]` on those
+  variants (a legitimately cross-platform enum), not restructuring.
+- **Can't cross-`cargo check` the non-host backends from a dev box:** chia's C deps (blst,
+  blake2b-rs) need a target C toolchain (`x86_64-linux-gnu-gcc`, apple clang) that a plain
+  `rustup target add` doesn't provide. The reliable gate is NATIVE CI runners — the `native-backends`
+  job on `windows-latest` + `macos-latest` compiles/lints/tests the per-OS files (ubuntu CI only ever
+  builds the Linux `#[cfg]`). Verify objc2/windows API shapes against the crate source in the cargo
+  registry cache before pushing a backend you can't compile locally.
+- **Biometric ≠ vault passphrase.** The confirm biometric is OS user re-auth (Windows Hello / Touch
+  ID / polkit, each with its own password fallback) — user presence + device-owner identity. The DIG
+  key unlock is separate (keystore/dispatch). Keeping the confirmer free of key material keeps its
+  boundary clean.

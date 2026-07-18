@@ -620,9 +620,21 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   the payload (the origin is never revealed to the decoder or the key until it is connected).
 - **Native confirm + biometric.** The app raises the OS foreground confirm window and requires an
   explicit biometric/passphrase action: **Windows Hello** (WinRT `UserConsentVerifier`) / **macOS Touch
-  ID** (`LocalAuthentication` `LAContext`) / **Linux** (polkit or fprintd via PAM), passphrase fallback
-  everywhere. If the active profile is locked, this action doubles as the §3.1 vault unlock (one user
-  action authorizes and unlocks).
+  ID** (`LocalAuthentication` `LAContext`) / **Linux** (polkit `pkcheck` against the action
+  `net.dignetwork.dig-app.authorize`, or fprintd via PAM), passphrase fallback everywhere. If the active
+  profile is locked, this action doubles as the §3.1 vault unlock (one user action authorizes and
+  unlocks).
+- **Confirmer selection + the two-step gate (implementation contract).** `confirm::native_confirmer()`
+  selects the per-OS backend when the host has an interactive desktop session and the fail-closed
+  headless confirmer otherwise. Every backend is the SAME two-step gate over the shared, unit-tested
+  policy: (1) a foreground window shows the origin-bound heading + the decoded transaction and takes an
+  approve/cancel choice; (2) on approve, the OS authenticator re-authenticates the user
+  (biometric, with the platform's own PIN/password as the built-in fallback). A signature is authorized
+  ONLY when BOTH succeed; a dismissed window, a cancelled/failed/unavailable authenticator, or a missing
+  authenticator all fail closed to the matching §5.6.7 code. The biometric step proves *user presence +
+  device-owner identity*; it is distinct from the vault passphrase (the key unlock stays in the keystore
+  path). **Never blind-sign (defense-in-depth):** a sign prompt whose `decoded_tx` is absent is denied
+  WITHOUT raising a window, independently of the §5.6.5 dispatch allowlist.
 - **Domain-separated signing (MUST — reuse, do not re-derive).** On approval the app signs, with the
   in-memory slot `0x0010` key, NOT `payload_b64` but the §5.3 domain-separated message:
 
