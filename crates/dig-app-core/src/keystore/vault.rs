@@ -258,25 +258,61 @@ impl ProfileVault {
     /// rename gives atomicity (a reader never sees a half-written blob); the two fsyncs give
     /// durability — on Linux the sealed file is the custody PRIMARY, so the identity must survive a
     /// crash/power-loss immediately after `create`/`rotate`, not linger only in the page cache.
+    ///
+    /// On Unix the profile directory is created with mode 0o700 and the sealed file with mode 0o600,
+    /// restricting visibility to the owning user (defense-in-depth on the file's DIGOP1 ciphertext).
     fn write_sealed_file(&self, blob: &[u8]) -> Result<(), KeystoreError> {
         use std::io::Write;
 
+        // Create the profile directory, setting mode 0o700 on Unix (owner rwx only).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&self.profile_dir)?;
+        }
+        #[cfg(not(unix))]
         std::fs::create_dir_all(&self.profile_dir)?;
+
         let final_path = self.sealed_file();
         let temp_path = final_path.with_extension("digop1.tmp");
 
         // Write + flush + fsync the temp file so its bytes are on stable storage before the rename.
-        let mut temp = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&temp_path)?;
-        temp.write_all(blob)?;
-        temp.flush()?;
-        temp.sync_all()?;
-        drop(temp);
+        // On Unix set mode 0o600 so only the owner can read the sealed ciphertext.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut temp = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temp_path)?;
+            temp.write_all(blob)?;
+            temp.flush()?;
+            temp.sync_all()?;
+            drop(temp);
+        }
+        #[cfg(not(unix))]
+        {
+            let mut temp = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            temp.write_all(blob)?;
+            temp.flush()?;
+            temp.sync_all()?;
+            drop(temp);
+        }
 
         std::fs::rename(&temp_path, &final_path)?;
+
+        // On Unix, set mode 0o600 on the final file as well (belt-and-suspenders against umask).
+        #[cfg(unix)]
+        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))?;
 
         // fsync the parent directory so the rename (the directory entry) is itself durable. Only
         // meaningful (and only permitted) on Unix — Windows cannot open a directory handle for
@@ -582,6 +618,37 @@ mod tests {
                 .unlock(Some("pw"))
                 .unwrap();
             assert_eq!(recovered.signing_public_key(), pk);
+        }
+
+        #[test]
+        fn sealed_file_and_profile_dir_are_mode_restricted_to_owner() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap();
+            ProfileVault::open("did-linux", dir.path())
+                .create(&IdentitySecrets::generate(), Some("pw"))
+                .unwrap();
+
+            // Profile directory MUST be 0o700 (owner rwx only).
+            let profile_dir_perms = std::fs::metadata(dir.path()).unwrap().permissions().mode();
+            assert_eq!(
+                profile_dir_perms & 0o777,
+                0o700,
+                "profile directory should be 0o700 (owner rwx only), got {:#o}",
+                profile_dir_perms & 0o777
+            );
+
+            // Sealed file MUST be 0o600 (owner rw only).
+            let sealed_file_perms = std::fs::metadata(dir.path().join(SEALED_IDENTITY_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                sealed_file_perms & 0o777,
+                0o600,
+                "sealed file should be 0o600 (owner rw only), got {:#o}",
+                sealed_file_perms & 0o777
+            );
         }
     }
 
