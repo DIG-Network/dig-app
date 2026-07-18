@@ -53,6 +53,17 @@ chia-traits.workspace = true
 clvmr.workspace = true
 hex-literal.workspace = true
 
+# APP-SIGN loopback identity channel (SIGN-1, SPEC §5.6). The extension↔dig-app paired WebSocket
+# server + the pairing/auth security core live in `loopback` + `pairing` + `confirm`. `tokio` +
+# `tokio-tungstenite` + `futures-util` are the async WS transport; `hmac` computes the per-frame
+# pairing-token MAC with a constant-time `verify_slice`; `uuid` mints the opaque `pairing_id`. The
+# HMAC reuses the existing `sha2` dep — no new crypto primitive is introduced.
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+hmac.workspace = true
+uuid.workspace = true
+
 # The OS credential store is the custody PRIMARY on Windows + macOS only (per-application access
 # gating). It is deliberately NOT a dependency on Linux: keyutils is same-UID-readable + volatile, so
 # Linux uses the passphrase-sealed file as its custody primary instead (see `keystore`). Gating the
