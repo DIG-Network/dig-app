@@ -49,7 +49,29 @@ use crate::keystore::{IdentitySecrets, SIGNATURE_LEN};
 /// The domain separator prepended to every session-attach challenge, so a signature minted for the
 /// session handshake can never be replayed as a signature over a spend, an SMT write, or any other
 /// message the identity key signs. Canonical — the engine builds the identical challenge to verify.
+///
+/// This is one instance of the crate-wide invariant: **every signature the slot-`0x0010` identity
+/// key produces MUST carry a unique per-purpose domain-separation tag.** Two purposes never share a
+/// tag, and no purpose signs un-prefixed caller bytes — otherwise a signature minted for one purpose
+/// could be replayed as a valid signature for another (a cross-protocol signing oracle).
 pub const SESSION_CHALLENGE_DOMAIN: &[u8] = b"DIGNET-SESSION-v1";
+
+/// The domain separator for the engine→app `sign` callback (§ [`SessionClient::handle_next_sign_callback`]).
+/// Distinct from [`SESSION_CHALLENGE_DOMAIN`], so a callback signature can NEVER equal an attach
+/// challenge signature — nor any other message the identity key signs — even when the engine chooses
+/// the callback payload to be byte-for-byte a valid attach challenge. Canonical: the engine
+/// reconstructs the identical byte string to verify.
+pub const SIGN_CALLBACK_DOMAIN: &[u8] = b"DIGNET-SIGN-v1";
+
+/// The largest single IPC frame [`LineTransport`] will read (1 MiB). Session-control frames and a
+/// detached signature are tiny; even a spend/SMT payload in a `sign` callback is far under this. The
+/// cap bounds a compromised local engine's ability to OOM the app with a newline-less giant frame.
+const MAX_FRAME_BYTES: u64 = 1024 * 1024;
+
+/// The most engine `sign` callbacks the client will service while awaiting a single handshake
+/// response before giving up. Bounds a compromised engine that would otherwise wedge the app in an
+/// endless callback stream instead of answering the request.
+const MAX_INTERLEAVED_CALLBACKS: usize = 64;
 
 /// JSON-RPC error code returned to the engine when a [`SignPolicy`] denies a `sign` callback.
 const SIGN_DENIED_CODE: i64 = -32001;
@@ -72,6 +94,35 @@ pub fn challenge_message(nonce: &[u8], profile_did: &str) -> Vec<u8> {
     message.extend_from_slice(nonce);
     message.extend_from_slice(profile_did.as_bytes());
     message
+}
+
+/// Builds the exact bytes the identity key signs for an engine `sign` callback:
+///
+/// ```text
+/// SIGN_CALLBACK_DOMAIN ‖ len16(payload_type) ‖ payload_type ‖ payload
+/// ```
+///
+/// where `len16` is the big-endian `u16` byte length of `payload_type`. The length prefix makes the
+/// `payload_type ‖ payload` boundary unambiguous, so `(type="a", payload="bc")` cannot collide with
+/// `(type="ab", payload="c")`. The [`SIGN_CALLBACK_DOMAIN`] tag — distinct from
+/// [`SESSION_CHALLENGE_DOMAIN`] — guarantees a callback signature can never equal an attach-challenge
+/// signature (or any other identity-key signature), closing the cross-protocol signing oracle a
+/// malicious engine would otherwise exploit by submitting a crafted `payload`.
+///
+/// Pure and canonical — the engine reconstructs the identical byte string to verify, so app and
+/// engine MUST agree on this construction byte-for-byte.
+///
+/// `payload_type` is bounded to [`u16::MAX`] bytes (labels are short); a longer label is a protocol
+/// error the caller rejects before signing.
+pub fn sign_callback_message(payload_type: &str, payload: &[u8]) -> Option<Vec<u8>> {
+    let type_len = u16::try_from(payload_type.len()).ok()?;
+    let mut message =
+        Vec::with_capacity(SIGN_CALLBACK_DOMAIN.len() + 2 + payload_type.len() + payload.len());
+    message.extend_from_slice(SIGN_CALLBACK_DOMAIN);
+    message.extend_from_slice(&type_len.to_be_bytes());
+    message.extend_from_slice(payload_type.as_bytes());
+    message.extend_from_slice(payload);
+    Some(message)
 }
 
 /// The signing capability the session client needs from the unlocked identity, without holding the
@@ -179,13 +230,25 @@ impl<R: Read, W: Write> FrameTransport for LineTransport<R, W> {
     }
 
     fn recv_frame(&mut self) -> io::Result<String> {
-        let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
+        // Read one newline-delimited frame, but NEVER more than MAX_FRAME_BYTES: the engine is a
+        // local peer, but a compromised or buggy one could otherwise stream a newline-less multi-GB
+        // "frame" and OOM the user's app. Cap the read and reject an over-long frame instead.
+        let mut buf = Vec::new();
+        let read = (&mut self.reader)
+            .take(MAX_FRAME_BYTES)
+            .read_until(b'\n', &mut buf)?;
+        if read == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
-        let end = line.trim_end_matches(['\n', '\r']).len();
-        line.truncate(end);
-        Ok(line)
+        if buf.last() != Some(&b'\n') && buf.len() as u64 >= MAX_FRAME_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "engine frame exceeds the maximum size",
+            ));
+        }
+        let text = String::from_utf8(buf)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "engine frame is not UTF-8"))?;
+        Ok(text.trim_end_matches(['\n', '\r']).to_string())
     }
 }
 
@@ -251,6 +314,12 @@ pub enum SessionError {
     /// [`SessionClient::handle_next_sign_callback`] read a frame that was not a `sign` callback.
     #[error("expected an engine sign callback but received a different frame")]
     NotASignCallback,
+
+    /// The engine streamed more than [`MAX_INTERLEAVED_CALLBACKS`] `sign` callbacks without answering
+    /// the pending handshake request — a wedged or hostile engine. The app gives up rather than loop
+    /// forever.
+    #[error("engine sent too many interleaved callbacks without a response")]
+    TooManyCallbacks,
 }
 
 /// The app-side session client: owns the transport to one engine connection, the [`SessionSigner`]
@@ -291,17 +360,29 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
         &mut self,
         profile: ProfileAttachment,
     ) -> Result<Session, SessionError> {
+        let begin_pubkey_hex = self.signer.signing_public_key_hex();
         let begin: BeginResult = self.call(
             METHOD_BEGIN,
             BeginParams {
                 profile_did: &profile.did,
-                signing_pubkey_hex: self.signer.signing_public_key_hex(),
+                signing_pubkey_hex: begin_pubkey_hex.clone(),
             },
         )?;
 
         let nonce = BASE64
             .decode(begin.nonce_b64.as_bytes())
             .map_err(|_| SessionError::MalformedResponse)?;
+
+        // We advertised `signer`'s public key in `begin`, and we attach `profile.did`; the engine
+        // backstops that this DID's published slot-0x0010 key IS this key (it verifies the challenge
+        // signature against the begin pubkey and binds the session to the DID). Locally assert the
+        // key we sign with is the one we advertised, so a future refactor that let them diverge trips
+        // in debug builds rather than silently attaching a mismatched identity.
+        debug_assert_eq!(
+            self.signer.signing_public_key_hex(),
+            begin_pubkey_hex,
+            "the attach signature must use the same identity key advertised in begin"
+        );
         let signature = self.signer.sign(&challenge_message(&nonce, &profile.did));
 
         let attach: AttachResult = self.call(
@@ -408,14 +489,33 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
 
         match &decision {
             SignDecision::Allow => {
-                let signature = self.signer.sign(&payload);
-                self.send_result(
-                    &id,
-                    SignCallbackResult {
-                        signature_b64: BASE64.encode(signature),
-                        pubkey_hex: self.signer.signing_public_key_hex(),
-                    },
-                )?;
+                // Sign the DOMAIN-SEPARATED, length-prefixed message — never the engine's raw bytes.
+                // This is what closes the cross-protocol signing oracle: a malicious engine cannot
+                // choose a `payload` that makes this signature verify as an attach challenge (or any
+                // other identity-key signature), because the `DIGNET-SIGN-v1` tag can never equal the
+                // `DIGNET-SESSION-v1` (or any other) tag those messages carry.
+                match sign_callback_message(&params.payload_type, &payload) {
+                    Some(message) => {
+                        let signature = self.signer.sign(&message);
+                        self.send_result(
+                            &id,
+                            SignCallbackResult {
+                                signature_b64: BASE64.encode(signature),
+                                pubkey_hex: self.signer.signing_public_key_hex(),
+                            },
+                        )?;
+                    }
+                    None => {
+                        // A `payload_type` longer than u16::MAX cannot be length-prefixed
+                        // unambiguously — reject rather than sign an ambiguous message.
+                        self.send_error(
+                            &id,
+                            SIGN_BAD_PAYLOAD_CODE,
+                            "sign payload_type exceeds the maximum length",
+                        )?;
+                        return Ok(SignDecision::Deny("payload_type too long".to_string()));
+                    }
+                }
             }
             SignDecision::Deny(reason) => {
                 self.send_error(&id, SIGN_DENIED_CODE, reason)?;
@@ -450,11 +550,16 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
         &mut self,
         awaited_id: u64,
     ) -> Result<R, SessionError> {
+        let mut callbacks_serviced = 0usize;
         loop {
             let raw = self.transport.recv_frame()?;
             let frame: IncomingFrame = serde_json::from_str(&raw)?;
 
             if frame.method.as_deref() == Some(METHOD_SIGN) {
+                callbacks_serviced += 1;
+                if callbacks_serviced > MAX_INTERLEAVED_CALLBACKS {
+                    return Err(SessionError::TooManyCallbacks);
+                }
                 self.service_sign_callback(frame)?;
                 continue;
             }
@@ -672,6 +777,7 @@ mod tests {
     use crate::keystore::verify_signature;
     use rand_chacha::rand_core::SeedableRng;
     use rand_chacha::ChaCha20Rng;
+    use sha2::{Digest, Sha256};
     use std::collections::VecDeque;
 
     /// A scripted in-memory transport: `incoming` frames are what the engine "sends" (popped in
@@ -705,7 +811,12 @@ mod tests {
     }
 
     const DID: &str = "did:chia:testprofile";
-    const NONCE: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+    /// The scripted engine reply's nonce. Derived (not a literal) so it is unmistakably a test
+    /// fixture — the production nonce is generated by the engine, never hard-coded.
+    fn nonce() -> Vec<u8> {
+        Sha256::digest(b"dig-app u6 session test nonce fixture").to_vec()
+    }
 
     fn signer() -> IdentitySecrets {
         IdentitySecrets::generate_with_rng(&mut ChaCha20Rng::seed_from_u64(42))
@@ -722,7 +833,7 @@ mod tests {
     fn begin_frame(id: u64) -> String {
         format!(
             r#"{{"jsonrpc":"2.0","id":{id},"result":{{"nonce_b64":"{}","session_candidate":"cand-1"}}}}"#,
-            BASE64.encode(NONCE)
+            BASE64.encode(nonce())
         )
     }
 
@@ -738,17 +849,21 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(outgoing).unwrap();
         let sig_b64 = sent["params"]["signature_b64"].as_str().unwrap();
         let signature: [u8; SIGNATURE_LEN] = BASE64.decode(sig_b64).unwrap().try_into().unwrap();
-        verify_signature(expected_pubkey, &challenge_message(NONCE, DID), &signature)
+        verify_signature(
+            expected_pubkey,
+            &challenge_message(&nonce(), DID),
+            &signature,
+        )
     }
 
     #[test]
     fn challenge_is_domain_separated_and_deterministic() {
-        let m = challenge_message(NONCE, DID);
+        let m = challenge_message(&nonce(), DID);
         assert!(m.starts_with(SESSION_CHALLENGE_DOMAIN));
-        assert_eq!(m, challenge_message(NONCE, DID));
+        assert_eq!(m, challenge_message(&nonce(), DID));
         // A different nonce or DID yields a different challenge.
         assert_ne!(m, challenge_message(b"other-nonce", DID));
-        assert_ne!(m, challenge_message(NONCE, "did:chia:someoneelse"));
+        assert_ne!(m, challenge_message(&nonce(), "did:chia:someoneelse"));
     }
 
     #[test]
@@ -822,10 +937,60 @@ mod tests {
         // The reply carries ONLY a signature + the public key — never the private key.
         let sig_b64 = reply["result"]["signature_b64"].as_str().unwrap();
         let signature: [u8; SIGNATURE_LEN] = BASE64.decode(sig_b64).unwrap().try_into().unwrap();
-        assert!(verify_signature(&pubkey, payload, &signature));
+        // The signature is over the DOMAIN-SEPARATED callback message, not the raw payload.
+        let signed = sign_callback_message("spend", payload).unwrap();
+        assert!(verify_signature(&pubkey, &signed, &signature));
+        assert!(
+            !verify_signature(&pubkey, payload, &signature),
+            "the signature must NOT verify over the raw payload — it is domain-separated"
+        );
         assert_eq!(reply["result"]["pubkey_hex"], hex::encode(pubkey));
         assert!(reply["result"].get("signing").is_none());
         assert!(reply["result"].get("private_key").is_none());
+    }
+
+    #[test]
+    fn sign_callback_cannot_be_used_as_an_attach_signing_oracle() {
+        // A malicious engine crafts a `sign` callback whose payload is BYTE-FOR-BYTE a valid attach
+        // challenge (`DIGNET-SESSION-v1 ‖ nonce ‖ did`), hoping the returned signature can be replayed
+        // to attach as this identity. Domain separation must defeat it: the produced signature must
+        // NOT verify as an attach signature for (nonce, did).
+        let id = signer();
+        let pubkey = id.signing_public_key();
+        let forged_payload = challenge_message(&nonce(), DID);
+        let callback = format!(
+            r#"{{"jsonrpc":"2.0","id":13,"method":"sign","params":{{"session_id":"s","op_id":"o","payload_type":"spend","payload_b64":"{}"}}}}"#,
+            BASE64.encode(&forged_payload)
+        );
+        let transport = FakeTransport::scripted([callback]);
+        let mut client = SessionClient::new(transport, id, AllowAllSignPolicy);
+
+        client.handle_next_sign_callback().unwrap();
+
+        let reply: serde_json::Value = serde_json::from_str(&client.transport.outgoing[0]).unwrap();
+        let sig_b64 = reply["result"]["signature_b64"].as_str().unwrap();
+        let signature: [u8; SIGNATURE_LEN] = BASE64.decode(sig_b64).unwrap().try_into().unwrap();
+
+        // The oracle is closed: the callback signature is NOT a valid attach challenge signature.
+        assert!(
+            !verify_signature(&pubkey, &forged_payload, &signature),
+            "cross-protocol signing oracle: a callback signature verified as an attach challenge"
+        );
+        // It IS a valid signature over the domain-separated callback message (proves it really signed).
+        let signed = sign_callback_message("spend", &forged_payload).unwrap();
+        assert!(verify_signature(&pubkey, &signed, &signature));
+    }
+
+    #[test]
+    fn sign_callback_message_disambiguates_the_type_payload_boundary() {
+        // Length-prefixing `payload_type` means (type="a", payload="bc") and (type="ab", payload="c")
+        // hash to distinct messages, so their signatures can never be confused.
+        let a = sign_callback_message("a", b"bc").unwrap();
+        let b = sign_callback_message("ab", b"c").unwrap();
+        assert_ne!(a, b);
+        assert!(a.starts_with(SIGN_CALLBACK_DOMAIN));
+        // A callback message can never equal an attach challenge (different domain tags).
+        assert!(!a.starts_with(SESSION_CHALLENGE_DOMAIN));
     }
 
     #[test]
@@ -970,5 +1135,33 @@ mod tests {
 
         transport.send_frame(r#"{"c":3}"#).unwrap();
         assert_eq!(transport.writer, b"{\"c\":3}\n");
+    }
+
+    #[test]
+    fn line_transport_rejects_an_oversized_frame_instead_of_oom() {
+        // A newline-less "frame" larger than the cap is rejected as InvalidData — the reader never
+        // buffers unbounded bytes (we allocate the input, but recv_frame stops at the cap).
+        let giant = vec![b'x'; (MAX_FRAME_BYTES + 16) as usize];
+        let mut transport = LineTransport::new(io::Cursor::new(giant), Vec::<u8>::new());
+        let err = transport.recv_frame().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_response_gives_up_after_too_many_interleaved_callbacks() {
+        // The engine floods sign callbacks and never answers begin. The client services up to the
+        // cap, then bails with TooManyCallbacks rather than looping forever.
+        let flood = (0..MAX_INTERLEAVED_CALLBACKS + 1).map(|i| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{i},"method":"sign","params":{{"session_id":"s","op_id":"o","payload_type":"t","payload_b64":"{}"}}}}"#,
+                BASE64.encode(b"x")
+            )
+        });
+        let transport = FakeTransport::scripted(flood);
+        let mut client = SessionClient::new(transport, signer(), AllowAllSignPolicy);
+        assert!(matches!(
+            client.begin_and_attach(profile()),
+            Err(SessionError::TooManyCallbacks)
+        ));
     }
 }
