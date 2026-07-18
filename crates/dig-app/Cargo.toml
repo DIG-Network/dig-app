@@ -1,17 +1,14 @@
-# The dig-app binaries — thin shells over `dig-app-core`.
+# The `dig-app` shell binary — a thin shell over `dig-app-core`.
 #
 #   * `dig-app` — the branded per-user tray / menu-bar agent shell (Windows system tray · macOS
 #     menu-bar LSUIElement · Linux AppIndicator). Degrades headless (no tray) on a GUI-less host,
 #     running as a per-user identity agent. U3 implements the shell.
-#   * `dign`    — the DIG USER CLI (owned by dig-app, migrated from dig-node). Talks to the user
-#     app over the identity-authenticated IPC, which authenticates the caller and proxies engine
-#     work. U7 implements the gateway/CLI.
 #
-# Both entrypoints stay intentionally minimal — they parse the invocation and hand off to
-# `dig-app-core` — so coverage of real logic is measured in the core library. The release build
-# ships BOTH binaries (per the #908 form factors). The one exception is `autostart` (src/lib.rs):
-# the per-user autostart artifacts belong to the SHELL, not the identity-agent core, so they're
-# unit-tested here directly.
+# The user CLI (`dign`) lives in its own sibling `dign` crate (U7), migrated from dig-node. Both
+# binaries stay intentionally minimal — they parse the invocation and hand off to `dig-app-core` —
+# so coverage of real logic is measured in the core library. The release build ships BOTH binaries
+# (per the #908 form factors). The one exception is `autostart` (src/lib.rs): the per-user autostart
+# artifacts belong to the SHELL, not the identity-agent core, so they're unit-tested here directly.
 [package]
 name = "dig-app"
 version.workspace = true
@@ -20,15 +17,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The DIG user app: the branded per-user tray/menu-bar identity agent (`dig-app`) and the DIG user CLI (`dign`), fronting the identity-agnostic dig-node engine (dig_ecosystem#908)."
+description = "The DIG user app: the branded per-user tray/menu-bar identity agent shell (`dig-app`), fronting the identity-agnostic dig-node engine (dig_ecosystem#908)."
 
 [[bin]]
 name = "dig-app"
 path = "src/bin/dig-app.rs"
-
-[[bin]]
-name = "dign"
-path = "src/bin/dign.rs"
 
 [features]
 # The desktop tray / menu-bar shell is on by default (release builds ship it), and degrades to the

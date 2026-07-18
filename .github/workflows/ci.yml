@@ -78,7 +78,7 @@ jobs:
       # over `dig-app-core` (where all logic + its coverage lives, per the crate design), so they are
       # excluded from the line gate — chasing coverage of the platform event loop is not meaningful.
       - name: Run tests with 80% line-coverage gate
-        run: cargo llvm-cov nextest --workspace --all-features --locked --ignore-filename-regex 'dig-app[/\\]src[/\\]bin[/\\]' --fail-under-lines 80 --retries 2
+        run: cargo llvm-cov nextest --workspace --all-features --locked --ignore-filename-regex '(dig-app[/\\]src[/\\]bin|dign[/\\]src)[/\\]' --fail-under-lines 80 --retries 2
       # nextest does not run doctests; run them explicitly so a doc example can never rot.
       - name: Run doctests
         run: cargo test --doc --workspace --all-features
