@@ -172,7 +172,8 @@ impl<S: ProfileSealer> ProfileManager<S> {
         let plaintext = serde_json::to_vec(data)?;
         let ciphertext = self.sealer.seal(did, &plaintext)?;
         let path = dir.join(SEAL_FILE);
-        write_durably(&path, &ciphertext)?;
+        let temp_path = path.with_extension("tmp");
+        crate::storage::write_durably(&path, &temp_path, &ciphertext)?;
         restrict_to_owner(&path)?;
         Ok(())
     }
@@ -192,15 +193,17 @@ impl<S: ProfileSealer> ProfileManager<S> {
     ///
     /// The registry is the ONLY pointer to every profile's DID + directory. A torn write — a crash
     /// or power loss partway through overwriting it — would otherwise strand every sealed blob (the
-    /// data survives, but the app can no longer find or list it). [`write_durably`] writes a temp
-    /// file, fsyncs it, then renames it over the registry, so a reader (or a recovering process)
-    /// only ever sees the complete old registry or the complete new one — never a half-written one.
+    /// data survives, but the app can no longer find or list it). [`crate::storage::write_durably`]
+    /// writes a temp file, fsyncs it, then renames it over the registry, so a reader (or a
+    /// recovering process) only ever sees the complete old registry or the complete new one —
+    /// never a half-written one.
     fn save_registry(&self, registry: &ProfileRegistry) -> Result<()> {
         let path = self.registry_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        write_durably(&path, &serde_json::to_vec_pretty(registry)?)?;
+        let temp_path = path.with_extension("tmp");
+        crate::storage::write_durably(&path, &temp_path, &serde_json::to_vec_pretty(registry)?)?;
         Ok(())
     }
 
@@ -215,35 +218,6 @@ impl<S: ProfileSealer> ProfileManager<S> {
     fn seal_path(&self, hash: &str) -> PathBuf {
         self.profile_dir(hash).join(SEAL_FILE)
     }
-}
-
-/// Writes `bytes` to `path` durably and atomically: write a sibling temp file, fsync it, rename it
-/// over `path`, then fsync the parent directory so the rename itself is durable.
-///
-/// The rename gives atomicity — a concurrent reader or a process recovering after a crash sees
-/// either the whole previous file or the whole new one, never a truncated mix. The fsyncs give
-/// durability so the bytes survive a power loss immediately after the call. This mirrors the
-/// keystore vault's sealed-file write, so every security-critical file in dig-app is written the
-/// same crash-safe way.
-fn write_durably(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let temp_path = path.with_extension("tmp");
-    let mut temp = std::fs::File::create(&temp_path)?;
-    temp.write_all(bytes)?;
-    temp.flush()?;
-    temp.sync_all()?;
-    drop(temp);
-
-    std::fs::rename(&temp_path, path)?;
-
-    // fsync the parent directory so the rename (the directory entry) is itself durable. Only
-    // meaningful — and only permitted — on Unix; Windows handles rename-metadata durability itself.
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
 }
 
 /// Decodes a stored lowercase-hex 32-byte public key.
@@ -274,15 +248,16 @@ fn restrict_to_owner(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    /// The registry save path routes through the shared [`crate::storage::write_durably`] helper;
+    /// this asserts the manager's usage still gets the atomic-replace / no-temp-left contract the
+    /// helper's own test suite (`storage::tests`) covers in full.
     #[test]
-    fn write_durably_replaces_atomically_and_leaves_no_temp_file() {
+    fn registry_save_path_replaces_atomically_and_leaves_no_temp_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("registry.json");
         let temp_path = path.with_extension("tmp");
 
-        write_durably(&path, b"first").unwrap();
+        crate::storage::write_durably(&path, &temp_path, b"first").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"first");
         assert!(
             !temp_path.exists(),
@@ -291,9 +266,9 @@ mod tests {
 
         // Overwriting fully replaces the previous content (no torn append / stale tail) and again
         // leaves no temp file — the property that keeps a crash mid-save from stranding profiles.
-        write_durably(&path, b"second-longer-then-shorter").unwrap();
+        crate::storage::write_durably(&path, &temp_path, b"second-longer-then-shorter").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"second-longer-then-shorter");
-        write_durably(&path, b"third").unwrap();
+        crate::storage::write_durably(&path, &temp_path, b"third").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"third");
         assert!(!temp_path.exists());
     }

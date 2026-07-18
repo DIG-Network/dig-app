@@ -68,9 +68,9 @@ key MUST NOT cross into the engine. Three mechanisms cover every case:
    the in-memory unlocked user key, and hands the **finished signed bytes** to the engine to
    broadcast/relay. The engine sees only signed bytes.
 2. **Engine-initiated signature** (e.g. a §21 authenticated-sync handshake the engine must answer) —
-   the engine cannot sign; it issues a **`sign` callback** over the IPC to the attached dig-app, which
-   signs and returns the signature. The engine composes the request with the returned signature. No
-   key crosses.
+   the engine cannot sign; it issues a **`sign` callback** over the IPC (the concrete contract is
+   §5.3) to the attached dig-app, which signs and returns the signature. The engine composes the
+   request with the returned signature. No key crosses.
 3. **DID-authenticated request** — dig-app mints a short-lived DID-signed capability/token and
    attaches it to the request it proxies; for the node-class mTLS path (§7) the channel presents
    dig-app's per-profile client cert. The engine validates nothing that requires the private key.
@@ -248,32 +248,75 @@ dig-app and the engine communicate over a **per-user, OS-native local channel**,
 
 | OS | Channel | Address |
 |---|---|---|
-| Windows | named pipe | `\\.\pipe\dignetwork-<user>` |
-| macOS / Linux | Unix domain socket | `<runtime-dir>/dignetwork.sock` (`$XDG_RUNTIME_DIR` on Linux) |
+| Windows | named pipe (per-user namespace) | `\\.\pipe\dignetwork-<USER>` |
+| macOS / Linux | Unix domain socket | `<RUNTIME_DIR>/dignetwork.sock` (`$XDG_RUNTIME_DIR` on Linux) |
 
-The pipe/socket ACL MUST be scoped to the owning user — tighter than loopback TCP, and the OS peer
-credential additionally binds the connecting identity. The existing engine `control.*` JSON-RPC
-**dispatch** is reused over this channel; only the transport changes (the protocol shape is not
-reworked). The pre-existing loopback-TCP `control.*` channel remains available for the MV3 browser
-extension, which cannot speak pipes.
+The channel MUST be **per-user and ACL-scoped to the owning user** — tighter than loopback TCP — and
+the OS peer credential additionally binds the connecting identity. The channel is **bidirectional**,
+carrying **newline-delimited JSON-RPC 2.0 frames** over the engine's existing `control.*` dispatch:
+this is a **transport swap only** — the `control.*` protocol shape is unchanged. The pre-existing
+loopback-TCP `control.*` channel STAYS for the MV3 browser extension, which cannot speak pipes.
+IPv6-first (ecosystem §5.2) is N/A here — the channel is a local pipe / UDS, not a network socket.
+
+The concrete request/response shapes below are the normative contract that the app-side (dig-app,
+APP work units) and the engine-side (dig-node, `control.session.*` + the `sign` callback) both build
+against. All frames are JSON-RPC 2.0; `params`/`result` fields use the names and encodings given.
 
 ### 5.2 Session authentication
 
-dig-app authenticates to the engine by **proving possession of the active profile's identity** — an
-identity-signed session handshake (a challenge signed by the profile key, or mTLS presenting the
-profile client cert) — NOT a static token file. On success the engine opens an in-memory session
-bound to that profile. No client can attach a profile it cannot sign for.
+dig-app authenticates to the engine by **proving possession of the active profile's identity key** —
+a signed-challenge handshake — NOT a static token file. No client can attach a `profile_did` it
+cannot sign for. The handshake is three methods (§5.3), and the engine opens an in-memory session
+only after it verifies the signature against the DID's own on-record signing key.
 
-### 5.3 Session methods (reference)
+The signed-challenge scheme is the baseline because the per-user pipe/socket ACL and the OS peer
+credential already authenticate the *channel*; the handshake additionally binds the *profile
+identity*. An **mTLS variant** — the app presents a client cert keyed by the profile identity —
+is an equivalent alternative where a cert-authenticated channel is preferred.
 
-Built on the existing `control.*` dispatch; the concrete request/response shapes are defined against
-the engine's control surface (this spec references them rather than fully re-defining that protocol):
+### 5.3 Session methods (the concrete contract)
 
-- `control.session.attach` — identity-authenticated; pushes the active profile's `{ identity handle,
-  subscriptions, config }` to the engine, opening the in-memory session.
-- `control.session.detach` — logout / profile switch / exit; the engine drops the in-memory context.
-- `sign` **callback** (engine → dig-app) — the engine requests a signature for an engine-initiated
-  operation (§2.3 case 2); dig-app signs with the in-memory user key and returns only the signature.
+Built on the existing `control.*` dispatch. The full handshake proves the caller holds the active
+profile's slot `0x0010` signing key before any session opens.
+
+1. **`control.session.begin`** (app → engine) — params: `profile_did`, `signing_pubkey_hex` (the
+   claimed slot `0x0010` signing key). Engine returns `nonce_b64` (32 random bytes, base64) and a
+   `session_candidate` (uuid) naming this pending handshake.
+
+2. **App signs the challenge.** The app produces an Ed25519 signature, using the in-memory slot
+   `0x0010` key, over the byte string:
+
+   ```
+   "DIGNET-SESSION-v1" || nonce || profile_did
+   ```
+
+   (the ASCII domain tag, the raw 32 nonce bytes decoded from `nonce_b64`, and the `profile_did`
+   bytes, concatenated in that order).
+
+3. **`control.session.attach`** (app → engine) — params: `session_candidate`, `signature_b64`, and
+   `profile { did, subscriptions, config_digest }`. The engine:
+   - resolves the `profile_did`'s slot `0x0010` signing key via the **dig-identity READ path**;
+   - **REQUIRES** that resolved key to equal the `signing_pubkey_hex` presented in `begin` (a client
+     cannot substitute a key it controls for the DID's real key);
+   - verifies `signature_b64` over the challenge of step 2 against that key;
+   - on success opens an in-memory session and returns `session_id` + `engine_capabilities`.
+
+   No client can attach a DID it cannot sign for. A failed key match or signature ⇒ a JSON-RPC error
+   and no session.
+
+4. **`control.session.detach`** (app → engine) — params: `session_id`. Logout / profile switch /
+   exit; the engine drops the in-memory session context.
+
+**`sign` callback** (engine → dig-app, over the same connection) — params: `session_id`, `op_id`,
+`payload_type`, `payload_b64`, `context`. The engine requests a signature for an engine-initiated
+operation (§2.3 case 2). dig-app **policy-checks** the request, signs `payload_b64` with the
+in-memory profile key, and returns `signature_b64` + `pubkey_hex`. **The engine NEVER receives the
+private key.** A timeout or a user-deny ⇒ a JSON-RPC error; `op_id` correlates the request with its
+response.
+
+**Multi-session.** The engine keeps a map `session_id → { profile_did, pubkey, subscriptions }`.
+Concurrent sessions for different users coexist; a `sign` callback routes to the connection that owns
+its `session_id`.
 
 ### 5.4 Client → node resolution ladder
 
@@ -282,6 +325,15 @@ resolves the local dig-app first, then the engine directly (`dig.local` → `loc
 only), then `rpc.dig.net`. An explicitly-configured node still overrides the ladder entirely.
 Node-class clients dial over mTLS (§7); a user-facing custom-node setting MUST be exposed (persisted
 in the sealed config).
+
+### 5.5 End-to-end seal scope on the IPC channel
+
+The local pipe / socket is **not** an intermediary-terminated channel to a remote recipient, so its
+own frames are **not** end-to-end sealed — the per-user channel ACL (§5.1) is sufficient. The
+ecosystem §5.4 seal-to-recipient rule (NC-1) applies to **recipient-directed content** (chat, email)
+that the engine RELAYS onward: dig-app seals such content to the recipient's dig-identity encryption
+key (slot `0x0011`) **before** handing the bytes to the engine, so the engine and any downstream
+relay see only ciphertext. Sealing is the app's responsibility, never the engine's.
 
 ---
 
@@ -404,9 +456,11 @@ A conformant implementation MUST include tests asserting:
 5. **IPC addressing** — `channel_endpoint` yields the correct per-user named pipe / socket path;
    distinct users get distinct endpoints.
 6. **Headless degrade** — no display ⇒ `FormFactor::Headless` (no tray); a display ⇒ `Tray`.
-7. **Signing-through-dig-app** — an engine-initiated `sign` callback is answered by dig-app and the
-   key never crosses the IPC boundary.
-8. **Multi-user concurrent sessions** — two attached sessions for different profiles coexist.
+7. **Signing-through-dig-app** — an engine-initiated `sign` callback (§5.3) is answered by dig-app and
+   the key never crosses the IPC boundary.
+8. **Multi-user concurrent sessions** — two attached sessions for different profiles coexist, each
+   with its own `session_id` in the engine's session map (§5.3), and a `sign` callback routes to the
+   owning connection.
 
 U1 ships tests (4), (5), (6) and the `IdentityKind` predicate for (1); the remaining tests land with
 the work units that implement their subsystems.
