@@ -132,7 +132,16 @@ impl ProfileVault {
         passphrase: Option<&str>,
     ) -> Result<UnlockSource, KeystoreError> {
         let plaintext = secrets.to_sealed_bytes();
-        self.seal_and_store(&*plaintext, passphrase)
+        // NEVER log `secrets`, `passphrase`, or the sealed blob — only the did_hash (an opaque,
+        // non-reversible profile handle) and the outcome. This holds throughout the module.
+        let result = self.seal_and_store(&*plaintext, passphrase);
+        match &result {
+            Ok(source) => {
+                tracing::info!(did_hash = %self.did_hash, source = ?source, "identity sealed")
+            }
+            Err(e) => tracing::warn!(did_hash = %self.did_hash, error = %e, "identity seal failed"),
+        }
+        result
     }
 
     /// Unlock the sealed identity into memory.
@@ -146,8 +155,19 @@ impl ProfileVault {
     /// unlock; [`KeystoreError::PassphraseRequired`] in fallback mode with no passphrase.
     pub fn unlock(&self, passphrase: Option<&str>) -> Result<IdentitySecrets, KeystoreError> {
         let (blob, password) = self.load_blob_and_password(passphrase)?;
-        let plaintext = opaque::open(&password, &blob).map_err(|_| KeystoreError::Unlock)?;
-        IdentitySecrets::from_sealed_bytes(&plaintext)
+        let opened = opaque::open(&password, &blob).map_err(|_| KeystoreError::Unlock);
+        // A failed unlock (wrong passphrase / tampered blob / foreign key) is logged at WARN — it is
+        // the signal an operator needs to notice repeated failed-unlock attempts — but the cause is
+        // never distinguished (fail-closed) and neither the passphrase nor any key material is logged.
+        let Ok(plaintext) = opened else {
+            tracing::warn!(did_hash = %self.did_hash, "identity unlock failed");
+            return Err(KeystoreError::Unlock);
+        };
+        let secrets = IdentitySecrets::from_sealed_bytes(&plaintext);
+        if secrets.is_ok() {
+            tracing::info!(did_hash = %self.did_hash, "identity unlocked");
+        }
+        secrets
     }
 
     /// Re-seal the identity under a fresh wrapping secret (a new random password in OS mode, or the
@@ -171,14 +191,18 @@ impl ProfileVault {
 
     /// Permanently delete the sealed identity for this profile (profile removal). Idempotent.
     pub fn remove(&self) -> Result<(), KeystoreError> {
-        match &self.credentials {
+        let result = match &self.credentials {
             Some(store) => store.delete(&self.account()),
             None => match std::fs::remove_file(self.sealed_file()) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(e.into()),
             },
+        };
+        if result.is_ok() {
+            tracing::info!(did_hash = %self.did_hash, "identity removed");
         }
+        result
     }
 
     // --- internals -------------------------------------------------------------------------------

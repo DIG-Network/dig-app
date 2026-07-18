@@ -52,7 +52,8 @@ pub fn handle_local(
     command: &Command,
     identity: &dyn LocalIdentity,
 ) -> Result<Outcome, GatewayError> {
-    match command {
+    tracing::debug!(action = command.action(), "routing command locally");
+    let result = match command {
         Command::Profiles(action) => handle_profiles(action, identity),
         Command::Wallet(action) => handle_wallet(action, identity),
         Command::Sign { message } => handle_sign(message, identity),
@@ -60,7 +61,11 @@ pub fn handle_local(
             ErrorCode::Usage,
             format!("{} is not a local command", other.action()),
         )),
+    };
+    if let Err(e) = &result {
+        tracing::warn!(action = command.action(), code = ?e.code, "local command failed");
     }
+    result
 }
 
 /// Serve the profile sub-commands: list / show the active one / create / select.

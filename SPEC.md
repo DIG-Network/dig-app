@@ -495,6 +495,39 @@ dig-app is a `modules/apps` repo and follows the ecosystem **nightlies** release
 
 ---
 
+## 9a. Logging — structured JSONL file + human stderr (#934)
+
+dig-app adopts the shared `dig-logging` building block (`dig-logging` crate, `dig_ecosystem` #547),
+so its sink layout, JSONL schema, log directory, rotation, level control, and correlation ids are
+byte-identical to every other DIG service binary (`dig-node` SPEC §20 is the sibling contract).
+`dig-logging`'s own `SPEC.md` is normative for the shared mechanics; this section records what
+dig-app MUST do.
+
+- **Where the subscriber is installed.** `dig-app-core` depends on ONLY `tracing` (the facade) —
+  never `dig-logging` — mirroring the `dig-node-core`/`dig-node-service` split, so the identity-agent
+  library stays subscriber-agnostic. The `dig-app` tray/headless shell installs the shared subscriber
+  once, at the top of `main`, as run context `service` (it is a long-lived per-user background
+  agent, not a one-shot invocation) and holds the guard for the process lifetime. `dign` — a
+  short-lived CLI — installs it as run context `cli` at the top of its own `main`, resolving the
+  SAME per-user log directory `dig-app` writes to (`dig-logging` SPEC §3), so the two processes'
+  records interleave in one place. A logging-install failure is reported on stderr and swallowed —
+  it MUST NOT stop the agent from starting.
+- **Levels — used by MEANING, not uniformly.** `error!` a broken invariant; `warn!` a denied `sign`
+  callback, a failed unlock, a rejected profile create/select (duplicate/invalid DID, not found), or
+  a failed engine-proxy call; `info!` sparse lifecycle (agent starting, engine endpoint resolved,
+  session attach/detach, identity sealed/unlocked/removed, profile created/selected, boot re-unlock
+  complete); `debug!` per-command routing (the gateway's local-vs-engine classification, `dign`'s
+  dispatch). The default filter is `dig-logging`'s noise-trimmed `info`.
+- **Never-log at source.** No secret — a passphrase, a raw identity/session key, a `sign` callback's
+  raw payload or produced signature, a sealed blob — is EVER passed to a `tracing` field or message,
+  at any level. Only public/opaque handles are logged: a DID (already public on-chain), a `did_hash`
+  (a one-way, non-reversible profile handle), a `session_id`/`op_id`, an `UnlockSource` variant, and
+  catalogued `ErrorCode`s. This is enforced by a never-log regression suite
+  (`crates/dig-app-core/tests/never_log.rs`) that captures real emitted records with a sentinel
+  passphrase live in scope and asserts it never appears — mirroring the dig-node #553 guarantee.
+
+---
+
 ## 10. Conformance tests
 
 A conformant implementation MUST include tests asserting:
@@ -514,6 +547,8 @@ A conformant implementation MUST include tests asserting:
 8. **Multi-user concurrent sessions** — two attached sessions for different profiles coexist, each
    with its own `session_id` in the engine's session map (§5.3), and a `sign` callback routes to the
    owning connection.
+9. **Never-log at source** — a captured, real emitted-record test proves a passphrase live in scope
+   during a vault create/unlock never reaches a logged field or message (§9a).
 
 U1 ships tests (4), (5), (6) and the `IdentityKind` predicate for (1); the remaining tests land with
 the work units that implement their subsystems.

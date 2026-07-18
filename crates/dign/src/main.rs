@@ -17,13 +17,25 @@ use clap::Parser;
 use dig_app_core::gateway::{
     error_envelope, success_envelope, Command, ErrorCode, GatewayError, Outcome,
 };
+use dig_logging::{RunContext, Service};
 
 use cli::Cli;
 
 fn main() {
+    // `dign` is a short-lived, one-shot invocation, so the guard is a plain local — held for this
+    // single run and dropped (flushing the writer) when `main` returns. `RunContext::Cli` resolves
+    // the SAME per-user log directory `dig-app`'s `RunContext::Service` writes to (SPEC §3 of
+    // `dig-logging`), so `dign logs tail` — once wired — would show both processes interleaved.
+    let _log_guard = dig_logging::init(Service {
+        name: "dig-app",
+        version: env!("CARGO_PKG_VERSION"),
+        run_context: RunContext::Cli,
+    });
+
     let cli = Cli::parse();
     let command = cli.command.into_command();
     let action = command.action();
+    tracing::debug!(action, "dispatching command");
 
     let exit = match send_to_app(&command) {
         Ok(outcome) => render_success(action, &outcome, cli.json),
@@ -47,7 +59,13 @@ fn send_to_app(_command: &Command) -> Result<Outcome, GatewayError> {
 }
 
 /// Render a successful outcome and return the process exit code (always `OK`).
+///
+/// Only the ACTION name is logged, never `outcome.result` — a local/wallet command's result can
+/// carry a signature or an address, and while neither is private key material, the log line stays a
+/// deliberately narrow surface (the never-log discipline is "don't reach into arbitrary payloads",
+/// not "trust every field is safe").
 fn render_success(action: &str, outcome: &Outcome, json: bool) -> u8 {
+    tracing::info!(action, "command succeeded");
     if json {
         println!("{}", success_envelope(action, &outcome.result));
     } else {
@@ -58,6 +76,7 @@ fn render_success(action: &str, outcome: &Outcome, json: bool) -> u8 {
 
 /// Render a failure and return its catalogued process exit code.
 fn render_error(action: &str, error: &GatewayError, json: bool) -> u8 {
+    tracing::warn!(action, code = ?error.code, message = %error.message, "command failed");
     if json {
         println!("{}", error_envelope(action, error));
     } else {
