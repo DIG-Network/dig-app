@@ -809,6 +809,8 @@ mod tests {
         assert_eq!(resp["result"]["granted"], true);
         assert_eq!(resp["result"]["profile_did"], DID);
         assert!(resp["result"]["pubkeys"][0].is_string());
+        // The handle carries the wallet receive addresses the wiring layer populated (#961).
+        assert_eq!(resp["result"]["addresses"][0], "xch1testaddress");
     }
 
     #[test]

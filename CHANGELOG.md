@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.15.0] - Unreleased
+
+### Added
+
+- **Wire wallet receive-addresses into the APP-SIGN connect handle (dig_ecosystem#961).** A dapp's
+  `connect.request` now returns the active profile's wallet receive address(es) in `addresses[]`
+  (previously always empty): `sign_service` loads them from the sealed wallet state (over the same
+  per-profile DEK the router's stores use) and `ProfileConnectInfo` advertises them alongside the
+  identity signing pubkey, so a connected dapp can display / send to the wallet. Only public data
+  crosses the handle — the wallet key stays sealed in the session. A profile with no saved wallet
+  state yet returns an empty `addresses[]` (the channel is still fully usable).
+- **Expose the wallet spend history (`WalletState::history`).** Each outbound spend is recorded as a
+  `SpendRecord` (recipient, asset, amount, broadcast time, transaction id), appended oldest-first, and
+  read via `history()`, `recent_recipients(limit)` (distinct, most-recent first), and
+  `total_sent(asset)`. Public metadata only — the substrate for the connected-wallet UX (address-book
+  suggestions, adaptive spend-confirm friction). Sealed at rest alongside the rest of the wallet state.
+
 ## [0.13.0] - Unreleased
 
 ### Fixed

@@ -9,7 +9,8 @@
 //!
 //! 1. builds a [`FrameRouter`] over the ACTIVE profile's identity — the pairing/whitelist stores seal
 //!    under its DEK (NC-2), the [`ProfileSessionSigner`] signs `sign.request`s with its `0x0010` key,
-//!    and [`ProfileConnectInfo`] advertises its public key on connect;
+//!    and [`ProfileConnectInfo`] advertises its signing public key AND the profile's wallet receive
+//!    addresses on connect (#961), so a connected dapp can display / send to the wallet;
 //! 2. gates every pair/connect/sign on the real per-OS [`native_confirmer`](crate::confirm::native_confirmer)
 //!    (Windows Hello / macOS Touch ID / Linux polkit) instead of the fail-closed `HeadlessConfirmer`;
 //! 3. attaches the durable [`FileSealedStore`] so pairings, connected origins, and the per-frame nonce
@@ -35,6 +36,7 @@ use crate::loopback::{
 use crate::pairing::PairingStore;
 use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
 use crate::session::{ProfileSessionSigner, SessionSigner};
+use crate::wallet::state::WalletStore;
 use crate::whitelist::WhitelistStore;
 
 /// Build the production [`FrameRouter`] for `profile_did` (which MUST be unlocked in `identities`),
@@ -76,13 +78,17 @@ fn build_router_with_kdf(
         KeystoreSealer::with_kdf(identities.clone(), kdf),
         profile_did,
     );
+    // Load the active profile's wallet receive addresses BEFORE `identities` is moved into the
+    // signer, so the connect handle can advertise them alongside the identity signing pubkey (#961).
+    let addresses = active_wallet_addresses(identities.clone(), profile_did, profile_dir, kdf);
+
     let signer = ProfileSessionSigner::new(identities, profile_did);
-    // The connect handle advertises the active identity's signing public key. Wallet receive
-    // addresses are exposed once the wallet host is wired through here (a follow-up); the identity
-    // pubkey is what the profile itself provides today (#958 item 3 — "from the active identity").
+    // The connect handle advertises the active identity's signing public key AND the wallet's
+    // receive addresses (#961), so a connected dapp can display / send to the wallet. Only public
+    // data crosses this handle — the wallet key stays sealed in the session.
     let connect_info = ProfileConnectInfo {
         profile_did: profile_did.to_string(),
-        addresses: Vec::new(),
+        addresses,
         pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
     };
     let store: Arc<dyn SealedRecordStore> = Arc::new(FileSealedStore::new(profile_dir));
@@ -98,6 +104,34 @@ fn build_router_with_kdf(
     .with_persistence(store);
     router.restore();
     router
+}
+
+/// Read the active profile's wallet receive addresses (`xch1…`) for the connect handle (#961).
+///
+/// The wallet state is sealed per profile under the SAME DEK the router's stores use, so this opens
+/// it through a [`WalletStore`] over the unlocked `identities` (with the assembly's `kdf`, so tests
+/// stay cheap). The store is rooted at the brand directory, which is the grandparent of
+/// `profile_dir` (`<brand>/profiles/<did-hash>/`); a profile with no saved wallet state yet — or one
+/// whose sealed state cannot be opened — yields no addresses rather than failing the assembly, since
+/// the signing channel is still fully usable without them (they only enrich the connect handle).
+fn active_wallet_addresses(
+    identities: UnlockedIdentities,
+    profile_did: &str,
+    profile_dir: &Path,
+    kdf: KdfParams,
+) -> Vec<String> {
+    let Some(brand_dir) = profile_dir.parent().and_then(Path::parent) else {
+        tracing::warn!("could not derive the brand dir from the profile dir — no wallet addresses");
+        return Vec::new();
+    };
+    let store = WalletStore::new(brand_dir, KeystoreSealer::with_kdf(identities, kdf));
+    match store.load_state(profile_did) {
+        Ok(state) => state.addresses,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not load wallet state — connect handle carries no addresses");
+            Vec::new()
+        }
+    }
 }
 
 /// Serve `router` on the two pinned loopback listeners until the process exits, on a dedicated
@@ -157,6 +191,91 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let router = assemble(unlocked(), dir.path());
         assert_eq!(router.restore(), (0, 0), "a fresh profile restores nothing");
+    }
+
+    #[test]
+    fn wallet_addresses_are_loaded_for_the_connect_handle() {
+        // Save a wallet state with receive addresses under the profile's DEK, then confirm the
+        // wiring reads them back for the connect handle (#961). The store is rooted at the brand
+        // dir; the profile dir is its `profiles/<did-hash>` child, so the helper must derive the
+        // brand dir back from the profile dir.
+        use crate::wallet::state::{WalletState, WalletStore};
+
+        let brand = tempfile::tempdir().unwrap();
+        let identities = unlocked();
+        let store = WalletStore::new(
+            brand.path(),
+            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+        );
+        store
+            .save_state(
+                DID,
+                &WalletState {
+                    addresses: vec!["xch1receive".into(), "xch1change".into()],
+                    ..WalletState::default()
+                },
+            )
+            .unwrap();
+
+        let profile_dir =
+            crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
+        let addresses =
+            active_wallet_addresses(identities, DID, &profile_dir, KdfParams::FAST_TEST);
+        assert_eq!(addresses, vec!["xch1receive", "xch1change"]);
+    }
+
+    #[test]
+    fn a_profile_with_no_saved_wallet_yields_no_addresses() {
+        // No wallet state was ever saved — the connect handle simply carries no addresses (the
+        // signing channel is still fully usable), never a failure.
+        let brand = tempfile::tempdir().unwrap();
+        let profile_dir =
+            crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
+        let addresses =
+            active_wallet_addresses(unlocked(), DID, &profile_dir, KdfParams::FAST_TEST);
+        assert!(addresses.is_empty());
+    }
+
+    #[test]
+    fn an_unopenable_sealed_wallet_yields_no_addresses() {
+        // A wallet state exists on disk but the profile is locked (its DEK is absent from the
+        // session), so `load_state` fails to open it — the helper falls back to no addresses rather
+        // than propagating the error into the assembly.
+        use crate::wallet::state::{WalletState, WalletStore};
+
+        let brand = tempfile::tempdir().unwrap();
+        WalletStore::new(
+            brand.path(),
+            KeystoreSealer::with_kdf(unlocked(), KdfParams::FAST_TEST),
+        )
+        .save_state(
+            DID,
+            &WalletState {
+                addresses: vec!["xch1receive".into()],
+                ..WalletState::default()
+            },
+        )
+        .unwrap();
+
+        let profile_dir =
+            crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
+        // A fresh session has DID LOCKED, so opening the sealed state fails the AEAD tag.
+        let addresses = active_wallet_addresses(
+            UnlockedIdentities::new(),
+            DID,
+            &profile_dir,
+            KdfParams::FAST_TEST,
+        );
+        assert!(addresses.is_empty());
+    }
+
+    #[test]
+    fn a_profile_dir_with_no_derivable_brand_dir_yields_no_addresses() {
+        // A profile dir shallow enough to have no grandparent cannot locate a brand dir — the
+        // helper must fall back to no addresses rather than panic.
+        let addresses =
+            active_wallet_addresses(unlocked(), DID, Path::new("solo"), KdfParams::FAST_TEST);
+        assert!(addresses.is_empty());
     }
 
     #[test]

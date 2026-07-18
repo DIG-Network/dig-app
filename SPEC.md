@@ -222,12 +222,19 @@ key (the same custody boundary as the §2.3 session `sign` callback). A required
 the wallet does not hold is skipped, so an incomplete bundle fails closed at the network rather than
 being silently forged.
 
-**Wallet state at rest.** The per-profile wallet view — receive addresses and the last-known
-spendable coins (per asset) used for display + coin selection between chain reads — is DIGOP1-sealed
-under that profile's own DEK (§3.4), in the profile's directory (`wallet-state.seal`), alongside the
-separately-sealed key seed (`wallet-key.seal`). Both are cryptographically isolated per profile: one
-profile's DEK cannot open another's wallet blobs (fail-closed). The `.dig` content cache is NOT
-wallet data and is exempt from sealing (§3.4).
+**Wallet state at rest.** The per-profile wallet view — receive addresses, the last-known spendable
+coins (per asset) used for display + coin selection between chain reads, and the outbound spend
+history — is DIGOP1-sealed under that profile's own DEK (§3.4), in the profile's directory
+(`wallet-state.seal`), alongside the separately-sealed key seed (`wallet-key.seal`). Both are
+cryptographically isolated per profile: one profile's DEK cannot open another's wallet blobs
+(fail-closed). The `.dig` content cache is NOT wallet data and is exempt from sealing (§3.4).
+
+**Spend history.** Each outbound spend the wallet broadcasts is recorded as a `SpendRecord` —
+recipient address, asset, amount, broadcast time, and the transaction id — appended oldest-first to
+the wallet state's history. It carries **public metadata only** (never key material, never the bundle
+bytes), so exposing it never crosses the custody boundary. The wallet host exposes read accessors
+over it — the distinct recent recipients (most-recent first) and the total sent per asset — as the
+substrate for the connected-wallet UX (address-book suggestions, adaptive spend-confirm friction).
 
 **Engine seam — the `control.wallet.*` contract (NODE-1, [dig_ecosystem#910]).** The two things the
 wallet cannot do itself — broadcasting a signed bundle and reading chain state — cross the §5.3 IPC
@@ -623,7 +630,11 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   requested scope, gated on Allow/Deny. On Allow the app persists a **whitelist entry**
   `{ origin, profile_did, granted_permissions, connected_at }`, DIGOP1-sealed per profile (NC-2), and
   returns `{ granted: true, profile_did, addresses[], pubkeys[] }` per the `window.chia` connect
-  contract. On Deny/timeout ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`. The sealed whitelist entry persists
+  contract. `addresses[]` is the active profile's wallet receive addresses (`xch1…`, first is the
+  primary/change), loaded from the sealed wallet state; `pubkeys[]` is the profile's identity signing
+  public key. Only this public data crosses the handle — never key material. A profile with no saved
+  wallet state yet returns an empty `addresses[]` (the channel is still fully usable). On Deny/timeout
+  ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`. The sealed whitelist entry persists
   to the profile's AppData and is restored on boot (a connected dapp survives a restart); `connect.revoke`
   deletes the at-rest record, so the revocation is durable too.
 - **Sign gating.** A `sign.request` whose `origin` is NOT whitelisted for the active profile ⇒
