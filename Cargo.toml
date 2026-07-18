@@ -88,6 +88,7 @@ chia-sdk-driver = "0.30"
 chia-sdk-signer = "0.30"
 chia-sdk-types = "0.30"
 chia-traits = "0.26"
+clvm-traits = "0.26"
 clvmr = "0.14"
 hex-literal = "0.4"
 # Canonical `xch1…`/`did:chia:` bech32m address encoding (wallet receive address; also the

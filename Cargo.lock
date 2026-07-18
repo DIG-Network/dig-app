@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "dig-app-core",
  "dig-logging",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64",
  "chia-bls 0.26.0",
@@ -1133,6 +1133,7 @@ dependencies = [
  "chia-sdk-utils",
  "chia-traits 0.26.0",
  "chip35-dl-coin",
+ "clvm-traits",
  "clvmr",
  "dig-identity",
  "dig-keystore",
@@ -1233,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "clap",
  "dig-app-core",

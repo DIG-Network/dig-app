@@ -33,7 +33,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::profiles::sealer::ProfileSealer;
 
-pub use dispatch::{FrameRouter, RequestFrame, SignErrorCode};
+pub use dispatch::{FrameRouter, ProfileConnectInfo, RequestFrame, SignErrorCode};
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
 
 /// The loopback identity server. Owns the shared [`FrameRouter`] (behind an `Arc`, one per active
@@ -246,13 +246,35 @@ mod tests {
     }
 
     fn router() -> FrameRouter<KeystoreSealer> {
+        use crate::loopback::dispatch::ProfileConnectInfo;
+        use crate::session::SessionSigner;
+        use crate::whitelist::WhitelistStore;
+        use std::sync::Arc;
+
         let identities = UnlockedIdentities::new();
         identities.unlock(DID, IdentitySecrets::generate());
-        let store = PairingStore::new(
+        let pairings = PairingStore::new(
+            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+            DID,
+        );
+        let whitelist = WhitelistStore::new(
             KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
             DID,
         );
-        FrameRouter::new(store, Box::new(Approver), [EXT.to_string()])
+        let signer = IdentitySecrets::generate();
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec!["xch1testaddress".to_string()],
+            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        };
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(Approver),
+            Box::new(signer),
+            connect_info,
+            [EXT.to_string()],
+        )
     }
 
     /// Build a WS client handshake request with a chosen `Host` (via the URI authority) and `Origin`.
