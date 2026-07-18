@@ -1,21 +1,21 @@
 # dig-app — the DIG user app / identity hub (epic dig_ecosystem#908).
 #
-# A Cargo workspace with two members, mirroring the #908 form-factor split:
+# A Cargo workspace mirroring the #908 form-factor split:
 #   * `dig-app-core` — the HEADLESS per-user identity-agent LIBRARY (identity/keys/profiles/
 #     wallet/storage/IPC/gateway). This is the real component; it degrades headless on a GUI-less
 #     host. U3+ implement its modules.
-#   * `dig-app`      — the thin binaries built on the core: the branded tray/menu-bar shell
-#     (`dig-app`) and the user CLI (`dign`). Both are thin entrypoints so all logic (and its test
-#     coverage) lives in the core library.
+#   * `dig-app`      — the branded tray/menu-bar shell binary built on the core.
+#   * `dign`         — the DIG user CLI binary (U7), migrated from dig-node. Both binary crates are
+#     thin entrypoints so all logic (and its test coverage) lives in the core library.
 #
 # The single workspace version is the source of truth for the release pipeline (the release
 # workflows read `[workspace.package].version`).
 [workspace]
 resolver = "2"
-members = ["crates/dig-app-core", "crates/dig-app"]
+members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"

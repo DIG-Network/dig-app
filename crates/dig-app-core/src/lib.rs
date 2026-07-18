@@ -32,8 +32,9 @@
 //! sealed-file fallback, rotation); U5 implemented [`profiles`] (multi-DID create/select/list/edit
 //! with per-profile sealed AppData), consuming U4's DEK sealing through the
 //! [`profiles::ProfileSealer`] seam. U6 implemented [`session`] (the identity-authenticated engine
-//! session: begin→attach handshake, the `sign` callback, detach, re-attach, multi-session). The
-//! remaining security-critical subsystem — [`gateway`] (U7) — remains stubbed to the SPEC.
+//! session: begin→attach handshake, the `sign` callback, detach, re-attach, multi-session). U7
+//! implemented [`gateway`] (the CLI/RPC front door: route each command LOCAL vs engine-PROXY, over
+//! the [`gateway::EngineProxy`] / [`gateway::LocalIdentity`] / [`gateway::LinkOpener`] seams).
 //!
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 
