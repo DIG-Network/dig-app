@@ -20,11 +20,26 @@ use dig_app_core::confirm::native_confirmer;
 use dig_app_core::engine::NullConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
+use dig_app_core::loopback::SignReauthGate;
 use dig_app_core::profiles::{
     did_hash, IdentityStore, KeystoreSealer, ProfileManager, RootUnlock, UnlockedIdentities,
 };
+use dig_app_core::session_lock::{
+    panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
+    SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
+};
+use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
 use dig_app_core::{sign_service, storage, Os};
 use std::sync::Arc;
+
+/// The live session-lock wiring the tray drives once the APP-SIGN channel is up: the shared
+/// [`SessionLock`] (lock-now / idle poll / OS screen-lock all act on it, and the sign path
+/// re-authenticates through it) plus the OS screen-lock subscription guard, kept alive for as long as
+/// the tray runs.
+struct TraySession {
+    lock: TraySessionLock,
+    _screen_guard: Box<dyn ScreenLockGuard>,
+}
 
 fn main() {
     // Install the shared logging stack FIRST, before anything else can emit an event that would
@@ -54,8 +69,9 @@ fn main() {
         FormFactor::Tray => {
             // A desktop session is present, so the terminal native-confirm gate is available — bring
             // the APP-SIGN extension↔dig-app signing channel live (best-effort; see the fn's docs).
-            start_sign_service(&env);
-            run_tray_or_headless(agent)
+            // A live channel hands back the session-lock the tray drives (lock-now / idle / OS lock).
+            let tray_session = start_sign_service(&env);
+            run_tray_or_headless(agent, tray_session)
         }
         FormFactor::Headless => {
             tracing::info!("no desktop display — running as headless agent (no tray)");
@@ -67,9 +83,9 @@ fn main() {
 
 /// Mount the tray shell, degrading to the headless agent if the tray cannot be built (no display,
 /// no desktop stack) or if the `tray` feature is disabled at build time.
-fn run_tray_or_headless(agent: Agent<NullConnector>) {
+fn run_tray_or_headless(agent: Agent<NullConnector>, session: Option<TraySession>) {
     #[cfg(feature = "tray")]
-    match tray::run(agent) {
+    match tray::run(agent, session) {
         // The event loop owns the process once mounted, so this arm is unreachable in practice.
         Ok(()) => {}
         // `run` returns only on the degrade path, handing the agent back so we can serve headless.
@@ -80,6 +96,7 @@ fn run_tray_or_headless(agent: Agent<NullConnector>) {
     }
     #[cfg(not(feature = "tray"))]
     {
+        let _ = session;
         eprintln!("dig-app: built without the tray feature — running as headless agent");
         agent.run();
     }
@@ -98,38 +115,57 @@ fn run_tray_or_headless(agent: Agent<NullConnector>) {
 ///    so the per-OS [`native_confirmer`] can raise a real biometric confirm.
 ///
 /// When both hold it assembles the [`FrameRouter`](dig_app_core::loopback::FrameRouter) over the
-/// active profile, restores any persisted pairings/whitelist/nonce ledger, and serves the two
-/// loopback listeners on a background thread (the OS event loop keeps the main thread).
-fn start_sign_service(env: &AppEnvironment) {
+/// active profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path re-authenticates
+/// after a lock, restores any persisted pairings/whitelist/nonce ledger, serves the two loopback
+/// listeners on a background thread (the OS event loop keeps the main thread), and hands the tray the
+/// [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on any deferral.
+fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     // Zero-prompt unlock is only available where the OS credential store is the custody primary.
     if !matches!(env.os, Os::Windows | Os::MacOs) {
         tracing::info!("APP-SIGN loopback deferred: no zero-prompt profile unlock on this OS yet");
-        return;
+        return None;
     }
-    let Ok(brand_dir) = env.brand_dir() else {
-        tracing::warn!("APP-SIGN loopback not started: could not resolve the AppData directory");
-        return;
+    let brand_dir = match env.brand_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(error = %e, "APP-SIGN loopback not started: could not resolve the AppData directory");
+            return None;
+        }
     };
 
     // Unlock the user's profiles via the OS credential store, then pick the active one.
     let session = UnlockedIdentities::new();
-    let manager = ProfileManager::new(
-        brand_dir.clone(),
-        KeystoreSealer::new(session.clone()),
-        IdentityStore::production(session.clone()),
-    );
-    if let Err(e) = manager.unlock_all(RootUnlock::OsKeychain) {
+    if let Err(e) = unlock_profiles(&brand_dir, &session) {
         tracing::warn!(error = %e, "APP-SIGN loopback not started: profile unlock failed");
-        return;
+        return None;
     }
+    let manager = profile_manager(&brand_dir, &session);
     let Ok(Some(active_did)) = manager.active_did() else {
         tracing::info!("APP-SIGN loopback not started: no active profile yet");
-        return;
+        return None;
     };
+
+    // The session-lock the tray drives and the sign path re-authenticates through — the SAME shared
+    // controller over the SAME unlocked session, so a lock the tray triggers is the lock the signer sees.
+    let lock: TraySessionLock = Arc::new(SessionLock::new(
+        session.clone(),
+        SystemClock::new(),
+        DEFAULT_IDLE_TIMEOUT,
+    ));
 
     let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&active_did));
     let confirmer: Arc<dyn dig_app_core::confirm::NativeConfirmer> = Arc::from(native_confirmer());
-    let router = sign_service::build_router(session, &active_did, &profile_dir, confirmer);
+    let reauth_gate = build_reauth_gate(Arc::clone(&lock), brand_dir.clone(), session.clone());
+    let router = sign_service::build_router(session, &active_did, &profile_dir, confirmer)
+        .with_reauth_gate(reauth_gate);
+
+    // Subscribe to OS screen-lock events, containing any callback panic before it can cross the
+    // extern-"system" FFI boundary (WSEC-D adversarial hardening). The returned guard lives in the
+    // TraySession so the subscription stays alive for the whole tray lifetime.
+    let lock_for_screen = Arc::clone(&lock);
+    let screen_guard = PlatformScreenLockSource::new().start(panic_safe_lock_callback(move || {
+        lock_for_screen.on_screen_locked();
+    }));
 
     std::thread::Builder::new()
         .name("dig-app-sign".to_string())
@@ -140,6 +176,47 @@ fn start_sign_service(env: &AppEnvironment) {
         })
         .map(|_| tracing::info!("APP-SIGN loopback signing channel started on port 9779"))
         .unwrap_or_else(|e| tracing::error!(error = %e, "could not spawn the APP-SIGN thread"));
+
+    Some(TraySession {
+        lock,
+        _screen_guard: screen_guard,
+    })
+}
+
+/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the profiles from the OS
+/// credential store (the keystore's job) before the signature proceeds. Re-derives a fresh
+/// [`ProfileManager`] per re-unlock so nothing but the shared session outlives this call.
+fn build_reauth_gate(
+    lock: TraySessionLock,
+    brand_dir: std::path::PathBuf,
+    session: UnlockedIdentities,
+) -> Arc<dyn SignReauthGate> {
+    Arc::new(SessionReauthGate::new(lock, move || {
+        unlock_profiles(&brand_dir, &session).is_ok()
+    }))
+}
+
+/// Re-unlock every profile's identity into `session` from the OS credential store (the zero-prompt
+/// custody primary on Windows/macOS).
+fn unlock_profiles(
+    brand_dir: &std::path::Path,
+    session: &UnlockedIdentities,
+) -> Result<(), dig_app_core::profiles::ProfileError> {
+    profile_manager(brand_dir, session)
+        .unlock_all(RootUnlock::OsKeychain)
+        .map(|_count| ())
+}
+
+/// A [`ProfileManager`] over `session`, rooted at `brand_dir`, with the production identity store.
+fn profile_manager(
+    brand_dir: &std::path::Path,
+    session: &UnlockedIdentities,
+) -> ProfileManager<KeystoreSealer> {
+    ProfileManager::new(
+        brand_dir.to_path_buf(),
+        KeystoreSealer::new(session.clone()),
+        IdentityStore::production(session.clone()),
+    )
 }
 
 /// Resolve the real per-user host facts the agent boots from. This is the impure process edge; the
@@ -207,6 +284,7 @@ fn has_display(os: Os) -> bool {
 /// build omits it entirely.
 #[cfg(feature = "tray")]
 mod tray {
+    use super::TraySession;
     use dig_app_core::agent::{Agent, SharedStatus};
     use dig_app_core::engine::{EngineState, NullConnector};
     use std::time::{Duration, Instant};
@@ -226,19 +304,26 @@ mod tray {
     /// On success the event loop owns the process for its lifetime and this never returns. On
     /// failure it hands `agent` back in the `Err` so the caller can still run it headless.
     #[allow(clippy::result_large_err)]
-    pub fn run(agent: Agent<NullConnector>) -> Result<(), (String, Agent<NullConnector>)> {
+    pub fn run(
+        agent: Agent<NullConnector>,
+        session: Option<TraySession>,
+    ) -> Result<(), (String, Agent<NullConnector>)> {
         let event_loop = EventLoopBuilder::new().build();
 
         let menu = Menu::new();
         let running_item = MenuItem::new("DIG — starting…", false, None);
         let engine_item = MenuItem::new("Engine: connecting…", false, None);
         let profile_item = MenuItem::new("Profile: (none)", false, None);
+        // "Lock now" one-tap re-seals the session (§WSEC-D); it is enabled only when a live unlocked
+        // session exists to lock — otherwise there is nothing to drop, so it stays disabled.
+        let lock_item = MenuItem::new("Lock now", session.is_some(), None);
         let quit_item = MenuItem::new("Quit DIG", true, None);
         if let Err(e) = menu.append_items(&[
             &running_item,
             &engine_item,
             &profile_item,
             &PredefinedMenuItem::separator(),
+            &lock_item,
             &quit_item,
         ]) {
             return Err((format!("menu build failed: {e}"), agent));
@@ -261,15 +346,30 @@ mod tray {
         std::thread::spawn(move || agent.run());
 
         let quit_id = quit_item.id().clone();
+        let lock_id = lock_item.id().clone();
         let menu_events = MenuEvent::receiver();
 
-        // The event loop diverges; `_tray` stays alive on this frame for the whole process.
+        // The event loop diverges; `_tray` + `session` stay alive on this frame for the whole process
+        // (dropping `session` would drop the OS screen-lock subscription guard it holds).
         event_loop.run(move |_event, _target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
             repaint(&status, &running_item, &engine_item, &profile_item);
 
+            // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
+            if let Some(session) = &session {
+                session.lock.poll_idle();
+            }
+
             while let Ok(event) = menu_events.try_recv() {
-                if event.id == quit_id {
+                // Any tray interaction is activity — postpone the idle auto-lock.
+                if let Some(session) = &session {
+                    session.lock.note_activity();
+                }
+                if event.id == lock_id {
+                    if let Some(session) = &session {
+                        session.lock.lock_now();
+                    }
+                } else if event.id == quit_id {
                     shutdown.trigger();
                     wait_for_stop(&status);
                     *control_flow = ControlFlow::Exit;

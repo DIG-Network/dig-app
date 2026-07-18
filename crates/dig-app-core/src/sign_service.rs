@@ -31,13 +31,61 @@ use dig_keystore::KdfParams;
 use crate::confirm::NativeConfirmer;
 use crate::loopback::{
     ConnectionGuard, FileSealedStore, FrameRouter, LoopbackServer, ProfileConnectInfo,
-    SealedRecordStore, PINNED_EXTENSION_IDS,
+    SealedRecordStore, SignReauthGate, PINNED_EXTENSION_IDS,
 };
 use crate::pairing::PairingStore;
 use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
 use crate::session::{ProfileSessionSigner, SessionSigner};
+use crate::session_lock::{SessionLock, SystemClock};
 use crate::wallet::state::WalletStore;
 use crate::whitelist::WhitelistStore;
+
+/// The shared session-lock controller the tray drives (lock-now / idle poll / OS screen-lock) and the
+/// sign path re-authenticates through — the SAME `Arc`, so a lock the tray triggers is the lock the
+/// signer sees. Timed with the wall-clock [`SystemClock`] in production.
+pub type TraySessionLock = Arc<SessionLock<UnlockedIdentities, SystemClock>>;
+
+/// The production [`SignReauthGate`] (WSEC-D, dig_ecosystem#967): it bridges the sign path to the live
+/// [`SessionLock`] so a signature that arrives after a lock re-authenticates before it uses the key.
+///
+/// - **Not locked** → signing is authorized, and — since a sign is user activity — the idle clock is
+///   reset so an active signer is not auto-locked mid-flow.
+/// - **Locked (a re-auth is owed)** → the caller-supplied `reunlock` runs (the keystore's job: re-unlock
+///   the DEK, e.g. via the OS credential store); on success the resume is noted (clearing the owed
+///   re-auth + restarting the idle clock) and signing proceeds, on failure signing is refused (`LOCKED`).
+///
+/// Keeping `reunlock` a closure decouples this from the profile-manager / keychain wiring and keeps the
+/// gate logic unit-testable.
+pub struct SessionReauthGate {
+    lock: TraySessionLock,
+    reunlock: Box<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl SessionReauthGate {
+    /// Build the gate over the shared `lock`, re-unlocking the session through `reunlock` when a lock
+    /// has dropped the DEK. `reunlock` returns whether the re-unlock succeeded.
+    pub fn new(lock: TraySessionLock, reunlock: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            lock,
+            reunlock: Box::new(reunlock),
+        }
+    }
+}
+
+impl SignReauthGate for SessionReauthGate {
+    fn authorize_sign(&self) -> bool {
+        if !self.lock.reauth_required() {
+            self.lock.note_activity();
+            return true;
+        }
+        if (self.reunlock)() {
+            self.lock.note_resumed();
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Build the production [`FrameRouter`] for `profile_did` (which MUST be unlocked in `identities`),
 /// persisting sealed pairings/whitelist/nonces under `profile_dir` and gating every action on
@@ -184,6 +232,68 @@ mod tests {
             Arc::new(HeadlessConfirmer),
             KdfParams::FAST_TEST,
         )
+    }
+
+    use crate::session_lock::DEFAULT_IDLE_TIMEOUT;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A [`TraySessionLock`] over a freshly-unlocked session, for the re-auth gate tests.
+    fn tray_lock() -> TraySessionLock {
+        Arc::new(SessionLock::new(
+            unlocked(),
+            SystemClock::new(),
+            DEFAULT_IDLE_TIMEOUT,
+        ))
+    }
+
+    #[test]
+    fn an_unlocked_session_authorizes_a_sign_without_reunlocking() {
+        let reunlocks = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&reunlocks);
+        let gate = SessionReauthGate::new(tray_lock(), move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+
+        assert!(gate.authorize_sign(), "an unlocked session signs");
+        assert_eq!(
+            reunlocks.load(Ordering::SeqCst),
+            0,
+            "an unlocked session never triggers a re-unlock"
+        );
+    }
+
+    #[test]
+    fn a_locked_session_reunlocks_then_authorizes_and_clears_the_owed_reauth() {
+        let lock = tray_lock();
+        let gate = SessionReauthGate::new(Arc::clone(&lock), || true);
+
+        lock.lock_now();
+        assert!(lock.reauth_required());
+        assert!(
+            gate.authorize_sign(),
+            "a successful re-unlock authorizes the sign"
+        );
+        assert!(
+            !lock.reauth_required(),
+            "the resume cleared the owed re-auth so the next sign passes without re-prompting"
+        );
+    }
+
+    #[test]
+    fn a_locked_session_whose_reunlock_fails_refuses_the_sign() {
+        let lock = tray_lock();
+        let gate = SessionReauthGate::new(Arc::clone(&lock), || false);
+
+        lock.lock_now();
+        assert!(
+            !gate.authorize_sign(),
+            "a failed re-unlock refuses the sign"
+        );
+        assert!(
+            lock.reauth_required(),
+            "a failed re-unlock leaves the re-auth owed (still locked)"
+        );
     }
 
     #[test]

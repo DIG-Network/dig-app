@@ -355,6 +355,14 @@ seam — implemented by `UnlockedIdentities` — and a `MonotonicClock`), so eve
 re-auth is unit-tested without a real keystore or OS; the native `ScreenLockSource` listeners are thin
 adapters validated behind the seam.
 
+The tray shell drives one `SessionLock` over the SAME live session the APP-SIGN signer holds (so a
+lock the tray triggers is the lock the signer sees): the "Lock now" menu item calls `lock_now`, the
+refresh tick calls `poll_idle` (interaction notes activity), and the `ScreenLockSource` callback —
+wrapped so a panic cannot unwind across the OS `extern "system"` boundary — calls `on_screen_locked`.
+The `sign.request` path consults the lock through a `SignReauthGate` immediately before it signs: when
+a re-auth is owed it re-unlocks the session (via the §3.1 unlock path) and, on failure, refuses the
+sign with `LOCKED` rather than signing on a dropped key. Reads never consult the gate.
+
 ---
 
 ## 4. Form factors
