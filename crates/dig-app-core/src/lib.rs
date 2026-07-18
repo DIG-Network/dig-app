@@ -47,6 +47,7 @@
 pub mod agent;
 pub mod config;
 pub mod confirm;
+pub mod decode;
 pub mod engine;
 pub mod environment;
 pub mod form_factor;
@@ -59,8 +60,10 @@ pub mod pairing;
 pub mod profiles;
 pub mod session;
 pub mod shutdown;
+pub mod sign_policy;
 pub mod storage;
 pub mod wallet;
+pub mod whitelist;
 
 /// The operating system the user app is running on. Used by [`storage`] and [`ipc`] to resolve the
 /// per-OS AppData layout and the native IPC endpoint without touching the real environment (so the
