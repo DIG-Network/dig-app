@@ -104,6 +104,15 @@ impl NativeConfirmer for HeadlessConfirmer {
     }
 }
 
+/// Select the confirmer this host should use as the terminal identity gate (SIGN-3).
+///
+/// STUB (this commit) — always returns the fail-closed [`HeadlessConfirmer`]. The per-OS backends
+/// (Windows Hello / macOS Touch ID / Linux polkit) and the desktop-session probe land in the
+/// follow-up commits of this work unit.
+pub fn native_confirmer() -> Box<dyn NativeConfirmer> {
+    Box::new(HeadlessConfirmer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
