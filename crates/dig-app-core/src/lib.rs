@@ -14,6 +14,12 @@
 //! - [`ipc`] — the per-user IPC endpoint address (named pipe / Unix socket) the session dials.
 //! - [`session`] — the identity-authenticated engine session over that channel: the begin→attach
 //!   handshake, the engine→app `sign` callback, detach, and re-attach.
+//! - [`pairing`] — the extension↔dig-app pairing store + per-frame pairing-token authentication
+//!   (HMAC + monotonic nonce) for the APP-SIGN loopback channel (SPEC §5.6.3).
+//! - [`confirm`] — the [`confirm::NativeConfirmer`] seam: the OS-native confirm + biometric that is
+//!   the sole authorization to pair, connect, or sign (SPEC §5.6.1).
+//! - [`loopback`] — the browser-reachable `ws://[127.0.0.1|::1]:9779` identity server the paired
+//!   extension relays to (SPEC §5.6).
 //! - [`gateway`] — the CLI/RPC front door: authenticate callers, proxy engine work.
 //! - [`identity`] — the two-identity model (transport peer-identity vs the user identity).
 //! - [`form_factor`] — headless agent core vs optional GUI tray shell.
@@ -40,6 +46,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod confirm;
 pub mod engine;
 pub mod environment;
 pub mod form_factor;
@@ -47,6 +54,8 @@ pub mod gateway;
 pub mod identity;
 pub mod ipc;
 pub mod keystore;
+pub mod loopback;
+pub mod pairing;
 pub mod profiles;
 pub mod session;
 pub mod shutdown;
