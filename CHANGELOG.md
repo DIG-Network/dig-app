@@ -18,7 +18,10 @@ This project adheres to [Semantic Versioning](https://semver.org) and
   the `NativeConfirmer` seam (the sole authorization to pair/connect/sign) with a fail-closed headless
   stub; `connect.request`/`sign.request` are transport-only stubs returning the honest §5.6.7 code —
   the dapp whitelist (SIGN-2) and per-OS native confirm (SIGN-3) build on this foundation. SPEC §5.6.3
-  now pins `canonical_json` as a normative byte-for-byte form so the extension (SIGN-4) matches.
+  now pins `canonical_json` as a normative byte-for-byte form — object keys sorted by Unicode
+  codepoint (not UTF-16 code-unit) order and no floating-point params — so the extension (SIGN-4)
+  matches. The in-memory channel secret and its serialized record are zeroized on drop, parity with
+  the identity-key at-rest handling.
 
 ## [0.9.1] - Unreleased
 

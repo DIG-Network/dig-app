@@ -548,10 +548,19 @@ confirm, never silent.
    (a forged or replayed frame can neither pass nor perturb the monotonic counter).
 
    **`canonical_json` (normative — both sides MUST match byte-for-byte).** `canonical_json(params)` is
-   the UTF-8 JSON serialization of `params` where: every object's keys are sorted lexicographically by
-   their UTF-16 code-unit / Unicode-scalar order at EVERY nesting level; there is NO insignificant
-   whitespace (no spaces after `:` or `,`); arrays keep their element order; and each scalar (string,
-   number, boolean, null) uses the standard compact JSON rendering with control characters escaped.
+   the UTF-8 JSON serialization of `params` where:
+   - every object's keys are sorted by **Unicode scalar value (codepoint) order** at EVERY nesting
+     level — equivalently, the lexicographic order of the keys' UTF-8 byte sequences. This is **NOT**
+     UTF-16 code-unit order; the two DIVERGE for supplementary-plane characters (a JS implementation
+     MUST NOT use the default `Array.prototype.sort()`, which compares UTF-16 code units — it MUST sort
+     by codepoint to match);
+   - there is NO insignificant whitespace (no spaces after `:` or `,`); arrays keep their element order;
+   - each scalar (string, boolean, null, integer) uses the standard compact JSON rendering with control
+     characters escaped. **`params` MUST NOT contain a JSON floating-point number** (only integers,
+     strings, booleans, null, arrays, objects) — float rendering diverges across implementations
+     (Rust `ryu` vs the ECMAScript `Number.prototype.toString` algorithm), which would break the MAC;
+     an amount is carried as an integer (mojos) or a decimal string, never a float.
+
    Because control characters are escaped, a raw `0x00` can never appear inside `canonical_json`, so it
    cannot collide with the `0x00` field separators in `canonical_frame_bytes`. The extension (SIGN-4)
    and dig-app derive identical bytes from equal `params`, regardless of the key order the transport
