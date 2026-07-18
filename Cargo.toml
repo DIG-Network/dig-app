@@ -139,3 +139,6 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
 block2 = "0.6"
+# libdispatch binding — hops the AppKit confirm window to the main thread (`run_on_main`) since the
+# loopback server calls the confirmer from a worker task but AppKit is main-thread-only.
+dispatch2 = "0.3"

@@ -88,6 +88,7 @@ objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 objc2-local-authentication.workspace = true
 block2.workspace = true
+dispatch2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -14,8 +14,8 @@
 use std::sync::mpsc;
 
 use block2::RcBlock;
+use dispatch2::run_on_main;
 use objc2::runtime::Bool;
-use objc2::MainThreadMarker;
 use objc2_app_kit::{NSAlert, NSApplication};
 use objc2_foundation::{NSError, NSString};
 use objc2_local_authentication::{LAContext, LAPolicy};
@@ -28,23 +28,32 @@ use super::{
 /// AppKit's `NSModalResponse` for the first (default) alert button — the approve action.
 const NS_ALERT_FIRST_BUTTON_RETURN: isize = 1000;
 
-/// A [`ForegroundWindow`] drawn as a front-most modal [`NSAlert`]. Holds a [`MainThreadMarker`] so the
-/// AppKit calls are statically guaranteed to run on the main thread.
-struct AlertWindow {
-    mtm: MainThreadMarker,
-}
+/// A [`ForegroundWindow`] drawn as a front-most modal [`NSAlert`].
+///
+/// A confirmer is shared across the loopback server's worker tasks (`Send + Sync`), but AppKit MUST be
+/// touched on the main thread. Rather than store the `!Send` [`MainThreadMarker`], each `show` hops to
+/// the main thread with [`run_on_main`] (the tray shell pumps the main run loop), so this stays a
+/// zero-field `Send + Sync` unit while the AppKit calls remain statically main-thread-checked.
+struct AlertWindow;
 
 impl ForegroundWindow for AlertWindow {
     fn show(&self, content: &ConfirmContent) -> WindowIntent {
-        let alert = NSAlert::new(self.mtm);
-        alert.setMessageText(&NSString::from_str(&content.heading));
-        alert.setInformativeText(&NSString::from_str(&content.body));
-        alert.addButtonWithTitle(&NSString::from_str(content.action));
-        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-        // Bring the app forward so the consent window is truly foreground, never hidden behind the
-        // browser that triggered it.
-        NSApplication::sharedApplication(self.mtm).activate();
-        intent_from_alert_response(alert.runModal())
+        // Move owned, `Send` copies of the display text onto the main thread (a borrow of `content`
+        // could not cross the thread hop).
+        let heading = content.heading.clone();
+        let body = content.body.clone();
+        let action = content.action;
+        run_on_main(move |mtm| {
+            let alert = NSAlert::new(mtm);
+            alert.setMessageText(&NSString::from_str(&heading));
+            alert.setInformativeText(&NSString::from_str(&body));
+            alert.addButtonWithTitle(&NSString::from_str(action));
+            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            // Bring the app forward so the consent window is truly foreground, never hidden behind the
+            // browser that triggered it.
+            NSApplication::sharedApplication(mtm).activate();
+            intent_from_alert_response(alert.runModal())
+        })
     }
 }
 
@@ -86,14 +95,10 @@ fn intent_from_alert_response(response: isize) -> WindowIntent {
     }
 }
 
-/// The macOS confirmer, or [`None`] when not on the main thread (AppKit requires it) so the caller
-/// falls back to the fail-closed confirmer.
+/// The macOS confirmer. Always available: the window hops to the main thread on demand
+/// ([`AlertWindow`]) and the biometric evaluates off any thread.
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
-    let mtm = MainThreadMarker::new()?;
-    Some(Box::new(BackedConfirmer::new(
-        AlertWindow { mtm },
-        TouchIdVerifier,
-    )))
+    Some(Box::new(BackedConfirmer::new(AlertWindow, TouchIdVerifier)))
 }
 
 #[cfg(test)]
