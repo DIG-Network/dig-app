@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "dig-app-core",
  "dig-logging",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "base64",
  "chia-sdk-utils",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "clap",
  "dig-app-core",
