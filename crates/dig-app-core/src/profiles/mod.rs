@@ -28,6 +28,7 @@
 
 pub mod data;
 pub mod error;
+pub mod identity_store;
 pub mod keygen_provisioner;
 pub mod keystore_sealer;
 pub mod manager;
@@ -37,11 +38,12 @@ pub mod sealer;
 
 pub use data::{did_hash, ProfileData, ProfilePrefs, ProfileRecord, ProfileRegistry};
 pub use error::ProfileError;
-pub use keygen_provisioner::{DidMinter, KeygenProvisioner, MintedDid};
+pub use identity_store::{IdentityStore, OsVaultFactory, RootUnlock, VaultFactory};
+pub use keygen_provisioner::{DidMinter, HeldDidMinter, KeygenProvisioner, MintedDid};
 pub use keystore_sealer::{KeystoreSealer, UnlockedIdentities};
 pub use manager::ProfileManager;
 pub use metadata::ProfileMetadata;
-pub use provision::{ProfileProvisioner, ProvisionError, ProvisionedIdentity};
+pub use provision::{ProfileProvisioner, ProvisionError, Provisioned, ProvisionedIdentity};
 pub use sealer::{ProfileSealer, SealError};
 
 /// A local reference to a profile — the DID plus (via the registry) its cached metadata.
@@ -57,22 +59,32 @@ pub struct ProfileRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profiles::identity_store::FileVaultFactory;
     use crate::profiles::provision::ProvisionError;
     use chia_sdk_utils::Address;
     use dig_identity::{Bytes32, Did};
     use dig_keystore::KdfParams;
     use std::cell::Cell;
+    use std::path::Path;
 
-    // --- Real U4-backed harness -----------------------------------------------------------------
+    // --- Real U4/U6-backed harness ---------------------------------------------------------------
     //
     // These tests exercise the REAL sealer (`KeystoreSealer`, U4 DIGOP1 under each profile's
-    // identity-derived DEK) and the REAL key-generating provisioner (`KeygenProvisioner`). The only
-    // seam still stubbed is the on-chain DID mint (a wallet/engine spend, U6/U7) — supplied here by a
-    // `CountingMinter` that returns canonical `did:chia:` strings. So the crypto under test is
-    // production crypto; only the chain interaction is faked.
+    // identity-derived DEK), the REAL key-generating provisioner (`KeygenProvisioner`), and the REAL
+    // cross-session `IdentityStore` (U6) sealing each identity to a passphrase-backed file vault. The
+    // only seam still stubbed is the on-chain DID mint (a wallet/engine spend, held on #771) —
+    // supplied here by a `CountingMinter` that returns canonical `did:chia:` strings. So the crypto
+    // under test is production crypto; only the chain interaction is faked.
+
+    /// The root unlock every test seals identities under — a passphrase, since the file-backed test
+    /// vault is the no-credential-store (Linux-style) custody path.
+    const PW: &str = "correct horse battery staple";
+    fn root() -> RootUnlock<'static> {
+        RootUnlock::Passphrase(PW)
+    }
 
     /// A [`DidMinter`] that returns a fresh canonical `did:chia:` per call — stands in for the
-    /// wallet/engine on-chain mint (U6/U7) without touching mainnet.
+    /// wallet/engine on-chain mint (held on #771) without touching mainnet.
     #[derive(Default)]
     struct CountingMinter {
         counter: Cell<u8>,
@@ -120,7 +132,7 @@ mod tests {
         }
     }
 
-    /// A minter that always returns the SAME DID — for the duplicate-DID path.
+    /// A minter that always returns the SAME DID — for the duplicate-DID / F-1 clobber path.
     struct FixedMinter;
     impl DidMinter for FixedMinter {
         fn mint(
@@ -142,23 +154,27 @@ mod tests {
             .expect("valid did encoding")
     }
 
-    /// A manager over `dir` whose real [`KeystoreSealer`] shares an [`UnlockedIdentities`] session
-    /// store with the provisioner, so a created profile is immediately unlockable for sealing.
-    /// Returns the manager plus the shared store (for isolation tests that seal/open directly).
-    fn harness(dir: &std::path::Path) -> (ProfileManager<KeystoreSealer>, UnlockedIdentities) {
-        let identities = UnlockedIdentities::new();
-        let sealer = KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST);
-        (ProfileManager::new(dir.to_path_buf(), sealer), identities)
+    /// A manager over `dir` wired to a real [`KeystoreSealer`] and a real file-backed
+    /// [`IdentityStore`] that SHARE one [`UnlockedIdentities`] session — the production wiring, with
+    /// the cheap test KDF. Returns the manager plus the shared session (for direct seal/open checks).
+    /// A second `harness` over the SAME `dir` models a process restart (a fresh, empty session).
+    fn harness(dir: &Path) -> (ProfileManager<KeystoreSealer>, UnlockedIdentities) {
+        let session = UnlockedIdentities::new();
+        let sealer = KeystoreSealer::with_kdf(session.clone(), KdfParams::FAST_TEST);
+        let store = IdentityStore::new(session.clone(), Box::new(FileVaultFactory));
+        (
+            ProfileManager::new(dir.to_path_buf(), sealer, store),
+            session,
+        )
     }
 
-    fn manager(dir: &std::path::Path) -> ProfileManager<KeystoreSealer> {
+    fn manager(dir: &Path) -> ProfileManager<KeystoreSealer> {
         harness(dir).0
     }
 
-    /// A real key-generating provisioner sharing `identities`, minting DIDs via a fresh
-    /// [`CountingMinter`].
-    fn provisioner(identities: &UnlockedIdentities) -> KeygenProvisioner<CountingMinter> {
-        KeygenProvisioner::new(identities.clone(), CountingMinter::default())
+    /// A real key-generating provisioner minting DIDs via a fresh [`CountingMinter`].
+    fn provisioner() -> KeygenProvisioner<CountingMinter> {
+        KeygenProvisioner::new(CountingMinter::default())
     }
 
     fn named(name: &str) -> ProfileMetadata {
@@ -168,16 +184,16 @@ mod tests {
         }
     }
 
-    // --- create / list / active ----------------------------------------------------------------
+    // --- create / list / active ------------------------------------------------------------------
 
     #[test]
     fn create_then_list_round_trips_both_profiles() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        let prov = provisioner(&ids);
+        let (mgr, _s) = harness(dir.path());
+        let prov = provisioner();
 
-        let a = mgr.create_profile(&prov, named("Ada")).unwrap();
-        let b = mgr.create_profile(&prov, named("Bob")).unwrap();
+        let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
 
         let listed = mgr.list().unwrap();
         assert_eq!(listed.len(), 2);
@@ -189,11 +205,11 @@ mod tests {
     #[test]
     fn first_created_profile_becomes_active() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        let prov = provisioner(&ids);
+        let (mgr, _s) = harness(dir.path());
+        let prov = provisioner();
 
-        let a = mgr.create_profile(&prov, named("Ada")).unwrap();
-        mgr.create_profile(&prov, named("Bob")).unwrap();
+        let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        mgr.create_profile(&prov, named("Bob"), root()).unwrap();
 
         // Creating more profiles does not steal the active pointer.
         assert_eq!(mgr.active_did().unwrap(), Some(a.did));
@@ -202,9 +218,9 @@ mod tests {
     #[test]
     fn a_profile_binds_a_did_and_its_two_public_keys() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
+        let (mgr, _s) = harness(dir.path());
         let record = mgr
-            .create_profile(&provisioner(&ids), named("Ada"))
+            .create_profile(&provisioner(), named("Ada"), root())
             .unwrap();
 
         assert!(Did::parse(&record.did).is_some(), "DID is canonical");
@@ -215,42 +231,121 @@ mod tests {
         assert_eq!(record.paired_store_id.as_deref(), Some("store-1"));
     }
 
-    // --- select / persistence ------------------------------------------------------------------
+    // --- select / same-session persistence -------------------------------------------------------
 
     #[test]
     fn select_loads_the_profiles_own_data_and_persists_the_active_pointer() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        let prov = provisioner(&ids);
-        let a = mgr.create_profile(&prov, named("Ada")).unwrap();
-        let b = mgr.create_profile(&prov, named("Bob")).unwrap();
+        let (mgr, _s) = harness(dir.path());
+        let prov = provisioner();
+        let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
 
         let data_b = mgr.select_profile(&b.did).unwrap();
         assert_eq!(data_b.metadata.display_name.as_deref(), Some("Bob"));
         assert!(data_b.prefs.auto_tip, "auto-tip defaults on");
 
-        // A fresh manager over the same dir sees the persisted active pointer (read from the
-        // plaintext registry, no unlock needed). Its sealer shares the same unlocked identities the
-        // user re-unlocked this session, so it can also open a profile's sealed data.
-        let reopened = ProfileManager::new(
-            dir.path(),
-            KeystoreSealer::with_kdf(ids, KdfParams::FAST_TEST),
-        );
-        assert_eq!(reopened.active_did().unwrap(), Some(b.did));
-
-        // And selecting A back loads A's own data, not B's.
-        let data_a = reopened.select_profile(&a.did).unwrap();
+        // Selecting A back loads A's own data, not B's.
+        let data_a = mgr.select_profile(&a.did).unwrap();
         assert_eq!(data_a.metadata.display_name.as_deref(), Some("Ada"));
+        assert_eq!(mgr.active_did().unwrap(), Some(a.did));
     }
 
-    // --- at-rest sealing + cross-profile isolation (security-critical) -------------------------
+    // --- cross-session persistence (the U6 core) -------------------------------------------------
+
+    #[test]
+    fn a_restarted_app_reopens_every_profile_after_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a_did, b_did) = {
+            let (mgr, _s) = harness(dir.path());
+            let prov = provisioner();
+            let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+            let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
+            (a.did, b.did)
+        };
+
+        // Restart: a brand-new manager + empty session over the same directory. Before unlocking,
+        // the plaintext registry still lists both profiles, but neither is unlockable yet.
+        let (restarted, session) = harness(dir.path());
+        assert_eq!(restarted.list().unwrap().len(), 2);
+        assert!(!session.is_unlocked(&a_did));
+        assert!(
+            restarted.select_profile(&a_did).is_err(),
+            "sealed data cannot be opened before the root unlock"
+        );
+
+        // The user supplies the root unlock: every persisted identity is re-derived …
+        assert_eq!(restarted.unlock_all(root()).unwrap(), 2);
+        assert!(session.is_unlocked(&a_did) && session.is_unlocked(&b_did));
+
+        // … so both profiles' sealed data opens again, each its own.
+        assert_eq!(
+            restarted
+                .select_profile(&a_did)
+                .unwrap()
+                .metadata
+                .display_name
+                .as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(
+            restarted
+                .select_profile(&b_did)
+                .unwrap()
+                .metadata
+                .display_name
+                .as_deref(),
+            Some("Bob")
+        );
+    }
+
+    #[test]
+    fn unlock_all_with_a_wrong_root_unlock_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let (mgr, _s) = harness(dir.path());
+            mgr.create_profile(&provisioner(), named("Ada"), root())
+                .unwrap();
+        }
+        let (restarted, _s) = harness(dir.path());
+        assert!(matches!(
+            restarted.unlock_all(RootUnlock::Passphrase("wrong")),
+            Err(ProfileError::Persist(_))
+        ));
+    }
+
+    #[test]
+    fn the_identity_is_sealed_at_rest_not_plaintext() {
+        // NC-2: the persisted identity key material is DIGOP1 ciphertext on disk, never the raw key.
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, session) = harness(dir.path());
+        let record = mgr
+            .create_profile(&provisioner(), named("Ada"), root())
+            .unwrap();
+
+        let identity_file = dir
+            .path()
+            .join("profiles")
+            .join(&record.did_hash)
+            .join("identity.digop1");
+        let on_disk = std::fs::read(&identity_file).unwrap();
+        // The public key is known; assert the file is not the 64-byte raw secret layout by checking
+        // the (public) signing key bytes do not appear — a proxy that the blob is sealed, not raw.
+        let pk = session.signing_public_key(&record.did).unwrap();
+        assert!(
+            !contains(&on_disk, &pk),
+            "identity file must be sealed, not raw key bytes"
+        );
+    }
+
+    // --- at-rest sealing + cross-profile isolation (security-critical) ---------------------------
 
     #[test]
     fn per_profile_data_is_ciphertext_at_rest() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
+        let (mgr, _s) = harness(dir.path());
         let record = mgr
-            .create_profile(&provisioner(&ids), named("SecretName"))
+            .create_profile(&provisioner(), named("SecretName"), root())
             .unwrap();
 
         let seal_path = dir
@@ -276,14 +371,14 @@ mod tests {
 
     #[test]
     fn one_profile_cannot_open_anothers_sealed_blob() {
-        // The F1 property, against the REAL DIGOP1 sealer: A's blob is sealed under A's
+        // The isolation property, against the REAL DIGOP1 sealer: A's blob is sealed under A's
         // identity-derived DEK; B holds a different identity hence a different DEK, so the AEAD tag
         // rejects B's open. Isolation is cryptographic, not a filesystem convention.
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        let prov = provisioner(&ids);
-        let a = mgr.create_profile(&prov, named("Ada")).unwrap();
-        let b = mgr.create_profile(&prov, named("Bob")).unwrap();
+        let (mgr, session) = harness(dir.path());
+        let prov = provisioner();
+        let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
 
         let a_bytes = std::fs::read(
             dir.path()
@@ -294,7 +389,7 @@ mod tests {
         .unwrap();
 
         // Both profiles are unlocked in the session, so the difference is purely the DEK.
-        let sealer = KeystoreSealer::with_kdf(ids, KdfParams::FAST_TEST);
+        let sealer = KeystoreSealer::with_kdf(session, KdfParams::FAST_TEST);
         assert!(
             sealer.open(&a.did, &a_bytes).is_ok(),
             "A opens its own blob"
@@ -305,14 +400,82 @@ mod tests {
         );
     }
 
-    // --- edit ----------------------------------------------------------------------------------
+    #[test]
+    fn cross_profile_isolation_survives_a_restart_and_reunlock() {
+        // The isolation property must hold across persistence: after a restart re-unlocks BOTH
+        // profiles from their sealed identities, A's re-derived DEK still cannot open B's blob.
+        let dir = tempfile::tempdir().unwrap();
+        let (a_did, b_did, a_hash) = {
+            let (mgr, _s) = harness(dir.path());
+            let prov = provisioner();
+            let a = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+            let b = mgr.create_profile(&prov, named("Bob"), root()).unwrap();
+            (a.did, b.did, a.did_hash)
+        };
+
+        let (restarted, session) = harness(dir.path());
+        restarted.unlock_all(root()).unwrap();
+
+        let a_bytes = std::fs::read(
+            dir.path()
+                .join("profiles")
+                .join(&a_hash)
+                .join("identity.seal"),
+        )
+        .unwrap();
+        let sealer = KeystoreSealer::with_kdf(session, KdfParams::FAST_TEST);
+        assert!(
+            sealer.open(&a_did, &a_bytes).is_ok(),
+            "A re-opens its own blob post-restart"
+        );
+        assert!(
+            matches!(sealer.open(&b_did, &a_bytes), Err(SealError::Open)),
+            "B's re-derived DEK still cannot open A's blob after a restart"
+        );
+    }
+
+    // --- F-1: a duplicate DID must not clobber the existing profile ------------------------------
+
+    #[test]
+    fn a_duplicate_did_does_not_clobber_the_existing_profiles_identity() {
+        // F-1 (from the U5 triple-gate): provisioning is side-effect free, and the manager validates
+        // + dedup-checks the DID BEFORE committing the identity. So a second create that mints the
+        // SAME DID is rejected WITHOUT touching the first profile's live session identity or its
+        // sealed data — the first profile stays fully intact and openable.
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, session) = harness(dir.path());
+        let prov = KeygenProvisioner::new(FixedMinter);
+
+        let first = mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        let pk_before = session.signing_public_key(&first.did).unwrap();
+
+        let err = mgr
+            .create_profile(&prov, named("Mallory"), root())
+            .unwrap_err();
+        assert!(matches!(err, ProfileError::AlreadyExists(_)));
+
+        // The existing profile's session identity is UNCHANGED (not overwritten by the dup attempt).
+        assert_eq!(session.signing_public_key(&first.did).unwrap(), pk_before);
+        // And its sealed data still opens and still says "Ada", never "Mallory".
+        assert_eq!(
+            mgr.select_profile(&first.did)
+                .unwrap()
+                .metadata
+                .display_name
+                .as_deref(),
+            Some("Ada")
+        );
+        assert_eq!(mgr.list().unwrap().len(), 1);
+    }
+
+    // --- edit ------------------------------------------------------------------------------------
 
     #[test]
     fn edit_updates_metadata_reseals_and_changes_the_smt_root() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
+        let (mgr, _s) = harness(dir.path());
         let record = mgr
-            .create_profile(&provisioner(&ids), named("Ada"))
+            .create_profile(&provisioner(), named("Ada"), root())
             .unwrap();
 
         let root_before = mgr.edit_profile(&record.did, |_| {}).unwrap();
@@ -324,7 +487,6 @@ mod tests {
             .unwrap();
         assert_ne!(root_before, root_after, "editing a field changes the root");
 
-        // The edit is reflected in the sealed data and the cached display name.
         let reloaded = mgr.load_profile_data(&record.did).unwrap();
         assert_eq!(reloaded.metadata.bio.as_deref(), Some("builds DIG"));
         let cached = mgr.list().unwrap()[0].display_name.clone();
@@ -334,9 +496,9 @@ mod tests {
     #[test]
     fn edit_can_change_the_cached_display_name() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
+        let (mgr, _s) = harness(dir.path());
         let record = mgr
-            .create_profile(&provisioner(&ids), named("Ada"))
+            .create_profile(&provisioner(), named("Ada"), root())
             .unwrap();
 
         mgr.edit_profile(&record.did, |m| m.display_name = Some("Ada L.".into()))
@@ -347,14 +509,14 @@ mod tests {
         );
     }
 
-    // --- error paths ---------------------------------------------------------------------------
+    // --- error paths -----------------------------------------------------------------------------
 
     #[test]
     fn provisioning_failure_surfaces_as_a_provision_error() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        let prov = KeygenProvisioner::new(ids, FailingMinter);
-        let err = mgr.create_profile(&prov, named("Ada")).unwrap_err();
+        let (mgr, _s) = harness(dir.path());
+        let prov = KeygenProvisioner::new(FailingMinter);
+        let err = mgr.create_profile(&prov, named("Ada"), root()).unwrap_err();
         assert!(matches!(err, ProfileError::Provision(_)));
         assert!(mgr.list().unwrap().is_empty());
     }
@@ -362,20 +524,23 @@ mod tests {
     #[test]
     fn a_non_canonical_did_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        let prov = KeygenProvisioner::new(ids, BadDidMinter);
-        let err = mgr.create_profile(&prov, named("Ada")).unwrap_err();
+        let (mgr, _s) = harness(dir.path());
+        let prov = KeygenProvisioner::new(BadDidMinter);
+        let err = mgr.create_profile(&prov, named("Ada"), root()).unwrap_err();
         assert!(matches!(err, ProfileError::InvalidDid(_)));
+        // Nothing was persisted or listed for the rejected DID.
+        assert!(mgr.list().unwrap().is_empty());
     }
 
     #[test]
     fn creating_a_duplicate_did_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let (mgr, ids) = harness(dir.path());
-        // A minter that returns the SAME DID twice (distinct keys, but a clashing identity anchor).
-        let prov = KeygenProvisioner::new(ids, FixedMinter);
-        mgr.create_profile(&prov, named("Ada")).unwrap();
-        let err = mgr.create_profile(&prov, named("Ada again")).unwrap_err();
+        let (mgr, _s) = harness(dir.path());
+        let prov = KeygenProvisioner::new(FixedMinter);
+        mgr.create_profile(&prov, named("Ada"), root()).unwrap();
+        let err = mgr
+            .create_profile(&prov, named("Ada again"), root())
+            .unwrap_err();
         assert!(matches!(err, ProfileError::AlreadyExists(_)));
         assert_eq!(mgr.list().unwrap().len(), 1);
     }

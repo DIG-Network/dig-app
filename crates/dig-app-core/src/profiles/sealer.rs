@@ -20,6 +20,9 @@
 //! - **Cross-profile isolation** — opening profile A's ciphertext under profile B's DID MUST fail
 //!   (AEAD authentication rejects the wrong key), so one profile can never read another's data
 //!   (§10, test 3).
+//! - **Zeroized plaintext** — [`ProfileSealer::open`] returns the decrypted bytes in a
+//!   [`Zeroizing`] buffer (the F-3 property), so a profile's decrypted secret-bearing content is
+//!   scrubbed from memory when the caller drops it rather than lingering in freed heap.
 //!
 //! # U4 integration point
 //!
@@ -27,6 +30,8 @@
 //! resolves the named profile's unlocked U4 [`IdentitySecrets`](crate::keystore::IdentitySecrets) and
 //! DIGOP1-seals under that identity's DEK, so `seal(did, pt)` seals `pt` for exactly that profile.
 //! The profile manager is generic over any `ProfileSealer`, so the seam stays testable in isolation.
+
+use zeroize::Zeroizing;
 
 /// A failure sealing or unsealing a per-profile blob.
 #[derive(Debug, thiserror::Error)]
@@ -50,9 +55,10 @@ pub trait ProfileSealer {
     /// ciphertext safe to persist at rest.
     fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError>;
 
-    /// Opens `ciphertext` that was sealed under the DEK of the profile named by `profile_did`.
+    /// Opens `ciphertext` that was sealed under the DEK of the profile named by `profile_did`,
+    /// returning the plaintext in a [`Zeroizing`] buffer so it is scrubbed from memory on drop.
     ///
     /// Returns [`SealError::Open`] when `ciphertext` was not sealed by this profile's DEK — the
     /// mechanism that keeps one profile from reading another's data.
-    fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Vec<u8>, SealError>;
+    fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError>;
 }

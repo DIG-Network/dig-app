@@ -1,12 +1,16 @@
 //! The profile manager — create / select / list / edit multi-DID profiles, persisting each
-//! profile's secret-bearing state sealed at rest under its own DEK.
+//! profile's identity and secret-bearing state sealed at rest under its own DEK, and re-unlocking
+//! every profile on boot so a restarted app can reopen its data (U5 + U6).
 //!
-//! [`ProfileManager`] is the security-critical heart of U5. It owns the on-disk layout (the
-//! plaintext registry + the per-profile sealed blobs) and delegates all crypto to the
-//! [`ProfileSealer`] seam (U4) and all identity minting to the [`ProfileProvisioner`] seam
-//! (U4 + wallet/engine). It never holds a private key and never seals with a shared key — every
-//! per-profile blob is sealed under that profile's own DEK, so profiles are cryptographically
-//! isolated from one another on disk (SPEC §3.1, §10 tests 2–3).
+//! [`ProfileManager`] is the security-critical heart of the profile layer. It owns the on-disk
+//! layout (the plaintext registry + the per-profile sealed blobs) and delegates all crypto to the
+//! seams around it: per-profile data sealing to [`ProfileSealer`] (U4), identity minting +
+//! key-generation to [`ProfileProvisioner`] (U4 + wallet/engine), and cross-session identity
+//! persistence + re-unlock to [`IdentityStore`] (U6). It never *retains* a private key — the freshly
+//! provisioned secret material passes straight through [`create_profile`](ProfileManager::create_profile)
+//! into the identity store — and never seals with a shared key: every per-profile blob is sealed
+//! under that profile's own DEK, so profiles are cryptographically isolated from one another on disk
+//! and stay isolated across a restart (SPEC §3.1/§3.2, §10 tests 2–3).
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +18,7 @@ use dig_identity::Did;
 
 use crate::profiles::data::{did_hash, ProfileData, ProfileRecord, ProfileRegistry};
 use crate::profiles::error::{ProfileError, Result};
+use crate::profiles::identity_store::{IdentityStore, RootUnlock};
 use crate::profiles::metadata::ProfileMetadata;
 use crate::profiles::provision::ProfileProvisioner;
 use crate::profiles::sealer::ProfileSealer;
@@ -28,19 +33,26 @@ const SEAL_FILE: &str = "identity.seal";
 /// Manages the user's profiles under a resolved brand data directory.
 ///
 /// Generic over its [`ProfileSealer`] so the run-time crypto (U4's keystore) and a test fake are
-/// interchangeable without reshaping the manager.
+/// interchangeable without reshaping the manager. It also owns an [`IdentityStore`] — the
+/// cross-session persistence collaborator (U6) that seals each profile's identity at rest and
+/// re-unlocks it on boot. The sealer and the identity store share one [`UnlockedIdentities`](crate::profiles::UnlockedIdentities) session
+/// (the manager's caller wires them to the same session), so an identity the store unlocks is
+/// immediately usable to seal/open that profile's data.
 pub struct ProfileManager<S: ProfileSealer> {
     brand_dir: PathBuf,
     sealer: S,
+    identities: IdentityStore,
 }
 
 impl<S: ProfileSealer> ProfileManager<S> {
     /// Builds a manager over `brand_dir` (the per-user AppData root, [`crate::storage`]) using
-    /// `sealer` for all at-rest sealing.
-    pub fn new(brand_dir: impl Into<PathBuf>, sealer: S) -> Self {
+    /// `sealer` for per-profile data sealing and `identities` for cross-session identity
+    /// persistence + re-unlock. Both MUST share the same [`UnlockedIdentities`](crate::profiles::UnlockedIdentities) session.
+    pub fn new(brand_dir: impl Into<PathBuf>, sealer: S, identities: IdentityStore) -> Self {
         Self {
             brand_dir: brand_dir.into(),
             sealer,
+            identities,
         }
     }
 
@@ -56,51 +68,93 @@ impl<S: ProfileSealer> ProfileManager<S> {
     }
 
     /// Creates a new profile: provisions an identity (mint DID + generate keys via the seam),
-    /// records it, seals its initial [`ProfileData`] under the new profile's DEK, and — when it is
-    /// the first profile — makes it active.
+    /// persists that identity sealed at rest and unlocks it, seals its initial [`ProfileData`] under
+    /// the new profile's DEK, records it, and — when it is the first profile — makes it active.
     ///
-    /// Fails if the provisioner returns a non-canonical DID or a DID that already has a profile, so
-    /// creation can never clobber an existing profile's sealed data.
+    /// `root` is the user's root unlock ([`RootUnlock`]) under which the identity is sealed at rest,
+    /// so a later restart can re-open it ([`unlock_all`](Self::unlock_all)).
+    ///
+    /// # Ordering is security-critical (the F-1 property)
+    ///
+    /// The DID is validated (canonical) and checked for a duplicate BEFORE the provisioned identity
+    /// is persisted or registered as unlocked. `provision` is side-effect-free ([`ProfileProvisioner`]),
+    /// so a rejected DID drops the freshly generated secrets untouched — creation can never clobber
+    /// an existing profile's sealed data or its live in-session identity. If sealing the initial data
+    /// or saving the registry then fails, the just-committed identity is rolled back
+    /// ([`IdentityStore::forget`]) so no half-created profile is left behind.
     pub fn create_profile(
         &self,
         provisioner: &dyn ProfileProvisioner,
         metadata: ProfileMetadata,
+        root: RootUnlock<'_>,
     ) -> Result<ProfileRecord> {
-        let identity = provisioner
+        let provisioned = provisioner
             .provision()
             .map_err(|e| ProfileError::Provision(e.to_string()))?;
+        let identity = &provisioned.identity;
 
+        // Validate BEFORE committing anything: a bad or duplicate DID returns here, dropping
+        // `provisioned` (and zeroizing its secrets) without touching persisted or session state.
         if Did::parse(&identity.did).is_none() {
-            return Err(ProfileError::InvalidDid(identity.did));
+            return Err(ProfileError::InvalidDid(identity.did.clone()));
         }
-
         let mut registry = self.load_registry()?;
         if registry.find(&identity.did).is_some() {
-            return Err(ProfileError::AlreadyExists(identity.did));
+            return Err(ProfileError::AlreadyExists(identity.did.clone()));
         }
 
-        let hash = did_hash(&identity.did);
+        let did = identity.did.clone();
+        let hash = did_hash(&did);
+        let record = ProfileRecord {
+            did: did.clone(),
+            did_hash: hash.clone(),
+            signing_public_key: hex::encode(identity.signing_public_key),
+            encryption_public_key: hex::encode(identity.encryption_public_key),
+            paired_store_id: identity.paired_store_id.clone(),
+            display_name: metadata.display_name.clone(),
+        };
+
+        // Commit the identity (seal at rest + unlock) now that the DID is validated + unique. From
+        // here on, any failure rolls the identity back so creation is all-or-nothing.
+        let profile_dir = self.profile_dir(&hash);
+        self.identities
+            .persist_and_unlock(&did, &hash, &profile_dir, provisioned.secrets, root)?;
+
         let data = ProfileData {
             metadata,
             ..ProfileData::default()
         };
-        self.seal_and_write(&identity.did, &hash, &data)?;
-
-        let record = ProfileRecord {
-            did: identity.did.clone(),
-            did_hash: hash,
-            signing_public_key: hex::encode(identity.signing_public_key),
-            encryption_public_key: hex::encode(identity.encryption_public_key),
-            paired_store_id: identity.paired_store_id,
-            display_name: data.metadata.display_name.clone(),
-        };
-
-        if registry.active.is_none() {
-            registry.active = Some(identity.did);
+        if let Err(e) = self.seal_and_write(&did, &hash, &data).and_then(|()| {
+            if registry.active.is_none() {
+                registry.active = Some(did.clone());
+            }
+            registry.profiles.push(record.clone());
+            self.save_registry(&registry)
+        }) {
+            // Roll back the sealed + unlocked identity so a failed create leaves nothing dangling.
+            let _ = self.identities.forget(&did, &hash, &profile_dir);
+            return Err(e);
         }
-        registry.profiles.push(record.clone());
-        self.save_registry(&registry)?;
         Ok(record)
+    }
+
+    /// Re-unlocks every profile's persisted identity into the session, so a restarted app can open
+    /// all of its sealed data once the user supplies the root unlock (U6 boot path).
+    ///
+    /// Reads the plaintext registry (no unlock needed to enumerate), then re-derives each profile's
+    /// identity from its sealed material under `root`. Returns how many profiles were unlocked. Fails
+    /// closed on a bad root unlock (a wrong passphrase surfaces the opaque unlock error); profiles
+    /// unlocked before the failing one stay unlocked, since each profile's identity is independent.
+    pub fn unlock_all(&self, root: RootUnlock<'_>) -> Result<usize> {
+        let registry = self.load_registry()?;
+        let mut unlocked = 0;
+        for record in &registry.profiles {
+            let profile_dir = self.profile_dir(&record.did_hash);
+            self.identities
+                .unlock_persisted(&record.did, &record.did_hash, &profile_dir, root)?;
+            unlocked += 1;
+        }
+        Ok(unlocked)
     }
 
     /// Selects `did` as the active profile and loads its sealed data into memory.
@@ -124,8 +178,10 @@ impl<S: ProfileSealer> ProfileManager<S> {
     pub fn load_profile_data(&self, did: &str) -> Result<ProfileData> {
         let path = self.seal_path(&did_hash(did));
         let ciphertext = std::fs::read(&path)?;
+        // `plaintext` is a zeroizing buffer (F-3): the decrypted profile content is scrubbed from
+        // memory when it drops at the end of this call, right after deserialization.
         let plaintext = self.sealer.open(did, &ciphertext)?;
-        Ok(serde_json::from_slice(&plaintext)?)
+        Ok(serde_json::from_slice(&plaintext[..])?)
     }
 
     /// Edits a profile's persona metadata in place, re-seals the updated data, refreshes the cached

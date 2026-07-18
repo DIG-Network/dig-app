@@ -4,6 +4,7 @@
 //! [`crate::Error`] wraps them via `#[from]` so a caller can handle profile failures alongside the
 //! rest of the agent's I/O.
 
+use crate::keystore::KeystoreError;
 use crate::profiles::sealer::SealError;
 
 /// A failure creating, selecting, listing, or editing a profile.
@@ -43,6 +44,12 @@ pub enum ProfileError {
     /// could not be built for the profile's on-chain representation.
     #[error("profile identity format error: {0}")]
     Identity(String),
+
+    /// Persisting a profile's identity sealed at rest, or re-unlocking it on boot, failed (a bad
+    /// root unlock, a tampered/missing sealed identity, or a credential-store error). Fail-closed:
+    /// the underlying [`KeystoreError`] never distinguishes a wrong passphrase from a foreign blob.
+    #[error("profile identity persistence error: {0}")]
+    Persist(#[from] KeystoreError),
 }
 
 /// The profile-management result type.
