@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.8.0] - Unreleased
+
+### Added
+
+- **`dign` CLI + gateway routing (U7).** The DIG user CLI is now its own `dign` binary crate
+  (migrated from dig-node, SPEC §3.5), a thin IPC client of the running dig-app. The new
+  `dig_app_core::gateway` module is the routing core: it classifies every command as served LOCALLY
+  with the held user identity (`profiles` / `wallet` / `sign`) or PROXIED to the engine (`info` /
+  `config` / `cache` / `stores` / `sync` / `subscriptions` / `peers` / `pair` / `open`), and
+  dispatches over three seams — `EngineProxy` (the session-forwarded `control.*` call, byte-faithful
+  to the engine control surface), `LocalIdentity` (the local identity ops), and `LinkOpener` (opens a
+  validated DIG link; only `chia://` / `urn:dig:chia:` are accepted). Every command offers `--json`
+  output + a `--help` discovery surface, and failures carry a stable `ErrorCode` (symbolic name +
+  numeric exit code) whose envelope matches the engine CLI. The per-user IPC session client lands
+  with U6; until then `dign` reports a catalogued `NOT_CONNECTED`.
+
 ## [0.7.0] - Unreleased
 
 ### Added

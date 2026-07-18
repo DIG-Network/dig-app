@@ -238,6 +238,15 @@ Machine-friendly (per the ecosystem agent-friendly baseline): `dign` MUST offer 
 beside human output, a discovery surface (`--help`/`--help-json`), and deterministic catalogued error
 codes.
 
+`dign` is its OWN binary crate (a thin IPC client); the routing lives in `dig_app_core::gateway`,
+which the running dig-app hosts. The gateway classifies every command as `Route::UserApp` (served
+locally with the held user identity — profiles / wallet / sign) or `Route::Engine` (proxied to the
+engine), and dispatches over three seams: `EngineProxy` (forwards the canonical `control.*` call over
+the session), `LocalIdentity` (serves the local identity ops), and `LinkOpener` (validates + opens a
+DIG link — only `chia://` / `urn:dig:chia:` are accepted, the security boundary). Failures carry a
+stable `ErrorCode` (symbolic name + numeric exit code); the `--json` envelopes match the engine CLI's
+shape so the DIG command line is one consistent surface.
+
 ---
 
 ## 4. Form factors
@@ -447,7 +456,7 @@ day one; the security-critical subsystems are implemented by later work units to
 | `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
 | `profiles` | multi-DID create/select/list/edit via dig-identity; per-profile sealed AppData | U5 |
 | `wallet` | per-profile wallet host | post-U5 (stub) |
-| `gateway` | authenticate callers + route (local vs proxy-to-engine) | U7 (stub) |
+| `gateway` | route each command (local vs proxy-to-engine) + dispatch over the `EngineProxy` / `LocalIdentity` / `LinkOpener` seams; catalogued `ErrorCode` + `--json` envelopes | U7 |
 
 The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows system tray · macOS
 menu-bar · Linux AppIndicator) and **degrades headless** (§4) when no display is present or the tray
