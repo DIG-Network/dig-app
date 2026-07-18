@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -24,6 +24,17 @@ authors = ["DIG Network"]
 
 [workspace.dependencies]
 dig-app-core = { path = "crates/dig-app-core" }
+# The `tracing` facade every module in this workspace emits events through. `dig-app-core` (and every
+# other library crate) depends on ONLY this — never `dig-logging` directly — so the engine-agnostic
+# core stays subscriber-agnostic; the `dig-app`/`dign` binary shells are the ones that install a
+# subscriber (see `dig-logging` below), mirroring the dig-node split (dig-node-core: tracing only,
+# dig-node-service: dig-logging + the init).
+tracing = "0.1"
+# The shared logging building block (dig_ecosystem#547/#934) — the ONE place `dig-app`/`dign` get
+# their dual JSONL-file + human-stderr sink, per-OS log dir, EnvFilter precedence, and `logs` CLI
+# verbs from, so the layout is byte-identical to dig-node/dig-dns/dig-updater. Sourced from crates.io
+# (no git/path dep) per the ecosystem crates.io policy (#681).
+dig-logging = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

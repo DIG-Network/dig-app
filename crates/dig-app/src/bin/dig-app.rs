@@ -22,16 +22,24 @@ use dig_app_core::form_factor::FormFactor;
 use dig_app_core::Os;
 
 fn main() {
+    // Install the shared logging stack FIRST, before anything else can emit an event that would
+    // otherwise be silently dropped. Held for the whole process lifetime; see `logging`'s docs for
+    // why a plain local guard is enough here (this is the crate's one entrypoint).
+    let _log_guard = dig_app::logging::init();
+
     let version = env!("CARGO_PKG_VERSION");
     let env = resolve_environment();
+    tracing::info!(version, os = ?env.os, has_display = env.has_display, "dig-app starting");
 
     let agent = match Agent::from_env(&env, NullConnector) {
         Ok(agent) => agent,
         Err(e) => {
+            tracing::error!(error = %e, "dig-app cannot start");
             eprintln!("dig-app {version}: cannot start — {e}");
             std::process::exit(1);
         }
     };
+    tracing::info!(endpoint = %agent.endpoint(), "engine endpoint resolved");
     eprintln!(
         "dig-app {version} — user identity agent starting (endpoint: {})",
         agent.endpoint()
@@ -40,6 +48,7 @@ fn main() {
     match env.form_factor() {
         FormFactor::Tray => run_tray_or_headless(agent),
         FormFactor::Headless => {
+            tracing::info!("no desktop display — running as headless agent (no tray)");
             eprintln!("dig-app: no desktop display — running as headless agent (no tray)");
             agent.run();
         }

@@ -22,6 +22,10 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The logging FACADE (#934) every module below emits lifecycle/diagnostic events through. This crate
+# never depends on `dig-logging` itself — installing a subscriber is a process-wide decision that
+# belongs to the `dig-app`/`dign` binary shells (see the workspace manifest for why).
+tracing.workspace = true
 # Key management (U4) — see the workspace manifest for why each is chosen. No hand-rolled crypto.
 dig-keystore.workspace = true
 ed25519-dalek.workspace = true
@@ -47,3 +51,7 @@ keyring.workspace = true
 tempfile.workspace = true
 rand_chacha.workspace = true
 chia-sdk-utils.workspace = true
+# Capturing subscriber for the never-log regression tests (#934, dig-logging SPEC §7): a `fmt` layer
+# writing into an in-memory buffer so a test can assert emitted records never contain secret values
+# (a passphrase, a raw identity key). Pinned to the same 0.3 line `dig-logging` builds on.
+tracing-subscriber = { version = "0.3", features = ["fmt"] }

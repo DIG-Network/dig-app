@@ -4,6 +4,25 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [0.9.0] - Unreleased
+
+### Added
+
+- **Structured logging via the shared `dig-logging` building block (APP-5, epic #908, #934).** The
+  `dig-app` tray/headless shell and the `dign` CLI now install the same dual-sink subscriber every
+  other DIG binary uses (`dig-node`/`dig-dns`/`dig-updater`) — a rolling daily JSONL file in the
+  per-OS machine log dir plus compact human text on `stderr`, behind one reloadable `EnvFilter` — so
+  a field report finally has a trace of what the identity agent did. `dig-app-core` gained no new
+  dependency (it emits through `tracing` only, exactly like `dig-node-core`); the binary shells own
+  installing the subscriber.
+- **Log-level discipline across the identity-agent core.** Lifecycle events (session attach/detach,
+  profile create/select/re-unlock-on-boot, identity seal/unlock, gateway routing) are now `INFO`;
+  per-request/per-frame detail (gateway route-classification, RPC dispatch) is `DEBUG`; every
+  auth/deny/failure path (a denied `sign` callback, a failed unlock, a duplicate/invalid DID, a
+  rejected profile select, a failed engine proxy call) is `WARN`. A never-log regression suite
+  (`crates/dig-app-core/tests/never_log.rs`) captures real emitted records and asserts a passphrase
+  can never reach a log field, mirroring the dig-node #553 guarantee.
+
 ## [0.8.0] - Unreleased
 
 ### Added

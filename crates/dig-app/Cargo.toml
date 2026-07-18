@@ -34,6 +34,11 @@ tray = ["dep:tray-icon", "dep:tao"]
 dig-app-core.workspace = true
 tray-icon = { workspace = true, optional = true }
 tao = { workspace = true, optional = true }
+# Structured logging (#934): the shared dual-sink (JSONL file + human stderr) building block, so the
+# tray/headless agent shell — the process that actually runs for the user's whole session — gets a
+# durable field log the same way dig-node/dig-dns/dig-updater do. See `src/logging.rs`.
+dig-logging.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

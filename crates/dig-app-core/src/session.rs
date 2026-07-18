@@ -360,6 +360,9 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
         &mut self,
         profile: ProfileAttachment,
     ) -> Result<Session, SessionError> {
+        // NEVER log the private key, the nonce, or a signature here — only the DID (already public
+        // on-chain) and the outcome. The handshake proves possession of the key; it never surfaces it.
+        tracing::info!(profile_did = %profile.did, "session attach starting");
         let begin_pubkey_hex = self.signer.signing_public_key_hex();
         let begin: BeginResult = self.call(
             METHOD_BEGIN,
@@ -394,6 +397,11 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
             },
         )?;
 
+        tracing::info!(
+            profile_did = %profile.did,
+            session_id = %attach.session_id,
+            "session attached"
+        );
         Ok(Session {
             session_id: attach.session_id,
             engine_capabilities: attach.engine_capabilities,
@@ -416,6 +424,11 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
                 session_id: &session.session_id,
             },
         )?;
+        tracing::info!(
+            profile_did = %session.profile_did,
+            session_id = %session.session_id,
+            "session detached"
+        );
         Ok(())
     }
 
@@ -486,6 +499,25 @@ impl<T: FrameTransport, S: SessionSigner, P: SignPolicy> SessionClient<T, S, P> 
             payload: &payload,
             context: params.context.as_ref(),
         });
+
+        // Log the DECISION and its bookkeeping (session/op/type), never the payload bytes or the
+        // signature the `Allow` arm below produces — this is the one place a compromised engine's
+        // callback request is observed, and the custody boundary must hold in the logs too.
+        match &decision {
+            SignDecision::Allow => tracing::info!(
+                session_id = %params.session_id,
+                op_id = %params.op_id,
+                payload_type = %params.payload_type,
+                "sign callback allowed"
+            ),
+            SignDecision::Deny(reason) => tracing::warn!(
+                session_id = %params.session_id,
+                op_id = %params.op_id,
+                payload_type = %params.payload_type,
+                reason = %reason,
+                "sign callback denied"
+            ),
+        }
 
         match &decision {
             SignDecision::Allow => {

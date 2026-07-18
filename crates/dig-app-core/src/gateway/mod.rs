@@ -65,7 +65,9 @@ impl<'a> Gateway<'a> {
 
     /// Dispatch `command`: serve it locally or proxy it to the engine, per [`Command::route`].
     pub fn dispatch(&self, command: &Command) -> Result<Outcome, GatewayError> {
-        match command.route() {
+        let route = command.route();
+        tracing::debug!(action = command.action(), route = ?route, "gateway routing decision");
+        match route {
             Route::UserApp => handle_local(command, self.identity),
             Route::Engine => self.dispatch_engine(command),
         }
@@ -84,7 +86,10 @@ impl<'a> Gateway<'a> {
                 format!("{} cannot be proxied to the engine", command.action()),
             )
         })?;
-        let result = self.proxy.call(call.method, call.params)?;
+        let result = self.proxy.call(call.method, call.params).map_err(|e| {
+            tracing::warn!(action = command.action(), method = call.method, code = ?e.code, "engine proxy call failed");
+            e
+        })?;
         Ok(Outcome::new(format!("{}: ok", command.action()), result))
     }
 }

@@ -6,3 +6,4 @@
 //! itself at login, per SPEC §4's form-factor table. See [`autostart`].
 
 pub mod autostart;
+pub mod logging;

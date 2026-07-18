@@ -29,3 +29,8 @@ dig-app-core.workspace = true
 # so this CLI crate stays self-contained.
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+# Structured logging (#934) — `dign` is a short-lived CLI invocation, so it installs the shared
+# dual-sink subscriber (`RunContext::Cli`) once at the top of `main` and holds the guard for the
+# process's one-shot lifetime; no service-style `OnceLock` is needed (there is exactly one entrypoint).
+dig-logging.workspace = true
+tracing.workspace = true

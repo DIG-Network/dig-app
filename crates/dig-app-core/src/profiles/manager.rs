@@ -96,10 +96,12 @@ impl<S: ProfileSealer> ProfileManager<S> {
         // Validate BEFORE committing anything: a bad or duplicate DID returns here, dropping
         // `provisioned` (and zeroizing its secrets) without touching persisted or session state.
         if Did::parse(&identity.did).is_none() {
+            tracing::warn!(did = %identity.did, "profile creation rejected: invalid DID");
             return Err(ProfileError::InvalidDid(identity.did.clone()));
         }
         let mut registry = self.load_registry()?;
         if registry.find(&identity.did).is_some() {
+            tracing::warn!(did = %identity.did, "profile creation rejected: DID already exists");
             return Err(ProfileError::AlreadyExists(identity.did.clone()));
         }
 
@@ -132,9 +134,11 @@ impl<S: ProfileSealer> ProfileManager<S> {
             self.save_registry(&registry)
         }) {
             // Roll back the sealed + unlocked identity so a failed create leaves nothing dangling.
+            tracing::warn!(did = %did, error = %e, "profile creation failed — rolling back identity");
             let _ = self.identities.forget(&did, &hash, &profile_dir);
             return Err(e);
         }
+        tracing::info!(did = %did, did_hash = %hash, "profile created");
         Ok(record)
     }
 
@@ -151,9 +155,16 @@ impl<S: ProfileSealer> ProfileManager<S> {
         for record in &registry.profiles {
             let profile_dir = self.profile_dir(&record.did_hash);
             self.identities
-                .unlock_persisted(&record.did, &record.did_hash, &profile_dir, root)?;
+                .unlock_persisted(&record.did, &record.did_hash, &profile_dir, root)
+                .map_err(|e| {
+                    // NEVER log the root unlock secret — only which profile failed and how many
+                    // preceding ones already succeeded (each profile's identity is independent).
+                    tracing::warn!(did = %record.did, unlocked_so_far = unlocked, error = %e, "profile re-unlock failed");
+                    e
+                })?;
             unlocked += 1;
         }
+        tracing::info!(profiles_unlocked = unlocked, "boot re-unlock complete");
         Ok(unlocked)
     }
 
@@ -164,11 +175,13 @@ impl<S: ProfileSealer> ProfileManager<S> {
     pub fn select_profile(&self, did: &str) -> Result<ProfileData> {
         let mut registry = self.load_registry()?;
         if registry.find(did).is_none() {
+            tracing::warn!(did, "profile select rejected: not found");
             return Err(ProfileError::NotFound(did.to_string()));
         }
         let data = self.load_profile_data(did)?;
         registry.active = Some(did.to_string());
         self.save_registry(&registry)?;
+        tracing::info!(did, "active profile changed");
         Ok(data)
     }
 
