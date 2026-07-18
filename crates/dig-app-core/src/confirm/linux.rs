@@ -63,11 +63,20 @@ impl DialogTool {
 
     /// The argument vector that shows `content` as a modal question dialog with an approve/cancel
     /// choice, self-dismissing after [`DIALOG_TIMEOUT_SECS`].
+    ///
+    /// **Markup safety (security-critical).** The displayed text carries attacker-influenced fields
+    /// (the dapp name / extension label, and — once the loopback wires them — the decoded transaction
+    /// and its `payload_type`). Both helpers can INTERPRET markup in their text (`zenity --text` reads
+    /// Pango markup; `kdialog` renders the string as Qt rich text when it looks HTML-ish), so a hostile
+    /// field could cosmetically distort what the user believes they are approving. Each helper is
+    /// therefore forced to treat the text as PLAIN: `zenity` via `--no-markup`, `kdialog` by escaping
+    /// the rich-text trigger characters so `mightBeRichText` can never fire.
     fn args(self, content: &ConfirmContent) -> Vec<String> {
         let text = format!("{}\n\n{}", content.heading, content.body);
         match self {
             Self::Zenity => vec![
                 "--question".into(),
+                "--no-markup".into(),
                 format!("--title={}", content.title),
                 format!("--text={text}"),
                 format!("--ok-label={}", content.action),
@@ -78,7 +87,7 @@ impl DialogTool {
                 "--title".into(),
                 content.title.clone(),
                 "--yesno".into(),
-                text,
+                escape_kdialog_plain(&text),
                 "--yes-label".into(),
                 content.action.into(),
                 "--no-label".into(),
@@ -86,6 +95,16 @@ impl DialogTool {
             ],
         }
     }
+}
+
+/// Neutralize Qt rich-text interpretation for `kdialog`, which renders its text as HTML when
+/// `Qt::mightBeRichText` matches an HTML-ish string. Escaping `&`, `<`, `>` removes every tag opener,
+/// so the heuristic sees plain text and shows the string literally — a hostile `<b>`/`<a href>` in a
+/// dapp name or decoded transaction is displayed verbatim, never rendered.
+fn escape_kdialog_plain(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A [`ForegroundWindow`] backed by a desktop dialog helper.
@@ -134,9 +153,53 @@ fn pkcheck_args() -> Vec<String> {
         "--action-id".into(),
         POLKIT_ACTION_ID.into(),
         "--process".into(),
-        std::process::id().to_string(),
+        process_subject(),
         "--allow-user-interaction".into(),
     ]
+}
+
+/// The `pkcheck --process` subject for THIS process.
+///
+/// polkit deprecates the bare-pid subject: a PID can be reused between the check and the
+/// authorization, letting a different process inherit the grant. The hardened form pins the process
+/// start time (and uid) so a reused PID cannot match. Fall back to the coarser forms only if the
+/// kernel facts are unreadable, and to the bare pid last — `pkcheck` still accepts it.
+fn process_subject() -> String {
+    let pid = std::process::id();
+    match (proc_start_time(pid), self_effective_uid()) {
+        (Some(start), Some(uid)) => format!("{pid},{start},{uid}"),
+        (Some(start), None) => format!("{pid},{start}"),
+        _ => pid.to_string(),
+    }
+}
+
+/// This process's start time in clock ticks (field 22 of `/proc/<pid>/stat`), or `None` if unreadable.
+fn proc_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_start_time_from_stat(&stat)
+}
+
+/// This process's effective uid (the second value of `/proc/self/status` `Uid:`), or `None`.
+fn self_effective_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_effective_uid_from_status(&status)
+}
+
+/// Parse the start-time field from a `/proc/<pid>/stat` line.
+///
+/// Field 2 (`comm`) is parenthesized and may itself contain spaces and `)`, so the whitespace split
+/// starts AFTER the last `)`. From there field 3 (state) is index 0, making start time (field 22)
+/// index 19.
+fn parse_start_time_from_stat(stat: &str) -> Option<u64> {
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Parse the effective uid (the second of the four space/tab-separated `Uid:` values) from
+/// `/proc/self/status`.
+fn parse_effective_uid_from_status(status: &str) -> Option<u32> {
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace().nth(2)?.parse().ok()
 }
 
 /// Map `pkcheck`'s exit code to a verification outcome.
@@ -317,6 +380,66 @@ mod tests {
         let kdialog = DialogTool::Kdialog.args(&c);
         assert!(zenity.iter().any(|a| a == "--question"));
         assert!(kdialog.iter().any(|a| a == "--yesno"));
+    }
+
+    #[test]
+    fn zenity_disables_markup_so_hostile_fields_show_literally() {
+        let content = ConfirmContent::connect(&crate::confirm::ConnectPrompt {
+            origin: "https://evil.example",
+            dapp_name: Some("<b>Trusted Bank</b>"),
+        });
+        let args = DialogTool::Zenity.args(&content);
+        assert!(args.iter().any(|a| a == "--no-markup"));
+        // The raw markup is carried through verbatim (rendered inert by --no-markup, not pre-stripped).
+        assert!(args.iter().any(|a| a.contains("<b>Trusted Bank</b>")));
+    }
+
+    #[test]
+    fn kdialog_escapes_rich_text_triggers_so_markup_cannot_render() {
+        let content = ConfirmContent::connect(&crate::confirm::ConnectPrompt {
+            origin: "https://evil.example",
+            dapp_name: Some("<a href=x>Bank</a> & co"),
+        });
+        let args = DialogTool::Kdialog.args(&content);
+        let text = &args[3];
+        assert!(!text.contains('<'), "no tag opener may survive: {text}");
+        assert!(!text.contains('>'), "no tag closer may survive: {text}");
+        assert!(text.contains("&lt;a href=x&gt;"));
+        assert!(text.contains("&amp; co"));
+    }
+
+    #[test]
+    fn escape_kdialog_plain_neutralizes_every_trigger() {
+        assert_eq!(escape_kdialog_plain("a<b>&c>"), "a&lt;b&gt;&amp;c&gt;");
+        assert_eq!(escape_kdialog_plain("plain text"), "plain text");
+    }
+
+    #[test]
+    fn pkcheck_uses_the_reuse_hardened_process_subject() {
+        // The bare pid alone is deprecated (PID-reuse race); the subject pins at least pid,start_time.
+        let subject = process_subject();
+        assert!(
+            subject.starts_with(&std::process::id().to_string()),
+            "subject names this process: {subject}"
+        );
+    }
+
+    #[test]
+    fn parse_start_time_handles_a_comm_with_spaces_and_parens() {
+        // A synthetic stat line whose comm contains spaces and a ')'; start time (field 22) = 8675309.
+        // After the last ')', field 3 (state, "S") is split-index 0, so field 22 is split-index 19 —
+        // i.e. the state token plus 19 following fields, so the sentinel is the 19th post-state field.
+        let mut fields: Vec<String> = (4..=44).map(|n| n.to_string()).collect();
+        fields[18] = "8675309".into();
+        let stat = format!("1234 (weird )name) S {}", fields.join(" "));
+        assert_eq!(parse_start_time_from_stat(&stat), Some(8675309));
+    }
+
+    #[test]
+    fn parse_effective_uid_takes_the_second_uid_field() {
+        let status = "Name:\tdig-app\nUid:\t1000\t1001\t1000\t1000\nGid:\t1000\n";
+        assert_eq!(parse_effective_uid_from_status(status), Some(1001));
+        assert_eq!(parse_effective_uid_from_status("no uid line"), None);
     }
 
     #[test]
