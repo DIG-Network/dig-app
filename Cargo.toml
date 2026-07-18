@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -28,6 +28,33 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+# Deterministic CSPRNG for tests only — pins seeded identity keys so key-management tests are
+# reproducible (never used in production code, which uses the OS CSPRNG).
+rand_chacha = "0.3"
+# Key management (U4). At-rest sealing is delegated to the audited dig-keystore `opaque` module
+# (DIGOP1 = AES-256-GCM + Argon2id); the identity keys are the dig-identity Ed25519 (slot 0x0010) +
+# X25519 (slot 0x0011) primitives from the maintained dalek crates; the OS credential store is
+# reached through the cross-platform `keyring` crate. NONE of the crypto is hand-rolled.
+dig-keystore = "0.3"
+ed25519-dalek = { version = "2", features = ["zeroize", "rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+hkdf = "0.12"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = "0.22"
+# The OS credential store abstraction — used as the custody PRIMARY on Windows (Credential Manager)
+# and macOS (Keychain) ONLY, because those backends gate access per-application. Linux is
+# deliberately EXCLUDED: the kernel keyutils session keyring is readable by any same-UID process in
+# the session (no per-app ACL) AND is non-persistent across reboot/logout, so it is unsafe as a
+# custody primary — on Linux the passphrase-sealed file is the primary instead (see the `keystore`
+# module). `keyring` is a TARGET-SPECIFIC dependency (the crate manifest gates it to windows/macos),
+# so it is never compiled on Linux and pulls no dbus/libsecret system libraries there.
+# `default-features = false` + only the per-OS native backends keeps CI builds free of system libs.
+keyring = { version = "3", default-features = false, features = [
+    "windows-native",
+    "apple-native",
+] }
 # Cross-platform desktop tray / menu-bar shell (Windows system tray · macOS menu-bar · Linux
 # AppIndicator/StatusNotifier). `tao` provides the platform event loop the tray icon needs to pump
 # its events; the native menu comes from `tray-icon`'s re-exported `muda`. The tray is the `dig-app`

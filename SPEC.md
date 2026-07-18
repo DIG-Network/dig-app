@@ -88,15 +88,51 @@ dig-app is the sole holder of the user's private keys. Keys are sealed at rest w
 DIGOP1** (AES-256-GCM + Argon2id) — never hand-rolled — under a three-level hierarchy rooted at the
 user's key:
 
-1. **Bootstrap unlock** — a DIGOP1 password held in the OS keychain (Windows DPAPI / Credential
-   Manager · macOS Keychain · Linux Secret Service), released by the login session; a passphrase
-   prompt is the fallback. Opens the active profile's sealed identity blob.
+1. **Bootstrap unlock** — a DIGOP1 password. On Windows/macOS it is held in the per-application OS
+   keychain (Windows Credential Manager / macOS Keychain), released by the login session; a
+   passphrase prompt is the fallback. On Linux it is a user passphrase (the keyutils keyring is not a
+   safe custody store — §3.1). Opens the active profile's sealed identity blob.
 2. **Root** — the unlocked profile identity key.
 3. **Per-profile DEK** — HKDF-derived from the identity, sealing every other per-profile blob.
    Profiles MUST NOT share a DEK.
 
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
+
+**Identity keys.** A profile's identity is the two `dig-identity` standard keys: an **Ed25519**
+signing key (slot `0x0010`) and an **X25519** encryption key (slot `0x0011`). Both are generated
+from the OS CSPRNG, held in memory only while unlocked, and zeroized on drop. Their at-rest form is
+a fixed 64-byte layout `signing_seed(32) || encryption_scalar(32)` that DIGOP1 seals; the private
+material is serialized nowhere else. Signing is Ed25519 over the caller's payload.
+
+**At-rest storage precedence (bootstrap unlock).** The precedence is PLATFORM-DEPENDENT, because an
+OS credential store is only a safe custody primary where its access gate is per-application:
+
+1. **OS credential store (primary on Windows + macOS ONLY)** — Windows Credential Manager · macOS
+   Keychain, reached through the `keyring` crate. The sealed blob and a freshly-generated 256-bit
+   random unlock password are stored together in ONE credential entry, so password rotation is a
+   single atomic overwrite. The login session releases the entry with no prompt. On these platforms
+   the store enforces a **per-application access ACL** — that ACL is the actual access control. The
+   DIGOP1 sealing is defense-in-depth UNDER that ACL, NOT an independent second secret: because the
+   unlock password rides in the same entry as the ciphertext, an attacker who defeats the ACL and
+   dumps the entry obtains both and can open the blob (splitting the password away from the
+   ciphertext is a separate follow-up hardening — §7). Fallback to the sealed file (below) if the
+   store is unavailable.
+2. **Sealed file (primary on Linux; fallback elsewhere)** — the sealed blob is a file
+   (`identity.digop1`) in the profile's AppData directory (home-directory-ACL'd to the owning user,
+   mode `0600`), written durably and atomically (temp file → fsync → rename → parent-dir fsync) and
+   opened with a user-supplied passphrase (Argon2id); the passphrase is never persisted. This is the
+   **primary on Linux**: the kernel keyutils session keyring is deliberately NOT used there because
+   it is readable by any same-UID process in the session (it has no per-application ACL, so a
+   same-UID background process could harvest the key) AND it is non-persistent across reboot/logout
+   (a plain reboot would destroy the only copy of a random, no-mnemonic identity — data loss). The
+   passphrase-sealed file is persistent, home-ACL'd, and — needing a user passphrase — not
+   harvestable by a background same-UID process. It is also the fallback anywhere the OS credential
+   store is unusable (a headless server, a minimal container).
+
+The precedence is detected once at vault-open time. Unlock **fails closed**: a wrong passphrase, a
+tampered blob, or a foreign key yields an opaque error that never distinguishes the cause and never
+produces partial plaintext.
 
 ### 3.2 Profiles (multi-DID)
 
@@ -256,7 +292,13 @@ When a work unit satisfies an NC item, it MUST update that item's "Satisfied by"
   - A non-admin user U2 cannot read U1's data — U1's per-profile AppData is ACL'd to U1, the
     pipe/socket ACL is per-user, and the engine opens a session only for a profile the caller can
     sign for.
-  - At-rest theft yields only DIGOP1 ciphertext.
+  - **At-rest theft of a raw disk artifact yields only DIGOP1 ciphertext** — the sealed file's bytes
+    are ciphertext, and its passphrase is never persisted. On the Windows/macOS OS-store path the
+    access control is the store's per-application ACL: defeating that ACL and dumping the entry yields
+    the blob AND its co-located unlock password together (so that path relies on the OS ACL, not on
+    the password being a separate secret; splitting them is a follow-up hardening). On Linux the
+    custody primary is the passphrase-sealed file, so at-rest theft there yields ciphertext whose
+    passphrase the attacker does not hold.
   - Engine/service compromise does not yield user keys — the engine never holds them. Worst case, a
     SYSTEM attacker abuses an *attached* session's proxied capabilities while that user is logged in;
     it cannot exfiltrate the key or act for a logged-out profile.
@@ -283,9 +325,9 @@ day one; the security-critical subsystems are implemented by later work units to
 | `engine` | engine connection state + reachability probe (`EngineConnector`, `EngineState`) | U3 (probe; real session U6) |
 | `shutdown` | the cooperative shutdown latch (`Shutdown`) that stops the run loop promptly | U3 |
 | `agent` | the per-user agent lifecycle: start/stop, reconcile run loop, live `AgentStatus` | U3 |
-| `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation | U4 (stub) |
+| `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
 | `profiles` | multi-DID create/select/edit via dig-identity | U5 (stub) |
-| `wallet` | per-profile wallet host | U4 (stub) |
+| `wallet` | per-profile wallet host | post-U4 (stub) |
 | `gateway` | authenticate callers + route (local vs proxy-to-engine) | U7 (stub) |
 
 The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows system tray · macOS

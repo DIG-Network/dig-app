@@ -22,6 +22,23 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Key management (U4) — see the workspace manifest for why each is chosen. No hand-rolled crypto.
+dig-keystore.workspace = true
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+rand_core.workspace = true
+base64.workspace = true
+
+# The OS credential store is the custody PRIMARY on Windows + macOS only (per-application access
+# gating). It is deliberately NOT a dependency on Linux: keyutils is same-UID-readable + volatile, so
+# Linux uses the passphrase-sealed file as its custody primary instead (see `keystore`). Gating the
+# dependency by target means `keyring` is never compiled on Linux — no dbus/libsecret build tax.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+keyring.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rand_chacha.workspace = true
