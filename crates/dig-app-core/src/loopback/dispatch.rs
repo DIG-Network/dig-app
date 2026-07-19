@@ -514,7 +514,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             Some(signature) => ok(
                 id,
                 json!({
-                    "signature_b64": BASE64.encode(signature),
+                    "signature_b64": BASE64.encode(signature.as_bytes()),
                     "pubkey_hex": self.signer.signing_public_key_hex(),
                 }),
             ),
