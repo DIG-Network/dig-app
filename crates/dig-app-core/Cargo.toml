@@ -33,6 +33,12 @@ dig-keystore.workspace = true
 # `crate::session` and supplies the app-specific concrete `SessionSigner` impls. Consuming the ONE
 # published definition (also consumed by dig-node #1080) makes the app↔engine contract drift-proof.
 dig-ipc-protocol.workspace = true
+# The canonical event-driven wallet backend (client seam) + the blockchain→app event contract
+# (#998/#1008/#1067). dig-app SUBSCRIBES to the WalletEvent stream through these — the `events`
+# module drives the reactive UI + #970 notifications off them, and never re-declares the taxonomy.
+dig-wallet-backend.workspace = true
+dig-events-protocol.workspace = true
+async-trait.workspace = true
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 hkdf.workspace = true

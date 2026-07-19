@@ -57,6 +57,7 @@ pub mod identity;
 pub mod ipc;
 pub mod keystore;
 pub mod loopback;
+pub mod notify;
 pub mod onboarding;
 pub mod pairing;
 pub mod profiles;
