@@ -50,6 +50,7 @@ pub mod confirm;
 pub mod decode;
 pub mod engine;
 pub mod environment;
+pub mod events;
 pub mod form_factor;
 pub mod gateway;
 pub mod identity;
