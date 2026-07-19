@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "0.20.0"
+version = "0.21.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -42,6 +42,21 @@ dig-logging = "0.1"
 # so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
 # per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
 dig-ipc-protocol = "0.1"
+# The canonical event-driven Chia wallet backend (dig_ecosystem#998/#1008). dig-app consumes its
+# `client` seam ONLY — the event subscriber, spend review/decode, and the local signer/identity
+# provider that hold the key — never the `engine` seam (that is dig-node's). Sourced from crates.io
+# per the ecosystem crates.io policy (#681). `default-features = false` + `client` keeps the engine's
+# async sync-loop deps out of the app build.
+dig-wallet-backend = { version = "0.6", default-features = false, features = ["client"] }
+# The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
+# WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
+# shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the
+# contract is canonical + byte-stable; re-declaring drifts the ecosystem, per #1008's design rule).
+# It re-exports `enumset` so the app names `EnumSet<EventKind>` without a separate enumset pin.
+dig-events-protocol = "0.1"
+# Async trait objects for the transport-injected event-feed seam (mirrors the wallet-backend client
+# seam's own `async_trait` usage), so the concrete IPC feed drops in behind a boxed trait.
+async-trait = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
