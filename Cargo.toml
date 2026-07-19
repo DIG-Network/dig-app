@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "0.21.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -41,7 +41,7 @@ dig-logging = "0.1"
 # traits + role-halves, and the APP-SIGN error taxonomy. dig-app-core consumes it as the CLIENT half
 # so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
 # per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
-dig-ipc-protocol = "0.1"
+dig-ipc-protocol = "0.2"
 # The canonical event-driven Chia wallet backend (dig_ecosystem#998/#1008). dig-app consumes its
 # `client` seam ONLY — the event subscriber, spend review/decode, and the local signer/identity
 # provider that hold the key — never the `engine` seam (that is dig-node's). Sourced from crates.io
@@ -65,12 +65,12 @@ tempfile = "3"
 # reproducible (never used in production code, which uses the OS CSPRNG).
 rand_chacha = "0.3"
 # Key management (U4). At-rest sealing is delegated to the audited dig-keystore `opaque` module
-# (DIGOP1 = AES-256-GCM + Argon2id); the identity keys are the dig-identity Ed25519 (slot 0x0010) +
-# X25519 (slot 0x0011) primitives from the maintained dalek crates; the OS credential store is
-# reached through the cross-platform `keyring` crate. NONE of the crypto is hand-rolled.
+# (DIGOP1 = AES-256-GCM + Argon2id); the identity key is the dig-identity slot-`0x0010` BLS12-381 G1
+# key (v2 model) sourced through dig-identity's own `bls` primitives (chia-bls / blst — never
+# hand-rolled), and the OS credential store is reached through the cross-platform `keyring` crate. The
+# single G1 key does BOTH signing (G2 AugScheme) and sealing (G1 ECDH), so the v1 X25519 slot `0x0011`
+# is retired — no separate encryption key, no dalek crates. NONE of the crypto is hand-rolled.
 dig-keystore = "0.3"
-ed25519-dalek = { version = "2", features = ["zeroize", "rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 hkdf = "0.12"
 # sha256 — the per-profile DEK HKDF (U4) and the per-profile AppData directory key (U5, a hash of the
 # profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
@@ -93,8 +93,11 @@ keyring = { version = "3", default-features = false, features = [
 ] }
 # The canonical DIG decentralized-identity profile FORMAT (dig_ecosystem#771): the `did:chia:` DID +
 # the additive sparse-merkle-tree of profile slots. dig-app CONSUMES this format for profile
-# metadata (never reinvents the SMT/slots); pinned release-first to the v0.1.0 tag.
-dig-identity = { git = "https://github.com/DIG-Network/dig-identity", tag = "v0.1.0" }
+# metadata (never reinvents the SMT/slots) AND its BLS12-381 G1/G2 identity-key primitives (the v2
+# key model — one slot-`0x0010` G1 key for sign + seal, X25519 slot `0x0011` retired). Pinned
+# release-first to the v0.4.2 tag; the default-on `bls` feature carries the key primitives dig-app's
+# keystore/session sign with.
+dig-identity = { git = "https://github.com/DIG-Network/dig-identity", tag = "v0.4.2" }
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.

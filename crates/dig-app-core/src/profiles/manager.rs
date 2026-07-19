@@ -159,7 +159,6 @@ impl<S: ProfileSealer> ProfileManager<S> {
             did: did.clone(),
             did_hash: hash.clone(),
             signing_public_key: hex::encode(identity.signing_public_key),
-            encryption_public_key: hex::encode(identity.encryption_public_key),
             paired_store_id: identity.paired_store_id.clone(),
             display_name: metadata.display_name.clone(),
         };
@@ -296,9 +295,8 @@ impl<S: ProfileSealer> ProfileManager<S> {
         self.save_registry(&registry)?;
 
         let signing = decode_key(&record.signing_public_key)?;
-        let encryption = decode_key(&record.encryption_public_key)?;
         data.metadata
-            .to_identity_profile(&signing, &encryption)
+            .to_identity_profile(&signing)
             .build_root()
             .map_err(|e| ProfileError::Identity(e.to_string()))
     }
@@ -361,13 +359,13 @@ impl<S: ProfileSealer> ProfileManager<S> {
     }
 }
 
-/// Decodes a stored lowercase-hex 32-byte public key.
-fn decode_key(hex_key: &str) -> Result<[u8; 32]> {
+/// Decodes a stored lowercase-hex 48-byte BLS12-381 G1 identity public key.
+fn decode_key(hex_key: &str) -> Result<[u8; 48]> {
     let bytes =
         hex::decode(hex_key).map_err(|e| ProfileError::Identity(format!("bad key hex: {e}")))?;
     bytes
         .try_into()
-        .map_err(|_| ProfileError::Identity("public key is not 32 bytes".to_string()))
+        .map_err(|_| ProfileError::Identity("public key is not 48 bytes".to_string()))
 }
 
 #[cfg(test)]

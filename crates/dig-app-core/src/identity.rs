@@ -8,8 +8,8 @@
 //!   `peer_id = SHA-256(TLS SPKI DER)`. It lets the engine be a network peer (mTLS P2P, relay
 //!   reservation) **headless at boot**. It lives in the SYSTEM service, NOT here. dig-app never
 //!   holds it.
-//! - **User identity** ([`IdentityKind::User`]) — the per-user, per-profile DID plus its signing
-//!   (`0x0010`) and encryption (`0x0011`) keys, wallet, and profile data. It lives HERE, sealed to
+//! - **User identity** ([`IdentityKind::User`]) — the per-user, per-profile DID plus its single
+//!   BLS12-381 G1 identity key (slot `0x0010`, signs + seals), wallet, and profile data. It lives HERE, sealed to
 //!   the user key. **The user key never enters the engine:** dig-app signs and hands finished bytes
 //!   to the engine, or answers a service→user-app `sign` callback for engine-initiated signatures.
 //!

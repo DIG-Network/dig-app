@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.0.0] - Unreleased
+
+### Changed
+
+- **BREAKING: migrate the identity key + IPC session signing to the BLS12-381 G1/G2 v2 key model
+  (dig_ecosystem#1211).** dig-app now signs the IPC session with the user's dig-identity slot-`0x0010`
+  **BLS12-381 G1** identity key (48-byte G1 public key, 96-byte G2 AugScheme signature) instead of the
+  retired v1 Ed25519 (32/64-byte) key, and bumps `dig-ipc-protocol` 0.1 → **0.2** and `dig-identity`
+  v0.1.0 → **v0.4.2**. This repairs a live break: a current dig-app could not open an IPC session with a
+  current dig-node (which already runs the 0.2 BLS contract) because the key/signature byte lengths
+  disagreed at attach. The single G1 key now does BOTH jobs — it signs (G2 AugScheme) AND is the seal
+  DH key (G1 ECDH) — so the v1 **X25519 encryption slot `0x0011` is retired** (no separate encryption
+  key). The user private key still signs strictly in-process; only the 96-byte detached signature and
+  the 48-byte public key ever cross the IPC boundary. The at-rest keystore layout changes to a
+  versioned `version(1) || bls_scalar(32)` blob; a legacy v1 64-byte Ed25519 blob is detected and
+  **fails closed** (`LegacyEd25519Identity`) so onboarding re-provisions a fresh v2 identity — the key
+  models are non-convertible and, pre-release (no live users), this is a clean cutover. Removes the
+  `ed25519-dalek` / `x25519-dalek` dependencies (BLS sourced via dig-identity / chia-bls). SPEC §2.2,
+  §3.1, §5.3, §5.5, §7.
+
 ## [0.18.0] - Unreleased
 
 ### Added

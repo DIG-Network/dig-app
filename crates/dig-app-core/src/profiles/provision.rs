@@ -2,8 +2,8 @@
 //! on-chain DID mint + key generation it depends on.
 //!
 //! Creating a profile mints a new `did:chia:` DID singleton, pairs it with a chip35 DataLayer store,
-//! and generates the profile's signing (slot `0x0010`) + encryption (slot `0x0011`) keys. Minting is
-//! a wallet/engine spend and key generation is U4's keystore — neither belongs in the profile layer.
+//! and generates the profile's BLS12-381 G1 identity key (slot `0x0010`). Minting is a wallet/engine
+//! spend and key generation is U4's keystore — neither belongs in the profile layer.
 //! So U5 depends on this narrow trait and receives back a [`Provisioned`]: the public
 //! [`ProvisionedIdentity`] the manager records, PLUS the freshly generated secret material the
 //! manager commits (persists sealed + unlocks) once it has validated the DID.
@@ -31,17 +31,16 @@ use crate::keystore::IdentitySecrets;
 
 /// The public identifiers of a newly minted identity handed back to the profile layer.
 ///
-/// The private keys never appear here — they live in the sibling `secrets` field of [`Provisioned`]
-/// until the manager commits them. This carries only what the plaintext registry records: the DID,
-/// the two public keys, and the paired store id.
+/// The private key never appears here — it lives in the sibling `secrets` field of [`Provisioned`]
+/// until the manager commits it. This carries only what the plaintext registry records: the DID,
+/// the public identity key, and the paired store id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvisionedIdentity {
     /// The canonical `did:chia:` DID string of the newly minted identity singleton.
     pub did: String,
-    /// The 32-byte Ed25519 signing public key (dig-identity slot `0x0010`).
-    pub signing_public_key: [u8; 32],
-    /// The 32-byte X25519 encryption public key (dig-identity slot `0x0011`).
-    pub encryption_public_key: [u8; 32],
+    /// The 48-byte compressed BLS12-381 G1 identity public key (dig-identity slot `0x0010`). The v2
+    /// model publishes ONE key — it both signs (G2 AugScheme) and seals (G1 ECDH).
+    pub signing_public_key: [u8; 48],
     /// The launcher id of the paired chip35 DataLayer store holding the profile SMT, if one was
     /// created at mint time.
     pub paired_store_id: Option<String>,

@@ -39,8 +39,6 @@ dig-ipc-protocol.workspace = true
 dig-wallet-backend.workspace = true
 dig-events-protocol.workspace = true
 async-trait.workspace = true
-ed25519-dalek.workspace = true
-x25519-dalek.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
@@ -104,6 +102,11 @@ dispatch2.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rand_chacha.workspace = true
+# The IPC contract's ENGINE half (the same one dig-node runs) + base64 — used by the #1211 headline
+# integration test (`tests/bls_ipc_session.rs`) to drive a real begin→attach handshake against the
+# app's BLS `SessionSigner` and prove a current dig-app opens a session with a current dig-node.
+dig-ipc-protocol.workspace = true
+base64.workspace = true
 # Capturing subscriber for the never-log regression tests (#934, dig-logging SPEC §7): a `fmt` layer
 # writing into an in-memory buffer so a test can assert emitted records never contain secret values
 # (a passphrase, a raw identity key). Pinned to the same 0.3 line `dig-logging` builds on.

@@ -54,9 +54,10 @@ hold it. It is what lets the engine serve + peer with no user logged in.
 ### 2.2 User identity (dig-app-side)
 
 The user identity is a **DID** (a `did:chia:` singleton, per `dig-identity` [dig_ecosystem#771]) plus
-its keys: the signing key (dig-identity slot `0x0010`) and the encryption key (slot `0x0011`, the
-X25519 IK used for end-to-end sealing), plus the wallet and the profile's data. It lives only in
-dig-app, sealed at rest to the user key.
+its single identity key: the **BLS12-381 G1 identity key** (dig-identity slot `0x0010`, the v2 key
+model), which both **signs** (BLS G2 AugScheme) and is the **seal DH key** (G1 ECDH for end-to-end
+sealing) — there is no separate encryption key (the v1 X25519 slot `0x0011` is retired). Plus the
+wallet and the profile's data. It lives only in dig-app, sealed at rest to the user key.
 
 ### 2.3 How the two relate — the user key never enters the engine
 
@@ -99,11 +100,16 @@ user's key:
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
 
-**Identity keys.** A profile's identity is the two `dig-identity` standard keys: an **Ed25519**
-signing key (slot `0x0010`) and an **X25519** encryption key (slot `0x0011`). Both are generated
-from the OS CSPRNG, held in memory only while unlocked, and zeroized on drop. Their at-rest form is
-a fixed 64-byte layout `signing_seed(32) || encryption_scalar(32)` that DIGOP1 seals; the private
-material is serialized nowhere else.
+**Identity key.** A profile's identity is ONE `dig-identity` standard key: the **BLS12-381 G1**
+identity key (slot `0x0010`, the v2 key model). The single 48-byte compressed G1 public key's private
+scalar does BOTH jobs — it signs (BLS G2 AugScheme) and is the DH key for end-to-end sealing (G1
+ECDH via `dig_identity::g1_dh`) — so the v1 X25519 encryption slot `0x0011` is retired. The key is
+generated from the OS CSPRNG (a 32-byte seed → EIP-2333 master → the standard identity derivation
+path), held in memory only while unlocked, and zeroized on drop. Its at-rest form is a **versioned**
+layout `version(1) || bls_scalar(32)` that DIGOP1 seals; the private material is serialized nowhere
+else. A reader dispatches on the version byte and **fails closed** on a legacy v1 (Ed25519+X25519)
+64-byte blob (`LegacyEd25519Identity`) — the v1↔v2 key models are non-convertible, so a legacy
+identity is re-provisioned, never reinterpreted (§ back-compat is a clean pre-release cutover).
 
 **Domain-separation invariant (MUST).** Every signature the slot `0x0010` identity key produces MUST
 carry a unique per-purpose ASCII domain-separation tag as the first bytes of the signed message; no
@@ -147,7 +153,7 @@ produces partial plaintext.
 
 ### 3.2 Profiles (multi-DID)
 
-A **profile** is `{ DID (did:chia singleton), keys (signing 0x0010 + encryption 0x0011), paired
+A **profile** is `{ DID (did:chia singleton), key (BLS12-381 G1 identity key, slot 0x0010), paired
 chip35 DataLayer store, local data (config / subscriptions / wallet / prefs) }`. The on-chain identity
 is the dig-identity #771 DID paired with a chip35 store via the store `description` field; profile
 fields are standard SMT slots. dig-app supports **multiple profiles** with exactly one **active
@@ -529,8 +535,8 @@ profile's slot `0x0010` signing key before any session opens.
    claimed slot `0x0010` signing key). Engine returns `nonce_b64` (32 random bytes, base64) and a
    `session_candidate` (uuid) naming this pending handshake.
 
-2. **App signs the challenge.** The app produces an Ed25519 signature, using the in-memory slot
-   `0x0010` key, over the byte string:
+2. **App signs the challenge.** The app produces a 96-byte BLS12-381 G2 AugScheme signature, using
+   the in-memory slot `0x0010` key, over the byte string:
 
    ```
    "DIGNET-SESSION-v1" || nonce || profile_did
@@ -589,9 +595,9 @@ in the sealed config).
 The local pipe / socket is **not** an intermediary-terminated channel to a remote recipient, so its
 own frames are **not** end-to-end sealed — the per-user channel ACL (§5.1) is sufficient. The
 ecosystem §5.4 seal-to-recipient rule (NC-1) applies to **recipient-directed content** (chat, email)
-that the engine RELAYS onward: dig-app seals such content to the recipient's dig-identity encryption
-key (slot `0x0011`) **before** handing the bytes to the engine, so the engine and any downstream
-relay see only ciphertext. Sealing is the app's responsibility, never the engine's.
+that the engine RELAYS onward: dig-app seals such content to the recipient's dig-identity BLS G1
+identity key (slot `0x0010`, via G1-DHKEM) **before** handing the bytes to the engine, so the engine
+and any downstream relay see only ciphertext. Sealing is the app's responsibility, never the engine's.
 
 ### 5.6 The extension ↔ dig-app paired-loopback signing channel (APP-SIGN)
 
@@ -846,8 +852,8 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   `payload_type`). This is the identical construction the engine `sign` callback uses, so a signature
   minted here is bound to its `payload_type` and cannot be replayed as a session attach (§5.3), a
   differently-typed spend, or any other `0x0010` signature (§3 domain-separation invariant).
-- **Response.** `{ signature_b64, pubkey_hex }` — the 64-byte detached Ed25519 signature over the
-  message above, and the signing public key. **Only the signature returns; the private key never
+- **Response.** `{ signature_b64, pubkey_hex }` — the 96-byte detached BLS12-381 G2 signature over the
+  message above, and the 48-byte G1 signing public key. **Only the signature returns; the private key never
   leaves dig-app.** A deny/timeout/decoder-failure ⇒ the matching §5.6.7 error. The JSON-RPC `id`
   correlates the response with its request across the async confirm.
 
@@ -906,9 +912,9 @@ When a work unit satisfies an NC item, it MUST update that item's "Satisfied by"
   a DIG identity key) connects to a node over mTLS, presenting a client cert derived from the profile
   identity key (§5.3 ecosystem contract). Applies to all three ladder tiers.
 - **End-to-end sealing on directed channels.** Any message dig-app sends to an intended recipient over
-  a channel an intermediary could terminate MUST be sealed to the recipient's dig-identity encryption
-  key (slot `0x0011`) *on top of* mTLS (ecosystem §5.4). mTLS authenticates the pipe; the payload is
-  sealed so a relay/intermediary sees only ciphertext.
+  a channel an intermediary could terminate MUST be sealed to the recipient's dig-identity BLS G1
+  identity key (slot `0x0010`, G1-DHKEM) *on top of* mTLS (ecosystem §5.4). mTLS authenticates the
+  pipe; the payload is sealed so a relay/intermediary sees only ciphertext.
 - **Threat model (summary).**
   - A non-admin user U2 cannot read U1's data — U1's per-profile AppData is ACL'd to U1, the
     pipe/socket ACL is per-user, and the engine opens a session only for a profile the caller can

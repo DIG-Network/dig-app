@@ -1,6 +1,6 @@
 //! Profiles — multi-DID identity, one active at a time (U5, SECURITY-CRITICAL).
 //!
-//! A **profile** is `{ DID (did:chia singleton), keys (signing 0x0010 + encryption 0x0011), paired
+//! A **profile** is `{ DID (did:chia singleton), key (BLS12-381 G1 identity key, slot 0x0010), paired
 //! chip35 DataLayer store, local data (config / subscriptions / prefs / cached metadata) }`. dig-app
 //! supports multiple profiles with exactly one **active** at a time and:
 //!
@@ -91,11 +91,7 @@ mod tests {
     }
 
     impl DidMinter for CountingMinter {
-        fn mint(
-            &self,
-            _signing: &[u8; 32],
-            _encryption: &[u8; 32],
-        ) -> Result<MintedDid, ProvisionError> {
+        fn mint(&self, _bls_g1: &[u8; 48]) -> Result<MintedDid, ProvisionError> {
             let n = self.counter.get() + 1;
             self.counter.set(n);
             Ok(MintedDid {
@@ -108,11 +104,7 @@ mod tests {
     /// A minter that always fails — for the create-error path (a rejected mint spend).
     struct FailingMinter;
     impl DidMinter for FailingMinter {
-        fn mint(
-            &self,
-            _signing: &[u8; 32],
-            _encryption: &[u8; 32],
-        ) -> Result<MintedDid, ProvisionError> {
+        fn mint(&self, _bls_g1: &[u8; 48]) -> Result<MintedDid, ProvisionError> {
             Err(ProvisionError::Failed("mint spend rejected".into()))
         }
     }
@@ -120,11 +112,7 @@ mod tests {
     /// A minter that returns a non-canonical DID string — for the DID-validation path.
     struct BadDidMinter;
     impl DidMinter for BadDidMinter {
-        fn mint(
-            &self,
-            _signing: &[u8; 32],
-            _encryption: &[u8; 32],
-        ) -> Result<MintedDid, ProvisionError> {
+        fn mint(&self, _bls_g1: &[u8; 48]) -> Result<MintedDid, ProvisionError> {
             Ok(MintedDid {
                 did: "not-a-did".into(),
                 paired_store_id: None,
@@ -135,11 +123,7 @@ mod tests {
     /// A minter that always returns the SAME DID — for the duplicate-DID / F-1 clobber path.
     struct FixedMinter;
     impl DidMinter for FixedMinter {
-        fn mint(
-            &self,
-            _signing: &[u8; 32],
-            _encryption: &[u8; 32],
-        ) -> Result<MintedDid, ProvisionError> {
+        fn mint(&self, _bls_g1: &[u8; 48]) -> Result<MintedDid, ProvisionError> {
             Ok(MintedDid {
                 did: canonical_did([9; 32]),
                 paired_store_id: None,
@@ -216,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_binds_a_did_and_its_two_public_keys() {
+    fn a_profile_binds_a_did_and_its_identity_key() {
         let dir = tempfile::tempdir().unwrap();
         let (mgr, _s) = harness(dir.path());
         let record = mgr
@@ -224,10 +208,8 @@ mod tests {
             .unwrap();
 
         assert!(Did::parse(&record.did).is_some(), "DID is canonical");
-        // 32 bytes rendered as 64 hex chars, and the two keys are distinct.
-        assert_eq!(record.signing_public_key.len(), 64);
-        assert_eq!(record.encryption_public_key.len(), 64);
-        assert_ne!(record.signing_public_key, record.encryption_public_key);
+        // The single 48-byte BLS12-381 G1 identity key, rendered as 96 hex chars.
+        assert_eq!(record.signing_public_key.len(), 96);
         assert_eq!(record.paired_store_id.as_deref(), Some("store-1"));
     }
 
@@ -723,12 +705,11 @@ mod tests {
             xch_address: None,
             ..ProfileMetadata::default()
         };
-        let profile = meta.to_identity_profile(&[3; 32], &[4; 32]);
+        let profile = meta.to_identity_profile(&[3; 48]);
         assert_eq!(profile.display_name(), Some("Ada"));
         assert!(profile.get(standard::XCH_ADDRESS).is_none());
         let keys = profile.resolve_keys();
-        assert_eq!(keys.signing_public_key, Some([3; 32]));
-        assert_eq!(keys.encryption_public_key, Some([4; 32]));
+        assert_eq!(keys.bls_g1_public_key, Some([3; 48]));
     }
 
     /// Substring search over raw bytes (no `str` assumption on ciphertext).
