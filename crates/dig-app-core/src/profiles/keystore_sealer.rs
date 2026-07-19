@@ -80,13 +80,13 @@ impl UnlockedIdentities {
         self.lock_map().contains_key(did)
     }
 
-    /// The Ed25519 signing public key of `did`'s unlocked identity, or `None` if it is locked. The
-    /// private key never leaves the session — only its public half is exposed.
-    pub fn signing_public_key(&self, did: &str) -> Option<[u8; 32]> {
+    /// The 48-byte BLS12-381 G1 signing public key of `did`'s unlocked identity, or `None` if it is
+    /// locked. The private key never leaves the session — only its public half is exposed.
+    pub fn signing_public_key(&self, did: &str) -> Option<[u8; crate::keystore::SIGNING_KEY_LEN]> {
         self.with_identity(did, |identity| identity.signing_public_key())
     }
 
-    /// Sign `message` with `did`'s unlocked Ed25519 identity key (slot `0x0010`), returning only the
+    /// Sign `message` with `did`'s unlocked BLS12-381 identity key (slot `0x0010`), returning only the
     /// detached signature, or `None` if that profile is locked. The private key never leaves the
     /// session — the caller receives a signature, never the key — so this is the custody-preserving
     /// seam a [`crate::session::SessionSigner`] over the active profile delegates to.

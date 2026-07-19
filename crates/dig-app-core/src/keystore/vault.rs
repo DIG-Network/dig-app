@@ -422,7 +422,8 @@ mod tests {
             .unwrap();
 
         let on_disk = std::fs::read(dir.path().join(SEALED_IDENTITY_FILE)).unwrap();
-        // The 64-byte plaintext key must NOT appear anywhere in the sealed file.
+        // The plaintext identity bytes (version tag + BLS scalar) must NOT appear anywhere in the
+        // sealed file.
         assert!(!on_disk.windows(raw_seed.len()).any(|w| w == &raw_seed[..]));
     }
 

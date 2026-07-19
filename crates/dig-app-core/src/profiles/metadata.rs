@@ -44,17 +44,16 @@ pub struct ProfileMetadata {
 }
 
 impl ProfileMetadata {
-    /// Materializes this metadata plus the profile's two published public keys into a canonical
-    /// dig-identity [`Profile`], ready to compute the SMT root or mint proofs for an on-chain write.
+    /// Materializes this metadata plus the profile's published BLS12-381 G1 identity key into a
+    /// canonical dig-identity [`Profile`], ready to compute the SMT root or mint proofs for an
+    /// on-chain write.
     ///
-    /// The keys are set into the standard signing (`0x0010`) and encryption (`0x0011`) slots so the
-    /// published profile resolves DID→keys for the rest of the ecosystem (dig-chat, dig-node).
-    pub fn to_identity_profile(
-        &self,
-        signing_public_key: &[u8; 32],
-        encryption_public_key: &[u8; 32],
-    ) -> Profile {
-        let mut profile = Profile::with_schema_v1();
+    /// The 48-byte G1 key is set into the standard identity slot (`0x0010`) so the published profile
+    /// resolves DID→key for the rest of the ecosystem (dig-chat, dig-node). The v2 model publishes
+    /// ONE key — the same G1 key signs (G2 AugScheme) and seals (G1 ECDH); the v1 X25519 encryption
+    /// slot `0x0011` is retired (SPEC §6a).
+    pub fn to_identity_profile(&self, bls_g1_public_key: &[u8; 48]) -> Profile {
+        let mut profile = Profile::with_schema_v2();
         set_utf8(&mut profile, standard::DISPLAY_NAME, &self.display_name);
         set_utf8(&mut profile, standard::BIO, &self.bio);
         set_utf8(&mut profile, standard::AVATAR, &self.avatar);
@@ -64,12 +63,8 @@ impl ProfileMetadata {
         set_utf8(&mut profile, standard::LINKS, &self.links);
         set_utf8(&mut profile, standard::XCH_ADDRESS, &self.xch_address);
         profile.set(
-            standard::SIGNING_PUBLIC_KEY,
-            Value::Bytes(signing_public_key.to_vec()),
-        );
-        profile.set(
-            standard::ENCRYPTION_PUBLIC_KEY,
-            Value::Bytes(encryption_public_key.to_vec()),
+            standard::BLS_G1_PUBLIC_KEY,
+            Value::Bytes(bls_g1_public_key.to_vec()),
         );
         profile
     }

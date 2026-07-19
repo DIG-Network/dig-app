@@ -69,18 +69,17 @@ pub struct ProfileData {
 
 /// The non-secret record of a profile, kept in the plaintext [`ProfileRegistry`].
 ///
-/// It carries only public information — the DID, the two public keys (hex), a cached display name
-/// for pre-unlock listing, and the directory hash — never anything that must be sealed.
+/// It carries only public information — the DID, the identity public key (hex), a cached display
+/// name for pre-unlock listing, and the directory hash — never anything that must be sealed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileRecord {
     /// The profile's canonical `did:chia:` DID.
     pub did: String,
     /// The per-profile AppData directory key, `sha256(did)` hex ([`did_hash`]).
     pub did_hash: String,
-    /// The 32-byte Ed25519 signing public key, lowercase hex.
+    /// The 48-byte BLS12-381 G1 identity public key (slot `0x0010`), lowercase hex. The v2 model's
+    /// single key — it both signs (G2 AugScheme) and seals (G1 ECDH).
     pub signing_public_key: String,
-    /// The 32-byte X25519 encryption public key, lowercase hex.
-    pub encryption_public_key: String,
     /// Launcher id of the paired chip35 profile store, if one exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paired_store_id: Option<String>,

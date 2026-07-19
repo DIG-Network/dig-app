@@ -2,9 +2,9 @@
 //!
 //! Provisioning a profile is two steps with different owners:
 //!
-//! 1. **Key generation (U4).** A fresh [`IdentitySecrets`] — the Ed25519 signing key (slot `0x0010`)
-//!    and the X25519 encryption key (slot `0x0011`) — generated from the OS CSPRNG. The private
-//!    material never leaves the identity layer; only the two public keys are published.
+//! 1. **Key generation (U4).** A fresh [`IdentitySecrets`] — the single BLS12-381 G1 identity key
+//!    (slot `0x0010`) — generated from the OS CSPRNG. The private material never leaves the identity
+//!    layer; only the 48-byte public key is published.
 //! 2. **DID mint (wallet/engine).** Minting the `did:chia:` singleton (and any paired chip35 store)
 //!    for that key pair is an on-chain spend built + signed by the wallet/engine. That is the
 //!    [`DidMinter`] seam: this crate does not build spends (SPEC §2.3), it supplies the freshly
@@ -32,18 +32,14 @@ pub struct MintedDid {
     pub paired_store_id: Option<String>,
 }
 
-/// Mints a `did:chia:` DID singleton for a generated key pair — the wallet/engine on-chain spend.
+/// Mints a `did:chia:` DID singleton for a generated identity key — the wallet/engine on-chain spend.
 ///
-/// The signing and encryption public keys are handed in so the mint can anchor them into the DID's
-/// initial profile SMT; the private keys never cross this boundary.
+/// The 48-byte BLS12-381 G1 identity public key is handed in so the mint can anchor it into the DID's
+/// initial profile SMT (slot `0x0010`); the private key never crosses this boundary.
 pub trait DidMinter {
-    /// Builds, signs, and broadcasts the DID-mint spend for the given public key pair, returning the
-    /// minted DID once it is confirmable.
-    fn mint(
-        &self,
-        signing_public_key: &[u8; 32],
-        encryption_public_key: &[u8; 32],
-    ) -> Result<MintedDid, ProvisionError>;
+    /// Builds, signs, and broadcasts the DID-mint spend for the given identity public key, returning
+    /// the minted DID once it is confirmable.
+    fn mint(&self, bls_g1_public_key: &[u8; 48]) -> Result<MintedDid, ProvisionError>;
 }
 
 /// The production [`DidMinter`] seam placeholder — the on-chain DID mint is HELD on dig-identity
@@ -58,11 +54,7 @@ pub trait DidMinter {
 pub struct HeldDidMinter;
 
 impl DidMinter for HeldDidMinter {
-    fn mint(
-        &self,
-        _signing_public_key: &[u8; 32],
-        _encryption_public_key: &[u8; 32],
-    ) -> Result<MintedDid, ProvisionError> {
+    fn mint(&self, _bls_g1_public_key: &[u8; 48]) -> Result<MintedDid, ProvisionError> {
         Err(ProvisionError::Failed(
             "on-chain DID mint is not yet available (gated on dig-identity #771)".to_string(),
         ))
@@ -95,19 +87,15 @@ impl<M: DidMinter> ProfileProvisioner for KeygenProvisioner<M> {
     fn provision(&self) -> Result<Provisioned, ProvisionError> {
         let secrets = IdentitySecrets::generate();
         let signing_public_key = secrets.signing_public_key();
-        let encryption_public_key = secrets.encryption_public_key();
 
         // The mint is attempted BEFORE building the result but produces no local state, so a failed
         // mint simply drops the freshly generated (still-unpersisted) secrets — nothing to roll back.
-        let minted = self
-            .minter
-            .mint(&signing_public_key, &encryption_public_key)?;
+        let minted = self.minter.mint(&signing_public_key)?;
 
         Ok(Provisioned {
             identity: ProvisionedIdentity {
                 did: minted.did,
                 signing_public_key,
-                encryption_public_key,
                 paired_store_id: minted.paired_store_id,
             },
             secrets,
@@ -123,7 +111,7 @@ mod tests {
     /// than silently succeeding — so a released build cannot appear to mint a DID it cannot anchor.
     #[test]
     fn held_minter_reports_the_mint_is_gated_on_771() {
-        let err = HeldDidMinter.mint(&[1; 32], &[2; 32]).unwrap_err();
+        let err = HeldDidMinter.mint(&[1; 48]).unwrap_err();
         let ProvisionError::Failed(msg) = err;
         assert!(
             msg.contains("#771"),

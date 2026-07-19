@@ -7,8 +7,9 @@
 //! 1. **Bootstrap unlock** — the DIGOP1 password that opens a profile's sealed identity blob. On
 //!    Windows/macOS its primary home is the OS credential store ([`OsCredentialStore`]); on Linux,
 //!    and as the fallback anywhere the OS store is unavailable, it is a user passphrase.
-//! 2. **Root** — the unlocked profile identity ([`IdentitySecrets`]): the Ed25519 signing key
-//!    (slot `0x0010`) and the X25519 encryption key (slot `0x0011`).
+//! 2. **Root** — the unlocked profile identity ([`IdentitySecrets`]): the single BLS12-381 G1
+//!    identity key (slot `0x0010`), which both signs (G2 AugScheme) and seals (G1 ECDH). The v1
+//!    X25519 encryption slot `0x0011` is retired.
 //! 3. **Per-profile DEK** — HKDF-derived from the identity, sealing every OTHER per-profile blob
 //!    (wallet, subscriptions, prefs) via [`IdentitySecrets::seal_data`]. Profiles never share a DEK.
 //!
@@ -39,7 +40,9 @@ mod vault;
 pub use credential::CredentialStore;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use credential::{OsCredentialStore, CREDENTIAL_SERVICE};
-pub use secrets::{verify_signature, IdentitySecrets, SEALED_SECRET_LEN, SIGNATURE_LEN};
+pub use secrets::{
+    verify_signature, IdentitySecrets, SEALED_SECRET_LEN, SIGNATURE_LEN, SIGNING_KEY_LEN,
+};
 pub use vault::ProfileVault;
 
 /// How a profile's bootstrap secret is unlocked.
@@ -84,6 +87,14 @@ pub enum KeystoreError {
     /// incompatible on-disk version, not tampering (tampering fails the AEAD tag first).
     #[error("sealed identity has an unexpected layout")]
     MalformedSecret,
+
+    /// The sealed blob is a legacy v1 (Ed25519 + X25519) identity, which the current BLS12-381 v2
+    /// key model cannot use. The two key models are non-convertible (§5.1), so this fails closed —
+    /// the profile must be re-provisioned with a fresh v2 identity rather than the legacy bytes being
+    /// reinterpreted. Pre-release (§3.7) makes this clean cutover correct: there are no live users
+    /// whose identity must survive.
+    #[error("sealed identity is a legacy Ed25519 identity and must be re-provisioned")]
+    LegacyEd25519Identity,
 
     /// The OS credential store backend returned an error (distinct from "no entry", which is not
     /// an error).

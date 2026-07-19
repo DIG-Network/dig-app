@@ -918,8 +918,8 @@ mod tests {
             .expect("a signature");
         assert_eq!(
             BASE64.decode(sig).unwrap().len(),
-            64,
-            "Ed25519 signature is 64 bytes"
+            96,
+            "a BLS12-381 G2 AugScheme signature is 96 bytes"
         );
         assert!(resp["result"]["pubkey_hex"].is_string());
     }
@@ -1261,7 +1261,7 @@ mod tests {
         let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
         let resp = router.handle(&request("sign.request", params, Some(auth)));
 
-        let sig: [u8; 64] = BASE64
+        let sig: [u8; 96] = BASE64
             .decode(resp["result"]["signature_b64"].as_str().unwrap())
             .unwrap()
             .try_into()

@@ -100,7 +100,7 @@ impl SessionSigner for ProfileSessionSigner {
         SigningPublicKey::new(
             self.identities
                 .signing_public_key(&self.profile_did)
-                .unwrap_or([0u8; 32]),
+                .unwrap_or([0u8; 48]),
         )
     }
 
@@ -113,7 +113,7 @@ impl SessionSigner for ProfileSessionSigner {
                 profile_did = %self.profile_did,
                 "sign requested for a locked profile — returning a non-verifying signature"
             );
-            Signature::new([0u8; 64])
+            Signature::new([0u8; 96])
         })
     }
 
