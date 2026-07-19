@@ -452,6 +452,19 @@ The concrete request/response shapes below are the normative contract that the a
 APP work units) and the engine-side (dig-node, `control.session.*` + the `sign` callback) both build
 against. All frames are JSON-RPC 2.0; `params`/`result` fields use the names and encodings given.
 
+**Single source of truth — the `dig-ipc-protocol` crate.** This contract is NOT hand-rolled in
+dig-app. The domain-separated message builders (`challenge_message`, `sign_callback_message`,
+`user_sign_message`), the `control.session.*` / `sign` wire types, the frame bounds, the seam traits
+(`SessionSigner`, `SignPolicy`, `FrameTransport`), the generic app-side `SessionClient` role-half, and
+the `verify_signature` engine primitive are all owned by the canonical [`dig-ipc-protocol`] crate
+(dig_ecosystem#1074) and re-exported from `dig-app-core::session`. dig-node (#1080) consumes the SAME
+crate for the engine half, so the two ends cannot drift. dig-app supplies only the app-specific
+concrete implementations: `impl SessionSigner for IdentitySecrets`, `ProfileSessionSigner`
+(`session.rs`), and the production decode-then-native-confirm `NativeConfirmSignPolicy`
+(`sign_policy.rs`). References to `session.rs::…` builders below denote those re-exports.
+
+[`dig-ipc-protocol`]: https://crates.io/crates/dig-ipc-protocol
+
 ### 5.2 Session authentication
 
 dig-app authenticates to the engine by **proving possession of the active profile's identity key** —
