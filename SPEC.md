@@ -396,6 +396,49 @@ DEK — via the §3.1 single-profile unlock path, so the re-auth restores the sm
 authorizes the sign and leaves all other profiles locked. On failure it refuses the sign with `LOCKED`
 rather than signing on a dropped key. Reads never consult the gate.
 
+### 3.7 Event-driven wallet UI + funds notifications
+
+dig-app does NOT poll wallet state; it SUBSCRIBES to the engine's wallet event stream and drives its
+UI reactively (the "event-driven, poll only on a gap" contract). The event taxonomy — `WalletEvent`,
+`EventKind`, `Cursor`/`EmittedEvent`, and the `CatchUp`/`filter_events` shape — is the CANONICAL
+`dig-events-protocol` contract, imported and never re-declared; the engine (dig-node, via
+`dig-wallet-backend`) emits it and dig-app consumes a FILTERED view (an `EnumSet<EventKind>` chosen
+per surface).
+
+The `events` module holds three transport-injected seams and the driver over them:
+
+- **`EventFeed`** — the live stream (server-push over the §5 IPC session in production; scripted in
+  tests). Each read is a `FeedItem`: a filter-matching `Event`, a `Lagged` signal (the subscriber fell
+  behind or reconnected), or `Closed`. Gap detection is a TRANSPORT concern — never derived from cursor
+  arithmetic, since a kind filter makes live cursors legitimately non-contiguous.
+- **`CatchUp`** — the backfill half (the canonical trait), called ONCE after a `Lagged` with the last
+  `Cursor` to recover the missed range, then live resumes.
+- **`EventSink`** — where recognized events land: the reactive `WalletView` and the notification
+  pipeline are sinks; the driver fans each event to all sinks.
+
+**Cursor + recovery.** Cursors are 1-based monotonic; `Cursor(0)` is the seen-nothing sentinel. On a
+`Lagged`, the driver calls `catch_up(cursor, EnumSet::all())` (ALL kinds, so cursors are contiguous for
+exact gap detection), then reconciles: if the earliest retained cursor is `> since.next()`, the missed
+range began before the engine's bounded in-memory catch-up window (4096 events; #1118 adds SQLite
+backing for longer ranges) → **unrecoverable gap** → the driver signals `EventSink::resync` and the
+sinks discard incremental state and re-read authoritatively (graceful degrade, never a crash);
+otherwise it delivers the filter-matching subset and resumes. Live events are deduped by cursor so a
+backfill/live overlap after a gap delivers each event once.
+
+**Reactive view (`events::WalletView`).** An `EventSink` that folds the stream into a cheap, cloneable
+`WalletSnapshot` (sync lifecycle, chain tip, glanceable received/sent tallies, a `balances_dirty`
+flag) the tray shell and `dign` CLI OBSERVE via a shared handle — the same pattern as
+`agent::SharedStatus`. Events say *when* to refresh; the authoritative balance comes from the §3.3
+wallet read seam when `balances_dirty` is set.
+
+**Funds notifications (`notify`, #970).** A `NotifyingSink` taps `FundsReceived`/`FundsSent` and feeds
+a debounced coalescer: every funds event within a short trailing window merges into ONE native OS toast
+(a burst of 3 receives → one "Received 3 payments: X total"), rendered through a per-OS `NativeNotifier`
+(Linux `notify-send`, macOS `osascript`; a logging fallback elsewhere — native WinRT toast is a
+follow-up). Amounts + asset labels are honest ($DIG vs XCH vs a short CAT id) and a notification NEVER
+carries a key, seed, or address. It is passive, dismissible, and opt-out — it never gates a read
+(§6.0/§6.1). This path holds no key and touches no custody surface.
+
 ---
 
 ## 4. Form factors
@@ -929,6 +972,8 @@ day one; the security-critical subsystems are implemented by later work units to
 | `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
 | `profiles` | multi-DID create/select/list/edit via dig-identity; per-profile sealed AppData | U5 |
 | `wallet` | per-profile wallet host | post-U5 (stub) |
+| `events` | event-driven wallet UI seam: `EventFeed`/`EventSink` + `EventDriver` (cursor/filter, `catch_up` backfill, graceful resync) + reactive `WalletView` (§3.7) | #1008 |
+| `notify` | debounced native funds-activity notifications off the event stream (§3.7, #970) | #970 |
 | `gateway` | route each command (local vs proxy-to-engine) + dispatch over the `EngineProxy` / `LocalIdentity` / `LinkOpener` seams; catalogued `ErrorCode` + `--json` envelopes | U7 |
 
 The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows system tray · macOS
