@@ -17,11 +17,11 @@
 //! model, so a legacy identity is re-provisioned, never silently reinterpreted).
 
 use chia_bls::SecretKey;
-use dig_keystore::{opaque, KdfParams, Password};
 use dig_identity::{
     derive_identity_sk, master_secret_key_from_seed, public_key_bytes, sign_message,
     verify_signature as bls_verify_signature,
 };
+use dig_keystore::{opaque, KdfParams, Password};
 use hkdf::Hkdf;
 use rand_core::{CryptoRng, RngCore};
 use sha2::Sha256;
@@ -184,7 +184,8 @@ impl IdentitySecrets {
         // itself, but this intermediate would not).
         let scalar: Zeroizing<[u8; SCALAR_LEN]> =
             Zeroizing::new(bytes[1..].try_into().expect("32-byte slice"));
-        let identity = SecretKey::from_bytes(&scalar).map_err(|_| KeystoreError::MalformedSecret)?;
+        let identity =
+            SecretKey::from_bytes(&scalar).map_err(|_| KeystoreError::MalformedSecret)?;
         Ok(Self { identity })
     }
 }
