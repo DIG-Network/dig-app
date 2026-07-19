@@ -1,7 +1,7 @@
 //! The unlocked, in-memory user identity key — the material that never touches disk in the clear
 //! and never crosses the IPC boundary to the engine (§2.3 of `SPEC.md`).
 //!
-//! A profile's identity is ONE key, matching the `dig-identity` v2 key model (SPEC §6a):
+//! A profile's identity is ONE key, matching the `dig-identity` v2 key model (SPEC §2.2 / §3.1):
 //!
 //! - the **BLS12-381 G1 identity key** (slot `0x0010`) — a 48-byte compressed G1 public key whose
 //!   private scalar does BOTH jobs: it signs (BLS G2, AugScheme — spends, profile SMT writes, the
@@ -9,7 +9,10 @@
 //!   sealing derives from (G1 ECDH via [`dig_identity::g1_dh`], ecosystem §5.4). There is no separate
 //!   encryption key — the v1 X25519 slot `0x0011` is retired.
 //!
-//! The key lives only in [`IdentitySecrets`], which zeroizes its secret scalar on drop. Its at-rest
+//! The key lives only in [`IdentitySecrets`]. Because `chia_bls::SecretKey` (0.26) does NOT
+//! self-zeroize (it implements no `Zeroize`/`Drop` scrub), [`IdentitySecrets`] stores the raw 32-byte
+//! scalar in a [`Zeroizing`] buffer — which IS scrubbed on drop — and reconstructs a transient
+//! `SecretKey` only per operation, so the private scalar is erased on logout / detach / lock. Its at-rest
 //! form is a versioned layout — `version(1) || bls_scalar(32)` — that [`crate::keystore::vault`]
 //! DIGOP1-seals; nothing else serializes the private material. The version byte lets a reader
 //! distinguish this BLS format from any future one AND fail-closed on a legacy v1 (Ed25519) 64-byte
@@ -62,15 +65,24 @@ pub const SIGNING_KEY_LEN: usize = 48;
 pub const SIGNATURE_LEN: usize = 96;
 
 /// The unlocked private key of one profile's DID identity. Held only in memory; its secret scalar
-/// is zeroized on drop (via `chia_bls::SecretKey`'s own `ZeroizeOnDrop`).
+/// is scrubbed from memory on drop.
+///
+/// `chia_bls::SecretKey` (0.26) implements no `Zeroize`/`Drop` scrub — the crate does not even depend
+/// on `zeroize` — so storing a live `SecretKey` would leave the 32-byte identity scalar lingering in
+/// freed heap after logout / detach / profile lock. We therefore keep the raw scalar in a
+/// [`Zeroizing`] buffer (which IS scrubbed on drop) and reconstruct a **transient** `SecretKey` only
+/// inside each operation that needs the private key, letting it fall out of scope immediately. This
+/// mirrors the proven pattern in [`crate::wallet::signing::WalletKey`].
 ///
 /// This is the sole owner of the user's private key material while a profile is unlocked. Callers
 /// obtain one from [`crate::keystore::ProfileVault::unlock`] and drop it (logout / detach) to erase
 /// the key from memory.
 pub struct IdentitySecrets {
-    /// The BLS12-381 G1 identity secret scalar (slot `0x0010`) — signs (G2 AugScheme) and is the DH
-    /// key for end-to-end sealing (G1 ECDH). The single key of the v2 model.
-    identity: SecretKey,
+    /// The BLS12-381 G1 identity secret scalar (slot `0x0010`), held as its 32 raw bytes in a
+    /// zeroizing buffer so the private material is scrubbed on drop. The transient `SecretKey` is
+    /// reconstructed per-op ([`IdentitySecrets::secret_key`]). This one key does BOTH jobs of the v2
+    /// model — it signs (G2 AugScheme) and is the DH key for end-to-end sealing (G1 ECDH).
+    identity_scalar: Zeroizing<[u8; SCALAR_LEN]>,
 }
 
 impl IdentitySecrets {
@@ -85,9 +97,11 @@ impl IdentitySecrets {
         let mut seed = Zeroizing::new([0u8; SCALAR_LEN]);
         rng.fill_bytes(&mut *seed);
         let master = master_secret_key_from_seed(&*seed);
-        Self {
-            identity: derive_identity_sk(&master),
-        }
+        // `master` and the derived identity key are transient `chia_bls::SecretKey` locals; chia-bls
+        // 0.26 does not scrub them on drop, so we immediately capture the identity scalar into a
+        // zeroizing buffer (the persisted form) and let the locals fall out of scope.
+        let identity_scalar = Zeroizing::new(derive_identity_sk(&master).to_bytes());
+        Self { identity_scalar }
     }
 
     /// Generate a fresh identity using the operating system's CSPRNG.
@@ -95,17 +109,23 @@ impl IdentitySecrets {
         Self::generate_with_rng(&mut rand_core::OsRng)
     }
 
+    /// Reconstruct the transient identity signing key from its zeroizing bytes, for the duration of
+    /// one operation. Crate-internal; the key is never handed to a caller and drops at end of scope.
+    fn secret_key(&self) -> SecretKey {
+        SecretKey::from_bytes(&self.identity_scalar).expect("32 stored bytes are a valid SecretKey")
+    }
+
     /// The 48-byte compressed BLS12-381 G1 signing public key — `dig-identity` slot `0x0010`. This is
     /// published to the DID profile; the private half never leaves this process.
     pub fn signing_public_key(&self) -> [u8; SIGNING_KEY_LEN] {
-        public_key_bytes(&self.identity)
+        public_key_bytes(&self.secret_key())
     }
 
     /// Sign `message` with the BLS12-381 identity key, returning the 96-byte G2 AugScheme signature.
     /// This is the in-process signing primitive every §2.3 flow funnels through — the key itself is
     /// never exposed to callers.
     pub fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
-        sign_message(&self.identity, message)
+        sign_message(&self.secret_key(), message)
     }
 
     /// Seal `plaintext` — a per-profile secret blob (wallet state, subscriptions, prefs) — under
@@ -150,8 +170,7 @@ impl IdentitySecrets {
     pub(super) fn to_sealed_bytes(&self) -> Zeroizing<[u8; SEALED_SECRET_LEN]> {
         let mut bytes = Zeroizing::new([0u8; SEALED_SECRET_LEN]);
         bytes[0] = SEALED_IDENTITY_VERSION;
-        let scalar = Zeroizing::new(self.identity.to_bytes());
-        bytes[1..].copy_from_slice(&*scalar);
+        bytes[1..].copy_from_slice(&*self.identity_scalar);
         bytes
     }
 
@@ -179,14 +198,14 @@ impl IdentitySecrets {
         if bytes[0] != SEALED_IDENTITY_VERSION {
             return Err(KeystoreError::MalformedSecret);
         }
-        // Hold the split-out raw scalar in a scrubbing buffer: it is private material, so its stack
-        // copy must be zeroized on drop rather than left in freed memory (the `SecretKey` zeroizes
-        // itself, but this intermediate would not).
-        let scalar: Zeroizing<[u8; SCALAR_LEN]> =
+        // Hold the split-out raw scalar in the scrubbing buffer that becomes this identity's stored
+        // form: it is private material, so it must be zeroized on drop rather than left in freed
+        // memory. Reconstruct a transient `SecretKey` purely to validate the scalar is well-formed
+        // (fail-closed on malformed bytes); it drops immediately — only the bytes are retained.
+        let identity_scalar: Zeroizing<[u8; SCALAR_LEN]> =
             Zeroizing::new(bytes[1..].try_into().expect("32-byte slice"));
-        let identity =
-            SecretKey::from_bytes(&scalar).map_err(|_| KeystoreError::MalformedSecret)?;
-        Ok(Self { identity })
+        SecretKey::from_bytes(&identity_scalar).map_err(|_| KeystoreError::MalformedSecret)?;
+        Ok(Self { identity_scalar })
     }
 }
 
@@ -229,6 +248,16 @@ mod tests {
         let msg = b"attach challenge";
         let sig = id.sign(msg);
         assert!(verify_signature(&id.signing_public_key(), msg, &sig));
+    }
+
+    #[test]
+    fn repeated_ops_reconstruct_the_same_transient_key() {
+        // The identity scalar is stored as raw bytes and a transient `SecretKey` is rebuilt per op;
+        // this proves that reconstruction is stable — the public key and a signature are identical
+        // across separate calls, so nothing is lost by not retaining a live `SecretKey`.
+        let id = seeded();
+        assert_eq!(id.signing_public_key(), id.signing_public_key());
+        assert_eq!(id.sign(b"same message"), id.sign(b"same message"));
     }
 
     #[test]

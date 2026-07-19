@@ -51,7 +51,7 @@ impl ProfileMetadata {
     /// The 48-byte G1 key is set into the standard identity slot (`0x0010`) so the published profile
     /// resolves DID→key for the rest of the ecosystem (dig-chat, dig-node). The v2 model publishes
     /// ONE key — the same G1 key signs (G2 AugScheme) and seals (G1 ECDH); the v1 X25519 encryption
-    /// slot `0x0011` is retired (SPEC §6a).
+    /// slot `0x0011` is retired (SPEC §2.2 / §3.1).
     pub fn to_identity_profile(&self, bls_g1_public_key: &[u8; 48]) -> Profile {
         let mut profile = Profile::with_schema_v2();
         set_utf8(&mut profile, standard::DISPLAY_NAME, &self.display_name);
