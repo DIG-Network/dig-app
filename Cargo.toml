@@ -35,6 +35,13 @@ tracing = "0.1"
 # verbs from, so the layout is byte-identical to dig-node/dig-dns/dig-updater. Sourced from crates.io
 # (no git/path dep) per the ecosystem crates.io policy (#681).
 dig-logging = "0.1"
+# The canonical dig-app ⇄ dig-node IPC session/signing contract (dig_ecosystem#1074/#1081). ONE
+# ecosystem definition of the local IPC channel — the domain-separated message builders (app signs,
+# engine verifies), frame bounds, the `control.session.*` wire types + `sign` callback, the seam
+# traits + role-halves, and the APP-SIGN error taxonomy. dig-app-core consumes it as the CLIENT half
+# so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
+# per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
+dig-ipc-protocol = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
