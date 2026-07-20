@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "dig-app-core",
  "dig-logging",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "async-trait",
  "base64",
@@ -1257,7 +1257,7 @@ dependencies = [
  "chip35-dl-coin",
  "clvm-traits",
  "clvmr",
- "dig-constants",
+ "dig-constants 0.7.0",
  "dig-events-protocol",
  "dig-identity",
  "dig-ipc-protocol",
@@ -1288,6 +1288,17 @@ dependencies = [
  "uuid",
  "windows",
  "zeroize",
+]
+
+[[package]]
+name = "dig-constants"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10260fd1f143402e5c87d36671932c3f3fc7640da00a94fa7ffffd80a9b9a1b2"
+dependencies = [
+ "chia-consensus",
+ "chia-protocol",
+ "hex-literal",
 ]
 
 [[package]]
@@ -1383,13 +1394,15 @@ dependencies = [
 
 [[package]]
 name = "dig-wallet-backend"
-version = "0.6.0"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5456dc1e4d53d8d3f955814788e7cc8c61b8c82cd09439c8d9b314f9daec580"
+checksum = "223ab54623a6ec2ead67419143a13dc3bf0d8fe5cf2f1e135518c3a12a2d1990"
 dependencies = [
  "async-trait",
  "chia",
+ "dig-constants 0.5.1",
  "dig-events-protocol",
+ "dig-identity",
  "enumset",
  "futures-core",
  "hex",
@@ -1424,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "clap",
  "dig-app-core",
