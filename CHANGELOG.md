@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.0.2] - Unreleased
+
+### Changed
+
+- **Consume the canonical crates for the profile-DEK at-rest byte contract (dig_ecosystem#1024 Phase 2,
+  WS1).** The per-profile DEK derivation in `keystore/secrets.rs` now sources its HKDF salt, IKM version
+  prefix, info/label, and output length from `dig_constants` (`DEK_SALT`, `IDENTITY_IKM_VERSION`,
+  `PROFILE_DEK_LABEL`, `SYMMETRIC_KEY_LEN`) instead of local literals — the single source of truth that
+  dig-session's `derive_symmetric_key` also consumes, so the two can never drift. The derived DEK is
+  **byte-identical** to before (a new regression test seals with the pre-swap literal construction and
+  opens under the new path, and vice-versa), so every already-sealed profile still unlocks (§5.1).
+- **Dedup `dig-identity` onto crates.io (dig_ecosystem#1024 Phase 2, WS2).** `dig-identity` moves off the
+  `git`+tag dependency to the crates.io `"0.4"` line — the same source dig-session and dig-wallet-backend
+  pin — so the whole dependency graph resolves to exactly one `dig-identity` (no duplicate-crate byte
+  drift). `cargo tree -i dig-identity` is single-source (v0.4.2).
+
 ## [1.0.0] - Unreleased
 
 ### Changed
