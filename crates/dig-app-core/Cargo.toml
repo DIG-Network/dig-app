@@ -28,6 +28,8 @@ serde_json.workspace = true
 tracing.workspace = true
 # Key management (U4) — see the workspace manifest for why each is chosen. No hand-rolled crypto.
 dig-keystore.workspace = true
+# Shared byte-frozen constants (the profile-DEK at-rest byte contract) — see the workspace manifest.
+dig-constants.workspace = true
 # The canonical dig-app ⇄ dig-node IPC session/signing contract (dig_ecosystem#1074/#1081). This
 # crate is the CLIENT half: it re-exports the contract's builders/traits/role-half from
 # `crate::session` and supplies the app-specific concrete `SessionSigner` impls. Consuming the ONE

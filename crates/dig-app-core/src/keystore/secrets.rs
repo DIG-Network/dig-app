@@ -20,6 +20,7 @@
 //! model, so a legacy identity is re-provisioned, never silently reinterpreted).
 
 use chia_bls::SecretKey;
+use dig_constants::{DEK_SALT, IDENTITY_IKM_VERSION, PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN};
 use dig_identity::{
     derive_identity_sk, master_secret_key_from_seed, public_key_bytes, sign_message,
     verify_signature as bls_verify_signature,
@@ -32,21 +33,21 @@ use zeroize::Zeroizing;
 
 use super::KeystoreError;
 
-/// HKDF domain separator for the per-profile data-encryption key. Bumping the version suffix is how
-/// a future DEK-derivation change stays distinguishable from this one. `v2` marks the BLS key model
-/// (the DEK is now keyed off the versioned BLS at-rest bytes, so it never collides with a v1 DEK).
-const DEK_INFO: &[u8] = b"dig-app:profile-dek:v2";
-
-/// HKDF salt for the per-profile DEK. A fixed, non-secret domain constant: the identity secret is
-/// the entropy source, so the salt only needs to separate this derivation from any other HKDF use.
-const DEK_SALT: &[u8] = b"dig-app:dek-salt:v1";
+// The per-profile DEK at-rest byte contract — the HKDF salt (`DEK_SALT`), the IKM version prefix
+// (`IDENTITY_IKM_VERSION`), the info/label (`PROFILE_DEK_LABEL`), and the output length
+// (`SYMMETRIC_KEY_LEN`) — is sourced from `dig_constants` as the single source of truth, so it can
+// never drift from the byte-identical copy dig-session's `UnlockedIdentity::derive_symmetric_key`
+// derives from the same crate (dig_ecosystem §5.1 back-compat / §4.1). See dig-constants' "Profile
+// DEK at-rest byte contract" section for the authoritative definition + golden vector.
 
 /// The number of bytes in a BLS12-381 secret-key scalar (`chia_bls::SecretKey`).
 const SCALAR_LEN: usize = 32;
 
 /// The version tag of the current (BLS12-381 G1) at-rest identity layout. Byte 0 of the sealed
-/// plaintext; a reader dispatches on it so the format is self-describing and future-proof.
-pub const SEALED_IDENTITY_VERSION: u8 = 2;
+/// plaintext; a reader dispatches on it so the format is self-describing and future-proof. It is the
+/// same byte as the DEK's [`IDENTITY_IKM_VERSION`] prefix (both mark the v2 BLS key model), sourced
+/// canonically from `dig_constants` rather than a local literal so the two can never disagree.
+pub const SEALED_IDENTITY_VERSION: u8 = IDENTITY_IKM_VERSION;
 
 /// The length of the [`IdentitySecrets`] at-rest serialization: one version byte followed by the
 /// 32-byte BLS secret scalar.
@@ -158,8 +159,8 @@ impl IdentitySecrets {
     fn dek_password(&self) -> Password {
         let ikm = self.to_sealed_bytes();
         let hkdf = Hkdf::<Sha256>::new(Some(DEK_SALT), &*ikm);
-        let mut dek = Zeroizing::new([0u8; 32]);
-        hkdf.expand(DEK_INFO, &mut *dek)
+        let mut dek = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
+        hkdf.expand(PROFILE_DEK_LABEL, &mut *dek)
             .expect("32 bytes is a valid HKDF-SHA256 output length");
         Password::new(*dek)
     }
@@ -345,6 +346,55 @@ mod tests {
             stranger.open_data(&blob),
             Err(KeystoreError::DataUnlock)
         ));
+    }
+
+    /// §5.1 back-compat gate for WS1 (dig-constants adoption): the per-profile DEK derivation is
+    /// byte-identical BEFORE and AFTER sourcing its salt/version/label/length from `dig_constants`.
+    ///
+    /// This reconstructs the PRE-refactor DEK construction from the OLD hard-coded literals (the
+    /// exact bytes shipped before this change: salt `dig-app:dek-salt:v1`, IKM prefix `2`, label
+    /// `dig-app:profile-dek:v2`, 32-byte output) and proves a blob sealed with the OLD-derived DEK
+    /// opens under the NEW [`open_data`](IdentitySecrets::open_data) path, AND a blob sealed with the
+    /// NEW [`seal_data`](IdentitySecrets::seal_data) path opens under the OLD-derived DEK. If the
+    /// dig-constants values ever drift from these frozen literals, this test fails — which is what
+    /// keeps already-sealed profiles readable (a drift would lock users out).
+    #[test]
+    fn dek_is_byte_identical_across_the_dig_constants_swap() {
+        // The OLD construction, reproduced from literals exactly as it was before WS1.
+        fn old_dek_password(id: &IdentitySecrets) -> Password {
+            const OLD_DEK_SALT: &[u8] = b"dig-app:dek-salt:v1";
+            const OLD_DEK_INFO: &[u8] = b"dig-app:profile-dek:v2";
+            let ikm = id.to_sealed_bytes(); // 0x02 || scalar — the versioned at-rest layout
+            let hkdf = Hkdf::<Sha256>::new(Some(OLD_DEK_SALT), &*ikm);
+            let mut dek = Zeroizing::new([0u8; 32]);
+            hkdf.expand(OLD_DEK_INFO, &mut *dek)
+                .expect("32 bytes is a valid HKDF-SHA256 output length");
+            Password::new(*dek)
+        }
+
+        let id = seeded();
+
+        // OLD-sealed blob opens under the NEW path.
+        let old_sealed = opaque::seal(
+            &old_dek_password(&id),
+            b"profile blob",
+            KdfParams::FAST_TEST,
+        )
+        .unwrap();
+        assert_eq!(
+            &*id.open_data(&old_sealed).unwrap(),
+            b"profile blob",
+            "a blob sealed with the pre-swap DEK must open under the dig-constants-sourced DEK"
+        );
+
+        // NEW-sealed blob opens under the OLD-derived DEK.
+        let new_sealed = id.seal_data(b"profile blob", KdfParams::FAST_TEST).unwrap();
+        let reopened = opaque::open(&old_dek_password(&id), &new_sealed).unwrap();
+        assert_eq!(
+            &reopened[..],
+            b"profile blob",
+            "a blob sealed with the dig-constants-sourced DEK must open under the pre-swap DEK"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -71,6 +71,11 @@ rand_chacha = "0.3"
 # single G1 key does BOTH signing (G2 AugScheme) and sealing (G1 ECDH), so the v1 X25519 slot `0x0011`
 # is retired — no separate encryption key, no dalek crates. NONE of the crypto is hand-rolled.
 dig-keystore = "0.3"
+# The ecosystem's single source of truth for shared byte-frozen constants (dig_ecosystem#681/§4.1).
+# dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
+# PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
+# copy dig-session's `derive_symmetric_key` already sources from the same crate (§5.1 back-compat).
+dig-constants = "0.7"
 hkdf = "0.12"
 # sha256 — the per-profile DEK HKDF (U4) and the per-profile AppData directory key (U5, a hash of the
 # profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
@@ -94,10 +99,12 @@ keyring = { version = "3", default-features = false, features = [
 # The canonical DIG decentralized-identity profile FORMAT (dig_ecosystem#771): the `did:chia:` DID +
 # the additive sparse-merkle-tree of profile slots. dig-app CONSUMES this format for profile
 # metadata (never reinvents the SMT/slots) AND its BLS12-381 G1/G2 identity-key primitives (the v2
-# key model — one slot-`0x0010` G1 key for sign + seal, X25519 slot `0x0011` retired). Pinned
-# release-first to the v0.4.2 tag; the default-on `bls` feature carries the key primitives dig-app's
-# keystore/session sign with.
-dig-identity = { git = "https://github.com/DIG-Network/dig-identity", tag = "v0.4.2" }
+# key model — one slot-`0x0010` G1 key for sign + seal, X25519 slot `0x0011` retired). Sourced from
+# crates.io per the ecosystem crates.io policy (#681) and — critically — from the SAME source
+# dig-session and dig-wallet-backend pin (`"0.4"`), so the whole dependency graph resolves to ONE
+# dig-identity (no duplicate-crate byte-drift). The default-on `bls` feature carries the key
+# primitives dig-app's keystore/session sign with.
+dig-identity = { version = "0.4", features = ["bls"] }
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.
