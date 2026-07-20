@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [1.0.3] - Unreleased
+
+### Changed
+
+- **Absorb the `dig-wallet-backend` 0.6 → 0.12 dependency major (dig_ecosystem#1024 Phase 2, PR1).**
+  Bump the `client`-feature dependency across six minors; the client-seam API `dig-app-core` consumes
+  stayed source-compatible, so no keystore/key-model change lands here (that is PR2). `dig-wallet-backend`
+  resolves single-source at `0.12.1` and `dig-identity` stays single-source at `0.4.2` (shared with
+  wallet-backend), preserving the #29 dedup. `dig-constants` appears twice in the tree — `0.7.0`
+  (dig-app's direct dep, carrying the DEK byte-contract consts) and `0.5.1` (pulled transitively by
+  wallet-backend, which caps it at `^0.5.1`). The duplicate is benign: the DEK consts exist ONLY in
+  `0.7.0` (absent from `0.5.1`), so no split-brain is possible, and no `dig-constants` type crosses the
+  wallet-backend ↔ dig-app boundary. A follow-up may raise wallet-backend's `dig-constants` bound to
+  `^0.7` to collapse the duplicate.
+
 ## [1.0.2] - Unreleased
 
 ### Changed
