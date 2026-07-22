@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -42,12 +42,6 @@ dig-logging = "0.1"
 # so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
 # per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
 dig-ipc-protocol = "0.2"
-# The canonical event-driven Chia wallet backend (dig_ecosystem#998/#1008). dig-app consumes its
-# `client` seam ONLY — the event subscriber, spend review/decode, and the local signer/identity
-# provider that hold the key — never the `engine` seam (that is dig-node's). Sourced from crates.io
-# per the ecosystem crates.io policy (#681). `default-features = false` + `client` keeps the engine's
-# async sync-loop deps out of the app build.
-dig-wallet-backend = { version = "0.12", default-features = false, features = ["client"] }
 # The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
 # WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the
@@ -70,7 +64,21 @@ rand_chacha = "0.3"
 # hand-rolled), and the OS credential store is reached through the cross-platform `keyring` crate. The
 # single G1 key does BOTH signing (G2 AugScheme) and sealing (G1 ECDH), so the v1 X25519 slot `0x0011`
 # is retired — no separate encryption key, no dalek crates. NONE of the crypto is hand-rolled.
-dig-keystore = "0.3"
+dig-keystore = "0.4"
+# The session/keystore facade (dig_ecosystem#1024 Phase 2): the master-HD custody model (#997). One
+# `UnlockedMasterSeed` per app holds the single master seed; per-profile identity + DEK derive from it
+# by profile index (`profile_public_key`/`profile_sign`/`profile_derive_symmetric_key`), and the DEK
+# is byte-identical to the frozen `dig_constants` HKDF construction (§5.1 at-rest back-compat). dig-app
+# routes ALL identity signing + at-rest DEK derivation through this facade — never a local re-derive.
+dig-session = "0.4"
+# The custody OBJECT MODEL + crypto crate (#1497/#1509): AccountStore/AccountSession/UnlockedAccount,
+# keystore at-rest crypto, AuthPolicy verification + KDF unlock, per-profile identity signing
+# (ProfileSigner: dig_ipc_protocol::SessionSigner), the wallet money-path (WalletOps), DEK, DID/dig-store
+# mint. dig-app is the THIN HARNESS consumer (#1509): it implements + injects AuthProvider + SpendAuthorizer
+# and wires ProfileSigner into the IPC sign callback. Consumed as the published crates.io release
+# (release-first, §4.1): dig-account 0.1.0 is live, so dig-app pins the crates.io `X.Y` version — never
+# a git source (§3.6 all-crates rule).
+dig-account = "0.1"
 # The ecosystem's single source of truth for shared byte-frozen constants (dig_ecosystem#681/§4.1).
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
@@ -101,10 +109,11 @@ keyring = { version = "3", default-features = false, features = [
 # metadata (never reinvents the SMT/slots) AND its BLS12-381 G1/G2 identity-key primitives (the v2
 # key model — one slot-`0x0010` G1 key for sign + seal, X25519 slot `0x0011` retired). Sourced from
 # crates.io per the ecosystem crates.io policy (#681) and — critically — from the SAME source
-# dig-session and dig-wallet-backend pin (`"0.4"`), so the whole dependency graph resolves to ONE
-# dig-identity (no duplicate-crate byte-drift). The default-on `bls` feature carries the key
-# primitives dig-app's keystore/session sign with.
-dig-identity = { version = "0.4", features = ["bls"] }
+# dig-session pins (`"0.5"`), so the whole dependency graph resolves to ONE dig-identity (no
+# duplicate-crate byte-drift). 0.5 adds the per-profile-index derivation (`derive_identity_sk_at`)
+# the master-HD multi-profile model (#997) needs. The default-on `bls` feature carries the key
+# primitives dig-app's session signs with.
+dig-identity = { version = "0.5", features = ["bls"] }
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.
