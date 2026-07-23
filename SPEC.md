@@ -277,6 +277,25 @@ key (the same custody boundary as the §2.3 session `sign` callback). A required
 the wallet does not hold is skipped, so an incomplete bundle fails closed at the network rather than
 being silently forged.
 
+**Authorize before sign (the live money path, master-HD / Model A).** A spend MUST pass a fail-closed
+gate, in this fixed order, before any signature is produced: (1) **summarize** — the recipients + fee
+are independently re-derived from the coin spends (never a caller's claim) and classified into a
+`SpendTier` (`AutoSend` | `Confirm` | `Vault`) under the profile's `CustodyPolicy`; (2) **authorize** —
+the injected `SpendAuthorizer` rules on the summary (programmatic limits/allowlists); (3) **confirm
+ceremony** — for every tier ABOVE `AutoSend` (i.e. `Confirm` and the clawback `Vault` — the
+`RequireAuth` class) the injected `AuthProvider::confirm_spend` MUST run and return `Approve`. An
+authorizer `Ok` is NOT sufficient on its own: a `RequireAuth`-class spend that skips or is declined at
+the confirm ceremony is REFUSED, and the money signer is never even built. The signer is drawn from the
+shared, lockable account residency and re-read at sign time, so a lock (lock-now / idle timeout / OS
+screen lock) that lands during the confirm dialog fails the sign closed. The residency is the SAME
+lockable seed home the identity signer reads — a locked account refuses to sign money AND identity.
+
+**No user key on the wire (#908).** The seed and every money/identity secret derived from it stay owned
+by the account crate; the money signer holds the key inside its vetted core and exposes signing only.
+What crosses the dig-app→dig-node IPC boundary is exclusively the signed `SpendBundle` (money path) and
+the profile-signed bytes + public key (identity path) — never seed, money secret, or per-profile DEK, in
+raw or hex form. This is asserted at the wire-byte level (the `no_user_key_on_wire` conformance test).
+
 **Wallet state at rest.** The per-profile wallet view — receive addresses, the last-known spendable
 coins (per asset) used for display + coin selection between chain reads, and the outbound spend
 history — is DIGOP1-sealed under that profile's own DEK (§3.4), in the profile's directory
