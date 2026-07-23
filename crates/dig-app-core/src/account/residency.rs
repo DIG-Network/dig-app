@@ -22,10 +22,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use dig_account::{ProfileIx, UnlockedAccount};
+use chia_protocol::CoinSpend;
+use dig_account::{
+    CustodyPolicy, LocalMoneySigner, ProfileIx, Result as AccountResult, SpendSummary,
+    UnlockedAccount,
+};
 use dig_ipc_protocol::domain::{Signature, SigningPublicKey};
 use dig_ipc_protocol::signer::SessionSigner;
 use dig_keystore::KdfParams;
+use dig_wallet_backend::types::Network;
 use zeroize::Zeroizing;
 
 use crate::account::sealer::AccountSealer;
@@ -85,6 +90,38 @@ impl AccountResidency {
     /// (production Argon2) KDF cost. A convenience so the tray shell need not name [`KdfParams`].
     pub fn production_sealer(&self, ix: ProfileIx) -> ResidencySealer {
         self.sealer(ix, KdfParams::DEFAULT)
+    }
+
+    /// Re-derive + tier a [`SpendSummary`] for `coin_spends` under `policy`, through the CURRENT
+    /// account's money path — or `None` once the residency is locked (fail-closed: a locked account
+    /// summarizes nothing, so the confirm ceremony can never run against a stale snapshot).
+    ///
+    /// The recipients + fee are re-derived from the coin spends by dig-account (never a caller's
+    /// claim); the returned [`SpendSummary::tier`] is what the [authorize-before-sign
+    /// gate](crate::account::money::MoneyPath) weighs. The inner `Result` is dig-account's — an
+    /// undecodable coin-spend set fails closed there.
+    pub fn summarize(
+        &self,
+        coin_spends: &[CoinSpend],
+        policy: &CustodyPolicy,
+    ) -> Option<AccountResult<SpendSummary>> {
+        self.guard()
+            .as_ref()
+            .map(|acct| acct.wallet_ops().summarize(coin_spends, policy))
+    }
+
+    /// Build the LIVE money signer for the default profile on `network`, through the CURRENT account —
+    /// or `None` once the residency is locked. Read on every call so a lock (lock-now / idle timeout /
+    /// OS screen lock) that drops the account between the confirm ceremony and this call fails the
+    /// sign closed rather than signing under a snapshot the user meant to relock.
+    ///
+    /// The returned [`LocalMoneySigner`] holds the master key inside dig-account's vetted signer and
+    /// exposes signing only — the seed never crosses this boundary. The inner `Result` is
+    /// dig-account's (a signer-construction failure).
+    pub fn money_signer(&self, network: Network) -> Option<AccountResult<LocalMoneySigner>> {
+        self.guard()
+            .as_ref()
+            .map(|acct| acct.wallet_ops().money_signer(network))
     }
 
     /// The 48-byte identity signing public key of profile `ix`, as hex — for the connect-handle
@@ -286,6 +323,44 @@ mod tests {
         assert!(
             signer.try_sign(b"m").is_some(),
             "re-installing an unlocked account re-unlocks the live signer"
+        );
+    }
+
+    #[test]
+    fn the_money_signer_is_live_while_unlocked_and_fails_closed_once_locked() {
+        use dig_wallet_backend::types::Network;
+        let residency = residency();
+
+        assert!(
+            matches!(residency.money_signer(Network::Mainnet), Some(Ok(_))),
+            "an unlocked residency yields a live money signer"
+        );
+
+        residency.lock_all();
+        assert!(
+            residency.money_signer(Network::Mainnet).is_none(),
+            "a locked residency yields NO money signer (fail-closed — never signs money)"
+        );
+    }
+
+    #[test]
+    fn summarize_reads_the_live_account_and_fails_closed_once_locked() {
+        use dig_account::{CustodyPolicy, HotWallet};
+        let residency = residency();
+        let policy = CustodyPolicy::Hot(HotWallet::default());
+
+        // Unlocked: the summary derivation runs (an empty coin-spend set is an undecodable spend, so
+        // dig-account fails it closed as `Err` — but the accessor itself is `Some`, i.e. the account
+        // was consulted).
+        assert!(
+            matches!(residency.summarize(&[], &policy), Some(Err(_))),
+            "an unlocked residency consults the account (and fails an empty spend closed)"
+        );
+
+        residency.lock_all();
+        assert!(
+            residency.summarize(&[], &policy).is_none(),
+            "a locked residency summarizes nothing (fail-closed)"
         );
     }
 
