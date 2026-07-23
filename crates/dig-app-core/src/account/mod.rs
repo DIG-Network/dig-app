@@ -29,6 +29,7 @@ pub mod auth;
 pub mod ceremony;
 pub mod lifecycle;
 pub mod registry;
+pub mod residency;
 pub mod sealer;
 
 /// The account identifier is the one defined by `dig-account`, re-exported so the harness (the

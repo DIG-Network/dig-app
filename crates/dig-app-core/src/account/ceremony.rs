@@ -80,7 +80,7 @@ impl<C: CredentialStore> CredentialCeremony<C> {
 fn generate_password() -> String {
     let mut raw = Zeroizing::new([0u8; GENERATED_PASSWORD_BYTES]);
     rand_core::OsRng.fill_bytes(&mut *raw);
-    hex::encode(&*raw)
+    hex::encode(*raw)
 }
 
 #[async_trait]
