@@ -27,6 +27,7 @@
 
 pub mod auth;
 pub mod registry;
+pub mod sealer;
 
 /// The account identifier is the one defined by `dig-account`, re-exported so the harness (the
 /// [`registry`] and the [`auth`] provider) keys every account by the SAME opaque id the custody crate's
