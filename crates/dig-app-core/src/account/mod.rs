@@ -26,6 +26,7 @@
 //! every commit. The mechanical switchover is a later pass.
 
 pub mod auth;
+pub mod ceremony;
 pub mod lifecycle;
 pub mod registry;
 pub mod sealer;
