@@ -30,7 +30,7 @@ use std::sync::Arc;
 use dig_keystore::{opaque, KdfParams, Password};
 use zeroize::Zeroizing;
 
-use crate::profiles::sealer::{ProfileSealer, SealError};
+use crate::sealer::{ProfileSealer, SealError};
 
 /// A [`ProfileSealer`] bound to a single profile's 32-byte data-encryption key (DEK).
 ///

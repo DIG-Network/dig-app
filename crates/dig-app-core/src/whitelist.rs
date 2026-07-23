@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::profiles::sealer::{ProfileSealer, SealError};
+use crate::sealer::{ProfileSealer, SealError};
 
 /// One authorized dapp origin, as persisted DIGOP1-sealed per profile (§5.6.4). Records what the user
 /// granted at connect time; it is convenience memory, not sign authority.
@@ -135,21 +135,15 @@ impl<S: ProfileSealer> WhitelistStore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keystore::IdentitySecrets;
-    use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-    use dig_keystore::KdfParams;
+    use crate::account::sealer::AccountSealer;
+    use crate::test_support::test_sealer;
 
     const DID: &str = "did:chia:whitelist-test";
     const ORIGIN: &str = "https://dapp.example";
 
-    /// A store whose active profile is unlocked with a fresh identity, sealing under the fast test KDF.
-    fn store() -> WhitelistStore<KeystoreSealer> {
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        WhitelistStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            DID,
-        )
+    /// A store sealing under a fresh profile DEK (the fast test KDF).
+    fn store() -> WhitelistStore<AccountSealer> {
+        WhitelistStore::new(test_sealer(DID), DID)
     }
 
     #[test]
@@ -200,12 +194,9 @@ mod tests {
         let store_a = store();
         let out = store_a.grant(ORIGIN, vec![], 1).unwrap();
 
-        let identities = UnlockedIdentities::new();
-        identities.unlock("did:chia:other", IdentitySecrets::generate());
-        let store_b = WhitelistStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            "did:chia:other",
-        );
+        // A DISTINCT profile DEK (a different label) cannot open A's sealed grant — isolation is
+        // cryptographic (the AEAD tag), not by DID string.
+        let store_b = WhitelistStore::new(test_sealer("did:chia:other"), "did:chia:other");
         assert!(matches!(
             store_b.restore_sealed(&out.sealed_record),
             Err(SealError::Open)
@@ -214,12 +205,16 @@ mod tests {
 
     #[test]
     fn a_locked_profile_fails_closed_on_grant() {
-        let identities = UnlockedIdentities::new();
-        // DID is NOT unlocked in this store — sealing must fail closed.
-        let store = WhitelistStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            DID,
-        );
+        use crate::account::residency::AccountResidency;
+        use crate::session_lock::SessionKeys;
+        use dig_account::ProfileIx;
+        use dig_keystore::KdfParams;
+
+        // A live-view sealer over a LOCKED residency must fail closed on seal.
+        let residency = crate::test_support::test_residency();
+        let sealer = residency.sealer(ProfileIx::ROOT, KdfParams::FAST_TEST);
+        AccountResidency::lock_all(&residency);
+        let store = WhitelistStore::new(sealer, DID);
         assert!(matches!(
             store.grant(ORIGIN, vec![], 1),
             Err(SealError::Seal(_))

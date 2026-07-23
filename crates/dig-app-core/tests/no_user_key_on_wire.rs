@@ -25,13 +25,13 @@ use chia_sdk_driver::{SpendContext, StandardLayer};
 use chia_sdk_types::Conditions;
 use chip35_dl_coin::master_to_wallet_unhardened;
 
+use dig_account::WalletKey;
 use dig_app_core::account::money::MoneyPath;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::wallet::encode_signed_bundle;
 use dig_app_core::wallet::engine::{
     BroadcastRequest, BroadcastResponse, CoinsRequest, CoinsResponse, WalletEngine,
 };
-use dig_app_core::wallet::signing::WalletKey;
 use dig_app_core::wallet::WalletError;
 
 use dig_account::{
@@ -122,7 +122,7 @@ fn residency_at_seed() -> AccountResidency {
 
 /// A real standard-layer XCH send out of the wallet's own coin (recipient hinted, change home).
 fn real_send() -> Vec<CoinSpend> {
-    let key = WalletKey::from_seed(SEED);
+    let key = WalletKey::from_seed(&SEED);
     let wallet_ph = key.puzzle_hash();
     let mut ctx = SpendContext::new();
     let coin = Coin::new(Bytes32::new([1u8; 32]), wallet_ph, 1_000_000);
@@ -196,7 +196,7 @@ async fn no_user_key_crosses_the_ipc_wire_on_a_live_signed_spend() {
     // A representative read request also crosses the wire — include it in the inspection.
     engine
         .coins(CoinsRequest {
-            address: WalletKey::from_seed(SEED).address().unwrap(),
+            address: WalletKey::from_seed(&SEED).address().unwrap(),
             asset: dig_app_core::wallet::state::Asset::Xch,
         })
         .unwrap();

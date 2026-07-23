@@ -21,10 +21,11 @@
 //! 4. serves the two loopback listeners (`[::1]:9779` + `127.0.0.1:9779`) behind the pinned
 //!    [`ConnectionGuard`].
 //!
-//! **The active profile MUST be unlocked** before assembly — the signer + sealer resolve the identity
-//! from the shared [`UnlockedIdentities`] session. A headless host, or a host with no unlocked profile,
-//! MUST NOT start the service (fail-closed, §5.6.1); that gate lives in the shell, which only calls
-//! [`build_router`] once it has an unlocked active profile on a desktop session.
+//! **The account MUST be unlocked** before assembly — the injected signer + sealer resolve the identity
+//! from the master-HD [`AccountResidency`](crate::account::residency::AccountResidency). A headless
+//! host, or a host with no unlocked account, MUST NOT start the service (fail-closed, §5.6.1); that gate
+//! lives in the shell, which only calls [`build_router`] once it has an unlocked account on a desktop
+//! session.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -35,7 +36,7 @@ use crate::loopback::{
     SealedRecordStore, SignReauthGate, PINNED_EXTENSION_IDS,
 };
 use crate::pairing::PairingStore;
-use crate::profiles::sealer::ProfileSealer;
+use crate::sealer::ProfileSealer;
 use crate::session::SessionSigner;
 use crate::session_lock::{SessionLock, SystemClock};
 use crate::wallet::state::WalletStore;
@@ -176,7 +177,7 @@ where
 /// [`std::io::Error`] if neither loopback address can be bound (the identity port is in use).
 pub fn serve_blocking<S>(router: FrameRouter<S>) -> std::io::Result<()>
 where
-    S: crate::profiles::sealer::ProfileSealer + Send + Sync + 'static,
+    S: crate::sealer::ProfileSealer + Send + Sync + 'static,
 {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -188,11 +189,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::sealer::AccountSealer;
     use crate::confirm::HeadlessConfirmer;
-    use crate::keystore::IdentitySecrets;
     use crate::loopback::persist::FileSealedStore;
-    use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-    use dig_keystore::KdfParams;
+    use crate::test_support::{test_residency, test_sealer};
 
     const DID: &str = "did:chia:sign-service-test";
 
@@ -204,17 +204,13 @@ mod tests {
         u64::from(u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]]))
     }
 
-    /// A session with `DID` unlocked to a fresh identity — the precondition for assembling a service.
-    fn unlocked() -> UnlockedIdentities {
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        identities
-    }
-
-    fn assemble(identities: UnlockedIdentities, dir: &Path) -> FrameRouter<KeystoreSealer> {
-        let signer = crate::session::ProfileSessionSigner::new(identities.clone(), DID);
+    /// Assemble a service over a fresh unlocked master-HD residency (the precondition for a live
+    /// service): the identity signer reads the residency's default profile and the stores seal under a
+    /// deterministic per-profile DEK (so a re-assembled service over the SAME `DID` re-opens its blobs).
+    fn assemble(dir: &Path) -> FrameRouter<AccountSealer> {
+        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
         build_router(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
+            test_sealer(DID),
             DID,
             dir,
             Arc::new(HeadlessConfirmer),
@@ -304,7 +300,7 @@ mod tests {
     #[test]
     fn assembling_a_fresh_profile_starts_with_no_pairings() {
         let dir = tempfile::tempdir().unwrap();
-        let router = assemble(unlocked(), dir.path());
+        let router = assemble(dir.path());
         assert_eq!(router.restore(), (0, 0), "a fresh profile restores nothing");
     }
 
@@ -317,11 +313,7 @@ mod tests {
         use crate::wallet::state::{WalletState, WalletStore};
 
         let brand = tempfile::tempdir().unwrap();
-        let identities = unlocked();
-        let store = WalletStore::new(
-            brand.path(),
-            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-        );
+        let store = WalletStore::new(brand.path(), test_sealer(DID));
         store
             .save_state(
                 DID,
@@ -332,13 +324,9 @@ mod tests {
             )
             .unwrap();
 
-        let profile_dir =
-            crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
-        let addresses = active_wallet_addresses(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            DID,
-            &profile_dir,
-        );
+        let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
+        // The SAME per-profile DEK (same label) re-opens the sealed state.
+        let addresses = active_wallet_addresses(test_sealer(DID), DID, &profile_dir);
         assert_eq!(addresses, vec!["xch1receive", "xch1change"]);
     }
 
@@ -347,45 +335,32 @@ mod tests {
         // No wallet state was ever saved — the connect handle simply carries no addresses (the
         // signing channel is still fully usable), never a failure.
         let brand = tempfile::tempdir().unwrap();
-        let profile_dir =
-            crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
-        let addresses = active_wallet_addresses(
-            KeystoreSealer::with_kdf(unlocked(), KdfParams::FAST_TEST),
-            DID,
-            &profile_dir,
-        );
+        let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
+        let addresses = active_wallet_addresses(test_sealer(DID), DID, &profile_dir);
         assert!(addresses.is_empty());
     }
 
     #[test]
     fn an_unopenable_sealed_wallet_yields_no_addresses() {
-        // A wallet state exists on disk but the profile is locked (its DEK is absent from the
-        // session), so `load_state` fails to open it — the helper falls back to no addresses rather
-        // than propagating the error into the assembly.
+        // A wallet state exists on disk but is sealed under a DIFFERENT profile DEK, so `load_state`
+        // fails the AEAD tag — the helper falls back to no addresses rather than propagating the error
+        // into the assembly.
         use crate::wallet::state::{WalletState, WalletStore};
 
         let brand = tempfile::tempdir().unwrap();
-        WalletStore::new(
-            brand.path(),
-            KeystoreSealer::with_kdf(unlocked(), KdfParams::FAST_TEST),
-        )
-        .save_state(
-            DID,
-            &WalletState {
-                addresses: vec!["xch1receive".into()],
-                ..WalletState::default()
-            },
-        )
-        .unwrap();
+        WalletStore::new(brand.path(), test_sealer(DID))
+            .save_state(
+                DID,
+                &WalletState {
+                    addresses: vec!["xch1receive".into()],
+                    ..WalletState::default()
+                },
+            )
+            .unwrap();
 
-        let profile_dir =
-            crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
-        // A fresh session has DID LOCKED, so opening the sealed state fails the AEAD tag.
-        let addresses = active_wallet_addresses(
-            KeystoreSealer::with_kdf(UnlockedIdentities::new(), KdfParams::FAST_TEST),
-            DID,
-            &profile_dir,
-        );
+        let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
+        // A DISTINCT DEK (a different label) cannot open the sealed state — the AEAD tag rejects it.
+        let addresses = active_wallet_addresses(test_sealer("another-profile"), DID, &profile_dir);
         assert!(addresses.is_empty());
     }
 
@@ -393,11 +368,7 @@ mod tests {
     fn a_profile_dir_with_no_derivable_brand_dir_yields_no_addresses() {
         // A profile dir shallow enough to have no grandparent cannot locate a brand dir — the
         // helper must fall back to no addresses rather than panic.
-        let addresses = active_wallet_addresses(
-            KeystoreSealer::with_kdf(unlocked(), KdfParams::FAST_TEST),
-            DID,
-            Path::new("solo"),
-        );
+        let addresses = active_wallet_addresses(test_sealer(DID), DID, Path::new("solo"));
         assert!(addresses.is_empty());
     }
 
@@ -406,13 +377,9 @@ mod tests {
         // Persist a sealed pairing under the profile's DEK, then assemble a fresh service over the
         // SAME identity + directory and confirm the pairing is restored (survives a restart, #958).
         let dir = tempfile::tempdir().unwrap();
-        let identities = unlocked();
 
         let sealed = {
-            let pairings = PairingStore::new(
-                KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-                DID,
-            );
+            let pairings = PairingStore::new(test_sealer(DID), DID);
             let outcome = pairings
                 .pair("mlibddmbhlgogepnjdienclhnkfpkfah", 1)
                 .unwrap();
@@ -426,7 +393,7 @@ mod tests {
             outcome.pairing_id
         };
 
-        let router = assemble(identities, dir.path());
+        let router = assemble(dir.path());
         assert!(
             router.pairings().is_paired(&sealed),
             "the persisted pairing is restored on assembly"

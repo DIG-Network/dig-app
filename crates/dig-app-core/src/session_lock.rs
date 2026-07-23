@@ -1,8 +1,8 @@
 //! Session-lock lifecycle (WSEC-D, dig_ecosystem#965) — **security-critical / custody**.
 //!
-//! A profile stays unlocked only as long as its data-encryption key (DEK) lives in the in-memory
-//! [`UnlockedIdentities`](crate::profiles::UnlockedIdentities) session (SPEC §3.1). Leaving that key
-//! resident indefinitely opens two windows an attacker can walk into: someone who reaches the
+//! The account stays unlocked only as long as its master seed / data-encryption keys live in the
+//! in-memory [`AccountResidency`](crate::account::residency::AccountResidency) (SPEC §3.1). Leaving
+//! that key resident indefinitely opens two windows an attacker can walk into: someone who reaches the
 //! unattended machine while the user is away, and the boot-unlock residency window where an OS
 //! keychain auto-unlock leaves the DEK resident for hours. This module closes both by **dropping the
 //! DEK** — re-sealing the session — on three triggers, and requiring re-authentication only when the
@@ -29,8 +29,8 @@
 //! # Boundary
 //!
 //! This module only *drops* the DEK and tracks whether a re-auth is owed. It never holds, derives, or
-//! re-derives key material: unlocking is the keystore's job ([`crate::keystore`] /
-//! [`crate::profiles`]), and the app calls [`SessionLock::note_resumed`] once a re-unlock succeeds to
+//! re-derives key material: unlocking is the account boot's job ([`crate::account::boot`]), and the
+//! app calls [`SessionLock::note_resumed`] once a re-unlock succeeds to
 //! clear the owed re-auth and restart the idle clock.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -38,34 +38,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::profiles::UnlockedIdentities;
-
 /// The default idle window before a foreground session auto-locks (SPEC §3.1 walk-away window).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// The in-memory key material a lock event drops. Implemented by
-/// [`UnlockedIdentities`](crate::profiles::UnlockedIdentities) in production; a test double elsewhere.
+/// The in-memory key material a lock event drops. Implemented by the master-HD
+/// [`AccountResidency`](crate::account::residency::AccountResidency) in production (dropping the
+/// unlocked account zeroizes the master seed); a test double elsewhere.
 ///
 /// Keeping this a narrow seam is what lets the lock lifecycle be exhaustively unit-tested without a
 /// real keystore, and keeps this module unable to do anything with the keys except drop them and ask
 /// whether any remain.
 pub trait SessionKeys {
-    /// Drop every unlocked profile DEK from memory, re-sealing the whole session.
+    /// Drop the unlocked account's key material from memory, re-sealing the session.
     fn lock_all(&self);
 
-    /// Whether any profile is currently unlocked (i.e. a lock still has key material to drop, and
+    /// Whether the account is currently unlocked (i.e. a lock still has key material to drop, and
     /// signing would not yet need a re-unlock).
     fn is_any_unlocked(&self) -> bool;
-}
-
-impl SessionKeys for UnlockedIdentities {
-    fn lock_all(&self) {
-        UnlockedIdentities::lock_all(self)
-    }
-
-    fn is_any_unlocked(&self) -> bool {
-        UnlockedIdentities::is_any_unlocked(self)
-    }
 }
 
 /// A monotonic time source, seamed so the idle logic is deterministic in tests. Production uses

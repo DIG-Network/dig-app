@@ -59,9 +59,8 @@ pub mod ipc;
 pub mod keystore;
 pub mod loopback;
 pub mod notify;
-pub mod onboarding;
 pub mod pairing;
-pub mod profiles;
+pub mod sealer;
 pub mod session;
 pub mod session_lock;
 pub mod shutdown;
@@ -71,6 +70,9 @@ pub mod spend_summary;
 pub mod storage;
 pub mod wallet;
 pub mod whitelist;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 /// The operating system the user app is running on. Used by [`storage`] and [`ipc`] to resolve the
 /// per-OS AppData layout and the native IPC endpoint without touching the real environment (so the
@@ -113,19 +115,15 @@ pub enum Error {
     #[error("key management error: {0}")]
     Keystore(#[from] keystore::KeystoreError),
 
-    /// A profile-management failure (create / select / edit / seal — see [`profiles::ProfileError`]).
-    #[error(transparent)]
-    Profiles(#[from] profiles::ProfileError),
-
-    /// A wallet-host failure (key/address derivation, spend build, local signing, sealed wallet
-    /// state, or the engine seam — see [`wallet::WalletError`]).
+    /// A wallet-host failure (address derivation, sealed wallet state, or the engine seam — see
+    /// [`wallet::WalletError`]).
     #[error(transparent)]
     Wallet(#[from] wallet::WalletError),
 
-    /// The dig-peer is not yet usable because onboarding is incomplete — a wallet or a profile is
-    /// still required (see [`onboarding::OnboardingError`]).
+    /// A per-profile at-rest sealing failure (locked account, or a foreign DEK — see
+    /// [`sealer::SealError`]).
     #[error(transparent)]
-    Onboarding(#[from] onboarding::OnboardingError),
+    Seal(#[from] sealer::SealError),
 }
 
 /// The crate result type.

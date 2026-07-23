@@ -24,12 +24,12 @@ use dig_app_core::engine::NullConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
 use dig_app_core::loopback::SignReauthGate;
-use dig_app_core::profiles::did_hash;
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
     SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
 };
 use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
+use dig_app_core::storage::did_hash;
 use dig_app_core::{sign_service, storage, Os};
 use std::sync::Arc;
 

@@ -174,7 +174,6 @@ mod tests {
     use super::*;
     use crate::account::residency::AccountResidency;
     use crate::session_lock::SessionKeys;
-    use crate::wallet::signing::WalletKey;
     use async_trait::async_trait;
     use chia_protocol::{Bytes32, Coin};
     use chia_puzzle_types::Memos;
@@ -182,16 +181,16 @@ mod tests {
     use chia_sdk_types::Conditions;
     use dig_account::{
         AccountSession, AccountStore, AuthFactors, HotWallet, Result as AccountResult,
-        SpendSummary, UnlockRequest, Vault,
+        SpendSummary, UnlockRequest, Vault, WalletKey,
     };
     use dig_keystore::MemoryBackend;
     use dig_session::{Password, SEED_LEN};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// A fixed 32-byte master seed so the test's independently-built coin spend (via dig-app's
+    /// A fixed 32-byte master seed so the test's independently-built coin spend (via dig-account's
     /// [`WalletKey`]) and the residency's dig-account money signer derive the SAME canonical wallet
-    /// key at [`ProfileIx::ROOT`] — the byte-contract proven in `wallet_key_byte_contract.rs`.
+    /// key at [`ProfileIx::ROOT`].
     const SEED: [u8; SEED_LEN] = [0x7c; SEED_LEN];
 
     /// A residency over a fresh account enrolled at [`SEED`].
@@ -212,7 +211,7 @@ mod tests {
     /// takes, so dig-account's money signer can actually verify + sign it. `native_out` mojos leave to
     /// a recipient; the remainder (minus `fee`) returns as change to the wallet.
     fn real_send(native_out: u64, fee: u64) -> Vec<CoinSpend> {
-        let key = WalletKey::from_seed(SEED);
+        let key = WalletKey::from_seed(&SEED);
         let wallet_ph = key.puzzle_hash();
         let mut ctx = SpendContext::new();
         let coin = Coin::new(Bytes32::new([1u8; 32]), wallet_ph, 1_000_000);

@@ -34,7 +34,7 @@ use dig_wallet_backend::types::Network;
 use zeroize::Zeroizing;
 
 use crate::account::sealer::AccountSealer;
-use crate::profiles::sealer::{ProfileSealer, SealError};
+use crate::sealer::{ProfileSealer, SealError};
 use crate::session_lock::SessionKeys;
 
 /// The single unlocked account the app currently holds, behind a shared lock so the tray, the sign
