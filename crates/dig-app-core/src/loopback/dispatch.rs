@@ -726,10 +726,9 @@ mod tests {
 
     #[test]
     fn a_sign_request_routes_through_a_dig_account_profile_signer() {
-        // The custody switchover (#1546) swaps the loopback sign seam from the app's
-        // `ProfileSessionSigner` to `dig_account::ProfileSigner`. Both implement
-        // `dig_ipc_protocol::SessionSigner`, so the seam is TYPE-COMPATIBLE — this proves it
-        // end-to-end: a `sign.request` routed through a `FrameRouter` whose signer IS a
+        // The loopback sign seam takes its identity signer by injection as a
+        // `dig_ipc_protocol::SessionSigner`; the custody path supplies `dig_account::ProfileSigner`.
+        // This proves the seam end-to-end: a `sign.request` routed through a `FrameRouter` whose signer IS a
         // `dig_account::ProfileSigner` returns a signature that verifies against that signer's
         // advertised key over the domain-separated `DIGNET-SIGN-v1` message (never the raw payload),
         // and the response advertises that same key.

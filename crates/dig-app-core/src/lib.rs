@@ -32,15 +32,14 @@
 //! - [`engine`] — the connection state + reachability probe to the identity-agnostic engine.
 //! - [`shutdown`] — the cooperative shutdown latch that stops the run loop promptly.
 //!
-//! The normative contract for all of the above is the repo `SPEC.md`. U1 shipped the module skeleton
-//! plus the pure helpers; U3 added the agent lifecycle and tray shell; U4 implemented [`keystore`]
-//! (identity key generation / unlock / sign, DIGOP1 at-rest sealing, OS-credential-store primary +
-//! sealed-file fallback, rotation); U5 implemented [`profiles`] (multi-DID create/select/list/edit
-//! with per-profile sealed AppData), consuming U4's DEK sealing through the
-//! [`profiles::ProfileSealer`] seam. U6 implemented [`session`] (the identity-authenticated engine
-//! session: begin→attach handshake, the `sign` callback, detach, re-attach, multi-session). U7
-//! implemented [`gateway`] (the CLI/RPC front door: route each command LOCAL vs engine-PROXY, over
-//! the [`gateway::EngineProxy`] / [`gateway::LocalIdentity`] / [`gateway::LinkOpener`] seams).
+//! The normative contract for all of the above is the repo `SPEC.md`. Custody is the master-HD
+//! [`account`] harness (enroll/unlock lifecycle, the lockable [`account::residency::AccountResidency`],
+//! per-profile identity signing + DEK derivation, and the authorize-before-sign money path) over the
+//! `dig-account` crate; [`keystore`] holds the DIGOP1 at-rest sealing + OS-credential-store primary /
+//! sealed-file fallback it builds on. [`session`] is the identity-authenticated engine session
+//! (begin→attach handshake, the `sign` callback, detach, re-attach, multi-session); [`gateway`] is the
+//! CLI/RPC front door that routes each command LOCAL vs engine-PROXY over the
+//! [`gateway::EngineProxy`] / [`gateway::LocalIdentity`] / [`gateway::LinkOpener`] seams.
 //!
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 

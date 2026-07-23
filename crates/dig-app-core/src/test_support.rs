@@ -1,7 +1,6 @@
 //! Shared test doubles for the master-HD custody path (test-only).
 //!
-//! The retired per-profile-identity tests built a `KeystoreSealer` + `ProfileSessionSigner` over an
-//! in-memory `UnlockedIdentities` session. The live path is the master-HD
+//! The custody path is the master-HD
 //! [`AccountResidency`](crate::account::residency::AccountResidency), so these helpers give every test
 //! module ONE way to build the two seams the loopback/pairing/whitelist/wallet stores depend on:
 //!
