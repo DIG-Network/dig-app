@@ -114,6 +114,7 @@ impl UnlockedIdentities {
 /// The production [`ProfileSealer`]: seals per-profile blobs under each profile's identity-derived
 /// DEK via U4's [`IdentitySecrets`], resolving the profile's identity from a shared
 /// [`UnlockedIdentities`] session store.
+#[derive(Clone)]
 pub struct KeystoreSealer {
     identities: UnlockedIdentities,
     kdf: KdfParams,

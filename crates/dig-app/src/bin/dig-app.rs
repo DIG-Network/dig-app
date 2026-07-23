@@ -168,7 +168,8 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     let signer: Box<dyn dig_app_core::session::SessionSigner + Send + Sync> = Box::new(
         dig_app_core::session::ProfileSessionSigner::new(session.clone(), active_did.clone()),
     );
-    let router = sign_service::build_router(session, &active_did, &profile_dir, confirmer, signer)
+    let sealer = KeystoreSealer::new(session);
+    let router = sign_service::build_router(sealer, &active_did, &profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate);
 
     // Subscribe to OS screen-lock events, containing any callback panic before it can cross the

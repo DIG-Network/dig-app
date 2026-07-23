@@ -29,15 +29,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use dig_keystore::KdfParams;
-
 use crate::confirm::NativeConfirmer;
 use crate::loopback::{
     ConnectionGuard, FileSealedStore, FrameRouter, LoopbackServer, ProfileConnectInfo,
     SealedRecordStore, SignReauthGate, PINNED_EXTENSION_IDS,
 };
 use crate::pairing::PairingStore;
-use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
+use crate::profiles::keystore_sealer::UnlockedIdentities;
+use crate::profiles::sealer::ProfileSealer;
 use crate::session::SessionSigner;
 use crate::session_lock::{SessionLock, SystemClock};
 use crate::wallet::state::WalletStore;
@@ -90,51 +89,32 @@ impl SignReauthGate for SessionReauthGate {
     }
 }
 
-/// Build the production [`FrameRouter`] for `profile_did` (which MUST be unlocked in `identities`),
-/// persisting sealed pairings/whitelist/nonces under `profile_dir` and gating every action on
-/// `confirmer`, then RESTORE any persisted state so a paired extension + its connected dapps survive a
-/// restart (#958/#956). Returns the ready-to-serve router.
+/// Build the production [`FrameRouter`] for `profile_did`, sealing every per-profile blob under the
+/// caller-supplied `sealer` (bound to the active profile's DEK), persisting sealed
+/// pairings/whitelist/nonces under `profile_dir` and gating every action on `confirmer`, then RESTORE
+/// any persisted state so a paired extension + its connected dapps survive a restart (#958/#956).
+/// Returns the ready-to-serve router.
 ///
-/// Uses the production Argon2 KDF cost for the per-profile DEK; the shell hands this router to
-/// [`serve_blocking`].
-pub fn build_router(
-    identities: UnlockedIdentities,
+/// The sealer is INJECTED (not built here) so the master-HD custody switchover (#1547) supplies an
+/// [`AccountSealer`](crate::account::sealer::AccountSealer) over the unlocked account's per-profile
+/// DEK through the SAME seam — mirroring how the identity `signer` is injected — without this assembly
+/// knowing which custody root produced the key. The sealer carries its own Argon2 KDF cost
+/// (production default vs the cheap test cost), so the assembly no longer threads a `KdfParams`.
+pub fn build_router<S>(
+    sealer: S,
     profile_did: &str,
     profile_dir: &Path,
     confirmer: Arc<dyn NativeConfirmer>,
     signer: Box<dyn SessionSigner + Send + Sync>,
-) -> FrameRouter<KeystoreSealer> {
-    build_router_with_kdf(
-        identities,
-        profile_did,
-        profile_dir,
-        confirmer,
-        signer,
-        KdfParams::DEFAULT,
-    )
-}
-
-/// The KDF-parameterized assembly behind [`build_router`]. Split out so tests can pass
-/// [`KdfParams::FAST_TEST`] and keep Argon2 cheap; production always uses the default cost.
-fn build_router_with_kdf(
-    identities: UnlockedIdentities,
-    profile_did: &str,
-    profile_dir: &Path,
-    confirmer: Arc<dyn NativeConfirmer>,
-    signer: Box<dyn SessionSigner + Send + Sync>,
-    kdf: KdfParams,
-) -> FrameRouter<KeystoreSealer> {
-    let pairings = PairingStore::new(
-        KeystoreSealer::with_kdf(identities.clone(), kdf),
-        profile_did,
-    );
-    let whitelist = WhitelistStore::new(
-        KeystoreSealer::with_kdf(identities.clone(), kdf),
-        profile_did,
-    );
-    // Load the active profile's wallet receive addresses BEFORE `identities` is moved into the
-    // signer, so the connect handle can advertise them alongside the identity signing pubkey (#961).
-    let addresses = active_wallet_addresses(identities.clone(), profile_did, profile_dir, kdf);
+) -> FrameRouter<S>
+where
+    S: ProfileSealer + Clone + Send + Sync + 'static,
+{
+    let pairings = PairingStore::new(sealer.clone(), profile_did);
+    let whitelist = WhitelistStore::new(sealer.clone(), profile_did);
+    // Load the active profile's wallet receive addresses so the connect handle can advertise them
+    // alongside the identity signing pubkey (#961).
+    let addresses = active_wallet_addresses(sealer, profile_did, profile_dir);
 
     // The connect handle advertises the active identity's signing public key AND the wallet's
     // receive addresses (#961), so a connected dapp can display / send to the wallet. Only public
@@ -162,22 +142,20 @@ fn build_router_with_kdf(
 /// Read the active profile's wallet receive addresses (`xch1…`) for the connect handle (#961).
 ///
 /// The wallet state is sealed per profile under the SAME DEK the router's stores use, so this opens
-/// it through a [`WalletStore`] over the unlocked `identities` (with the assembly's `kdf`, so tests
-/// stay cheap). The store is rooted at the brand directory, which is the grandparent of
-/// `profile_dir` (`<brand>/profiles/<did-hash>/`); a profile with no saved wallet state yet — or one
-/// whose sealed state cannot be opened — yields no addresses rather than failing the assembly, since
-/// the signing channel is still fully usable without them (they only enrich the connect handle).
-fn active_wallet_addresses(
-    identities: UnlockedIdentities,
-    profile_did: &str,
-    profile_dir: &Path,
-    kdf: KdfParams,
-) -> Vec<String> {
+/// it through a [`WalletStore`] over the same injected `sealer`. The store is rooted at the brand
+/// directory, which is the grandparent of `profile_dir` (`<brand>/profiles/<did-hash>/`); a profile
+/// with no saved wallet state yet — or one whose sealed state cannot be opened — yields no addresses
+/// rather than failing the assembly, since the signing channel is still fully usable without them
+/// (they only enrich the connect handle).
+fn active_wallet_addresses<S>(sealer: S, profile_did: &str, profile_dir: &Path) -> Vec<String>
+where
+    S: ProfileSealer + Send + Sync + 'static,
+{
     let Some(brand_dir) = profile_dir.parent().and_then(Path::parent) else {
         tracing::warn!("could not derive the brand dir from the profile dir — no wallet addresses");
         return Vec::new();
     };
-    let store = WalletStore::new(brand_dir, KeystoreSealer::with_kdf(identities, kdf));
+    let store = WalletStore::new(brand_dir, sealer);
     match store.load_state(profile_did) {
         Ok(state) => state.addresses,
         Err(e) => {
@@ -211,6 +189,8 @@ mod tests {
     use crate::confirm::HeadlessConfirmer;
     use crate::keystore::IdentitySecrets;
     use crate::loopback::persist::FileSealedStore;
+    use crate::profiles::keystore_sealer::KeystoreSealer;
+    use dig_keystore::KdfParams;
 
     const DID: &str = "did:chia:sign-service-test";
 
@@ -231,13 +211,12 @@ mod tests {
 
     fn assemble(identities: UnlockedIdentities, dir: &Path) -> FrameRouter<KeystoreSealer> {
         let signer = crate::session::ProfileSessionSigner::new(identities.clone(), DID);
-        build_router_with_kdf(
-            identities,
+        build_router(
+            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
             DID,
             dir,
             Arc::new(HeadlessConfirmer),
             Box::new(signer),
-            KdfParams::FAST_TEST,
         )
     }
 
@@ -336,8 +315,11 @@ mod tests {
 
         let profile_dir =
             crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
-        let addresses =
-            active_wallet_addresses(identities, DID, &profile_dir, KdfParams::FAST_TEST);
+        let addresses = active_wallet_addresses(
+            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
+            DID,
+            &profile_dir,
+        );
         assert_eq!(addresses, vec!["xch1receive", "xch1change"]);
     }
 
@@ -348,8 +330,11 @@ mod tests {
         let brand = tempfile::tempdir().unwrap();
         let profile_dir =
             crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
-        let addresses =
-            active_wallet_addresses(unlocked(), DID, &profile_dir, KdfParams::FAST_TEST);
+        let addresses = active_wallet_addresses(
+            KeystoreSealer::with_kdf(unlocked(), KdfParams::FAST_TEST),
+            DID,
+            &profile_dir,
+        );
         assert!(addresses.is_empty());
     }
 
@@ -378,10 +363,9 @@ mod tests {
             crate::storage::profile_dir(brand.path(), &crate::profiles::did_hash(DID));
         // A fresh session has DID LOCKED, so opening the sealed state fails the AEAD tag.
         let addresses = active_wallet_addresses(
-            UnlockedIdentities::new(),
+            KeystoreSealer::with_kdf(UnlockedIdentities::new(), KdfParams::FAST_TEST),
             DID,
             &profile_dir,
-            KdfParams::FAST_TEST,
         );
         assert!(addresses.is_empty());
     }
@@ -390,8 +374,11 @@ mod tests {
     fn a_profile_dir_with_no_derivable_brand_dir_yields_no_addresses() {
         // A profile dir shallow enough to have no grandparent cannot locate a brand dir — the
         // helper must fall back to no addresses rather than panic.
-        let addresses =
-            active_wallet_addresses(unlocked(), DID, Path::new("solo"), KdfParams::FAST_TEST);
+        let addresses = active_wallet_addresses(
+            KeystoreSealer::with_kdf(unlocked(), KdfParams::FAST_TEST),
+            DID,
+            Path::new("solo"),
+        );
         assert!(addresses.is_empty());
     }
 
