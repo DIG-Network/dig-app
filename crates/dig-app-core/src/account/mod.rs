@@ -26,6 +26,7 @@
 //! every commit. The mechanical switchover is a later pass.
 
 pub mod auth;
+pub mod boot;
 pub mod ceremony;
 pub mod lifecycle;
 pub mod registry;
@@ -38,3 +39,8 @@ pub mod sealer;
 /// and NOT derived from key material — so relabelling an account never disturbs its custody root. There
 /// is deliberately no second, harness-local id type to drift out of sync with the crate's.
 pub use dig_account::AccountId;
+
+/// The profile index within an account, re-exported so harness code (the tray shell, the boot glue)
+/// names the default profile ([`ProfileIx::ROOT`](dig_account::ProfileIx::ROOT)) without depending on
+/// `dig-account` directly.
+pub use dig_account::ProfileIx;

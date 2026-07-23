@@ -15,15 +15,16 @@
 //! reachable" until U6 stands up the identity-authenticated session listener. Keys/profiles/wallet
 //! (U4/U5) and the `dign` gateway (U7) remain stubs.
 
+use dig_app_core::account::boot::{boot_residency, reboot_reunlock};
+use dig_app_core::account::residency::AccountResidency;
+use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
 use dig_app_core::confirm::native_confirmer;
 use dig_app_core::engine::NullConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
 use dig_app_core::loopback::SignReauthGate;
-use dig_app_core::profiles::{
-    did_hash, IdentityStore, KeystoreSealer, ProfileManager, RootUnlock, UnlockedIdentities,
-};
+use dig_app_core::profiles::did_hash;
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
     SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
@@ -122,7 +123,7 @@ fn run_tray_or_headless(agent: Agent<NullConnector>, session: Option<TraySession
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     // Zero-prompt unlock is only available where the OS credential store is the custody primary.
     if !matches!(env.os, Os::Windows | Os::MacOs) {
-        tracing::info!("APP-SIGN loopback deferred: no zero-prompt profile unlock on this OS yet");
+        tracing::info!("APP-SIGN loopback deferred: no zero-prompt account unlock on this OS yet");
         return None;
     }
     let brand_dir = match env.brand_dir() {
@@ -133,43 +134,39 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
         }
     };
 
-    // Unlock the user's profiles via the OS credential store, then pick the active one.
-    let session = UnlockedIdentities::new();
-    if let Err(e) = unlock_profiles(&brand_dir, &session) {
-        tracing::warn!(error = %e, "APP-SIGN loopback not started: profile unlock failed");
-        return None;
-    }
-    let manager = profile_manager(&brand_dir, &session);
-    let Ok(Some(active_did)) = manager.active_did() else {
-        tracing::info!("APP-SIGN loopback not started: no active profile yet");
-        return None;
-    };
+    // Enrol-or-unlock the master-HD account (#1547): the seed is sealed in a per-user file backend
+    // under the OS-credential-store password, and housed in a lockable residency. The residency owns
+    // the sole unlocked account; the live-view signer + sealer below read through it, so a tray lock
+    // relocks them at once.
+    let residency = boot_residency(&brand_dir)?;
+
+    // The signing profile is the account's default (root) profile. There is no on-chain DID mint yet
+    // (dig-account's ProfileMinter is a Phase-2 stub), so the profile is identified by its
+    // seed-derived identity public key — a stable per-profile handle for the connect advertisement +
+    // the per-profile sealed-store directory until the DID mint lands.
+    let profile_id = residency.signing_public_key_hex(ProfileIx::ROOT)?;
 
     // The session-lock the tray drives and the sign path re-authenticates through — the SAME shared
-    // controller over the SAME unlocked session, so a lock the tray triggers is the lock the signer sees.
+    // controller over the SAME account residency, so a lock the tray triggers is the lock the signer
+    // and sealer see.
     let lock: TraySessionLock = Arc::new(SessionLock::new(
-        session.clone(),
+        residency.clone(),
         SystemClock::new(),
         DEFAULT_IDLE_TIMEOUT,
     ));
 
-    let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&active_did));
+    let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&profile_id));
     let confirmer: Arc<dyn dig_app_core::confirm::NativeConfirmer> = Arc::from(native_confirmer());
-    let reauth_gate = build_reauth_gate(
-        Arc::clone(&lock),
-        brand_dir.clone(),
-        session.clone(),
-        active_did.clone(),
-    );
-    // Inject the identity signer through the sign seam (#1546). Today this is the profile-session
-    // signer over the unlocked-identity session; the custody switchover (#1547, same branch) will
-    // inject a `dig_account::ProfileSigner` derived from the account master seed through this SAME
-    // seam once the seed-backed unlock lifecycle lands — the seam is already type-compatible.
-    let signer: Box<dyn dig_app_core::session::SessionSigner + Send + Sync> = Box::new(
-        dig_app_core::session::ProfileSessionSigner::new(session.clone(), active_did.clone()),
-    );
-    let sealer = KeystoreSealer::new(session);
-    let router = sign_service::build_router(sealer, &active_did, &profile_dir, confirmer, signer)
+    let reauth_gate = build_reauth_gate(Arc::clone(&lock), brand_dir.clone(), residency.clone());
+    // Inject the LIVE unlocked-account identity signer through the sign seam (#1547 flip): the
+    // identity-sign path now runs through the real master-HD account (a `dig_account::ProfileSigner`
+    // behind the residency's live view), replacing the retired ProfileSessionSigner. The sealer is
+    // the residency's live-view AccountSealer over the profile's master-seed DEK — both relock the
+    // instant the residency is locked.
+    let signer: Box<dyn dig_app_core::session::SessionSigner + Send + Sync> =
+        Box::new(residency.signer(ProfileIx::ROOT));
+    let sealer = residency.production_sealer(ProfileIx::ROOT);
+    let router = sign_service::build_router(sealer, &profile_id, &profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate);
 
     // Subscribe to OS screen-lock events, containing any callback panic before it can cross the
@@ -196,54 +193,18 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     })
 }
 
-/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks ONLY the signing
-/// profile (`active_did`) from the OS credential store (the keystore's job) before the signature
-/// proceeds — never every profile's DEK, since only the active profile signs (dig_ecosystem#973).
-/// Re-derives a fresh [`ProfileManager`] per re-unlock so nothing but the shared session outlives
-/// this call.
+/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the account (a
+/// zero-prompt re-unlock from the OS credential store) and re-installs it into the shared `residency`
+/// before the signature proceeds — restoring the live-view signer so the pending sign can complete
+/// (dig_ecosystem#967 / #1547). A failed re-unlock leaves the residency locked, so the sign is refused.
 fn build_reauth_gate(
     lock: TraySessionLock,
     brand_dir: std::path::PathBuf,
-    session: UnlockedIdentities,
-    active_did: String,
+    residency: AccountResidency,
 ) -> Arc<dyn SignReauthGate> {
     Arc::new(SessionReauthGate::new(lock, move || {
-        reunlock_signing_profile(&brand_dir, &session, &active_did).is_ok()
+        reboot_reunlock(&brand_dir, &residency)
     }))
-}
-
-/// Re-unlock JUST the signing profile's identity into `session` from the OS credential store (the
-/// zero-prompt custody primary on Windows/macOS), leaving every other profile locked.
-fn reunlock_signing_profile(
-    brand_dir: &std::path::Path,
-    session: &UnlockedIdentities,
-    did: &str,
-) -> Result<(), dig_app_core::profiles::ProfileError> {
-    profile_manager(brand_dir, session).unlock_profile(did, RootUnlock::OsKeychain)
-}
-
-/// Re-unlock every profile's identity into `session` from the OS credential store — the BOOT-time
-/// re-unlock (a restarted app must reopen ALL of its profiles), distinct from the sign-path re-auth
-/// which re-unlocks only the signing profile ([`reunlock_signing_profile`]).
-fn unlock_profiles(
-    brand_dir: &std::path::Path,
-    session: &UnlockedIdentities,
-) -> Result<(), dig_app_core::profiles::ProfileError> {
-    profile_manager(brand_dir, session)
-        .unlock_all(RootUnlock::OsKeychain)
-        .map(|_count| ())
-}
-
-/// A [`ProfileManager`] over `session`, rooted at `brand_dir`, with the production identity store.
-fn profile_manager(
-    brand_dir: &std::path::Path,
-    session: &UnlockedIdentities,
-) -> ProfileManager<KeystoreSealer> {
-    ProfileManager::new(
-        brand_dir.to_path_buf(),
-        KeystoreSealer::new(session.clone()),
-        IdentityStore::production(session.clone()),
-    )
 }
 
 /// Resolve the real per-user host facts the agent boots from. This is the impure process edge; the

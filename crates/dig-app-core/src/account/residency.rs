@@ -81,6 +81,12 @@ impl AccountResidency {
         }
     }
 
+    /// The production live-view sealer for profile `ix` — [`sealer`](Self::sealer) at the default
+    /// (production Argon2) KDF cost. A convenience so the tray shell need not name [`KdfParams`].
+    pub fn production_sealer(&self, ix: ProfileIx) -> ResidencySealer {
+        self.sealer(ix, KdfParams::DEFAULT)
+    }
+
     /// The 48-byte identity signing public key of profile `ix`, as hex — for the connect-handle
     /// advertisement at assembly time (read while unlocked). `None` if the residency is locked.
     pub fn signing_public_key_hex(&self, ix: ProfileIx) -> Option<String> {

@@ -35,7 +35,6 @@ use crate::loopback::{
     SealedRecordStore, SignReauthGate, PINNED_EXTENSION_IDS,
 };
 use crate::pairing::PairingStore;
-use crate::profiles::keystore_sealer::UnlockedIdentities;
 use crate::profiles::sealer::ProfileSealer;
 use crate::session::SessionSigner;
 use crate::session_lock::{SessionLock, SystemClock};
@@ -44,8 +43,11 @@ use crate::whitelist::WhitelistStore;
 
 /// The shared session-lock controller the tray drives (lock-now / idle poll / OS screen-lock) and the
 /// sign path re-authenticates through — the SAME `Arc`, so a lock the tray triggers is the lock the
-/// signer sees. Timed with the wall-clock [`SystemClock`] in production.
-pub type TraySessionLock = Arc<SessionLock<UnlockedIdentities, SystemClock>>;
+/// signer sees. It locks the master-HD [`AccountResidency`](crate::account::residency::AccountResidency),
+/// dropping the unlocked account so the live-view signer + sealer relock at once. Timed with the
+/// wall-clock [`SystemClock`] in production.
+pub type TraySessionLock =
+    Arc<SessionLock<crate::account::residency::AccountResidency, SystemClock>>;
 
 /// The production [`SignReauthGate`] (WSEC-D, dig_ecosystem#967): it bridges the sign path to the live
 /// [`SessionLock`] so a signature that arrives after a lock re-authenticates before it uses the key.
@@ -189,7 +191,7 @@ mod tests {
     use crate::confirm::HeadlessConfirmer;
     use crate::keystore::IdentitySecrets;
     use crate::loopback::persist::FileSealedStore;
-    use crate::profiles::keystore_sealer::KeystoreSealer;
+    use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
     use dig_keystore::KdfParams;
 
     const DID: &str = "did:chia:sign-service-test";
@@ -223,10 +225,27 @@ mod tests {
     use crate::session_lock::DEFAULT_IDLE_TIMEOUT;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A [`TraySessionLock`] over a freshly-unlocked session, for the re-auth gate tests.
+    /// A [`TraySessionLock`] over a freshly-unlocked account residency, for the re-auth gate tests.
     fn tray_lock() -> TraySessionLock {
+        use crate::account::residency::AccountResidency;
+        use dig_account::{AccountId, AccountSession, AccountStore, ProfileIx};
+        use dig_keystore::MemoryBackend;
+        use dig_session::{Password, SEED_LEN};
+        use rand_core::RngCore;
+
+        let mut seed = [0u8; SEED_LEN];
+        rand_core::OsRng.fill_bytes(&mut seed);
+        let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
+        let unlocked = AccountSession::enroll(
+            store,
+            AccountId::new("tray-lock-test"),
+            Password::new("pw"),
+            &seed,
+            ProfileIx::ROOT,
+        )
+        .unwrap();
         Arc::new(SessionLock::new(
-            unlocked(),
+            AccountResidency::new(unlocked),
             SystemClock::new(),
             DEFAULT_IDLE_TIMEOUT,
         ))
