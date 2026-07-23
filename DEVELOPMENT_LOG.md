@@ -1,3 +1,26 @@
+## #1548 — live money path: authorize-before-sign + #908 on-wire enforcement (slice C)
+
+- **authorize()==Ok is necessary but NOT sufficient — the confirm ceremony is a SECOND, independent
+  gate.** The money path (`account::money::MoneyPath`) runs summarize → `SpendAuthorizer::authorize`
+  → (for every tier above `AutoSend`) `AuthProvider::confirm_spend` → sign, in that fixed order. A
+  `RequireAuth`-class spend (Vault, or over-allowance Confirm) that the authorizer ALLOWS but the
+  confirm ceremony DECLINES/skips is refused, and the money signer is never even built (the #1522
+  gate note). Only a within-allowance `AutoSend` may skip the ceremony.
+- **Re-read the residency at SIGN time, not once up front.** The signer is drawn from the shared
+  `AccountResidency` AFTER the (async) confirm ceremony returns, so a lock landing DURING the confirm
+  dialog fails the sign closed — no snapshot escape. The residency is the SAME lockable seed home the
+  identity signer reads, so one `lock_all()` relocks BOTH money and identity signing.
+- **The #908 on-wire test is only possible because the money key derivation is byte-contracted.**
+  dig-app's `wallet::signing::WalletKey::from_seed(seed)` reproduces dig-account's canonical money key
+  at `ProfileIx::ROOT` (`master_to_wallet_unhardened(seed,0).derive_synthetic()`), proven in
+  `wallet_key_byte_contract.rs`. That lets the test derive the money secret + DEK INDEPENDENTLY from a
+  known seed and assert they never appear (raw or hex) in the serialized `control.wallet.*` wire bytes,
+  while the signed bundle does. Model-A's whole point: only signed bytes cross the dig-app→dig-node IPC.
+- **The money signer refuses an unhinted non-change output (exfiltration guard).** A real test send
+  must HINT the recipient coin (`ctx.hint`) and return change to the wallet's own puzzle hash; a bare
+  `create_coin(recipient, amount, Memos::None)` reads as a possible drain and dig-account fails it
+  closed with `SpendValidationFailed: a non-recipient output does not return to this wallet`.
+
 ## #1547 — master-HD custody switchover: the DEK migration decision (CLEAN CUTOVER)
 
 - **The two custody roots are not reconcilable, so migration is a clean cutover.** The retired model
