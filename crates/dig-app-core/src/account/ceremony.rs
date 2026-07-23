@@ -16,8 +16,13 @@
 //! password-splitting follow-up), and Linux (no per-application ACL) stays deferred to a passphrase
 //! ceremony, exactly as the old path deferred it.
 //!
-//! Spend confirmation is deliberately fail-closed here: the money-path confirm UI is wired in the
-//! #1548 slice (sub-c), so until then no programmatic spend can be confirmed through this ceremony.
+//! Spend confirmation (#1548, slice C — money goes live) is gated on the per-OS native confirmer: the
+//! money path calls [`confirm_spend`](AuthCeremony::confirm_spend), which renders the independently
+//! re-derived [`SpendSummary`] (recipients / fee / tier — never raw bytes) and requires the user to
+//! authorize it at the OS biometric/passphrase prompt (Windows Hello / macOS Touch ID / Linux polkit).
+//! A headless host has no confirmer, so a spend confirmation fails closed there (`Unavailable`).
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use dig_account::{AccountId, AuthFactors, ProfileIx, SpendDecision, SpendSummary};
@@ -26,6 +31,7 @@ use rand_core::RngCore;
 use zeroize::Zeroizing;
 
 use crate::account::auth::{AuthCeremony, CeremonyError};
+use crate::confirm::{native_confirmer, ConfirmDecision, NativeConfirmer, SignPrompt};
 use crate::keystore::CredentialStore;
 
 /// The number of random bytes in a generated account master password before hex-encoding — 32 bytes
@@ -39,12 +45,26 @@ const GENERATED_PASSWORD_BYTES: usize = 32;
 /// real [`OsCredentialStore`](crate::keystore::OsCredentialStore) in production.
 pub struct CredentialCeremony<C: CredentialStore> {
     store: C,
+    /// The terminal human gate for a spend confirmation — the per-OS native biometric/passphrase
+    /// confirmer (or the fail-closed headless default). Unlock factors come zero-prompt from the
+    /// credential store; a SPEND, by contrast, always requires the human at this gate.
+    confirmer: Arc<dyn NativeConfirmer>,
 }
 
 impl<C: CredentialStore> CredentialCeremony<C> {
-    /// Wrap `store` as the zero-prompt password source.
+    /// Wrap `store` as the zero-prompt password source, gating spend confirmations on the host's
+    /// [`native_confirmer`] (the per-OS biometric prompt, or the fail-closed headless default).
     pub fn new(store: C) -> Self {
-        Self { store }
+        Self {
+            store,
+            confirmer: Arc::from(native_confirmer()),
+        }
+    }
+
+    /// Build the ceremony with an explicit spend `confirmer` — the production path can pass the tray's
+    /// shared confirmer, and tests inject a scripted double to assert the confirm gate.
+    pub fn with_confirmer(store: C, confirmer: Arc<dyn NativeConfirmer>) -> Self {
+        Self { store, confirmer }
     }
 
     /// The credential-store key the account's master password is filed under. Stable across restarts
@@ -97,15 +117,50 @@ impl<C: CredentialStore + Send + Sync> AuthCeremony for CredentialCeremony<C> {
         &self,
         _account: &AccountId,
         _profile: ProfileIx,
-        _summary: &SpendSummary,
+        summary: &SpendSummary,
     ) -> Result<SpendDecision, CeremonyError> {
-        // Fail-closed: the money-path confirm UI is wired in #1548 (sub-c). Until then this ceremony
-        // never approves a spend — the identity-sign path (which does NOT route through confirm_spend)
-        // is unaffected.
-        Ok(SpendDecision::Decline(Some(
-            "spend confirmation is not yet wired (pending #1548)".to_string(),
-        )))
+        // Render the re-derived effect of the spend (recipients / fee / tier) as the confirm body —
+        // NEVER raw bytes — and require the human at the OS biometric/passphrase gate. The summary is
+        // dig-account's independently re-derived structure, so the prompt shows exactly what the
+        // signature will authorize.
+        let body = render_spend(summary);
+        let prompt = SignPrompt {
+            origin: SPEND_CONFIRM_ORIGIN,
+            payload_type: SPEND_PAYLOAD_TYPE,
+            decoded_tx: Some(&body),
+        };
+        Ok(match self.confirmer.confirm_sign(&prompt) {
+            ConfirmDecision::Approve => SpendDecision::Approve,
+            ConfirmDecision::Deny => {
+                SpendDecision::Decline(Some("declined at the confirm prompt".to_string()))
+            }
+            ConfirmDecision::Timeout => {
+                SpendDecision::Decline(Some("the confirm prompt timed out".to_string()))
+            }
+            // No native confirmer (a headless host) — fail closed as a ceremony error, so the spend
+            // aborts with no key touched rather than silently declining as if the user chose to.
+            ConfirmDecision::Unavailable => {
+                return Err(CeremonyError::Unavailable(
+                    "no native confirmer for the spend prompt".to_string(),
+                ))
+            }
+        })
     }
+}
+
+/// The origin label shown on a local wallet spend confirmation — a fixed, non-dapp source (the spend
+/// originates in the user's own app, not a vouched web origin).
+const SPEND_CONFIRM_ORIGIN: &str = "dig-app (local wallet)";
+
+/// The payload tag naming what the confirm prompt is authorizing (parallels the §5.6.5 dapp sign tags).
+const SPEND_PAYLOAD_TYPE: &str = "wallet.spend";
+
+/// Render a [`SpendSummary`] as the plain-text confirm body: the custody tier, each recipient +
+/// amount, and the fee. Uses the summary's own [`Display`](std::fmt::Display) — the recipients + fee
+/// are dig-account's independently re-derived figures, so the body cannot disagree with what is signed.
+/// Plain text only (the per-OS confirmers neutralize markup), never key material.
+fn render_spend(summary: &SpendSummary) -> String {
+    format!("Approve this {:?}-tier spend?\n\n{}", summary.tier, summary)
 }
 
 #[cfg(test)]
@@ -211,14 +266,94 @@ mod tests {
         assert!(matches!(result, Err(CeremonyError::Unavailable(_))));
     }
 
+    /// A [`NativeConfirmer`] double returning a fixed decision + recording the confirm body it was
+    /// shown, so a test can assert the ceremony routed the spend through the native gate with the
+    /// re-derived summary (never raw bytes).
+    struct ScriptedConfirmer {
+        decision: ConfirmDecision,
+        last_body: Mutex<Option<String>>,
+    }
+    impl ScriptedConfirmer {
+        fn new(decision: ConfirmDecision) -> Self {
+            Self {
+                decision,
+                last_body: Mutex::new(None),
+            }
+        }
+    }
+    impl NativeConfirmer for ScriptedConfirmer {
+        fn confirm_pair(&self, _prompt: &crate::confirm::PairPrompt<'_>) -> ConfirmDecision {
+            unreachable!("the spend ceremony never pairs")
+        }
+        fn confirm_connect(&self, _prompt: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            unreachable!("the spend ceremony never connects")
+        }
+        fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision {
+            *self.last_body.lock().unwrap() = prompt.decoded_tx.map(str::to_string);
+            self.decision
+        }
+    }
+
+    fn sample_summary() -> SpendSummary {
+        use dig_account::{SpendRecipient, SpendTier};
+        SpendSummary::new(
+            SpendTier::Vault,
+            vec![SpendRecipient {
+                address: "xch1recipient".into(),
+                amount_mojos: 5_000_000,
+                asset_id: None,
+            }],
+            10,
+        )
+    }
+
     #[tokio::test]
-    async fn spend_confirmation_is_fail_closed_until_the_money_path_lands() {
-        let ceremony = CredentialCeremony::new(MemCred::default());
-        let summary = SpendSummary::new(dig_account::SpendTier::Confirm, vec![], 0);
+    async fn an_approved_native_confirm_approves_the_spend_and_shows_the_summary() {
+        let confirmer = Arc::new(ScriptedConfirmer::new(ConfirmDecision::Approve));
+        let ceremony = CredentialCeremony::with_confirmer(MemCred::default(), confirmer.clone());
         let decision = ceremony
-            .confirm_spend(&account(), ProfileIx::ROOT, &summary)
+            .confirm_spend(&account(), ProfileIx::ROOT, &sample_summary())
+            .await
+            .unwrap();
+        assert_eq!(decision, SpendDecision::Approve);
+        let body = confirmer.last_body.lock().unwrap().clone().unwrap();
+        assert!(
+            body.contains("xch1recipient") && body.contains("Vault"),
+            "the native prompt shows the re-derived summary: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_native_confirm_declines_the_spend() {
+        let confirmer = Arc::new(ScriptedConfirmer::new(ConfirmDecision::Deny));
+        let ceremony = CredentialCeremony::with_confirmer(MemCred::default(), confirmer);
+        let decision = ceremony
+            .confirm_spend(&account(), ProfileIx::ROOT, &sample_summary())
             .await
             .unwrap();
         assert!(matches!(decision, SpendDecision::Decline(_)));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_native_confirm_declines_the_spend() {
+        let confirmer = Arc::new(ScriptedConfirmer::new(ConfirmDecision::Timeout));
+        let ceremony = CredentialCeremony::with_confirmer(MemCred::default(), confirmer);
+        let decision = ceremony
+            .confirm_spend(&account(), ProfileIx::ROOT, &sample_summary())
+            .await
+            .unwrap();
+        assert!(matches!(decision, SpendDecision::Decline(_)));
+    }
+
+    #[tokio::test]
+    async fn a_headless_host_fails_the_spend_confirm_closed() {
+        // No native confirmer (Unavailable) -> a ceremony ERROR (not a silent decline), so the money
+        // path aborts fail-closed with no key touched.
+        let confirmer = Arc::new(ScriptedConfirmer::new(ConfirmDecision::Unavailable));
+        let ceremony = CredentialCeremony::with_confirmer(MemCred::default(), confirmer);
+        let result = ceremony
+            .confirm_spend(&account(), ProfileIx::ROOT, &sample_summary())
+            .await;
+        assert!(matches!(result, Err(CeremonyError::Unavailable(_))));
     }
 }
