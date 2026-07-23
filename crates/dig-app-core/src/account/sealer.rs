@@ -1,8 +1,8 @@
 //! The DEK-bound per-profile sealer for the master-HD account model (#1547, custody switchover).
 //!
-//! In the retired per-profile-identity model, [`KeystoreSealer`](crate::profiles::keystore_sealer::KeystoreSealer)
-//! resolved each profile's *independently-random* identity scalar from an in-memory session and
-//! HKDF-derived a DEK from it per seal/open. The master-HD model inverts the root: there is ONE
+//! In the retired per-profile-identity model, the sealer resolved each profile's *independently-random*
+//! identity scalar from an in-memory session and HKDF-derived a DEK from it per seal/open. The
+//! master-HD model inverts the root: there is ONE
 //! account master seed, and every profile's DEK is derived from it at that profile's index
 //! ([`dig_account::profile_dek`] / [`UnlockedAccount::dek`](dig_account::UnlockedAccount::dek)).
 //!

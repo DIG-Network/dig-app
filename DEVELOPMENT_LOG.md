@@ -135,3 +135,34 @@ Sharp edges that cost time here:
   the session. A locked profile yields an all-zero (non-verifying) signature, never a forgery.
 - **Windows MAX_PATH:** building under the deep agent-worktree path trips libz-sys's CMake (260-char
   limit). Build with a short `CARGO_TARGET_DIR` (e.g. `C:\dt`).
+
+## #1530/#1549 custody switchover — old-path retirement (zero residue), the FINAL slice
+
+- **The live custody root is `account::residency::AccountResidency` (master-HD), full stop.** After the
+  #1530 switchover the retired per-profile-identity path is GONE: `profiles/` (UnlockedIdentities,
+  ProfileSessionSigner, KeystoreSealer, ProfileManager, IdentityStore, DidMinter, …), `keystore/{secrets,
+  vault}` (IdentitySecrets, ProfileVault), `wallet/{signing,spend}` (WalletKey + local spend builders),
+  and `onboarding` were deleted. What survived was RELOCATED, not kept in place: the sealing seam
+  `ProfileSealer`/`SealError` -> top-level `crate::sealer`; `did_hash` -> `crate::storage`; `ProfileRef`
+  -> `crate::agent`. `keystore` was trimmed to ONLY the OS credential-store seam
+  (CredentialStore/OsCredentialStore/KeystoreError) — the zero-prompt password source the account boot
+  reads; everything crypto now lives in `dig-account`.
+- **Isolation moved from the DID string to the DEK (per ProfileIx).** The old `KeystoreSealer` derived a
+  DEK per-DID from an in-memory identity; the new `AccountSealer` is bound to ONE profile DEK
+  (`profile_dek(seed, ix)`) at construction — the `profile_did` argument is advisory. So cross-profile
+  isolation tests now use DISTINCT DEKs (distinct labels / profile indices), NOT distinct DID strings.
+  A shared `#[cfg(test)] test_support` module gives every test one way to build the two seams
+  (`test_sealer(label)` = a per-label-DEK AccountSealer; `test_residency()` = an enrolled unlocked
+  residency whose `.signer(ROOT)` is the live-view SessionSigner). Same label -> same DEK (a "restart"
+  re-opens a sealed blob); different label -> AEAD-rejected (isolation).
+- **`dig_account::WalletKey` is the public test builder for spends.** The deleted dig-app `WalletKey` was
+  byte-identical to `dig_account::WalletKey` (from_seed/public_key/puzzle_hash/address); tests that build
+  a real coin spend for the residency's money signer now use `dig_account::WalletKey` directly (takes
+  `&[u8]`, not `[u8;32]`). The obsolete dig-app-WalletKey byte-contract integration test was dropped —
+  the golden now lives inside dig-account.
+- **Money-send has NO live surface yet.** MoneyPath is fully constructed over AccountResidency at library
+  level, but nothing invokes `authorize_and_sign` on the live path: the tray menu is lock/quit only, and
+  the loopback APP-SIGN `payload_type="spend"` returns an identity ATTESTATION signature over the
+  DIGNET-SIGN-v1 callback message (NOT a `sign_coin_spends` aggregate SpendBundle). Routing loopback-spend
+  through MoneyPath would change that wire semantics — a cross-repo (ext/dig-node) contract change — so it
+  is a deliberate SHAPE decision left for a decider, not built speculatively (§1.10).

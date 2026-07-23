@@ -1,10 +1,8 @@
 //! The account BOOT lifecycle — the master-HD replacement for the retired per-profile
 //! unlock/enroll flow (#1547, custody switchover).
 //!
-//! The old boot path (`dig-app.rs::unlock_profiles` over a
-//! [`ProfileManager`](crate::profiles::ProfileManager) plus an
-//! [`IdentityStore`](crate::profiles::IdentityStore)) re-derived each profile's independently-random
-//! identity into an in-memory session. The master-HD model has ONE account master seed, enrolled once
+//! The old boot path re-derived each profile's independently-random identity into an in-memory
+//! session. The master-HD model has ONE account master seed, enrolled once
 //! and unlocked on every subsequent boot, from which every profile's identity + DEK is derived at its
 //! profile index.
 //!

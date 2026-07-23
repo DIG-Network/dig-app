@@ -3,8 +3,8 @@
 //!
 //! # The one custody flow money moves through
 //!
-//! A spend is a set of unsigned [`CoinSpend`]s the app has built (via the canonical chip35 builders,
-//! [`crate::wallet::spend`]). This module turns those into a signed [`SpendBundle`] through a
+//! A spend is a set of unsigned [`CoinSpend`]s the app has built (via the canonical chip35 spend
+//! builders). This module turns those into a signed [`SpendBundle`] through a
 //! FAIL-CLOSED gate that runs, in order:
 //!
 //! 1. **summarize** — [`AccountResidency::summarize`] independently re-derives the recipients + fee

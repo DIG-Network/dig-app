@@ -13,12 +13,8 @@
 //! shared lock, and hands out LIVE-VIEW capabilities ([`ResidencySigner`], [`ResidencySealer`]) that
 //! re-read the account on every operation and FAIL CLOSED once it is locked. So a lock-now / idle
 //! timeout / OS screen lock that drops the residency ([`SessionKeys::lock_all`]) immediately relocks
-//! the running sign + seal paths — restoring the retired [`UnlockedIdentities`](crate::profiles::UnlockedIdentities)
-//! semantics over the master-HD account, without relying on dig-account's deferred capability relock.
-//!
-//! This mirrors the old [`ProfileSessionSigner`](crate::session::ProfileSessionSigner) +
-//! [`KeystoreSealer`](crate::profiles::keystore_sealer::KeystoreSealer) exactly: the signer never
-//! forges when locked, and the sealer fails closed when locked.
+//! the running sign + seal paths over the master-HD account, without relying on dig-account's deferred
+//! capability relock. The signer never forges when locked, and the sealer fails closed when locked.
 
 use std::sync::{Arc, Mutex};
 
@@ -164,7 +160,7 @@ impl SessionSigner for ResidencySigner {
     fn signing_public_key(&self) -> SigningPublicKey {
         match self.residency.guard().as_ref() {
             Some(acct) => acct.profile_signer(self.ix).signing_public_key(),
-            // Locked: advertise the all-zero key rather than panic (mirrors ProfileSessionSigner).
+            // Locked: advertise the all-zero key rather than panic (fail-closed, never a forgery).
             None => SigningPublicKey::new([0u8; 48]),
         }
     }

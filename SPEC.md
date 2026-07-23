@@ -252,16 +252,17 @@ rather than a generic error, so the UI can route the user to it.
 ### 3.3 Wallet
 
 The wallet is user-identity state and lives in dig-app (migrated out of the engine). It is a
-**focused host**, not a port of the engine's wallet tree: it holds the wallet key, builds and signs
-spends locally, caches the per-profile wallet view, and delegates network I/O to the engine.
+**focused host**, not a port of the engine's wallet tree: it caches the per-profile wallet view
+(addresses / coins / balance / history, sealed at rest, §3.4), delegates network I/O to the engine,
+and signs money through the master-HD custody path — the wallet host itself holds NO key material.
 
-**Wallet key.** A profile's wallet key is a Chia BLS key rooted at a 32-byte seed. The on-chain
-spending key is the canonical Chia standard wallet child —
-`master_to_wallet_unhardened(master, 0).derive_synthetic()` — whose public half curries the standard
-puzzle; that puzzle's tree hash is the wallet's `xch1…` receive address. The key is held in memory
-only while the profile is unlocked, and its seed is the ONLY serialized form — always DIGOP1-sealed
-(§3.4) before it touches disk. The seed is never exposed to callers and never crosses the IPC
-boundary to the engine.
+**Wallet key.** A profile's wallet key is the canonical Chia standard wallet child of the ACCOUNT
+master seed at the profile's HD index —
+`master_to_wallet_unhardened(master, ix).derive_synthetic()` — whose public half curries the standard
+puzzle; that puzzle's tree hash is the wallet's `xch1…` receive address. The key is owned by
+`dig-account` and derived on demand from the unlocked account by the money path
+(`account::money::MoneyPath` over the `AccountResidency`); it is never stored per profile, never
+exposed to callers, and never crosses the IPC boundary to the engine.
 
 **Spend building — chip35 only.** Every `$DIG` spend bundle is constructed by the canonical chip35
 spend builder (`chip35_dl_coin::build_dig_store_payment`); dig-app MUST NOT hand-roll a spend bundle.
@@ -425,7 +426,8 @@ passphrase, via the §3.1 unlock path); the lock exposes a `reauth_required` pre
 signing paths consult. Once a re-unlock succeeds the owed re-auth clears and the idle window restarts.
 
 The lifecycle is a pure, seamed controller (`session_lock::SessionLock` over a `SessionKeys` DEK-drop
-seam — implemented by `UnlockedIdentities` — and a `MonotonicClock`), so every trigger + the tiered
+seam — implemented by the master-HD `account::residency::AccountResidency` — and a `MonotonicClock`),
+so every trigger + the tiered
 re-auth is unit-tested without a real keystore or OS; the native `ScreenLockSource` listeners are thin
 adapters validated behind the seam.
 
@@ -546,10 +548,9 @@ the `verify_signature` engine primitive are all owned by the canonical [`dig-ipc
 (dig_ecosystem#1074) and re-exported from `dig-app-core::session`. dig-node (#1080) consumes the SAME
 crate for the engine half, so the two ends cannot drift. The loopback sign seam (`sign_service.rs`)
 takes its identity `SessionSigner` by INJECTION, so the concrete signer is a caller choice: the
-custody path uses `dig_account::ProfileSigner` (the master-HD identity signer, which implements the
-same `dig-ipc-protocol::SessionSigner`), while `ProfileSessionSigner` (`session.rs`) remains a
-compatible implementation over the in-memory unlocked-identity session. dig-app also supplies the
-`impl SessionSigner for IdentitySecrets` and the production decode-then-native-confirm
+custody path uses the master-HD `account::residency::ResidencySigner` — a live-view wrapper over
+`dig_account::ProfileSigner` that fails closed the instant the account is locked, implementing the same
+`dig-ipc-protocol::SessionSigner`. dig-app supplies the production decode-then-native-confirm
 `NativeConfirmSignPolicy` (`sign_policy.rs`). References to `session.rs::…` builders below denote the
 re-exports of the canonical crate.
 
