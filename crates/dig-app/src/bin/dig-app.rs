@@ -109,17 +109,18 @@ fn run_tray_or_headless(agent: Agent<NullConnector>, session: Option<TraySession
 /// deliberately best-effort and fail-closed — it starts the server only when both hold, and simply
 /// logs + returns otherwise (never blocks or crashes the shell):
 ///
-/// 1. **An unlocked active profile** — the signer + the sealed-store DEK resolve the identity from
-///    the unlocked session. Only Windows/macOS can unlock zero-prompt via the OS credential store;
-///    Linux needs a user passphrase (a UX not yet wired), so the channel defers there.
+/// 1. **An unlocked master-HD account** — the injected live-view signer + sealer read the master seed
+///    from the [`AccountResidency`]. Only Windows/macOS can unlock zero-prompt via the OS credential
+///    store; Linux needs a user passphrase (a UX not yet wired), so the channel defers there.
 /// 2. **A desktop session** — guaranteed here because this runs only on the [`FormFactor::Tray`] path,
 ///    so the per-OS [`native_confirmer`] can raise a real biometric confirm.
 ///
 /// When both hold it assembles the [`FrameRouter`](dig_app_core::loopback::FrameRouter) over the
-/// active profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path re-authenticates
-/// after a lock, restores any persisted pairings/whitelist/nonce ledger, serves the two loopback
-/// listeners on a background thread (the OS event loop keeps the main thread), and hands the tray the
-/// [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on any deferral.
+/// account's default profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path
+/// re-authenticates after a lock, restores any persisted pairings/whitelist/nonce ledger, serves the
+/// two loopback listeners on a background thread (the OS event loop keeps the main thread), and hands
+/// the tray the [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on
+/// any deferral.
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     // Zero-prompt unlock is only available where the OS credential store is the custody primary.
     if !matches!(env.os, Os::Windows | Os::MacOs) {

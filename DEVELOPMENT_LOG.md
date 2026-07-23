@@ -1,3 +1,31 @@
+## #1547 — master-HD custody switchover: the DEK migration decision (CLEAN CUTOVER)
+
+- **The two custody roots are not reconcilable, so migration is a clean cutover.** The retired model
+  sealed each profile under a DEK derived from an INDEPENDENTLY-RANDOM per-profile BLS identity scalar
+  (`keystore/secrets.rs`: `version(0x02) || scalar`, HKDF-SHA256(DEK_SALT, IDENTITY_IKM_VERSION||scalar,
+  PROFILE_DEK_LABEL)). The master-HD model (`dig-account`) derives every profile's scalar FROM one
+  account master seed at a profile index. A byte-identical DEK across the two is therefore
+  **cryptographically impossible** — no master seed can be found that derives a pre-existing random
+  scalar — so a "re-enrol the scalar onto a seed index" migration cannot preserve the at-rest DEK; it
+  would require reading old data with the old scalar and RE-SEALING under the new seed-derived DEK (a
+  data migration, not byte-identical). dig-app is PRE-RELEASE (NullConnector stub engine, U-milestone
+  WIP, §3.7 no production users), so the decision is a clean cutover: old per-profile-scalar identities
+  are abandoned, a fresh master-seed account is enrolled on first boot. The sealing CONTAINER (DIGOP1)
+  and the DEK derivation CONTRACT (HKDF + the `dig-constants` salt/version/label/len) are PRESERVED —
+  only the seed SOURCE changed — so this is a root swap, not a format break.
+- **Live-view capabilities beat snapshot capabilities for lockability.** `dig_account::UnlockedAccount::signer`
+  returns a `ProfileSigner` that captures its OWN `Arc<seed>`; injecting that snapshot would make a tray
+  lock cosmetic (the running signer keeps its seed). dig-account itself DEFERS wiring idle-relock onto
+  the capability lifecycle (its `unlocked` docs / SPEC §4.1). The harness closes the gap with
+  `AccountResidency`: it owns the sole `UnlockedAccount` behind a shared lock and hands out live-view
+  signer + sealer that re-read the account per operation and fail closed once locked — so `lock_all()`
+  relocks the running paths without depending on the deferred crate feature.
+- **Zero-prompt unlock = OS-credential-store password + file-backed sealed seed.** The
+  `CredentialCeremony` generates + persists a 256-bit account password in the OS credential store on
+  first run and fetches it thereafter, so dig-account unlocks the master seed with no prompt on
+  Windows/macOS. This SPLITS the password (credential store) from the ciphertext (file backend) — a
+  strict improvement over the retired vault that co-located both in one entry.
+
 
 ## SIGN-1: APP-SIGN loopback transport + pairing (#950)
 

@@ -92,10 +92,28 @@ user's key:
 1. **Bootstrap unlock** — a DIGOP1 password. On Windows/macOS it is held in the per-application OS
    keychain (Windows Credential Manager / macOS Keychain), released by the login session; a
    passphrase prompt is the fallback. On Linux it is a user passphrase (the keyutils keyring is not a
-   safe custody store — §3.1). Opens the active profile's sealed identity blob.
+   safe custody store — §3.1). Opens the account's sealed master seed.
 2. **Root** — the unlocked profile identity key.
 3. **Per-profile DEK** — HKDF-derived from the identity, sealing every other per-profile blob.
    Profiles MUST NOT share a DEK.
+
+**Custody root: the master-HD account (`dig-account`).** The custody object model — enrol/unlock,
+the keystore crypto, per-profile identity signing + DEK derivation, and the wallet money path — is
+owned by the **`dig-account`** crate and consumed here (never re-implemented). The at-rest ROOT is a
+SINGLE account **master seed**, sealed in a per-user file backend under the bootstrap-unlock password
+(held zero-prompt in the OS credential store on Windows/macOS), and from which every profile's
+identity key AND its DEK are derived at that profile's HD index (`ProfileIx`). This REPLACES the
+retired model in which each profile held an independently-generated random identity scalar. The
+sealing container (DIGOP1) and the DEK derivation contract (HKDF-SHA256 over `DEK_SALT` /
+`IDENTITY_IKM_VERSION` / `PROFILE_DEK_LABEL`, from `dig-constants`) are UNCHANGED — only the seed
+SOURCE moved (random-per-profile → master-seed-at-index). The unlocked account is housed in a
+harness-side lockable RESIDENCY that hands out live-view signer + sealer capabilities: a session lock
+(idle timeout / lock-now / OS screen lock) drops the residency and thereby relocks the running sign +
+seal paths at once. **Migration is a clean pre-release cutover** (§ back-compat): because a master
+seed cannot reproduce a pre-existing random per-profile scalar, no byte-identical DEK exists to carry
+an old at-rest profile onto a seed index — and dig-app is pre-release with no persisted users, so old
+per-profile-scalar identities are abandoned rather than migrated. The on-chain profile DID mint is a
+later phase; until it lands a profile is identified by its seed-derived identity public key.
 
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
