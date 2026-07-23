@@ -507,10 +507,14 @@ dig-app. The domain-separated message builders (`challenge_message`, `sign_callb
 (`SessionSigner`, `SignPolicy`, `FrameTransport`), the generic app-side `SessionClient` role-half, and
 the `verify_signature` engine primitive are all owned by the canonical [`dig-ipc-protocol`] crate
 (dig_ecosystem#1074) and re-exported from `dig-app-core::session`. dig-node (#1080) consumes the SAME
-crate for the engine half, so the two ends cannot drift. dig-app supplies only the app-specific
-concrete implementations: `impl SessionSigner for IdentitySecrets`, `ProfileSessionSigner`
-(`session.rs`), and the production decode-then-native-confirm `NativeConfirmSignPolicy`
-(`sign_policy.rs`). References to `session.rs::…` builders below denote those re-exports.
+crate for the engine half, so the two ends cannot drift. The loopback sign seam (`sign_service.rs`)
+takes its identity `SessionSigner` by INJECTION, so the concrete signer is a caller choice: the
+custody path uses `dig_account::ProfileSigner` (the master-HD identity signer, which implements the
+same `dig-ipc-protocol::SessionSigner`), while `ProfileSessionSigner` (`session.rs`) remains a
+compatible implementation over the in-memory unlocked-identity session. dig-app also supplies the
+`impl SessionSigner for IdentitySecrets` and the production decode-then-native-confirm
+`NativeConfirmSignPolicy` (`sign_policy.rs`). References to `session.rs::…` builders below denote the
+re-exports of the canonical crate.
 
 [`dig-ipc-protocol`]: https://crates.io/crates/dig-ipc-protocol
 

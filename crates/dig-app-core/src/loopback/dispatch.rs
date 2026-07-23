@@ -707,6 +707,105 @@ mod tests {
         router_with(ScriptedConfirmer(ConfirmDecision::Approve))
     }
 
+    /// Build an approving router whose loopback sign seam is the supplied `signer`, advertising its
+    /// public key on the connect handle. The pairing/whitelist stores still seal under a separate
+    /// unlocked identity's DEK; only the SIGN seam is the injected `signer`. Used to prove the seam
+    /// accepts ANY [`SessionSigner`] — including the `dig_account::ProfileSigner` the custody
+    /// switchover routes through (#1546).
+    fn router_with_signer(
+        signer: Box<dyn SessionSigner + Send + Sync>,
+    ) -> FrameRouter<KeystoreSealer> {
+        let identities = UnlockedIdentities::new();
+        identities.unlock(DID, IdentitySecrets::generate());
+        let pairings = PairingStore::new(
+            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
+            DID,
+        );
+        let whitelist = WhitelistStore::new(
+            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
+            DID,
+        );
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec!["xch1testaddress".to_string()],
+            pubkeys: vec![signer.signing_public_key_hex()],
+        };
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            signer,
+            connect_info,
+            [EXT.to_string()],
+        )
+    }
+
+    #[test]
+    fn a_sign_request_routes_through_a_dig_account_profile_signer() {
+        // The custody switchover (#1546) swaps the loopback sign seam from the app's
+        // `ProfileSessionSigner` to `dig_account::ProfileSigner`. Both implement
+        // `dig_ipc_protocol::SessionSigner`, so the seam is TYPE-COMPATIBLE — this proves it
+        // end-to-end: a `sign.request` routed through a `FrameRouter` whose signer IS a
+        // `dig_account::ProfileSigner` returns a signature that verifies against that signer's
+        // advertised key over the domain-separated `DIGNET-SIGN-v1` message (never the raw payload),
+        // and the response advertises that same key.
+        use crate::session::verify_signature;
+        use dig_ipc_protocol::Signature;
+
+        // A master seed wrapped as an `UnlockedMasterSeed` (the "thing that feeds the signer"), then
+        // the concrete dig-account identity signer for the default profile — exactly what
+        // `UnlockedAccount::signer()` hands out. The seed is DERIVED (not a literal) so static
+        // analysis never reads it as hard-coded key material.
+        let seed_arr: [u8; 32] =
+            Sha256::digest(b"dig-app #1546 profile-signer conformance seed").into();
+        let dir = tempfile::tempdir().unwrap();
+        let seed = Arc::new(
+            dig_session::Session::enroll_master_seed(
+                Arc::new(dig_keystore::FileBackend::new(dir.path().to_path_buf())),
+                dig_keystore::BackendKey::new("conformance"),
+                dig_session::Password::new("pw"),
+                &seed_arr,
+            )
+            .unwrap(),
+        );
+        let signer =
+            dig_account::ProfileSigner::new(Arc::clone(&seed), dig_account::ProfileIx::ROOT);
+        let pubkey = SessionSigner::signing_public_key(&signer);
+
+        let router = router_with_signer(Box::new(signer));
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let payload_b64 = spend_payload_b64();
+        let params =
+            json!({ "origin": origin, "payload_type": "spend", "payload_b64": payload_b64 });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        let sig_bytes: [u8; 96] = BASE64
+            .decode(resp["result"]["signature_b64"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let signature = Signature::new(sig_bytes);
+        let payload = BASE64.decode(&payload_b64).unwrap();
+        let message = sign_callback_message("spend", &payload).unwrap();
+
+        assert!(
+            verify_signature(&pubkey, &message, &signature),
+            "a dig_account::ProfileSigner signature must verify through the loopback sign seam"
+        );
+        assert!(
+            !verify_signature(&pubkey, &payload, &signature),
+            "and NOT over the raw payload — the callback message is domain-separated"
+        );
+        assert_eq!(
+            resp["result"]["pubkey_hex"],
+            hex::encode(pubkey.as_bytes()),
+            "the sign response advertises the injected ProfileSigner's key"
+        );
+    }
+
     /// A real, decodable spend-bundle payload (base64), for the sign path.
     fn spend_payload_b64() -> String {
         use chia_bls::{SecretKey, Signature};

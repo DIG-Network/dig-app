@@ -4,13 +4,16 @@
 //!
 //! SIGN-1/2/3 delivered the pieces — the [`LoopbackServer`], the [`FrameRouter`], the sealed
 //! [`PairingStore`]/[`WhitelistStore`], the per-OS [`native_confirmer`](crate::confirm::native_confirmer),
-//! and the [`ProfileSessionSigner`] — but nothing assembled them into a live server. This module is
+//! and the identity [`SessionSigner`] — but nothing assembled them into a live server. This module is
 //! that assembly, called by the dig-app tray shell on boot:
 //!
 //! 1. builds a [`FrameRouter`] over the ACTIVE profile's identity — the pairing/whitelist stores seal
-//!    under its DEK (NC-2), the [`ProfileSessionSigner`] signs `sign.request`s with its `0x0010` key,
-//!    and [`ProfileConnectInfo`] advertises its signing public key AND the profile's wallet receive
-//!    addresses on connect (#961), so a connected dapp can display / send to the wallet;
+//!    under its DEK (NC-2), the caller-injected identity [`SessionSigner`] signs `sign.request`s with
+//!    the profile's `0x0010` key, and [`ProfileConnectInfo`] advertises that signing public key AND the
+//!    profile's wallet receive addresses on connect (#961), so a connected dapp can display / send to
+//!    the wallet. The signer is INJECTED (not built here) so the custody switchover (#1530/#1546) can
+//!    supply a [`dig_account::ProfileSigner`] — the master-HD identity signer — through the SAME seam
+//!    without touching this assembly;
 //! 2. gates every pair/connect/sign on the real per-OS [`native_confirmer`](crate::confirm::native_confirmer)
 //!    (Windows Hello / macOS Touch ID / Linux polkit) instead of the fail-closed `HeadlessConfirmer`;
 //! 3. attaches the durable [`FileSealedStore`] so pairings, connected origins, and the per-frame nonce
@@ -35,7 +38,7 @@ use crate::loopback::{
 };
 use crate::pairing::PairingStore;
 use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-use crate::session::{ProfileSessionSigner, SessionSigner};
+use crate::session::SessionSigner;
 use crate::session_lock::{SessionLock, SystemClock};
 use crate::wallet::state::WalletStore;
 use crate::whitelist::WhitelistStore;
@@ -99,12 +102,14 @@ pub fn build_router(
     profile_did: &str,
     profile_dir: &Path,
     confirmer: Arc<dyn NativeConfirmer>,
+    signer: Box<dyn SessionSigner + Send + Sync>,
 ) -> FrameRouter<KeystoreSealer> {
     build_router_with_kdf(
         identities,
         profile_did,
         profile_dir,
         confirmer,
+        signer,
         KdfParams::DEFAULT,
     )
 }
@@ -116,6 +121,7 @@ fn build_router_with_kdf(
     profile_did: &str,
     profile_dir: &Path,
     confirmer: Arc<dyn NativeConfirmer>,
+    signer: Box<dyn SessionSigner + Send + Sync>,
     kdf: KdfParams,
 ) -> FrameRouter<KeystoreSealer> {
     let pairings = PairingStore::new(
@@ -130,14 +136,13 @@ fn build_router_with_kdf(
     // signer, so the connect handle can advertise them alongside the identity signing pubkey (#961).
     let addresses = active_wallet_addresses(identities.clone(), profile_did, profile_dir, kdf);
 
-    let signer = ProfileSessionSigner::new(identities, profile_did);
     // The connect handle advertises the active identity's signing public key AND the wallet's
     // receive addresses (#961), so a connected dapp can display / send to the wallet. Only public
-    // data crosses this handle — the wallet key stays sealed in the session.
+    // data crosses this handle — the private key stays sealed in the injected `signer`.
     let connect_info = ProfileConnectInfo {
         profile_did: profile_did.to_string(),
         addresses,
-        pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        pubkeys: vec![signer.signing_public_key_hex()],
     };
     let store: Arc<dyn SealedRecordStore> = Arc::new(FileSealedStore::new(profile_dir));
 
@@ -145,7 +150,7 @@ fn build_router_with_kdf(
         pairings,
         whitelist,
         confirmer,
-        Box::new(signer),
+        signer,
         connect_info,
         PINNED_EXTENSION_IDS.iter().map(|id| id.to_string()),
     )
@@ -225,11 +230,13 @@ mod tests {
     }
 
     fn assemble(identities: UnlockedIdentities, dir: &Path) -> FrameRouter<KeystoreSealer> {
+        let signer = crate::session::ProfileSessionSigner::new(identities.clone(), DID);
         build_router_with_kdf(
             identities,
             DID,
             dir,
             Arc::new(HeadlessConfirmer),
+            Box::new(signer),
             KdfParams::FAST_TEST,
         )
     }

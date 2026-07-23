@@ -41,7 +41,7 @@ dig-logging = "0.1"
 # traits + role-halves, and the APP-SIGN error taxonomy. dig-app-core consumes it as the CLIENT half
 # so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
 # per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
-dig-ipc-protocol = "0.2"
+dig-ipc-protocol = "0.3"
 # The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
 # WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the

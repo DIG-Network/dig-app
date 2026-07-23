@@ -1371,7 +1371,7 @@ dependencies = [
  "clvmr",
  "dig-constants 0.7.0",
  "dig-identity 0.5.0",
- "dig-ipc-protocol 0.3.0",
+ "dig-ipc-protocol",
  "dig-keystore",
  "dig-session",
  "dig-social-profile",
@@ -1415,7 +1415,7 @@ dependencies = [
  "dig-constants 0.7.0",
  "dig-events-protocol",
  "dig-identity 0.5.0",
- "dig-ipc-protocol 0.2.0",
+ "dig-ipc-protocol",
  "dig-keystore",
  "dig-session",
  "dispatch2",
@@ -1549,21 +1549,6 @@ dependencies = [
  "sha2 0.10.9",
  "sparse-merkle-tree",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "dig-ipc-protocol"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5558929d2823b73a9ead6d617cc96ea4fe2284949fdb2cbe2309a160e01b60cc"
-dependencies = [
- "base64",
- "chia-bls 0.26.0",
- "getrandom 0.2.17",
- "hex",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
 ]
 
 [[package]]
