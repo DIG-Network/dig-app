@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::profiles::sealer::ProfileSealer;
+use crate::sealer::ProfileSealer;
 
 pub use dispatch::{
     FrameRouter, OpenSignGate, ProfileConnectInfo, RequestFrame, SignErrorCode, SignReauthGate,
@@ -224,11 +224,10 @@ pub enum LoopbackError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::sealer::AccountSealer;
     use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt, SignPrompt};
-    use crate::keystore::IdentitySecrets;
     use crate::pairing::PairingStore;
-    use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-    use dig_keystore::KdfParams;
+    use crate::test_support::{test_residency, test_sealer};
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::header::{HeaderValue, ORIGIN};
@@ -249,23 +248,15 @@ mod tests {
         }
     }
 
-    fn router() -> FrameRouter<KeystoreSealer> {
+    fn router() -> FrameRouter<AccountSealer> {
         use crate::loopback::dispatch::ProfileConnectInfo;
         use crate::session::SessionSigner;
         use crate::whitelist::WhitelistStore;
         use std::sync::Arc;
 
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        let pairings = PairingStore::new(
-            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-            DID,
-        );
-        let whitelist = WhitelistStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            DID,
-        );
-        let signer = IdentitySecrets::generate();
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec!["xch1testaddress".to_string()],

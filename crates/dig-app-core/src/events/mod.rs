@@ -1,4 +1,4 @@
-//! Event-driven wallet UI seam (#1008) — dig-app consumes the dig-wallet-backend event stream.
+//! Event-driven wallet UI seam (#1008) — dig-app consumes the dig-events-protocol event stream.
 //!
 //! dig-app does not poll wallet state; it SUBSCRIBES to the engine's [`WalletEvent`] stream (a
 //! FILTERED view chosen with an [`EnumSet<EventKind>`]) and drives its UI reactively, event by

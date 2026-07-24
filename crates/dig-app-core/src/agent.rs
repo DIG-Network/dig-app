@@ -6,21 +6,30 @@
 //! tray reads [`Agent::status_handle`] to paint its menu and trips [`Agent::shutdown_handle`] on
 //! "Quit"; a headless host runs the very same [`Agent::run`] with no shell attached.
 //!
-//! U3 delivers this lifecycle. The security-critical guts it will eventually drive — unlocking keys
-//! ([`crate::keystore`], U4), profile management ([`crate::profiles`], U5), and the
-//! identity-authenticated session + `sign` callback ([`crate::engine`]/[`crate::ipc`], U6) — remain
-//! stubs; the agent connects to the engine through the [`EngineConnector`] seam so U6 slots the real
-//! handshake in without reshaping the loop.
+//! U3 delivers this lifecycle. The security-critical custody it drives — unlocking the master-HD
+//! account ([`crate::account`]), the credential-store seam ([`crate::keystore`]), and the
+//! identity-authenticated session + `sign` callback ([`crate::engine`]/[`crate::ipc`]) — is reached
+//! through seams; the agent connects to the engine through the [`EngineConnector`] seam so the real
+//! handshake slots in without reshaping the loop.
 
 use crate::config::AgentConfig;
 use crate::engine::{EngineConnector, EngineState};
 use crate::environment::AppEnvironment;
-use crate::profiles::ProfileRef;
 use crate::shutdown::Shutdown;
 use crate::Result;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+/// A lightweight reference to the active profile — the DID the status surface and the tray menu
+/// display. The full custody state lives behind the
+/// [`AccountResidency`](crate::account::residency::AccountResidency); this handle carries only the
+/// public DID, so the agent status can be read without unlocking anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileRef {
+    /// The profile's `did:chia:` decentralized identifier.
+    pub did: String,
+}
 
 /// The agent's live status — a cheap, cloneable snapshot the tray shell and CLI read to show what
 /// the agent is doing. Updated in place by the run loop under a shared lock ([`SharedStatus`]).

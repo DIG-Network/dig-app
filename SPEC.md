@@ -87,15 +87,35 @@ user private key never leaves the dig-app process.
 
 dig-app is the sole holder of the user's private keys. Keys are sealed at rest with **dig-keystore
 DIGOP1** (AES-256-GCM + Argon2id) — never hand-rolled — under a three-level hierarchy rooted at the
-user's key:
+account master seed:
 
 1. **Bootstrap unlock** — a DIGOP1 password. On Windows/macOS it is held in the per-application OS
-   keychain (Windows Credential Manager / macOS Keychain), released by the login session; a
-   passphrase prompt is the fallback. On Linux it is a user passphrase (the keyutils keyring is not a
-   safe custody store — §3.1). Opens the active profile's sealed identity blob.
-2. **Root** — the unlocked profile identity key.
-3. **Per-profile DEK** — HKDF-derived from the identity, sealing every other per-profile blob.
-   Profiles MUST NOT share a DEK.
+   keychain (Windows Credential Manager / macOS Keychain), released by the login session with no
+   prompt; a passphrase prompt is the fallback. On Linux it is a user passphrase (the keyutils keyring
+   is not a safe custody store — §3.1). It opens the account's sealed **master seed** — the sole
+   at-rest secret.
+2. **Master seed** — the unlocked account root. Every profile's identity key AND its DEK are derived
+   from it at that profile's HD index (`ProfileIx`); no per-profile secret is stored.
+3. **Per-profile DEK** — HKDF-derived from the profile's derived identity, sealing every other
+   per-profile blob. Profiles MUST NOT share a DEK.
+
+**Custody root: the master-HD account (`dig-account`).** The custody object model — enrol/unlock,
+the keystore crypto, per-profile identity signing + DEK derivation, and the wallet money path — is
+owned by the **`dig-account`** crate and consumed here (never re-implemented). The at-rest ROOT is a
+SINGLE account **master seed**, sealed in a per-user file backend under the bootstrap-unlock password
+(held zero-prompt in the OS credential store on Windows/macOS), and from which every profile's
+identity key AND its DEK are derived at that profile's HD index (`ProfileIx`). This REPLACES the
+retired model in which each profile held an independently-generated random identity scalar. The
+sealing container (DIGOP1) and the DEK derivation contract (HKDF-SHA256 over `DEK_SALT` /
+`IDENTITY_IKM_VERSION` / `PROFILE_DEK_LABEL`, from `dig-constants`) are UNCHANGED — only the seed
+SOURCE moved (random-per-profile → master-seed-at-index). The unlocked account is housed in a
+harness-side lockable RESIDENCY that hands out live-view signer + sealer capabilities: a session lock
+(idle timeout / lock-now / OS screen lock) drops the residency and thereby relocks the running sign +
+seal paths at once. **Migration is a clean pre-release cutover** (§ back-compat): because a master
+seed cannot reproduce a pre-existing random per-profile scalar, no byte-identical DEK exists to carry
+an old at-rest profile onto a seed index — and dig-app is pre-release with no persisted users, so old
+per-profile-scalar identities are abandoned rather than migrated. The on-chain profile DID mint is a
+later phase; until it lands a profile is identified by its seed-derived identity public key.
 
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
@@ -103,13 +123,13 @@ profile's blobs in one transaction (DIGOP1 is versioned; a store-version header 
 **Identity key.** A profile's identity is ONE `dig-identity` standard key: the **BLS12-381 G1**
 identity key (slot `0x0010`, the v2 key model). The single 48-byte compressed G1 public key's private
 scalar does BOTH jobs — it signs (BLS G2 AugScheme) and is the DH key for end-to-end sealing (G1
-ECDH via `dig_identity::g1_dh`) — so the v1 X25519 encryption slot `0x0011` is retired. The key is
-generated from the OS CSPRNG (a 32-byte seed → EIP-2333 master → the standard identity derivation
-path), held in memory only while unlocked, and zeroized on drop. Its at-rest form is a **versioned**
-layout `version(1) || bls_scalar(32)` that DIGOP1 seals; the private material is serialized nowhere
-else. A reader dispatches on the version byte and **fails closed** on a legacy v1 (Ed25519+X25519)
-64-byte blob (`LegacyEd25519Identity`) — the v1↔v2 key models are non-convertible, so a legacy
-identity is re-provisioned, never reinterpreted (§ back-compat is a clean pre-release cutover).
+ECDH via `dig_identity::g1_dh`) — so the v1 X25519 encryption slot `0x0011` is retired. The scalar is
+**derived, never stored**: `dig-account` derives it from the unlocked master seed at the profile's HD
+index (`ProfileIx`) on demand, holds it in memory only while the account is unlocked, and zeroizes it
+on relock. The ONLY at-rest secret is the account master seed, DIGOP1-sealed by `dig-account`; no
+per-profile identity scalar is serialized. A legacy v1 (Ed25519+X25519) identity is non-convertible to
+the v2 key model and is re-provisioned, never reinterpreted (§ back-compat is a clean pre-release
+cutover).
 
 **Domain-separation invariant (MUST).** Every signature the slot `0x0010` identity key produces MUST
 carry a unique per-purpose ASCII domain-separation tag as the first bytes of the signed message; no
@@ -151,99 +171,91 @@ The precedence is detected once at vault-open time. Unlock **fails closed**: a w
 tampered blob, or a foreign key yields an opaque error that never distinguishes the cause and never
 produces partial plaintext.
 
-### 3.2 Profiles (multi-DID)
+### 3.2 Profiles and the Accounts registry
 
-A **profile** is `{ DID (did:chia singleton), key (BLS12-381 G1 identity key, slot 0x0010), paired
-chip35 DataLayer store, local data (config / subscriptions / wallet / prefs) }`. The on-chain identity
-is the dig-identity #771 DID paired with a chip35 store via the store `description` field; profile
-fields are standard SMT slots. dig-app supports **multiple profiles** with exactly one **active
-profile** selected at a time; it creates (mint DID + paired store via chip35 delegation), selects,
-edits (write SMT slots), and reads profiles — always through `dig-identity`, never a reinvented
-format (release-first: the format ships in dig-identity, then dig-app consumes it).
+A **profile** is one HD identity within the account: `{ HD index (`ProfileIx`), derived BLS12-381 G1
+identity key (slot `0x0010`), derived per-profile DEK, local data (config / subscriptions / wallet /
+prefs) }`. Every profile's identity key AND its DEK are DERIVED from the single account master seed at
+the profile's index (§3.1) — a profile holds no independently-stored secret. `ProfileIx::ROOT` is the
+default profile the boot opens.
 
-On disk the profile set splits into three tiers per profile: a **plaintext registry**
-(`<brand-dir>/profiles/registry.json` — the active-profile pointer plus a non-secret record per
-profile: its DID, its two public keys, the paired store id, and a cached display name) so the app
-can list profiles and restore the active one *before any profile is unlocked*; a **sealed identity
-blob** (`<brand-dir>/profiles/<did-hash>/identity.digop1`, or the OS credential store — the profile's
-private key material, DIGOP1-sealed under the user's root unlock, §3.1); and a **sealed per-profile
-data blob** (`<brand-dir>/profiles/<did-hash>/identity.seal` — the persona metadata cache,
-subscriptions, and per-profile prefs), DIGOP1-sealed under that profile's own DEK. Every per-profile
-data blob is sealed with the owning profile's key and no other, so opening one profile's blob under a
-different profile's DEK MUST fail — profiles are cryptographically isolated on disk. Because each
-profile's DEK is HKDF-derived from that profile's own freshly generated identity key (§3.1), the
-isolation holds by the cipher, not by directory layout, and MUST continue to hold after a restart +
-re-unlock (below). The registry is the sole pointer to every profile's directory, so it MUST be
-written durably and atomically (temp file → fsync → rename), the same way the sealed blobs are (§3.1);
-a torn write can never strand a profile's data.
+**The on-chain DID is a later phase.** A profile's public on-chain identity is a `did:chia:` singleton
+paired with a chip35 DataLayer store (via `dig-identity` [dig_ecosystem#771]); minting it is owned by
+`dig-account`'s `ProfileMinter` (phase 2) and is NOT yet wired. Until it lands, a profile is identified
+by its **seed-derived identity public key**, not a minted DID, and dig-app MUST NOT fake a mint.
 
-**Cross-session persistence + boot re-unlock.** Each profile's identity is persisted **sealed at
-rest** (via the §3.1 vault) at creation, so a restarted app can recover it. On boot, after the user
-supplies the root unlock, the app re-derives every profile's identity from its sealed material and
-holds it in the in-memory session, making that profile's DEK — and therefore its sealed data —
-available again. A profile whose identity is not unlocked this session is *locked*: its data cannot
-be opened (fail-closed). Before the root unlock, only the plaintext registry is readable (list +
-restore-active); no sealed data opens.
+**The Accounts registry.** Which accounts exist, which ONE is the default, and which is currently
+active is tracked app-side by `account::registry::AccountRegistry`, keyed by an app-local `AccountId`
+— an opaque handle, NOT a DID and NOT derived from key material, so relabelling an account never
+disturbs its custody root. Invariants, enforced at every mutation:
 
-**Creation ordering (security-critical).** Provisioning an identity (mint DID + generate keys) MUST
-be free of side effects: it neither persists nor unlocks the identity. The manager validates the
-minted DID (canonical + not already owned) and only THEN commits it — seals it at rest and registers
-it unlocked. So a duplicate or invalid DID can never clobber an existing profile's live in-session
-identity or its sealed data; a rejected DID drops the freshly generated secret material untouched
-(zeroized). If a later creation step fails, the just-committed identity is rolled back (sealed
-material removed + session locked) so no half-created profile is left behind. Decrypted profile data
-is returned in a zeroizing buffer, so a profile's plaintext content is scrubbed from memory after use.
+- **Exactly one default over a non-empty registry.** The first account registered becomes the default;
+  removing the default promotes the next in insertion order; removing the last clears it. Never zero
+  defaults over a non-empty registry, never two.
+- **At most one active account.** Removing the active account clears the slot; it does NOT auto-promote
+  (activation is a deliberate user action, unlike the always-present default).
 
-dig-app never *retains* a private key while doing this: provisioned secret material passes straight
-through the manager into the sealing/persistence layer (§3.1); minting the DID + generating the keys
-is delegated to the keystore + wallet/engine, and the on-chain DID mint itself remains a seam gated on
-dig-identity #771. Editing a profile updates the sealed metadata and recomputes the canonical
-dig-identity SMT root; broadcasting that root on-chain (chip35 delegation) is a wallet/engine operation.
+The registry holds only the always-holdable **locked** `AccountSession` handle and never touches key
+material; unlocking a session yields a transient `UnlockedAccount` the caller owns for the duration of
+a signing ceremony.
 
-**Default profile (configurable).** In addition to the *active* profile (the one currently loaded in
-memory), the registry records an optional user-configured **default profile** DID — the identity
-presented by default (in the social selector, as the primary identity). Because a DID is public, the
-default pointer lives in the plaintext registry alongside the active pointer; no sealing is required.
-Resolving the default follows a fixed precedence so a caller always gets a sensible answer while any
-profile exists: (1) the explicitly-configured default IF it still names a known profile (a stale
-default — the chosen profile was removed — is ignored, never returned); (2) otherwise the active
-profile, if selected and known; (3) otherwise the first profile in creation order; (4) `None` only
-when no profile exists. Setting the default MUST reject a DID that names no existing profile, so the
-persisted default always points at a presentable identity.
+**Cross-session persistence + boot re-unlock.** The account master seed is persisted **sealed at
+rest** (§3.1) at enrolment, so a restarted app recovers it. On boot the app enrols-or-unlocks the
+account (§3.2a): a first run generates + seals a fresh master seed; every later boot unlocks it. Once
+unlocked, every profile's identity + DEK is re-derived from the seed at its index on demand — no
+per-profile material is separately persisted or re-derived. A **locked** account exposes NO profile
+identity or DEK (fail-closed): its sealed per-profile data cannot be opened until the account unlocks.
 
-### 3.2a Onboarding gate (wallet → profile → ready)
+**Per-profile isolation (by the cipher).** Each profile's DEK is HKDF-derived from that profile's own
+seed-derived identity (§3.1), so opening one profile's sealed data blob under a different profile's DEK
+MUST fail — profiles are cryptographically isolated by the cipher, not by directory layout, and the
+isolation holds across a restart + re-unlock. Decrypted profile data is returned in a zeroizing buffer,
+so plaintext content is scrubbed from memory after use.
 
-The dig-peer — the social / profile-exchange surfaces (epic dig_ecosystem#986) — is UNUSABLE until the
-user has completed onboarding, in a strictly ordered sequence: a **wallet first**, then **at least one
-profile**. This is modelled as a single onboarding state with three values:
+### 3.2a Unlock / enroll account lifecycle
 
-- **NeedsWallet** — no wallet has been imported or created; the first, blocking step. Every downstream
-  social/peer operation is refused.
-- **NeedsProfile** — a wallet exists but no profile does; the second, blocking step. Creating a profile
-  mints a `did:chia:` DID, which is gated on the on-chain mint spend (the DID-mint seam, held on
-  dig-identity #771): the wizard step exists now, but the mint returns an explicit held error until
-  #771 lands — the flow is wired and MUST NOT fake a mint.
-- **Ready** — a wallet and ≥1 profile exist; the dig-peer is usable.
+The account is the custody root; the app turns "a brand directory" into "a live, lockable unlocked
+account" through ONE boot primitive (`account::lifecycle::open_or_enroll`, assembled by
+`account::boot`):
 
-The state is a pure function of two observed facts — whether a wallet exists and how many profiles
-exist — so it is fully determined without I/O. The app observes wallet presence through a seam and the
-profile count from the profile registry (§3.2). Downstream peer operations MUST consult the gate
-(`require_ready`) and, when not ready, surface the specific next required step (wallet vs profile)
-rather than a generic error, so the UI can route the user to it.
+- **First run** (no sealed seed blob exists) — collect the unlock factors through the OS-native
+  ceremony, gate them on the injected `AuthPolicy` (fail-closed on refusal), generate a fresh master
+  seed from the OS CSPRNG, and `enroll` it DIGOP1-sealed under the collected password — returning the
+  account already unlocked.
+- **Returning boot** (the seed blob exists) — build a locked `AccountSession` and `unlock` it through
+  the SAME injected ceremony + policy, recovering the enrolled seed and yielding the live
+  `UnlockedAccount`. A returning unlock re-derives the identical master-seed-derived identity key.
+
+On Windows/macOS the bootstrap password is sourced zero-prompt from the per-application OS credential
+store (§3.1), so a returning boot unlocks with no prompt. Linux — and any host with no
+per-application-ACL credential store — DEFERS zero-prompt unlock: the account boot yields no residency
+and the signing channel stays down until a Linux unlock UX lands (dig_ecosystem#962).
+
+The unlocked account is never held as a snapshot: it lives in the shared, lockable
+`account::residency::AccountResidency` (§3.6) — a single `Arc<Mutex<Option<UnlockedAccount>>>` that
+hands out LIVE-VIEW signer + sealer capabilities re-reading the account on every operation. A session
+lock (idle timeout / lock-now / OS screen lock) drops the residency (`lock_all`), which relocks BOTH
+the identity sign path AND the money path at once — there is no lock that leaves a running capability
+able to sign. The private key never crosses this boundary (#908, Model A): the harness collects a
+password, `dig-account` seals/unlocks the seed, and callers receive only capability handles.
+
+Fail-closed everywhere: any ceremony, policy, or keystore error — a wrong password, a cancelled prompt,
+a tampered blob, a policy refusal — aborts with NO unlocked account and no partial key material.
 
 ### 3.3 Wallet
 
 The wallet is user-identity state and lives in dig-app (migrated out of the engine). It is a
-**focused host**, not a port of the engine's wallet tree: it holds the wallet key, builds and signs
-spends locally, caches the per-profile wallet view, and delegates network I/O to the engine.
+**focused host**, not a port of the engine's wallet tree: it caches the per-profile wallet view
+(addresses / coins / balance / history, sealed at rest, §3.4), delegates network I/O to the engine,
+and signs money through the master-HD custody path — the wallet host itself holds NO key material.
 
-**Wallet key.** A profile's wallet key is a Chia BLS key rooted at a 32-byte seed. The on-chain
-spending key is the canonical Chia standard wallet child —
-`master_to_wallet_unhardened(master, 0).derive_synthetic()` — whose public half curries the standard
-puzzle; that puzzle's tree hash is the wallet's `xch1…` receive address. The key is held in memory
-only while the profile is unlocked, and its seed is the ONLY serialized form — always DIGOP1-sealed
-(§3.4) before it touches disk. The seed is never exposed to callers and never crosses the IPC
-boundary to the engine.
+**Wallet key.** A profile's wallet key is the canonical Chia standard wallet child of the ACCOUNT
+master seed at the profile's HD index —
+`master_to_wallet_unhardened(master, ix).derive_synthetic()` — whose public half curries the standard
+puzzle; that puzzle's tree hash is the wallet's `xch1…` receive address. The key is owned by
+`dig-account` and derived on demand from the unlocked account by the money path
+(`account::money::MoneyPath` over the `AccountResidency`); it is never stored per profile, never
+exposed to callers, and never crosses the IPC boundary to the engine.
 
 **Spend building — chip35 only.** Every `$DIG` spend bundle is constructed by the canonical chip35
 spend builder (`chip35_dl_coin::build_dig_store_payment`); dig-app MUST NOT hand-roll a spend bundle.
@@ -258,6 +270,25 @@ serialized to hex and handed to the engine to broadcast. The engine never receiv
 key (the same custody boundary as the §2.3 session `sign` callback). A required signature for a key
 the wallet does not hold is skipped, so an incomplete bundle fails closed at the network rather than
 being silently forged.
+
+**Authorize before sign (the live money path, master-HD / Model A).** A spend MUST pass a fail-closed
+gate, in this fixed order, before any signature is produced: (1) **summarize** — the recipients + fee
+are independently re-derived from the coin spends (never a caller's claim) and classified into a
+`SpendTier` (`AutoSend` | `Confirm` | `Vault`) under the profile's `CustodyPolicy`; (2) **authorize** —
+the injected `SpendAuthorizer` rules on the summary (programmatic limits/allowlists); (3) **confirm
+ceremony** — for every tier ABOVE `AutoSend` (i.e. `Confirm` and the clawback `Vault` — the
+`RequireAuth` class) the injected `AuthProvider::confirm_spend` MUST run and return `Approve`. An
+authorizer `Ok` is NOT sufficient on its own: a `RequireAuth`-class spend that skips or is declined at
+the confirm ceremony is REFUSED, and the money signer is never even built. The signer is drawn from the
+shared, lockable account residency and re-read at sign time, so a lock (lock-now / idle timeout / OS
+screen lock) that lands during the confirm dialog fails the sign closed. The residency is the SAME
+lockable seed home the identity signer reads — a locked account refuses to sign money AND identity.
+
+**No user key on the wire (#908).** The seed and every money/identity secret derived from it stay owned
+by the account crate; the money signer holds the key inside its vetted core and exposes signing only.
+What crosses the dig-app→dig-node IPC boundary is exclusively the signed `SpendBundle` (money path) and
+the profile-signed bytes + public key (identity path) — never seed, money secret, or per-profile DEK, in
+raw or hex form. This is asserted at the wire-byte level (the `no_user_key_on_wire` conformance test).
 
 **Wallet state at rest.** The per-profile wallet view — receive addresses, the last-known spendable
 coins (per asset) used for display + coin selection between chain reads, and the outbound spend
@@ -303,8 +334,10 @@ per-profile subdirectory keyed by the profile's DID, sealed at rest to the user 
 | macOS | `~/Library/Application Support/DigNetwork` |
 | Linux | `$XDG_DATA_HOME/dignetwork` (config under `$XDG_CONFIG_HOME`) |
 
-Per-profile layout: `<brand-dir>/profiles/<did-hash>/…`, ACL/mode `0600` to the owning user.
-Sealed contents: the DID identity keys, wallet state, subscriptions, user config/prefs (the §5.3
+Layout: the account master seed is DIGOP1-sealed by `dig-account` under `<brand-dir>/account/`; each
+profile's data lives under `<brand-dir>/profiles/<profile-hash>/…`, ACL/mode `0600` to the owning
+user. Sealed contents: the account master seed (the sole at-rest key material — every profile identity
+key + DEK derives from it, §3.1), wallet state, subscriptions, user config/prefs (the §5.3
 upstream/custom-node setting, the auto-tip preference), and profile metadata (a local cache of the
 dig-identity SMT). This satisfies **NC-3** (data in the user's AppData) and **NC-2** (encrypted at
 rest to the user key) — see the `normative-contract` skill.
@@ -388,7 +421,8 @@ passphrase, via the §3.1 unlock path); the lock exposes a `reauth_required` pre
 signing paths consult. Once a re-unlock succeeds the owed re-auth clears and the idle window restarts.
 
 The lifecycle is a pure, seamed controller (`session_lock::SessionLock` over a `SessionKeys` DEK-drop
-seam — implemented by `UnlockedIdentities` — and a `MonotonicClock`), so every trigger + the tiered
+seam — implemented by the master-HD `account::residency::AccountResidency` — and a `MonotonicClock`),
+so every trigger + the tiered
 re-auth is unit-tested without a real keystore or OS; the native `ScreenLockSource` listeners are thin
 adapters validated behind the seam.
 
@@ -507,10 +541,13 @@ dig-app. The domain-separated message builders (`challenge_message`, `sign_callb
 (`SessionSigner`, `SignPolicy`, `FrameTransport`), the generic app-side `SessionClient` role-half, and
 the `verify_signature` engine primitive are all owned by the canonical [`dig-ipc-protocol`] crate
 (dig_ecosystem#1074) and re-exported from `dig-app-core::session`. dig-node (#1080) consumes the SAME
-crate for the engine half, so the two ends cannot drift. dig-app supplies only the app-specific
-concrete implementations: `impl SessionSigner for IdentitySecrets`, `ProfileSessionSigner`
-(`session.rs`), and the production decode-then-native-confirm `NativeConfirmSignPolicy`
-(`sign_policy.rs`). References to `session.rs::…` builders below denote those re-exports.
+crate for the engine half, so the two ends cannot drift. The loopback sign seam (`sign_service.rs`)
+takes its identity `SessionSigner` by INJECTION, so the concrete signer is a caller choice: the
+custody path uses the master-HD `account::residency::ResidencySigner` — a live-view wrapper over
+`dig_account::ProfileSigner` that fails closed the instant the account is locked, implementing the same
+`dig-ipc-protocol::SessionSigner`. dig-app supplies the production decode-then-native-confirm
+`NativeConfirmSignPolicy` (`sign_policy.rs`). References to `session.rs::…` builders below denote the
+re-exports of the canonical crate.
 
 [`dig-ipc-protocol`]: https://crates.io/crates/dig-ipc-protocol
 
@@ -976,8 +1013,8 @@ day one; the security-critical subsystems are implemented by later work units to
 | `shutdown` | the cooperative shutdown latch (`Shutdown`) that stops the run loop promptly | U3 |
 | `agent` | the per-user agent lifecycle: start/stop, reconcile run loop, live `AgentStatus` | U3 |
 | `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
-| `profiles` | multi-DID create/select/list/edit via dig-identity; per-profile sealed AppData | U5 |
-| `wallet` | per-profile wallet host | post-U5 (stub) |
+| `account` | master-HD custody harness (SECURITY-CRITICAL, 2.0.0): [`registry`] (default/active account tracking), [`residency`] (live, lockable unlocked-account home with fail-closed [`ResidencySigner`]/[`ResidencySealer`]), [`money`] (authorize-before-sign [`SpendSummary`] gate + signing), [`sealer`] (profile DEK derivation), [`ceremony`]/[`auth`]/[`lifecycle`] (confirmation/enrollment/lifecycle) | 2.0.0 |
+| `wallet` | per-profile wallet state (address/coins/balance, DIGOP1-sealed per-profile), engine broadcast seam (`WalletEngine`), signed bundle encoding | U5 |
 | `events` | event-driven wallet UI seam: `EventFeed`/`EventSink` + `EventDriver` (cursor/filter, `catch_up` backfill, graceful resync) + reactive `WalletView` (§3.7) | #1008 |
 | `notify` | debounced native funds-activity notifications off the event stream (§3.7, #970) | #970 |
 | `gateway` | route each command (local vs proxy-to-engine) + dispatch over the `EngineProxy` / `LocalIdentity` / `LinkOpener` seams; catalogued `ErrorCode` + `--json` envelopes | U7 |

@@ -27,7 +27,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::profiles::sealer::{ProfileSealer, SealError};
+use crate::sealer::{ProfileSealer, SealError};
 
 /// The length of the channel secret (a pairing token), in bytes — 256 bits of CSPRNG entropy.
 pub const CHANNEL_SECRET_LEN: usize = 32;
@@ -349,9 +349,8 @@ impl<S: ProfileSealer> PairingStore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keystore::IdentitySecrets;
-    use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-    use dig_keystore::KdfParams;
+    use crate::account::sealer::AccountSealer;
+    use crate::test_support::test_sealer;
     use serde_json::json;
     use sha2::Digest;
 
@@ -367,14 +366,9 @@ mod tests {
         u64::from(u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]])) + step
     }
 
-    /// A store whose active profile is unlocked with a fresh identity, sealing under the fast test KDF.
-    fn store() -> PairingStore<KeystoreSealer> {
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        PairingStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            DID,
-        )
+    /// A store sealing under a fresh profile DEK (the fast test KDF).
+    fn store() -> PairingStore<AccountSealer> {
+        PairingStore::new(test_sealer(DID), DID)
     }
 
     /// Compute the client-side MAC the extension would send for a frame.
@@ -571,16 +565,9 @@ mod tests {
         // dig_ecosystem#956: a frame captured before a restart must not replay after restore. The
         // persisted high-water mark is re-seeded onto the freshly-restored (empty) ledger, so a nonce
         // at or below it is rejected as a replay — exactly as if the session had never restarted.
-        // One identity session (same DEK) shared across the "restart" — a fresh store over the SAME
-        // identity models a restarted app that re-unlocked the profile.
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        let store_of = || {
-            PairingStore::new(
-                KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-                DID,
-            )
-        };
+        // Same profile DEK (same label) shared across the "restart" — a fresh store over the SAME DEK
+        // models a restarted app that re-unlocked the profile.
+        let store_of = || PairingStore::new(test_sealer(DID), DID);
 
         let first = store_of();
         let out = first.pair(EXT, 1).unwrap();
@@ -637,12 +624,8 @@ mod tests {
         let store_a = store();
         let out = store_a.pair(EXT, 1).unwrap();
 
-        let identities = UnlockedIdentities::new();
-        identities.unlock("did:chia:other", IdentitySecrets::generate());
-        let store_b = PairingStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            "did:chia:other",
-        );
+        // A DISTINCT profile DEK (a different label) cannot open A's sealed pairing.
+        let store_b = PairingStore::new(test_sealer("did:chia:other"), "did:chia:other");
         assert!(matches!(
             store_b.restore_sealed(&out.sealed_record),
             Err(SealError::Open)

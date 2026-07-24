@@ -1,42 +1,43 @@
-//! The per-profile sealing seam — the boundary between profile management (U5) and key management
-//! (U4, [`crate::keystore`]).
+//! The per-profile sealing seam — the boundary between the app's at-rest persistence and the custody
+//! crypto that supplies each profile's data-encryption key.
 //!
 //! # Why a trait
 //!
-//! U5 owns *which* bytes are sealed and *where* they live on disk; it MUST NOT own the crypto.
-//! Sealing is dig-keystore **DIGOP1** (AES-256-GCM + Argon2id/HKDF) under a **per-profile DEK**
-//! derived from that profile's unlocked identity key (`DEK = HKDF(identity key)`, SPEC §3.1) — and
-//! that derivation lives in U4. So U5 depends on this narrow trait rather than on a concrete cipher,
-//! keeping the crypto in exactly one place and letting the two work units land independently.
+//! The persistence layers (pairings, whitelist, wallet state) own *which* bytes are sealed and *where*
+//! they live on disk; they MUST NOT own the crypto. Sealing is dig-keystore **DIGOP1** (AES-256-GCM +
+//! Argon2id/HKDF) under a **per-profile DEK** derived from the master-HD account
+//! ([`AccountResidency`](crate::account::residency::AccountResidency), SPEC §3.1). So the persistence
+//! layers depend on this narrow trait rather than on a concrete cipher, keeping the crypto in exactly
+//! one place.
 //!
 //! # The per-profile-key contract (security-critical)
 //!
 //! A [`ProfileSealer`] is addressed by a profile DID. The implementation MUST seal and open using
 //! **only** the DEK of the named profile, and profiles MUST NOT share a DEK (SPEC §3.1). Two
-//! consequences the profile layer relies on:
+//! consequences the persistence layers rely on:
 //!
 //! - **At-rest ciphertext** — [`ProfileSealer::seal`] returns AEAD ciphertext, never plaintext, so a
-//!   sealed blob on disk reveals nothing (§10, test 2).
+//!   sealed blob on disk reveals nothing.
 //! - **Cross-profile isolation** — opening profile A's ciphertext under profile B's DID MUST fail
-//!   (AEAD authentication rejects the wrong key), so one profile can never read another's data
-//!   (§10, test 3).
+//!   (AEAD authentication rejects the wrong key), so one profile can never read another's data.
 //! - **Zeroized plaintext** — [`ProfileSealer::open`] returns the decrypted bytes in a
-//!   [`Zeroizing`] buffer (the F-3 property), so a profile's decrypted secret-bearing content is
-//!   scrubbed from memory when the caller drops it rather than lingering in freed heap.
+//!   [`Zeroizing`] buffer, so decrypted secret-bearing content is scrubbed from memory on drop.
 //!
-//! # U4 integration point
+//! # The production implementation
 //!
-//! The production implementation is [`KeystoreSealer`](super::keystore_sealer::KeystoreSealer): it
-//! resolves the named profile's unlocked U4 [`IdentitySecrets`](crate::keystore::IdentitySecrets) and
-//! DIGOP1-seals under that identity's DEK, so `seal(did, pt)` seals `pt` for exactly that profile.
-//! The profile manager is generic over any `ProfileSealer`, so the seam stays testable in isolation.
+//! The production implementation is the live-view
+//! [`ResidencySealer`](crate::account::residency::ResidencySealer): it derives the named profile's DEK
+//! from the unlocked master-HD account on every call and DIGOP1-seals through the
+//! [`AccountSealer`](crate::account::sealer::AccountSealer), failing closed the instant the account is
+//! locked. Every persistence store is generic over any `ProfileSealer`, so the seam stays testable in
+//! isolation.
 
 use zeroize::Zeroizing;
 
 /// A failure sealing or unsealing a per-profile blob.
 #[derive(Debug, thiserror::Error)]
 pub enum SealError {
-    /// The plaintext could not be sealed (e.g. the profile's key is not unlocked).
+    /// The plaintext could not be sealed (e.g. the account is locked).
     #[error("could not seal profile data: {0}")]
     Seal(String),
 

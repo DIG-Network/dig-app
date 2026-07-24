@@ -19,7 +19,7 @@
 use async_trait::async_trait;
 use dig_account::{
     AccountId, AuthFactors, AuthProvider, ProfileIx, Result as AccountResult, SpendConfirmRequest,
-    SpendDecision, UnlockRequest,
+    SpendDecision, SpendSummary, UnlockRequest,
 };
 
 /// Why a harness auth ceremony failed to produce a result (the user cancelled, a device was
@@ -55,11 +55,15 @@ pub trait AuthCeremony: Send + Sync {
 
     /// Render the spend-confirm modal for `summary` (drawn from `account`/`profile`) and return the
     /// user's [`SpendDecision`].
+    ///
+    /// The [`SpendSummary`] carries the independently re-derived recipients, fee, and custody tier —
+    /// so the modal shows the real effect of the spend (amount/asset/tier), never a caller-supplied
+    /// display string that could misrepresent it.
     async fn confirm_spend(
         &self,
         account: &AccountId,
         profile: ProfileIx,
-        summary: &str,
+        summary: &SpendSummary,
     ) -> Result<SpendDecision, CeremonyError>;
 }
 
@@ -104,7 +108,7 @@ impl<C: AuthCeremony> AuthProvider for HarnessAuthProvider<C> {
 pub struct AlwaysConfirmAuthorizer;
 
 impl dig_account::SpendAuthorizer for AlwaysConfirmAuthorizer {
-    fn authorize(&self, _summary: &str) -> AccountResult<()> {
+    fn authorize(&self, _summary: &SpendSummary) -> AccountResult<()> {
         // No extra programmatic restriction — the async confirm_spend ceremony is the real gate.
         Ok(())
     }
@@ -176,7 +180,7 @@ mod tests {
             &self,
             _account: &AccountId,
             _profile: ProfileIx,
-            _summary: &str,
+            _summary: &SpendSummary,
         ) -> Result<SpendDecision, CeremonyError> {
             self.confirm_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.spend.clone())
@@ -217,31 +221,42 @@ mod tests {
         assert!(matches!(result, Err(dig_account::AccountError::Auth(_))));
     }
 
-    // NOTE: the provider-level `confirm_spend` mapping cannot be unit-tested here because
-    // `SpendConfirmRequest` is `#[non_exhaustive]` with no public constructor — a downstream crate
-    // cannot build one. Relayed to aa868df3 to add `SpendConfirmRequest::new(account, profile,
-    // summary)` (symmetric with `UnlockRequest::new`). Until then we prove the Approve/Decline
-    // plumbing at the ceremony seam, which the provider delegates to verbatim.
+    /// A sample re-derived [`SpendSummary`] (one recipient, no fee) for confirm-ceremony tests. The
+    /// exact amounts are irrelevant here — the tests assert relaying, not classification.
+    fn sample_summary() -> SpendSummary {
+        use dig_account::{SpendRecipient, SpendTier};
+        SpendSummary::new(
+            SpendTier::Confirm,
+            vec![SpendRecipient {
+                address: "xch1recipient".into(),
+                amount_mojos: 5_000_000_000_000,
+                asset_id: None,
+            }],
+            0,
+        )
+    }
+
+    /// The provider maps a dig-account [`SpendConfirmRequest`] onto the ceremony and relays its
+    /// [`SpendDecision`] verbatim — now unit-testable end-to-end since dig-account 0.1.1 added the
+    /// public `SpendConfirmRequest::new` constructor.
     #[tokio::test]
-    async fn the_ceremony_seam_relays_both_spend_decisions() {
-        let approve = FakeCeremony::approving("x");
+    async fn confirm_spend_delegates_to_the_ceremony_and_relays_the_decision() {
+        let provider = HarnessAuthProvider::new(FakeCeremony::approving("x"));
+        let request =
+            SpendConfirmRequest::new(AccountId::new("acct"), ProfileIx(0), sample_summary());
         assert_eq!(
-            approve
-                .confirm_spend(&AccountId::new("acct"), ProfileIx(0), "send 5 XCH")
-                .await
-                .unwrap(),
+            provider.confirm_spend(request).await.unwrap(),
             SpendDecision::Approve
         );
 
-        let decline = FakeCeremony {
+        let declining = HarnessAuthProvider::new(FakeCeremony {
             spend: SpendDecision::Decline(Some("not me".into())),
             ..FakeCeremony::approving("x")
-        };
+        });
+        let request =
+            SpendConfirmRequest::new(AccountId::new("acct"), ProfileIx(0), sample_summary());
         assert_eq!(
-            decline
-                .confirm_spend(&AccountId::new("acct"), ProfileIx(0), "send 5 XCH")
-                .await
-                .unwrap(),
+            declining.confirm_spend(request).await.unwrap(),
             SpendDecision::Decline(Some("not me".into()))
         );
     }
@@ -249,6 +264,6 @@ mod tests {
     #[test]
     fn always_confirm_authorizer_defers_to_the_confirm_ceremony() {
         // It imposes no programmatic block; the real gate is the async confirm_spend ceremony.
-        assert!(AlwaysConfirmAuthorizer.authorize("send 5 XCH").is_ok());
+        assert!(AlwaysConfirmAuthorizer.authorize(&sample_summary()).is_ok());
     }
 }

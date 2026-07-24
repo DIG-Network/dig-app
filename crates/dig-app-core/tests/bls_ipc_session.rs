@@ -4,21 +4,44 @@
 //! Before this migration dig-app pinned `dig-ipc-protocol` 0.1 (Ed25519: 32-byte key, 64-byte sig)
 //! while dig-node ran 0.2 (BLS12-381 G1: 48-byte key, 96-byte G2 sig). The byte lengths disagreed, so
 //! the attach handshake failed at the wire and no session could ever open. These tests drive the
-//! dig-app client-side signer ([`IdentitySecrets`], a `SessionSigner`) against the SAME
+//! dig-app client-side signer (the master-HD [`ResidencySigner`], a `SessionSigner`) against the SAME
 //! `dig-ipc-protocol` 0.2 engine half dig-node runs — the engine `begin` → app signs the canonical
 //! `challenge_message` in-process → engine `attach` — and prove the handshake now SUCCEEDS.
 //!
 //! The custody invariant is preserved and asserted: only the 96-byte detached signature and the
 //! 48-byte public key cross the boundary; the private key never leaves the app process.
 
-use dig_app_core::keystore::IdentitySecrets;
+use std::sync::Arc;
+
+use dig_account::{AccountId, AccountSession, AccountStore, ProfileIx};
+use dig_app_core::account::residency::{AccountResidency, ResidencySigner};
 use dig_app_core::session::{challenge_message, SessionSigner};
 use dig_ipc_protocol::{
     AttachError, AttachParams, BeginParams, DidSigningKeyResolver, EngineSessionRegistry,
     OsEntropy, ProfileAttachment, SigningPublicKey,
 };
+use dig_keystore::MemoryBackend;
+use dig_session::{Password, SEED_LEN};
 
 const DID: &str = "did:chia:testprofile1211";
+
+/// A live-view master-HD identity signer over a freshly-enrolled account (a distinct random seed each
+/// call), exactly the signer the loopback router signs with in production.
+fn app_signer() -> ResidencySigner {
+    use rand_core::RngCore;
+    let mut seed = [0u8; SEED_LEN];
+    rand_core::OsRng.fill_bytes(&mut seed);
+    let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
+    let unlocked = AccountSession::enroll(
+        store,
+        AccountId::new("bls-ipc-test"),
+        Password::new("pw"),
+        &seed,
+        ProfileIx::ROOT,
+    )
+    .expect("enrol a fresh account");
+    AccountResidency::new(unlocked).signer(ProfileIx::ROOT)
+}
 
 /// The engine's DID→published-key backstop. dig-node resolves this from the profile DID's on-chain
 /// slot-`0x0010` BLS G1 key; here it returns the app identity's own advertised key, modelling a DID
@@ -46,7 +69,7 @@ fn profile() -> ProfileAttachment {
 /// alone pass — against the pre-migration Ed25519 (32/64-byte) contract.
 #[test]
 fn a_current_dig_app_opens_a_session_with_a_current_dig_node_engine() {
-    let app = IdentitySecrets::generate();
+    let app = app_signer();
     let advertised = SessionSigner::signing_public_key(&app);
 
     let mut engine = EngineSessionRegistry::new(OsEntropy, FixedKeyResolver { key: advertised });
@@ -88,8 +111,8 @@ fn a_current_dig_app_opens_a_session_with_a_current_dig_node_engine() {
 /// migration accidentally verifying against the wrong key.
 #[test]
 fn a_foreign_identity_cannot_attach() {
-    let published = IdentitySecrets::generate();
-    let attacker = IdentitySecrets::generate();
+    let published = app_signer();
+    let attacker = app_signer();
 
     let mut engine = EngineSessionRegistry::new(
         OsEntropy,

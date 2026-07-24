@@ -16,7 +16,15 @@
 //! config / profile-metadata are sealed under this layout.
 
 use crate::{Error, Os, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+/// Derives the per-profile AppData directory key from a profile's DID: lowercase-hex `sha256(did)`.
+/// Stable and filesystem-safe, so `<brand>/profiles/<did-hash>/` isolates each profile's blobs on
+/// disk regardless of how exotic the DID string is.
+pub fn did_hash(did: &str) -> String {
+    hex::encode(Sha256::digest(did.as_bytes()))
+}
 
 /// The canonical brand directory segment shared across every OS (never drift this literal — it is
 /// the on-disk namespace every DIG user-app install shares).
@@ -175,6 +183,14 @@ mod tests {
         ));
         // The error renders a useful message rather than a bare debug string.
         assert!(err.to_string().contains("XDG_DATA_HOME"));
+    }
+
+    #[test]
+    fn did_hash_is_stable_and_distinct_per_did() {
+        assert_eq!(did_hash("did:chia:aaa"), did_hash("did:chia:aaa"));
+        assert_ne!(did_hash("did:chia:aaa"), did_hash("did:chia:bbb"));
+        // Lowercase-hex sha256 is 64 chars.
+        assert_eq!(did_hash("did:chia:aaa").len(), 64);
     }
 
     #[test]

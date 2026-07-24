@@ -35,6 +35,10 @@ dig-session.workspace = true
 # implements + injects AuthProvider + SpendAuthorizer and wires ProfileSigner (a SessionSigner) into
 # the IPC sign callback. All account crypto/derivation/unlock-policy lives in dig-account, never here.
 dig-account.workspace = true
+# Only the Chia `Network` selector the dig-account money signer takes (`WalletOps::money_signer`).
+# dig-app does NOT use the wallet-backend client seam — the money path signs through dig-account's
+# canonical signer (Option A #1024); this dep names one shared `Network` type, no drifted copy.
+dig-wallet-backend.workspace = true
 # Shared byte-frozen constants (the profile-DEK at-rest byte contract) — see the workspace manifest.
 dig-constants.workspace = true
 # The canonical dig-app ⇄ dig-node IPC session/signing contract (dig_ecosystem#1074/#1081). This
@@ -44,8 +48,8 @@ dig-constants.workspace = true
 dig-ipc-protocol.workspace = true
 # The canonical blockchain→app event CONTRACT (#1067). dig-app SUBSCRIBES to the WalletEvent stream
 # through this — the `events` module drives the reactive UI + #970 notifications off it, and never
-# re-declares the taxonomy. (The wallet-backend crate itself is NOT a dig-app dependency: the money
-# path signs locally via chip35 — ratified Option A #1024 — so the app never uses its client seam.)
+# re-declares the taxonomy. (The wallet-backend crate is named ONLY for its `Network` selector, above;
+# the money path signs through dig-account's canonical signer, not the wallet-backend client seam.)
 dig-events-protocol.workspace = true
 async-trait.workspace = true
 hkdf.workspace = true

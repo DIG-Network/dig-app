@@ -23,7 +23,7 @@ use dig_account::AccountSession;
 /// account, with the single default + active slot tracked on top. Unlocking a session yields a
 /// transient `UnlockedAccount` the caller owns for the duration of a signing ceremony; the registry
 /// itself only ever holds the safe, always-holdable locked handle.
-pub type SessionRegistry = AccountRegistry<AccountSession>;
+pub type AccountSessionRegistry = AccountRegistry<AccountSession>;
 
 /// One registered account: its stable id plus the loaded handle of type `A`.
 struct Entry<A> {

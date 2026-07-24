@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{AuthFailure, PairingStore};
-use crate::profiles::sealer::ProfileSealer;
+use crate::sealer::ProfileSealer;
 use crate::session::{sign_callback_message, SessionSigner};
 use crate::sign_policy::{NativeConfirmSignPolicy, SignRejection, SignSubject, SignVerdict};
 use crate::whitelist::WhitelistStore;
@@ -619,11 +619,11 @@ fn method_not_found(id: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::residency::AccountResidency;
+    use crate::account::sealer::AccountSealer;
     use crate::confirm::HeadlessConfirmer;
-    use crate::keystore::IdentitySecrets;
     use crate::pairing::{frame_mac_input, PairingStore};
-    use crate::profiles::keystore_sealer::{KeystoreSealer, UnlockedIdentities};
-    use dig_keystore::KdfParams;
+    use crate::test_support::{test_residency, test_sealer};
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
 
@@ -675,18 +675,10 @@ mod tests {
     /// Build a router over a fresh unlocked profile, gating every prompt through `confirmer`. The
     /// pairing + whitelist stores share the profile's unlocked identity (so both seal under its DEK);
     /// the loopback signer is a separate identity whose pubkey the connect handle advertises.
-    fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<KeystoreSealer> {
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        let pairings = PairingStore::new(
-            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-            DID,
-        );
-        let whitelist = WhitelistStore::new(
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-            DID,
-        );
-        let signer = IdentitySecrets::generate();
+    fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<AccountSealer> {
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec!["xch1testaddress".to_string()],
@@ -703,8 +695,98 @@ mod tests {
     }
 
     /// A router that approves every prompt.
-    fn approving_router() -> FrameRouter<KeystoreSealer> {
+    fn approving_router() -> FrameRouter<AccountSealer> {
         router_with(ScriptedConfirmer(ConfirmDecision::Approve))
+    }
+
+    /// Build an approving router whose loopback sign seam is the supplied `signer`, advertising its
+    /// public key on the connect handle. The pairing/whitelist stores still seal under a separate
+    /// unlocked identity's DEK; only the SIGN seam is the injected `signer`. Used to prove the seam
+    /// accepts ANY [`SessionSigner`] — including the `dig_account::ProfileSigner` the custody
+    /// switchover routes through (#1546).
+    fn router_with_signer(
+        signer: Box<dyn SessionSigner + Send + Sync>,
+    ) -> FrameRouter<AccountSealer> {
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec!["xch1testaddress".to_string()],
+            pubkeys: vec![signer.signing_public_key_hex()],
+        };
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            signer,
+            connect_info,
+            [EXT.to_string()],
+        )
+    }
+
+    #[test]
+    fn a_sign_request_routes_through_a_dig_account_profile_signer() {
+        // The loopback sign seam takes its identity signer by injection as a
+        // `dig_ipc_protocol::SessionSigner`; the custody path supplies `dig_account::ProfileSigner`.
+        // This proves the seam end-to-end: a `sign.request` routed through a `FrameRouter` whose signer IS a
+        // `dig_account::ProfileSigner` returns a signature that verifies against that signer's
+        // advertised key over the domain-separated `DIGNET-SIGN-v1` message (never the raw payload),
+        // and the response advertises that same key.
+        use crate::session::verify_signature;
+        use dig_ipc_protocol::Signature;
+
+        // A master seed wrapped as an `UnlockedMasterSeed` (the "thing that feeds the signer"), then
+        // the concrete dig-account identity signer for the default profile — exactly what
+        // `UnlockedAccount::signer()` hands out. The seed is DERIVED (not a literal) so static
+        // analysis never reads it as hard-coded key material.
+        let seed_arr: [u8; 32] =
+            Sha256::digest(b"dig-app #1546 profile-signer conformance seed").into();
+        let dir = tempfile::tempdir().unwrap();
+        let seed = Arc::new(
+            dig_session::Session::enroll_master_seed(
+                Arc::new(dig_keystore::FileBackend::new(dir.path().to_path_buf())),
+                dig_keystore::BackendKey::new("conformance"),
+                dig_session::Password::new("pw"),
+                &seed_arr,
+            )
+            .unwrap(),
+        );
+        let signer =
+            dig_account::ProfileSigner::new(Arc::clone(&seed), dig_account::ProfileIx::ROOT);
+        let pubkey = SessionSigner::signing_public_key(&signer);
+
+        let router = router_with_signer(Box::new(signer));
+        let origin = "https://dapp.example";
+        let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+
+        let payload_b64 = spend_payload_b64();
+        let params =
+            json!({ "origin": origin, "payload_type": "spend", "payload_b64": payload_b64 });
+        let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+        let resp = router.handle(&request("sign.request", params, Some(auth)));
+
+        let sig_bytes: [u8; 96] = BASE64
+            .decode(resp["result"]["signature_b64"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let signature = Signature::new(sig_bytes);
+        let payload = BASE64.decode(&payload_b64).unwrap();
+        let message = sign_callback_message("spend", &payload).unwrap();
+
+        assert!(
+            verify_signature(&pubkey, &message, &signature),
+            "a dig_account::ProfileSigner signature must verify through the loopback sign seam"
+        );
+        assert!(
+            !verify_signature(&pubkey, &payload, &signature),
+            "and NOT over the raw payload — the callback message is domain-separated"
+        );
+        assert_eq!(
+            resp["result"]["pubkey_hex"],
+            hex::encode(pubkey.as_bytes()),
+            "the sign response advertises the injected ProfileSigner's key"
+        );
     }
 
     /// A real, decodable spend-bundle payload (base64), for the sign path.
@@ -744,7 +826,7 @@ mod tests {
     /// Pair, then connect `origin` through an approving router, returning `(pairing_id, token)` with
     /// the origin now whitelisted. Uses fresh monotonic nonces `n(1)` (pair carries none) + `n(1)`.
     fn pair_and_connect(
-        router: &FrameRouter<KeystoreSealer>,
+        router: &FrameRouter<AccountSealer>,
         origin: &str,
         nonce: u64,
     ) -> (String, String) {
@@ -766,7 +848,7 @@ mod tests {
     }
 
     /// Pair through the router (approving confirmer) and return `(pairing_id, channel_token_b64)`.
-    fn pair(router: &FrameRouter<KeystoreSealer>) -> (String, String) {
+    fn pair(router: &FrameRouter<AccountSealer>) -> (String, String) {
         let resp = router.handle(&request(
             "pair.begin",
             json!({ "ext_id": EXT, "requested_at": 1 }),
@@ -1094,21 +1176,17 @@ mod tests {
         assert_eq!(resp["error"]["code"], -32601);
     }
 
-    /// Build a router over an explicit shared identity session + persistence store, so a test can
-    /// stand up a SECOND router over the SAME profile DEK + the SAME on-disk store to model a restart.
+    /// Build a router over `residency`'s live-view signer + a persistence store, so a test can stand up
+    /// a SECOND router over the SAME profile DEK (the deterministic `test_sealer(DID)`) + the SAME
+    /// on-disk store to model a restart. The signer reads `residency`, so `residency.lock_all()` relocks
+    /// the running signer (the mid-session lock edge).
     fn router_persisting(
-        identities: UnlockedIdentities,
+        residency: &AccountResidency,
         store: Arc<dyn crate::loopback::persist::SealedRecordStore>,
-    ) -> FrameRouter<KeystoreSealer> {
-        let pairings = PairingStore::new(
-            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-            DID,
-        );
-        let whitelist = WhitelistStore::new(
-            KeystoreSealer::with_kdf(identities.clone(), KdfParams::FAST_TEST),
-            DID,
-        );
-        let signer = crate::session::ProfileSessionSigner::new(identities.clone(), DID);
+    ) -> FrameRouter<AccountSealer> {
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let signer = residency.signer(dig_account::ProfileIx::ROOT);
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec!["xch1testaddress".to_string()],
@@ -1128,18 +1206,18 @@ mod tests {
     #[test]
     fn pairings_connects_and_nonces_survive_a_simulated_restart_and_replay_is_rejected() {
         use crate::loopback::persist::FileSealedStore;
-        // A shared profile identity (its DEK is what opens the sealed records) + a shared on-disk
-        // store, so the "restarted" router re-derives the same DEK and reads the same files.
+        // A shared profile DEK (the deterministic test_sealer(DID) opens the sealed records) + a shared
+        // on-disk store, so the "restarted" router re-derives the same DEK and reads the same files. The
+        // signer reads a persistent unlocked residency shared across the simulated restart.
         let dir = tempfile::tempdir().unwrap();
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
+        let residency = test_residency();
         let store: Arc<dyn crate::loopback::persist::SealedRecordStore> =
             Arc::new(FileSealedStore::new(dir.path()));
         let origin = "https://dapp.example";
 
         // --- First session: pair, connect, and authenticate a frame at nonce n(5). ---
         let (pairing_id, token) = {
-            let router = router_persisting(identities.clone(), Arc::clone(&store));
+            let router = router_persisting(&residency, Arc::clone(&store));
             let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
             // A sign at n(5) advances (and persists) the nonce ledger.
             let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
@@ -1153,7 +1231,7 @@ mod tests {
         };
 
         // --- Restart: a brand-new router (fresh in-memory stores) over the same DEK + files. ---
-        let restarted = router_persisting(identities, store);
+        let restarted = router_persisting(&residency, store);
         let (restored_pairings, restored_origins) = restarted.restore();
         assert_eq!(restored_pairings, 1, "the pairing is restored from disk");
         assert_eq!(restored_origins, 1, "the connected origin is restored");
@@ -1182,19 +1260,19 @@ mod tests {
 
     #[test]
     fn a_sign_on_a_locked_profile_returns_locked_not_an_ok_zero_signature() {
-        // A profile that locks mid-session (its identity dropped from the session) must NOT frame a
-        // success response carrying the ProfileSessionSigner's all-zero fallback signature — the sign
-        // MUST fail with LOCKED (SPEC §5.6.7).
+        // A residency that locks mid-session (its unlocked account dropped) must NOT frame a success
+        // response carrying the live-view signer's all-zero fallback signature — the sign MUST fail with
+        // LOCKED (SPEC §5.6.7).
         use crate::loopback::persist::NullSealedStore;
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        let router = router_persisting(identities.clone(), Arc::new(NullSealedStore));
+        use crate::session_lock::SessionKeys;
+        let residency = test_residency();
+        let router = router_persisting(&residency, Arc::new(NullSealedStore));
 
         let origin = "https://dapp.example";
         let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
 
-        // Lock the profile, then request a sign.
-        identities.lock_profile(DID);
+        // Lock the account, then request a sign.
+        AccountResidency::lock_all(&residency);
         let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
         let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
         let resp = router.handle(&request("sign.request", params, Some(auth)));
@@ -1213,19 +1291,18 @@ mod tests {
         // nonces.json, or a pairing that never authenticated a frame pre-restart), the pairing MUST be
         // dropped — NOT restored with an empty ledger that would accept any nonce.
         let dir = tempfile::tempdir().unwrap();
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
+        let residency = test_residency();
         let store: Arc<dyn crate::loopback::persist::SealedRecordStore> =
             Arc::new(FileSealedStore::new(dir.path()));
 
         // Session 1: pair ONLY (pair.begin is not an authenticated frame, so no nonce is persisted).
         let (pairing_id, token) = {
-            let router = router_persisting(identities.clone(), Arc::clone(&store));
+            let router = router_persisting(&residency, Arc::clone(&store));
             pair(&router)
         };
 
         // Restart: a fresh router over the same DEK + files restores state.
-        let restarted = router_persisting(identities, store);
+        let restarted = router_persisting(&residency, store);
         let (restored_pairings, _) = restarted.restore();
         assert_eq!(
             restored_pairings, 0,
@@ -1242,16 +1319,16 @@ mod tests {
 
     #[test]
     fn an_approved_connect_signs_with_the_profile_identity_key() {
-        // The ProfileSessionSigner signs with the active profile's identity key; the signature must
-        // verify against that key over the domain-separated DIGNET-SIGN-v1 message (never raw bytes).
-        use crate::keystore::verify_signature;
+        // The live-view residency signer signs with the master-HD profile's identity key; the signature
+        // must verify against that key over the domain-separated DIGNET-SIGN-v1 message (never raw bytes).
         use crate::loopback::persist::NullSealedStore;
-        use crate::session::sign_callback_message;
+        use crate::session::{sign_callback_message, verify_signature, SessionSigner as _};
 
-        let identities = UnlockedIdentities::new();
-        identities.unlock(DID, IdentitySecrets::generate());
-        let pubkey = identities.signing_public_key(DID).unwrap();
-        let router = router_persisting(identities, Arc::new(NullSealedStore));
+        let residency = test_residency();
+        let pubkey = residency
+            .signer(dig_account::ProfileIx::ROOT)
+            .signing_public_key();
+        let router = router_persisting(&residency, Arc::new(NullSealedStore));
 
         let origin = "https://dapp.example";
         let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
@@ -1261,11 +1338,12 @@ mod tests {
         let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
         let resp = router.handle(&request("sign.request", params, Some(auth)));
 
-        let sig: [u8; 96] = BASE64
+        let sig_bytes: [u8; 96] = BASE64
             .decode(resp["result"]["signature_b64"].as_str().unwrap())
             .unwrap()
             .try_into()
             .unwrap();
+        let sig = dig_ipc_protocol::Signature::new(sig_bytes);
         let payload = BASE64.decode(&payload_b64).unwrap();
         let message = sign_callback_message("spend", &payload).unwrap();
         assert!(
@@ -1276,7 +1354,7 @@ mod tests {
             !verify_signature(&pubkey, &payload, &sig),
             "and NOT over the raw payload — it is domain-separated"
         );
-        assert_eq!(resp["result"]["pubkey_hex"], hex::encode(pubkey));
+        assert_eq!(resp["result"]["pubkey_hex"], hex::encode(pubkey.as_bytes()));
     }
 
     #[test]

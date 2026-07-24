@@ -1,13 +1,13 @@
 //! The per-profile wallet state and its DIGOP1-sealed-at-rest store (NC-2 / NC-3).
 //!
-//! Two secret-bearing blobs live in the profile's own AppData directory
-//! (`<brand>/profiles/<did-hash>/`), each sealed under that profile's DEK through the U4/U5
-//! [`ProfileSealer`] seam — never a shared key, never plaintext at rest:
+//! The **`wallet-state.seal`** blob lives in the profile's own AppData directory
+//! (`<brand>/profiles/<did-hash>/`), sealed under that profile's DEK through the [`ProfileSealer`]
+//! seam — never plaintext at rest. It holds the public-facing [`WalletState`] (addresses / coins view
+//! / balance cache / spend history): user data (SPEC §3.4), but NO key material.
 //!
-//! - **`wallet-key.seal`** — the 32-byte wallet-key seed ([`super::signing::WalletKey`]). The only
-//!   serialized form of the private key; sealed before it ever touches disk.
-//! - **`wallet-state.seal`** — the public-facing [`WalletState`] (addresses / coins view / balance
-//!   cache). Sealed too, because it is user data (SPEC §3.4) — but it holds no key material.
+//! The wallet's spending KEY is NOT stored here: in the master-HD model it is derived on demand from
+//! the account master seed by the [`MoneyPath`](crate::account::money::MoneyPath) — nothing per-profile
+//! is persisted for it.
 //!
 //! The `.dig` content cache is explicitly OUT of scope here (SPEC §3.4 exemption): it is public,
 //! on-chain-anchored, machine-owned, and unsealed. Only identity/wallet/subscriptions/config/
@@ -18,10 +18,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::profiles::{did_hash, ProfileSealer};
-use crate::storage::{profile_dir, write_durably};
+use crate::sealer::ProfileSealer;
+use crate::storage::{did_hash, profile_dir, write_durably};
 
-use super::signing::WalletKey;
 use super::WalletError;
 
 /// The asset a coin or balance is denominated in. Kept small + explicit; extended additively as the
@@ -72,8 +71,8 @@ pub struct SpendRecord {
 /// A profile's wallet view — its receive addresses, its last-known spendable coins, and its
 /// outbound spend history. This is the cached, user-facing state; it is authoritative for display +
 /// coin selection between chain reads, and is refreshed from the engine's chain-read seam
-/// ([`super::engine`]). It holds NO private key (the key lives sealed separately,
-/// [`WalletStore::save_key`]).
+/// ([`super::engine`]). It holds NO private key (the money key is derived from the master-HD account,
+/// never stored per profile).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletState {
     /// The profile's receive addresses (`xch1…`). The first is the primary / change address.
@@ -138,14 +137,17 @@ impl WalletState {
     }
 }
 
-/// The file name of the sealed wallet-key seed blob within a profile's directory.
-const KEY_SEAL_FILE: &str = "wallet-key.seal";
 /// The file name of the sealed wallet-state blob within a profile's directory.
 const STATE_SEAL_FILE: &str = "wallet-state.seal";
 
-/// Seals and loads a profile's wallet blobs under that profile's DEK, in the profile's AppData
-/// directory. Generic over the [`ProfileSealer`] seam so the crypto stays in exactly one place (U4)
-/// and the store is testable in isolation — mirroring [`crate::profiles::ProfileManager`].
+/// Seals and loads a profile's wallet state under that profile's DEK, in the profile's AppData
+/// directory. Generic over the [`ProfileSealer`] seam so the crypto stays in exactly one place
+/// (the master-HD [`AccountResidency`](crate::account::residency::AccountResidency)) and the store is
+/// testable in isolation.
+///
+/// The wallet's spending KEY is NOT stored here: it is derived on demand from the master-HD account
+/// by the [`MoneyPath`](crate::account::money::MoneyPath). This store persists only the public-facing
+/// wallet view (addresses / coins / balance / history), which is user data sealed at rest (SPEC §3.4).
 pub struct WalletStore<S: ProfileSealer> {
     brand_dir: PathBuf,
     sealer: S,
@@ -158,26 +160,6 @@ impl<S: ProfileSealer> WalletStore<S> {
             brand_dir: brand_dir.into(),
             sealer,
         }
-    }
-
-    /// Seal `key`'s seed under `did`'s DEK and write it durably to the profile's directory. The
-    /// plaintext seed exists only inside the zeroizing buffer and the sealer's transient input; the
-    /// bytes reaching disk are AEAD ciphertext.
-    pub fn save_key(&self, did: &str, key: &WalletKey) -> Result<(), WalletError> {
-        let seed = key.sealed_seed();
-        self.seal_to(did, KEY_SEAL_FILE, &*seed)
-    }
-
-    /// Load the wallet key for `did` by opening its sealed seed. Fails closed if the profile is
-    /// locked or the blob was sealed by another profile's DEK.
-    pub fn load_key(&self, did: &str) -> Result<WalletKey, WalletError> {
-        let plaintext = self.open_from(did, KEY_SEAL_FILE)?;
-        let seed: [u8; 32] = plaintext.as_slice().try_into().map_err(|_| {
-            WalletError::State("sealed wallet seed has an unexpected length".into())
-        })?;
-        // `seed` is a stack copy of the 32 key bytes; the zeroizing `plaintext` scrubs the heap
-        // buffer, and `WalletKey::from_seed` moves the copy into its own zeroizing store.
-        Ok(WalletKey::from_seed(seed))
     }
 
     /// Seal `state` under `did`'s DEK and write it durably to the profile's directory.
@@ -217,17 +199,8 @@ impl<S: ProfileSealer> WalletStore<S> {
         Ok(())
     }
 
-    /// Read + open the sealed blob at `file`, returning its plaintext (zeroizing). A missing blob is
-    /// an error here (use [`WalletStore::load_state`] for the tolerant path).
-    fn open_from(&self, did: &str, file: &str) -> Result<Zeroizing<Vec<u8>>, WalletError> {
-        let ciphertext = self
-            .read_seal(did, file)
-            .ok_or_else(|| WalletError::State(format!("no sealed {file} for this profile")))?;
-        self.open_bytes(did, &ciphertext)
-    }
-
     /// Open `ciphertext` under `did`'s DEK. The plaintext stays in a zeroizing buffer so a decrypted
-    /// key seed / wallet blob is scrubbed from memory once the caller is done with it.
+    /// wallet blob is scrubbed from memory once the caller is done with it.
     fn open_bytes(&self, did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, WalletError> {
         Ok(self.sealer.open(did, ciphertext)?)
     }
@@ -258,24 +231,16 @@ fn restrict_to_owner(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keystore::IdentitySecrets;
-    use crate::profiles::{KeystoreSealer, UnlockedIdentities};
-    use dig_keystore::KdfParams;
+    use crate::account::sealer::AccountSealer;
+    use crate::test_support::test_sealer;
 
     const DID_A: &str = "did:chia:profile-a";
     const DID_B: &str = "did:chia:profile-b";
 
-    /// A store over `dir` whose real (fast-KDF) [`KeystoreSealer`] has `dids` unlocked to fresh,
-    /// distinct identities — so sealing/opening exercises the production DIGOP1 crypto.
-    fn store(dir: &Path, dids: &[&str]) -> WalletStore<KeystoreSealer> {
-        let identities = UnlockedIdentities::new();
-        for did in dids {
-            identities.unlock(*did, IdentitySecrets::generate());
-        }
-        WalletStore::new(
-            dir,
-            KeystoreSealer::with_kdf(identities, KdfParams::FAST_TEST),
-        )
+    /// A store over `dir` sealing under `did`'s per-profile DEK (the fast test KDF), exercising the
+    /// production DIGOP1 crypto. Distinct DIDs → distinct DEKs → cross-profile isolation.
+    fn store(dir: &Path, did: &str) -> WalletStore<AccountSealer> {
+        WalletStore::new(dir, test_sealer(did))
     }
 
     #[test]
@@ -368,7 +333,7 @@ mod tests {
     #[test]
     fn history_round_trips_through_the_seal() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[DID_A]);
+        let store = store(dir.path(), DID_A);
         let mut state = WalletState {
             addresses: vec!["xch1primary".into()],
             ..WalletState::default()
@@ -381,7 +346,7 @@ mod tests {
     #[test]
     fn state_round_trips_through_the_seal() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[DID_A]);
+        let store = store(dir.path(), DID_A);
         let state = WalletState {
             addresses: vec!["xch1primary".into()],
             coins: vec![CoinRecord {
@@ -398,63 +363,70 @@ mod tests {
     #[test]
     fn a_profile_with_no_saved_state_loads_the_empty_default() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[DID_A]);
+        let store = store(dir.path(), DID_A);
         assert_eq!(store.load_state(DID_A).unwrap(), WalletState::default());
     }
 
     #[test]
-    fn the_wallet_key_round_trips_through_the_seal() {
+    fn the_sealed_state_blob_is_ciphertext_never_the_plaintext_address() {
+        // The custody-critical property: the user-facing plaintext (a receive address) must NOT appear
+        // in the sealed bytes on disk.
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[DID_A]);
-        let key = WalletKey::from_seed([9u8; 32]);
-        store.save_key(DID_A, &key).unwrap();
+        let store = store(dir.path(), DID_A);
+        let state = WalletState {
+            addresses: vec!["xch1secretaddress".into()],
+            ..WalletState::default()
+        };
+        store.save_state(DID_A, &state).unwrap();
 
-        let loaded = store.load_key(DID_A).unwrap();
-        assert_eq!(loaded.public_key(), key.public_key());
-    }
-
-    #[test]
-    fn the_sealed_key_blob_is_ciphertext_never_the_plaintext_seed() {
-        // The custody-critical property: the 32-byte seed must NOT appear in the sealed bytes.
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[DID_A]);
-        let seed = [0x5au8; 32];
-        store.save_key(DID_A, &WalletKey::from_seed(seed)).unwrap();
-
-        let on_disk = std::fs::read(store.dir_for(DID_A).join(KEY_SEAL_FILE)).unwrap();
+        let on_disk = std::fs::read(store.dir_for(DID_A).join(STATE_SEAL_FILE)).unwrap();
         assert!(
-            !on_disk.windows(seed.len()).any(|w| w == seed),
-            "the plaintext wallet seed leaked into the sealed blob"
+            !on_disk
+                .windows(b"xch1secretaddress".len())
+                .any(|w| w == b"xch1secretaddress"),
+            "plaintext leaked into the sealed wallet-state blob"
         );
     }
 
     #[test]
     fn one_profile_cannot_open_anothers_sealed_wallet() {
-        // A's wallet is sealed under A's DEK; B holds a different identity, so B's open fails the
-        // AEAD tag — cross-profile isolation is cryptographic, not a filesystem convention.
+        // A's wallet is sealed under A's DEK; a store bound to a DIFFERENT profile's DEK fails the AEAD
+        // tag — cross-profile isolation is cryptographic, not a filesystem convention.
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[DID_A, DID_B]);
-        store
-            .save_key(DID_A, &WalletKey::from_seed([1u8; 32]))
-            .unwrap();
+        let store_a = store(dir.path(), DID_A);
+        let state = WalletState {
+            addresses: vec!["xch1a".into()],
+            ..WalletState::default()
+        };
+        store_a.save_state(DID_A, &state).unwrap();
 
-        // Relocate A's sealed blob into B's directory and try to open it as B.
-        let a_blob = std::fs::read(store.dir_for(DID_A).join(KEY_SEAL_FILE)).unwrap();
-        std::fs::create_dir_all(store.dir_for(DID_B)).unwrap();
-        std::fs::write(store.dir_for(DID_B).join(KEY_SEAL_FILE), &a_blob).unwrap();
+        // Relocate A's sealed blob into B's directory and open it through B's DEK (a distinct label).
+        let a_blob = std::fs::read(store_a.dir_for(DID_A).join(STATE_SEAL_FILE)).unwrap();
+        let store_b = store(dir.path(), DID_B);
+        std::fs::create_dir_all(store_b.dir_for(DID_B)).unwrap();
+        std::fs::write(store_b.dir_for(DID_B).join(STATE_SEAL_FILE), &a_blob).unwrap();
 
         assert!(
-            matches!(store.load_key(DID_B), Err(WalletError::Seal(_))),
+            matches!(store_b.load_state(DID_B), Err(WalletError::Seal(_))),
             "B must not open A's sealed wallet"
         );
     }
 
     #[test]
     fn a_locked_profile_cannot_seal_its_wallet() {
+        use crate::account::residency::AccountResidency;
+        use crate::session_lock::SessionKeys;
+        use dig_account::ProfileIx;
+        use dig_keystore::KdfParams;
+
+        // A live-view sealer over a LOCKED residency must fail closed on seal.
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &[]); // no profile unlocked
+        let residency = crate::test_support::test_residency();
+        let sealer = residency.sealer(ProfileIx::ROOT, KdfParams::FAST_TEST);
+        AccountResidency::lock_all(&residency);
+        let store = WalletStore::new(dir.path(), sealer);
         let err = store
-            .save_key(DID_A, &WalletKey::from_seed([2u8; 32]))
+            .save_state(DID_A, &WalletState::default())
             .unwrap_err();
         assert!(matches!(err, WalletError::Seal(_)));
     }

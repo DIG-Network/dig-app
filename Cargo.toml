@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -41,7 +41,7 @@ dig-logging = "0.1"
 # traits + role-halves, and the APP-SIGN error taxonomy. dig-app-core consumes it as the CLIENT half
 # so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
 # per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
-dig-ipc-protocol = "0.2"
+dig-ipc-protocol = "0.3"
 # The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
 # WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the
@@ -76,9 +76,16 @@ dig-session = "0.4"
 # (ProfileSigner: dig_ipc_protocol::SessionSigner), the wallet money-path (WalletOps), DEK, DID/dig-store
 # mint. dig-app is the THIN HARNESS consumer (#1509): it implements + injects AuthProvider + SpendAuthorizer
 # and wires ProfileSigner into the IPC sign callback. Consumed as the published crates.io release
-# (release-first, §4.1): dig-account 0.1.0 is live, so dig-app pins the crates.io `X.Y` version — never
-# a git source (§3.6 all-crates rule).
-dig-account = "0.1"
+# (release-first, §4.1): dig-account 0.1.1 is live (the CONCRETE money signer via
+# LocalSigner::new_canonical), so dig-app pins the crates.io version — never a git source (§3.6 all-crates
+# rule).
+dig-account = "0.1.1"
+# The Chia `Network` selector the dig-account money signer is parameterised by
+# (`WalletOps::money_signer(network)` → `dig_wallet_backend::types::Network`). dig-app names ONLY this
+# selector type from the wallet backend — it does NOT use its client seam (the app signs through
+# dig-account's canonical money signer, ratified Option A #1024). Pinned to the same 0.16 line
+# dig-account 0.1.1 resolves so the `Network` type is one shared definition, never a drifted copy.
+dig-wallet-backend = "0.16"
 # The ecosystem's single source of truth for shared byte-frozen constants (dig_ecosystem#681/§4.1).
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
