@@ -68,6 +68,7 @@ pub mod sign_policy;
 pub mod sign_service;
 pub mod spend_summary;
 pub mod storage;
+pub mod tray_menu;
 pub mod wallet;
 pub mod whitelist;
 
