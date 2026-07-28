@@ -474,11 +474,7 @@ mod tests {
     /// the id in the menu matches the one they pasted. A prefix-only rendering would fail this.
     #[test]
     fn a_long_dig_id_is_abbreviated_at_both_ends() {
-        let id = format!(
-            "{}{}",
-            "1".repeat(8),
-            format!("{}{}", "0".repeat(80), "9".repeat(8))
-        );
+        let id = format!("{}{}{}", "1".repeat(8), "0".repeat(80), "9".repeat(8));
         let label = dig_id_label(Some(&id));
         assert_eq!(label, "11111111…99999999");
         assert!(label.len() < id.len());

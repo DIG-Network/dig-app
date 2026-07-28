@@ -1,14 +1,14 @@
 //! The production account BOOT glue — assembles the master-HD unlock/enroll flow the tray shell mounts
 //! (#1547, custody switchover).
 //!
-//! [`boot_account`] is the production journey: enrol-or-unlock, and on a FIRST run show the user their
+//! [`open_account`] is the production journey: enrol-or-unlock, and on a FIRST run show the user their
 //! 24-word recovery phrase, require them to confirm they kept it, and seal a copy into the phrase vault
 //! so the tray can show it again (dig_ecosystem#1752).
 //!
 //! [`assemble_residency`] is the testable core: over any keystore backend + credential store it
 //! enrols-or-unlocks the account (through [`open_or_enroll`](crate::account::lifecycle::open_or_enroll)
 //! with a [`CredentialCeremony`](crate::account::ceremony::CredentialCeremony)) and houses the result
-//! in an [`AccountResidency`]. [`boot_residency`] / [`reunlock_into`] are the thin, cfg-gated
+//! in an [`AccountResidency`]. [`open_account`] / [`boot_existing_account`] / [`reunlock_into`] are the thin, cfg-gated
 //! production wrappers that wire the host's real [`OsCredentialStore`](crate::keystore::OsCredentialStore)
 //! (Windows/macOS zero-prompt) + a per-user [`FileBackend`](dig_session::FileBackend) — deferring on
 //! Linux exactly as the retired path did (no per-application-ACL credential store to unlock without a
@@ -172,21 +172,32 @@ pub struct BootedAccount {
     pub recoverable: bool,
 }
 
-/// Boot the default account from `brand_dir` — the production tray entry point.
+/// Whether the default account is already enrolled on this host.
+///
+/// A pure existence check on the sealed-seed blob — no unlock, no credential store, no prompt — so the
+/// shell can decide between "unlock the account we have" and "offer to set one up" without any side
+/// effect. This is what keeps first-run setup a DELIBERATE tray action rather than a modal that ambushes
+/// the user at login.
+pub fn account_exists(brand_dir: &std::path::Path) -> bool {
+    use dig_session::FileBackend;
+
+    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    account_store(backend)
+        .exists(&AccountId::new(DEFAULT_ACCOUNT_ID))
+        .unwrap_or(false)
+}
+
+/// Open the default account from `brand_dir`, enrolling it from `seeding` if it does not exist yet.
 ///
 /// Uses the host's [`OsCredentialStore`](crate::keystore::OsCredentialStore) for the zero-prompt
 /// password and a per-user [`FileBackend`](dig_session::FileBackend) under `<brand_dir>/account` for the
-/// sealed master seed. A FIRST run generates a 24-word recovery phrase, shows it through `presenter`,
-/// and enrols only once the user confirms they kept it — then seals a copy into the phrase vault so the
-/// tray can show it again later.
+/// sealed master seed. On a first run the phrase is shown, retention is confirmed, and a copy is sealed
+/// into the phrase vault so the tray can show it again later.
 ///
 /// Returns `None` when there is no usable OS credential store, when the user cancels setup, or on any
-/// keystore failure (⇒ the signing channel defers, as the retired path did).
+/// keystore failure — in every case leaving the host exactly as it was.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub fn boot_account(
-    brand_dir: &std::path::Path,
-    presenter: &dyn PhrasePresenter,
-) -> Option<BootedAccount> {
+pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option<BootedAccount> {
     use crate::keystore::OsCredentialStore;
     use dig_session::FileBackend;
 
@@ -195,30 +206,41 @@ pub fn boot_account(
         return None;
     };
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
-    let assembled = assemble_residency(
-        backend,
-        cred,
-        AccountId::new(DEFAULT_ACCOUNT_ID),
-        Seeding::NewPhrase(presenter),
-    );
+    let assembled = assemble_residency(backend, cred, AccountId::new(DEFAULT_ACCOUNT_ID), seeding);
     let (residency, fresh_phrase) = match assembled {
         Ok(pair) => pair,
         Err(e) => {
-            tracing::warn!(error = %e, "account boot failed — signing channel not started");
+            tracing::warn!(error = %e, "account not opened");
             return None;
         }
     };
     Some(finish_boot(brand_dir, residency, fresh_phrase))
 }
 
+/// Unlock the default account only if it ALREADY exists — the boot-time path.
+///
+/// Never enrols: a host with no account yet gets `None` and a tray that offers to set one up, rather
+/// than a recovery-phrase window nobody asked for.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn boot_existing_account(brand_dir: &std::path::Path) -> Option<BootedAccount> {
+    if !account_exists(brand_dir) {
+        tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
+        return None;
+    }
+    open_account(brand_dir, Seeding::NewPhrase(&NeverEnrols))
+}
+
 /// Linux (and any host without a per-application-ACL credential store) defers zero-prompt unlock, so
 /// the account boot yields no account — mirroring the retired path's Linux deferral.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn boot_account(
-    _brand_dir: &std::path::Path,
-    _presenter: &dyn PhrasePresenter,
-) -> Option<BootedAccount> {
+pub fn open_account(_brand_dir: &std::path::Path, _seeding: Seeding<'_>) -> Option<BootedAccount> {
     tracing::info!("account boot deferred: no zero-prompt credential store on this OS yet");
+    None
+}
+
+/// Linux stub — see [`open_account`].
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn boot_existing_account(_brand_dir: &std::path::Path) -> Option<BootedAccount> {
     None
 }
 
