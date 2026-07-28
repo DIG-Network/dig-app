@@ -82,6 +82,13 @@ impl<S: ProfileSealer> PhraseVault<S> {
         }
     }
 
+    /// The sealer, for tests that need to drive it into a locked state. Test-only: production code has
+    /// no business reaching past the vault to its sealer.
+    #[cfg(test)]
+    pub(crate) fn sealer_for_test(&self) -> &S {
+        &self.sealer
+    }
+
     /// Whether a phrase has been stored for this profile — i.e. whether the account is recoverable.
     ///
     /// Cheap (a file-existence check), so the tray can ask it on every repaint without an unlock.
