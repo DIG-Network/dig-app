@@ -46,6 +46,10 @@ dig-constants.workspace = true
 # `crate::session` and supplies the app-specific concrete `SessionSigner` impls. Consuming the ONE
 # published definition (also consumed by dig-node #1080) makes the app↔engine contract drift-proof.
 dig-ipc-protocol.workspace = true
+# The canonical dig-node CONTROL method catalog (#1152). `crate::control` carries these typed
+# calls/results over the node's loopback JSON-RPC surface, so the method names + result shapes are
+# the published contract rather than a hand-copied catalog that silently drifts.
+dig-node-control-interface.workspace = true
 # The canonical blockchain→app event CONTRACT (#1067). dig-app SUBSCRIBES to the WalletEvent stream
 # through this — the `events` module drives the reactive UI + #970 notifications off it, and never
 # re-declares the taxonomy. (The wallet-backend crate is named ONLY for its `Network` selector, above;

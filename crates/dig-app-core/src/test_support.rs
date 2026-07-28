@@ -47,3 +47,190 @@ pub fn test_residency() -> AccountResidency {
     .expect("enrol a fresh test account");
     AccountResidency::new(unlocked)
 }
+
+/// A FAKE dig-node control plane, served over a real loopback TCP socket.
+///
+/// The connector under test is a transport, so its tests must exercise a transport: this stands up
+/// an actual [`TcpListener`](std::net::TcpListener), speaks real HTTP/1.1 back, and replies with the
+/// real JSON shape `dig-node`'s `control.rs::status` emits. A double that shared a helper with the
+/// client — or wrote into a discarding sink — could pass while the bytes on the wire were wrong.
+pub mod node {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::mpsc;
+    use std::thread::JoinHandle;
+
+    use crate::control::CONTROL_TOKEN_HEADER;
+
+    /// How a [`FakeNode`] should answer the one request it accepts.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Behaviour {
+        /// Reply `200` with a `control.status` result — a healthy, authorized node.
+        Status,
+        /// Reply `200` with a JSON-RPC `error` — what an unauthorized/refused call looks like.
+        JsonRpcError(String),
+        /// Reply with an HTTP status and body — e.g. the `401` an unknown token draws.
+        Http(u16, String),
+        /// Accept the connection and close it without replying — a node that is up but mute.
+        Silent,
+    }
+
+    /// A one-shot fake control plane on loopback. Dropping it joins the server thread.
+    pub struct FakeNode {
+        addr: SocketAddr,
+        token: String,
+        requests: mpsc::Receiver<String>,
+        server: Option<JoinHandle<()>>,
+    }
+
+    impl FakeNode {
+        /// The node version this fake reports, so a test can assert the value travelled rather than
+        /// that *some* string arrived.
+        pub const VERSION: &'static str = "0.64.0";
+
+        /// The token this fake accepts. A request without it draws the `401` a real node would send.
+        pub const TOKEN: &'static str = "f00dcafe";
+
+        /// A fake that answers `control.status` like a healthy node.
+        pub fn serving_status() -> Self {
+            Self::with_behaviour(Behaviour::Status)
+        }
+
+        /// A fake with an explicit [`Behaviour`], bound to an ephemeral loopback port.
+        pub fn with_behaviour(behaviour: Behaviour) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+            let addr = listener.local_addr().expect("local addr");
+            let (tx, requests) = mpsc::channel();
+            let server = std::thread::spawn(move || serve_once(listener, behaviour, tx));
+            Self {
+                addr,
+                token: Self::TOKEN.to_string(),
+                requests,
+                server: Some(server),
+            }
+        }
+
+        /// The `http://…` endpoint a client should dial.
+        pub fn endpoint(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        /// The token this fake authorizes.
+        pub fn token(&self) -> &str {
+            &self.token
+        }
+
+        /// The raw request text the fake received, so a test can assert what actually went out on
+        /// the wire (the method name, the token header) rather than trusting the client's own view.
+        pub fn received(&self) -> String {
+            self.requests
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the fake node received no request")
+        }
+    }
+
+    impl Drop for FakeNode {
+        fn drop(&mut self) {
+            if let Some(server) = self.server.take() {
+                // The server thread exits on its own after one request (or on listener close); a
+                // failed join must not mask the test's real assertion failure.
+                let _ = server.join();
+            }
+        }
+    }
+
+    /// Accept exactly one connection, report the request text, and answer per `behaviour`.
+    fn serve_once(listener: TcpListener, behaviour: Behaviour, tx: mpsc::Sender<String>) {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let request = read_request(&mut stream);
+        let authorized = request
+            .to_lowercase()
+            .contains(&format!("{}: {}", CONTROL_TOKEN_HEADER, FakeNode::TOKEN).to_lowercase());
+        let _ = tx.send(request);
+
+        let (code, body) = match &behaviour {
+            Behaviour::Silent => return,
+            // A real node gates `control.*` on the token, so the fake must too — otherwise a client
+            // that forgot the header would still see a green test.
+            _ if !authorized => (401, "401: unauthorized control request".to_string()),
+            Behaviour::Status => (200, status_result()),
+            Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
+            Behaviour::Http(code, body) => (*code, body.clone()),
+        };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.flush();
+    }
+
+    /// Read the request head plus its declared `Content-Length` body.
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        // Read to the end of the headers first: the body length is only knowable from them.
+        while !buf.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(0) | Err(_) => return String::from_utf8_lossy(&buf).to_string(),
+                Ok(_) => buf.push(byte[0]),
+            }
+        }
+        let head = String::from_utf8_lossy(&buf).to_string();
+        let len = head
+            .lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        if stream.read_exact(&mut body).is_ok() {
+            buf.extend_from_slice(&body);
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    /// The `control.status` reply, field-for-field as `dig-node-service`'s `control::status` emits it.
+    fn status_result() -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "running": true,
+                "service": "dig-node",
+                "version": FakeNode::VERSION,
+                "commit": "deadbee",
+                "protocol": "1",
+                "uptime_secs": 4242,
+                "addr": "127.0.0.1:9778",
+                "upstream": "https://rpc.dig.net",
+                "cache": { "cap_bytes": 1024, "used_bytes": 512, "dir": "/tmp/cache", "shared": false },
+                "hosted_store_count": 3,
+                "cached_capsule_count": 9,
+                "pinned_store_count": 1,
+                "sync": { "available": true }
+            }
+        })
+        .to_string()
+    }
+
+    /// A JSON-RPC error reply carrying `message`.
+    fn json_rpc_error(message: &str) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32000,
+                "message": message,
+                "data": { "code": "UNAUTHORIZED", "origin": "shell" }
+            }
+        })
+        .to_string()
+    }
+}
