@@ -47,6 +47,7 @@ use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
 use dig_app_core::storage::did_hash;
 #[cfg(feature = "tray")]
 use dig_app_core::tray_menu::{self, AccountState, SessionFacts};
+#[cfg(feature = "tray")]
 use dig_app_core::Os;
 #[cfg(feature = "tray")]
 use dig_app_core::{sign_service, storage};
@@ -406,6 +407,10 @@ fn resolve_environment() -> AppEnvironment {
 }
 
 /// The OS this build targets, for the tray-unavailable advice text.
+///
+/// Only the tray shell renders that advice, so a headless build has no caller — gated to keep
+/// `--no-default-features` free of dead-code warnings.
+#[cfg(feature = "tray")]
 fn current_os() -> Os {
     if cfg!(target_os = "windows") {
         Os::Windows
@@ -535,11 +540,15 @@ mod tray {
             Err(e) => return Err((e, agent)),
         };
 
-        let tray_icon = TrayIconBuilder::new()
+        // The icon is attached only if it decoded. A tray with no picture is still a working tray, so
+        // a bad brand mark must never be the reason the user has no agent at all.
+        let mut builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu.menu.clone()))
-            .with_tooltip("DIG — user identity agent")
-            .with_icon(brand_icon())
-            .build();
+            .with_tooltip("DIG — user identity agent");
+        if let Some(icon) = brand_icon() {
+            builder = builder.with_icon(icon);
+        }
+        let tray_icon = builder.build();
         let tray: TrayIcon = match tray_icon {
             Ok(tray) => tray,
             Err(e) => return Err((format!("tray build failed: {e}"), agent)),
@@ -810,16 +819,31 @@ mod tray {
         }
     }
 
-    /// A small solid-color brand icon (DIG accent) generated in code, so the binary carries no
-    /// external asset. A richer branded icon is wired by the dig-installer packaging (U8).
-    fn brand_icon() -> Icon {
-        const SIZE: u32 = 32;
-        // DIG dark-theme accent (teal-green), fully opaque.
-        const PIXEL: [u8; 4] = [0x12, 0x9E, 0x76, 0xFF];
-        let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-        for _ in 0..(SIZE * SIZE) {
-            rgba.extend_from_slice(&PIXEL);
+    /// The DIG brand mark, decoded from the PNG embedded in this binary at the size this platform's
+    /// tray paints (see [`dig_app::brand`]).
+    ///
+    /// Returns `None` rather than panicking on any decoding problem: the icon is decoration, and a
+    /// user whose agent refused to start because of a bad picture would be far worse served than one
+    /// whose tray is briefly unlabelled. The caller mounts the tray either way.
+    fn brand_icon() -> Option<Icon> {
+        let mark = match dig_app::brand::decode(dig_app::brand::TRAY_MARK) {
+            Ok(mark) => mark,
+            Err(e) => {
+                tracing::warn!(error = %e, "tray icon unavailable — mounting the tray without one");
+                return None;
+            }
+        };
+        match Icon::from_rgba(mark.rgba, mark.width, mark.height) {
+            Ok(icon) => Some(icon),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    width = mark.width,
+                    height = mark.height,
+                    "tray rejected the brand mark — mounting the tray without an icon"
+                );
+                None
+            }
         }
-        Icon::from_rgba(rgba, SIZE, SIZE).expect("a solid-color icon is always valid")
     }
 }

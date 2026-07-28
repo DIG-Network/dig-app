@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "3.2.0"
+version = "3.3.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -170,6 +170,12 @@ chia-sdk-utils = "0.30"
 # AppIndicator/GTK menus rather than an unused extra; see `README.md`.
 tray-icon = { version = "0.19", default-features = false }
 tao = "0.30"
+# Decoder for the embedded DIG brand mark the tray paints (`dig-app::brand`). This is NOT a new
+# dependency for the tray stack: `tray-icon` and `muda` already depend on `png` on Linux and macOS to
+# load their own icons, so on those targets it is a graph we are already carrying, and it is a small
+# pure-Rust decoder on Windows. Declared optional and forwarded from the `dig-app` crate's `tray`
+# feature, so a `--no-default-features` headless build carries neither the mark nor a decoder.
+png = "0.17"
 # APP-SIGN loopback identity channel (SIGN-1, dig_ecosystem#950, SPEC §5.6). The extension↔dig-app
 # paired WebSocket server lives in `dig-app-core::loopback`, so the async runtime + WS + HMAC + uuid
 # deps are declared here and consumed there. `tokio` drives the loopback listeners; `tokio-tungstenite`
