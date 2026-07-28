@@ -29,6 +29,12 @@ dig-app-core.workspace = true
 # so this CLI crate stays self-contained.
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+thiserror.workspace = true
+# Reads the 24-word recovery phrase from the terminal with echo SUPPRESSED (dig_ecosystem#1752), so the
+# words never land in terminal scrollback or a screen recording. A standard, single-purpose crate — the
+# alternative is per-OS termios/console FFI in a CLI, which is exactly the kind of hand-rolling this
+# codebase avoids for security-relevant input.
+rpassword = "7"
 # Structured logging (#934) — `dign` is a short-lived CLI invocation, so it installs the shared
 # dual-sink subscriber (`RunContext::Cli`) once at the top of `main` and holds the guard for the
 # process's one-shot lifetime; no service-style `OnceLock` is needed (there is exactly one entrypoint).

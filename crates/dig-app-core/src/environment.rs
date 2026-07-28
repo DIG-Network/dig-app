@@ -33,6 +33,24 @@ pub struct AppEnvironment {
 }
 
 impl AppEnvironment {
+    /// Resolve the real per-user host facts from the process environment.
+    ///
+    /// This is the impure process edge, and it lives here — not in a binary — because **both** shells
+    /// need the identical answer: `dig-app` boots the account from this directory, and `dign` must
+    /// address the SAME one when it restores or inspects that account. Two copies of this resolution
+    /// would be two subtly different directories, and a restore that writes where the app does not look
+    /// is worse than no restore at all.
+    pub fn from_host() -> Self {
+        let os = current_os();
+        Self {
+            os,
+            app_data_root: app_data_root(os),
+            user: current_user(),
+            runtime_dir: std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
+            has_display: has_display(os),
+        }
+    }
+
     /// The per-user brand data directory (`.../DigNetwork`). Fails loudly if the AppData root is
     /// unset — an agent with nowhere to store user data must not guess a location.
     pub fn brand_dir(&self) -> Result<PathBuf> {
@@ -143,5 +161,79 @@ mod tests {
         env.app_data_root = String::new();
         assert!(env.brand_dir().is_err());
         assert!(env.config_path().is_err());
+    }
+}
+
+/// The OS this build is running on. Unknown targets are treated as Linux (the Unix-socket + XDG
+/// conventions), which is the only sane default for a POSIX-like host.
+fn current_os() -> Os {
+    if cfg!(target_os = "windows") {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::MacOs
+    } else {
+        Os::Linux
+    }
+}
+
+/// The per-OS AppData root env var: `%LOCALAPPDATA%` (Windows), `$HOME` (macOS), `$XDG_DATA_HOME`
+/// (Linux, falling back to `$HOME/.local/share` per the XDG default).
+fn app_data_root(os: Os) -> String {
+    match os {
+        Os::Windows => std::env::var("LOCALAPPDATA").unwrap_or_default(),
+        Os::MacOs => std::env::var("HOME").unwrap_or_default(),
+        Os::Linux => std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| format!("{h}/.local/share"))
+                .unwrap_or_default()
+        }),
+    }
+}
+
+/// The current login user, used to namespace the per-user IPC endpoint.
+fn current_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".to_string())
+}
+
+/// Whether a usable desktop display is present. On Linux this is a real check (`$DISPLAY` /
+/// `$WAYLAND_DISPLAY`); on Windows/macOS an interactive desktop is assumed, and a tray that still
+/// cannot mount degrades at runtime.
+fn has_display(os: Os) -> bool {
+    match os {
+        Os::Linux => {
+            !std::env::var("DISPLAY").unwrap_or_default().is_empty()
+                || !std::env::var("WAYLAND_DISPLAY")
+                    .unwrap_or_default()
+                    .is_empty()
+        }
+        Os::Windows | Os::MacOs => true,
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    /// `from_host` must agree with the compile target and produce a usable, non-guessed layout. The
+    /// assertion is on the OS mapping because that is the one field a wrong answer would silently
+    /// redirect every path in the app.
+    #[test]
+    fn from_host_reports_this_platform() {
+        let env = AppEnvironment::from_host();
+        assert_eq!(env.os, current_os());
+        assert!(
+            !env.user.is_empty(),
+            "the user must never resolve to nothing"
+        );
+    }
+
+    /// Both shells must resolve the SAME brand directory — the property that makes a `dign` restore
+    /// land where `dig-app` will look for it. Two independent calls stand in for the two processes.
+    #[test]
+    fn two_resolutions_address_the_same_brand_directory() {
+        let (a, b) = (AppEnvironment::from_host(), AppEnvironment::from_host());
+        assert_eq!(a.brand_dir().ok(), b.brand_dir().ok());
     }
 }

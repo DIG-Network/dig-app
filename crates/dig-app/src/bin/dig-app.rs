@@ -16,33 +16,48 @@
 //! JSON-RPC surface, so the tray shows the node's real version, cache and hosted-store counts — and,
 //! when no node is running, says so with the reason rather than spinning.
 
+#[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
     account_exists, boot_existing_account, open_account, reboot_reunlock, BootedAccount,
 };
-use dig_app_core::account::journey::{explain_missing_phrase, reveal_phrase, WindowedPresenter};
+#[cfg(feature = "tray")]
+use dig_app_core::account::journey::WindowedPresenter;
+#[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
+#[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
+#[cfg(feature = "tray")]
 use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
+#[cfg(feature = "tray")]
 use dig_app_core::confirm::{native_confirmer, NativeConfirmer, NoticePrompt};
 use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
+#[cfg(feature = "tray")]
 use dig_app_core::loopback::SignReauthGate;
+#[cfg(feature = "tray")]
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
     SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
 };
+#[cfg(feature = "tray")]
 use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
+#[cfg(feature = "tray")]
 use dig_app_core::storage::did_hash;
+#[cfg(feature = "tray")]
 use dig_app_core::tray_menu::AccountState;
-use dig_app_core::{sign_service, storage, Os};
+use dig_app_core::Os;
+#[cfg(feature = "tray")]
+use dig_app_core::{sign_service, storage};
+#[cfg(feature = "tray")]
 use std::sync::Arc;
 
 /// The live session-lock wiring the tray drives once the APP-SIGN channel is up: the shared
 /// [`SessionLock`] (lock-now / idle poll / OS screen-lock all act on it, and the sign path
 /// re-authenticates through it) plus the OS screen-lock subscription guard, kept alive for as long as
 /// the tray runs.
+#[cfg(feature = "tray")]
 struct TraySession {
     lock: TraySessionLock,
     _screen_guard: Box<dyn ScreenLockGuard>,
@@ -57,6 +72,7 @@ struct TraySession {
 
 /// The user-visible facts about the account behind a live session.
 #[derive(Clone)]
+#[cfg(feature = "tray")]
 struct AccountFacts {
     /// The root profile's stable id (the seed-derived identity key in hex, until the DID mint lands).
     profile_id: String,
@@ -94,7 +110,14 @@ fn main() {
             // A desktop session is present, so the terminal native-confirm gate is available — bring
             // the APP-SIGN extension↔dig-app signing channel live (best-effort; see the fn's docs).
             // A live channel hands back the session-lock the tray drives (lock-now / idle / OS lock).
+            //
+            // A `--no-default-features` (headless) build has no tray, no confirm windows and therefore
+            // no way for a human to authorize a signature, so it starts no signing channel at all
+            // rather than one that could only ever fail closed.
+            #[cfg(feature = "tray")]
             let tray_session = start_sign_service(&env);
+            #[cfg(not(feature = "tray"))]
+            let tray_session = None::<()>;
             run_tray_or_headless(agent, tray_session, env)
         }
         FormFactor::Headless => {
@@ -109,7 +132,8 @@ fn main() {
 /// no desktop stack) or if the `tray` feature is disabled at build time.
 fn run_tray_or_headless(
     agent: Agent<NodeConnector>,
-    session: Option<TraySession>,
+    #[cfg(feature = "tray")] session: Option<TraySession>,
+    #[cfg(not(feature = "tray"))] session: Option<()>,
     env: AppEnvironment,
 ) {
     #[cfg(feature = "tray")]
@@ -118,16 +142,51 @@ fn run_tray_or_headless(
         Ok(()) => {}
         // `run` returns only on the degrade path, handing the agent back so we can serve headless.
         Err((reason, agent)) => {
-            eprintln!("dig-app: tray unavailable ({reason}) — running as headless agent");
+            report_tray_unavailable(&reason, env_os_of(&agent));
             agent.run();
         }
     }
     #[cfg(not(feature = "tray"))]
     {
-        let _ = (session, env);
-        eprintln!("dig-app: built without the tray feature — running as headless agent");
+        let _ = session;
+        // A headless BUILD is a deliberate choice, not a failure, so it is stated plainly and without
+        // the "install a tray library" advice that would only mislead here.
+        tracing::info!("built without the tray feature — running as headless agent");
+        eprintln!(
+            "dig-app: this is the headless build — there is no menu. Use `dign` for your account \
+             (`dign account status`, `dign account restore`)."
+        );
+        let _ = env;
         agent.run();
     }
+}
+
+/// Report a tray that could not be mounted, on BOTH channels a person might look at.
+///
+/// An unmountable tray is the app's most dangerous failure mode because it is INVISIBLE: the process
+/// runs, reports healthy, and every account surface is unreachable (see
+/// [`tray_unavailable_advice`](dig_app_core::tray_menu::tray_unavailable_advice) for why Linux hits this
+/// silently). So it is logged at WARN — a level a bug-report bundle keeps — and printed to stderr, with
+/// the cause and the `dign` way in.
+#[cfg(feature = "tray")]
+fn report_tray_unavailable(reason: &str, os: Os) {
+    let advice = dig_app_core::tray_menu::tray_unavailable_advice(reason, os);
+    tracing::warn!(
+        reason,
+        ?os,
+        "tray could not be mounted — the DIG menu is not reachable"
+    );
+    eprintln!("dig-app: {advice}");
+}
+
+/// The OS the shell resolved, recovered for the degrade path.
+///
+/// `tray::run` hands the agent back but not the environment (it moved it), and the advice text needs the
+/// platform. Re-deriving it from the compile target is exact — this is the same mapping
+/// [`current_os`] uses, and a binary cannot change platform at runtime.
+#[cfg(feature = "tray")]
+fn env_os_of<T>(_agent: &T) -> Os {
+    current_os()
 }
 
 /// Bring the APP-SIGN loopback signing channel live on boot (dig_ecosystem#958, `SPEC.md` §5.6).
@@ -148,6 +207,7 @@ fn run_tray_or_headless(
 /// two loopback listeners on a background thread (the OS event loop keeps the main thread), and hands
 /// the tray the [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on
 /// any deferral.
+#[cfg(feature = "tray")]
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     // Zero-prompt unlock is only available where the OS credential store is the custody primary.
     if !matches!(env.os, Os::Windows | Os::MacOs) {
@@ -232,6 +292,7 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
 
 /// Where this host keeps its DIG data, or `None` if it cannot be resolved. A thin wrapper so the tray's
 /// account actions and [`start_sign_service`] name the same directory.
+#[cfg(feature = "tray")]
 fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
     env.brand_dir()
         .map_err(|e| tracing::warn!(error = %e, "could not resolve the DIG data directory"))
@@ -242,6 +303,7 @@ fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
 ///
 /// The three inputs are genuinely different situations and the user is told which one they are in: a
 /// host that cannot hold an account at all, an account that exists but did not unlock, and a live one.
+#[cfg(feature = "tray")]
 fn account_state(env: &AppEnvironment, session: Option<&TraySession>) -> AccountState {
     if !matches!(env.os, Os::Windows | Os::MacOs) {
         return AccountState::Unsupported;
@@ -261,6 +323,7 @@ fn account_state(env: &AppEnvironment, session: Option<&TraySession>) -> Account
 ///
 /// Returns the live session on success. On any refusal or failure it returns `None` and tells the user
 /// what happened — never silently, because the user pressed a button and is waiting for an answer.
+#[cfg(feature = "tray")]
 fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
     let dir = brand_dir(env)?;
     let presenter = WindowedPresenter::new(confirmer);
@@ -294,6 +357,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
 /// phrase into an OS message box is not something the platform offers. So the restore lives in the
 /// `dign` CLI, and this window hands over the exact command rather than leaving the user to search for
 /// it (§6.1: point at the way forward, never a dead end).
+#[cfg(feature = "tray")]
 fn explain_restore(confirmer: &dyn NativeConfirmer) {
     notify(
         confirmer,
@@ -307,6 +371,7 @@ fn explain_restore(confirmer: &dyn NativeConfirmer) {
 
 /// Draw a plain informational window. A helper so every one of the tray's messages goes through the same
 /// OS-owned surface rather than a mix of dialogs, notifications and silence.
+#[cfg(feature = "tray")]
 fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &str) {
     confirmer.show_notice(&NoticePrompt {
         title,
@@ -320,6 +385,7 @@ fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &st
 /// zero-prompt re-unlock from the OS credential store) and re-installs it into the shared `residency`
 /// before the signature proceeds — restoring the live-view signer so the pending sign can complete
 /// (dig_ecosystem#967 / #1547). A failed re-unlock leaves the residency locked, so the sign is refused.
+#[cfg(feature = "tray")]
 fn build_reauth_gate(
     lock: TraySessionLock,
     brand_dir: std::path::PathBuf,
@@ -330,21 +396,13 @@ fn build_reauth_gate(
     }))
 }
 
-/// Resolve the real per-user host facts the agent boots from. This is the impure process edge; the
-/// pure derivations happen in [`AppEnvironment`].
+/// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
+/// address the identical per-user directory ([`AppEnvironment::from_host`]).
 fn resolve_environment() -> AppEnvironment {
-    let os = current_os();
-    AppEnvironment {
-        os,
-        app_data_root: app_data_root(os),
-        user: current_user(),
-        runtime_dir: std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
-        has_display: has_display(os),
-    }
+    AppEnvironment::from_host()
 }
 
-/// The OS this build is running on, mapped onto the core's [`Os`]. Unknown targets are treated as
-/// Linux (the Unix-socket + XDG conventions).
+/// The OS this build targets, for the tray-unavailable advice text.
 fn current_os() -> Os {
     if cfg!(target_os = "windows") {
         Os::Windows
@@ -352,42 +410,6 @@ fn current_os() -> Os {
         Os::MacOs
     } else {
         Os::Linux
-    }
-}
-
-/// The per-OS AppData root env var: `%LOCALAPPDATA%` (Windows), `$HOME` (macOS), `$XDG_DATA_HOME`
-/// (Linux, falling back to `$HOME/.local/share` per the XDG default).
-fn app_data_root(os: Os) -> String {
-    match os {
-        Os::Windows => std::env::var("LOCALAPPDATA").unwrap_or_default(),
-        Os::MacOs => std::env::var("HOME").unwrap_or_default(),
-        Os::Linux => std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| format!("{h}/.local/share"))
-                .unwrap_or_default()
-        }),
-    }
-}
-
-/// The current login user, used to namespace the per-user IPC endpoint.
-fn current_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "user".to_string())
-}
-
-/// Whether a usable desktop display is present. On Linux this is a real check (`$DISPLAY` /
-/// `$WAYLAND_DISPLAY`); on Windows/macOS an interactive desktop is assumed, and a tray that still
-/// cannot mount degrades at runtime via [`run_tray_or_headless`].
-fn has_display(os: Os) -> bool {
-    match os {
-        Os::Linux => {
-            !std::env::var("DISPLAY").unwrap_or_default().is_empty()
-                || !std::env::var("WAYLAND_DISPLAY")
-                    .unwrap_or_default()
-                    .is_empty()
-        }
-        Os::Windows | Os::MacOs => true,
     }
 }
 
@@ -402,10 +424,11 @@ fn has_display(os: Os) -> bool {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, explain_missing_phrase, explain_restore, notify, reveal_phrase,
-        set_up_account, start_sign_service, AppEnvironment, TraySession,
+        account_state, explain_restore, notify, set_up_account, start_sign_service, AppEnvironment,
+        TraySession,
     };
     use dig_app_core::account::boot::vault_for;
+    use dig_app_core::account::journey::{explain_missing_phrase, reveal_phrase};
     use dig_app_core::agent::{Agent, SharedStatus};
     use dig_app_core::confirm::{native_confirmer, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;

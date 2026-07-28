@@ -11,6 +11,7 @@
 //! command surface + `--help`/`--json` discovery and drops onto the real session with a one-line
 //! swap.
 
+mod account;
 mod cli;
 
 use clap::Parser;
@@ -19,7 +20,7 @@ use dig_app_core::gateway::{
 };
 use dig_logging::{RunContext, Service};
 
-use cli::Cli;
+use cli::{AccountVerb, Cli, CliCommand};
 
 fn main() {
     // `dign` is a short-lived, one-shot invocation, so the guard is a plain local — held for this
@@ -33,6 +34,13 @@ fn main() {
     });
 
     let cli = Cli::parse();
+
+    // `account` is served HERE, not through the gateway: it acts on this machine's account store, and it
+    // must work when dig-app is not running (that is when a person asks). See `account`'s module docs.
+    if let CliCommand::Account { action } = &cli.command {
+        std::process::exit(run_account(action, cli.json) as i32);
+    }
+
     let command = cli.command.into_command();
     let action = command.action();
     tracing::debug!(action, "dispatching command");
@@ -42,6 +50,63 @@ fn main() {
         Err(error) => render_error(action, &error, cli.json),
     };
     std::process::exit(exit as i32);
+}
+
+/// Run an `account` verb locally and render it. Returns the process exit code.
+///
+/// Success and failure BOTH produce output on both surfaces (prose on stderr, one JSON object on stdout
+/// under `--json`), because a custody command that says nothing is indistinguishable from one that
+/// silently did the wrong thing.
+fn run_account(action: &AccountVerb, json: bool) -> u8 {
+    let result = match action {
+        AccountVerb::Status => account::status(),
+        AccountVerb::Restore => account::restore_interactive(),
+    };
+    match result {
+        Ok(report) => {
+            let text = account::describe(&report);
+            if json {
+                println!("{}", account_json(&report));
+            }
+            eprintln!("{text}");
+            0
+        }
+        Err(e) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "action": "account", "error": e.to_string()})
+                );
+            }
+            eprintln!("dign: {e}");
+            1
+        }
+    }
+}
+
+/// The machine-readable form of an account report (§6.2 — every CLI surface has a `--json` twin).
+///
+/// The words themselves are NEVER part of it: a recovery phrase must not be printable to stdout, where
+/// it would be captured by any script or CI log that ran the command.
+fn account_json(report: &account::AccountReport) -> serde_json::Value {
+    use account::AccountReport;
+
+    let body = match report {
+        AccountReport::NotSetUp => serde_json::json!({"state": "not_set_up"}),
+        AccountReport::Present {
+            dig_id,
+            recoverable,
+        } => serde_json::json!({
+            "state": "present",
+            "dig_id": dig_id,
+            "recoverable": recoverable,
+        }),
+        AccountReport::Restored { dig_id } => serde_json::json!({
+            "state": "restored",
+            "dig_id": dig_id,
+        }),
+    };
+    serde_json::json!({"ok": true, "action": "account", "result": body})
 }
 
 /// Send `command` to the running dig-app over the identity-authenticated session and return its

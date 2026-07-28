@@ -273,6 +273,36 @@ fn did_label(did: Option<&str>) -> String {
     did.unwrap_or("not created yet (optional)").to_string()
 }
 
+/// What to tell a user whose tray icon never appeared, for `os`, given the shell's `reason`.
+///
+/// # Why this exists (an invisible failure is the worst kind)
+///
+/// On Linux the AppIndicator library is **dlopened, not linked**, so on a desktop without
+/// `libayatana-appindicator3-1` the process starts, reports itself healthy, and the icon simply never
+/// appears. The user is left with an app that is running and unreachable — and every account surface
+/// (setup, the recovery phrase, unlock) lives behind that icon.
+///
+/// So a tray that fails to mount MUST say so somewhere a person will find, name the likely cause, and
+/// point at the way in that still works. This function is that message; it is pure so the wording is
+/// tested rather than trusted.
+pub fn tray_unavailable_advice(reason: &str, os: crate::Os) -> String {
+    let cause = match os {
+        // The overwhelmingly common cause, and one the user can act on in one command.
+        crate::Os::Linux => {
+            "\n\nOn Linux this is almost always a missing system tray library. Install \
+             `libayatana-appindicator3-1` (Debian/Ubuntu) or `libappindicator-gtk3` (Fedora), then \
+             start DIG again. Some desktops (GNOME) also need a tray extension such as \
+             AppIndicator Support."
+        }
+        crate::Os::Windows | crate::Os::MacOs => "",
+    };
+    format!(
+        "DIG is running, but its menu-bar icon could not be shown ({reason}), so the DIG menu is \
+         not reachable on this desktop.{cause}\n\nUntil that is fixed, use the `dign` command-line \
+         tool for your account: `dign account status` and `dign account restore`."
+    )
+}
+
 impl fmt::Display for AccountState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
@@ -534,6 +564,37 @@ mod tests {
         assert!(build(&v)
             .rows
             .contains(&MenuRow::Status("DIG — running".to_string())));
+    }
+
+    /// The advice must name the fix, not merely the symptom — a user told only "the tray failed" has
+    /// nowhere to go, which is the failure this message exists to prevent.
+    #[test]
+    fn linux_tray_advice_names_the_missing_library_and_a_way_in() {
+        let advice = tray_unavailable_advice("no display", crate::Os::Linux);
+        assert!(advice.contains("libayatana-appindicator3-1"), "{advice}");
+        assert!(
+            advice.contains("dign"),
+            "the CLI fallback must be offered: {advice}"
+        );
+        assert!(
+            advice.contains("no display"),
+            "the real reason must survive: {advice}"
+        );
+    }
+
+    /// The Linux-specific package advice must NOT be shown on Windows/macOS, where it is wrong and
+    /// would send the user chasing a library their OS does not have. Two platforms are needed to see
+    /// this at all — a Linux-only fixture would pass for a function that always appended it.
+    #[test]
+    fn desktop_platforms_get_no_linux_package_advice() {
+        for os in [crate::Os::Windows, crate::Os::MacOs] {
+            let advice = tray_unavailable_advice("tray build failed", os);
+            assert!(!advice.contains("appindicator"), "{os:?}: {advice}");
+            assert!(
+                advice.contains("dign"),
+                "{os:?} still needs the way in: {advice}"
+            );
+        }
     }
 
     /// Before the first boot reports, the menu must render — defaulting to "no account" rather than
