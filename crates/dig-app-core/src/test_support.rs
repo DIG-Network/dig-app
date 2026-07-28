@@ -132,8 +132,11 @@ pub mod node {
     impl Drop for FakeNode {
         fn drop(&mut self) {
             if let Some(server) = self.server.take() {
-                // The server thread exits on its own after one request (or on listener close); a
-                // failed join must not mask the test's real assertion failure.
+                // The server thread is parked in a BLOCKING `accept`, so a fake that no test ever
+                // dialled would never return and the join would hang the test run forever — a hang
+                // is a far worse failure than an assertion, because it reports nothing. Poke the
+                // listener with a throwaway connection so `accept` returns and the thread finishes.
+                let _ = std::net::TcpStream::connect(self.addr);
                 let _ = server.join();
             }
         }

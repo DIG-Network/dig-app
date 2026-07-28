@@ -519,6 +519,38 @@ dig-app and the engine communicate over a **per-user, OS-native local channel**,
 
 ### 5.1 Transport
 
+#### 5.1.0 The transport dig-app uses TODAY: loopback HTTP JSON-RPC (normative)
+
+dig-app reaches a running dig-node over the **loopback HTTP JSON-RPC control plane the node serves**:
+`POST /` with a JSON-RPC 2.0 body naming a `control.*` method, authorized by the
+`X-Dig-Control-Token` header. dig-app MUST resolve the endpoint by the ecosystem §5.3 ladder, first
+responder wins:
+
+| Order | Endpoint | Notes |
+|---|---|---|
+| 1 | the user's configured endpoint | Wins outright and is tried ALONE — never fall through to a different node. |
+| 2 | `http://dig.local` | Port **80**, not `DIG_NODE_PORT`: the node's bare-`dig.local` listener binds `127.0.0.2:80`. |
+| 3 | `http://localhost:9778` (`DIG_NODE_PORT`) | The node's always-on loopback listener, dual-stack (`127.0.0.1` + `[::1]`). |
+
+`https://rpc.dig.net` MUST NOT be a tier for the control plane: it is the anonymous public read tier
+and dispatches no `control.*` method, so probing it can only mislead.
+
+The control token MUST be read from where dig-node writes it (`<state-dir>/control-token`, with
+`DIG_NODE_STATE_DIR` honoured first, then the machine-wide state dir, then the legacy per-user dir).
+dig-app MUST NOT mint a control token — a token the node does not know authorizes nothing.
+
+A node that ANSWERS but refuses MUST be reported distinctly from no node at all: the remedies differ
+(a token/permission fault on a running node vs nothing installed or running).
+
+The method names, params/result types and error taxonomy MUST come from the published
+`dig-node-control-interface` crate, never a hand-copied catalog.
+
+#### 5.1.1 The per-user OS channel (SPECIFIED, NOT YET IMPLEMENTED)
+
+The addressing below is the specified per-user OS channel. **No engine answers it today** — dig-node
+carries no named-pipe or Unix-domain-socket listener — so it is a forward contract both sides must
+agree on if that listener is built, not a transport dig-app dials.
+
 | OS | Channel | Address |
 |---|---|---|
 | Windows | named pipe (per-user namespace) | `\\.\pipe\dignetwork-<USER>` |
@@ -1006,10 +1038,11 @@ day one; the security-critical subsystems are implemented by later work units to
 | `identity` | the two-identity model (`IdentityKind`: transport-peer vs user) | U1 (types) |
 | `form_factor` | tray-vs-headless detection (`FormFactor::detect`) | U1 |
 | `storage` | per-OS AppData layout (`brand_data_dir`, `profile_dir`) — NC-2/NC-3 | U1 (paths) |
-| `ipc` | per-user IPC endpoint resolution (`channel_endpoint`) | U1 (addressing) |
+| `ipc` | per-user OS channel address resolution (`channel_endpoint`) — §5.1.1, addressing only; nothing answers it yet | U1 (addressing) |
+| `control` | the LIVE loopback dig-node control client (§5.1.0): §5.3 endpoint ladder, control-token discovery, one blocking JSON-RPC exchange, typed `control.status` | #949 |
 | `environment` | resolved per-user host facts (`AppEnvironment`) all boot decisions derive from | U3 |
 | `config` | the agent's non-secret on-disk runtime settings (`AgentConfig`, AppData; plaintext pre-U4) | U3 |
-| `engine` | engine connection state + reachability probe (`EngineConnector`, `EngineState`) | U3 (probe; real session U6) |
+| `engine` | the node link the status surface renders: `EngineState` (connected-with-snapshot / disconnected-with-reason) + the live `NodeConnector` over `control` (`NullConnector` is a test double only) | #949 |
 | `shutdown` | the cooperative shutdown latch (`Shutdown`) that stops the run loop promptly | U3 |
 | `agent` | the per-user agent lifecycle: start/stop, reconcile run loop, live `AgentStatus` | U3 |
 | `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
@@ -1023,8 +1056,9 @@ The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows
 menu-bar · Linux AppIndicator) and **degrades headless** (§4) when no display is present or the tray
 cannot mount; the tray is the crate's default `tray` feature, so a headless build omits the desktop
 stack entirely. U3 delivers `environment`/`config`/`engine`/`shutdown`/`agent` + the shell; the
-agent reaches the engine through the `EngineConnector` seam so U6 slots in the real
-identity-authenticated session without reshaping the run loop.
+agent reaches a node through the `EngineConnector` seam, whose production implementation
+(`NodeConnector`, #949) probes the §5.3 ladder each tick and publishes the node's own
+`control.status` snapshot, so the tray and the headless log both show real node state.
 
 The engine-side of the IPC contract (the `control.session.*` methods + the `sign` callback) is
 implemented in the dig-node repo (U2/U6), not here.
@@ -1100,7 +1134,11 @@ A conformant implementation MUST include tests asserting:
 3. **Cross-user denial** — U2 cannot read U1's AppData nor attach U1's profile.
 4. **Per-OS AppData layout** — `brand_data_dir` resolves the correct directory per OS; per-profile
    subdirs are isolated by DID hash.
-5. **IPC addressing** — `channel_endpoint` yields the correct per-user named pipe / socket path;
+5. **Node connection** — the §5.3 ladder is walked in order, a configured endpoint is tried alone,
+   `http://dig.local` resolves to port 80, the control token is read from dig-node's own state-dir
+   candidates, a live node's `control.status` round-trips over a REAL socket, and a refusal is
+   reported distinctly from no-node-at-all (`control`, `engine`).
+6. **IPC addressing** — `channel_endpoint` yields the correct per-user named pipe / socket path;
    distinct users get distinct endpoints.
 6. **Headless degrade** — no display ⇒ `FormFactor::Headless` (no tray); a display ⇒ `Tray`.
 7. **Signing-through-dig-app** — an engine-initiated `sign` callback (§5.3) is answered by dig-app and
