@@ -30,6 +30,7 @@ pub mod boot;
 pub mod ceremony;
 pub mod lifecycle;
 pub mod money;
+pub mod recovery;
 pub mod registry;
 pub mod residency;
 pub mod sealer;

@@ -56,6 +56,10 @@ dig-node-control-interface.workspace = true
 # the money path signs through dig-account's canonical signer, not the wallet-backend client seam.)
 dig-events-protocol.workspace = true
 async-trait.workspace = true
+# The BIP-39 recovery phrase — see the workspace manifest. `account::recovery` is the ONLY module
+# that touches it, and it maps a phrase to the 32-byte account master seed (never a hand-rolled
+# wordlist or checksum).
+bip39.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
 zeroize.workspace = true
