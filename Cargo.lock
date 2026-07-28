@@ -1398,12 +1398,13 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "3.2.0"
+version = "3.3.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
  "dig-logging",
  "dig-session",
+ "png",
  "tao",
  "tempfile",
  "tracing",
@@ -1412,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "3.2.0"
+version = "3.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1854,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "3.2.0"
+version = "3.3.0"
 dependencies = [
  "clap",
  "dig-app-core",

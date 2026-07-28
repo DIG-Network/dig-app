@@ -245,6 +245,15 @@ Binding rules:
   missing library yields a running process with no icon and no error. The shell MUST log the failure and
   print the likely cause plus a working alternative (`dign`), because an invisible tray is otherwise
   indistinguishable from a broken application.
+- **The tray icon MUST be the DIG brand mark, carried inside the binary.** The mark is embedded as PNG
+  artwork and decoded to RGBA at mount time; the shell MUST NOT read it from disk or from another
+  component's files, so any `dig-app` binary shows the right icon however it was packaged. The shell
+  SHOULD embed the artwork size closest to the host's tray paint size rather than downscaling a large
+  master, which loses the glyph at tray dimensions.
+- **A brand mark that fails to decode MUST NOT prevent the tray from mounting.** The icon is decoration;
+  decoding is fallible and its failure MUST be logged and then tolerated, leaving a working, fully
+  actionable tray without a picture. A user whose agent refused to start over artwork would be far worse
+  served than one whose tray is briefly unlabelled.
 
 ### 3.1d Native input, modals and prompts (normative)
 
