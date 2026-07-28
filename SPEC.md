@@ -233,12 +233,53 @@ Binding rules:
   status line AND offered the explainer, and MUST NOT be shown an inert "show my recovery phrase" item.
   An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
   existence is discoverable.
+- **Read the lock state from the KEYS, never from the session (MUST).** A session deliberately outlives
+  its key material — lock-now and the idle auto-lock drop the keys and keep the session so the sign path
+  can re-unlock into it. The reported state MUST therefore be derived from whether key material is held
+  RIGHT NOW; a session with no keys is `Locked`, identically to a not-yet-unlocked account, so the way
+  back in (`Unlock…`) is the same. Inferring "unlocked" from the session's existence reports a lock that
+  is not there and offers no route out of it.
 - **Price before the click.** An action that spends funds MUST name the cost in its LABEL, not only in a
   confirmation dialog (§3.1b).
 - **A tray that cannot mount MUST report itself.** On Linux the indicator library is dlopened, so a
   missing library yields a running process with no icon and no error. The shell MUST log the failure and
   print the likely cause plus a working alternative (`dign`), because an invisible tray is otherwise
   indistinguishable from a broken application.
+
+### 3.1d Native input, modals and prompts (normative)
+
+**Whenever dig-app needs input from the user it MUST use the platform's native input box, modal or
+prompt** — Windows and macOS both provide one, and the app already owns the native-confirm plumbing
+(§5.6.1) these extend. This covers the recovery phrase on restore, any password or passphrase entry, the
+retention confirmation, and every future field.
+
+Two shapes are explicitly NOT acceptable substitutes: dropping the user to a terminal command, and an
+in-app or web-rendered text field. A tray menu itself has no text field — that is a property of the tray
+API, not a reason to hand the user off — so an input need is met by raising a native dialog from the tray,
+not by printing a command for them to run.
+
+Binding rules, which matter more for an input control than for a notice:
+
+- **Cancel MUST always work.** An unescapable modal on a background tray agent is the worst available
+  failure mode (§3.1c, never trap the user). Dismissal MUST be a first-class outcome, and MUST leave
+  nothing half-created.
+- **Entered secrets MUST go straight into the zeroizing path.** Typed key material (a recovery phrase, a
+  passphrase) MUST be moved into its `Zeroizing`/`RecoveryPhrase` home and MUST NOT be left in a control
+  buffer, a window title, a process argument, or any log record. The never-log gate covers the restore
+  path, not only enrolment.
+- **Echo policy is a deliberate decision, stated here.** A recovery phrase on RESTORE is entered
+  **masked**, matching `dign account restore`'s suppressed echo: the words already exist on paper, so
+  shoulder-surfing is the live risk and a typo is recoverable by retrying (a wrong phrase cannot silently
+  damage anything — restore refuses when an account exists, and a bad checksum is rejected outright,
+  §3.1a). Where a mistyped phrase would be costly rather than merely fruitless, the prompt MUST offer an
+  explicit reveal-while-typing affordance rather than defaulting to clear text.
+- **The words a user types are DIG's, not a Chia wallet's (MUST).** Both the restore prompt and the setup
+  screen MUST state that a DIG recovery phrase is not a Chia wallet phrase and vice versa, because DIG
+  will accept a Sage phrase and silently build a different, empty account from it (§3.1a).
+
+**Current state:** restore is served by `dign account restore` (masked terminal entry) while the native
+input dialog is built; the tray's restore item hands over that exact command. That is a documented
+interim, not the specified end state.
 
 ### 3.2 Profiles and the Accounts registry
 

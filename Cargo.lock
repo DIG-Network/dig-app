@@ -1401,7 +1401,9 @@ name = "dig-app"
 version = "3.2.0"
 dependencies = [
  "dig-app-core",
+ "dig-keystore",
  "dig-logging",
+ "dig-session",
  "tao",
  "tempfile",
  "tracing",

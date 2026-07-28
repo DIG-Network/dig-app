@@ -303,17 +303,20 @@ mod tests {
     }
 
     /// The custody root must not be printable by accident — the whole reason `Debug` is hand-written.
+    ///
+    /// Asserted as EXACT equality against a fixed string, which is both stronger than a per-word search
+    /// (nothing at all can hide in it) and immune to a false RED: BIP-39 words are ordinary English, so
+    /// `act` and `cover` are substrings of "redacted" and "Recovery" respectively. An earlier version of
+    /// this test searched per word and failed spuriously whenever a phrase happened to contain one —
+    /// the same trap as `never_log`'s `account` collision.
     #[test]
-    fn debug_redacts_the_words() {
+    fn debug_renders_only_a_fixed_redaction() {
         let phrase = RecoveryPhrase::generate();
-        let rendered = format!("{phrase:?}");
-        for word in phrase.words() {
-            assert!(
-                !rendered.contains(word),
-                "Debug leaked the word {word:?}: {rendered}"
-            );
-        }
-        assert!(rendered.contains("redacted"));
+        assert_eq!(
+            format!("{phrase:?}"),
+            "RecoveryPhrase(<redacted 24 words>)",
+            "Debug must render a constant, so no part of the phrase can appear in it"
+        );
     }
 
     /// An account enrolled BEFORE this module existed has a raw CSPRNG seed. Rendering it as words must

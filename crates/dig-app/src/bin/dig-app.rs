@@ -46,7 +46,7 @@ use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
 #[cfg(feature = "tray")]
 use dig_app_core::storage::did_hash;
 #[cfg(feature = "tray")]
-use dig_app_core::tray_menu::AccountState;
+use dig_app_core::tray_menu::{self, AccountState, SessionFacts};
 use dig_app_core::Os;
 #[cfg(feature = "tray")]
 use dig_app_core::{sign_service, storage};
@@ -299,24 +299,24 @@ fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
         .ok()
 }
 
-/// The account state the tray shows, derived from what actually exists on this host.
+/// The account state the tray shows: read the impure host facts, then let the tested rules decide.
 ///
-/// The three inputs are genuinely different situations and the user is told which one they are in: a
-/// host that cannot hold an account at all, an account that exists but did not unlock, and a live one.
+/// The lock state is read FRESH from the residency on every repaint via [`SessionFacts::of`], never
+/// inferred from the session existing — a session deliberately outlives its key material (lock-now and
+/// the idle auto-lock drop the keys and keep the session so the sign path can re-unlock into it). This
+/// function therefore holds no logic of its own; [`tray_menu::account_state`] owns every rule, where it
+/// is covered by tests rather than sitting untested in a binary.
 #[cfg(feature = "tray")]
 fn account_state(env: &AppEnvironment, session: Option<&TraySession>) -> AccountState {
-    if !matches!(env.os, Os::Windows | Os::MacOs) {
-        return AccountState::Unsupported;
-    }
-    match session {
-        Some(session) => AccountState::Unlocked {
-            recoverable: session.account.recoverable,
-        },
-        None => match brand_dir(env) {
-            Some(dir) if account_exists(&dir) => AccountState::Locked,
-            _ => AccountState::Absent,
-        },
-    }
+    let supported = matches!(env.os, Os::Windows | Os::MacOs);
+    // Only worth a filesystem check when there is no session to ask: with one, the account provably
+    // exists, and this runs on every repaint tick.
+    let enrolled = match session {
+        Some(_) => true,
+        None => brand_dir(env).is_some_and(|dir| account_exists(&dir)),
+    };
+    let facts = session.map(|s| SessionFacts::of(&s.residency, s.account.recoverable));
+    tray_menu::account_state(supported, enrolled, facts)
 }
 
 /// Create a brand-new account: generate a recovery phrase, show it once, confirm retention, enrol.
@@ -353,10 +353,11 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
 
 /// Tell the user how to restore an account from their recovery phrase.
 ///
-/// The tray cannot take 24 words as input — a system-tray menu has no text field, and typing a recovery
-/// phrase into an OS message box is not something the platform offers. So the restore lives in the
-/// `dign` CLI, and this window hands over the exact command rather than leaving the user to search for
-/// it (§6.1: point at the way forward, never a dead end).
+/// **Interim (`SPEC.md` §3.1d).** The specified end state is a NATIVE INPUT DIALOG raised from the tray:
+/// a tray menu has no text field of its own, but that is a property of the tray API and not a reason to
+/// hand the user off to a terminal. Until that dialog is built, restore is served by `dign account
+/// restore` (masked entry) and this window hands over the exact command rather than leaving the user to
+/// search for it (§6.1: point at the way forward, never a dead end).
 #[cfg(feature = "tray")]
 fn explain_restore(confirmer: &dyn NativeConfirmer) {
     notify(
@@ -365,7 +366,9 @@ fn explain_restore(confirmer: &dyn NativeConfirmer) {
         "Restoring an account is done from the command line.",
         "Open a terminal and run:\n\n    dign account restore\n\nIt will ask for your 24 words, \
          privately, and will not echo them. When it finishes, restart DIG and your account will be \
-         here.\n\nThis machine currently has no DIG Account, so nothing will be overwritten.",
+         here.\n\nThis machine currently has no DIG Account, so nothing will be overwritten.\n\n\
+         Use the words DIG gave you. A recovery phrase from a Chia wallet such as Sage is NOT a DIG \
+         recovery phrase — DIG would accept it and build a DIFFERENT, empty account from it.",
     );
 }
 

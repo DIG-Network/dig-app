@@ -42,3 +42,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# In-memory keystore + credential backends for the integration tests, so a REAL AccountResidency holding
+# real derived key material can be built and locked without touching the OS credential store
+# (`tests/tray_lock_state.rs`, dig_ecosystem#1752).
+dig-keystore.workspace = true
+dig-session.workspace = true

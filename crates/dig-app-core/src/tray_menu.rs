@@ -64,6 +64,65 @@ impl TrayView {
     }
 }
 
+/// What a live tray session knows about its account — the two facts the state derivation needs.
+///
+/// `keys_unlocked` is read FRESH from the residency, never inferred from the session existing: a session
+/// outlives its key material by design (lock-now and the idle auto-lock drop the keys and keep the
+/// session, so the sign path can re-unlock into it). Confusing "we have a session" with "the account is
+/// unlocked" is what made the menu report `unlocked` after Lock now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionFacts {
+    /// Whether the residency still holds key material RIGHT NOW.
+    pub keys_unlocked: bool,
+    /// Whether a recovery phrase is stored for this account.
+    pub recoverable: bool,
+}
+
+impl SessionFacts {
+    /// Read the facts off a live residency.
+    ///
+    /// This lives here, beside the rules that consume it, so the `is_any_unlocked` call itself is covered
+    /// by tests rather than sitting untested in a binary.
+    pub fn of(residency: &crate::account::residency::AccountResidency, recoverable: bool) -> Self {
+        use crate::session_lock::SessionKeys;
+
+        Self {
+            keys_unlocked: residency.is_any_unlocked(),
+            recoverable,
+        }
+    }
+}
+
+/// Derive the account state the menu shows.
+///
+/// - `host_supports_accounts` — whether this OS can hold an account at all (a per-application-ACL
+///   credential store exists).
+/// - `enrolled` — whether an account exists at rest.
+/// - `session` — the live session's facts, or `None` when the shell holds no session.
+///
+/// A session whose KEYS have been dropped reports [`AccountState::Locked`] — deliberately the same state
+/// as a not-yet-unlocked account, because the way back in is the same (`Unlock…`). Anything else would
+/// report a lock that is not there and offer no route out of it (`SPEC.md` §3.1c).
+pub fn account_state(
+    host_supports_accounts: bool,
+    enrolled: bool,
+    session: Option<SessionFacts>,
+) -> AccountState {
+    if !host_supports_accounts {
+        return AccountState::Unsupported;
+    }
+    match session {
+        Some(SessionFacts {
+            keys_unlocked: true,
+            recoverable,
+        }) => AccountState::Unlocked { recoverable },
+        // A session with no keys, or no session at all: locked if there is something to unlock.
+        Some(_) => AccountState::Locked,
+        None if enrolled => AccountState::Locked,
+        None => AccountState::Absent,
+    }
+}
+
 /// One thing the user can click. The shell maps each to its handler; the model never performs an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
@@ -77,8 +136,13 @@ pub enum TrayAction {
     LockNow,
     /// Re-display the account's recovery phrase, behind unlock + a native confirm.
     ShowRecoveryPhrase,
-    /// Offered ONLY to an account that has no recovery phrase: explain the situation and offer the one
-    /// remedy that exists (replacing the account), destructively and explicitly.
+    /// Offered ONLY to an account that has no recovery phrase: EXPLAIN the situation and what the one
+    /// remedy would be (creating a new account, which yields a new identity and address).
+    ///
+    /// It informs and nothing more — it does NOT replace or delete anything. Destroying an existing
+    /// custody root is not something to reach in one click from a tray menu, so it is deliberately not
+    /// wired here (see [`explain_missing_phrase`](crate::account::journey::explain_missing_phrase),
+    /// whose copy states "Nothing has changed yet").
     FixMissingPhrase,
     /// Copy the profile's DIG ID to the clipboard.
     CopyDigId,
@@ -224,7 +288,7 @@ fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     let mut rows = match account {
         AccountState::Unlocked { recoverable: false } => vec![MenuRow::action(
             TrayAction::FixMissingPhrase,
-            "This account has NO recovery phrase — fix this…",
+            "This account has NO recovery phrase — what to do…",
             true,
         )],
         _ => vec![MenuRow::action(
@@ -593,6 +657,132 @@ mod tests {
             assert!(
                 advice.contains("dign"),
                 "{os:?} still needs the way in: {advice}"
+            );
+        }
+    }
+
+    /// **Regression (#1752 security gate).** After `Lock now` — or an idle auto-lock — the session is
+    /// still held but its KEYS are gone. The menu previously keyed on the session's existence, so it
+    /// reported `Account: unlocked`, kept the reveal enabled, and left `Unlock…` disabled: a false state
+    /// report AND a dead end (`SPEC.md` §3.1c).
+    ///
+    /// The fixture varies ONLY `keys_unlocked` across two otherwise identical sessions, because that is
+    /// the single input the bug ignored — a fixture with no session, or with a different `recoverable`,
+    /// could not tell the two apart.
+    #[test]
+    fn a_session_whose_keys_were_dropped_reports_locked() {
+        let unlocked = SessionFacts {
+            keys_unlocked: true,
+            recoverable: true,
+        };
+        let after_lock = SessionFacts {
+            keys_unlocked: false,
+            ..unlocked
+        };
+
+        assert_eq!(
+            account_state(true, true, Some(unlocked)),
+            AccountState::Unlocked { recoverable: true }
+        );
+        assert_eq!(
+            account_state(true, true, Some(after_lock)),
+            AccountState::Locked,
+            "a session that has dropped its keys is LOCKED, not unlocked"
+        );
+    }
+
+    /// The user-visible consequence of the state above, asserted on the MENU rather than the enum: after
+    /// Lock now the reveal must be gone and `Unlock…` must be the way back in. This is the assertion that
+    /// would have caught the defect on stage.
+    #[test]
+    fn the_menu_after_lock_now_offers_unlock_and_no_reveal() {
+        let after_lock = account_state(
+            true,
+            true,
+            Some(SessionFacts {
+                keys_unlocked: false,
+                recoverable: true,
+            }),
+        );
+        let menu = build(&view(after_lock));
+
+        assert!(
+            menu.is_enabled(TrayAction::Unlock),
+            "the way back in must be clickable"
+        );
+        assert!(
+            !menu.is_enabled(TrayAction::ShowRecoveryPhrase),
+            "a locked account must not offer to reveal its phrase"
+        );
+        assert!(
+            !menu.is_enabled(TrayAction::LockNow),
+            "there is nothing left to lock"
+        );
+        assert!(
+            menu.rows
+                .contains(&MenuRow::Status("Account: locked".to_string())),
+            "the status line must say locked: {:?}",
+            menu.rows
+        );
+    }
+
+    /// A locked session must NOT be mistaken for an absent account — that would offer `Set up my DIG
+    /// Account…` over an account that already exists, and enrolment refuses on an existing custody root.
+    #[test]
+    fn a_locked_session_is_never_reported_as_absent() {
+        let state = account_state(
+            true,
+            true,
+            Some(SessionFacts {
+                keys_unlocked: false,
+                recoverable: false,
+            }),
+        );
+        assert_eq!(state, AccountState::Locked);
+        assert!(!build(&view(state)).is_enabled(TrayAction::SetUpAccount));
+    }
+
+    /// With no session, `enrolled` is what separates "locked" from "not set up yet".
+    #[test]
+    fn with_no_session_enrolment_separates_locked_from_absent() {
+        assert_eq!(account_state(true, true, None), AccountState::Locked);
+        assert_eq!(account_state(true, false, None), AccountState::Absent);
+    }
+
+    /// An unsupported host wins over everything else — it cannot hold an account, so no amount of
+    /// session or enrolment state changes what the user is told.
+    #[test]
+    fn an_unsupported_host_overrides_every_other_input() {
+        for enrolled in [true, false] {
+            for session in [
+                None,
+                Some(SessionFacts {
+                    keys_unlocked: true,
+                    recoverable: true,
+                }),
+            ] {
+                assert_eq!(
+                    account_state(false, enrolled, session),
+                    AccountState::Unsupported
+                );
+            }
+        }
+    }
+
+    /// `recoverable` must survive the derivation — it is what selects the reveal row over the warning.
+    #[test]
+    fn an_unlocked_state_carries_the_recoverable_flag_through() {
+        for recoverable in [true, false] {
+            assert_eq!(
+                account_state(
+                    true,
+                    true,
+                    Some(SessionFacts {
+                        keys_unlocked: true,
+                        recoverable
+                    })
+                ),
+                AccountState::Unlocked { recoverable }
             );
         }
     }

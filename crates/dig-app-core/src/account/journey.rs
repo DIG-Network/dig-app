@@ -131,11 +131,13 @@ pub fn reveal_phrase<S: ProfileSealer>(
     }
 }
 
-/// What a phrase-less (legacy) account is told, and what it is offered.
+/// What a phrase-less (legacy) account is told.
 ///
-/// There is exactly one honest remedy and it is destructive, so this function ONLY informs — it never
-/// acts. The account keeps working untouched; replacing it is a separate, explicitly-confirmed step the
-/// user must ask for again (see the tray's `FixMissingPhrase` handler).
+/// The only remedy is destructive — a new account means a new identity and address — so this function
+/// ONLY informs, and **no code path anywhere replaces the account**. The tray's `FixMissingPhrase` item
+/// calls exactly this and nothing else, and the copy says so ("Nothing has changed yet"). Should a
+/// replacement flow ever be built it belongs behind its own separate, explicitly-confirmed action, not in
+/// this explainer.
 pub fn explain_missing_phrase(confirmer: &dyn NativeConfirmer) -> ConfirmDecision {
     confirmer.show_notice(&NoticePrompt {
         title: "DIG — No recovery phrase",
@@ -283,13 +285,13 @@ mod tests {
             2,
             "one acknowledgement is a reflex; the retention claim needs its own screen"
         );
-        let drawn = confirmer.drawn();
-        for word in phrase.words() {
-            assert!(
-                drawn.contains(word),
-                "the word {word:?} never reached a window"
-            );
-        }
+        // Matched as the whole numbered block, not per word: a per-word presence check would be satisfied
+        // by prompt copy that happens to contain a BIP-39 word (`act` sits inside "redacted", `cover`
+        // inside "recovery"), so it could pass without the phrase ever being drawn.
+        assert!(
+            drew_the_words(&confirmer, &phrase),
+            "the generated words must reach the screen, in full and in order"
+        );
     }
 
     /// Backing out of the FIRST screen declines. The fixture scripts a decline followed by an approve,

@@ -219,12 +219,73 @@ fn the_recovery_phrase_never_reaches_a_log_record() {
         let _ = reveal_phrase(&ApproveAll, &vault);
         // And the display-once presenter, which formats the words for a window.
         let _ = WindowedPresenter::new(&ApproveAll).present_new_phrase(&RecoveryPhrase::generate());
+
+        // The RESTORE leg: enrolling from a phrase the USER supplied, on a fresh store. This is the path
+        // `dign account restore` and (once native input lands) the tray's restore prompt both drive, and
+        // it handles the words at their most exposed — they arrive from outside the process.
+        let restored_from = RecoveryPhrase::parse(&words.join(" ")).expect("the phrase re-parses");
+        let fresh: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
+        let restored = assemble_residency(
+            fresh,
+            MemCred::seeded(),
+            AccountId::new("restored"),
+            Seeding::Restore(&restored_from),
+        );
+        assert!(restored.is_ok(), "the restore leg must actually run");
     });
 
-    for word in &words {
+    assert_no_phrase_in(&logged, &words);
+}
+
+/// Assert that none of `words` (a recovery phrase, in order) leaked into `logged`.
+///
+/// # Why this checks PAIRS and not single words
+///
+/// The obvious assertion — "no individual word appears" — is wrong, and flakily so. BIP-39 words are
+/// ordinary English, and several of them appear in this crate's own log output: **`account` is a BIP-39
+/// word**, and it occurs in module targets (`dig_app_core::account::boot`) and in message text
+/// ("account boot deferred", "account re-unlock failed"). So roughly one generated phrase in eighty
+/// would fail the test spuriously — a false RED, the same class of defect as `cover` sitting inside
+/// "recovery".
+///
+/// A single common word is therefore not evidence of a leak. A *run* of the phrase's words in order is:
+/// any real leak — the joined string, a `{:?}`, a structured field, the numbered block — emits at least
+/// two consecutive words together, while "bulk crew" appearing in log prose is not something that
+/// happens. Checking every adjacent pair is strictly stronger than checking only the fully joined
+/// phrase (which a partial or re-wrapped leak would slip past) and carries no collision risk.
+fn assert_no_phrase_in(logged: &str, words: &[String]) {
+    assert_eq!(words.len(), 24, "the fixture must be a full phrase");
+    let haystack = words_only(logged);
+
+    assert!(
+        !haystack.contains(&words.join(" ")),
+        "the whole recovery phrase reached a log record: {logged}"
+    );
+    for pair in words.windows(2) {
+        let run = pair.join(" ");
         assert!(
-            !logged.contains(word.as_str()),
-            "the recovery-phrase word {word:?} reached a log record: {logged}"
+            !haystack.contains(&run),
+            "the recovery-phrase words {run:?} reached a log record together: {logged}"
         );
     }
+}
+
+/// Reduce `text` to lowercase words separated by single spaces, discarding all punctuation.
+///
+/// This is what makes the pair check see through a leak's FORMATTING. A `tracing` field rendered with
+/// `{:?}` emits `["bulk", "crew"]`, so a naive search for `"bulk crew"` — or for `"bulk\ncrew"` — finds
+/// nothing and the test passes on a real leak. Verified by injecting exactly that: a `?&words[3..6]`
+/// slice slipped past the unnormalized check and is caught by this one. Normalizing collapses every
+/// plausible rendering (quoted, comma-separated, `key=value`, newline-wrapped, ANSI-coloured) onto the
+/// same word sequence.
+fn words_only(text: &str) -> String {
+    let letters: String = text
+        .chars()
+        .map(|c| if c.is_ascii_alphabetic() { c } else { ' ' })
+        .collect();
+    letters
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
