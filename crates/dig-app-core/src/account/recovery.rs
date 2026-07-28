@@ -238,7 +238,9 @@ mod tests {
         let messy = format!("  {}  ", canonical.to_uppercase().replace(' ', "\n  "));
 
         assert_eq!(
-            &*RecoveryPhrase::parse(&messy).expect("messy input parses").master_seed(),
+            &*RecoveryPhrase::parse(&messy)
+                .expect("messy input parses")
+                .master_seed(),
             &*phrase.master_seed(),
             "case + whitespace must not change the seed"
         );
@@ -261,7 +263,12 @@ mod tests {
         // one we pick, and "abandon"/"zoo" are both real wordlist entries, so this stays a wordlist-
         // valid phrase whose checksum is wrong.
         let last = words.len() - 1;
-        words[last] = if words[last] == "zoo" { "abandon" } else { "zoo" }.to_string();
+        words[last] = if words[last] == "zoo" {
+            "abandon"
+        } else {
+            "zoo"
+        }
+        .to_string();
 
         assert_eq!(
             RecoveryPhrase::parse(&words.join(" ")).unwrap_err(),
@@ -316,7 +323,8 @@ mod tests {
     fn a_legacy_csprng_seed_renders_as_a_phrase_that_restores_it() {
         // A fixed, non-uniform pattern (not all-zero, not all-same) so a byte-order or padding bug in
         // the entropy mapping shows up as a mismatch rather than hiding behind a symmetric value.
-        let legacy: [u8; SEED_LEN] = std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
+        let legacy: [u8; SEED_LEN] =
+            std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
 
         let phrase = RecoveryPhrase::from_master_seed(&legacy);
         assert_eq!(

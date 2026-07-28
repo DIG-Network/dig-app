@@ -11,9 +11,15 @@
 //! - **Returning user** (the account's seed blob already exists) → build a locked
 //!   [`AccountSession`] and [`unlock`](AccountSession::unlock) it through the harness-injected
 //!   [`AuthProvider`] + [`AuthPolicy`], yielding a live [`UnlockedAccount`].
-//! - **First run** (no seed blob) → collect the same factors, run the policy, generate a fresh
-//!   master seed from the OS CSPRNG, and [`enroll`](AccountSession::enroll) it sealed under the
-//!   collected password — returning the account already unlocked.
+//! - **First run** (no seed blob) → settle the custody root as a 24-word BIP-39 **recovery phrase**
+//!   (generated and shown once, or supplied by the user restoring an account — [`Seeding`]), collect
+//!   the same factors, run the policy, and [`enroll`](AccountSession::enroll) the phrase's seed sealed
+//!   under the collected password — returning the account already unlocked, plus the phrase for the
+//!   caller to vault.
+//!
+//! The phrase is what makes an account portable: the sealed blob is decryptable only on the machine
+//! whose credential store holds its password, so the words are the ONE thing a user can carry to a new
+//! machine (#1500, dig_ecosystem#1752).
 //!
 //! The private key never crosses this boundary: the harness collects a password, dig-account seals /
 //! unlocks the seed, and the caller receives only the capability handle. See `SPEC.md` §3 and the
@@ -22,16 +28,75 @@
 
 use std::sync::Arc;
 
+use crate::account::recovery::RecoveryPhrase;
 use dig_account::{AccountError, AccountStore};
 use dig_account::{
     AccountId, AccountSession, AuthPolicy, AuthProvider, ProfileIx, Result as AccountResult,
     UnlockRequest, UnlockedAccount,
 };
-use dig_session::{KeychainBackend, Password, SEED_LEN};
-use rand_core::RngCore;
-use zeroize::Zeroizing;
+use dig_session::{KeychainBackend, Password};
 
-/// Open `account` if it is already enrolled, otherwise enrol it fresh — returning it unlocked.
+/// The user's ruling on the display-once recovery-phrase screen (#1500: *generate → display once →
+/// require confirmation of retention → enrol*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionDecision {
+    /// The user says they have written the words down. Only this value permits enrolment.
+    Confirmed,
+    /// The user backed out. Enrolment is abandoned and NO account is created, so they can start over
+    /// with a fresh phrase rather than owning an account whose root they never recorded.
+    Declined,
+    /// No surface could show the words — a headless host, or no desktop session. Fails closed for the
+    /// same reason: an account nobody can recover must not be created silently.
+    Unavailable,
+}
+
+/// Shows a freshly generated recovery phrase to the user and reports whether they retained it.
+///
+/// Implemented by the host shell (the tray draws a native window); tests inject a scripted double.
+/// The implementation MUST NOT log, persist, or transmit the words — it may only draw them.
+pub trait PhrasePresenter: Send + Sync {
+    /// Draw `phrase` and return the user's retention ruling.
+    fn present_new_phrase(&self, phrase: &RecoveryPhrase) -> RetentionDecision;
+}
+
+/// Where a first run's master seed comes from — the ONLY two honest origins for a custody root.
+pub enum Seeding<'a> {
+    /// Create a brand-new account: generate a 24-word phrase, show it once through the presenter, and
+    /// enrol only once retention is confirmed.
+    NewPhrase(&'a dyn PhrasePresenter),
+    /// Restore an existing account on a new machine from words the user supplied and that have already
+    /// been validated by [`RecoveryPhrase::parse`].
+    Restore(&'a RecoveryPhrase),
+}
+
+/// What a boot did — distinguished because a caller must treat a FIRST run differently from a
+/// returning one (it is the only moment the app legitimately holds the phrase and can vault it).
+pub enum Opened {
+    /// The account was already enrolled and has been unlocked. No phrase is available here — see
+    /// [`PhraseVault`](crate::account::phrase_vault::PhraseVault) for the re-reveal path.
+    Existing(UnlockedAccount),
+    /// The account was enrolled just now, from `phrase`.
+    Enrolled {
+        /// The freshly unlocked account.
+        account: UnlockedAccount,
+        /// The phrase it was enrolled from, for the caller to seal into the phrase vault. Dropped
+        /// (and zeroized) as soon as the caller lets it go.
+        phrase: RecoveryPhrase,
+    },
+}
+
+impl Opened {
+    /// The unlocked account, discarding the enrolment phrase if there was one.
+    pub fn into_account(self) -> UnlockedAccount {
+        match self {
+            Opened::Existing(account) => account,
+            Opened::Enrolled { account, .. } => account,
+        }
+    }
+}
+
+/// Open `account` if it is already enrolled, otherwise enrol it fresh from `seeding` — returning it
+/// unlocked.
 ///
 /// The custody root is the master seed sealed in `store` (a [`FileBackend`](dig_session::FileBackend)
 /// in production, keyed by `account`). `provider` collects the unlock factors through the OS-native
@@ -39,18 +104,24 @@ use zeroize::Zeroizing;
 /// the profile the returned handle's [`signer`](UnlockedAccount::signer) / [`dek`](UnlockedAccount::dek)
 /// default to (normally [`ProfileIx::ROOT`]).
 ///
+/// A first run NEVER invents an unwritable-down seed: per the #1500 derived model the seed is the
+/// entropy of a 24-word BIP-39 phrase, which is either shown-and-confirmed
+/// ([`Seeding::NewPhrase`]) or supplied by the user ([`Seeding::Restore`]).
+///
 /// # Errors
 ///
 /// Any [`AccountError`] from the ceremony, policy, or keystore — fail-closed, yielding no key material
 /// (a wrong password, a cancelled prompt, a tampered blob, or a policy refusal all abort with no
-/// [`UnlockedAccount`]).
+/// [`UnlockedAccount`]). A declined or unshowable recovery phrase aborts with [`AccountError::Auth`],
+/// leaving nothing enrolled.
 pub async fn open_or_enroll(
     store: Arc<AccountStore>,
     account: AccountId,
     provider: &dyn AuthProvider,
     policy: &dyn AuthPolicy,
     default_profile_ix: ProfileIx,
-) -> AccountResult<UnlockedAccount> {
+    seeding: Seeding<'_>,
+) -> AccountResult<Opened> {
     let already_enrolled = store
         .exists(&account)
         .map_err(|why| AccountError::Keystore(why.to_string()))?;
@@ -59,35 +130,58 @@ pub async fn open_or_enroll(
         // Returning user: the locked session unlocks through the same injected ceremony + policy.
         return AccountSession::new(store, account, default_profile_ix)
             .unlock(provider, policy)
-            .await;
+            .await
+            .map(Opened::Existing);
     }
 
-    // First run: collect the enrolment factors through the SAME ceremony, gate them on the policy,
-    // then seal a freshly generated master seed under the collected password. Reusing the unlock
-    // ceremony here means first-run and every subsequent unlock present one consistent prompt.
+    // First run: settle the PHRASE before touching the keystore, so a declined retention screen leaves
+    // no partially-enrolled account behind.
+    let phrase = match seeding {
+        Seeding::NewPhrase(presenter) => {
+            let phrase = RecoveryPhrase::generate();
+            match presenter.present_new_phrase(&phrase) {
+                RetentionDecision::Confirmed => phrase,
+                RetentionDecision::Declined => {
+                    return Err(AccountError::Auth(
+                        "account setup cancelled — the recovery phrase was not confirmed".into(),
+                    ))
+                }
+                RetentionDecision::Unavailable => {
+                    return Err(AccountError::Auth(
+                        "cannot create an account here: there is no way to show you your recovery phrase"
+                            .into(),
+                    ))
+                }
+            }
+        }
+        Seeding::Restore(phrase) => RecoveryPhrase::from_master_seed(&phrase.master_seed()),
+    };
+
+    // Collect the enrolment factors through the SAME ceremony every later unlock uses, gate them on the
+    // policy, then seal the phrase's seed.
     let factors = provider
         .collect_factors(UnlockRequest::new(account.clone()))
         .await?;
     policy
         .authorize(&factors)
         .map_err(|why| AccountError::Auth(why.to_string()))?;
-    let seed = fresh_master_seed();
-    AccountSession::enroll(store, account, factors.password, &seed, default_profile_ix)
+    let unlocked = AccountSession::enroll(
+        store,
+        account,
+        factors.password,
+        &phrase.master_seed(),
+        default_profile_ix,
+    )?;
+    Ok(Opened::Enrolled {
+        account: unlocked,
+        phrase,
+    })
 }
 
 /// Build a locked [`AccountStore`] over `backend` (a per-user [`FileBackend`](dig_session::FileBackend)
 /// in production, a `MemoryBackend` in tests), wrapped in the [`Arc`] the session/enrol paths hold.
 pub fn account_store(backend: Arc<dyn KeychainBackend>) -> Arc<AccountStore> {
     Arc::new(AccountStore::new(backend))
-}
-
-/// Draw a fresh master seed from the OS CSPRNG, held in a scrubbing buffer so the plaintext seed is
-/// zeroized once dig-account has sealed it. Used only on first-run enrolment — every later boot
-/// unlocks the already-sealed seed instead.
-fn fresh_master_seed() -> Zeroizing<[u8; SEED_LEN]> {
-    let mut seed = Zeroizing::new([0u8; SEED_LEN]);
-    rand_core::OsRng.fill_bytes(&mut *seed);
-    seed
 }
 
 /// Present an account password as a [`dig_session::Password`]. A convenience for harness code that has
@@ -104,6 +198,7 @@ mod tests {
     use dig_account::{AuthFactors, PasswordOnlyPolicy, SpendConfirmRequest, SpendDecision};
     use dig_ipc_protocol::signer::SessionSigner;
     use dig_keystore::MemoryBackend;
+    use std::sync::Mutex;
 
     /// A DERIVED password (not an inline literal) so static analysis never flags a hard-coded secret.
     fn derived_password(label: &str) -> Vec<u8> {
@@ -139,27 +234,208 @@ mod tests {
         account_store(Arc::new(MemoryBackend::new()))
     }
 
+    /// A presenter that records what it was shown and returns a scripted ruling — so the tests can
+    /// assert BOTH that the words reached the screen and that a refusal aborts enrolment. A double that
+    /// could only approve could not express the decline path at all.
+    struct ScriptedPresenter {
+        decision: RetentionDecision,
+        shown: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedPresenter {
+        fn new(decision: RetentionDecision) -> Self {
+            Self {
+                decision,
+                shown: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn shown_phrase(&self) -> Option<String> {
+            self.shown.lock().unwrap().first().cloned()
+        }
+    }
+
+    impl PhrasePresenter for ScriptedPresenter {
+        fn present_new_phrase(&self, phrase: &RecoveryPhrase) -> RetentionDecision {
+            self.shown.lock().unwrap().push(phrase.words().join(" "));
+            self.decision
+        }
+    }
+
+    /// The retention-confirmed happy path: a first run shows the words, enrols from them, and the
+    /// account works.
     #[tokio::test]
-    async fn first_run_enrols_and_returns_an_unlocked_account() {
+    async fn first_run_shows_the_phrase_then_enrols_from_it() {
         let store = store();
         let account = AccountId::new("primary");
         let provider = FixedProvider::new("pw-a");
+        let presenter = ScriptedPresenter::new(RetentionDecision::Confirmed);
 
-        let unlocked = open_or_enroll(
+        let opened = open_or_enroll(
             store.clone(),
             account.clone(),
             &provider,
             &PasswordOnlyPolicy,
             ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
         )
         .await
         .expect("first run enrols and unlocks");
 
+        let Opened::Enrolled {
+            account: unlocked,
+            phrase,
+        } = opened
+        else {
+            panic!(
+                "a first run must report itself as an enrolment so the caller can vault the phrase"
+            );
+        };
         assert_eq!(unlocked.account_id(), &account);
-        // The unlocked account yields a working identity signer for the default profile.
         assert!(unlocked.signer().try_sign(b"challenge").is_some());
-        // First run created the seed blob, so the account now exists at rest.
-        assert!(store.exists(&account).unwrap());
+        assert!(
+            store.exists(&account).unwrap(),
+            "the seed blob exists at rest"
+        );
+        // The phrase handed back MUST be the one the user was shown — otherwise they wrote down words
+        // that recover nothing, which is the exact failure this whole feature exists to prevent.
+        assert_eq!(
+            presenter.shown_phrase().as_deref(),
+            Some(phrase.words().join(" ").as_str())
+        );
+    }
+
+    /// Declining the retention screen must leave NOTHING enrolled. Asserting only the error would pass
+    /// for an implementation that enrolled first and then reported a failure, so the seed blob's
+    /// absence is the load-bearing assertion here.
+    #[tokio::test]
+    async fn declining_the_phrase_enrols_nothing() {
+        let store = store();
+        let account = AccountId::new("primary");
+        let presenter = ScriptedPresenter::new(RetentionDecision::Declined);
+
+        let result = open_or_enroll(
+            store.clone(),
+            account.clone(),
+            &FixedProvider::new("pw-a"),
+            &PasswordOnlyPolicy,
+            ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AccountError::Auth(_))));
+        assert!(
+            !store.exists(&account).unwrap(),
+            "a cancelled setup must leave no account behind"
+        );
+    }
+
+    /// A host that cannot show the words must not create an account either — the same fail-closed rule
+    /// as a decline, for the same reason (an unrecoverable account must never be created silently).
+    #[tokio::test]
+    async fn an_unshowable_phrase_enrols_nothing() {
+        let store = store();
+        let account = AccountId::new("primary");
+        let presenter = ScriptedPresenter::new(RetentionDecision::Unavailable);
+
+        let result = open_or_enroll(
+            store.clone(),
+            account.clone(),
+            &FixedProvider::new("pw-a"),
+            &PasswordOnlyPolicy,
+            ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AccountError::Auth(_))));
+        assert!(!store.exists(&account).unwrap());
+    }
+
+    /// **The proof the whole feature rests on**: a phrase enrolled on one "machine" restores the SAME
+    /// identity on a DIFFERENT, empty store — no shared state but the words.
+    ///
+    /// The fixture deliberately uses a DIFFERENT unlock password on the second machine, because the
+    /// sealed blob's password is machine-generated: if the identity still matches, it matched via the
+    /// phrase and nothing else. A same-password fixture could not distinguish that from luck.
+    #[tokio::test]
+    async fn a_phrase_restores_the_same_identity_on_a_fresh_machine() {
+        let account = AccountId::new("primary");
+        let presenter = ScriptedPresenter::new(RetentionDecision::Confirmed);
+
+        let opened = open_or_enroll(
+            store(),
+            account.clone(),
+            &FixedProvider::new("machine-one-password"),
+            &PasswordOnlyPolicy,
+            ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
+        )
+        .await
+        .unwrap();
+        let Opened::Enrolled {
+            account: original,
+            phrase,
+        } = opened
+        else {
+            panic!("first run enrols");
+        };
+        let original_pk = original.signer().signing_public_key();
+        original.lock();
+
+        let restored = open_or_enroll(
+            store(),
+            account,
+            &FixedProvider::new("machine-two-password"),
+            &PasswordOnlyPolicy,
+            ProfileIx::ROOT,
+            Seeding::Restore(&phrase),
+        )
+        .await
+        .expect("a restore enrols from the supplied phrase")
+        .into_account();
+
+        assert_eq!(
+            restored.signer().signing_public_key().as_bytes(),
+            original_pk.as_bytes(),
+            "restoring from the phrase alone must reach the identical identity"
+        );
+    }
+
+    /// A restore from a DIFFERENT phrase must reach a different identity — the control that proves the
+    /// test above is reading the phrase rather than a constant.
+    #[tokio::test]
+    async fn restoring_from_a_different_phrase_reaches_a_different_identity() {
+        let account = AccountId::new("primary");
+
+        let first = open_or_enroll(
+            store(),
+            account.clone(),
+            &FixedProvider::new("pw"),
+            &PasswordOnlyPolicy,
+            ProfileIx::ROOT,
+            Seeding::Restore(&RecoveryPhrase::generate()),
+        )
+        .await
+        .unwrap()
+        .into_account();
+        let second = open_or_enroll(
+            store(),
+            account,
+            &FixedProvider::new("pw"),
+            &PasswordOnlyPolicy,
+            ProfileIx::ROOT,
+            Seeding::Restore(&RecoveryPhrase::generate()),
+        )
+        .await
+        .unwrap()
+        .into_account();
+
+        assert_ne!(
+            first.signer().signing_public_key().as_bytes(),
+            second.signer().signing_public_key().as_bytes()
+        );
     }
 
     #[tokio::test]
@@ -167,6 +443,7 @@ mod tests {
         let store = store();
         let account = AccountId::new("primary");
         let provider = FixedProvider::new("pw-a");
+        let presenter = ScriptedPresenter::new(RetentionDecision::Confirmed);
 
         let first = open_or_enroll(
             store.clone(),
@@ -174,27 +451,38 @@ mod tests {
             &provider,
             &PasswordOnlyPolicy,
             ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .into_account();
         let first_pk = first.signer().signing_public_key();
         first.lock();
 
         // A "restart": a fresh session over the SAME store + password unlocks the enrolled seed and
-        // derives the SAME identity key — proving the seed persisted, not re-generated.
+        // derives the SAME identity key — proving the seed persisted, not re-generated. The presenter
+        // must NOT be consulted again: a returning boot never re-shows a phrase. It is scripted to
+        // DECLINE so a boot that wrongly re-enrolled would fail loudly rather than pass quietly.
+        let returning = ScriptedPresenter::new(RetentionDecision::Declined);
         let second = open_or_enroll(
             store,
             account,
             &provider,
             &PasswordOnlyPolicy,
             ProfileIx::ROOT,
+            Seeding::NewPhrase(&returning),
         )
         .await
-        .expect("returning boot unlocks the enrolled seed");
+        .expect("returning boot unlocks the enrolled seed")
+        .into_account();
         assert_eq!(
             second.signer().signing_public_key().as_bytes(),
             first_pk.as_bytes(),
             "a returning unlock must recover the same master-seed-derived identity"
+        );
+        assert!(
+            returning.shown_phrase().is_none(),
+            "a returning boot must not generate or show a new phrase"
         );
     }
 
@@ -202,6 +490,7 @@ mod tests {
     async fn a_wrong_password_on_a_returning_boot_fails_closed() {
         let store = store();
         let account = AccountId::new("primary");
+        let presenter = ScriptedPresenter::new(RetentionDecision::Confirmed);
 
         open_or_enroll(
             store.clone(),
@@ -209,6 +498,7 @@ mod tests {
             &FixedProvider::new("right"),
             &PasswordOnlyPolicy,
             ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
         )
         .await
         .unwrap();
@@ -219,18 +509,12 @@ mod tests {
             &FixedProvider::new("wrong"),
             &PasswordOnlyPolicy,
             ProfileIx::ROOT,
+            Seeding::NewPhrase(&presenter),
         )
         .await;
         assert!(
             matches!(result, Err(AccountError::Keystore(_))),
             "a wrong password must fail closed with no unlocked account"
         );
-    }
-
-    #[test]
-    fn a_fresh_master_seed_is_the_expected_length_and_not_all_zero() {
-        let seed = fresh_master_seed();
-        assert_eq!(seed.len(), SEED_LEN);
-        assert_ne!(&*seed, &[0u8; SEED_LEN], "the OS CSPRNG must fill the seed");
     }
 }
