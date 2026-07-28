@@ -44,20 +44,30 @@ impl AppEnvironment {
         Ok(AgentConfig::path_in(&self.brand_dir()?))
     }
 
-    /// The per-user IPC endpoint address (named pipe / Unix socket) the agent uses to reach the
-    /// engine. A configured `node_url` in [`AgentConfig`] overrides this (§5.3); [`Self::endpoint`]
-    /// applies that precedence.
+    /// The per-user OS IPC endpoint address (named pipe / Unix socket) described by
+    /// [`ipc::channel_endpoint`].
+    ///
+    /// **Nothing answers this today** — dig-node serves its control plane over loopback HTTP and has
+    /// no pipe/socket listener (see [`crate::control`]), so the agent does NOT dial this. It is kept
+    /// because the address scheme is specified (`SPEC.md` §5.1) and both sides must agree on it if
+    /// that listener is ever built.
     pub fn ipc_endpoint(&self) -> String {
         ipc::channel_endpoint(self.os, &self.user, &self.runtime_dir)
     }
 
-    /// The engine endpoint the agent should dial, applying the §5.3 override precedence: an
-    /// explicitly-configured `node_url` wins over the auto-resolved local IPC endpoint.
+    /// The user's explicitly-configured node endpoint (§5.3), or an empty string when there is none.
+    ///
+    /// Empty means "auto-resolve", which is the connector's job: it walks the §5.3 ladder
+    /// ([`crate::control::endpoint_ladder`]) rather than guessing one address here, because only the
+    /// connector can tell which tier actually answers.
     pub fn endpoint(&self, config: &AgentConfig) -> String {
-        match &config.node_url {
-            Some(url) if !url.is_empty() => url.clone(),
-            _ => self.ipc_endpoint(),
-        }
+        config
+            .node_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or_default()
+            .to_string()
     }
 
     /// The form factor for this host: a tray shell when a display is present, else headless.
@@ -94,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_node_url_overrides_the_ipc_endpoint() {
+    fn a_configured_node_url_is_carried_through_as_the_override() {
         let env = linux_env();
         let cfg = AgentConfig {
             node_url: Some("https://my.node".to_string()),
@@ -104,14 +114,19 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_empty_node_url_falls_back_to_ipc() {
+    fn no_configured_node_url_means_auto_resolve() {
+        // Empty is the connector's signal to walk the §5.3 ladder. It must NOT be the OS pipe path:
+        // nothing answers there, so handing it over would report "no node" against a healthy node.
         let env = linux_env();
-        assert_eq!(env.endpoint(&AgentConfig::default()), env.ipc_endpoint());
-        let empty = AgentConfig {
-            node_url: Some(String::new()),
-            ..AgentConfig::default()
-        };
-        assert_eq!(env.endpoint(&empty), env.ipc_endpoint());
+        assert_eq!(env.endpoint(&AgentConfig::default()), "");
+        for blank in ["", "   "] {
+            let cfg = AgentConfig {
+                node_url: Some(blank.to_string()),
+                ..AgentConfig::default()
+            };
+            assert_eq!(env.endpoint(&cfg), "");
+        }
+        assert_ne!(env.endpoint(&AgentConfig::default()), env.ipc_endpoint());
     }
 
     #[test]
