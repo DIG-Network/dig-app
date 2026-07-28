@@ -492,8 +492,12 @@ mod tests {
     #[test]
     fn a_node_that_accepts_then_says_nothing_fails_rather_than_hanging() {
         let node = FakeNode::with_behaviour(Behaviour::Silent);
-        let err = fetch_status(&node.endpoint(), Some(node.token()), Duration::from_millis(300))
-            .expect_err("a mute node must not look connected");
+        let err = fetch_status(
+            &node.endpoint(),
+            Some(node.token()),
+            Duration::from_millis(300),
+        )
+        .expect_err("a mute node must not look connected");
         assert!(
             matches!(
                 err,

@@ -166,3 +166,42 @@ Sharp edges that cost time here:
   DIGNET-SIGN-v1 callback message (NOT a `sign_coin_spends` aggregate SpendBundle). Routing loopback-spend
   through MoneyPath would change that wire semantics — a cross-repo (ext/dig-node) contract change — so it
   is a deliberate SHAPE decision left for a decider, not built speculatively (§1.10).
+
+## dig-app ⇄ dig-node: the transport in the SPEC was not the transport that exists (#949, 3.0.0)
+
+- **dig-node has no named pipe and no Unix domain socket.** `SPEC.md` §5.1, `crate::ipc`, and ticket
+  #949 all described the app↔engine channel as a per-user OS pipe (`\.\pipe\dignetwork-<USER>`) /
+  UDS (`<RUNTIME_DIR>/dignetwork.sock`), with the engine half deferred to "U6". Verified against
+  dig-node v0.64.0 `origin/main`: `git grep -iE 'NamedPipe|UnixListener|dignetwork\.sock'` across the
+  whole repo matches only unrelated *service-name* strings. That listener was never built, so
+  `NullConnector` was not a temporary stub over an almost-ready seam — it stood in front of a
+  transport with no other end.
+- **What dig-node actually answers** (`dig-node-service/src/server.rs::serve_with_shutdown`): JSON-RPC
+  2.0 over loopback HTTP, `POST /`, gated by an `X-Dig-Control-Token` header. Up to three listeners
+  for the ONE surface: `127.0.0.1:9778` (always on, fatal if it cannot bind), `[::1]:9778`
+  (best-effort IPv6 twin), and `127.0.0.2:80` for bare `http://dig.local` (best-effort).
+- **`dig.local` is on port 80, NOT `DIG_NODE_PORT`.** `dig_constants::DIG_LOCAL_HOST`'s own doc says a
+  client "tries `dig.local` (on `DIG_NODE_PORT`)", but the node binds `127.0.0.2:80` for that name and
+  nothing on `127.0.0.2:9778`. A client that appends the high port to `dig.local` silently loses the
+  whole first §5.3 tier. Default the port from the URL SCHEME, never from the node's high port.
+- **`rpc.dig.net` is not a control tier.** §5.3's fourth tier is a *content-read* fallback: the public
+  gateway dispatches no `control.*` and could not hold this machine's local control token, so probing
+  it for node status can only mislead. The control ladder ends at `localhost`.
+- **A node that REFUSES is a different fault from no node.** The remedies diverge completely (a
+  token/permission fault on a running node vs nothing installed or running), so the disconnected
+  reason distinguishes them and names the control token when that is the cause. Collapsing both into
+  "not connected" sends a person hunting the wrong thing.
+- **`dig-node-control-interface` mirrors the node faithfully but nothing enforces it.** Its
+  `results::StatusResult` is field-for-field what `control.rs::status` emits (checked by hand). Yet
+  dig-node does NOT depend on the crate — `git grep dig-node-control-interface` in dig-node returns
+  nothing — so the "cannot drift" property the crate claims is currently one-sided: only clients read
+  it. It also does not carry the `X-Dig-Control-Token` header name (it is transport-agnostic), so each
+  client re-declares that constant.
+- **A test double parked in a blocking `accept` HANGS the suite when nobody dials it.** Found while
+  proving a ladder test load-bearing: reverting the fall-through made the test hang, not fail — which
+  reports nothing and would stall CI. A one-shot fake server MUST unblock its own `accept` on drop.
+- **A machine with a real dig-node installed breaks env-based fixtures.** Tests that pointed
+  `DIG_NODE_STATE_DIR` at a temp dir still found the REAL `C:\ProgramData\DigNode\control-token`
+  through the later default candidates, so "no token here" assertions passed a real token. Make the
+  lookup take an explicit candidate list and assert on that, rather than mutating global env and
+  hoping the machine is clean.
