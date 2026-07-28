@@ -224,10 +224,13 @@ pub fn boot_account(
 
 /// Complete a boot: vault a first run's phrase and read back whether the account is recoverable.
 ///
+/// Public so the integration suite can drive it on any platform (the cfg-gated [`boot_account`] above
+/// is the only production caller).
+///
 /// Split out (and platform-independent) so the vaulting rule — *a fresh phrase is sealed immediately,
 /// while the account is unlocked and the words are still in hand* — is unit-tested rather than living
 /// only inside the cfg-gated production path.
-fn finish_boot(
+pub fn finish_boot(
     brand_dir: &std::path::Path,
     residency: AccountResidency,
     fresh_phrase: Option<RecoveryPhrase>,
