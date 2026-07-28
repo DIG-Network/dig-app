@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [3.2.0] - 2026-07-28
+
+### Features
+- **tray:** Account, recovery phrase and DID surfaces in the tray menu
+
+### Bug Fixes
+- **linux:** Drop the unused libxdo dep and ship a headless binary
+
 ## [3.0.0] - 2026-07-28
 
 ### Features
