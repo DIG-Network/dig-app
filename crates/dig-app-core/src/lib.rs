@@ -47,6 +47,7 @@ pub mod account;
 pub mod agent;
 pub mod config;
 pub mod confirm;
+pub mod control;
 pub mod decode;
 pub mod engine;
 pub mod environment;

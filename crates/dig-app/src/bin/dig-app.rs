@@ -11,16 +11,17 @@
 //! when no display is detected, and — belt and braces — a tray that fails to initialize on a
 //! display-present host falls back to the headless agent rather than aborting.
 //!
-//! The engine connection is the U3 stub ([`NullConnector`]): the agent surfaces "engine not yet
-//! reachable" until U6 stands up the identity-authenticated session listener. Keys/profiles/wallet
-//! (U4/U5) and the `dign` gateway (U7) remain stubs.
+//! The node connection is live ([`NodeConnector`], dig_ecosystem#949): on every tick the agent walks
+//! the §5.3 endpoint ladder and asks a running dig-node for `control.status` over its loopback
+//! JSON-RPC surface, so the tray shows the node's real version, cache and hosted-store counts — and,
+//! when no node is running, says so with the reason rather than spinning.
 
 use dig_app_core::account::boot::{boot_residency, reboot_reunlock};
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
 use dig_app_core::confirm::native_confirmer;
-use dig_app_core::engine::NullConnector;
+use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
 use dig_app_core::loopback::SignReauthGate;
@@ -52,7 +53,7 @@ fn main() {
     let env = resolve_environment();
     tracing::info!(version, os = ?env.os, has_display = env.has_display, "dig-app starting");
 
-    let agent = match Agent::from_env(&env, NullConnector) {
+    let agent = match Agent::from_env(&env, NodeConnector::default()) {
         Ok(agent) => agent,
         Err(e) => {
             tracing::error!(error = %e, "dig-app cannot start");
@@ -60,11 +61,11 @@ fn main() {
             std::process::exit(1);
         }
     };
-    tracing::info!(endpoint = %agent.endpoint(), "engine endpoint resolved");
-    eprintln!(
-        "dig-app {version} — user identity agent starting (endpoint: {})",
-        agent.endpoint()
-    );
+    // Name the endpoints that WILL be tried, not a single guessed address: the agent resolves the
+    // §5.3 ladder on each probe, so "which node?" is only answered once one answers.
+    let ladder = dig_app_core::control::endpoint_ladder(Some(agent.endpoint())).join(", ");
+    tracing::info!(node_endpoints = %ladder, "node endpoint ladder resolved");
+    eprintln!("dig-app {version} — user identity agent starting (looking for a node at: {ladder})");
 
     match env.form_factor() {
         FormFactor::Tray => {
@@ -84,7 +85,7 @@ fn main() {
 
 /// Mount the tray shell, degrading to the headless agent if the tray cannot be built (no display,
 /// no desktop stack) or if the `tray` feature is disabled at build time.
-fn run_tray_or_headless(agent: Agent<NullConnector>, session: Option<TraySession>) {
+fn run_tray_or_headless(agent: Agent<NodeConnector>, session: Option<TraySession>) {
     #[cfg(feature = "tray")]
     match tray::run(agent, session) {
         // The event loop owns the process once mounted, so this arm is unreachable in practice.
@@ -275,7 +276,7 @@ fn has_display(os: Os) -> bool {
 mod tray {
     use super::TraySession;
     use dig_app_core::agent::{Agent, SharedStatus};
-    use dig_app_core::engine::{EngineState, NullConnector};
+    use dig_app_core::engine::NodeConnector;
     use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -294,9 +295,9 @@ mod tray {
     /// failure it hands `agent` back in the `Err` so the caller can still run it headless.
     #[allow(clippy::result_large_err)]
     pub fn run(
-        agent: Agent<NullConnector>,
+        agent: Agent<NodeConnector>,
         session: Option<TraySession>,
-    ) -> Result<(), (String, Agent<NullConnector>)> {
+    ) -> Result<(), (String, Agent<NodeConnector>)> {
         let event_loop = EventLoopBuilder::new().build();
 
         let menu = Menu::new();
@@ -380,10 +381,9 @@ mod tray {
         } else {
             "DIG — stopped"
         });
-        engine_item.set_text(match &status.engine {
-            EngineState::Connected => "Engine: connected",
-            EngineState::Disconnected { .. } => "Engine: not connected",
-        });
+        // The node line carries the node's OWN report (version + what it holds) when connected, and
+        // the actionable reason when not — a bare "not connected" leaves a person with nowhere to go.
+        engine_item.set_text(status.engine.summary());
         profile_item.set_text(match &status.active_profile {
             Some(p) => format!("Profile: {}", p.did),
             None => "Profile: (none)".to_string(),

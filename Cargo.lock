@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "dig-app-core",
  "dig-logging",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1424,11 +1424,12 @@ dependencies = [
  "clvm-traits",
  "clvmr",
  "dig-account",
- "dig-constants 0.7.0",
+ "dig-constants 0.8.0",
  "dig-events-protocol",
  "dig-identity 0.5.0",
  "dig-ipc-protocol",
  "dig-keystore",
+ "dig-node-control-interface",
  "dig-session",
  "dig-wallet-backend",
  "dispatch2",
@@ -1525,6 +1526,17 @@ name = "dig-constants"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe27605492cc88fae549f134337a0741ad450c65ea8b72d01f53f48ba4ebd678"
+dependencies = [
+ "chia-consensus",
+ "chia-protocol",
+ "hex-literal",
+]
+
+[[package]]
+name = "dig-constants"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6c8b18e4c82af7bd809037195f3c8af5c58fe6cbe4387ab4d2defbc9790c062"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -1657,6 +1669,17 @@ dependencies = [
  "dig-chainsource-interface",
  "hex-literal",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dig-node-control-interface"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34da421af7c75cf8da16454cd844e8f34c72980d4f01a4da7c94814b5ac60c64"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1825,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "clap",
  "dig-app-core",

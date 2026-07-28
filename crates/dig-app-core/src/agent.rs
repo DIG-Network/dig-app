@@ -92,7 +92,8 @@ impl<C: EngineConnector> Agent<C> {
         Ok(Self::new(endpoint, config_path, config, connector))
     }
 
-    /// The engine endpoint this agent dials.
+    /// The user's explicitly-configured node endpoint (§5.3), or empty when the agent should
+    /// auto-resolve one. Passed to the connector on every probe.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -117,15 +118,26 @@ impl<C: EngineConnector> Agent<C> {
         self.shutdown.clone()
     }
 
-    /// Run one reconcile step: probe the engine and update the status. Public so a shell can drive a
-    /// single tick in a custom loop, and so it is directly testable.
+    /// Run one reconcile step: probe for a node and publish the resulting link state. Public so a
+    /// shell can drive a single tick in a custom loop, and so it is directly testable.
+    ///
+    /// A CHANGE in the link is logged, every tick is not. On a headless host the log is the only
+    /// place a person can see that the app found a node (there is no tray to paint), and a line per
+    /// tick would bury that signal in noise.
     pub fn tick(&self) {
-        let probe = self.connector.probe(&self.endpoint);
-        let next = match probe {
-            crate::engine::Probe::Reachable => EngineState::Connected,
-            crate::engine::Probe::Unreachable(reason) => EngineState::Disconnected { reason },
-        };
-        self.write_status().engine = next;
+        let next = self.connector.probe(&self.endpoint);
+        let mut status = self.write_status();
+        if status.engine != next {
+            match &next {
+                EngineState::Connected { endpoint, .. } => {
+                    tracing::info!(endpoint = %endpoint, node = %next.summary(), "connected to a DIG node");
+                }
+                EngineState::Disconnected { reason } => {
+                    tracing::warn!(reason = %reason, "no DIG node connected");
+                }
+            }
+            status.engine = next;
+        }
     }
 
     /// Run the agent to completion: mark running, reconcile on each tick until shutdown is
@@ -167,21 +179,77 @@ impl<C: EngineConnector> Agent<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{NullConnector, Probe};
+    use crate::engine::NullConnector;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
-    /// A connector that always reports the engine reachable and counts how many times it was
-    /// probed — enough to exercise the loop deterministically.
+    /// A connector that always reports a connected node and counts how many times it was probed —
+    /// enough to exercise the loop deterministically without a socket.
     #[derive(Clone, Default)]
     struct CountingConnector {
         probes: Arc<AtomicUsize>,
     }
 
     impl EngineConnector for CountingConnector {
-        fn probe(&self, _endpoint: &str) -> Probe {
+        fn probe(&self, _configured_endpoint: &str) -> EngineState {
             self.probes.fetch_add(1, Ordering::SeqCst);
-            Probe::Reachable
+            EngineState::Connected {
+                endpoint: "http://localhost:9778".to_string(),
+                status: Box::new(fake_status()),
+            }
+        }
+    }
+
+    /// An in-memory sink a `tracing_subscriber::fmt` layer writes records into, so a test can read
+    /// back what was logged. Mirrors the one `tests/never_log.rs` uses.
+    #[derive(Clone, Default)]
+    struct CaptureBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CaptureBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl std::io::Write for CaptureBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureBuffer {
+        type Writer = CaptureBuffer;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A minimal `control.status` snapshot, for driving the loop's connected branch.
+    fn fake_status() -> dig_node_control_interface::results::StatusResult {
+        use dig_node_control_interface::results::{CacheView, StatusResult, SyncAvailability};
+        StatusResult {
+            running: true,
+            service: "dig-node".to_string(),
+            version: "0.64.0".to_string(),
+            commit: "deadbee".to_string(),
+            protocol: "1".to_string(),
+            uptime_secs: 1,
+            addr: "127.0.0.1:9778".to_string(),
+            upstream: "https://rpc.dig.net".to_string(),
+            cache: CacheView {
+                cap_bytes: 0,
+                used_bytes: 0,
+                dir: String::new(),
+                shared: false,
+            },
+            hosted_store_count: 0,
+            cached_capsule_count: 0,
+            pinned_store_count: 0,
+            sync: SyncAvailability { available: false },
         }
     }
 
@@ -215,17 +283,49 @@ mod tests {
     }
 
     #[test]
-    fn tick_reflects_a_reachable_engine() {
+    fn tick_publishes_the_connected_node_and_its_snapshot() {
         let (agent, _dir) = agent_with(CountingConnector::default(), 5);
         agent.tick();
-        assert!(agent.status().engine.is_connected());
+        let engine = agent.status().engine;
+        assert!(engine.is_connected());
+        // The loop must publish the node's OWN numbers, not merely a connected flag — that snapshot
+        // is what the tray paints.
+        assert_eq!(engine.status().expect("a snapshot").version, "0.64.0");
     }
 
     #[test]
-    fn tick_reflects_an_unreachable_engine() {
+    fn a_repeated_tick_announces_a_link_change_only_once() {
+        // The fixture must tick MORE than once against an UNCHANGING link: a single-tick test cannot
+        // tell "logs on change" apart from "logs every tick".
+        let (agent, _dir) = agent_with(CountingConnector::default(), 5);
+        let logs = CaptureBuffer::default();
+        let announcements = {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .without_time()
+                .finish();
+            let _sub = tracing::subscriber::set_default(subscriber);
+            agent.tick();
+            agent.tick();
+            agent.tick();
+            logs.contents().matches("connected to a DIG node").count()
+        };
+        assert_eq!(
+            announcements, 1,
+            "three ticks at an unchanged link must announce once, not three times"
+        );
+    }
+
+    #[test]
+    fn tick_publishes_the_reason_when_no_node_is_reachable() {
         let (agent, _dir) = agent_with(NullConnector, 5);
         agent.tick();
-        assert!(!agent.status().engine.is_connected());
+        let engine = agent.status().engine;
+        assert!(!engine.is_connected());
+        let EngineState::Disconnected { reason } = engine else {
+            panic!("expected Disconnected");
+        };
+        assert!(!reason.is_empty(), "a person must be told WHY");
     }
 
     #[test]
@@ -290,7 +390,7 @@ mod tests {
         cfg.save(&env.config_path().unwrap()).unwrap();
 
         let agent = Agent::from_env(&env, NullConnector).unwrap();
-        // The configured node_url wins over the IPC endpoint (§5.3 override precedence).
+        // The configured node_url is carried through as the §5.3 override the connector honours.
         assert_eq!(agent.endpoint(), "https://configured.node");
         assert_eq!(
             agent.config().node_url.as_deref(),
