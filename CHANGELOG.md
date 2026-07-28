@@ -4,250 +4,27 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
-## [1.0.3] - Unreleased
+## [3.0.0] - 2026-07-28
 
-### Changed
+### Features
+- **agent:** Dig-app agent core + cross-platform tray shell (U3, epic #908) (#2)- **keystore:** DIG identity key mgmt — sign/unlock + DIGOP1 sealing + OS-store primary (#3)- **profiles:** Multi-DID profile management with per-profile sealed AppData (U5) (#4)- **dig-app:** Per-user autostart — macOS LaunchAgent + Linux systemd user unit (#908) (#8)- **dig-app:** U6 IPC session client — handshake, attach, sign-callback, re-attach (#908) (#6)- **dig-app:** U6 cross-session profile persistence + F-1/F-3 hardening (#908) (#10)- **dig-app:** U7 dign CLI + gateway routing (local vs engine-proxy) (#908) (#9)- **dig-app:** Integrate dig-logging — dual-sink + op-level log discipline (#934) (#12)- **dig-app:** Per-profile wallet host — chip35 spend build + local sign (#948) (#11)- **dig-app:** APP-SIGN ws:9779 transport + pairing + auth-HMAC (SIGN-1, #950) (#14)- **dig-app:** APP-SIGN connect-whitelist + sign policy + tx-decode (SIGN-2, #950) (#15)- **dig-app:** Per-OS NativeConfirmer — Win Hello / macOS Touch ID / Linux polkit (SIGN-3, #950) (#16)- **dig-app:** Wire APP-SIGN loopback server + native confirmer + sealed persistence (#958) (#18)- **dig-app:** Wire wallet receive-addresses + send-history into APP-SIGN connect (#961) (#20)- **dig-app:** Plain-language spend summary in the confirm dialog (WSEC-B, #964) (#19)- **dig-app:** Session-lock lifecycle — idle + OS-lock + lock-now + tiered re-auth (WSEC-D, #965) (#21)- **dig-app:** Wire session-lock into the tray + sign-path re-auth gate (#967) (#22)- **dig-app:** Onboarding gate (wallet→profile) + configurable default profile (#986 SG-0) (#24)- **session:** Consume dig-ipc-protocol client session half (#1081) (#25)- **events:** Event-driven wallet UI seam + native notifications (#1008, #970) (#26)- Migrate IPC session signing to BLS G1/G2 identity key (#1211) (#27)- **keystore:** Consume canonical dig-constants + dedup dig-identity (#1024 Phase 2, WS1+WS2) (#29)- **custody:** Adopt published dig-account 0.1.0 as the harness custody crate (#1509) (#31)- Custody SWITCHOVER — dig-account is the live custody path, retire old keystore (#1530) (#32)- **engine:** Connect to a real dig-node over loopback JSON-RPC, retiring NullConnector
 
-- **Absorb the `dig-wallet-backend` 0.6 → 0.12 dependency major (dig_ecosystem#1024 Phase 2, PR1).**
-  Bump the `client`-feature dependency across six minors; the client-seam API `dig-app-core` consumes
-  stayed source-compatible, so no keystore/key-model change lands here (that is PR2). `dig-wallet-backend`
-  resolves single-source at `0.12.1` and `dig-identity` stays single-source at `0.4.2` (shared with
-  wallet-backend), preserving the #29 dedup. `dig-constants` appears twice in the tree — `0.7.0`
-  (dig-app's direct dep, carrying the DEK byte-contract consts) and `0.5.1` (pulled transitively by
-  wallet-backend, which caps it at `^0.5.1`). The duplicate is benign: the DEK consts exist ONLY in
-  `0.7.0` (absent from `0.5.1`), so no split-brain is possible, and no `dig-constants` type crosses the
-  wallet-backend ↔ dig-app boundary. A follow-up may raise wallet-backend's `dig-constants` bound to
-  `^0.7` to collapse the duplicate.
+### Bug Fixes
+- **dig-app:** Domain-separate + confirm-gate dign sign (close identity-key oracle #959) (#17)
 
-## [1.0.2] - Unreleased
+### Refactor
+- **dig-app:** Extract one shared crash-safe durable-write helper (F-4, #908) (#7)- **dig-app:** Re-unlock only the signing profile on sign re-auth (#973) (#23)
 
-### Changed
+### Documentation
+- **spec:** Dig-app identity-hub architecture SPEC + gated apps-repo scaffold (U1, epic #908) (#1)- **dig-app:** Concrete dig-app↔engine IPC session contract (SPEC §5.3, epic #908) (#5)- **dig-app:** APP-SIGN paired-loopback signing + dapp-connect contract (SPEC §5.6, #950) (#13)
 
-- **Consume the canonical crates for the profile-DEK at-rest byte contract (dig_ecosystem#1024 Phase 2,
-  WS1).** The per-profile DEK derivation in `keystore/secrets.rs` now sources its HKDF salt, IKM version
-  prefix, info/label, and output length from `dig_constants` (`DEK_SALT`, `IDENTITY_IKM_VERSION`,
-  `PROFILE_DEK_LABEL`, `SYMMETRIC_KEY_LEN`) instead of local literals — the single source of truth that
-  dig-session's `derive_symmetric_key` also consumes, so the two can never drift. The derived DEK is
-  **byte-identical** to before (a new regression test seals with the pre-swap literal construction and
-  opens under the new path, and vice-versa), so every already-sealed profile still unlocks (§5.1).
-- **Dedup `dig-identity` onto crates.io (dig_ecosystem#1024 Phase 2, WS2).** `dig-identity` moves off the
-  `git`+tag dependency to the crates.io `"0.4"` line — the same source dig-session and dig-wallet-backend
-  pin — so the whole dependency graph resolves to exactly one `dig-identity` (no duplicate-crate byte
-  drift). `cargo tree -i dig-identity` is single-source (v0.4.2).
+### Build
+- **deps:** Bump dig-wallet-backend 0.6→0.12 + absorb client-seam breaking deltas (#1024) (#30)
 
-## [1.0.0] - Unreleased
+### CI
+- **nightly:** Install GTK/libxdo system deps in nightly test-gate (#28)
 
-### Changed
+### Chores
+- Initial commit — dig-app scaffold (the DIG user app / identity hub, epic #908)
 
-- **BREAKING: migrate the identity key + IPC session signing to the BLS12-381 G1/G2 v2 key model
-  (dig_ecosystem#1211).** dig-app now signs the IPC session with the user's dig-identity slot-`0x0010`
-  **BLS12-381 G1** identity key (48-byte G1 public key, 96-byte G2 AugScheme signature) instead of the
-  retired v1 Ed25519 (32/64-byte) key, and bumps `dig-ipc-protocol` 0.1 → **0.2** and `dig-identity`
-  v0.1.0 → **v0.4.2**. This repairs a live break: a current dig-app could not open an IPC session with a
-  current dig-node (which already runs the 0.2 BLS contract) because the key/signature byte lengths
-  disagreed at attach. The single G1 key now does BOTH jobs — it signs (G2 AugScheme) AND is the seal
-  DH key (G1 ECDH) — so the v1 **X25519 encryption slot `0x0011` is retired** (no separate encryption
-  key). The user private key still signs strictly in-process; only the 96-byte detached signature and
-  the 48-byte public key ever cross the IPC boundary. The at-rest keystore layout changes to a
-  versioned `version(1) || bls_scalar(32)` blob; a legacy v1 64-byte Ed25519 blob is detected and
-  **fails closed** (`LegacyEd25519Identity`) so onboarding re-provisions a fresh v2 identity — the key
-  models are non-convertible and, pre-release (no live users), this is a clean cutover. Removes the
-  `ed25519-dalek` / `x25519-dalek` dependencies (BLS sourced via dig-identity / chia-bls). SPEC §2.2,
-  §3.1, §5.3, §5.5, §7.
 
-## [0.18.0] - Unreleased
-
-### Added
-
-- **Wire the session-lock into the running tray + gate the sign path on re-auth (WSEC-D,
-  dig_ecosystem#967).** The session-lock lifecycle (#965) is now USER-REACHABLE: the tray shell
-  constructs a `SessionLock` over the live `UnlockedIdentities` session the APP-SIGN signer holds, so
-  every trigger acts on the same session. A new tray **"Lock now"** menu item drops the DEK on one tap;
-  the tray tick calls `poll_idle` for idle auto-lock (any tray interaction is noted as activity); and
-  the per-OS `ScreenLockSource` (Windows / macOS; Linux deferred #962) is started onto the held session,
-  its callback wrapped by the new `panic_safe_lock_callback` so a panic can never unwind across the OS
-  `extern "system"` boundary. The `sign.request` path now consults a `SignReauthGate` (production
-  `SessionReauthGate`) immediately before signing: after a lock it re-unlocks the session (the keystore's
-  job, via the OS credential store) and notes the resume, and a failed re-unlock refuses the sign with
-  `LOCKED` rather than signing on a dropped key. Reads never consult the gate (frictionless consumption,
-  §6.0). `FrameRouter` gains `with_reauth_gate` (defaulting to the always-authorize `OpenSignGate`, the
-  pre-hookup behaviour). SPEC §3.6.
-
-## [0.17.0] - Unreleased
-
-### Added
-
-- **Wire wallet receive-addresses into the APP-SIGN connect handle (dig_ecosystem#961).** A dapp's
-  `connect.request` now returns the active profile's wallet receive address(es) in `addresses[]`
-  (previously always empty): `sign_service` loads them from the sealed wallet state (over the same
-  per-profile DEK the router's stores use) and `ProfileConnectInfo` advertises them alongside the
-  identity signing pubkey, so a connected dapp can display / send to the wallet. Only public data
-  crosses the handle — the wallet key stays sealed in the session. A profile with no saved wallet
-  state yet returns an empty `addresses[]` (the channel is still fully usable).
-- **Expose the wallet spend history (`WalletState::history`).** Each outbound spend is recorded as a
-  `SpendRecord` (recipient, asset, amount, broadcast time, transaction id), appended oldest-first, and
-  read via `history()`, `recent_recipients(limit)` (distinct, most-recent first), and
-  `total_sent(asset)`. Public metadata only — the substrate for the connected-wallet UX (address-book
-  suggestions, adaptive spend-confirm friction). Sealed at rest alongside the rest of the wallet state.
-- **Session-lock lifecycle (WSEC-D, dig_ecosystem#965).** A new `session_lock` module drops the
-  in-memory profile DEK — re-sealing the session — on three triggers: idle auto-lock (a 5-minute
-  default idle window), OS screen lock (Windows `WM_WTSSESSION_CHANGE` / macOS
-  `com.apple.screenIsLocked`, behind a `ScreenLockSource` seam; Linux logind deferred to
-  dig_ecosystem#962), and a one-tap lock-now (no confirmation). Re-authentication is TIERED: reading
-  and browsing never touch the key and are never prompted, so only the NEXT signing after a lock
-  re-authenticates (§6.0). `UnlockedIdentities` gains `lock_all` + `is_any_unlocked` as the DEK-drop
-  primitives. The lifecycle is a pure, seamed controller (`SessionLock` over `SessionKeys` +
-  `MonotonicClock`), exhaustively unit-tested. SPEC §3.6.
-
-## [0.13.0] - Unreleased
-
-### Fixed
-
-- **Close the `dign sign` identity-key signing oracle (SIGN-2 audit finding, dig_ecosystem#959).**
-  The local `dign sign` gateway path (`gateway/local.rs`) signed the RAW caller message with the
-  slot-0x0010 identity key — no domain tag, no confirm — so a caller could obtain a signature
-  byte-identical to a confirm-gated `DIGNET-SIGN-v1` spend or a `DIGNET-SESSION-v1` session attach (a
-  cross-protocol signing oracle). `dign sign` now (1) signs the domain-separated
-  `DIGNET-USER-SIGN-v1 ‖ message` (a third distinct purpose tag, in `session.rs::user_sign_message`),
-  never the raw bytes, so its signature can never be replayed in another context; and (2) funnels
-  through the terminal `NativeConfirmer` — the same human gate as the §5.3 engine and §5.6 dapp sign
-  paths — returning the new `DENIED` error code when not human-approved, so no local process signs
-  silently. `LocalIdentity` has no production impl yet, so this was a latent contract bug fixed before
-  the real signer is wired. SPEC §3.5 documents the construction.
-
-## [0.10.0] - Unreleased
-
-### Added
-
-- **APP-SIGN loopback transport + pairing + auth foundation (SIGN-1, epic #908, #950).** The
-  browser-reachable identity channel dig-app exposes for the extension: a loopback WebSocket server
-  binding `[::1]:9779` (IPv6-first) and `127.0.0.1:9779`, guarding every upgrade with the `Host`
-  allowlist + pinned-`Origin` check (anti-DNS-rebinding, SPEC §5.6.2); the `pair.begin` handshake that
-  mints a 32-byte CSPRNG channel token and seals the pairing record DIGOP1 per-profile (NC-2); and
-  per-frame authentication — a constant-time HMAC-SHA256 over the canonical frame bytes plus a
-  strictly-monotonic nonce (replay barred; a bad MAC never perturbs the ledger, SPEC §5.6.3). Ships
-  the `NativeConfirmer` seam (the sole authorization to pair/connect/sign) with a fail-closed headless
-  stub; `connect.request`/`sign.request` are transport-only stubs returning the honest §5.6.7 code —
-  the dapp whitelist (SIGN-2) and per-OS native confirm (SIGN-3) build on this foundation. SPEC §5.6.3
-  now pins `canonical_json` as a normative byte-for-byte form — object keys sorted by Unicode
-  codepoint (not UTF-16 code-unit) order and no floating-point params — so the extension (SIGN-4)
-  matches. The in-memory channel secret and its serialized record are zeroized on drop, parity with
-  the identity-key at-rest handling.
-
-## [0.9.1] - Unreleased
-
-### Added
-
-- **APP-SIGN paired-loopback signing contract (SPEC §5.6, #950).** New normative SPEC section
-  freezing the extension ↔ dig-app paired-loopback identity channel: the WebSocket loopback transport
-  (`ws://127.0.0.1:9779`, Host/Origin/token-guarded), the one-time pairing handshake, the dapp
-  connect/whitelist protocol, the domain-separated `sign` request/response (reusing `DIGNET-SIGN-v1`),
-  the decoded-transaction display requirement, the layered threat model (SPEC §7 addition), and the
-  error-code taxonomy. Documentation only — the byte-identical cross-repo contract the per-OS
-  confirm lanes and the extension consumer build against.
-
-## [0.9.0] - Unreleased
-
-### Added
-
-- **Structured logging via the shared `dig-logging` building block (APP-5, epic #908, #934).** The
-  `dig-app` tray/headless shell and the `dign` CLI now install the same dual-sink subscriber every
-  other DIG binary uses (`dig-node`/`dig-dns`/`dig-updater`) — a rolling daily JSONL file in the
-  per-OS machine log dir plus compact human text on `stderr`, behind one reloadable `EnvFilter` — so
-  a field report finally has a trace of what the identity agent did. `dig-app-core` gained no new
-  dependency (it emits through `tracing` only, exactly like `dig-node-core`); the binary shells own
-  installing the subscriber.
-- **Log-level discipline across the identity-agent core.** Lifecycle events (session attach/detach,
-  profile create/select/re-unlock-on-boot, identity seal/unlock, gateway routing) are now `INFO`;
-  per-request/per-frame detail (gateway route-classification, RPC dispatch) is `DEBUG`; every
-  auth/deny/failure path (a denied `sign` callback, a failed unlock, a duplicate/invalid DID, a
-  rejected profile select, a failed engine proxy call) is `WARN`. A never-log regression suite
-  (`crates/dig-app-core/tests/never_log.rs`) captures real emitted records and asserts a passphrase
-  can never reach a log field, mirroring the dig-node #553 guarantee.
-
-## [0.8.0] - Unreleased
-
-### Added
-
-- **`dign` CLI + gateway routing (U7).** The DIG user CLI is now its own `dign` binary crate
-  (migrated from dig-node, SPEC §3.5), a thin IPC client of the running dig-app. The new
-  `dig_app_core::gateway` module is the routing core: it classifies every command as served LOCALLY
-  with the held user identity (`profiles` / `wallet` / `sign`) or PROXIED to the engine (`info` /
-  `config` / `cache` / `stores` / `sync` / `subscriptions` / `peers` / `pair` / `open`), and
-  dispatches over three seams — `EngineProxy` (the session-forwarded `control.*` call, byte-faithful
-  to the engine control surface), `LocalIdentity` (the local identity ops), and `LinkOpener` (opens a
-  validated DIG link; only `chia://` / `urn:dig:chia:` are accepted). Every command offers `--json`
-  output + a `--help` discovery surface, and failures carry a stable `ErrorCode` (symbolic name +
-  numeric exit code) whose envelope matches the engine CLI. The per-user IPC session client lands
-  with U6; until then `dign` reports a catalogued `NOT_CONNECTED`.
-
-## [0.7.0] - Unreleased
-
-### Added
-
-- **Cross-session profile persistence (U6).** A profile's identity is now persisted **sealed at
-  rest** (U4 `ProfileVault`: DIGOP1 under the user's root unlock, in per-user AppData — NC-2/NC-3) at
-  creation, and a new boot path (`ProfileManager::unlock_all`) re-derives every profile's identity
-  from its sealed material once the user unlocks. So a restarted app reopens all of its profiles'
-  sealed data — closing the U5 gap where a generated identity lived only in the in-memory session and
-  vanished on exit. The new `IdentityStore` collaborator + `VaultFactory` seam bridge the on-disk
-  vault to the shared `UnlockedIdentities` session; cross-profile isolation stays cryptographic and
-  is proven to hold across a restart + re-unlock. Both the sealed identity blob and the profile
-  registry are written through the shared `crate::storage::write_durably` crash-safe helper (F-4).
-
-### Changed / Fixed (U5 triple-gate follow-ups)
-
-- **F-1 — a duplicate DID can no longer clobber an existing profile.** Provisioning is now
-  side-effect-free: it returns the generated identity to the manager, which validates + dedup-checks
-  the DID BEFORE persisting or unlocking it. A duplicate/invalid DID is a pure no-op (its secret
-  material is dropped + zeroized), never overwriting a live profile's in-session identity or sealed
-  data. Profile creation is now all-or-nothing (rolls the identity back if a later step fails).
-- **F-3 — decrypted profile data is zeroized.** `ProfileSealer::open` returns the plaintext in a
-  `Zeroizing` buffer, so a profile's decrypted content is scrubbed from memory on drop rather than
-  lingering in freed heap.
-- **DidMinter seam wired; on-chain mint held on #771.** The production provisioner composes cleanly
-  around the `DidMinter` seam via `HeldDidMinter`, which fails loudly until dig-identity #771 ships
-  the mint spend builder — so a released build cannot appear to mint a DID it cannot anchor.
-
-## [0.6.0] - Unreleased
-
-### Added
-
-- **Identity-authenticated engine session (U6, security-critical).** The new `session` module
-  implements the app side of the per-user IPC channel to the identity-agnostic engine (`SPEC.md`
-  §5.3): the `control.session.begin` → `attach` challenge/response handshake (the app signs a
-  domain-separated challenge, `DIGNET-SESSION-v1` ‖ nonce ‖ profile DID, with the in-memory Ed25519
-  identity key), `control.session.detach`, and re-attach after a dropped pipe or engine restart. The
-  engine→app `sign` callback signs engine-initiated operations — over a domain-separated,
-  length-prefixed message (`DIGNET-SIGN-v1` ‖ len16(payload_type) ‖ payload_type ‖ payload), never
-  the raw payload, so a signature can never be replayed across purposes — in process behind a
-  mandatory `SignPolicy` custody gate, and returns only the signature + public key. The private key
-  never crosses the boundary. IPC frames are size-capped and the callback loop is bounded against a
-  hostile local engine. Multi-session aware (one session per active profile) via `SessionRegistry`.
-  The signing seam (`SessionSigner`) and the newline-delimited JSON-RPC transport (`FrameTransport`
-  / `LineTransport`) keep the protocol logic pure and fully unit-tested.
-
-## [0.5.0] - Unreleased
-
-### Added
-
-- **Per-user autostart artifacts (form-factor shell residual, epic #908).** `dig-app`'s
-  `autostart` module renders + installs the two residual per-user autostart mechanisms called out
-  in SPEC §4: a macOS `launchd` LaunchAgent plist (`~/Library/LaunchAgents`) and a Linux systemd
-  **user** unit (`$XDG_CONFIG_HOME/systemd/user`, falling back to `~/.config/systemd/user`).
-  Windows autostart remains dig-installer's job (U8); this closes the macOS/Linux residual so the
-  shell can start itself at login on every desktop OS the SPEC promises.
-- **Profiles (U5, multi-DID).** The `profiles` module implements multi-profile identity management:
-  create (provision a `did:chia:` DID + keys, then seal the profile's initial data), select the
-  active profile, list profiles, and edit persona metadata. Each profile's secret-bearing state is
-  DIGOP1-sealed at rest under its own per-profile DEK in its own AppData directory, so profiles are
-  cryptographically isolated (NC-2/NC-3). Profile metadata maps onto the canonical `dig-identity`
-  (#771) sparse-merkle-tree of standard slots — the format is consumed, never reinvented.
-- **Real U4 sealing wired in.** The production `ProfileSealer` is `KeystoreSealer`: it seals each
-  profile's blobs with U4's DIGOP1 under a DEK HKDF-derived from that profile's own identity key, so
-  cross-profile isolation holds by the cipher (profile A's blob is undecryptable with profile B's
-  DEK). The production `ProfileProvisioner` is `KeygenProvisioner` (U4 key generation + a
-  wallet/engine `DidMinter` seam for the on-chain DID mint).
-- **Crash-safe registry writes.** The plaintext profile registry — the only pointer to every
-  profile's directory — is now written atomically and durably (temp file + fsync + rename), so a
-  crash mid-save can never strand a profile's sealed data.
