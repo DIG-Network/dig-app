@@ -232,9 +232,20 @@ mod tests {
 
     /// A sealer good enough to exercise the vault end of the journey; cross-profile isolation is proven
     /// in the vault's own tests, so this one only needs to round-trip and to be lockable.
+    /// It also COUNTS decryptions, which is the load-bearing part. "The gate runs before the vault is
+    /// opened" is a statement about PLACEMENT, and a test that only checks the returned outcome — or even
+    /// that no words reached a window — is satisfied identically by a gate placed AFTER the decryption.
+    /// Only the decryption count changes when the guard moves.
     #[derive(Default)]
     struct PassthroughSealer {
         locked: Mutex<bool>,
+        opens: Mutex<usize>,
+    }
+
+    impl PassthroughSealer {
+        fn opens(&self) -> usize {
+            *self.opens.lock().unwrap()
+        }
     }
 
     impl ProfileSealer for PassthroughSealer {
@@ -245,6 +256,7 @@ mod tests {
             Ok(plaintext.to_vec())
         }
         fn open(&self, _did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
+            *self.opens.lock().unwrap() += 1;
             if *self.locked.lock().unwrap() {
                 return Err(SealError::Open);
             }
@@ -339,15 +351,23 @@ mod tests {
         );
 
         assert_eq!(reveal_phrase(&confirmer, &vault), RevealOutcome::Shown);
-        let drawn = confirmer.drawn();
-        for word in phrase.words() {
-            assert!(drawn.contains(word));
-        }
+        // The control for the placement test below: an APPROVED reveal decrypts exactly once, so a count
+        // of zero there is a real observation rather than a counter that never moves.
+        assert_eq!(vault.sealer_for_test().opens(), 1);
+        assert!(
+            drew_the_words(&confirmer, &phrase),
+            "the stored words must reach a window"
+        );
     }
 
-    /// **The placement assertion**: a refused gate must mean the vault was never opened. Asserting only
-    /// that the outcome is `Refused` would pass for a flow that decrypted the phrase and then discarded
-    /// it, so this asserts on what reached a WINDOW — the gate line and nothing else.
+    /// **A placement assertion, and it needs the right observable.** "The gate runs before the vault is
+    /// opened" is a statement about WHERE the guard sits, and the tempting assertions — the outcome is
+    /// `Refused`, no words reached a window — are satisfied IDENTICALLY by a gate placed after the
+    /// decryption. Moving the guard below `vault.load()` leaves both of those green.
+    ///
+    /// The one observable that moves is whether the ciphertext was decrypted at all, which is why the test
+    /// sealer counts its `open` calls. Verified by reverting exactly that ordering: with the count
+    /// asserted the test fails, without it the test passes on the wrong placement.
     #[test]
     fn a_refused_gate_never_opens_the_vault() {
         let dir = tempfile::tempdir().unwrap();
@@ -359,17 +379,29 @@ mod tests {
 
         assert_eq!(reveal_phrase(&confirmer, &vault), RevealOutcome::Refused);
         assert_eq!(
+            vault.sealer_for_test().opens(),
+            0,
+            "a refused gate must run BEFORE the phrase is decrypted, not after"
+        );
+        assert_eq!(
             confirmer.windows_drawn(),
             1,
             "only the gate should have been drawn — no words window"
         );
-        let drawn = confirmer.drawn();
-        for word in phrase.words() {
-            assert!(
-                !drawn.contains(word),
-                "the word {word:?} leaked past a refused gate"
-            );
-        }
+        assert!(
+            !drew_the_words(&confirmer, &phrase),
+            "the words leaked past a refused gate"
+        );
+    }
+
+    /// Whether the words window was drawn, matched on the WHOLE phrase as one numbered block.
+    ///
+    /// A per-word substring search over everything drawn is quietly wrong: BIP-39 words are ordinary
+    /// English, and several are substrings of the prompt copy itself — `cover` sits inside "recovery",
+    /// `over` inside "recover". Such a check reports a leak at random depending on which words were
+    /// generated. Matching the rendered block is exact.
+    fn drew_the_words(confirmer: &ScriptedConfirmer, phrase: &RecoveryPhrase) -> bool {
+        confirmer.drawn().contains(&*phrase.numbered_lines())
     }
 
     /// An unavailable authenticator refuses too — a machine with no Hello/Touch ID must not become a
@@ -385,6 +417,11 @@ mod tests {
         );
 
         assert_eq!(reveal_phrase(&confirmer, &vault), RevealOutcome::Refused);
+        assert_eq!(
+            vault.sealer_for_test().opens(),
+            0,
+            "an unavailable authenticator must not decrypt the phrase either"
+        );
     }
 
     /// A legacy account is distinguished from a broken one, because the tray offers different things.
