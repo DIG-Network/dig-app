@@ -513,9 +513,22 @@ MUST work — there is no single "active machine profile."
 
 ## 5. The user-app ↔ engine IPC contract
 
-dig-app and the engine communicate over a **per-user, OS-native local channel**, carrying an
-**identity-authenticated session**. This supersedes the SYSTEM-minted control-token model
-([dig_ecosystem#856] Family B).
+This section specifies **two** transports, and a reimplementation MUST NOT confuse them:
+
+- **§5.1.0 — the LIVE transport.** dig-app reaches the engine over the engine's **loopback HTTP
+  JSON-RPC control plane**, authorized by the **`X-Dig-Control-Token` header**. This is what a
+  conformant dig-app implements today, and the control token is **NORMATIVE, not superseded**.
+- **§5.1.1 + §§5.2–5.3 — the SPECIFIED-BUT-UNBUILT transport.** A **per-user, OS-native local
+  channel** (named pipe / UDS) carrying an **identity-authenticated session**. **No engine answers it**
+  — dig-node carries no pipe or UDS listener — so every requirement stated for it is a forward
+  contract, binding only once that listener exists.
+
+The identity-authenticated session is what would supersede the SYSTEM-minted control-token model
+([dig_ecosystem#856] Family B) — **when it is built**. Until then it supersedes nothing: an
+implementation that treats the control token as obsolete cannot talk to a real engine at all.
+
+Everything below §5.1.1 (session authentication §5.2, the session methods §5.3, the `sign` callback)
+describes that unbuilt channel unless it explicitly says otherwise.
 
 ### 5.1 Transport
 
@@ -556,12 +569,19 @@ agree on if that listener is built, not a transport dig-app dials.
 | Windows | named pipe (per-user namespace) | `\\.\pipe\dignetwork-<USER>` |
 | macOS / Linux | Unix domain socket | `<RUNTIME_DIR>/dignetwork.sock` (`$XDG_RUNTIME_DIR` on Linux) |
 
-The channel MUST be **per-user and ACL-scoped to the owning user** — tighter than loopback TCP — and
-the OS peer credential additionally binds the connecting identity. The channel is **bidirectional**,
-carrying **newline-delimited JSON-RPC 2.0 frames** over the engine's existing `control.*` dispatch:
-this is a **transport swap only** — the `control.*` protocol shape is unchanged. The pre-existing
-loopback-TCP `control.*` channel STAYS for the MV3 browser extension, which cannot speak pipes.
-IPv6-first (ecosystem §5.2) is N/A here — the channel is a local pipe / UDS, not a network socket.
+Were it built, the channel MUST be **per-user and ACL-scoped to the owning user** — tighter than
+loopback TCP — and the OS peer credential would additionally bind the connecting identity. It is
+**bidirectional**, carrying **newline-delimited JSON-RPC 2.0 frames** over the engine's existing
+`control.*` dispatch: for that channel this would be a **transport swap only**, leaving the `control.*`
+protocol shape unchanged.
+
+The loopback-TCP `control.*` channel is **not** a legacy path that merely "stays for the MV3 browser
+extension": it is the channel **dig-app itself uses** (§5.1.0), alongside the extension. Consequently
+IPv6-first (ecosystem §5.2) is **NOT** N/A to dig-app — it is required, because §5.1.0 dials real
+network sockets: a §5.1.0 client MUST prefer the IPv6 loopback (`[::1]`) among a host's resolved
+addresses before IPv4, since the engine's IPv6 listener is best-effort and `localhost` resolves to
+both families. IPv6-first would be N/A only to the §5.1.1 pipe / UDS channel, which is not a network
+socket.
 
 The concrete request/response shapes below are the normative contract that the app-side (dig-app,
 APP work units) and the engine-side (dig-node, `control.session.*` + the `sign` callback) both build
@@ -590,9 +610,12 @@ a signed-challenge handshake — NOT a static token file. No client can attach a
 cannot sign for. The handshake is three methods (§5.3), and the engine opens an in-memory session
 only after it verifies the signature against the DID's own on-record signing key.
 
-The signed-challenge scheme is the baseline because the per-user pipe/socket ACL and the OS peer
-credential already authenticate the *channel*; the handshake additionally binds the *profile
-identity*. An **mTLS variant** — the app presents a client cert keyed by the profile identity —
+The signed-challenge scheme is the baseline because the §5.1.1 per-user pipe/socket ACL and the OS
+peer credential already authenticate the *channel*; the handshake additionally binds the *profile
+identity*. **That premise is specific to §5.1.1 and does NOT transfer to §5.1.0**: a loopback TCP
+port has no per-user ACL and is reachable by any local user, so on the live transport it is the
+**control token** (a file whose own ACL is the access control) that authenticates the caller — not the
+channel. An **mTLS variant** — the app presents a client cert keyed by the profile identity —
 is an equivalent alternative where a cert-authenticated channel is preferred.
 
 ### 5.3 Session methods (the concrete contract)
@@ -653,6 +676,12 @@ its `session_id`.
 
 ### 5.4 Client → node resolution ladder
 
+**Two distinct ladders, both derived from ecosystem §5.3 — do not conflate them.** This section is the
+**content-read** ladder, in which dig-app is tier-0 *for other clients*. dig-app's own **control-plane**
+ladder — how it finds the engine to ask `control.*` — is §5.1.0, and it deliberately ends at
+`localhost` with no `rpc.dig.net` tier, because the public gateway dispatches no `control.*` and cannot
+hold this machine's local control token.
+
 dig-app is **tier-0** of the ecosystem client→node ladder (§5.3 of the ecosystem contract): a client
 resolves the local dig-app first, then the engine directly (`dig.local` → `localhost`, public reads
 only), then `rpc.dig.net`. An explicitly-configured node still overrides the ladder entirely.
@@ -661,8 +690,11 @@ in the sealed config).
 
 ### 5.5 End-to-end seal scope on the IPC channel
 
-The local pipe / socket is **not** an intermediary-terminated channel to a remote recipient, so its
-own frames are **not** end-to-end sealed — the per-user channel ACL (§5.1) is sufficient. The
+Neither local channel is an intermediary-terminated channel to a remote recipient — loopback bytes
+never leave the host, and a pipe / UDS has no network hop at all — so their own frames are **not**
+end-to-end sealed. The sufficient control differs by transport, and only one of them is an ACL on the
+channel: for §5.1.1 it is the per-user channel ACL; for the live §5.1.0 transport it is the
+**loopback-only bind plus the control token**, because a loopback port carries no per-user ACL. The
 ecosystem §5.4 seal-to-recipient rule (NC-1) applies to **recipient-directed content** (chat, email)
 that the engine RELAYS onward: dig-app seals such content to the recipient's dig-identity BLS G1
 identity key (slot `0x0010`, via G1-DHKEM) **before** handing the bytes to the engine, so the engine
@@ -670,7 +702,8 @@ and any downstream relay see only ciphertext. Sealing is the app's responsibilit
 
 ### 5.6 The extension ↔ dig-app paired-loopback signing channel (APP-SIGN)
 
-The §5.3 pipe/UDS session is the ENGINE's path to dig-app. Browsers cannot speak that channel, so a
+The §5.3 session over the §5.1.1 pipe/UDS channel is the ENGINE's path to dig-app *once that channel
+exists*; dig-app's own path to the engine today is §5.1.0. Browsers can speak neither, so a
 **second, browser-reachable front door** exists for the identity path: a web dapp reaches dig-app
 **through the DIG browser extension**, which relays over a paired loopback WebSocket. This is the
 identity channel (connect / sign); it is distinct from the extension ↔ dig-node **content** channel
@@ -977,17 +1010,30 @@ When a work unit satisfies an NC item, it MUST update that item's "Satisfied by"
 
 ## 7. Security properties
 
-- **Transport = mTLS for node-class clients.** dig-app (and `dign`, and any filesystem client holding
-  a DIG identity key) connects to a node over mTLS, presenting a client cert derived from the profile
-  identity key (§5.3 ecosystem contract). Applies to all three ladder tiers.
+- **Transport = mTLS for node-class clients — on the surfaces that offer it.** dig-app (and `dign`,
+  and any filesystem client holding a DIG identity key) presents a client cert derived from the profile
+  identity key (§5.3 ecosystem contract) on every node surface that accepts one.
+  **The CONTROL plane is not currently one of them.** The engine's mTLS listener serves the
+  **wallet** (Sage-parity) surface only; `control.*` is dispatched on the plain loopback HTTP
+  listeners and is authorized by the **control token** (§5.1.0). So a conformant dig-app reaches
+  `control.*` over plain loopback HTTP + token, and MUST NOT be read as requiring mTLS there — that
+  requirement is unsatisfiable against a real engine today. Stating it unconditionally is what would
+  make this document contradict §5.1.0. Gate any hard mTLS requirement on the engine exposing a
+  control surface that accepts a client cert.
 - **End-to-end sealing on directed channels.** Any message dig-app sends to an intended recipient over
   a channel an intermediary could terminate MUST be sealed to the recipient's dig-identity BLS G1
-  identity key (slot `0x0010`, G1-DHKEM) *on top of* mTLS (ecosystem §5.4). mTLS authenticates the
-  pipe; the payload is sealed so a relay/intermediary sees only ciphertext.
+  identity key (slot `0x0010`, G1-DHKEM) *on top of* whatever transport authentication that channel
+  has (ecosystem §5.4). The transport authenticates and encrypts the *channel*; the payload is sealed
+  independently, so a relay or any other intermediary that terminates the channel sees only ciphertext.
+  The seal is therefore never waived because a transport happens to be mTLS — or because it happens to
+  be loopback.
 - **Threat model (summary).**
-  - A non-admin user U2 cannot read U1's data — U1's per-profile AppData is ACL'd to U1, the
-    pipe/socket ACL is per-user, and the engine opens a session only for a profile the caller can
-    sign for.
+  - A non-admin user U2 cannot read U1's data — U1's per-profile AppData is ACL'd to U1, and (on
+    §5.1.1) the pipe/socket ACL is per-user with the engine opening a session only for a profile the
+    caller can sign for. **On the live §5.1.0 transport the channel contributes no such separation**:
+    the engine's loopback control port is reachable by any local user, so the boundary is the
+    **control-token file's ACL** — a user who cannot read that file cannot drive `control.*`. The
+    engine deliberately refuses a foreign-owned token file rather than trusting it.
   - **At-rest theft of a raw disk artifact yields only DIGOP1 ciphertext** — the sealed file's bytes
     are ciphertext, and its passphrase is never persisted. On the Windows/macOS OS-store path the
     access control is the store's per-application ACL: defeating that ACL and dumping the entry yields
@@ -1134,23 +1180,24 @@ A conformant implementation MUST include tests asserting:
 3. **Cross-user denial** — U2 cannot read U1's AppData nor attach U1's profile.
 4. **Per-OS AppData layout** — `brand_data_dir` resolves the correct directory per OS; per-profile
    subdirs are isolated by DID hash.
-5. **Node connection** — the §5.3 ladder is walked in order, a configured endpoint is tried alone,
-   `http://dig.local` resolves to port 80, the control token is read from dig-node's own state-dir
-   candidates, a live node's `control.status` round-trips over a REAL socket, and a refusal is
-   reported distinctly from no-node-at-all (`control`, `engine`).
-6. **IPC addressing** — `channel_endpoint` yields the correct per-user named pipe / socket path;
-   distinct users get distinct endpoints.
-6. **Headless degrade** — no display ⇒ `FormFactor::Headless` (no tray); a display ⇒ `Tray`.
-7. **Signing-through-dig-app** — an engine-initiated `sign` callback (§5.3) is answered by dig-app and
+5. **Node connection (§5.1.0)** — the control-plane ladder is walked in order, a configured endpoint
+   is tried alone, `http://dig.local` resolves from the URL scheme rather than the node's high port,
+   the IPv6 loopback is preferred over IPv4, the control token is read from dig-node's own state-dir
+   candidates, a live node's `control.status` round-trips over a REAL socket, and a node that answers
+   but refuses is reported distinctly from no node at all (`control`, `engine`).
+6. **IPC addressing (§5.1.1)** — `channel_endpoint` yields the correct per-user named pipe / socket
+   path; distinct users get distinct endpoints. Addressing only — nothing answers it yet.
+7. **Headless degrade** — no display ⇒ `FormFactor::Headless` (no tray); a display ⇒ `Tray`.
+8. **Signing-through-dig-app** — an engine-initiated `sign` callback (§5.3) is answered by dig-app and
    the key never crosses the IPC boundary.
-8. **Multi-user concurrent sessions** — two attached sessions for different profiles coexist, each
+9. **Multi-user concurrent sessions** — two attached sessions for different profiles coexist, each
    with its own `session_id` in the engine's session map (§5.3), and a `sign` callback routes to the
    owning connection.
-9. **Never-log at source** — a captured, real emitted-record test proves a passphrase live in scope
-   during a vault create/unlock never reaches a logged field or message (§9a).
+10. **Never-log at source** — a captured, real emitted-record test proves a passphrase live in scope
+    during a vault create/unlock never reaches a logged field or message (§9a).
 
-U1 ships tests (4), (5), (6) and the `IdentityKind` predicate for (1); the remaining tests land with
-the work units that implement their subsystems.
+U1 ships tests (4), (6), (7) and the `IdentityKind` predicate for (1); (5) ships with the live
+control client (#949); the remaining tests land with the work units that implement their subsystems.
 
 ---
 

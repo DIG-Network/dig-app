@@ -35,7 +35,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dig_node_control_interface::envelope::{JsonRpcResponse, RequestId};
@@ -57,6 +57,11 @@ const CONTROL_TOKEN_FILE: &str = "control-token";
 /// Byte-identical to `dig-node-service`'s `state::STATE_DIR_ENV` — honouring it is what lets a test
 /// rig (and a non-default install) find the same token the node minted.
 const STATE_DIR_ENV: &str = "DIG_NODE_STATE_DIR";
+
+/// Relocates dig-node's cache directory, and with it the LEGACY state dir a plain `dig-node run`
+/// writes its control token into. Byte-identical to the variable `dig-node-core`'s
+/// `canonical_cache_dir` reads.
+const CACHE_DIR_ENV: &str = "DIG_NODE_CACHE";
 
 /// The machine-wide state folder name dig-node uses on Windows and macOS
 /// (`state::MACHINE_FOLDER`), and the legacy per-user folder name on every OS.
@@ -129,19 +134,32 @@ fn normalize_endpoint(endpoint: &str) -> String {
 /// dig-app reads whichever exists; it never mints a token, because a token the node does not know
 /// would authorize nothing.
 pub fn control_token_candidates() -> Vec<PathBuf> {
+    control_token_candidates_from(
+        non_empty_env(STATE_DIR_ENV).as_deref(),
+        non_empty_env(CACHE_DIR_ENV).as_deref(),
+    )
+}
+
+/// [`control_token_candidates`] over explicit override values, so the ordering and the
+/// cache-dir-relative derivation are testable without mutating process-global environment.
+fn control_token_candidates_from(state_dir: Option<&str>, cache_dir: Option<&str>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(dir) = std::env::var(STATE_DIR_ENV)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(dir) = state_dir.map(str::trim).filter(|d| !d.is_empty()) {
         dirs.push(PathBuf::from(dir));
     }
     dirs.extend(machine_state_dirs());
-    dirs.extend(legacy_state_dir());
+    dirs.extend(legacy_state_dir(cache_dir));
     dirs.into_iter()
         .map(|d| d.join(CONTROL_TOKEN_FILE))
         .collect()
+}
+
+/// An environment variable's value, treating unset and blank alike.
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// This OS's machine-wide dig-node state directories, mirroring `state::machine_state_dirs`.
@@ -167,9 +185,28 @@ fn machine_state_dirs() -> Vec<PathBuf> {
     }
 }
 
-/// The legacy per-user state directory a plain `dig-node run` writes its token into
-/// (`%LOCALAPPDATA%\DigNode` / `$HOME/DigNode`), mirroring `state::legacy_state_dir`.
-fn legacy_state_dir() -> Option<PathBuf> {
+/// The legacy per-user state directory a plain (non-service) `dig-node run` writes its token into,
+/// mirroring `state::legacy_state_dir`.
+///
+/// dig-node derives it as `config_path().parent()`, and `config_path()` is `cache_dir().parent()`
+/// joined with `config.json` — so this directory is **the PARENT of dig-node's cache directory**, not
+/// the cache directory itself. `cache_dir()` honours `DIG_NODE_CACHE` (which the installer sets), so
+/// an override there MOVES the token: `cache_override.parent()`. Hardcoding the default root would
+/// make dig-app report "no control token" against a correctly-paired node.
+///
+/// With no override the default is `%LOCALAPPDATA%\DigNode` / `$HOME/DigNode` — which is exactly
+/// `<...>/DigNode/cache`'s parent, so both branches express the same rule.
+///
+/// NOT covered: when the canonical cache dir is unwritable, dig-node falls back to a PID-keyed
+/// private directory, whose name is unknowable from outside that process. A node in that degraded
+/// mode cannot be located by any external client until it publishes its state dir.
+fn legacy_state_dir(cache_dir: Option<&str>) -> Option<PathBuf> {
+    if let Some(cache) = cache_dir.map(str::trim).filter(|c| !c.is_empty()) {
+        return PathBuf::from(cache)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+    }
     #[cfg(windows)]
     let base = std::env::var("LOCALAPPDATA").ok();
     #[cfg(not(windows))]
@@ -642,6 +679,49 @@ mod tests {
         assert!(
             candidates.len() > 1,
             "the default install locations must still be tried after the override"
+        );
+    }
+
+    #[test]
+    fn the_cache_dir_override_moves_the_legacy_token_location() {
+        // dig-node's legacy state dir is `config_path().parent()` = `cache_dir().PARENT()`, and
+        // `cache_dir()` honours DIG_NODE_CACHE. With that var set (the installer sets it), a token
+        // written by a plain `dig-node run` is NOT under the default %LOCALAPPDATA%/$HOME root, so a
+        // hardcoded default reports "no control token" against a correctly-paired node.
+        //
+        // Built from a tempdir rather than a literal so the fixture is a real path on EVERY OS: a
+        // `D:\...` literal has no parent on Linux, where the coverage gate runs, and would have
+        // passed there for the wrong reason.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cache = root.path().join("cache");
+        let candidates = control_token_candidates_from(None, cache.to_str());
+
+        // The cache dir's PARENT, not the cache dir itself. A fix that joined the cache dir would
+        // look in `<cache>/control-token` — the nearest wrong implementation — so this asserts the
+        // exact expected path AND the absence of the wrong one.
+        assert!(
+            candidates.contains(&root.path().join(CONTROL_TOKEN_FILE)),
+            "expected the cache dir's PARENT ({:?}); got {candidates:?}",
+            root.path().join(CONTROL_TOKEN_FILE)
+        );
+        assert!(
+            !candidates.contains(&cache.join(CONTROL_TOKEN_FILE)),
+            "the cache dir itself is not the state dir; got {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn the_state_dir_override_still_outranks_the_cache_dir_override() {
+        // Both overrides set: DIG_NODE_STATE_DIR is dig-node's own direct state-dir override and
+        // MUST win, so the fixture sets BOTH — with only one set, either order would pass.
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = root.path().join("state");
+        let cache = root.path().join("cache");
+        let candidates = control_token_candidates_from(state.to_str(), cache.to_str());
+        assert_eq!(
+            candidates.first(),
+            Some(&state.join(CONTROL_TOKEN_FILE)),
+            "the explicit state-dir override must be tried FIRST; got {candidates:?}"
         );
     }
 
