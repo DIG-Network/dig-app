@@ -45,10 +45,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      # The default `tray` feature links the desktop tray stack (GTK + libxdo on Linux); install its
+      # The default `tray` feature links the desktop tray stack (GTK on Linux; NOT libxdo, see
+      # dig_ecosystem#1753); install its
       # system dev libraries so `--all-features` compiles here. Runtime still degrades headless.
       - name: Install tray build deps (Linux)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
       - name: cargo clippy -D warnings
@@ -63,9 +64,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      # The default `tray` feature links the desktop tray stack (GTK + libxdo on Linux).
+      # The default `tray` feature links the desktop tray stack (GTK on Linux). NOT libxdo: it is
+      # disabled in the workspace manifest, because a DT_NEEDED entry on `libxdo.so.3` killed the
+      # shipped binary before `main` on stock Ubuntu (dig_ecosystem#1753).
       - name: Install tray build deps (Linux)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov

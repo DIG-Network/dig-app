@@ -55,9 +55,11 @@ jobs:
           rustup toolchain install stable --component rustfmt --component clippy
           rustup default stable
           rustc --version
-      # The default `tray` feature links the desktop tray stack (GTK + libxdo on Linux).
+      # The default `tray` feature links the desktop tray stack (GTK on Linux). NOT libxdo: it is
+      # disabled in the workspace manifest, because a DT_NEEDED entry on `libxdo.so.3` killed the
+      # shipped binary before `main` on stock Ubuntu (dig_ecosystem#1753).
       - name: Install tray build deps (Linux)
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -98,16 +100,30 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
           rustc --version
-      # The default `tray` feature links the desktop tray stack (GTK + libxdo on Linux). macOS +
+      # The default `tray` feature links the desktop tray stack (GTK on Linux). NOT libxdo: it is
+      # disabled in the workspace manifest, because a DT_NEEDED entry on `libxdo.so.3` killed the
+      # shipped binary before `main` on stock Ubuntu (dig_ecosystem#1753). macOS +
       # Windows carry their tray stack in the OS SDK, so only Linux needs extra dev libraries.
       - name: Install tray build deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxdo-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       - name: Build release binaries (dig-app + dign)
         run: cargo build --release --locked --target ${{ matrix.target }} --bin dig-app --bin dign
+      # A SECOND Linux dig-app: the same shell with the `tray` feature off, so it links no desktop
+      # stack at all. The tray build hard-links GTK 3 (8 DT_NEEDED entries), which a stock Ubuntu
+      # Server / cloud image does not have — and a missing library kills the process in the loader,
+      # before `main`, so the shell's own headless degradation can never be reached there
+      # (dig_ecosystem#1753). This artifact is the one that runs on such a host. It is ADDITIVE: the
+      # primary `dig-app-<ver>-linux-x64` asset stays the tray build for desktop sessions.
+      # A separate `--target-dir` keeps it from overwriting the tray binary at the same path.
+      - name: Build the headless Linux binary (no desktop stack)
+        if: runner.os == 'Linux'
+        run: >-
+          cargo build --release --locked --target ${{ matrix.target }}
+          --target-dir target-headless --no-default-features --package dig-app --bin dig-app
       - name: Stage artifacts
         shell: bash
         run: |
@@ -120,6 +136,11 @@ jobs:
             test -f "$SRC" || { echo "binary not produced: $SRC"; exit 1; }
             cp "$SRC" "dist/${bin}-${VER}-${{ matrix.out_name }}${EXT}"
           done
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            HEADLESS="target-headless/${{ matrix.target }}/release/dig-app"
+            test -f "$HEADLESS" || { echo "headless binary not produced: $HEADLESS"; exit 1; }
+            cp "$HEADLESS" "dist/dig-app-${VER}-${{ matrix.out_name }}-headless"
+          fi
           ls -la dist
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
