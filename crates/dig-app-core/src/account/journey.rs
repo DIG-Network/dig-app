@@ -61,7 +61,7 @@ impl PhrasePresenter for WindowedPresenter<'_> {
             body: &format!(
                 "{}\nThese words ARE your DIG Account. Anyone who has them can take it, and \
                  nobody — including DIG — can recover your account without them.",
-                &*words
+                *words
             ),
             acknowledge: "I have written these down",
         });
