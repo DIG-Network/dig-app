@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -153,7 +153,16 @@ chia-sdk-utils = "0.30"
 # its events; the native menu comes from `tray-icon`'s re-exported `muda`. The tray is the `dig-app`
 # crate's default `tray` feature; disable it (`--no-default-features`) to build the pure headless
 # agent with no desktop stack.
-tray-icon = "0.19"
+#
+# `default-features = false` drops `tray-icon`'s only default feature, `libxdo`, which it forwards to
+# `muda`. `muda` uses libxdo in exactly one place: synthesizing ctrl+c/x/v/a keystrokes so the
+# PREDEFINED Copy/Cut/Paste/SelectAll menu items work on Linux. Our menu has none of them, so the
+# feature bought nothing while adding `libxdo.so.3` to the binary's DT_NEEDED list — a library stock
+# Ubuntu does not ship, so the loader killed dig-app with rc=127 before `main` and no runtime
+# fallback could ever run (dig_ecosystem#1753). Pinned by `tests/linux_runtime_deps.rs` in the
+# `dig-app` crate. The Linux tray still needs the GTK 3 runtime, which is inherent to
+# AppIndicator/GTK menus rather than an unused extra; see `README.md`.
+tray-icon = { version = "0.19", default-features = false }
 tao = "0.30"
 # APP-SIGN loopback identity channel (SIGN-1, dig_ecosystem#950, SPEC §5.6). The extension↔dig-app
 # paired WebSocket server lives in `dig-app-core::loopback`, so the async runtime + WS + HMAC + uuid
