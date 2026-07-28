@@ -17,6 +17,35 @@ Surfaces per OS: Windows system-tray · macOS menu-bar (`LSUIElement` launchd La
 AppIndicator tray (or systemd user service). **Degrades headless** — on a GUI-less host it's a per-user
 identity agent + the `dign` CLI, no tray.
 
+## Your DIG Account, from the tray
+
+On a fresh install there is no account yet, and DIG does not create one behind your back — creating an
+account means showing you a recovery phrase, and that should happen when you are ready for it. Open the
+DIG menu from your system tray or menu bar and choose **Set up my DIG Account**. You are shown **24
+words**, once, and asked to confirm you have written them down before the account is created.
+
+Those 24 words ARE your account. The account itself is sealed to this machine (its unlock password lives
+in your OS credential store), so the words are the only thing that can bring it back on a different
+computer. Nobody, including DIG, can recover an account without them.
+
+The tray menu also lets you see your account state, **show your recovery phrase again** (behind your
+Windows Hello / Touch ID / system authentication), copy your DIG ID, lock the session, and open the log
+folder.
+
+To bring an account back on another computer:
+
+```bash
+dign account restore   # asks for your 24 words, without showing them
+dign account status    # what account this machine has, and whether it has a phrase
+```
+
+An on-chain `did:chia:` DID is optional and costs XCH; DIG never mints one without you asking, and your
+account, phrase and address all work fully without it.
+
+If the tray icon never appears, DIG is probably running but unable to draw it — on Linux that is almost
+always a missing `libayatana-appindicator3-1`. DIG logs that and prints the cause; meanwhile `dign` still
+works.
+
 Architecture + design: DIG-Network/dig_ecosystem#908 (epic). Boundary invariant: the node is the
 identity-agnostic engine; dig-app is the identity + user interaction.
 

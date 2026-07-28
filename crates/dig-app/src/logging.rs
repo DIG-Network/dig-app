@@ -28,6 +28,16 @@ pub fn service() -> Service {
     }
 }
 
+/// Where this binary's log files live, resolved the same way [`init`] resolves them.
+///
+/// Exposed so the tray can OPEN the folder for the user: "read the logs" is the escape hatch every
+/// unexplainable failure points at (§6.1), and a path a person has to work out for themselves is not an
+/// escape hatch. Resolving it through `dig_logging` rather than re-deriving a per-OS path is what keeps
+/// the folder the tray opens the folder the logs are actually in.
+pub fn log_dir() -> std::path::PathBuf {
+    dig_logging::log_dir(service().name)
+}
+
 /// Install the shared logging stack for this process and return the guard. Hold it for the
 /// process lifetime (dropping it flushes + detaches the file writer). A failure to install — the
 /// log dir is unwritable, or a subscriber is already set — is reported on stderr and swallowed:

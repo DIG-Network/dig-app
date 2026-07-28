@@ -26,9 +26,13 @@ struct MessageBoxWindow;
 
 impl ForegroundWindow for MessageBoxWindow {
     fn show(&self, content: &ConfirmContent) -> WindowIntent {
+        // `MessageBoxW` cannot relabel its buttons, so the choice is spelled out in the body — using the
+        // content's OWN `choice_hint` rather than one template for every prompt, because an
+        // authorization ("Choose OK to Sign") and an acknowledgement ("Choose OK — I have written these
+        // down") cannot share a sentence and stay readable (#1752).
         let text = HSTRING::from(format!(
-            "{}\n\n{}\n\nChoose OK to {}, or Cancel to reject.",
-            content.heading, content.body, content.action
+            "{}\n\n{}\n\n{}",
+            content.heading, content.body, content.choice_hint
         ));
         let caption = HSTRING::from(content.title.as_str());
         // SAFETY: the two pointers reference `HSTRING`s that outlive the (blocking) call, and the flags

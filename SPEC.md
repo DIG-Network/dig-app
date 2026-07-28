@@ -114,8 +114,10 @@ harness-side lockable RESIDENCY that hands out live-view signer + sealer capabil
 seal paths at once. **Migration is a clean pre-release cutover** (§ back-compat): because a master
 seed cannot reproduce a pre-existing random per-profile scalar, no byte-identical DEK exists to carry
 an old at-rest profile onto a seed index — and dig-app is pre-release with no persisted users, so old
-per-profile-scalar identities are abandoned rather than migrated. The on-chain profile DID mint is a
-later phase; until it lands a profile is identified by its seed-derived identity public key.
+per-profile-scalar identities are abandoned rather than migrated. The master seed is NOT drawn
+directly from the CSPRNG: it is the entropy of a 24-word BIP-39 **recovery phrase** (§3.1a), which is
+what makes an account portable. The on-chain profile DID mint is a later phase; until it lands a
+profile is identified by its seed-derived identity public key, and minting is NEVER automatic (§3.1b).
 
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
@@ -162,7 +164,7 @@ OS credential store is only a safe custody primary where its access gate is per-
    **primary on Linux**: the kernel keyutils session keyring is deliberately NOT used there because
    it is readable by any same-UID process in the session (it has no per-application ACL, so a
    same-UID background process could harvest the key) AND it is non-persistent across reboot/logout
-   (a plain reboot would destroy the only copy of a random, no-mnemonic identity — data loss). The
+   (a plain reboot would destroy the only copy of the sealed seed, and the machine-held unlock password with it — see §3.1a: the recovery phrase, not the sealed blob, is what survives losing a machine). The
    passphrase-sealed file is persistent, home-ACL'd, and — needing a user passphrase — not
    harvestable by a background same-UID process. It is also the fallback anywhere the OS credential
    store is unusable (a headless server, a minimal container).
@@ -170,6 +172,114 @@ OS credential store is only a safe custody primary where its access gate is per-
 The precedence is detected once at vault-open time. Unlock **fails closed**: a wrong passphrase, a
 tampered blob, or a foreign key yields an opaque error that never distinguishes the cause and never
 produces partial plaintext.
+
+### 3.1a The recovery phrase (normative)
+
+An account's master seed MUST be the entropy of a **24-word BIP-39 mnemonic**, the account's *recovery
+phrase*. The phrase is the ONE portable custody root: the sealed seed blob is openable only on the
+machine whose credential store holds its unlock password (§3.1), so the words are the only thing a user
+can carry to a new machine.
+
+- **Mapping.** A 24-word phrase carries exactly 32 bytes of entropy, which IS the `SEED_LEN` master
+  seed, taken verbatim. Phrase to seed is therefore a lossless bijection, and a restore reaches the
+  identical identity, wallet key and per-profile DEK with no stored state whatsoever.
+- **NOT the Chia mnemonic derivation.** Chia wallets map a phrase to a key through the 64-byte PBKDF2
+  seed of BIP-39 §5. DIG uses the entropy directly, so the SAME phrase yields a DIFFERENT address in a
+  Chia wallet than in DIG. A DIG recovery phrase MUST NOT be presented to the user as importable into a
+  Chia wallet, nor a Chia wallet's phrase as importable here.
+- **Enrolment order (MUST).** A first run MUST: generate the phrase, display it once, obtain an explicit
+  confirmation that the user has retained it, and only then enrol. A declined or unshowable phrase MUST
+  leave NOTHING enrolled; an implementation MUST NOT create an account whose phrase was never seen.
+- **Re-reveal (MUST).** An enrolled account MUST be able to display its phrase again, gated on BOTH the
+  account being unlocked AND a fresh OS re-authentication, and the gate MUST run BEFORE the phrase is
+  decrypted. The phrase is stored for this purpose sealed under the ROOT profile's DEK.
+- **Restore (MUST).** An account MUST be restorable from its phrase alone on a host with no prior state.
+  Restoring MUST refuse when an account already exists, rather than overwriting a custody root.
+- **Handling (MUST).** The phrase MUST NOT be logged, serialized, transmitted, or written anywhere but
+  its sealed vault. It is held in zeroizing memory, redacted in debug output, and reaches only an
+  OS-owned foreground window.
+- **Accounts enrolled without a phrase.** An account whose seed predates this section has NO phrase and
+  its words CANNOT be reconstructed. Such an account MUST be reported to the user as unrecoverable, and
+  MUST NOT be silently re-enrolled: replacing it destroys its identity, address and sealed data, so it
+  requires an explicit, separately-confirmed user action.
+
+### 3.1b On-chain DID minting (normative)
+
+Minting a profile's `did:chia:` DID is a real Chia mainnet transaction that spends real funds. It is
+therefore **never automatic**: an implementation MUST NOT mint a DID during enrolment, boot, or any flow
+the user did not explicitly initiate for that purpose, and MUST show the cost before spending. An
+account is fully functional without a DID; a profile is identified by its seed-derived identity public
+key until one is minted (§3.1).
+
+### 3.1c The tray account surface (normative)
+
+The tray is the only surface a person has on a fresh install, so it MUST expose the whole account
+journey, not merely lock and quit. The menu is built from ONE pure model (`dig_app_core::tray_menu`) so
+these rules are testable independently of any desktop.
+
+The menu MUST offer, at minimum: the agent's own state, the node connection line, the account state, the
+profile's DIG ID, the on-chain DID state, and actions to set up an account, restore from a recovery
+phrase, unlock, lock now, reveal the recovery phrase, copy the DIG ID, create an on-chain DID, open the
+log folder, and quit.
+
+Binding rules:
+
+- **Boot MUST NOT enrol.** Creating an account displays a recovery phrase, and a phrase window that
+  appears unbidden at login is a window people dismiss. An account is created only by an explicit user
+  action, so a host with no account boots to a tray offering to set one up.
+- **Never trap the user.** "Quit" and the log folder MUST be enabled in EVERY state, including when the
+  account is unsupported, absent, locked, or broken. No state may leave the menu with nothing actionable.
+- **Say the true state.** An account with no recovery phrase MUST be labelled as such in the account
+  status line AND offered the explainer, and MUST NOT be shown an inert "show my recovery phrase" item.
+  An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
+  existence is discoverable.
+- **Read the lock state from the KEYS, never from the session (MUST).** A session deliberately outlives
+  its key material — lock-now and the idle auto-lock drop the keys and keep the session so the sign path
+  can re-unlock into it. The reported state MUST therefore be derived from whether key material is held
+  RIGHT NOW; a session with no keys is `Locked`, identically to a not-yet-unlocked account, so the way
+  back in (`Unlock…`) is the same. Inferring "unlocked" from the session's existence reports a lock that
+  is not there and offers no route out of it.
+- **Price before the click.** An action that spends funds MUST name the cost in its LABEL, not only in a
+  confirmation dialog (§3.1b).
+- **A tray that cannot mount MUST report itself.** On Linux the indicator library is dlopened, so a
+  missing library yields a running process with no icon and no error. The shell MUST log the failure and
+  print the likely cause plus a working alternative (`dign`), because an invisible tray is otherwise
+  indistinguishable from a broken application.
+
+### 3.1d Native input, modals and prompts (normative)
+
+**Whenever dig-app needs input from the user it MUST use the platform's native input box, modal or
+prompt** — Windows and macOS both provide one, and the app already owns the native-confirm plumbing
+(§5.6.1) these extend. This covers the recovery phrase on restore, any password or passphrase entry, the
+retention confirmation, and every future field.
+
+Two shapes are explicitly NOT acceptable substitutes: dropping the user to a terminal command, and an
+in-app or web-rendered text field. A tray menu itself has no text field — that is a property of the tray
+API, not a reason to hand the user off — so an input need is met by raising a native dialog from the tray,
+not by printing a command for them to run.
+
+Binding rules, which matter more for an input control than for a notice:
+
+- **Cancel MUST always work.** An unescapable modal on a background tray agent is the worst available
+  failure mode (§3.1c, never trap the user). Dismissal MUST be a first-class outcome, and MUST leave
+  nothing half-created.
+- **Entered secrets MUST go straight into the zeroizing path.** Typed key material (a recovery phrase, a
+  passphrase) MUST be moved into its `Zeroizing`/`RecoveryPhrase` home and MUST NOT be left in a control
+  buffer, a window title, a process argument, or any log record. The never-log gate covers the restore
+  path, not only enrolment.
+- **Echo policy is a deliberate decision, stated here.** A recovery phrase on RESTORE is entered
+  **masked**, matching `dign account restore`'s suppressed echo: the words already exist on paper, so
+  shoulder-surfing is the live risk and a typo is recoverable by retrying (a wrong phrase cannot silently
+  damage anything — restore refuses when an account exists, and a bad checksum is rejected outright,
+  §3.1a). Where a mistyped phrase would be costly rather than merely fruitless, the prompt MUST offer an
+  explicit reveal-while-typing affordance rather than defaulting to clear text.
+- **The words a user types are DIG's, not a Chia wallet's (MUST).** Both the restore prompt and the setup
+  screen MUST state that a DIG recovery phrase is not a Chia wallet phrase and vice versa, because DIG
+  will accept a Sage phrase and silently build a different, empty account from it (§3.1a).
+
+**Current state:** restore is served by `dign account restore` (masked terminal entry) while the native
+input dialog is built; the tray's restore item hands over that exact command. That is a documented
+interim, not the specified end state.
 
 ### 3.2 Profiles and the Accounts registry
 
@@ -355,6 +465,15 @@ are sealed under §3.4.
 authenticates the caller and either serves the request locally with the user keys (sign / profile /
 wallet) or proxies engine work over the authenticated session. The user/identity/control subcommands
 (info/config/cache/stores/sync/subscriptions/peers/pair/open + wallet/profiles/sign) live here.
+
+**`dign account` is served in-process, NOT through the gateway (normative).** The `account status`
+and `account restore` verbs act directly on this machine's account store and MUST work with no running
+dig-app, because both matter precisely when there is no account for the app to serve. They resolve the
+per-user directory through the SAME host resolution the tray shell uses, so the CLI and the app can never
+address different directories. `account restore` MUST read the phrase with terminal echo suppressed, MUST
+refuse when an account already exists (§3.1a), and MUST NOT accept the phrase from a non-terminal stdin
+(a piped phrase lands in shell history). No `account` verb ever prints the phrase to stdout, including
+under `--json`.
 
 The `dig-node` binary retains **only** machine service-lifecycle subcommands
 (install/start/stop/status/uninstall/run-service) — the identity-agnostic engine admin surface. It

@@ -21,3 +21,6 @@ Thumbs.db
 # Claude Code local settings & worktrees
 .claude/settings.local.json
 .claude/worktrees/
+
+# Lane scratch files (a lane marker committed by mistake in #1752).
+.lane-*.md

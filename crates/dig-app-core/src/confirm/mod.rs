@@ -67,6 +67,35 @@ pub struct SignPrompt<'a> {
     pub decoded_tx: Option<&'a str>,
 }
 
+/// The reveal-confirm prompt: *"Show your recovery phrase?"* (dig_ecosystem#1752).
+///
+/// Revealing the phrase hands over the whole account, so it is gated exactly like a signature — a real
+/// foreground window plus a biometric re-authentication. The prompt names WHAT is about to be shown so
+/// the window can warn about the surroundings ("anyone who can see your screen…").
+#[derive(Debug, Clone, Copy)]
+pub struct RevealPrompt<'a> {
+    /// What is about to be revealed, in the user's words (e.g. `"your 24-word recovery phrase"`).
+    pub secret: &'a str,
+}
+
+/// A display-only notice: text the user must acknowledge, with no biometric step (dig_ecosystem#1752).
+///
+/// This is how the recovery phrase itself reaches the screen. It is NOT an authorization surface — the
+/// authorization already happened (a [`RevealPrompt`] confirm, or a first-run setup the user initiated)
+/// — so it carries no verifier; it exists so the words are drawn by the same OS-owned, focus-stealing,
+/// never-logged window every other DIG prompt uses, rather than a console print or a log line.
+#[derive(Debug, Clone, Copy)]
+pub struct NoticePrompt<'a> {
+    /// The window title.
+    pub title: &'a str,
+    /// The primary line.
+    pub heading: &'a str,
+    /// The body — for a phrase reveal, the numbered words.
+    pub body: &'a str,
+    /// The label of the acknowledge button (e.g. `"I have written these down"`).
+    pub acknowledge: &'static str,
+}
+
 /// The terminal human authorization for the identity channel. The one production implementation is
 /// the per-OS native confirm (SIGN-3); [`HeadlessConfirmer`] is the fail-closed default, and tests
 /// use a scripted double. There is deliberately no default-approve — an unimplemented backend denies.
@@ -81,6 +110,24 @@ pub trait NativeConfirmer: Send + Sync {
 
     /// Confirm signing the decoded transaction with the in-memory identity key.
     fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision;
+
+    /// Confirm revealing a secret (the recovery phrase) on screen.
+    ///
+    /// Defaults to [`ConfirmDecision::Unavailable`] so a backend that has not implemented it refuses to
+    /// reveal rather than revealing unguarded — the same fail-closed default the rest of this trait has.
+    fn confirm_reveal(&self, _prompt: &RevealPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    /// Draw a display-only notice and return whether the user acknowledged it.
+    ///
+    /// Returns [`ConfirmDecision::Approve`] when acknowledged, [`ConfirmDecision::Deny`] when dismissed.
+    /// Defaults to [`ConfirmDecision::Unavailable`], which callers MUST treat as "the user never saw
+    /// this" — the display-once enrolment path relies on that to refuse creating an account whose phrase
+    /// could not be shown.
+    fn show_notice(&self, _prompt: &NoticePrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
 }
 
 /// The fail-closed confirmer for a host with no desktop session — the SIGN-1 default until the per-OS
@@ -100,6 +147,14 @@ impl NativeConfirmer for HeadlessConfirmer {
     }
 
     fn confirm_sign(&self, _prompt: &SignPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    fn confirm_reveal(&self, _prompt: &RevealPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    fn show_notice(&self, _prompt: &NoticePrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Unavailable
     }
 }
@@ -161,6 +216,14 @@ pub(crate) struct ConfirmContent {
     /// The label of the approve action (`"Pair"`, `"Connect"`, `"Sign"`), reused as the reason string
     /// the biometric prompt shows.
     pub action: &'static str,
+    /// The sentence explaining the two buttons, for a backend whose buttons cannot be RELABELLED.
+    ///
+    /// macOS and the Linux helper put [`action`](Self::action) directly on the button, so they ignore
+    /// this. Windows `MessageBoxW` is stuck with OK/Cancel, so it must spell the choice out in the body —
+    /// and the right sentence differs between an authorization ("Choose OK to Sign") and an
+    /// acknowledgement, where the same template produced the unreadable *"Choose OK to I have written
+    /// these down"* found in a live window during #1752 review.
+    pub choice_hint: String,
 }
 
 impl ConfirmContent {
@@ -178,7 +241,46 @@ impl ConfirmContent {
                    your DIG identity. You approve every signature individually."
                     .to_string(),
             action: "Pair",
+            choice_hint: Self::authorize_hint("Pair"),
         }
+    }
+
+    /// The content for a reveal confirm (dig_ecosystem#1752): approve putting a secret on screen.
+    ///
+    /// The body warns about the *surroundings*, not the mechanics, because that is the actual risk at
+    /// this moment: the account is already unlocked and the user already asked — what they may not have
+    /// considered is who else can see the screen, or a screen recorder.
+    fn reveal(prompt: &RevealPrompt<'_>) -> Self {
+        Self {
+            title: "DIG — Reveal recovery phrase".to_string(),
+            heading: format!("Show {} on this screen?", prompt.secret),
+            body: "Anyone who can see your screen — or any screen-sharing or recording that is running \
+                   — will see it, and anyone who has it can take your DIG Account. Make sure you are \
+                   alone before continuing."
+                .to_string(),
+            action: "Reveal",
+            choice_hint: Self::authorize_hint("Reveal"),
+        }
+    }
+
+    /// The content for a display-only notice (dig_ecosystem#1752), passed through verbatim: the caller
+    /// owns this copy because it is showing secret material it composed itself.
+    fn notice(prompt: &NoticePrompt<'_>) -> Self {
+        Self {
+            title: prompt.title.to_string(),
+            heading: prompt.heading.to_string(),
+            body: prompt.body.to_string(),
+            action: prompt.acknowledge,
+            // An acknowledgement, not an authorization: the button label is a CLAIM the user is making
+            // ("I have written these down"), so it is quoted as a choice rather than slotted into a
+            // "Choose OK to <verb>" sentence that cannot read correctly.
+            choice_hint: format!("Choose OK — {} — or Cancel to go back.", prompt.acknowledge),
+        }
+    }
+
+    /// The two-button sentence for an AUTHORIZATION prompt, whose `action` is an imperative verb.
+    fn authorize_hint(action: &str) -> String {
+        format!("Choose OK to {action}, or Cancel to reject.")
     }
 
     /// The content for a first-connect confirm (§5.6.4): approve a dapp origin talking to this identity.
@@ -196,6 +298,7 @@ impl ConfirmContent {
                 prompt.origin
             ),
             action: "Connect",
+            choice_hint: Self::authorize_hint("Connect"),
         }
     }
 
@@ -216,6 +319,7 @@ impl ConfirmContent {
                 prompt.payload_type
             ),
             action: "Sign",
+            choice_hint: Self::authorize_hint("Sign"),
         })
     }
 }
@@ -333,6 +437,27 @@ impl<W: ForegroundWindow, V: BiometricVerifier> NativeConfirmer for BackedConfir
             &self.window,
             &self.verifier,
         )
+    }
+
+    fn confirm_reveal(&self, prompt: &RevealPrompt<'_>) -> ConfirmDecision {
+        // The same two-step gate as a signature: the window explains the risk, the biometric proves who
+        // is asking. Revealing the phrase is at least as consequential as one signature.
+        gated_consent(
+            &ConfirmContent::reveal(prompt),
+            &self.window,
+            &self.verifier,
+        )
+    }
+
+    fn show_notice(&self, prompt: &NoticePrompt<'_>) -> ConfirmDecision {
+        // Display only: no biometric, because nothing is being authorized here — the authorization
+        // happened before we composed the content this window is showing.
+        match self.window.show(&ConfirmContent::notice(prompt)) {
+            WindowIntent::Approve => ConfirmDecision::Approve,
+            WindowIntent::Deny => ConfirmDecision::Deny,
+            WindowIntent::Timeout => ConfirmDecision::Timeout,
+            WindowIntent::Unavailable => ConfirmDecision::Unavailable,
+        }
     }
 
     fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision {
@@ -556,5 +681,45 @@ mod tests {
         // returns the per-OS backend. Either way the returned trait object must be usable.
         let confirmer = native_confirmer();
         let _ = confirmer.confirm_sign(&sign_prompt(None));
+    }
+
+    /// **Regression (#1752).** The notice window must not slot its acknowledge label into an
+    /// authorization sentence. This was found by reading the LIVE Windows window out of a running
+    /// process, which showed *"Choose OK to I have written these down, or Cancel to reject."*
+    ///
+    /// The fixture is the real acknowledge label from the display-once phrase screen — a first-person
+    /// CLAIM rather than an imperative verb — because a verb-shaped label ("Done", "OK") reads fine in
+    /// EITHER sentence and so cannot distinguish the bug from the fix.
+    #[test]
+    fn a_notice_hint_reads_as_a_claim_not_an_imperative() {
+        let content = ConfirmContent::notice(&NoticePrompt {
+            title: "DIG — Your recovery phrase",
+            heading: "Write these 24 words down.",
+            body: " 1. abandon",
+            acknowledge: "I have written these down",
+        });
+
+        assert!(
+            !content.choice_hint.contains("Choose OK to I have"),
+            "the notice hint must not read as an imperative: {}",
+            content.choice_hint
+        );
+        assert_eq!(
+            content.choice_hint,
+            "Choose OK — I have written these down — or Cancel to go back."
+        );
+    }
+
+    /// The control: an AUTHORIZATION prompt still gets the imperative sentence, so fixing the notice did
+    /// not flatten both into one wording.
+    #[test]
+    fn an_authorization_hint_stays_imperative() {
+        assert_eq!(
+            ConfirmContent::reveal(&RevealPrompt {
+                secret: "your recovery phrase"
+            })
+            .choice_hint,
+            "Choose OK to Reveal, or Cancel to reject."
+        );
     }
 }

@@ -14,7 +14,17 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::fmt::MakeWriter;
 
 use dig_account::AccountId;
-use dig_app_core::account::boot::{assemble_residency, reunlock_into, DEFAULT_ACCOUNT_ID};
+use dig_app_core::account::boot::{
+    assemble_residency, finish_boot, reunlock_into, DEFAULT_ACCOUNT_ID,
+};
+use dig_app_core::account::journey::{reveal_phrase, WindowedPresenter};
+use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
+use dig_app_core::account::recovery::RecoveryPhrase;
+use dig_app_core::account::residency::AccountResidency;
+use dig_app_core::confirm::{
+    ConfirmDecision, ConnectPrompt, NativeConfirmer, NoticePrompt, PairPrompt, RevealPrompt,
+    SignPrompt,
+};
 use dig_app_core::keystore::{CredentialStore, KeystoreError};
 use dig_app_core::session_lock::SessionKeys;
 use dig_keystore::MemoryBackend;
@@ -100,6 +110,24 @@ fn account() -> AccountId {
     AccountId::new(DEFAULT_ACCOUNT_ID)
 }
 
+/// A presenter that confirms retention without drawing anything — the boot fixture for these tests,
+/// which are about what gets LOGGED, not about what gets shown.
+struct SilentlyKeeps;
+
+impl PhrasePresenter for SilentlyKeeps {
+    fn present_new_phrase(&self, _phrase: &RecoveryPhrase) -> RetentionDecision {
+        RetentionDecision::Confirmed
+    }
+}
+
+/// Boot an account over `backend` + `cred`, confirming any recovery phrase.
+fn boot(
+    backend: Arc<dyn KeychainBackend>,
+    cred: MemCred,
+) -> (AccountResidency, Option<RecoveryPhrase>) {
+    assemble_residency(backend, cred, account(), Seeding::NewPhrase(&SilentlyKeeps)).unwrap()
+}
+
 /// Enrolling + unlocking the master-HD account under the sentinel password must never log the password,
 /// even though it is live in scope for the whole boot.
 #[test]
@@ -109,8 +137,8 @@ fn account_boot_never_logs_the_master_password() {
 
     let logged = capture(|| {
         // First boot enrols + seals the seed under the sentinel; a second boot unlocks with it.
-        assemble_residency(backend.clone(), cred.clone(), account()).unwrap();
-        assemble_residency(backend.clone(), cred.clone(), account()).unwrap();
+        boot(backend.clone(), cred.clone());
+        boot(backend.clone(), cred.clone());
     });
 
     assert!(
@@ -125,7 +153,7 @@ fn account_boot_never_logs_the_master_password() {
 fn a_failed_reunlock_logs_the_outcome_never_the_password() {
     let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
     // Enrol under the sentinel password, then lock.
-    let residency = assemble_residency(backend.clone(), MemCred::seeded(), account()).unwrap();
+    let (residency, _phrase) = boot(backend.clone(), MemCred::seeded());
     residency.lock_all();
 
     let logged = capture(|| {
@@ -142,4 +170,122 @@ fn a_failed_reunlock_logs_the_outcome_never_the_password() {
         !logged.contains(SENTINEL_PASSWORD),
         "the master password must NEVER reach a log record: {logged}"
     );
+}
+
+/// A confirmer that approves everything and records nothing — the reveal path needs a real confirmer to
+/// reach the vault, and these tests care only about what is LOGGED.
+struct ApproveAll;
+
+impl NativeConfirmer for ApproveAll {
+    fn confirm_pair(&self, _p: &PairPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn confirm_connect(&self, _p: &ConnectPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn confirm_sign(&self, _p: &SignPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn confirm_reveal(&self, _p: &RevealPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn show_notice(&self, _p: &NoticePrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+}
+
+/// **The recovery phrase must never reach a log record** — it is the whole account in 24 words, so a
+/// single leaked log line is a total compromise (dig_ecosystem#1752, dig-logging SPEC §7).
+///
+/// The fixture drives the phrase through every path that HANDLES it — enrolment, vaulting, and a full
+/// reveal — and then asserts on each individual word, not on the joined phrase. Searching for the joined
+/// string would miss the realistic leak, which is a structured field or a `{:?}` printing the words
+/// one per line or space-normalized differently.
+#[test]
+fn the_recovery_phrase_never_reaches_a_log_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
+    let mut words: Vec<String> = Vec::new();
+
+    let logged = capture(|| {
+        let (residency, phrase) = boot(backend.clone(), MemCred::seeded());
+        let phrase = phrase.expect("a first run yields the phrase it enrolled from");
+        words = phrase.words().iter().map(|w| w.to_string()).collect();
+
+        // Vault it (the enrolment path), then read it all the way back out through the reveal journey.
+        let booted = finish_boot(dir.path(), residency, Some(phrase));
+        let vault = dig_app_core::account::boot::vault_for(dir.path(), &booted.residency)
+            .expect("the account is unlocked");
+        let _ = reveal_phrase(&ApproveAll, &vault);
+        // And the display-once presenter, which formats the words for a window.
+        let _ = WindowedPresenter::new(&ApproveAll).present_new_phrase(&RecoveryPhrase::generate());
+
+        // The RESTORE leg: enrolling from a phrase the USER supplied, on a fresh store. This is the path
+        // `dign account restore` and (once native input lands) the tray's restore prompt both drive, and
+        // it handles the words at their most exposed — they arrive from outside the process.
+        let restored_from = RecoveryPhrase::parse(&words.join(" ")).expect("the phrase re-parses");
+        let fresh: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
+        let restored = assemble_residency(
+            fresh,
+            MemCred::seeded(),
+            AccountId::new("restored"),
+            Seeding::Restore(&restored_from),
+        );
+        assert!(restored.is_ok(), "the restore leg must actually run");
+    });
+
+    assert_no_phrase_in(&logged, &words);
+}
+
+/// Assert that none of `words` (a recovery phrase, in order) leaked into `logged`.
+///
+/// # Why this checks PAIRS and not single words
+///
+/// The obvious assertion — "no individual word appears" — is wrong, and flakily so. BIP-39 words are
+/// ordinary English, and several of them appear in this crate's own log output: **`account` is a BIP-39
+/// word**, and it occurs in module targets (`dig_app_core::account::boot`) and in message text
+/// ("account boot deferred", "account re-unlock failed"). So roughly one generated phrase in eighty
+/// would fail the test spuriously — a false RED, the same class of defect as `cover` sitting inside
+/// "recovery".
+///
+/// A single common word is therefore not evidence of a leak. A *run* of the phrase's words in order is:
+/// any real leak — the joined string, a `{:?}`, a structured field, the numbered block — emits at least
+/// two consecutive words together, while "bulk crew" appearing in log prose is not something that
+/// happens. Checking every adjacent pair is strictly stronger than checking only the fully joined
+/// phrase (which a partial or re-wrapped leak would slip past) and carries no collision risk.
+fn assert_no_phrase_in(logged: &str, words: &[String]) {
+    assert_eq!(words.len(), 24, "the fixture must be a full phrase");
+    let haystack = words_only(logged);
+
+    assert!(
+        !haystack.contains(&words.join(" ")),
+        "the whole recovery phrase reached a log record: {logged}"
+    );
+    for pair in words.windows(2) {
+        let run = pair.join(" ");
+        assert!(
+            !haystack.contains(&run),
+            "the recovery-phrase words {run:?} reached a log record together: {logged}"
+        );
+    }
+}
+
+/// Reduce `text` to lowercase words separated by single spaces, discarding all punctuation.
+///
+/// This is what makes the pair check see through a leak's FORMATTING. A `tracing` field rendered with
+/// `{:?}` emits `["bulk", "crew"]`, so a naive search for `"bulk crew"` — or for `"bulk\ncrew"` — finds
+/// nothing and the test passes on a real leak. Verified by injecting exactly that: a `?&words[3..6]`
+/// slice slipped past the unnormalized check and is caught by this one. Normalizing collapses every
+/// plausible rendering (quoted, comma-separated, `key=value`, newline-wrapped, ANSI-coloured) onto the
+/// same word sequence.
+fn words_only(text: &str) -> String {
+    let letters: String = text
+        .chars()
+        .map(|c| if c.is_ascii_alphabetic() { c } else { ' ' })
+        .collect();
+    letters
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }

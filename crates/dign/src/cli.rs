@@ -26,10 +26,29 @@ pub struct Cli {
     pub command: CliCommand,
 }
 
+/// The `dign account` verbs. Deliberately only these two: everything else about an account (creating
+/// one, viewing the recovery phrase, locking) belongs to the tray, where an OS-owned window and the
+/// platform biometric are available.
+#[derive(Subcommand)]
+pub enum AccountVerb {
+    /// Report whether this computer has a DIG Account, and whether it has a recovery phrase.
+    Status,
+    /// Restore your DIG Account on this computer from your 24-word recovery phrase.
+    Restore,
+}
+
 /// The top-level `dign` verbs. Local verbs (profiles/wallet/sign) are served by the app with the
 /// user identity; the rest are proxied to the engine.
 #[derive(Subcommand)]
 pub enum CliCommand {
+    /// Your DIG Account: whether this computer has one, and restoring it from a recovery phrase.
+    ///
+    /// These verbs act on THIS machine's account store directly rather than through the running app,
+    /// because both matter most when the app has no account to serve.
+    Account {
+        #[command(subcommand)]
+        action: AccountVerb,
+    },
     /// Manage your DIG profiles (multi-DID identity).
     Profiles {
         #[command(subcommand)]
@@ -251,6 +270,12 @@ impl CliCommand {
     /// with no verb default to their natural read (list / show / get), matching the engine CLI.
     pub fn into_command(self) -> Command {
         match self {
+            // `account` never reaches the gateway — `main` serves it locally before this conversion,
+            // because it must work with no running app. Unreachable rather than mapped, so a future
+            // gateway `account` command has to be a deliberate decision rather than an accident.
+            CliCommand::Account { .. } => {
+                unreachable!("account verbs are served locally in main, never through the gateway")
+            }
             CliCommand::Profiles { action } => Command::Profiles(match action {
                 None => ProfilesAction::Show,
                 Some(ProfilesVerb::List) => ProfilesAction::List,

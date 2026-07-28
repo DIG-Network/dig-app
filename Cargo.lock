@@ -303,8 +303,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
+ "rand",
+ "rand_core",
  "serde",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -1395,10 +1398,12 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "dig-app-core",
+ "dig-keystore",
  "dig-logging",
+ "dig-session",
  "tao",
  "tempfile",
  "tracing",
@@ -1407,10 +1412,11 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "async-trait",
  "base64",
+ "bip39",
  "block2 0.6.2",
  "chia-bls 0.26.0",
  "chia-protocol",
@@ -1848,12 +1854,14 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "clap",
  "dig-app-core",
  "dig-logging",
+ "rpassword",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -4136,6 +4144,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4153,6 +4172,16 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a0e551c1e27e1731aba276dbeaeac73f53c7cd34d1bda485d02bd1e0f36844"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

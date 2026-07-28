@@ -1,3 +1,39 @@
+## #1752 — the recovery phrase, and what a tray can and cannot do
+
+- **`dig_session::SEED_LEN` is 32, and a 24-word BIP-39 phrase carries exactly 32 bytes of entropy — so
+  the entropy IS the master seed.** That identity is what makes the phrase to seed mapping a lossless
+  bijection and lets a restore reach the same identity with zero stored state. **But it is NOT the Chia
+  derivation**: Chia wallets go phrase → 64-byte PBKDF2 seed → `SecretKey::from_seed`, so the SAME phrase
+  gives a DIFFERENT address in Sage than in DIG. Making them agree means widening `SEED_LEN` to 64 in
+  `dig-session` (a `10-primitives` crate), cascading through `dig-account` and `dig-wallet-backend`, and
+  breaking at-rest compatibility for every enrolled account. Do not "fix" this casually.
+- **`dig-account` deliberately never returns the master seed.** `UnlockedAccount` hands out capability
+  handles only, and `AccountStore`'s blob-key prefix (`"account."`) is a private const. So dig-app cannot
+  re-derive an enrolled account's words, and re-implementing the prefix app-side would be a copied
+  canonical value waiting to drift. The app therefore keeps its own copy of the phrase, sealed under the
+  ROOT profile's DEK, which adds no new exposure class (the phrase and the seed are one secret in two
+  encodings, under one unlock). The cleaner answer — a `recovery_seed()` accessor on `UnlockedAccount` —
+  is a release-first `dig-account` change, and would additionally let a LEGACY (phrase-less) account be
+  rendered as words without destroying it.
+- **The unlock password is machine-generated and lives in the OS credential store.** So the sealed blob is
+  openable on exactly one machine, and the phrase is not a convenience — it is the ONLY thing that
+  survives losing the machine. This is why a phrase-less account is genuinely unrecoverable and must be
+  labelled that way rather than treated as merely "older".
+- **A tray menu has no text field.** The OS gives a tray only menu items and message boxes, so 24 words of
+  typed input cannot be taken there. Restore therefore lives in `dign account restore` (echo suppressed)
+  and the tray hands over the exact command instead of offering a dead end.
+- **A unit test on the CONTENT passed while the RENDERER was untouched.** The notice window's two-button
+  sentence was fixed in `ConfirmContent`, its test went green — and the live Windows window still said
+  *"Choose OK to I have written these down, or Cancel to reject."*, because the `windows.rs` patch had
+  silently failed to apply and nothing tested the composition. Reading the real window out of the running
+  process is what caught it: `Get-Process <name> | Select MainWindowTitle` gives the title, and
+  `System.Windows.Automation` (UIAutomationClient) walks the descendants and dumps the full body text of a
+  live modal. That is a genuine machine check for a native window, and on a session with no visible
+  desktop it works where a screen capture returns black.
+- **A `MessageBoxW` cannot relabel its buttons**, so it must spell the choice out in the body — and one
+  template cannot serve both an authorization ("Choose OK to Sign") and an acknowledgement, whose button
+  label is a first-person claim. macOS/Linux put the label on the button and need no such sentence.
+
 ## #1548 — live money path: authorize-before-sign + #908 on-wire enforcement (slice C)
 
 - **authorize()==Ok is necessary but NOT sufficient — the confirm ceremony is a SECOND, independent

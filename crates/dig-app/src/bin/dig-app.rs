@@ -16,31 +16,69 @@
 //! JSON-RPC surface, so the tray shows the node's real version, cache and hosted-store counts — and,
 //! when no node is running, says so with the reason rather than spinning.
 
-use dig_app_core::account::boot::{boot_residency, reboot_reunlock};
+#[cfg(feature = "tray")]
+use dig_app_core::account::boot::{
+    account_exists, boot_existing_account, open_account, reboot_reunlock, BootedAccount,
+};
+#[cfg(feature = "tray")]
+use dig_app_core::account::journey::WindowedPresenter;
+#[cfg(feature = "tray")]
+use dig_app_core::account::lifecycle::Seeding;
+#[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
+#[cfg(feature = "tray")]
 use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
-use dig_app_core::confirm::native_confirmer;
+#[cfg(feature = "tray")]
+use dig_app_core::confirm::{native_confirmer, NativeConfirmer, NoticePrompt};
 use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
+#[cfg(feature = "tray")]
 use dig_app_core::loopback::SignReauthGate;
+#[cfg(feature = "tray")]
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
     SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
 };
+#[cfg(feature = "tray")]
 use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
+#[cfg(feature = "tray")]
 use dig_app_core::storage::did_hash;
-use dig_app_core::{sign_service, storage, Os};
+#[cfg(feature = "tray")]
+use dig_app_core::tray_menu::{self, AccountState, SessionFacts};
+use dig_app_core::Os;
+#[cfg(feature = "tray")]
+use dig_app_core::{sign_service, storage};
+#[cfg(feature = "tray")]
 use std::sync::Arc;
 
 /// The live session-lock wiring the tray drives once the APP-SIGN channel is up: the shared
 /// [`SessionLock`] (lock-now / idle poll / OS screen-lock all act on it, and the sign path
 /// re-authenticates through it) plus the OS screen-lock subscription guard, kept alive for as long as
 /// the tray runs.
+#[cfg(feature = "tray")]
 struct TraySession {
     lock: TraySessionLock,
     _screen_guard: Box<dyn ScreenLockGuard>,
+    /// The live account behind this session, so the tray can address its phrase vault. Held here
+    /// because [`SessionLock`] deliberately exposes only lock/unlock, not the keys it guards.
+    residency: AccountResidency,
+    /// What the tray must tell the user about this account: its root profile id, and whether it has a
+    /// recovery phrase at all. Carried here (not re-read each repaint) because both are fixed for the
+    /// life of an unlocked account and reading them per-tick would touch the disk 120 times a minute.
+    account: AccountFacts,
+}
+
+/// The user-visible facts about the account behind a live session.
+#[derive(Clone)]
+#[cfg(feature = "tray")]
+struct AccountFacts {
+    /// The root profile's stable id (the seed-derived identity key in hex, until the DID mint lands).
+    profile_id: String,
+    /// Whether a recovery phrase is stored — `false` = enrolled before phrases existed, so the account
+    /// cannot be recovered from words and the tray says so.
+    recoverable: bool,
 }
 
 fn main() {
@@ -72,8 +110,15 @@ fn main() {
             // A desktop session is present, so the terminal native-confirm gate is available — bring
             // the APP-SIGN extension↔dig-app signing channel live (best-effort; see the fn's docs).
             // A live channel hands back the session-lock the tray drives (lock-now / idle / OS lock).
+            //
+            // A `--no-default-features` (headless) build has no tray, no confirm windows and therefore
+            // no way for a human to authorize a signature, so it starts no signing channel at all
+            // rather than one that could only ever fail closed.
+            #[cfg(feature = "tray")]
             let tray_session = start_sign_service(&env);
-            run_tray_or_headless(agent, tray_session)
+            #[cfg(not(feature = "tray"))]
+            let tray_session = None::<()>;
+            run_tray_or_headless(agent, tray_session, env)
         }
         FormFactor::Headless => {
             tracing::info!("no desktop display — running as headless agent (no tray)");
@@ -85,23 +130,63 @@ fn main() {
 
 /// Mount the tray shell, degrading to the headless agent if the tray cannot be built (no display,
 /// no desktop stack) or if the `tray` feature is disabled at build time.
-fn run_tray_or_headless(agent: Agent<NodeConnector>, session: Option<TraySession>) {
+fn run_tray_or_headless(
+    agent: Agent<NodeConnector>,
+    #[cfg(feature = "tray")] session: Option<TraySession>,
+    #[cfg(not(feature = "tray"))] session: Option<()>,
+    env: AppEnvironment,
+) {
     #[cfg(feature = "tray")]
-    match tray::run(agent, session) {
+    match tray::run(agent, session, env) {
         // The event loop owns the process once mounted, so this arm is unreachable in practice.
         Ok(()) => {}
         // `run` returns only on the degrade path, handing the agent back so we can serve headless.
         Err((reason, agent)) => {
-            eprintln!("dig-app: tray unavailable ({reason}) — running as headless agent");
+            report_tray_unavailable(&reason, env_os_of(&agent));
             agent.run();
         }
     }
     #[cfg(not(feature = "tray"))]
     {
         let _ = session;
-        eprintln!("dig-app: built without the tray feature — running as headless agent");
+        // A headless BUILD is a deliberate choice, not a failure, so it is stated plainly and without
+        // the "install a tray library" advice that would only mislead here.
+        tracing::info!("built without the tray feature — running as headless agent");
+        eprintln!(
+            "dig-app: this is the headless build — there is no menu. Use `dign` for your account \
+             (`dign account status`, `dign account restore`)."
+        );
+        let _ = env;
         agent.run();
     }
+}
+
+/// Report a tray that could not be mounted, on BOTH channels a person might look at.
+///
+/// An unmountable tray is the app's most dangerous failure mode because it is INVISIBLE: the process
+/// runs, reports healthy, and every account surface is unreachable (see
+/// [`tray_unavailable_advice`](dig_app_core::tray_menu::tray_unavailable_advice) for why Linux hits this
+/// silently). So it is logged at WARN — a level a bug-report bundle keeps — and printed to stderr, with
+/// the cause and the `dign` way in.
+#[cfg(feature = "tray")]
+fn report_tray_unavailable(reason: &str, os: Os) {
+    let advice = dig_app_core::tray_menu::tray_unavailable_advice(reason, os);
+    tracing::warn!(
+        reason,
+        ?os,
+        "tray could not be mounted — the DIG menu is not reachable"
+    );
+    eprintln!("dig-app: {advice}");
+}
+
+/// The OS the shell resolved, recovered for the degrade path.
+///
+/// `tray::run` hands the agent back but not the environment (it moved it), and the advice text needs the
+/// platform. Re-deriving it from the compile target is exact — this is the same mapping
+/// [`current_os`] uses, and a binary cannot change platform at runtime.
+#[cfg(feature = "tray")]
+fn env_os_of<T>(_agent: &T) -> Os {
+    current_os()
 }
 
 /// Bring the APP-SIGN loopback signing channel live on boot (dig_ecosystem#958, `SPEC.md` §5.6).
@@ -122,6 +207,7 @@ fn run_tray_or_headless(agent: Agent<NodeConnector>, session: Option<TraySession
 /// two loopback listeners on a background thread (the OS event loop keeps the main thread), and hands
 /// the tray the [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on
 /// any deferral.
+#[cfg(feature = "tray")]
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     // Zero-prompt unlock is only available where the OS credential store is the custody primary.
     if !matches!(env.os, Os::Windows | Os::MacOs) {
@@ -136,17 +222,21 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
         }
     };
 
-    // Enrol-or-unlock the master-HD account (#1547): the seed is sealed in a per-user file backend
-    // under the OS-credential-store password, and housed in a lockable residency. The residency owns
-    // the sole unlocked account; the live-view signer + sealer below read through it, so a tray lock
-    // relocks them at once.
-    let residency = boot_residency(&brand_dir)?;
-
-    // The signing profile is the account's default (root) profile. There is no on-chain DID mint yet
-    // (dig-account's ProfileMinter is a Phase-2 stub), so the profile is identified by its
-    // seed-derived identity public key — a stable per-profile handle for the connect advertisement +
-    // the per-profile sealed-store directory until the DID mint lands.
-    let profile_id = residency.signing_public_key_hex(ProfileIx::ROOT)?;
+    // Unlock the master-HD account (#1547): the seed is sealed in a per-user file backend under the
+    // OS-credential-store password, and housed in a lockable residency. The residency owns the sole
+    // unlocked account; the live-view signer + sealer below read through it, so a tray lock relocks
+    // them at once.
+    //
+    // This path NEVER enrols (dig_ecosystem#1752). A host with no account yet gets no session, and the
+    // tray offers "Set up my DIG Account…" — because creating an account means showing a recovery
+    // phrase, and a recovery-phrase window that appears unbidden at login is a window people click
+    // away. Setup is something the user asks for.
+    let booted = boot_existing_account(&brand_dir)?;
+    let BootedAccount {
+        residency,
+        profile_id,
+        recoverable,
+    } = booted;
 
     // The session-lock the tray drives and the sign path re-authenticates through — the SAME shared
     // controller over the SAME account residency, so a lock the tray triggers is the lock the signer
@@ -191,14 +281,114 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
 
     Some(TraySession {
         lock,
+        residency,
         _screen_guard: screen_guard,
+        account: AccountFacts {
+            profile_id,
+            recoverable,
+        },
     })
+}
+
+/// Where this host keeps its DIG data, or `None` if it cannot be resolved. A thin wrapper so the tray's
+/// account actions and [`start_sign_service`] name the same directory.
+#[cfg(feature = "tray")]
+fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
+    env.brand_dir()
+        .map_err(|e| tracing::warn!(error = %e, "could not resolve the DIG data directory"))
+        .ok()
+}
+
+/// The account state the tray shows: read the impure host facts, then let the tested rules decide.
+///
+/// The lock state is read FRESH from the residency on every repaint via [`SessionFacts::of`], never
+/// inferred from the session existing — a session deliberately outlives its key material (lock-now and
+/// the idle auto-lock drop the keys and keep the session so the sign path can re-unlock into it). This
+/// function therefore holds no logic of its own; [`tray_menu::account_state`] owns every rule, where it
+/// is covered by tests rather than sitting untested in a binary.
+#[cfg(feature = "tray")]
+fn account_state(env: &AppEnvironment, session: Option<&TraySession>) -> AccountState {
+    let supported = matches!(env.os, Os::Windows | Os::MacOs);
+    // Only worth a filesystem check when there is no session to ask: with one, the account provably
+    // exists, and this runs on every repaint tick.
+    let enrolled = match session {
+        Some(_) => true,
+        None => brand_dir(env).is_some_and(|dir| account_exists(&dir)),
+    };
+    let facts = session.map(|s| SessionFacts::of(&s.residency, s.account.recoverable));
+    tray_menu::account_state(supported, enrolled, facts)
+}
+
+/// Create a brand-new account: generate a recovery phrase, show it once, confirm retention, enrol.
+///
+/// Returns the live session on success. On any refusal or failure it returns `None` and tells the user
+/// what happened — never silently, because the user pressed a button and is waiting for an answer.
+#[cfg(feature = "tray")]
+fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
+    let dir = brand_dir(env)?;
+    let presenter = WindowedPresenter::new(confirmer);
+    if open_account(&dir, Seeding::NewPhrase(&presenter)).is_none() {
+        notify(
+            confirmer,
+            "DIG — Setup not completed",
+            "Your DIG Account was not created.",
+            "Nothing was changed on this computer. You can start again from the DIG tray menu \
+             whenever you are ready.",
+        );
+        return None;
+    }
+    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+    // assembled exactly as they are on every other start — one code path, no special-cased first run.
+    let session = start_sign_service(env);
+    if session.is_some() {
+        notify(
+            confirmer,
+            "DIG — Account ready",
+            "Your DIG Account is set up.",
+            "You can view your recovery phrase again at any time from the DIG tray menu.",
+        );
+    }
+    session
+}
+
+/// Tell the user how to restore an account from their recovery phrase.
+///
+/// **Interim (`SPEC.md` §3.1d).** The specified end state is a NATIVE INPUT DIALOG raised from the tray:
+/// a tray menu has no text field of its own, but that is a property of the tray API and not a reason to
+/// hand the user off to a terminal. Until that dialog is built, restore is served by `dign account
+/// restore` (masked entry) and this window hands over the exact command rather than leaving the user to
+/// search for it (§6.1: point at the way forward, never a dead end).
+#[cfg(feature = "tray")]
+fn explain_restore(confirmer: &dyn NativeConfirmer) {
+    notify(
+        confirmer,
+        "DIG — Restore from a recovery phrase",
+        "Restoring an account is done from the command line.",
+        "Open a terminal and run:\n\n    dign account restore\n\nIt will ask for your 24 words, \
+         privately, and will not echo them. When it finishes, restart DIG and your account will be \
+         here.\n\nThis machine currently has no DIG Account, so nothing will be overwritten.\n\n\
+         Use the words DIG gave you. A recovery phrase from a Chia wallet such as Sage is NOT a DIG \
+         recovery phrase — DIG would accept it and build a DIFFERENT, empty account from it.",
+    );
+}
+
+/// Draw a plain informational window. A helper so every one of the tray's messages goes through the same
+/// OS-owned surface rather than a mix of dialogs, notifications and silence.
+#[cfg(feature = "tray")]
+fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &str) {
+    confirmer.show_notice(&NoticePrompt {
+        title,
+        heading,
+        body,
+        acknowledge: "OK",
+    });
 }
 
 /// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the account (a
 /// zero-prompt re-unlock from the OS credential store) and re-installs it into the shared `residency`
 /// before the signature proceeds — restoring the live-view signer so the pending sign can complete
 /// (dig_ecosystem#967 / #1547). A failed re-unlock leaves the residency locked, so the sign is refused.
+#[cfg(feature = "tray")]
 fn build_reauth_gate(
     lock: TraySessionLock,
     brand_dir: std::path::PathBuf,
@@ -209,21 +399,13 @@ fn build_reauth_gate(
     }))
 }
 
-/// Resolve the real per-user host facts the agent boots from. This is the impure process edge; the
-/// pure derivations happen in [`AppEnvironment`].
+/// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
+/// address the identical per-user directory ([`AppEnvironment::from_host`]).
 fn resolve_environment() -> AppEnvironment {
-    let os = current_os();
-    AppEnvironment {
-        os,
-        app_data_root: app_data_root(os),
-        user: current_user(),
-        runtime_dir: std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
-        has_display: has_display(os),
-    }
+    AppEnvironment::from_host()
 }
 
-/// The OS this build is running on, mapped onto the core's [`Os`]. Unknown targets are treated as
-/// Linux (the Unix-socket + XDG conventions).
+/// The OS this build targets, for the tray-unavailable advice text.
 fn current_os() -> Os {
     if cfg!(target_os = "windows") {
         Os::Windows
@@ -234,58 +416,103 @@ fn current_os() -> Os {
     }
 }
 
-/// The per-OS AppData root env var: `%LOCALAPPDATA%` (Windows), `$HOME` (macOS), `$XDG_DATA_HOME`
-/// (Linux, falling back to `$HOME/.local/share` per the XDG default).
-fn app_data_root(os: Os) -> String {
-    match os {
-        Os::Windows => std::env::var("LOCALAPPDATA").unwrap_or_default(),
-        Os::MacOs => std::env::var("HOME").unwrap_or_default(),
-        Os::Linux => std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| format!("{h}/.local/share"))
-                .unwrap_or_default()
-        }),
-    }
-}
-
-/// The current login user, used to namespace the per-user IPC endpoint.
-fn current_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "user".to_string())
-}
-
-/// Whether a usable desktop display is present. On Linux this is a real check (`$DISPLAY` /
-/// `$WAYLAND_DISPLAY`); on Windows/macOS an interactive desktop is assumed, and a tray that still
-/// cannot mount degrades at runtime via [`run_tray_or_headless`].
-fn has_display(os: Os) -> bool {
-    match os {
-        Os::Linux => {
-            !std::env::var("DISPLAY").unwrap_or_default().is_empty()
-                || !std::env::var("WAYLAND_DISPLAY")
-                    .unwrap_or_default()
-                    .is_empty()
-        }
-        Os::Windows | Os::MacOs => true,
-    }
-}
-
 /// The desktop tray / menu-bar shell. Compiled only with the default `tray` feature; a headless
 /// build omits it entirely.
+///
+/// The shell is deliberately dumb about WHAT the menu should contain: it asks
+/// [`dig_app_core::tray_menu::build`] for a [`MenuModel`] and renders it, so every rule about which items
+/// appear and when lives in one unit-tested place (dig_ecosystem#1752). What lives here is only the two
+/// things that cannot be tested without a desktop: turning rows into native menu items, and running each
+/// [`TrayAction`]'s handler.
 #[cfg(feature = "tray")]
 mod tray {
-    use super::TraySession;
+    use super::{
+        account_state, explain_restore, notify, set_up_account, start_sign_service, AppEnvironment,
+        TraySession,
+    };
+    use dig_app_core::account::boot::vault_for;
+    use dig_app_core::account::journey::{explain_missing_phrase, reveal_phrase};
     use dig_app_core::agent::{Agent, SharedStatus};
+    use dig_app_core::confirm::{native_confirmer, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;
+    use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, TrayIconBuilder};
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+    use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     /// How long to let the agent thread flush + stop after "Quit" before the loop exits the process.
     const GRACEFUL_STOP: Duration = Duration::from_secs(1);
-    /// How often the tray repaints its status labels from the shared agent status.
+    /// How often the tray re-reads the agent status and, if anything changed, repaints its menu.
     const REFRESH: Duration = Duration::from_millis(500);
+
+    /// A rendered menu plus the map from each native item id back to the action it stands for.
+    ///
+    /// The map is what lets the shell stay ignorant of the menu's shape: a click arrives as an opaque
+    /// [`MenuId`], and this translates it into the [`TrayAction`] the model named.
+    struct RenderedMenu {
+        menu: Menu,
+        actions: HashMap<MenuId, TrayAction>,
+    }
+
+    /// Turn a [`MenuModel`] into a native menu.
+    ///
+    /// Returns an error string (not a panic) if the platform refuses an item, so a menu that cannot be
+    /// built degrades the shell to headless rather than killing the process.
+    fn render(model: &MenuModel) -> Result<RenderedMenu, String> {
+        let menu = Menu::new();
+        let mut actions = HashMap::new();
+        for row in &model.rows {
+            match row {
+                MenuRow::Status(text) => {
+                    // Status rows are disabled items: they read as text, and cannot be clicked.
+                    menu.append(&MenuItem::new(text, false, None))
+                        .map_err(|e| format!("menu status row failed: {e}"))?;
+                }
+                MenuRow::Separator => menu
+                    .append(&PredefinedMenuItem::separator())
+                    .map_err(|e| format!("menu separator failed: {e}"))?,
+                MenuRow::Action {
+                    action,
+                    label,
+                    enabled,
+                } => {
+                    let item = MenuItem::new(label, *enabled, None);
+                    actions.insert(item.id().clone(), *action);
+                    menu.append(&item)
+                        .map_err(|e| format!("menu action row failed: {e}"))?;
+                }
+            }
+        }
+        Ok(RenderedMenu { menu, actions })
+    }
+
+    /// Read the current state of the world into the one snapshot the menu is built from.
+    fn snapshot(
+        status: &SharedStatus,
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+    ) -> TrayView {
+        let account = account_state(env, session);
+        let (running, node, did) = match status.read() {
+            Ok(status) => (
+                status.running,
+                status.engine.summary(),
+                status.active_profile.as_ref().map(|p| p.did.clone()),
+            ),
+            // A poisoned status lock is not a reason to show a blank menu: say what we can, and let the
+            // rest read as "starting".
+            Err(_) => (false, "Node: status unavailable".to_string(), None),
+        };
+        TrayView {
+            running,
+            node,
+            account: Some(account),
+            profile_id: session.map(|s| s.account.profile_id.clone()),
+            did,
+        }
+    }
 
     /// Mount the tray over `agent` and run the platform event loop. The tray is built FIRST (that is
     /// what fails on a display-less host); only once it mounts do we spawn the agent's blocking run
@@ -297,53 +524,42 @@ mod tray {
     pub fn run(
         agent: Agent<NodeConnector>,
         session: Option<TraySession>,
+        env: AppEnvironment,
     ) -> Result<(), (String, Agent<NodeConnector>)> {
         let event_loop = EventLoopBuilder::new().build();
+        let status = agent.status_handle();
 
-        let menu = Menu::new();
-        let running_item = MenuItem::new("DIG — starting…", false, None);
-        let engine_item = MenuItem::new("Engine: connecting…", false, None);
-        let profile_item = MenuItem::new("Profile: (none)", false, None);
-        // "Lock now" one-tap re-seals the session (§WSEC-D); it is enabled only when a live unlocked
-        // session exists to lock — otherwise there is nothing to drop, so it stays disabled.
-        let lock_item = MenuItem::new("Lock now", session.is_some(), None);
-        let quit_item = MenuItem::new("Quit DIG", true, None);
-        if let Err(e) = menu.append_items(&[
-            &running_item,
-            &engine_item,
-            &profile_item,
-            &PredefinedMenuItem::separator(),
-            &lock_item,
-            &quit_item,
-        ]) {
-            return Err((format!("menu build failed: {e}"), agent));
-        }
+        let mut model = snapshot(&status, &env, session.as_ref());
+        let mut menu = match render(&tray_menu::build(&model)) {
+            Ok(rendered) => rendered,
+            Err(e) => return Err((e, agent)),
+        };
 
         let tray_icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(menu.menu.clone()))
             .with_tooltip("DIG — user identity agent")
             .with_icon(brand_icon())
             .build();
-        let _tray = match tray_icon {
+        let tray: TrayIcon = match tray_icon {
             Ok(tray) => tray,
             Err(e) => return Err((format!("tray build failed: {e}"), agent)),
         };
 
         // The shell mounted — run the agent core on its own thread. We hand it owned handles for the
         // status surface + shutdown BEFORE moving the agent into the thread.
-        let status = agent.status_handle();
         let shutdown = agent.shutdown_handle();
         std::thread::spawn(move || agent.run());
 
-        let quit_id = quit_item.id().clone();
-        let lock_id = lock_item.id().clone();
         let menu_events = MenuEvent::receiver();
+        // ONE confirmer for the whole shell: every account window (setup, reveal, the explainers) is
+        // drawn by the same OS-owned, biometric-backed surface the signing path uses.
+        let confirmer: Box<dyn NativeConfirmer> = native_confirmer();
+        let mut session = session;
 
-        // The event loop diverges; `_tray` + `session` stay alive on this frame for the whole process
+        // The event loop diverges; `tray` + `session` stay alive on this frame for the whole process
         // (dropping `session` would drop the OS screen-lock subscription guard it holds).
         event_loop.run(move |_event, _target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
-            repaint(&status, &running_item, &engine_item, &profile_item);
 
             // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
             if let Some(session) = &session {
@@ -355,39 +571,231 @@ mod tray {
                 if let Some(session) = &session {
                     session.lock.note_activity();
                 }
-                if event.id == lock_id {
-                    if let Some(session) = &session {
-                        session.lock.lock_now();
-                    }
-                } else if event.id == quit_id {
-                    shutdown.trigger();
-                    wait_for_stop(&status);
+                let Some(action) = menu.actions.get(&event.id).copied() else {
+                    continue;
+                };
+                if dispatch(
+                    action,
+                    &mut session,
+                    &env,
+                    confirmer.as_ref(),
+                    &shutdown,
+                    &status,
+                ) {
                     *control_flow = ControlFlow::Exit;
+                    return;
+                }
+            }
+
+            // Repaint only when something actually changed: rebuilding a native menu every 500ms would
+            // close the menu under the user's cursor while they are reading it.
+            let latest = snapshot(&status, &env, session.as_ref());
+            if !view_eq(&latest, &model) {
+                if let Ok(rendered) = render(&tray_menu::build(&latest)) {
+                    tray.set_menu(Some(Box::new(rendered.menu.clone())));
+                    menu = rendered;
+                    model = latest;
                 }
             }
         });
     }
 
-    /// Repaint the tray menu labels from the latest agent status.
-    fn repaint(
+    /// Whether two snapshots would render the same menu. [`TrayView`] is not `PartialEq` (it is a
+    /// display model whose equality is only ever this question), so the comparison is spelled out.
+    fn view_eq(a: &TrayView, b: &TrayView) -> bool {
+        a.running == b.running
+            && a.node == b.node
+            && a.account == b.account
+            && a.profile_id == b.profile_id
+            && a.did == b.did
+    }
+
+    /// Run one menu action. Returns `true` when the process should exit.
+    ///
+    /// Every arm ends in something the user can see — a window, a new menu state, or the app closing.
+    /// A handler that silently did nothing would leave a person clicking a menu item that appears
+    /// broken, which is the failure mode §6.1 exists to prevent.
+    fn dispatch(
+        action: TrayAction,
+        session: &mut Option<TraySession>,
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
+        shutdown: &dig_app_core::shutdown::Shutdown,
         status: &SharedStatus,
-        running_item: &MenuItem,
-        engine_item: &MenuItem,
-        profile_item: &MenuItem,
+    ) -> bool {
+        match action {
+            TrayAction::SetUpAccount => {
+                if session.is_none() {
+                    *session = set_up_account(env, confirmer);
+                }
+            }
+            TrayAction::RestoreFromPhrase => explain_restore(confirmer),
+            TrayAction::Unlock => {
+                // The account exists but did not unlock at boot. Re-running the boot path is the whole
+                // unlock: on Windows/macOS it is zero-prompt from the OS credential store.
+                *session = start_sign_service(env);
+                if session.is_none() {
+                    notify(
+                        confirmer,
+                        "DIG — Could not unlock",
+                        "Your DIG Account could not be unlocked.",
+                        "The stored password for this account could not be read from the system \
+                         credential store. The log folder (in this menu) has the details.",
+                    );
+                }
+            }
+            TrayAction::LockNow => {
+                if let Some(session) = session {
+                    session.lock.lock_now();
+                }
+            }
+            TrayAction::ShowRecoveryPhrase => show_phrase(session.as_ref(), env, confirmer),
+            TrayAction::FixMissingPhrase => {
+                explain_missing_phrase(confirmer);
+            }
+            TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
+            TrayAction::CreateDid => explain_did_mint(confirmer),
+            TrayAction::OpenLogs => open_log_folder(confirmer),
+            TrayAction::Quit => {
+                shutdown.trigger();
+                wait_for_stop(status);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Re-display the account's recovery phrase, behind the OS re-authentication gate.
+    fn show_phrase(
+        session: Option<&TraySession>,
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
     ) {
-        let Ok(status) = status.read() else { return };
-        running_item.set_text(if status.running {
-            "DIG — running"
+        use dig_app_core::account::journey::RevealOutcome;
+
+        // `vault_for` returns `None` on a locked account, so an idle auto-lock between opening the menu
+        // and clicking the item lands in the "locked" branch below rather than revealing anything.
+        let vault = super::brand_dir(env)
+            .zip(session)
+            .and_then(|(dir, session)| vault_for(&dir, &session.residency));
+        let Some(vault) = vault else {
+            notify(
+                confirmer,
+                "DIG — Recovery phrase",
+                "Your DIG Account is locked.",
+                "Unlock it from this menu first, then try again.",
+            );
+            return;
+        };
+        match reveal_phrase(confirmer, &vault) {
+            RevealOutcome::Shown | RevealOutcome::Refused => {}
+            RevealOutcome::NoPhraseStored => {
+                explain_missing_phrase(confirmer);
+            }
+            RevealOutcome::Unavailable => notify(
+                confirmer,
+                "DIG — Recovery phrase",
+                "Your recovery phrase could not be read.",
+                "Your account is fine and still works. The log folder (in this menu) has the details.",
+            ),
+        }
+    }
+
+    /// Put the profile's DIG ID on the clipboard, telling the user either way.
+    ///
+    /// The clipboard write goes through the platform's own utility rather than pulling a clipboard
+    /// crate into the shell for one string; if it is unavailable the id is shown instead, so the user
+    /// can still copy it by hand rather than being told "no".
+    fn copy_dig_id(session: Option<&TraySession>, confirmer: &dyn NativeConfirmer) {
+        let Some(session) = session else { return };
+        let id = &session.account.profile_id;
+        if write_clipboard(id) {
+            notify(
+                confirmer,
+                "DIG — DIG ID copied",
+                "Your DIG ID is on the clipboard.",
+                id,
+            );
         } else {
-            "DIG — stopped"
-        });
-        // The node line carries the node's OWN report (version + what it holds) when connected, and
-        // the actionable reason when not — a bare "not connected" leaves a person with nowhere to go.
-        engine_item.set_text(status.engine.summary());
-        profile_item.set_text(match &status.active_profile {
-            Some(p) => format!("Profile: {}", p.did),
-            None => "Profile: (none)".to_string(),
-        });
+            notify(
+                confirmer,
+                "DIG — Your DIG ID",
+                "Here is your DIG ID (select it to copy).",
+                id,
+            );
+        }
+    }
+
+    /// Write `text` to the OS clipboard via the platform utility. Returns whether it succeeded.
+    fn write_clipboard(text: &str) -> bool {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut command = if cfg!(target_os = "windows") {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "clip"]);
+            c
+        } else if cfg!(target_os = "macos") {
+            Command::new("pbcopy")
+        } else {
+            let mut c = Command::new("xclip");
+            c.args(["-selection", "clipboard"]);
+            c
+        };
+        let Ok(mut child) = command.stdin(Stdio::piped()).spawn() else {
+            return false;
+        };
+        let written = child
+            .stdin
+            .as_mut()
+            .map(|stdin| stdin.write_all(text.as_bytes()).is_ok())
+            .unwrap_or(false);
+        written && child.wait().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// What the user is told when they ask for an on-chain DID.
+    ///
+    /// Minting a `did:chia:` is a real mainnet spend, and `dig-account`'s minter is still a Phase-2
+    /// stub, so this NEVER spends and never pretends to. It says what a DID is for, that it costs money,
+    /// and that the account works fully without one — which is true, and is the honest alternative to a
+    /// button that fails obscurely (§3.7).
+    fn explain_did_mint(confirmer: &dyn NativeConfirmer) {
+        notify(
+            confirmer,
+            "DIG — On-chain DID",
+            "An on-chain DID is optional, and it costs XCH.",
+            "A DID publishes your identity on the Chia blockchain so others can find and verify it. \
+             Creating one is a real transaction that spends real XCH from your DIG Account, so DIG \
+             will never create one without you asking.\n\n\
+             Your account, your recovery phrase and your address all work fully without a DID. \
+             On-chain minting is not available in this version yet — when it is, this is where you \
+             will start it, and you will see the exact cost before anything is spent.",
+        );
+    }
+
+    /// Open the log folder in the platform file manager — the escape hatch when the menu cannot explain
+    /// what went wrong.
+    fn open_log_folder(confirmer: &dyn NativeConfirmer) {
+        let dir = dig_app::logging::log_dir();
+        let opener = if cfg!(target_os = "windows") {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        if std::process::Command::new(opener)
+            .arg(&dir)
+            .spawn()
+            .is_err()
+        {
+            notify(
+                confirmer,
+                "DIG — Logs",
+                "DIG could not open the folder for you.",
+                &format!("The logs are here:\n\n{}", dir.display()),
+            );
+        }
     }
 
     /// Give the agent thread a brief window to flush its config and mark itself stopped before the
