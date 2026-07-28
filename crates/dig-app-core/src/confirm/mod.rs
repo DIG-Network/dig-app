@@ -216,6 +216,14 @@ pub(crate) struct ConfirmContent {
     /// The label of the approve action (`"Pair"`, `"Connect"`, `"Sign"`), reused as the reason string
     /// the biometric prompt shows.
     pub action: &'static str,
+    /// The sentence explaining the two buttons, for a backend whose buttons cannot be RELABELLED.
+    ///
+    /// macOS and the Linux helper put [`action`](Self::action) directly on the button, so they ignore
+    /// this. Windows `MessageBoxW` is stuck with OK/Cancel, so it must spell the choice out in the body —
+    /// and the right sentence differs between an authorization ("Choose OK to Sign") and an
+    /// acknowledgement, where the same template produced the unreadable *"Choose OK to I have written
+    /// these down"* found in a live window during #1752 review.
+    pub choice_hint: String,
 }
 
 impl ConfirmContent {
@@ -233,6 +241,7 @@ impl ConfirmContent {
                    your DIG identity. You approve every signature individually."
                     .to_string(),
             action: "Pair",
+            choice_hint: Self::authorize_hint("Pair"),
         }
     }
 
@@ -250,6 +259,7 @@ impl ConfirmContent {
                    alone before continuing."
                 .to_string(),
             action: "Reveal",
+            choice_hint: Self::authorize_hint("Reveal"),
         }
     }
 
@@ -261,7 +271,16 @@ impl ConfirmContent {
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
             action: prompt.acknowledge,
+            // An acknowledgement, not an authorization: the button label is a CLAIM the user is making
+            // ("I have written these down"), so it is quoted as a choice rather than slotted into a
+            // "Choose OK to <verb>" sentence that cannot read correctly.
+            choice_hint: format!("Choose OK — {} — or Cancel to go back.", prompt.acknowledge),
         }
+    }
+
+    /// The two-button sentence for an AUTHORIZATION prompt, whose `action` is an imperative verb.
+    fn authorize_hint(action: &str) -> String {
+        format!("Choose OK to {action}, or Cancel to reject.")
     }
 
     /// The content for a first-connect confirm (§5.6.4): approve a dapp origin talking to this identity.
@@ -279,6 +298,7 @@ impl ConfirmContent {
                 prompt.origin
             ),
             action: "Connect",
+            choice_hint: Self::authorize_hint("Connect"),
         }
     }
 
@@ -299,6 +319,7 @@ impl ConfirmContent {
                 prompt.payload_type
             ),
             action: "Sign",
+            choice_hint: Self::authorize_hint("Sign"),
         })
     }
 }
@@ -660,5 +681,45 @@ mod tests {
         // returns the per-OS backend. Either way the returned trait object must be usable.
         let confirmer = native_confirmer();
         let _ = confirmer.confirm_sign(&sign_prompt(None));
+    }
+
+    /// **Regression (#1752).** The notice window must not slot its acknowledge label into an
+    /// authorization sentence. This was found by reading the LIVE Windows window out of a running
+    /// process, which showed *"Choose OK to I have written these down, or Cancel to reject."*
+    ///
+    /// The fixture is the real acknowledge label from the display-once phrase screen — a first-person
+    /// CLAIM rather than an imperative verb — because a verb-shaped label ("Done", "OK") reads fine in
+    /// EITHER sentence and so cannot distinguish the bug from the fix.
+    #[test]
+    fn a_notice_hint_reads_as_a_claim_not_an_imperative() {
+        let content = ConfirmContent::notice(&NoticePrompt {
+            title: "DIG — Your recovery phrase",
+            heading: "Write these 24 words down.",
+            body: " 1. abandon",
+            acknowledge: "I have written these down",
+        });
+
+        assert!(
+            !content.choice_hint.contains("Choose OK to I have"),
+            "the notice hint must not read as an imperative: {}",
+            content.choice_hint
+        );
+        assert_eq!(
+            content.choice_hint,
+            "Choose OK — I have written these down — or Cancel to go back."
+        );
+    }
+
+    /// The control: an AUTHORIZATION prompt still gets the imperative sentence, so fixing the notice did
+    /// not flatten both into one wording.
+    #[test]
+    fn an_authorization_hint_stays_imperative() {
+        assert_eq!(
+            ConfirmContent::reveal(&RevealPrompt {
+                secret: "your recovery phrase"
+            })
+            .choice_hint,
+            "Choose OK to Reveal, or Cancel to reject."
+        );
     }
 }
