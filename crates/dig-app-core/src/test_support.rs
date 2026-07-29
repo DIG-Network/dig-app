@@ -48,6 +48,151 @@ pub fn test_residency() -> AccountResidency {
     AccountResidency::new(unlocked)
 }
 
+/// One [`InputPrompt`](crate::confirm::InputPrompt) as a [`ScriptedInput`] recorded it — owned, because
+/// the real prompt borrows its strings from the caller's frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedPrompt {
+    /// The primary line the window asked.
+    pub heading: String,
+    /// The explanatory body.
+    pub body: String,
+    /// The submit button's label.
+    pub submit: String,
+    /// Whether the field started masked.
+    pub masked: bool,
+    /// The reveal control's label, or `None` when the window offered none.
+    ///
+    /// The LABEL and not a `bool`: a double that recorded only "there was a reveal control" could not
+    /// express a wrong label, and a wrong label is exactly the defect this recorded — the password window
+    /// inherited the recovery-phrase copy "Show the words while I type" and shipped it
+    /// (dig_ecosystem#1817). A double that can only vary one field cannot catch a multi-field lie.
+    pub reveal_label: Option<String>,
+}
+
+/// A [`NativeConfirmer`](crate::confirm::NativeConfirmer) whose input window returns a SCRIPT of
+/// answers in order, recording every prompt it was shown.
+///
+/// # Why a script and not a fixed answer
+///
+/// A double that can only ever return ONE string cannot express a multi-answer lie — it cannot say
+/// "the user typed X, then Y", which is precisely the case a type-it-twice ceremony exists to catch.
+/// Every test that turns on a mismatch, a re-ask, or a bound would silently degenerate into a test of
+/// the happy path. So the answers are a queue, and the prompts are recorded, so a test can assert BOTH
+/// what came out and how many questions it took.
+///
+/// Running past the end of the script yields [`InputOutcome::Cancelled`] — a script that runs out is a
+/// user who walked away, which is a legitimate outcome rather than a panic that would mask a real
+/// off-by-one in the ceremony's loop.
+pub struct ScriptedInput {
+    answers: std::sync::Mutex<std::collections::VecDeque<Answer>>,
+    prompts: std::sync::Mutex<Vec<RecordedPrompt>>,
+}
+
+/// What the scripted window does for one prompt.
+enum Answer {
+    /// The user typed this and submitted it.
+    Typed(String),
+    /// The user cancelled.
+    Cancelled,
+    /// No window could be drawn.
+    Unavailable,
+}
+
+impl ScriptedInput {
+    /// A window that answers each prompt with the next string in `answers`.
+    pub fn of<I: IntoIterator<Item = String>>(answers: I) -> Arc<Self> {
+        Self::scripted(answers.into_iter().map(Answer::Typed).collect())
+    }
+
+    /// A window the user always cancels.
+    pub fn cancelling() -> Arc<Self> {
+        Self::scripted(vec![Answer::Cancelled])
+    }
+
+    /// A host on which no input window can be drawn at all.
+    pub fn unavailable() -> Arc<Self> {
+        Self::scripted(vec![Answer::Unavailable])
+    }
+
+    /// A window that answers `a`, `b`, `a`, `b`, … forever — a user who never manages to type the
+    /// same thing twice, which is what proves a re-ask loop is BOUNDED rather than testing that it
+    /// eventually succeeds.
+    pub fn alternating(a: String, b: String) -> Arc<Self> {
+        // Long enough that the ceremony's own bound, not the script's length, is what stops the loop:
+        // a script that ran out first would prove the bound exists when it does not.
+        let answers = (0..64)
+            .map(|i| Answer::Typed(if i % 2 == 0 { a.clone() } else { b.clone() }))
+            .collect();
+        Self::scripted(answers)
+    }
+
+    fn scripted(answers: Vec<Answer>) -> Arc<Self> {
+        Arc::new(Self {
+            answers: std::sync::Mutex::new(answers.into()),
+            prompts: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// This window as the `Arc<dyn NativeConfirmer>` a ceremony holds.
+    ///
+    /// A plain `Arc::clone` infers `Arc<ScriptedInput>` and will not coerce at an argument position, so
+    /// this spells the coercion once rather than at every call site.
+    pub fn confirmer(self: &Arc<Self>) -> Arc<dyn crate::confirm::NativeConfirmer> {
+        Arc::clone(self) as Arc<dyn crate::confirm::NativeConfirmer>
+    }
+
+    /// Every prompt this window was shown, in order.
+    pub fn prompts(&self) -> Vec<RecordedPrompt> {
+        self.prompts.lock().expect("scripted prompts").clone()
+    }
+}
+
+impl crate::confirm::NativeConfirmer for ScriptedInput {
+    fn confirm_pair(
+        &self,
+        _prompt: &crate::confirm::PairPrompt<'_>,
+    ) -> crate::confirm::ConfirmDecision {
+        crate::confirm::ConfirmDecision::Unavailable
+    }
+
+    fn confirm_connect(
+        &self,
+        _prompt: &crate::confirm::ConnectPrompt<'_>,
+    ) -> crate::confirm::ConfirmDecision {
+        crate::confirm::ConfirmDecision::Unavailable
+    }
+
+    fn confirm_sign(
+        &self,
+        _prompt: &crate::confirm::SignPrompt<'_>,
+    ) -> crate::confirm::ConfirmDecision {
+        crate::confirm::ConfirmDecision::Unavailable
+    }
+
+    fn request_input(
+        &self,
+        prompt: &crate::confirm::InputPrompt<'_>,
+    ) -> crate::confirm::InputOutcome {
+        self.prompts
+            .lock()
+            .expect("scripted prompts")
+            .push(RecordedPrompt {
+                heading: prompt.heading.to_string(),
+                body: prompt.body.to_string(),
+                submit: prompt.submit.to_string(),
+                masked: prompt.masked,
+                reveal_label: prompt.reveal_label.map(str::to_string),
+            });
+        match self.answers.lock().expect("scripted answers").pop_front() {
+            Some(Answer::Typed(text)) => {
+                crate::confirm::InputOutcome::Provided(zeroize::Zeroizing::new(text))
+            }
+            Some(Answer::Unavailable) => crate::confirm::InputOutcome::Unavailable,
+            Some(Answer::Cancelled) | None => crate::confirm::InputOutcome::Cancelled,
+        }
+    }
+}
+
 /// A FAKE dig-node control plane, served over a real loopback TCP socket.
 ///
 /// The connector under test is a transport, so its tests must exercise a transport: this stands up

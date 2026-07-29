@@ -525,6 +525,12 @@ pub fn details_text(view: &TrayView) -> String {
         "DIG agent: starting…\n"
     });
     out.push_str(&format!("Account: {account}\n"));
+    // A locked account is the state a person is most likely to misread as "DIG is not working". It gates
+    // signing and custody and NOTHING else (§6.0 — consumption is never gated on a custody action), so the
+    // one surface with room to say so says it (dig_ecosystem#1817).
+    if matches!(account, AccountState::Locked) {
+        out.push_str(LOCKED_STILL_READS);
+    }
     out.push_str(&format!(
         "DIG ID: {}\n",
         view.profile_id.as_deref().unwrap_or("not set up yet")
@@ -540,6 +546,16 @@ pub fn details_text(view: &TrayView) -> String {
     ));
     out
 }
+
+/// What a locked account does and does not stop, in the details window.
+///
+/// `concat!` rather than a `\`-continued literal: `cargo fmt` collapses a continuation and keeps the
+/// source indentation as real spaces, which has already shipped visible multi-space holes in this app's
+/// account copy.
+const LOCKED_STILL_READS: &str = concat!(
+    "  Signing and your recovery phrase need it unlocked. Reading DIG content does not, and keeps\n",
+    "  working while it is locked.\n"
+);
 
 /// Build the menu for `view`.
 ///

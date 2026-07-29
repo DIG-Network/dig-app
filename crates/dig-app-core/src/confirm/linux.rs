@@ -441,7 +441,10 @@ mod tests {
             field_label: "Your 24 words:".to_string(),
             submit: "Restore",
             masked,
-            revealable: true,
+            // Zenity/kdialog offer no checkbox beside an entry, so the Linux backend never draws a reveal
+            // control (see the `ask` docs); the label is carried anyway because `InputContent` is the
+            // shared, platform-independent render.
+            reveal_label: Some("Show the words while I type"),
         }
     }
 

@@ -31,7 +31,7 @@
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, boot_existing_account, discard_account, open_account, reboot_reunlock,
+    account_exists, discard_account, open_account, reboot_reunlock, unlock_existing_account,
     vault_for, BootedAccount, DiscardOutcome,
 };
 #[cfg(feature = "tray")]
@@ -40,6 +40,10 @@ use dig_app_core::account::journey::{
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
+#[cfg(feature = "tray")]
+use dig_app_core::account::migrate::{migrate_default_account, MigrationOutcome};
+#[cfg(feature = "tray")]
+use dig_app_core::account::passphrase::PasswordCeremony;
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
@@ -159,17 +163,15 @@ fn main() {
 
     match env.form_factor() {
         FormFactor::Tray => {
-            // A desktop session is present, so the terminal native-confirm gate is available — bring
-            // the APP-SIGN extension↔dig-app signing channel live (best-effort; see the fn's docs).
-            // A live channel hands back the session-lock the tray drives (lock-now / idle / OS lock).
+            // **The tray starts LOCKED (dig_ecosystem#1817).** No account is opened here and no
+            // signing channel is started, because opening the account now would mean either prompting
+            // the user for a password at login — which is not what a tray application does — or
+            // reaching the seed without one, which is the defect this exists to remove. The user
+            // unlocks from the menu when they want to sign, exactly like a password manager.
             //
-            // A `--no-default-features` (headless) build has no tray, no confirm windows and therefore
-            // no way for a human to authorize a signature, so it starts no signing channel at all
-            // rather than one that could only ever fail closed.
-            #[cfg(feature = "tray")]
-            let tray_session = start_sign_service(&env);
-            #[cfg(not(feature = "tray"))]
-            let tray_session = None::<()>;
+            // The consequence worth stating: until then the APP-SIGN loopback port is not merely
+            // refusing, it is not LISTENING. A dapp cannot reach a seed the process does not hold.
+            let tray_session = None;
             run_tray_or_headless(agent, tray_session, env)
         }
         FormFactor::Headless => {
@@ -241,49 +243,22 @@ fn env_os_of<T>(_agent: &T) -> Os {
     current_os()
 }
 
-/// Bring the APP-SIGN loopback signing channel live on boot (dig_ecosystem#958, `SPEC.md` §5.6).
+/// Bring the APP-SIGN loopback signing channel live over an account the user has just UNLOCKED
+/// (dig_ecosystem#958, `SPEC.md` §5.6; password-gated since dig_ecosystem#1817).
 ///
-/// The signing channel needs TWO things a headless / locked host cannot provide, so this is
-/// deliberately best-effort and fail-closed — it starts the server only when both hold, and simply
-/// logs + returns otherwise (never blocks or crashes the shell):
+/// `booted` is the live account — this function never opens one, which is what makes "the tray starts
+/// locked" a property of the code rather than of a comment: there is no path from process start to a
+/// live signing channel that does not pass through a password prompt.
 ///
-/// 1. **An unlocked master-HD account** — the injected live-view signer + sealer read the master seed
-///    from the [`AccountResidency`]. Only Windows/macOS can unlock zero-prompt via the OS credential
-///    store; Linux needs a user passphrase (a UX not yet wired), so the channel defers there.
-/// 2. **A desktop session** — guaranteed here because this runs only on the [`FormFactor::Tray`] path,
-///    so the per-OS [`native_confirmer`] can raise a real biometric confirm.
-///
-/// When both hold it assembles the [`FrameRouter`](dig_app_core::loopback::FrameRouter) over the
-/// account's default profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path
-/// re-authenticates after a lock, restores any persisted pairings/whitelist/nonce ledger, serves the
-/// two loopback listeners on a background thread (the OS event loop keeps the main thread), and hands
-/// the tray the [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on
-/// any deferral.
+/// It assembles the [`FrameRouter`](dig_app_core::loopback::FrameRouter) over the account's default
+/// profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path re-authenticates after a
+/// lock, restores any persisted pairings/whitelist/nonce ledger, serves the two loopback listeners on a
+/// background thread (the OS event loop keeps the main thread), and hands the tray the [`TraySession`] it
+/// drives (lock-now / idle poll / OS screen-lock). Returns `None` only when the AppData directory cannot
+/// be resolved.
 #[cfg(feature = "tray")]
-fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
-    // Zero-prompt unlock is only available where the OS credential store is the custody primary.
-    if !matches!(env.os, Os::Windows | Os::MacOs) {
-        tracing::info!("APP-SIGN loopback deferred: no zero-prompt account unlock on this OS yet");
-        return None;
-    }
-    let brand_dir = match env.brand_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            tracing::warn!(error = %e, "APP-SIGN loopback not started: could not resolve the AppData directory");
-            return None;
-        }
-    };
-
-    // Unlock the master-HD account (#1547): the seed is sealed in a per-user file backend under the
-    // OS-credential-store password, and housed in a lockable residency. The residency owns the sole
-    // unlocked account; the live-view signer + sealer below read through it, so a tray lock relocks
-    // them at once.
-    //
-    // This path NEVER enrols (dig_ecosystem#1752). A host with no account yet gets no session, and the
-    // tray offers "Set up my DIG Account…" — because creating an account means showing a recovery
-    // phrase, and a recovery-phrase window that appears unbidden at login is a window people click
-    // away. Setup is something the user asks for.
-    let booted = boot_existing_account(&brand_dir)?;
+fn start_sign_service(env: &AppEnvironment, booted: BootedAccount) -> Option<TraySession> {
+    let brand_dir = brand_dir(env)?;
     let BootedAccount {
         residency,
         profile_id,
@@ -300,8 +275,13 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     ));
 
     let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&profile_id));
-    let confirmer: Arc<dyn dig_app_core::confirm::NativeConfirmer> = Arc::from(native_confirmer());
-    let reauth_gate = build_reauth_gate(Arc::clone(&lock), brand_dir.clone(), residency.clone());
+    let confirmer = shared_confirmer();
+    let reauth_gate = build_reauth_gate(
+        Arc::clone(&lock),
+        brand_dir.clone(),
+        Arc::clone(&confirmer),
+        residency.clone(),
+    );
     // Inject the LIVE unlocked-account identity signer through the sign seam (#1547 flip): the
     // identity-sign path now runs through the real master-HD account (a `dig_account::ProfileSigner`
     // behind the residency's live view), replacing the retired ProfileSessionSigner. The sealer is
@@ -391,28 +371,37 @@ fn account_state(
 /// Returns the live session on success. On any refusal or failure it returns `None` and tells the user
 /// what happened — never silently, because the user pressed a button and is waiting for an answer.
 #[cfg(feature = "tray")]
-fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
+fn set_up_account(
+    env: &AppEnvironment,
+    confirmer: &Arc<dyn NativeConfirmer>,
+) -> Option<TraySession> {
     let dir = brand_dir(env)?;
-    let presenter = WindowedPresenter::new(confirmer);
-    if open_account(&dir, Seeding::NewPhrase(&presenter)).is_none() {
+    let presenter = WindowedPresenter::new(confirmer.as_ref());
+    // The phrase screens run first (inside `open_account`), and only then the choose-a-password window —
+    // the order is `open_or_enroll`'s, and it is the order that keeps a forgotten password recoverable.
+    let booted = open_account(
+        &dir,
+        PasswordCeremony::for_a_new_account(Arc::clone(confirmer)),
+        Seeding::NewPhrase(&presenter),
+    );
+    let Some(booted) = booted else {
         notify(
-            confirmer,
+            confirmer.as_ref(),
             "DIG — Setup not completed",
             "Your DIG Account was not created.",
             "Nothing was changed on this computer. You can start again from the DIG tray menu \
              whenever you are ready.",
         );
         return None;
-    }
-    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
-    // assembled exactly as they are on every other start — one code path, no special-cased first run.
-    let session = start_sign_service(env);
+    };
+    let session = start_sign_service(env, booted);
     if session.is_some() {
         notify(
-            confirmer,
+            confirmer.as_ref(),
             "DIG — Account ready",
-            "Your DIG Account is set up.",
-            "You can view your recovery phrase again at any time from the DIG tray menu.",
+            "Your DIG Account is set up and unlocked.",
+            "It locks itself when you are away, and asks for your password when you next need to \
+             sign. You can view your recovery phrase again at any time from the DIG tray menu.",
         );
     }
     session
@@ -429,34 +418,157 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
 /// Returns the live session on success, and `None` on any refusal or failure — always after telling the
 /// user which, because they pressed a button and are waiting for an answer.
 #[cfg(feature = "tray")]
-fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
+fn restore_account(
+    env: &AppEnvironment,
+    confirmer: &Arc<dyn NativeConfirmer>,
+) -> Option<TraySession> {
     let dir = brand_dir(env)?;
     let phrase = ask_for_phrase(
-        confirmer,
+        confirmer.as_ref(),
         "Restore your DIG Account from its recovery phrase.",
     )?;
-    if open_account(&dir, Seeding::Restore(&phrase)).is_none() {
+    // A restore chooses a NEW password for THIS computer: the phrase settles which account it is, the
+    // password settles who can open it here. That is what lets someone restore onto a shared machine and
+    // still be the only one who can unlock it.
+    let booted = open_account(
+        &dir,
+        PasswordCeremony::for_a_new_account(Arc::clone(confirmer)),
+        Seeding::Restore(&phrase),
+    );
+    let Some(booted) = booted else {
         notify(
-            confirmer,
+            confirmer.as_ref(),
             "DIG — Restore did not complete",
             "Your DIG Account could not be restored.",
             "Nothing was changed on this computer. The log folder (in the DIG menu) has the details, \
              and you can try again from the DIG menu whenever you are ready.",
         );
         return None;
-    }
-    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
-    // assembled exactly as on every other start — one code path, no special-cased restore.
-    let session = start_sign_service(env);
+    };
+    let session = start_sign_service(env, booted);
     if session.is_some() {
         notify(
-            confirmer,
+            confirmer.as_ref(),
             "DIG — Account restored",
             "Your DIG Account is back on this computer.",
             "You can view your recovery phrase again at any time from the DIG menu.",
         );
     }
     session
+}
+
+/// Unlock the account the host already has: ask for the password, re-asking on a wrong one, and bring
+/// the signing channel up.
+///
+/// # Why it re-asks, and why it stops
+///
+/// A mistyped password is the normal case, and a window that closes on the first mistake and leaves the
+/// user to find the menu item again is the kind of surface people give up on (§6.1 — never trap the
+/// user). So a failure is re-asked, and the loop is BOUNDED so a confirmer that cannot draw cannot spin.
+///
+/// # Why the final message names two causes
+///
+/// A wrong password and a blob this version cannot read are the SAME observation — both are one
+/// authentication failure with no further detail, which is exactly the property that keeps an attacker
+/// from learning whether their guess was close. So the app does not pretend to distinguish them: it names
+/// both possibilities and points at the remedy for the second. The account stays `Locked` with `Unlock…`
+/// live, because a mistyped password must not cost the user their phrase row and their menu.
+#[cfg(feature = "tray")]
+fn unlock_account(
+    env: &AppEnvironment,
+    confirmer: &Arc<dyn NativeConfirmer>,
+) -> Option<TraySession> {
+    let dir = brand_dir(env)?;
+
+    // Before the first prompt: an account still sealed under the retired machine-held password is
+    // re-sealed under one the user chooses. Any other state returns `NotNeeded` having drawn nothing, so
+    // this costs a credential-store read on the unlock path and nothing else.
+    migrate_if_machine_sealed(env, confirmer);
+
+    for _ in 0..UNLOCK_ATTEMPTS {
+        let opened =
+            unlock_existing_account(&dir, PasswordCeremony::to_unlock(Arc::clone(confirmer)));
+        if let Some(booted) = opened {
+            return start_sign_service(env, booted);
+        }
+    }
+    notify(
+        confirmer.as_ref(),
+        "DIG — Could not unlock",
+        "Your DIG Account was not unlocked.",
+        concat!(
+            "Either the password was not right, or this account was created by an older version of DIG ",
+            "whose format this version can no longer open. DIG cannot tell those apart, and deliberately ",
+            "does not guess.\n\n",
+            "Nothing has been changed or deleted. Try Unlock again if you think it was a typo. If you are ",
+            "sure of your password, the account cannot be opened here — use \"Manage my DIG Account\" to ",
+            "restore it from your 24 words.\n\n",
+            "Reading DIG content does not need your account and is working normally."
+        ),
+    );
+    None
+}
+
+/// How many times `Unlock…` re-asks for a password before it explains and stops.
+#[cfg(feature = "tray")]
+const UNLOCK_ATTEMPTS: usize = 3;
+
+/// Re-seal a machine-sealed account under a user-chosen password, telling the user what happened.
+///
+/// The outcomes that changed nothing and needed no user attention ([`MigrationOutcome::NotNeeded`],
+/// and the two refusals the user themselves chose) say nothing: they drew their own windows, or there was
+/// nothing to draw.
+#[cfg(feature = "tray")]
+fn migrate_if_machine_sealed(env: &AppEnvironment, confirmer: &Arc<dyn NativeConfirmer>) {
+    let Some(dir) = brand_dir(env) else { return };
+
+    match migrate_default_account(&dir, confirmer) {
+        MigrationOutcome::Migrated => notify(
+            confirmer.as_ref(),
+            "DIG — Your account now has a password",
+            "Your DIG Account is protected by the password you just chose.",
+            concat!(
+                "Until now it was unlocked automatically by this computer, which meant anything running ",
+                "as you could use it. Now only your password opens it.\n\n",
+                "Nothing else changed: it is the same account, the same DIG ID and the same recovery ",
+                "phrase."
+            ),
+        ),
+        MigrationOutcome::CannotReseal => notify(
+            confirmer.as_ref(),
+            "DIG — This account cannot take a password",
+            "Your DIG Account has no recovery phrase, so a password cannot be added to it.",
+            concat!(
+                "Adding a password means re-sealing the account, and that needs its 24 words — which this ",
+                "account never had (it predates them).\n\n",
+                "Nothing has been changed or deleted, and it still works exactly as before. For an account ",
+                "with both a password and a recovery phrase, use \"Manage my DIG Account\" then \"Replace ",
+                "this account with a NEW one…\"."
+            ),
+        ),
+        MigrationOutcome::Lost => notify(
+            confirmer.as_ref(),
+            "DIG — Your account could not be re-sealed",
+            "Something went wrong while giving your DIG Account a password, and it is no longer on this computer.",
+            concat!(
+                "Your 24 words are the way back: use \"Manage my DIG Account\" then \"Replace it with an ",
+                "account from a recovery phrase…\" and type them in. Everything comes back exactly as it ",
+                "was.\n\n",
+                "The log folder (in the DIG menu) has the details of what failed."
+            ),
+        ),
+        MigrationOutcome::Failed | MigrationOutcome::RestoredUnderOldPassword => notify(
+            confirmer.as_ref(),
+            "DIG — Nothing was changed",
+            "Your DIG Account could not be given a password just now.",
+            "It is exactly as it was and still works. Try Unlock again later; the log folder (in the \
+             DIG menu) has the details.",
+        ),
+        // Nothing to do, or the user's own choice, already made in a window they saw.
+        MigrationOutcome::NotNeeded
+        | MigrationOutcome::Unopenable
+        | MigrationOutcome::RefusedByUser => {}
+    }
 }
 
 /// Draw a plain informational window. A helper so every one of the shell's own messages goes through the
@@ -474,19 +586,35 @@ fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &st
     });
 }
 
-/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the account (a zero-prompt
-/// re-unlock from the OS credential store) and re-installs it into the shared `residency` before the
-/// signature proceeds — restoring the live-view signer so the pending sign can complete
-/// (dig_ecosystem#967 / #1547). A failed re-unlock leaves the residency locked, so the sign is refused.
+/// The production sign-path re-auth gate: on a sign after a lock it asks the user for their account
+/// password and re-installs the unlocked account into the shared `residency` before the signature
+/// proceeds — restoring the live-view signer so the pending sign can complete (dig_ecosystem#967 /
+/// #1547). A refused or wrong password leaves the residency locked, so the sign is refused.
+///
+/// Since dig_ecosystem#1817 this is a real gate rather than a formality: it used to re-unlock zero-prompt
+/// from the OS credential store, which made the idle auto-lock and `Lock now` decorative — they dropped
+/// key material the very next signature silently re-derived.
 #[cfg(feature = "tray")]
 fn build_reauth_gate(
     lock: TraySessionLock,
     brand_dir: std::path::PathBuf,
+    confirmer: Arc<dyn NativeConfirmer>,
     residency: AccountResidency,
 ) -> Arc<dyn SignReauthGate> {
     Arc::new(SessionReauthGate::new(lock, move || {
-        reboot_reunlock(&brand_dir, &residency)
+        reboot_reunlock(&brand_dir, Arc::clone(&confirmer), &residency)
     }))
+}
+
+/// The process-wide OS-owned confirm/input surface, as the [`Arc`] the ceremonies and the loopback
+/// server share.
+///
+/// One helper rather than a `native_confirmer()` call at each site, so every account window — setup,
+/// unlock, reveal, migrate, spend — provably comes from the same surface. A second, differently-built
+/// confirmer would be a second place for a policy to drift.
+#[cfg(feature = "tray")]
+fn shared_confirmer() -> Arc<dyn NativeConfirmer> {
+    Arc::from(native_confirmer())
 }
 
 /// The shell's [`AccountCustodian`]: the four host effects a destructive account verb has.
@@ -502,7 +630,7 @@ fn build_reauth_gate(
 #[cfg(feature = "tray")]
 struct ShellCustodian<'a> {
     env: &'a AppEnvironment,
-    confirmer: &'a dyn NativeConfirmer,
+    confirmer: &'a Arc<dyn NativeConfirmer>,
     brand_dir: std::path::PathBuf,
     /// The tray's live session, replaced in place as the account is locked, discarded and re-enrolled.
     session: std::cell::RefCell<&'a mut Option<TraySession>>,
@@ -530,19 +658,22 @@ impl AccountCustodian for ShellCustodian<'_> {
     }
 
     fn enrol_from(&self, phrase: &dig_app_core::account::recovery::RecoveryPhrase) -> bool {
-        if open_account(&self.brand_dir, Seeding::Restore(phrase)).is_none() {
-            return false;
-        }
-        // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
-        // assembled exactly as on every other start — one code path, no special-cased restore.
-        let session = start_sign_service(self.env);
+        let booted = open_account(
+            &self.brand_dir,
+            PasswordCeremony::for_a_new_account(Arc::clone(self.confirmer)),
+            Seeding::Restore(phrase),
+        );
+        let Some(booted) = booted else { return false };
+        let session = start_sign_service(self.env, booted);
         let live = session.is_some();
         **self.session.borrow_mut() = session;
         live
     }
 
     fn reopen(&self) {
-        **self.session.borrow_mut() = start_sign_service(self.env);
+        // The account survived a failed discard, so it needs UNLOCKING, not enrolling — and unlocking
+        // asks for the password, because there is no other way in any more.
+        **self.session.borrow_mut() = unlock_account(self.env, self.confirmer);
     }
 }
 
@@ -555,7 +686,7 @@ impl AccountCustodian for ShellCustodian<'_> {
 fn replace_account(
     session: &mut Option<TraySession>,
     env: &AppEnvironment,
-    confirmer: &dyn NativeConfirmer,
+    confirmer: &Arc<dyn NativeConfirmer>,
     what: Replacement,
 ) {
     let Some(dir) = brand_dir(env) else { return };
@@ -568,7 +699,12 @@ fn replace_account(
         brand_dir: dir,
         session: std::cell::RefCell::new(session),
     };
-    dig_app_core::account::journey::replace_account(confirmer, &custodian, what, vault.as_ref());
+    dig_app_core::account::journey::replace_account(
+        confirmer.as_ref(),
+        &custodian,
+        what,
+        vault.as_ref(),
+    );
 }
 
 /// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
@@ -605,8 +741,8 @@ fn current_os() -> Os {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, notify, replace_account, restore_account, set_up_account,
-        start_sign_service, AppEnvironment, TraySession,
+        account_state, notify, replace_account, restore_account, set_up_account, shared_confirmer,
+        unlock_account, AppEnvironment, TraySession,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app_core::account::boot::vault_for;
@@ -615,7 +751,7 @@ mod tray {
         explain_missing_phrase, explain_unopenable, reveal_phrase,
     };
     use dig_app_core::agent::{Agent, SharedStatus};
-    use dig_app_core::confirm::{native_confirmer, NativeConfirmer};
+    use dig_app_core::confirm::NativeConfirmer;
     use dig_app_core::engine::NodeConnector;
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
@@ -825,9 +961,9 @@ mod tray {
         std::thread::spawn(move || agent.run());
 
         let menu_events = MenuEvent::receiver();
-        // ONE confirmer for the whole shell: every account window (setup, reveal, the explainers) is
-        // drawn by the same OS-owned, biometric-backed surface the signing path uses.
-        let confirmer: Box<dyn NativeConfirmer> = native_confirmer();
+        // ONE confirmer for the whole shell: every account window (setup, unlock, reveal, migrate, the
+        // explainers) is drawn by the same OS-owned, biometric-backed surface the signing path uses.
+        let confirmer: std::sync::Arc<dyn NativeConfirmer> = shared_confirmer();
         let mut session = session;
 
         // The event loop diverges; `tray` + `session` stay alive on this frame for the whole process
@@ -848,14 +984,7 @@ mod tray {
                 let Some(action) = menu.actions.get(&event.id).copied() else {
                     continue;
                 };
-                if dispatch(
-                    action,
-                    &mut session,
-                    &env,
-                    confirmer.as_ref(),
-                    &shutdown,
-                    &status,
-                ) {
+                if dispatch(action, &mut session, &env, &confirmer, &shutdown, &status) {
                     *control_flow = ControlFlow::Exit;
                     return;
                 }
@@ -918,7 +1047,7 @@ mod tray {
         action: TrayAction,
         session: &mut Option<TraySession>,
         env: &AppEnvironment,
-        confirmer: &dyn NativeConfirmer,
+        confirmer: &std::sync::Arc<dyn NativeConfirmer>,
         shutdown: &dig_app_core::shutdown::Shutdown,
         status: &SharedStatus,
     ) -> bool {
@@ -945,36 +1074,30 @@ mod tray {
             TrayAction::RemoveAccount => {
                 replace_account(session, env, confirmer, Replacement::Nothing)
             }
-            TrayAction::ShowStatus => show_status(status, env, session.as_ref(), confirmer),
-            TrayAction::Unlock => {
-                // The account exists but did not unlock at boot. Re-running the boot path is the whole
-                // unlock: on Windows/macOS it is zero-prompt from the OS credential store.
-                *session = start_sign_service(env);
-                if session.is_none() {
-                    notify(
-                        confirmer,
-                        "DIG — Could not unlock",
-                        "Your DIG Account could not be unlocked.",
-                        "The stored password for this account could not be read from the system \
-                         credential store. The log folder (in this menu) has the details.",
-                    );
-                }
+            TrayAction::ShowStatus => {
+                show_status(status, env, session.as_ref(), confirmer.as_ref())
             }
+            // The account is locked — which is how the tray starts and how it returns after an idle
+            // auto-lock. `unlock_account` asks for the password, re-asks on a wrong one, and says what
+            // happened either way; every message it can show is its own.
+            TrayAction::Unlock => *session = unlock_account(env, confirmer),
             TrayAction::LockNow => {
                 if let Some(session) = session {
                     session.lock.lock_now();
                 }
             }
-            TrayAction::ShowRecoveryPhrase => show_phrase(session.as_ref(), env, confirmer),
+            TrayAction::ShowRecoveryPhrase => {
+                show_phrase(session.as_ref(), env, confirmer.as_ref())
+            }
             TrayAction::ExplainUnopenable => {
-                explain_unopenable(confirmer);
+                explain_unopenable(confirmer.as_ref());
             }
             TrayAction::FixMissingPhrase => {
-                explain_missing_phrase(confirmer);
+                explain_missing_phrase(confirmer.as_ref());
             }
-            TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
-            TrayAction::AboutDid => explain_did(confirmer),
-            TrayAction::OpenLogs => open_log_folder(confirmer),
+            TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer.as_ref()),
+            TrayAction::AboutDid => explain_did(confirmer.as_ref()),
+            TrayAction::OpenLogs => open_log_folder(confirmer.as_ref()),
             TrayAction::Quit => {
                 shutdown.trigger();
                 wait_for_stop(status);

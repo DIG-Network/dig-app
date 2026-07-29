@@ -302,7 +302,7 @@ pub fn ask_for_phrase(confirmer: &dyn NativeConfirmer, purpose: &str) -> Option<
             // from that rule — 24 words typed entirely blind cannot be checked, so the window offers a
             // deliberate un-mask rather than defaulting to clear text.
             masked: true,
-            revealable: true,
+            reveal_label: Some("Show the words while I type"),
         }) {
             InputOutcome::Provided(text) => text,
             // Cancelled or undrawable: either way the user has not supplied a phrase, so stop. Retrying an

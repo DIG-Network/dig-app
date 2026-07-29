@@ -36,3 +36,43 @@ fn draw_every_account_window_for_visual_inspection() {
     let acknowledged = explain_missing_phrase(confirmer.as_ref());
     println!("explainer acknowledged: {acknowledged:?}");
 }
+
+/// A **manual visual check** of the PASSWORD windows (dig_ecosystem#1817).
+///
+/// Separate from the phrase walk above because it is the one that has to be screenshotted for the
+/// acceptance evidence, and because it is the window a person sees most often — every unlock, every
+/// re-auth after an idle lock. Nothing is enrolled and no account is touched: the ceremony collects a
+/// password and this test drops it.
+///
+/// ```text
+/// cargo test -p dig-app --test account_windows_visual -- --ignored password --nocapture
+/// ```
+///
+/// Walks both questions in order: the unlock prompt, then the choose-a-password pair a new account is
+/// created through.
+#[test]
+#[ignore = "draws real OS windows for a human to look at; run manually with --ignored"]
+fn draw_the_password_windows_for_visual_inspection() {
+    use dig_app_core::account::auth::AuthCeremony;
+    use dig_app_core::account::passphrase::PasswordCeremony;
+    use dig_app_core::account::AccountId;
+
+    let confirmer: std::sync::Arc<dyn dig_app_core::confirm::NativeConfirmer> =
+        std::sync::Arc::from(native_confirmer());
+    let account = AccountId::new("default");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the async ceremony");
+
+    println!("-- drawing the UNLOCK prompt (masked, with a reveal control) --");
+    let unlock = PasswordCeremony::to_unlock(std::sync::Arc::clone(&confirmer));
+    let collected = runtime.block_on(unlock.collect_unlock_factors(&account, None));
+    // Never the password itself — only whether the ceremony completed.
+    println!("unlock ceremony completed: {}", collected.is_ok());
+
+    println!("-- drawing the CHOOSE-A-PASSWORD pair (asked twice, 12-character minimum) --");
+    let choose = PasswordCeremony::for_a_new_account(confirmer);
+    let chosen = runtime.block_on(choose.collect_unlock_factors(&account, None));
+    println!("choose ceremony completed: {}", chosen.is_ok());
+}

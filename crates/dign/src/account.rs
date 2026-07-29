@@ -21,10 +21,9 @@
 
 use std::io::IsTerminal;
 
-use dig_app_core::account::boot::{
-    account_exists, boot_existing_account, open_account, BootedAccount,
-};
+use dig_app_core::account::boot::{account_exists, open_account};
 use dig_app_core::account::lifecycle::Seeding;
+use dig_app_core::account::passphrase::PasswordCeremony;
 use dig_app_core::account::recovery::{RecoveryPhrase, PHRASE_WORDS};
 use dig_app_core::environment::AppEnvironment;
 
@@ -33,13 +32,14 @@ use dig_app_core::environment::AppEnvironment;
 pub enum AccountReport {
     /// No account is enrolled on this host.
     NotSetUp,
-    /// An account exists. `dig_id` is present only when it could be unlocked to read it.
-    Present {
-        /// The root profile's DIG ID, if the account unlocked.
-        dig_id: Option<String>,
-        /// Whether a recovery phrase is stored for it.
-        recoverable: bool,
-    },
+    /// An account exists, and is LOCKED.
+    ///
+    /// Neither the DIG ID nor whether a recovery phrase is stored can be read without unlocking, and
+    /// unlocking needs the user's password (dig_ecosystem#1817). Asking for one in order to answer "is
+    /// there an account here?" would be the wrong trade, so this variant carries neither and says so.
+    /// The unrecoverable WARNING is deliberately absent: a locked account might be perfectly
+    /// recoverable, and guessing would be a lie either way.
+    PresentLocked,
     /// A restore completed and the account is now on this host.
     Restored {
         /// The restored account's DIG ID.
@@ -80,30 +80,15 @@ pub enum AccountCliError {
 
 /// Report what account, if any, this host has.
 ///
-/// Deliberately does not force an unlock: on a host where the account cannot be unlocked (no credential
-/// store, a locked keychain) the honest answer is still "there IS an account here", which is the fact the
-/// user asked for.
+/// A pure existence check — no unlock, no password prompt, no side effect. It used to unlock (zero-prompt
+/// from the OS credential store) in order to also report the DIG ID and whether a phrase was stored; since
+/// dig_ecosystem#1817 that would mean demanding the user's password to answer a question, so it does not.
+/// The honest answer to "is there an account here?" never needed the seed.
 pub fn status() -> Result<AccountReport, AccountCliError> {
     let dir = brand_dir()?;
-    if !account_exists(&dir) {
-        return Ok(AccountReport::NotSetUp);
-    }
-    // An unlock may legitimately fail (no credential store on this OS); that costs us the DIG ID and the
-    // recoverable flag, not the answer. `boot_existing_account` can only unlock, never enrol, so asking
-    // for status can never create an account as a side effect.
-    match boot_existing_account(&dir) {
-        Some(BootedAccount {
-            profile_id,
-            recoverable,
-            ..
-        }) => Ok(AccountReport::Present {
-            dig_id: Some(profile_id),
-            recoverable,
-        }),
-        None => Ok(AccountReport::Present {
-            dig_id: None,
-            recoverable: false,
-        }),
+    match account_exists(&dir) {
+        false => Ok(AccountReport::NotSetUp),
+        true => Ok(AccountReport::PresentLocked),
     }
 }
 
@@ -119,7 +104,13 @@ pub fn restore_from(input: &str) -> Result<AccountReport, AccountCliError> {
     let phrase =
         RecoveryPhrase::parse(input).map_err(|why| AccountCliError::BadPhrase(why.to_string()))?;
 
-    match open_account(&dir, Seeding::Restore(&phrase)) {
+    // A restore CHOOSES the password this computer will use: the phrase settles which account it is,
+    // the password settles who can open it here.
+    match open_account(
+        &dir,
+        PasswordCeremony::for_a_new_account(std::sync::Arc::new(crate::password::TerminalPassword)),
+        Seeding::Restore(&phrase),
+    ) {
         Some(booted) => Ok(AccountReport::Restored {
             dig_id: booted.profile_id,
         }),
@@ -161,19 +152,13 @@ pub fn describe(report: &AccountReport) -> String {
              system tray and choose \"Set up my DIG Account\", or run `dign account restore` if you \
              already have a recovery phrase."
             .to_string(),
-        AccountReport::Present {
-            dig_id,
-            recoverable,
-        } => {
-            let id = dig_id.as_deref().unwrap_or("(locked — could not be read)");
-            let recovery = if *recoverable {
-                "It has a recovery phrase; you can view it from the DIG tray menu."
-            } else {
-                "WARNING: it has NO recovery phrase, so it exists only on this computer and cannot \
-                 be recovered if you lose it."
-            };
-            format!("You have a DIG Account.\n  DIG ID: {id}\n  {recovery}")
-        }
+        AccountReport::PresentLocked => concat!(
+            "You have a DIG Account on this computer, and it is locked.\n",
+            "  Unlock it from the DIG tray menu with your account password. Once unlocked, the menu \
+shows your DIG ID and your recovery phrase.\n",
+            "  Reading DIG content does not need your account and works while it is locked."
+        )
+        .to_string(),
         AccountReport::Restored { dig_id } => format!(
             "Your DIG Account has been restored on this computer.\n  DIG ID: {dig_id}\n  \
              Restart DIG so the tray picks it up."
@@ -185,48 +170,35 @@ pub fn describe(report: &AccountReport) -> String {
 mod tests {
     use super::*;
 
-    /// A phrase-less account must read as a WARNING, not as a neutral fact — the copy is the only place
-    /// a CLI user learns their account is unrecoverable.
+    /// A locked account reports itself as PRESENT — the answer the user asked for — says it is locked,
+    /// and names where to unlock it.
     #[test]
-    fn a_phrase_less_account_is_described_as_a_warning() {
-        let text = describe(&AccountReport::Present {
-            dig_id: Some("abc".to_string()),
-            recoverable: false,
-        });
-        assert!(text.contains("NO recovery phrase"), "{text}");
-        // Asserted on the RENDERED sentence. The previous form expected a literal newline and indentation
-        // that the line-continuation removes, so its first clause could never match — and its
-        // `|| text.contains("cannot")` fallback made the whole assertion unfailable. A substring test that
-        // cannot fail is not a test; review found the same class in the tray's own copy
-        // (dig_ecosystem#1799).
-        assert!(
-            text.contains("cannot be recovered if you lose it"),
-            "{text}"
-        );
-    }
-
-    /// A recoverable account must NOT carry the warning — the control proving the description reads the
-    /// flag rather than always warning.
-    #[test]
-    fn a_recoverable_account_is_described_without_the_warning() {
-        let text = describe(&AccountReport::Present {
-            dig_id: Some("abc".to_string()),
-            recoverable: true,
-        });
-        assert!(!text.contains("WARNING"), "{text}");
-        assert!(text.contains("has a recovery phrase"), "{text}");
-    }
-
-    /// A locked account still reports itself as PRESENT — the answer the user asked for — and says why
-    /// the id is missing instead of printing an empty field.
-    #[test]
-    fn a_locked_account_still_reports_itself_present() {
-        let text = describe(&AccountReport::Present {
-            dig_id: None,
-            recoverable: false,
-        });
+    fn a_locked_account_reports_itself_present_and_says_where_to_unlock_it() {
+        let text = describe(&AccountReport::PresentLocked);
         assert!(text.contains("You have a DIG Account"), "{text}");
         assert!(text.contains("locked"), "{text}");
+        assert!(text.contains("DIG tray menu"), "{text}");
+    }
+
+    /// **`status` must not guess about recoverability.** It cannot know without unlocking, and the old
+    /// report defaulted a failed unlock to `recoverable: false` — which rendered a WARNING that an
+    /// account has no recovery phrase to users whose accounts were perfectly recoverable and merely
+    /// locked. Silence is the only honest answer here.
+    #[test]
+    fn a_locked_account_is_never_warned_about_as_unrecoverable() {
+        let text = describe(&AccountReport::PresentLocked);
+        assert!(!text.contains("WARNING"), "{text}");
+        assert!(!text.contains("NO recovery phrase"), "{text}");
+    }
+
+    /// And it says the thing a locked-out user most needs to hear (§6.0): reading content is unaffected.
+    #[test]
+    fn a_locked_account_is_told_that_reading_still_works() {
+        assert!(
+            describe(&AccountReport::PresentLocked).contains("works while it is locked"),
+            "{}",
+            describe(&AccountReport::PresentLocked)
+        );
     }
 
     #[test]

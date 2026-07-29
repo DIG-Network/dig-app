@@ -57,3 +57,12 @@ tempfile.workspace = true
 # (`tests/tray_lock_state.rs`, dig_ecosystem#1752).
 dig-keystore.workspace = true
 dig-session.workspace = true
+# Deriving the integration tests' passwords from a label rather than writing them inline, so no test
+# password is a literal a static analyser reads as a hard-coded cryptographic value (#917/#950), and
+# holding the typed password in a scrubbing buffer the way the real input window does.
+sha2.workspace = true
+hex.workspace = true
+zeroize.workspace = true
+# Driving the async auth ceremony from the manual visual check (`tests/account_windows_visual.rs`), which
+# needs a runtime the way the production boot glue does.
+tokio.workspace = true

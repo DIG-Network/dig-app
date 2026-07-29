@@ -1398,23 +1398,27 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
  "dig-logging",
  "dig-session",
+ "hex",
  "png",
+ "sha2 0.10.9",
  "tao",
  "tempfile",
+ "tokio",
  "tracing",
  "tray-icon",
  "windows",
+ "zeroize",
 ]
 
 [[package]]
 name = "dig-app-core"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1856,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -1865,6 +1869,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

@@ -13,6 +13,7 @@
 
 mod account;
 mod cli;
+mod password;
 
 use clap::Parser;
 use dig_app_core::gateway::{
@@ -93,13 +94,13 @@ fn account_json(report: &account::AccountReport) -> serde_json::Value {
 
     let body = match report {
         AccountReport::NotSetUp => serde_json::json!({"state": "not_set_up"}),
-        AccountReport::Present {
-            dig_id,
-            recoverable,
-        } => serde_json::json!({
-            "state": "present",
-            "dig_id": dig_id,
-            "recoverable": recoverable,
+        // `dig_id` and `recoverable` are absent rather than null-or-guessed: neither can be read
+        // without the user's password (dig_ecosystem#1817), and a `"recoverable": false` on a locked
+        // account would tell a script the opposite of the truth. A consumer that needs them reads them
+        // from the unlocked tray.
+        AccountReport::PresentLocked => serde_json::json!({
+            "state": "present_locked",
+            "locked": true,
         }),
         AccountReport::Restored { dig_id } => serde_json::json!({
             "state": "restored",

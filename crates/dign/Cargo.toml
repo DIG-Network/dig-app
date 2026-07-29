@@ -35,6 +35,9 @@ thiserror.workspace = true
 # alternative is per-OS termios/console FFI in a CLI, which is exactly the kind of hand-rolling this
 # codebase avoids for security-relevant input.
 rpassword = "7"
+# Holding the typed account password in a scrubbing buffer, so the CLI's password prompt gives the same
+# at-rest-in-memory guarantee the desktop input window does (`src/password.rs`, dig_ecosystem#1817).
+zeroize.workspace = true
 # Structured logging (#934) — `dign` is a short-lived CLI invocation, so it installs the shared
 # dual-sink subscriber (`RunContext::Cli`) once at the top of `main` and holds the guard for the
 # process's one-shot lifetime; no service-style `OnceLock` is needed (there is exactly one entrypoint).

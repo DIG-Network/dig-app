@@ -296,3 +296,51 @@ Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app
 - **Reproducing this needs a DISPLAY, not just a container.** Without one, `FormFactor::detect` returns
   `Headless` and the tray is never attempted, so the bug hides. `Xvfb :99` + `DISPLAY=:99` is what makes
   it appear.
+
+## A seal is only as strong as who holds its key (dig_ecosystem#1817, 2026-07-29)
+
+The account master seed was DIGOP1-sealed with AES-256-GCM under a 256-bit Argon2id-stretched password.
+Every part of that sentence is good, and the whole thing protected nothing a local attacker had to work
+for, because **dig-app generated the password itself and filed it in the OS credential store**. The
+credential store releases its entries to the logged-in session with no prompt, so any code running as the
+user could fetch the password and open the seed without a single interaction. The tray's `Unlock…` item
+opened an account the machine had already opened.
+
+- **"Encrypted at rest" and "protected at rest" are different claims, and the difference is custody of the
+  key.** The audit trail here is worth keeping: the SPEC had *correctly* recorded that the DIGOP1 sealing
+  was "defense-in-depth UNDER that ACL, NOT an independent second secret", and had filed splitting the
+  password away from the ciphertext as a follow-up. The honest description was written down and the
+  conclusion — that there was no user-known secret protecting custody anywhere — was still not drawn for
+  several releases. A correct description of a weakness is not a mitigation of it.
+- **A lock that can re-open itself is not a lock.** The idle auto-lock, `Lock now` and the OS screen-lock
+  hook all worked exactly as designed: they dropped the residency's key material. The sign-path re-auth
+  gate then re-unlocked zero-prompt from the same credential store, so the very next signature silently
+  re-derived everything that had just been dropped. Three lock mechanisms, one re-auth, net effect zero.
+  When auditing a lock, follow what happens on the NEXT operation, not what the lock itself does.
+- **The abstraction was already there and unused.** `account/auth.rs` had defined `AuthCeremony` as "the
+  thing that actually renders the OS-native password/TOTP/passkey prompt" from the beginning, and v4.0.0
+  had shipped a masked, revealable, `Zeroizing` native input window for typing recovery phrases. The fix
+  was to connect two things that already existed. Before building a prompt, check whether the seam and
+  the window are already sitting in the tree.
+- **Making the boot path take the ceremony as a PARAMETER is what makes the guarantee real.** The property
+  wanted is "no path from process start reaches a seed without a user". Asserting that with tests alone is
+  weak, because the assertion lives next to the code it constrains. Making `start_sign_service` require a
+  `BootedAccount` it cannot construct, where the only producers of one require an `AuthCeremony`, hands the
+  guarantee to the compiler. The remaining hole — `main` simply CALLING an unlock at startup — is the one
+  a type cannot close, and needed a source-reading test (`tests/starts_locked.rs`) because `main` has no
+  runtime seam. That is the second time in this repo that a custody property in a `bin` target had zero
+  coverage; the first cost a destroy-authorization inversion that stayed green.
+- **Re-sealing is possible precisely while the old key is still available.** The migration off the
+  machine-held password only works on a machine that still HAS it, which means the window for a graceful
+  in-place re-seal is open exactly until someone "cleans up" the credential entry. It re-enrols from the
+  vaulted recovery phrase, so the seed — and therefore the identity key, the addresses, the per-profile
+  DEKs and every already-sealed blob — survives unchanged. Ship the migration in the same release that
+  removes the old path, or the graceful path stops existing.
+- **`dign account status` was warning users about a danger they did not have.** It reported the DIG ID and
+  recoverability by attempting an unlock, and on failure fell through to `recoverable: false` — which
+  renders "WARNING: it has NO recovery phrase". So a merely-locked account with a perfectly good phrase
+  was told the opposite. A default that stands in for "unknown" will eventually be read as a fact; make
+  unknown its own value, or do not report the field.
+- **`discard_account` was deleting the wrong credential key.** It removed the bare account id while the
+  ceremony had written `"<account>.master-password"`, so destroying an account left the machine-held
+  password behind in Credential Manager forever. Two places computing a key format, one of them by hand.

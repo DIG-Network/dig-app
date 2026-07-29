@@ -177,12 +177,17 @@ pub struct InputPrompt<'a> {
     /// Secret material is masked by DEFAULT (`SPEC.md` §3.1d): the words already exist on paper, so a
     /// person who can see the screen is the live risk, and a typo costs only a retry.
     pub masked: bool,
-    /// Whether the window offers a reveal-while-typing control.
+    /// The label of the reveal-while-typing control, or `None` for no such control.
     ///
     /// §3.1d's own escape from the masking rule, and what makes it humane: masking is right by default, but
-    /// 24 words typed entirely blind cannot be checked, so the field is masked AND deliberately un-maskable
-    /// rather than defaulting to clear text. A short passphrase needs no such control.
-    pub revealable: bool,
+    /// something typed entirely blind cannot be checked, so the field is masked AND deliberately
+    /// un-maskable rather than defaulting to clear text.
+    ///
+    /// The LABEL is the caller's because only the caller knows what is in the field. It was once hardcoded
+    /// to "Show the words while I type", which read correctly beside a 24-word recovery phrase and read as
+    /// a bug beside a password (dig_ecosystem#1817) — the same class of mistake as a shared string that
+    /// grew a second, differently-shaped caller.
+    pub reveal_label: Option<&'static str>,
 }
 
 /// What came back from an [`InputPrompt`].
@@ -640,8 +645,8 @@ pub(crate) struct InputContent {
     pub submit: &'static str,
     /// Whether typed characters start out hidden.
     pub masked: bool,
-    /// Whether a reveal-while-typing control is offered.
-    pub revealable: bool,
+    /// The reveal-while-typing control's label, or `None` when the window offers none.
+    pub reveal_label: Option<&'static str>,
 }
 
 impl InputContent {
@@ -655,8 +660,15 @@ impl InputContent {
             field_label: prompt.field_label.to_string(),
             submit: prompt.submit,
             masked: prompt.masked,
-            revealable: prompt.revealable,
+            reveal_label: prompt.reveal_label,
         }
+    }
+}
+
+impl InputContent {
+    /// Whether this window offers a reveal control.
+    pub fn revealable(&self) -> bool {
+        self.reveal_label.is_some()
     }
 }
 

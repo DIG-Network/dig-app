@@ -242,18 +242,11 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
         top += field_height + layout::MARGIN / 2;
 
         // §3.1d's reveal-while-typing affordance: masked by default, un-maskable on purpose. Without it a
-        // person typing 24 words into a masked field cannot check their own work, which is how a restore
-        // fails for a reason nobody can see.
-        if content.revealable {
-            add_checkbox(
-                window,
-                instance,
-                font,
-                "Show the words while I type",
-                REVEAL_ID,
-                top,
-                inner,
-            );
+        // person typing into a masked field cannot check their own work, which is how a restore fails for a
+        // reason nobody can see. The label is the CALLER's, because only the caller knows whether the field
+        // holds 24 words or a password.
+        if let Some(label) = content.reveal_label {
+            add_checkbox(window, instance, font, label, REVEAL_ID, top, inner);
         }
         top += reveal_height(content) + layout::MARGIN / 2;
 
@@ -306,7 +299,7 @@ fn field_height(_content: &InputContent) -> i32 {
 
 /// The vertical space the reveal checkbox occupies, or zero when the window does not offer one.
 fn reveal_height(content: &InputContent) -> i32 {
-    match content.revealable {
+    match content.revealable() {
         true => layout::LINE + layout::MARGIN / 2,
         false => 0,
     }
@@ -690,12 +683,12 @@ mod tests {
     #[test]
     fn the_field_is_masked_exactly_when_the_prompt_asks() {
         assert_ne!(
-            edit_style(&content(true, true)).0 & ES_PASSWORD as u32,
+            edit_style(&content(true, REVEAL)).0 & ES_PASSWORD as u32,
             0,
             "secret entry is masked by default (§3.1d)"
         );
         assert_eq!(
-            edit_style(&content(false, false)).0 & ES_PASSWORD as u32,
+            edit_style(&content(false, None)).0 & ES_PASSWORD as u32,
             0,
             "a field that asked for no mask must not get one"
         );
@@ -705,10 +698,10 @@ mod tests {
     /// passphrase window from carrying a blank strip where a control it does not have would go.
     #[test]
     fn the_reveal_control_takes_space_only_when_it_is_offered() {
-        assert!(reveal_height(&content(true, true)) > 0);
-        assert_eq!(reveal_height(&content(true, false)), 0);
+        assert!(reveal_height(&content(true, REVEAL)) > 0);
+        assert_eq!(reveal_height(&content(true, None)), 0);
         assert!(
-            window_height(&content(true, true)) > window_height(&content(true, false)),
+            window_height(&content(true, REVEAL)) > window_height(&content(true, None)),
             "the window must grow to fit the checkbox"
         );
     }
@@ -728,7 +721,7 @@ mod tests {
     fn every_field_is_a_tab_stop() {
         for masked in [true, false] {
             assert_ne!(
-                edit_style(&content(masked, masked)).0 & WS_TABSTOP.0,
+                edit_style(&content(masked, masked.then_some(REVEAL_TEXT))).0 & WS_TABSTOP.0,
                 0,
                 "masked={masked}"
             );
@@ -766,7 +759,7 @@ mod tests {
              account from it.";
         let content = InputContent {
             body: REAL_BODY.to_string(),
-            ..content(false, true)
+            ..content(false, REVEAL)
         };
 
         const OLD_FIXED_HEIGHT: i32 = 84;
@@ -792,7 +785,7 @@ mod tests {
     fn a_short_body_stays_compact_and_a_huge_one_is_bounded() {
         let short = InputContent {
             body: "One line.".to_string(),
-            ..content(false, false)
+            ..content(false, None)
         };
         assert_eq!(
             body_height(&short),
@@ -802,7 +795,7 @@ mod tests {
 
         let huge = InputContent {
             body: "word ".repeat(2000),
-            ..content(false, false)
+            ..content(false, None)
         };
         assert_eq!(
             body_height(&huge),
@@ -824,7 +817,12 @@ mod tests {
         );
     }
 
-    fn content(masked: bool, revealable: bool) -> InputContent {
+    /// The reveal label the fixtures use when they want a reveal control — named so a test reads as
+    /// "with a reveal" rather than as an opaque `Some("…")`.
+    const REVEAL_TEXT: &str = "Show the words while I type";
+    const REVEAL: Option<&'static str> = Some(REVEAL_TEXT);
+
+    fn content(masked: bool, reveal_label: Option<&'static str>) -> InputContent {
         InputContent {
             title: "DIG — Restore".to_string(),
             heading: "Type your 24-word recovery phrase.".to_string(),
@@ -832,7 +830,7 @@ mod tests {
             field_label: "Your 24 words:".to_string(),
             submit: "Restore",
             masked,
-            revealable,
+            reveal_label,
         }
     }
 }

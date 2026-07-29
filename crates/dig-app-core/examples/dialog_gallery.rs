@@ -95,7 +95,12 @@ fn main() {
                 },
                 submit: "Continue",
                 masked,
-                revealable: !masked,
+                // A masked phrase field needs the reveal (24 words typed blind cannot be checked); the
+                // unmasked variant is already legible, so it offers none.
+                reveal_label: match masked {
+                    true => Some("Show the words while I type"),
+                    false => None,
+                },
             });
             // `InputOutcome`'s Debug redacts the text by design, so this is safe to print.
             println!("{which}: {outcome:?}");
