@@ -1,13 +1,23 @@
-//! The Windows native **input** window (dig_ecosystem#1798): a real Win32 window with an `EDIT` control.
+//! **Every** native DIG window on Windows: one registered window class, drawn with or without a typed field.
 //!
 //! # Why this exists at all
 //!
-//! Every other DIG window on Windows is a `MessageBoxW`, which cannot take typed input — it has no
-//! control to type into and no API to add one. That single API limitation is why the tray shipped
-//! *"Restore from a recovery phrase (in a terminal)…"* and handed the user a command to run. A tray menu
-//! having no text field is a fact about the tray API, not a reason to make a person open a console, so
-//! this module builds the window `MessageBoxW` cannot: a registered window class with a heading, a body,
-//! a label, an `EDIT` control, and Submit / Cancel buttons.
+//! It began (dig_ecosystem#1798) as the ONE window `MessageBoxW` could not draw. A message box cannot take
+//! typed input — no control to type into and no API to add one — and that single limitation is why the tray
+//! once shipped *"Restore from a recovery phrase (in a terminal)…"* and handed the user a command to run. A
+//! tray menu having no text field is a fact about the tray API, not a reason to make a person open a console.
+//!
+//! It then absorbed the other four (dig_ecosystem#1832), because the same limitation shaped them too:
+//! `MessageBoxW` cannot RELABEL its buttons, so every two-choice window had to spell its choice out in a
+//! sentence — the retention claim explained in a paragraph what a button reading "Yes, I have them" says by
+//! itself, and the destroy window's way out was labelled "Cancel", which names the dialog rather than the
+//! outcome. Nor could it be scaled, styled, or given the DIG mark. The labels were in the content all along;
+//! macOS and Linux put them on their buttons and only Windows discarded them.
+//!
+//! So there is now ONE window here, described by a [`WindowSpec`]: a heading, a body, an optional
+//! [`FieldSpec`], and [`ButtonSpec`] buttons. That is deliberate rather than incidental — it means the DPI
+//! scaling, the type hierarchy, the keyboard handling and (next) dark mode are implemented once and cannot
+//! drift between "the message window" and "the input window".
 //!
 //! # Why it is not a subprocess helper
 //!
@@ -33,7 +43,7 @@
 use std::sync::OnceLock;
 
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, InvalidateRect, MonitorFromPoint, ANSI_CHARSET, CLEARTYPE_QUALITY,
     COLOR_WINDOW, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HFONT,
@@ -45,19 +55,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 // `BM_GETCHECK`/`BST_CHECKED`/`EM_SETPASSWORDCHAR` live in the Controls module, not WindowsAndMessaging.
 use windows::Win32::UI::Controls::{BST_CHECKED, EM_SETPASSWORDCHAR};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW,
-    LoadCursorW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BS_AUTOCHECKBOX,
-    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CW_USEDEFAULT, ES_AUTOHSCROLL, ES_PASSWORD,
-    GWLP_USERDATA, HMENU, IDCANCEL, IDC_ARROW, IDOK, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_NCCREATE, WM_SETFONT,
-    WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_GROUP, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetDlgItem,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+    IsDialogMessageW, LoadCursorW, PostQuitMessage, RegisterClassW, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
+    BM_GETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CW_USEDEFAULT,
+    ES_AUTOHSCROLL, ES_PASSWORD, GWLP_USERDATA, HMENU, IDCANCEL, IDC_ARROW, IDOK, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_GROUP,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use zeroize::Zeroizing;
 
-use super::{ForegroundInput, InputContent, InputOutcome};
+use super::{
+    ConfirmContent, ForegroundInput, ForegroundWindow, InputContent, InputOutcome, Presentation,
+    WindowIntent,
+};
 
 /// The window class this module registers. Namespaced so it can never collide with another component's.
 const CLASS_NAME: PCWSTR = windows::core::w!("DigAppNativeInputWindow");
@@ -262,6 +275,76 @@ unsafe fn dpi_for_cursor_monitor() -> u32 {
     }
 }
 
+/// What one DIG window draws, independent of what it is asking about.
+///
+/// # Why every window is described by ONE type
+///
+/// The typed-input window and the four consent windows differ in exactly two ways: whether there is a field,
+/// and what the buttons say. Everything else — the heading, the body paragraph, the DPI-scaled metrics, the
+/// type hierarchy, the message loop, the keyboard handling — is identical. Describing all five with one spec
+/// means there is ONE layout path: dark mode, the DIG mark and text measurement get implemented once and
+/// cannot drift between a "message window" and an "input window" (dig_ecosystem#1832).
+struct WindowSpec<'a> {
+    /// The caption bar text.
+    title: &'a str,
+    /// The primary line, drawn in the larger semibold face.
+    heading: &'a str,
+    /// The paragraph beneath it. `\n` is honoured; the block's height is derived from the text.
+    body: &'a str,
+    /// The typed field, or `None` for a window that only asks the user to choose.
+    field: Option<FieldSpec<'a>>,
+    /// What the buttons say and which one Enter activates.
+    buttons: ButtonSpec<'a>,
+}
+
+/// The typed field on a window that has one.
+struct FieldSpec<'a> {
+    /// The label above the field (`"DIG link:"`, `"Your 24 words:"`).
+    label: &'a str,
+    /// Whether characters are replaced by [`MASK_CHARACTER`]. Required for secret entry (`SPEC.md` §3.1d).
+    masked: bool,
+    /// Whether to offer the reveal-while-typing checkbox.
+    revealable: bool,
+}
+
+/// The buttons a window offers.
+///
+/// This replaces the `MESSAGEBOX_STYLE` bit-fiddling that used to encode the same thing (`MB_OK` vs
+/// `MB_OKCANCEL | MB_DEFBUTTON2`). Naming the buttons directly is what removes the workaround that shaped the
+/// old windows: `MessageBoxW` could not relabel OK/Cancel, so a two-choice window had to spell its choice out
+/// in a sentence — the retention claim explained in a paragraph what a button reading "Yes, I have them" says
+/// by itself. The labels were always in the content; the message box just threw them away.
+enum ButtonSpec<'a> {
+    /// ONE dismiss button. Informational: nothing branches on the answer, so nothing is asked.
+    Acknowledge {
+        /// The dismiss label (`"OK"`).
+        label: &'a str,
+    },
+    /// TWO labelled choices, because refusing genuinely changes what happens.
+    Decide {
+        /// The affirmative label — an imperative verb (`"Sign"`, `"Destroy"`) or a first-person claim
+        /// (`"Yes, I have them"`).
+        affirm: &'a str,
+        /// The refusing label.
+        refuse: &'a str,
+        /// Whether REFUSING holds the focus, so a bare Enter refuses.
+        ///
+        /// The destroy window sets this: without it, a focused window would confirm irreversible key
+        /// destruction on an accidental Enter (dig_ecosystem#1799).
+        refusal_is_default: bool,
+    },
+}
+
+/// What the user did, before it is interpreted as text or as consent.
+enum Answer {
+    /// The affirmative (or sole dismiss) button. `Some` carries the field's contents when there was a
+    /// field and it could be read; `None` means either there was no field, or its text was unreadable —
+    /// [`InputWindow::ask`] is what distinguishes those, because only it knows a field was asked for.
+    Affirmed(Option<Zeroizing<String>>),
+    /// Cancel, Escape, or the frame's close box. Nothing the caller may act on.
+    Refused,
+}
+
 /// Per-window state, owned by the window for its lifetime and reached through `GWLP_USERDATA`.
 ///
 /// Boxed and handed to `CreateWindowExW` rather than kept in a global, so two concurrent input windows
@@ -275,20 +358,124 @@ struct WindowState {
     accepted: bool,
 }
 
-/// A [`ForegroundInput`] that draws the Win32 input window.
+/// A [`ForegroundInput`] that draws the Win32 window with a typed field.
 pub(super) struct InputWindow;
 
 impl ForegroundInput for InputWindow {
     fn ask(&self, content: &InputContent) -> InputOutcome {
-        match show(content) {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                // A window that could not be created means the user was never asked, which callers MUST
-                // treat as fail-closed rather than as an empty answer.
-                tracing::warn!(error = %e, "the native input window could not be shown");
-                InputOutcome::Unavailable
-            }
+        let result = show(&spec_for_input(content));
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "the native input window could not be shown");
         }
+        input_outcome_from(result)
+    }
+}
+
+/// Map a field window's result to the caller's outcome.
+///
+/// Pure and separate from [`InputWindow::ask`] so the FAIL-CLOSED property is unit-testable. It is the
+/// distinction that matters here, and it is easy to lose: "the user declined" and "the window never appeared"
+/// are different facts, and only the first is an answer. A caller that renders a cancel as *nothing happened*
+/// would silently swallow a broken prompt if the two collapsed — which is precisely the regression that
+/// reaching this module's error path as a refusal introduced, and that this function exists to pin.
+fn input_outcome_from(result: Result<Answer, windows::core::Error>) -> InputOutcome {
+    match result {
+        Ok(Answer::Affirmed(Some(text))) => InputOutcome::Provided(text),
+        // Submit with an unreadable field is not an empty answer — the caller must not act on it.
+        Ok(Answer::Affirmed(None)) => InputOutcome::Unavailable,
+        Ok(Answer::Refused) => InputOutcome::Cancelled,
+        // Never asked, so never answered. Callers MUST fail closed rather than read a phantom empty string.
+        Err(_) => InputOutcome::Unavailable,
+    }
+}
+
+/// A [`ForegroundWindow`] that draws the same window WITHOUT a field, for the consent prompts.
+///
+/// This replaced `MessageBoxW` (dig_ecosystem#1832). The message box could not relabel its buttons, so every
+/// two-choice window carried a sentence explaining which button meant what; here the labels come straight from
+/// the content, which already held them for macOS and Linux.
+pub(super) struct DialogWindow;
+
+impl ForegroundWindow for DialogWindow {
+    fn show(&self, content: &ConfirmContent) -> WindowIntent {
+        let result = show(&spec_for_confirm(content));
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "the native confirm window could not be shown");
+        }
+        intent_from(result)
+    }
+}
+
+/// Map a consent window's result to the user's intent. Only an affirmative approves; everything else — a
+/// refusal, a closed frame, a window that could not be drawn at all — denies.
+fn intent_from(result: Result<Answer, windows::core::Error>) -> WindowIntent {
+    match result {
+        Ok(Answer::Affirmed(_)) => WindowIntent::Approve,
+        _ => WindowIntent::Deny,
+    }
+}
+
+/// The window an [`InputContent`] draws.
+///
+/// Pure and separate from [`InputWindow::ask`] so the MAPPING is unit-testable. This is the seam where a
+/// field's mask could be silently dropped — `masked` travelling from the content to the field is what
+/// `SPEC.md` §3.1d actually requires, and a window cannot be constructed in a test process to check it any
+/// other way.
+fn spec_for_input(content: &InputContent) -> WindowSpec<'_> {
+    WindowSpec {
+        title: &content.title,
+        heading: &content.heading,
+        body: &content.body,
+        field: Some(FieldSpec {
+            label: &content.field_label,
+            masked: content.masked,
+            revealable: content.revealable,
+        }),
+        // A field window's affirmative is its own submit verb; refusing to type is a plain Cancel.
+        buttons: ButtonSpec::Decide {
+            affirm: content.submit,
+            refuse: "Cancel",
+            refusal_is_default: false,
+        },
+    }
+}
+
+/// The window a [`ConfirmContent`] draws.
+///
+/// Pure and separate from [`DialogWindow::show`] for the same reason, and it carries more weight: this is
+/// where dig_ecosystem#1773 (a notice gets ONE button, not a Cancel nobody reads) and dig_ecosystem#1799 (a
+/// destroy pre-selects its refusal) are decided. Both defects were originally invisible to every test and
+/// visible only in a screenshot; expressing them as a value a test can read is what makes them checkable.
+fn spec_for_confirm(content: &ConfirmContent) -> WindowSpec<'_> {
+    let buttons = match &content.presentation {
+        Presentation::Acknowledge => ButtonSpec::Acknowledge {
+            label: content.action,
+        },
+        Presentation::Decide { refusal_is_default } => ButtonSpec::Decide {
+            affirm: content.action,
+            refuse: refusal_label(content.action),
+            refusal_is_default: *refusal_is_default,
+        },
+    };
+    WindowSpec {
+        title: &content.title,
+        heading: &content.heading,
+        body: &content.body,
+        field: None,
+        buttons,
+    }
+}
+
+/// What the refusing button says, given the affirmative label.
+///
+/// Plain "Cancel" is right for an authorization the user just asked for — refusing costs a retry, and the
+/// word is unambiguous. It is WRONG for a destroy: next to a button reading "Destroy", "Cancel" names the
+/// dialog rather than the outcome, and the outcome is what a person hesitating over an irreversible action is
+/// looking for. So that one window says what keeping the account is.
+fn refusal_label(affirm: &str) -> &'static str {
+    match affirm {
+        "Destroy" => "Keep my account",
+        _ => "Cancel",
     }
 }
 
@@ -323,11 +510,32 @@ fn class_registered() -> bool {
     })
 }
 
-/// Create the window, pump its messages until the user answers, and report what they typed.
-fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
-    if !class_registered() {
-        return Ok(InputOutcome::Unavailable);
+/// The window class, as a `Result` rather than a `bool`.
+///
+/// # Why this is not `if !class_registered() { ... }`
+///
+/// A class that will not register means the window was never drawn and the user was never asked — which is
+/// NOT the same as them declining. While unifying these windows (dig_ecosystem#1832) that early return was
+/// briefly written as a refusal, which reaches `InputOutcome::Cancelled`: a caller that renders a cancel as
+/// *the user chose not to, show nothing* would then silently swallow a completely broken prompt.
+///
+/// Returning a `Result` and using `?` at the call site makes that mistake **unexpressible** rather than merely
+/// tested against. A test cannot reach this branch — `RegisterClassW` succeeds in a test process, so the
+/// failure is not forceable in-process — so the protection has to be structural: `?` on a `Result<(), _>`
+/// cannot produce an `Answer`, and both callers already route every `Err` to their fail-closed outcome.
+fn require_class() -> Result<(), windows::core::Error> {
+    match class_registered() {
+        true => Ok(()),
+        false => Err(windows::core::Error::new(
+            E_FAIL,
+            "the DIG window class could not be registered",
+        )),
     }
+}
+
+/// Create the window, pump its messages until the user answers, and report what they chose.
+fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
+    require_class()?;
     // SAFETY: every call below is a documented Win32 entry point given valid handles; the boxed state is
     // adopted by the window on WM_NCCREATE and dropped exactly once, at the end of this function, after
     // the message loop has returned and the window has been destroyed.
@@ -337,9 +545,8 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
         let m = Metrics::for_display(dpi_for_cursor_monitor(), GetSystemMetrics(SM_CXSCREEN));
         let font = gui_font(m.font_body, FW_NORMAL.0 as i32);
         let heading_font = gui_font(m.font_heading, FW_SEMIBOLD.0 as i32);
-        let field_height = field_height(content, m);
-        let body = body_height(content, m);
-        let height = window_height(content, m);
+        let body = body_height(spec, m);
+        let height = window_height(spec, m);
         let (x, y) = centred(m.width, height);
 
         let mut state = Box::new(WindowState {
@@ -350,11 +557,9 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
         let state_ptr: *mut WindowState = &mut *state;
 
         let window = CreateWindowExW(
-            // Topmost, because an input window the browser or the tray can hide is an input window the
-            // user never answers.
-            WS_EX_TOPMOST,
+            window_ex_style(),
             CLASS_NAME,
-            &HSTRING::from(content.title.as_str()),
+            &HSTRING::from(spec.title),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WINDOW_STYLE(0),
             x,
             y,
@@ -381,88 +586,142 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
 
         let mut top = m.margin;
         let inner = m.width - m.margin * 4;
-        add_static(&heading_ctx, &content.heading, top, inner, m.heading_line);
+        add_static(&heading_ctx, spec.heading, top, inner, m.heading_line);
         top += m.heading_line + m.margin / 2;
-        add_static(&ctx, &content.body, top, inner, body);
+        add_static(&ctx, spec.body, top, inner, body);
         top += body + m.margin / 2;
-        add_static(&ctx, &content.field_label, top, inner, m.line);
-        top += m.line;
 
-        let edit = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            windows::core::w!("EDIT"),
-            PCWSTR::null(),
-            edit_style(content),
-            m.margin,
-            top,
-            inner,
-            field_height,
-            window,
-            HMENU::default(),
-            instance,
-            None,
-        )?;
-        set_font(edit, font);
-        (*state_ptr).edit = edit;
-        top += field_height + m.margin / 2;
+        if let Some(field) = &spec.field {
+            add_static(&ctx, field.label, top, inner, m.line);
+            top += m.line;
 
-        // §3.1d's reveal-while-typing affordance: masked by default, un-maskable on purpose. Without it a
-        // person typing 24 words into a masked field cannot check their own work, which is how a restore
-        // fails for a reason nobody can see.
-        if content.revealable {
-            add_checkbox(&ctx, "Show the words while I type", REVEAL_ID, top, inner);
+            let edit = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                windows::core::w!("EDIT"),
+                PCWSTR::null(),
+                edit_style(field),
+                m.margin,
+                top,
+                inner,
+                m.field_single,
+                window,
+                HMENU::default(),
+                instance,
+                None,
+            )?;
+            set_font(edit, font);
+            (*state_ptr).edit = edit;
+            top += m.field_single + m.margin / 2;
+
+            // §3.1d's reveal-while-typing affordance: masked by default, un-maskable on purpose. Without it
+            // a person typing 24 words into a masked field cannot check their own work, which is how a
+            // restore fails for a reason nobody can see.
+            if field.revealable {
+                add_checkbox(&ctx, "Show the words while I type", REVEAL_ID, top, inner);
+                top += m.line + m.margin / 2;
+            }
+            top += m.margin / 2;
         }
-        top += reveal_height(content, m) + m.margin / 2;
 
-        // Submit is the DEFAULT button, so Enter on a single-line field submits; Cancel sits left of it so
-        // the destructive-adjacent action is never under the cursor's resting position.
-        let buttons_left = m.width - m.margin * 3 - m.button_w * 2;
-        add_button(
-            &ctx,
-            "Cancel",
-            IDCANCEL.0,
-            buttons_left,
-            top,
-            BS_PUSHBUTTON as u32,
-        );
-        add_button(
-            &ctx,
-            content.submit,
-            IDOK.0,
-            buttons_left + m.button_w + m.margin,
-            top,
-            BS_DEFPUSHBUTTON as u32,
-        );
+        // Both windows right-align to the SAME edge — the text block's — so a notice's lone button sits
+        // exactly where a decision's affirmative does. Derived once rather than per-arm: two arms computing
+        // the same edge from different expressions is an alignment that drifts the first time one is edited.
+        let affirm_left = affirm_button_left(m);
+        match &spec.buttons {
+            ButtonSpec::Acknowledge { label } => {
+                add_button(
+                    &ctx,
+                    label,
+                    IDOK.0,
+                    affirm_left,
+                    top,
+                    BS_DEFPUSHBUTTON as u32,
+                );
+            }
+            ButtonSpec::Decide {
+                affirm,
+                refuse,
+                refusal_is_default,
+            } => {
+                // Refuse sits LEFT of affirm so the affirmative is never under the cursor's resting
+                // position, and `refusal_is_default` decides which one a bare Enter activates.
+                let (refuse_style, affirm_style) = match refusal_is_default {
+                    true => (BS_DEFPUSHBUTTON, BS_PUSHBUTTON),
+                    false => (BS_PUSHBUTTON, BS_DEFPUSHBUTTON),
+                };
+                add_button(
+                    &ctx,
+                    refuse,
+                    IDCANCEL.0,
+                    affirm_left - m.button_w - m.margin,
+                    top,
+                    refuse_style as u32,
+                );
+                add_button(&ctx, affirm, IDOK.0, affirm_left, top, affirm_style as u32);
+            }
+        }
 
         let _ = ShowWindow(window, SW_SHOW);
         let _ = SetForegroundWindow(window);
-        let _ = SetFocus(edit);
+        // Focus the field when there is one; otherwise let the default button hold it, so Enter and Space
+        // both do what the window's default says — including refusing, on a destroy.
+        focus_first(window, (*state_ptr).edit, &spec.buttons);
 
         pump(window);
 
         // The window is gone by now (WM_DESTROY ran), so the state is ours again.
         let _ = DeleteObject(font);
-        let outcome = match (state.accepted, state.submitted.take()) {
-            (true, Some(text)) => InputOutcome::Provided(text),
-            // Submit with an unreadable field is not an empty answer — the caller must not act on it.
-            (true, None) => InputOutcome::Unavailable,
-            _ => InputOutcome::Cancelled,
+        let _ = DeleteObject(heading_font);
+        let answer = match state.accepted {
+            true => Answer::Affirmed(state.submitted.take()),
+            false => Answer::Refused,
         };
-        Ok(outcome)
+        Ok(answer)
     }
 }
 
-/// How tall the input field is. One line always — see [`edit_style`] for why it cannot be multiline.
-fn field_height(_content: &InputContent, m: Metrics) -> i32 {
-    m.field_single
+/// Give the keyboard to the field, or — when there is none — to whichever button the spec made default.
+///
+/// A window with no field that focuses nothing would leave Enter doing nothing at all, and Space landing
+/// wherever Windows happened to put the focus. On the destroy window that difference is the whole point of
+/// `refusal_is_default`, so the focus has to follow it.
+///
+/// # Safety
+///
+/// `window` must be live; `edit` is either a live `EDIT` control or the default (absent) handle.
+unsafe fn focus_first(window: HWND, edit: HWND, buttons: &ButtonSpec<'_>) {
+    if !edit.is_invalid() {
+        let _ = SetFocus(edit);
+        return;
+    }
+    let default_id = match buttons {
+        ButtonSpec::Decide {
+            refusal_is_default: true,
+            ..
+        } => IDCANCEL.0,
+        _ => IDOK.0,
+    };
+    if let Ok(button) = GetDlgItem(window, default_id) {
+        let _ = SetFocus(button);
+    }
 }
 
-/// The vertical space the reveal checkbox occupies, or zero when the window does not offer one.
-fn reveal_height(content: &InputContent, m: Metrics) -> i32 {
-    match content.revealable {
-        true => m.line + m.margin / 2,
-        false => 0,
+/// The vertical space the field, its label and its reveal checkbox occupy together, or zero on a window with
+/// no field.
+///
+/// One block rather than three functions because they stand or fall together: a window with no field has no
+/// label to place above it and no checkbox to place below it, and the three heights being separate is how a
+/// window ends up reserving room for a control it never draws.
+fn field_block_height(spec: &WindowSpec<'_>, m: Metrics) -> i32 {
+    let Some(field) = &spec.field else {
+        return 0;
+    };
+    // The label line, the field itself (always one line — see `edit_style`), and the gap beneath.
+    let mut height = m.line + m.field_single + m.margin / 2;
+    if field.revealable {
+        height += m.line + m.margin / 2;
     }
+    height
 }
 
 /// How tall the body paragraph's `STATIC` control must be to show all of `body`.
@@ -482,24 +741,22 @@ fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
     (wrapped as i32).clamp(layout::BODY_MIN_LINES, layout::BODY_MAX_LINES)
 }
 
-/// The pixel height of the body block for `content`.
-fn body_height(content: &InputContent, m: Metrics) -> i32 {
-    body_lines(&content.body, m.width - m.margin * 4, m) * m.line
+/// The pixel height of the body block for `spec`.
+fn body_height(spec: &WindowSpec<'_>, m: Metrics) -> i32 {
+    body_lines(spec.body, m.width - m.margin * 4, m) * m.line
 }
 
 /// The outer window height that fits `content`'s controls, with the caption and frame accounted for.
 ///
 /// A function rather than an expression inline in [`show`] so the layout arithmetic is unit-tested: a window
 /// too short to show its own Submit button — or its own warning — is a defect no compiler catches.
-fn window_height(content: &InputContent, m: Metrics) -> i32 {
+fn window_height(spec: &WindowSpec<'_>, m: Metrics) -> i32 {
     m.chrome
         + m.margin * 5
-        // The heading is its own, taller line; the field label is an ordinary one.
+        // The heading is its own, taller line.
         + m.heading_line
-        + m.line
-        + body_height(content, m)
-        + field_height(content, m)
-        + reveal_height(content, m)
+        + body_height(spec, m)
+        + field_block_height(spec, m)
         + m.button_h
 }
 
@@ -509,10 +766,10 @@ fn window_height(content: &InputContent, m: Metrics) -> i32 {
 /// be masked cannot be multiline — and `SPEC.md` §3.1d requires secret entry to be masked by default. The
 /// field therefore scrolls horizontally, and the reveal checkbox ([`REVEAL_ID`]) is what makes 24 words
 /// checkable rather than typed blind.
-fn edit_style(content: &InputContent) -> WINDOW_STYLE {
+fn edit_style(field: &FieldSpec<'_>) -> WINDOW_STYLE {
     let mut style = WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP;
     style |= WINDOW_STYLE(ES_AUTOHSCROLL as u32);
-    if content.masked {
+    if field.masked {
         style |= WINDOW_STYLE(ES_PASSWORD as u32);
     }
     style
@@ -536,6 +793,31 @@ fn centred_in(width: i32, height: i32, screen_w: i32, screen_h: i32) -> (i32, i3
         return (CW_USEDEFAULT, CW_USEDEFAULT);
     }
     ((screen_w - width) / 2, (screen_h - height) / 2)
+}
+
+/// The left edge of the AFFIRMATIVE button — the rightmost control on every window.
+///
+/// It is flush with the right edge of the text block above it (`margin + inner`, where `inner` is
+/// `width - margin * 4`), so the buttons line up with the heading and body rather than overhanging them.
+/// A notice's single button and a decision's affirmative both sit here, which is what makes the two window
+/// kinds read as one design.
+fn affirm_button_left(m: Metrics) -> i32 {
+    let text_block_right = m.margin + (m.width - m.margin * 4);
+    text_block_right - m.button_w
+}
+
+/// The extended style every DIG window carries.
+///
+/// **Topmost is load-bearing, not cosmetic.** A consent window the triggering browser or the tray can sit on
+/// top of is a consent window the user never answers — and worse, one an attacker can cover while the user
+/// clicks where they think a different button is. The `MessageBoxW` this window replaced got the same property
+/// from `MB_TOPMOST | MB_SETFOREGROUND | MB_SYSTEMMODAL`; here it is `WS_EX_TOPMOST` plus the
+/// `SetForegroundWindow` call in [`show`].
+///
+/// A function rather than a literal at the call site so the property is unit-testable — the equivalent
+/// assertion existed for the message box and would otherwise have been lost with it (dig_ecosystem#1832).
+fn window_ex_style() -> WINDOW_EX_STYLE {
+    WS_EX_TOPMOST
 }
 
 /// The window's message loop, ending when the window posts a quit.
@@ -584,11 +866,15 @@ unsafe extern "system" fn wnd_proc(
             let id = (wparam.0 & 0xFFFF) as i32;
             if id == IDOK.0 {
                 if let Some(state) = state_of(window) {
-                    state.submitted = read_edit(state.edit);
                     state.accepted = true;
-                    // Overwrite the control's OWN copy of the secret before the window goes away, so the
-                    // phrase does not sit in an `EDIT` buffer until the heap happens to be reused.
-                    let _ = SetWindowTextW(state.edit, windows::core::w!(""));
+                    // A window with no field leaves `submitted` as `None`; only a FIELD window's caller
+                    // treats that as unreadable, which is why the distinction lives in `InputWindow::ask`.
+                    if !state.edit.is_invalid() {
+                        state.submitted = read_edit(state.edit);
+                        // Overwrite the control's OWN copy of the secret before the window goes away, so the
+                        // phrase does not sit in an `EDIT` buffer until the heap happens to be reused.
+                        let _ = SetWindowTextW(state.edit, windows::core::w!(""));
+                    }
                 }
                 let _ = DestroyWindow(window);
                 LRESULT(0)
@@ -830,12 +1116,12 @@ mod tests {
     #[test]
     fn the_field_is_masked_exactly_when_the_prompt_asks() {
         assert_ne!(
-            edit_style(&content(true, true)).0 & ES_PASSWORD as u32,
+            edit_style(field_spec(true, true).field.as_ref().unwrap()).0 & ES_PASSWORD as u32,
             0,
             "secret entry is masked by default (§3.1d)"
         );
         assert_eq!(
-            edit_style(&content(false, false)).0 & ES_PASSWORD as u32,
+            edit_style(field_spec(false, false).field.as_ref().unwrap()).0 & ES_PASSWORD as u32,
             0,
             "a field that asked for no mask must not get one"
         );
@@ -846,11 +1132,33 @@ mod tests {
     #[test]
     fn the_reveal_control_takes_space_only_when_it_is_offered() {
         let m = Metrics::for_dpi(BASE_DPI);
-        assert!(reveal_height(&content(true, true), m) > 0);
-        assert_eq!(reveal_height(&content(true, false), m), 0);
         assert!(
-            window_height(&content(true, true), m) > window_height(&content(true, false), m),
+            field_block_height(&field_spec(true, true), m)
+                > field_block_height(&field_spec(true, false), m)
+        );
+        assert!(
+            window_height(&field_spec(true, true), m) > window_height(&field_spec(true, false), m),
             "the window must grow to fit the checkbox"
+        );
+    }
+
+    /// **The whole point of one window serving both roles.** A window with NO field must reserve no room for
+    /// one — no label line, no field, no checkbox — so a notice is not a phrase window with a hole in it.
+    ///
+    /// Paired with the test above: together they pin that the field block is present exactly when a field is,
+    /// which neither assertion could establish alone.
+    #[test]
+    fn a_window_with_no_field_reserves_no_room_for_one() {
+        let m = Metrics::for_dpi(BASE_DPI);
+        let message = message_spec(
+            "Something happened.",
+            ButtonSpec::Acknowledge { label: "OK" },
+        );
+
+        assert_eq!(field_block_height(&message, m), 0);
+        assert!(
+            window_height(&message, m) < window_height(&field_spec(false, false), m),
+            "a fieldless window must be shorter than the same window with a field"
         );
     }
 
@@ -869,7 +1177,7 @@ mod tests {
     fn every_field_is_a_tab_stop() {
         for masked in [true, false] {
             assert_ne!(
-                edit_style(&content(masked, masked)).0 & WS_TABSTOP.0,
+                edit_style(field_spec(masked, masked).field.as_ref().unwrap()).0 & WS_TABSTOP.0,
                 0,
                 "masked={masked}"
             );
@@ -905,17 +1213,17 @@ mod tests {
              do not matter.\n\nUse the words DIG gave you. A recovery phrase from a Chia wallet such \
              as Sage is NOT a DIG recovery phrase — DIG would accept it and build a DIFFERENT, empty \
              account from it.";
-        let content = InputContent {
-            body: REAL_BODY.to_string(),
-            ..content(false, true)
+        let spec = WindowSpec {
+            body: REAL_BODY,
+            ..field_spec(false, true)
         };
 
         let m = Metrics::for_dpi(BASE_DPI);
         const OLD_FIXED_HEIGHT: i32 = 84;
         assert!(
-            body_height(&content, m) > OLD_FIXED_HEIGHT,
+            body_height(&spec, m) > OLD_FIXED_HEIGHT,
             "the real copy does not fit the height that clipped it: {}",
-            body_height(&content, m)
+            body_height(&spec, m)
         );
         // And every line of it must be accounted for: the estimate is per-character, so this is the check
         // that the arithmetic reaches the last sentence rather than merely being "bigger".
@@ -933,9 +1241,9 @@ mod tests {
     #[test]
     fn a_short_body_stays_compact_and_a_huge_one_is_bounded() {
         let m = Metrics::for_dpi(BASE_DPI);
-        let short = InputContent {
-            body: "One line.".to_string(),
-            ..content(false, false)
+        let short = WindowSpec {
+            body: "One line.",
+            ..field_spec(false, false)
         };
         assert_eq!(
             body_height(&short, m),
@@ -943,9 +1251,10 @@ mod tests {
             "a one-line body must not reserve the tall block"
         );
 
-        let huge = InputContent {
-            body: "word ".repeat(2000),
-            ..content(false, false)
+        let long_body = "word ".repeat(2000);
+        let huge = WindowSpec {
+            body: &long_body,
+            ..field_spec(false, false)
         };
         assert_eq!(
             body_height(&huge, m),
@@ -984,7 +1293,7 @@ mod tests {
     /// would clip its own controls.
     #[test]
     fn the_window_grows_with_dpi_for_the_same_content() {
-        let c = content(false, true);
+        let c = field_spec(false, true);
         let h96 = window_height(&c, Metrics::for_dpi(96));
         let h150 = window_height(&c, Metrics::for_dpi(144));
         let h200 = window_height(&c, Metrics::for_dpi(192));
@@ -1095,6 +1404,297 @@ mod tests {
             submit: "Restore",
             masked,
             revealable,
+        }
+    }
+
+    // ──────────────── The presentation guarantees, carried over from the MessageBoxW window ────────────────
+    //
+    // These previously asserted on `MESSAGEBOX_STYLE` bits in `windows.rs`. That window is gone
+    // (dig_ecosystem#1832), so the guarantees are re-pinned here on `ButtonSpec` — the value that replaced the
+    // bits. Asserting on named buttons is STRONGER than asserting on flags: `MB_OKCANCEL` said only "two
+    // buttons", while these say two buttons WITH THESE WORDS and THIS default.
+
+    /// **Regression.** A window that could NOT BE DRAWN must not be reported as the user declining.
+    ///
+    /// Introduced while unifying the windows (dig_ecosystem#1832): the class-registration failure path started
+    /// returning a refusal, which reaches `InputOutcome::Cancelled`. That is a different fact from
+    /// `Unavailable` — a caller that treats a cancel as *the user chose not to, show nothing* would silently
+    /// swallow a completely broken prompt. `Unavailable`'s own contract says callers MUST fail closed and never
+    /// read it as an empty answer, so the two cannot be merged.
+    ///
+    /// Caught by review rather than by a test. Note what this test does and does not cover: it pins the
+    /// MAPPING, not the call site where the mistake was actually made. That branch is unreachable from a test
+    /// (`RegisterClassW` succeeds in a test process), so the call site is protected structurally instead —
+    /// [`require_class`] returns a `Result` and `show` uses `?`, so "cannot draw" can no longer be spelled as
+    /// an `Answer` at all. This test guards the other half: that an `Err`, however it arrives, stays
+    /// fail-closed.
+    #[test]
+    fn a_window_that_could_not_be_drawn_is_unavailable_not_cancelled() {
+        let failed = || Err(windows::core::Error::new(E_FAIL, "no window"));
+
+        assert!(
+            matches!(input_outcome_from(failed()), InputOutcome::Unavailable),
+            "a window that never appeared was never answered"
+        );
+        // The control: a REAL cancel is still a cancel. Without this pair, mapping everything to
+        // `Unavailable` would satisfy the assertion above while destroying the ordinary path.
+        assert!(matches!(
+            input_outcome_from(Ok(Answer::Refused)),
+            InputOutcome::Cancelled
+        ));
+        assert!(matches!(
+            input_outcome_from(Ok(Answer::Affirmed(Some(Zeroizing::new("x".to_string()))))),
+            InputOutcome::Provided(_)
+        ));
+        // Submit with a field that could not be read is NOT an empty answer.
+        assert!(matches!(
+            input_outcome_from(Ok(Answer::Affirmed(None))),
+            InputOutcome::Unavailable
+        ));
+    }
+
+    /// The same property on the consent path: every non-affirmative, including an undrawable window, DENIES.
+    #[test]
+    fn a_consent_window_denies_unless_it_was_affirmed() {
+        assert_eq!(
+            intent_from(Err(windows::core::Error::new(E_FAIL, "no window"))),
+            WindowIntent::Deny,
+            "a consent window that never appeared cannot have consented"
+        );
+        assert_eq!(intent_from(Ok(Answer::Refused)), WindowIntent::Deny);
+        assert_eq!(
+            intent_from(Ok(Answer::Affirmed(None))),
+            WindowIntent::Approve,
+            "a fieldless window affirms with no text, which is not a failure"
+        );
+    }
+
+    /// Every window's buttons align with its text block, and a notice's lone button sits exactly where a
+    /// decision's affirmative does — so the two kinds are visibly one design rather than two dialogs.
+    ///
+    /// Pinned at several scales because the alignment is arithmetic over scaled metrics: a rounding change
+    /// that broke it at 150% only would otherwise be invisible.
+    #[test]
+    fn the_buttons_align_with_the_text_block_at_every_scale() {
+        for dpi in [96, 144, 192, 240] {
+            let m = Metrics::for_dpi(dpi);
+            let text_block_right = m.margin + (m.width - m.margin * 4);
+
+            assert_eq!(
+                affirm_button_left(m) + m.button_w,
+                text_block_right,
+                "the affirmative's right edge must meet the text block's at {dpi} DPI"
+            );
+            // ...and the refusal, one button plus a gap to its left, must still start inside the frame.
+            assert!(
+                affirm_button_left(m) - m.button_w - m.margin > m.margin,
+                "two buttons must fit beside each other at {dpi} DPI"
+            );
+        }
+    }
+
+    /// **Carried over from the message box.** EVERY window — notice or decision, with a field or without —
+    /// must be forced above the windows that triggered it.
+    ///
+    /// The message-box version of this test asserted `MB_TOPMOST | MB_SETFOREGROUND | MB_SYSTEMMODAL`. Losing
+    /// it silently with that window is exactly how a security property decays into a comment.
+    #[test]
+    fn every_window_is_topmost() {
+        assert_ne!(
+            window_ex_style().0 & WS_EX_TOPMOST.0,
+            0,
+            "a consent window the browser can cover is not a consent window"
+        );
+    }
+
+    /// **Regression (#1773).** An informational window must not offer a Cancel that nothing reads. "Your DIG
+    /// ID is on the clipboard" is not a question.
+    #[test]
+    fn a_notice_gets_exactly_one_button() {
+        let content = ConfirmContent::notice(&crate::confirm::NoticePrompt {
+            title: "DIG — DIG ID copied",
+            heading: "Your DIG ID is on the clipboard.",
+            body: "abc123",
+            acknowledge: "OK",
+        });
+        let spec = spec_for_confirm(&content);
+
+        assert!(
+            matches!(spec.buttons, ButtonSpec::Acknowledge { label: "OK" }),
+            "a notice has nothing to cancel, so it gets one dismiss button and no refusal"
+        );
+        assert!(spec.field.is_none(), "a notice asks for nothing typed");
+    }
+
+    /// **The control that makes the test above load-bearing.** A GENUINE either/or still gets two buttons.
+    /// Without this pair, flattening every window to a single OK — destroying the reveal gate's and the
+    /// retention claim's real way out — would pass just as happily.
+    #[test]
+    fn an_authorization_keeps_both_buttons() {
+        let content = ConfirmContent::reveal(&crate::confirm::RevealPrompt {
+            secret: "your recovery phrase",
+        });
+        let spec = spec_for_confirm(&content);
+
+        assert!(
+            matches!(
+                spec.buttons,
+                ButtonSpec::Decide {
+                    affirm: "Reveal",
+                    refuse: "Cancel",
+                    refusal_is_default: false,
+                }
+            ),
+            "declining a reveal must stay possible, on a button that says so"
+        );
+    }
+
+    /// **Regression (#1799).** A destroy window must pre-select its REFUSAL, so a bare Enter on a focused
+    /// window cannot confirm irreversible key destruction.
+    ///
+    /// It also checks the label, which the message-box window could not have: next to a button reading
+    /// "Destroy", a way out labelled "Cancel" names the dialog rather than the outcome.
+    #[test]
+    fn a_destroy_window_pre_selects_its_refusal_and_names_it() {
+        let content = ConfirmContent::destroy(&crate::confirm::DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: false,
+        });
+        let spec = spec_for_confirm(&content);
+
+        match spec.buttons {
+            ButtonSpec::Decide {
+                affirm,
+                refuse,
+                refusal_is_default,
+            } => {
+                assert!(
+                    refusal_is_default,
+                    "Enter on a destroy window must not destroy an account"
+                );
+                assert_eq!(affirm, "Destroy");
+                assert_eq!(
+                    refuse, "Keep my account",
+                    "the way out must name the outcome, not the dialog"
+                );
+            }
+            ButtonSpec::Acknowledge { .. } => panic!("a destroy must keep a real way out"),
+        }
+    }
+
+    /// **The control for #1799.** An ORDINARY authorization keeps its AFFIRMATIVE as the default: the user
+    /// just asked for the action, and making every signature need a deliberate extra click would be its own
+    /// defect. Without this pair, defaulting EVERY window to its refusal would satisfy the test above.
+    #[test]
+    fn an_ordinary_authorization_keeps_its_affirmative_as_the_default() {
+        for content in [
+            ConfirmContent::reveal(&crate::confirm::RevealPrompt {
+                secret: "your recovery phrase",
+            }),
+            ConfirmContent::notice(&crate::confirm::NoticePrompt {
+                title: "t",
+                heading: "h",
+                body: "b",
+                acknowledge: "OK",
+            }),
+        ] {
+            let refuses_by_default = matches!(
+                spec_for_confirm(&content).buttons,
+                ButtonSpec::Decide {
+                    refusal_is_default: true,
+                    ..
+                }
+            );
+            assert!(
+                !refuses_by_default,
+                "only a destroy pre-selects its refusal: {}",
+                content.title
+            );
+        }
+    }
+
+    /// **Regression (#1752), at the window seam.** A CLAIM's first-person label reaches the BUTTON verbatim.
+    ///
+    /// This is what replaced the choice sentence the message box needed. The old defect — *"Choose OK to I
+    /// have written these down"* — is now structurally impossible, because there is no sentence to slot a
+    /// label into; this pins that the label arrives unaltered.
+    #[test]
+    fn a_claim_puts_its_own_words_on_the_button() {
+        let content = ConfirmContent::claim(&crate::confirm::ClaimPrompt {
+            title: "DIG — Confirm you saved it",
+            heading: "Do you have your 24 words written down?",
+            body: "...",
+            affirm: "Yes, I have them",
+        });
+        let spec = spec_for_confirm(&content);
+
+        assert!(matches!(
+            spec.buttons,
+            ButtonSpec::Decide {
+                affirm: "Yes, I have them",
+                ..
+            }
+        ));
+    }
+
+    /// **`SPEC.md` §3.1d at the mapping seam.** The content's mask and reveal flags must REACH the field.
+    ///
+    /// `content` is the `InputContent` the tray actually builds, so this covers the one step the layout tests
+    /// cannot: a mapping that dropped `masked` would put a recovery phrase on screen while every
+    /// `edit_style` test still passed, because those test the field they are handed.
+    #[test]
+    fn the_input_mapping_carries_the_mask_and_reveal_flags_to_the_field() {
+        for (masked, revealable) in [(true, true), (true, false), (false, true), (false, false)] {
+            let c = content(masked, revealable);
+            let spec = spec_for_input(&c);
+            let field = spec
+                .field
+                .as_ref()
+                .expect("an input window always has a field");
+
+            assert_eq!(field.masked, masked, "masked={masked}");
+            assert_eq!(field.revealable, revealable, "revealable={revealable}");
+            assert_eq!(field.label, "Your 24 words:");
+        }
+        let c = content(true, true);
+        assert!(matches!(
+            spec_for_input(&c).buttons,
+            ButtonSpec::Decide {
+                affirm: "Restore",
+                ..
+            }
+        ));
+    }
+
+    /// A field window's spec, the shape `InputWindow::ask` builds.
+    fn field_spec(masked: bool, revealable: bool) -> WindowSpec<'static> {
+        WindowSpec {
+            title: "DIG — Restore",
+            heading: "Type your 24-word recovery phrase.",
+            body: "Words in order, separated by spaces.",
+            field: Some(FieldSpec {
+                label: "Your 24 words:",
+                masked,
+                revealable,
+            }),
+            buttons: ButtonSpec::Decide {
+                affirm: "Restore",
+                refuse: "Cancel",
+                refusal_is_default: false,
+            },
+        }
+    }
+
+    /// A window with no field, the shape `DialogWindow::show` builds. `body` is borrowed so a test can
+    /// measure how the block grows with real copy.
+    fn message_spec<'a>(body: &'a str, buttons: ButtonSpec<'a>) -> WindowSpec<'a> {
+        WindowSpec {
+            title: "DIG — Notice",
+            heading: "Something happened.",
+            body,
+            field: None,
+            buttons,
         }
     }
 }
