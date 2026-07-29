@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [3.4.0] - 2026-07-29
+
+### Features
+- **tray:** Make every tray entry do what it names, add --version, survive a missing Linux indicator (#37)
+
 ## [3.3.0] - 2026-07-28
 
 ### Features
