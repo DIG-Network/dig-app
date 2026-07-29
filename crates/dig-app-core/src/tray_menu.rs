@@ -1,40 +1,68 @@
-//! The tray menu **model** — what the user can see and do, as data (dig_ecosystem#1752).
+//! The tray menu **model** — what the user can do, as data (dig_ecosystem#1800).
 //!
 //! # Why the menu is a model and not just code in the shell
 //!
-//! Before this module the tray offered two actions, "Lock now" and "Quit DIG", so a person who
-//! installed DIG had no way to create an account, see their recovery phrase, or find out what state
-//! they were in. Growing that into a real menu means real rules — *which* items appear, which are
-//! enabled, and what each one says — and rules that live inside a platform event loop cannot be tested.
+//! Rules about which items appear, which are enabled, and what each one says cannot be tested from
+//! inside a platform event loop. So the shell ([`dig-app`'s `tray` module](../../dig_app/index.html))
+//! asks [`build`] for a [`MenuModel`] and does nothing but render it and dispatch the [`TrayAction`]s
+//! back. Every rule below is unit-tested here.
 //!
-//! So the shell ([`dig-app`'s `tray` module](../../dig_app/index.html)) asks [`build`] for a
-//! [`MenuModel`] and does nothing but render it and dispatch the [`TrayAction`]s back. Every rule below
-//! is unit-tested here.
+//! # The three craft rules this module enforces (§6.1 `professional-ui`)
 //!
-//! # The two craft rules this module enforces (§6.1 `professional-ui`)
+//! **1. A menu item is an ACTION. State is not a menu item.**
 //!
-//! - **Never trap the user.** Every state offers a way forward AND a way out: "Quit DIG" and the log
-//!   folder are always enabled, no matter how badly the account or node is doing, and no action is ever
-//!   the *only* thing on the menu.
-//! - **Say the true state, including the unflattering one.** An account with no recovery phrase is
-//!   labelled as such, in the menu, permanently — not silently treated as safe. A DID that costs money
-//!   to create says so before the user clicks it.
+//! The tray used to open with five greyed rows — the running line, the node line, the account line, the
+//! DIG ID and the on-chain DID — because they were convenient places to print text. A disabled item
+//! means *"something you cannot do right now"*, so using five of them as labels taught every new user
+//! that the app was broken before they read a word. It also forced absurdities: one status row had to be
+//! truncated to 72 characters because a real node diagnosis ran to ~700, and a "Node details…" row was
+//! itself greyed out whenever there was nothing to expand.
+//!
+//! State now lives in the three places a tray application has for it, and the menu holds actions only:
+//!
+//! | What the user needs to know | Where it lives now |
+//! |---|---|
+//! | Am I connected / locked / set up? | the tray ICON — [`status`] picks a [`TrayGlyph`] |
+//! | The one-line summary | the tray TOOLTIP — [`TrayStatus::tooltip`] |
+//! | Everything, in full, untruncated | the `Status and details…` window — [`details_text`] |
+//!
+//! **2. Never trap the user.** Every state offers a way forward AND a way out. `Quit DIG`, the log
+//! folder and `Status and details…` are always clickable, and — the defect this module was rewritten
+//! for — **account management is reachable at all times**: creating, replacing, restoring and removing
+//! an account are offered whenever the host can hold one, never gated on the account being absent.
+//!
+//! **3. A row that IS legitimately disabled says why in its own label.** Two rows are disabled across the
+//! five account states — `Set up my DIG Account (not supported on this system yet)` on a host with no
+//! per-application credential store, and `Show my recovery phrase (unlock first)` while the account is
+//! locked. Both name their own reason, and both sit beside an ENABLED remedy (the management submenu; the
+//! `Unlock…` row directly above), so neither is a dead end. That count is asserted by
+//! [`the_disabled_rows_are_exactly_the_two_that_name_their_reason`], because "rare" is the kind of claim
+//! that drifts silently — an earlier revision of this comment said "exactly one" while the model rendered
+//! two.
+//!
+//! # Destroying custody is deliberately awkward
+//!
+//! [`TrayAction::ReplaceWithNewAccount`], [`TrayAction::ReplaceFromPhrase`] and
+//! [`TrayAction::RemoveAccount`] destroy master key material. They are always REACHABLE — a user who
+//! wants a different account must not have to edit files — but they live in the
+//! `Manage my DIG Account…` submenu rather than the top level, they say "Replace"/"Remove" in their own
+//! labels, and the shell routes each through the biometric authorization seam
+//! ([`confirm_destroy`](crate::confirm::NativeConfirmer::confirm_destroy)), never through a notice or a
+//! claim. See [`crate::account::journey::replace_account`].
 
 use std::fmt;
 
-/// The widest a status row may be, in characters.
+/// The widest the tray TOOLTIP may be, in characters.
 ///
-/// A native tray menu sizes itself to its widest item, so ONE long row stretches the whole menu —
-/// past the screen edge on a real desktop, where it is unreadable and can push the action rows out of
-/// reach. The engine's disconnected reasons are deliberately verbose and actionable (a real one
-/// observed in the field runs to ~700 characters: the control-token explanation, complete with a
-/// reinstall recipe), which is exactly right for a log or a details window and impossible in a menu
-/// row.
+/// The Windows notification area truncates `NOTIFYICONDATA::szTip` at 128 UTF-16 units and simply drops
+/// the rest, so a tooltip built from the engine's disconnected reason (~700 characters in the field)
+/// would be cut at an arbitrary point with no indication anything was missing. Bounding it here makes
+/// the cut deliberate and appends an ellipsis, and [`details_text`] holds the untruncated text one click
+/// away.
 ///
-/// 72 is chosen to sit inside the narrowest surface that must render it — a macOS menu-bar dropdown
-/// near the right edge of a 1280-pt display — with the full text always one click away via
-/// [`TrayAction::ShowNodeDetails`], so nothing is lost by bounding it.
-pub const MAX_STATUS_ROW_CHARS: usize = 72;
+/// 120 leaves room inside the 128-unit budget for the ellipsis and for a multi-byte character sitting on
+/// the boundary.
+pub const MAX_TOOLTIP_CHARS: usize = 120;
 
 /// Where the account is, as far as the user is concerned. This is the four-state async surface for the
 /// account: not-possible-here, none-yet, locked, and live.
@@ -47,6 +75,21 @@ pub enum AccountState {
     Absent,
     /// An account exists but is locked, so nothing can be signed or revealed until it unlocks.
     Locked,
+    /// An account exists at rest but **cannot be opened at all** — its sealed seed will not unlock.
+    ///
+    /// # Why this is its own state and not "locked"
+    ///
+    /// A locked account has a way back in: `Unlock…`. An unopenable one does not, so reporting it as locked
+    /// offers a button that will always fail and says nothing about why. The tray must name the situation and
+    /// route the user to the only remedy there is — replacing the account (dig_ecosystem#1799 review).
+    ///
+    /// The live cause is a **legacy raw-seed blob**: every Windows/macOS host that has ever run dig-app
+    /// auto-enrolled `account.default` at first boot, and those blobs carry the old `DIGVK1` shape. Under
+    /// `dig-account` 0.2 they neither unlock (`SessionError::LegacySeedFormat`) nor re-enrol at the same id
+    /// (`AlreadyExists`) — they are WEDGED, not merely fail-closed. Before this state existed the boot
+    /// swallowed that into a `tracing::warn!` and returned `None`, so the tray reported a locked account and
+    /// the user silently lost signing with no in-app route out. This state is what makes that impossible.
+    Unopenable,
     /// An account is live.
     Unlocked {
         /// Whether a recovery phrase is stored for it. `false` = enrolled before recovery phrases
@@ -55,13 +98,37 @@ pub enum AccountState {
     },
 }
 
-/// Everything the menu is rendered from — one snapshot, read once per repaint.
+impl AccountState {
+    /// Whether an account exists on this host at all (locked or live).
+    ///
+    /// This is the fact the management verbs branch on: with an account present they REPLACE, and
+    /// without one they CREATE. It deliberately does not care whether the account is unlocked — a locked
+    /// account is still custody that a replace would destroy.
+    fn exists(&self) -> bool {
+        matches!(
+            self,
+            Self::Locked | Self::Unopenable | Self::Unlocked { .. }
+        )
+    }
+
+    /// Whether this host can hold an account at all.
+    fn supported(&self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
+/// Everything the tray is rendered from — one snapshot, read once per repaint.
 #[derive(Debug, Clone, Default)]
 pub struct TrayView {
     /// Whether the agent loop is running.
     pub running: bool,
-    /// The node connection line, already summarized by the engine (connecting / connected+detail /
-    /// the actionable reason it is not).
+    /// Whether the agent is talking to a node right now.
+    ///
+    /// Read from the engine's own state rather than sniffed out of [`node`](Self::node), so the icon and
+    /// the tooltip cannot disagree with the engine because a summary's wording changed.
+    pub node_connected: bool,
+    /// The node connection line, already summarized by the engine (connected + detail, or the
+    /// actionable reason it is not).
     pub node: String,
     /// The account's user-visible state.
     pub account: Option<AccountState>,
@@ -70,11 +137,9 @@ pub struct TrayView {
     /// The profile's **minted on-chain** `did:chia:` DID, or `None` when it has none.
     ///
     /// This must be set from evidence that a DID was actually minted on chain — never from a local
-    /// profile reference that merely has DID-shaped text in it. The shell previously filled it from
-    /// `config.active_profile`, a locally-written string; that field is never populated today so the row
-    /// was inert, but the moment profile selection began writing it the tray would have claimed an
-    /// on-chain identity that does not exist. Since minting is unimplemented, the honest value is
-    /// always `None` (see the `never_claims_an_on_chain_did_from_a_local_profile_reference` test).
+    /// profile reference that merely has DID-shaped text in it. Since minting is unimplemented, the
+    /// honest value is always `None` (see the
+    /// `never_claims_an_on_chain_did_from_a_local_profile_reference` test).
     pub did: Option<String>,
 }
 
@@ -83,6 +148,21 @@ impl TrayView {
     fn account(&self) -> AccountState {
         self.account.clone().unwrap_or(AccountState::Absent)
     }
+}
+
+/// What the host holds at rest, independent of any live session.
+///
+/// Three states rather than a `bool`, because "there is an account here that will not open" is a genuinely
+/// different situation from both "no account" and "an account we simply have not unlocked yet" — and
+/// collapsing it into either produces a tray that lies (see [`AccountState::Unopenable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtRest {
+    /// No account is enrolled on this host.
+    None,
+    /// An account is enrolled. Whether it is currently unlocked is the session's business.
+    Present,
+    /// An account is enrolled and an attempt to open it FAILED.
+    PresentButUnopenable,
 }
 
 /// What a live tray session knows about its account — the two facts the state derivation needs.
@@ -126,7 +206,7 @@ impl SessionFacts {
 /// report a lock that is not there and offer no route out of it (`SPEC.md` §3.1c).
 pub fn account_state(
     host_supports_accounts: bool,
-    enrolled: bool,
+    at_rest: AtRest,
     session: Option<SessionFacts>,
 ) -> AccountState {
     if !host_supports_accounts {
@@ -137,53 +217,75 @@ pub fn account_state(
             keys_unlocked: true,
             recoverable,
         }) => AccountState::Unlocked { recoverable },
-        // A session with no keys, or no session at all: locked if there is something to unlock.
+        // A session with no keys is LOCKED even if a previous open attempt failed: we provably opened this
+        // account once, so `Unlock…` is the right offer and the way back in.
         Some(_) => AccountState::Locked,
-        None if enrolled => AccountState::Locked,
-        None => AccountState::Absent,
+        None => match at_rest {
+            AtRest::None => AccountState::Absent,
+            AtRest::Present => AccountState::Locked,
+            AtRest::PresentButUnopenable => AccountState::Unopenable,
+        },
     }
 }
 
 /// One thing the user can click. The shell maps each to its handler; the model never performs an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
-    /// Create a brand-new account: generate a recovery phrase, show it once, confirm, enrol.
+    /// Show everything the tray knows, in full, in a window that can hold it.
+    ///
+    /// This is where the five former greyed status rows went. It is enabled in every state, because what
+    /// it promises — telling the user what is going on — is something the app can always do, even (and
+    /// especially) when everything else is broken.
+    ShowStatus,
+    /// Create the FIRST account on a host that has none: generate a recovery phrase, show it, confirm,
+    /// enrol. Offered only while no account exists; replacing one that does is
+    /// [`ReplaceWithNewAccount`](Self::ReplaceWithNewAccount), which destroys custody and must say so.
     SetUpAccount,
-    /// Restore an existing account from its recovery phrase.
+    /// Restore an account onto a host that has none, from its recovery phrase, typed into a native
+    /// input window.
     RestoreFromPhrase,
+    /// **Destructive.** Discard the account on this host and create a brand-new one in its place.
+    ///
+    /// The remedy for a phrase-less legacy account (there is no way to add words to an existing custody
+    /// root) and for a user who simply wants a different identity. Routed through the biometric
+    /// authorization seam, never a notice.
+    ReplaceWithNewAccount,
+    /// **Destructive.** Discard the account on this host and restore a different one from its recovery
+    /// phrase. Same guard as [`ReplaceWithNewAccount`](Self::ReplaceWithNewAccount).
+    ReplaceFromPhrase,
+    /// **Destructive.** Remove the account from this computer, leaving none.
+    ///
+    /// The way out for someone uninstalling, handing the machine on, or moving their account elsewhere —
+    /// and the reason "manage the current one" does not mean "replace it or live with it".
+    RemoveAccount,
     /// Unlock the existing account.
     Unlock,
     /// Re-seal the session now.
     LockNow,
     /// Re-display the account's recovery phrase, behind unlock + a native confirm.
     ShowRecoveryPhrase,
-    /// Offered ONLY to an account that has no recovery phrase: EXPLAIN the situation and what the one
-    /// remedy would be (creating a new account, which yields a new identity and address).
+    /// Offered ONLY to an account that cannot be opened: explain WHY signing is unavailable and point at
+    /// the only remedy, which is replacing the account.
     ///
-    /// It informs and nothing more — it does NOT replace or delete anything. Destroying an existing
-    /// custody root is not something to reach in one click from a tray menu, so it is deliberately not
-    /// wired here (see [`explain_missing_phrase`](crate::account::journey::explain_missing_phrase),
-    /// whose copy states "Nothing has changed yet").
+    /// This is the in-app route out of the wedged legacy-seed state ([`AccountState::Unopenable`]) that the
+    /// boot previously reduced to a log line.
+    ExplainUnopenable,
+    /// Offered ONLY to an account that has no recovery phrase: explain the situation and point at the
+    /// remedy, which is [`ReplaceWithNewAccount`](Self::ReplaceWithNewAccount) in the management submenu.
+    ///
+    /// It informs and nothing more — it does NOT replace or delete anything. Before #1800 this was a
+    /// dead end: it explained that the only remedy was a new account while the menu offered no way to
+    /// create one. Now it names where that remedy is.
     FixMissingPhrase,
     /// Copy the profile's DIG ID to the clipboard.
     CopyDigId,
     /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
     ///
     /// There is deliberately no `CreateDid` action: `dig-account`'s minter is a Phase-2 stub, so an action
-    /// that mints does not exist and therefore is not offered — not even disabled. A disabled row was the
-    /// first fix (dig_ecosystem#1773), but it left a carefully-written explanation permanently unreachable
-    /// and a control on the menu that could never be clicked. An ENABLED row that promises an explanation
-    /// and delivers one is honest, keeps the user informed that the capability is coming and costs money,
-    /// and — because no `TrayAction` can mint — makes "the tray cannot spend XCH on a DID" structural
-    /// rather than a property of one `enabled: false`.
+    /// that mints does not exist and therefore is not offered — not even disabled. Because no
+    /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
+    /// of one `enabled: false`.
     AboutDid,
-    /// Show the node status line in full, in a window that can hold it.
-    ///
-    /// The menu row is bounded to [`MAX_STATUS_ROW_CHARS`], and the engine's reason for not being
-    /// connected is the one status text that regularly exceeds it — and is also the most actionable
-    /// thing the app can tell a user, since it names what to start or reinstall. This is where the
-    /// bounded row hands back the part it had to cut.
-    ShowNodeDetails,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.
@@ -191,11 +293,14 @@ pub enum TrayAction {
 }
 
 /// A row of the rendered menu.
+///
+/// There is deliberately **no status/label variant**. A native menu offers only clickable items,
+/// separators and submenus, so "read-only text" can only be rendered as a disabled item — which reads as
+/// a broken control (see the module docs). Text belongs in the tooltip or the
+/// `Status and details…` window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuRow {
-    /// Non-clickable status text.
-    Status(String),
-    /// A visual divider.
+    /// A visual divider grouping the rows around it.
     Separator,
     /// A clickable item.
     Action {
@@ -204,8 +309,15 @@ pub enum MenuRow {
         /// Its user-facing label.
         label: String,
         /// Whether it is clickable right now. A disabled item still SHOWS, so the menu's shape is
-        /// stable and the user can see the capability exists.
+        /// stable — and its label must state WHY it cannot be used.
         enabled: bool,
+    },
+    /// A nested menu, so rare or destructive verbs stay reachable without lengthening the top level.
+    Submenu {
+        /// The parent row's label.
+        label: String,
+        /// Its contents, in render order.
+        rows: Vec<MenuRow>,
     },
 }
 
@@ -218,6 +330,14 @@ impl MenuRow {
             enabled,
         }
     }
+
+    /// A submenu row.
+    fn submenu(label: impl Into<String>, rows: Vec<MenuRow>) -> Self {
+        MenuRow::Submenu {
+            label: label.into(),
+            rows,
+        }
+    }
 }
 
 /// The complete menu, in render order.
@@ -228,12 +348,13 @@ pub struct MenuModel {
 }
 
 impl MenuModel {
-    /// The row for `action`, if the menu offers it. Used by the shell to bind handlers, and by the
-    /// tests to assert on one item without indexing into a list.
+    /// The row for `action`, wherever it is — top level or inside a submenu.
+    ///
+    /// Searching recursively is what lets every query below stay indifferent to WHERE a verb was placed:
+    /// moving `Remove this account…` into the management submenu must not change whether the model
+    /// "offers" it.
     pub fn find(&self, wanted: TrayAction) -> Option<&MenuRow> {
-        self.rows
-            .iter()
-            .find(|row| matches!(row, MenuRow::Action { action, .. } if *action == wanted))
+        find_action(&self.rows, wanted)
     }
 
     /// Whether `action` is present AND clickable.
@@ -256,45 +377,189 @@ impl MenuModel {
             _ => None,
         }
     }
+
+    /// Every action row in the whole menu, submenus included, as (label, enabled) pairs.
+    ///
+    /// Used by the tests that must hold for EVERY row rather than a named one — "no row mentions a
+    /// terminal", "every disabled row says why".
+    pub fn all_actions(&self) -> Vec<(&str, bool)> {
+        let mut out = Vec::new();
+        collect_actions(&self.rows, &mut out);
+        out
+    }
+}
+
+/// Depth-first search for the row carrying `wanted`.
+fn find_action(rows: &[MenuRow], wanted: TrayAction) -> Option<&MenuRow> {
+    for row in rows {
+        match row {
+            MenuRow::Action { action, .. } if *action == wanted => return Some(row),
+            MenuRow::Submenu { rows, .. } => {
+                if let Some(found) = find_action(rows, wanted) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Flatten every action row, submenus included.
+fn collect_actions<'a>(rows: &'a [MenuRow], out: &mut Vec<(&'a str, bool)>) {
+    for row in rows {
+        match row {
+            MenuRow::Action { label, enabled, .. } => out.push((label.as_str(), *enabled)),
+            MenuRow::Submenu { rows, .. } => collect_actions(rows, out),
+            MenuRow::Separator => {}
+        }
+    }
+}
+
+/// Which picture the tray icon shows — the app's state, at a glance, with no menu open.
+///
+/// A tray application's icon is the only thing a user sees without clicking, so it must carry the state
+/// that used to be printed in greyed menu rows. The variants are ordered by how much they need the
+/// user's attention, and [`status`] picks the FIRST one that applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayGlyph {
+    /// The agent has not finished starting.
+    Starting,
+    /// This host cannot hold an account, or has none — nothing works until that is resolved, and it is
+    /// the user's next action.
+    NeedsAccount,
+    /// An account exists but is locked: signing and revealing are unavailable until it unlocks.
+    Locked,
+    /// Unlocked, but not talking to a node — content cannot be read.
+    NoNode,
+    /// Everything is working.
+    Ready,
+}
+
+/// The whole non-menu surface of the tray: its picture and its tooltip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayStatus {
+    /// The icon to paint.
+    pub glyph: TrayGlyph,
+    /// The hover text, bounded to [`MAX_TOOLTIP_CHARS`].
+    pub tooltip: String,
+}
+
+/// Pick the icon and tooltip for `view`.
+///
+/// The glyph reports the most actionable problem, not the prettiest fact: a locked account with a
+/// healthy node is [`TrayGlyph::Locked`], because the lock is what stops the user doing anything.
+pub fn status(view: &TrayView) -> TrayStatus {
+    let account = view.account();
+    let glyph = if !view.running {
+        TrayGlyph::Starting
+    } else if matches!(account, AccountState::Unopenable) || !account.exists() {
+        TrayGlyph::NeedsAccount
+    } else if !matches!(account, AccountState::Unlocked { .. }) {
+        TrayGlyph::Locked
+    } else if !view.node_connected {
+        TrayGlyph::NoNode
+    } else {
+        TrayGlyph::Ready
+    };
+    TrayStatus {
+        glyph,
+        tooltip: bound_tooltip(&tooltip_text(view, glyph)),
+    }
+}
+
+/// The unbounded tooltip text: the headline for `glyph`, then the node line.
+///
+/// Two lines rather than five, because a tooltip is glanced at, not read. Everything else is in
+/// [`details_text`].
+fn tooltip_text(view: &TrayView, glyph: TrayGlyph) -> String {
+    let headline = match glyph {
+        TrayGlyph::Starting => "DIG is starting…",
+        TrayGlyph::NeedsAccount => match view.account() {
+            AccountState::Unsupported => "DIG — accounts are not available on this system yet",
+            AccountState::Unopenable => "DIG — your account cannot be opened",
+            _ => "DIG — no account set up yet",
+        },
+        TrayGlyph::Locked => "DIG — your account is locked",
+        TrayGlyph::NoNode => "DIG — no node connection",
+        TrayGlyph::Ready => "DIG — ready",
+    };
+    // The node line is dropped from the tooltip when it would only repeat the headline; two lines saying
+    // the same thing waste the whole budget.
+    if matches!(glyph, TrayGlyph::NoNode) || view.node.is_empty() {
+        headline.to_string()
+    } else {
+        format!("{headline}\n{}", first_line(&view.node))
+    }
+}
+
+/// Fit `full` into the tooltip budget, appending an ellipsis when anything was left out.
+///
+/// Counts and cuts by CHARACTER, not by byte — the connected summary contains `·`, so a byte-indexed
+/// slice would panic on a multi-byte boundary.
+fn bound_tooltip(full: &str) -> String {
+    if full.chars().count() <= MAX_TOOLTIP_CHARS {
+        return full.to_string();
+    }
+    let kept: String = full.chars().take(MAX_TOOLTIP_CHARS).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// The first line of a possibly-multi-line summary.
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
+}
+
+/// The full, untruncated text the `Status and details…` window shows.
+///
+/// This is the home of the five status rows the menu used to carry, and the reason nothing is lost by
+/// removing them: a window has no width limit, so the engine's ~700-character diagnosis — the single most
+/// actionable message the app can produce, naming the node to start or reinstall — arrives whole instead
+/// of cut at 72 characters.
+pub fn details_text(view: &TrayView) -> String {
+    let account = view.account();
+    let mut out = String::new();
+    out.push_str(if view.running {
+        "DIG agent: running\n"
+    } else {
+        "DIG agent: starting…\n"
+    });
+    out.push_str(&format!("Account: {account}\n"));
+    out.push_str(&format!(
+        "DIG ID: {}\n",
+        view.profile_id.as_deref().unwrap_or("not set up yet")
+    ));
+    out.push_str(&format!(
+        "On-chain DID: {}\n\nNode\n{}",
+        did_label(view.did.as_deref()),
+        if view.node.is_empty() {
+            "The node connection has not been probed yet."
+        } else {
+            &view.node
+        }
+    ));
+    out
 }
 
 /// Build the menu for `view`.
 ///
-/// The order is deliberate: **what is true** (status), then **what to do about the account**, then
-/// **identity**, then the always-available escapes. A person opening the tray reads their state before
-/// they are offered a choice.
+/// The shape is fixed, so the menu never moves under the user's cursor between repaints: the details
+/// window, then the ONE primary account action, then the identity actions, then the management submenu,
+/// then the always-available escapes.
 pub fn build(view: &TrayView) -> MenuModel {
     let account = view.account();
     let mut rows = vec![
-        MenuRow::Status(running_label(view.running).to_string()),
-        MenuRow::Status(status_row_text(&view.node)),
-        MenuRow::Status(format!("Account: {account}")),
-        MenuRow::Status(format!(
-            "DIG ID: {}",
-            dig_id_label(view.profile_id.as_deref())
-        )),
-        MenuRow::Status(format!("On-chain DID: {}", did_label(view.did.as_deref()))),
+        MenuRow::action(TrayAction::ShowStatus, "Status and details…", true),
         MenuRow::Separator,
     ];
-    rows.extend(account_actions(&account));
-    rows.push(MenuRow::Separator);
+    rows.extend(primary_account_actions(&account));
     rows.extend(identity_actions(view, &account));
     rows.push(MenuRow::Separator);
-    // The diagnostics block. `Node details…` appears ONLY when the bounded status row actually cut
-    // something; otherwise the row above already says everything the window would.
-    //
-    // It is OMITTED rather than shown-disabled, because this module's own rule is that a disabled row must
-    // say WHY it is disabled (see `the_did_label_states_both_its_unavailability_and_its_cost`) and there is
-    // no sensible reason to print here: "nothing was truncated" is a fact about the row above, not about
-    // this control. A greyed "Node details…" with no explanation is a small mystery on every healthy
-    // install; absent, the menu simply has nothing more to offer, which is the truth.
-    if was_truncated(&view.node) {
-        rows.push(MenuRow::action(
-            TrayAction::ShowNodeDetails,
-            "Node details…",
-            true,
-        ));
-    }
+    rows.push(MenuRow::submenu(
+        "Manage my DIG Account",
+        management_actions(&account),
+    ));
+    rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
     rows.push(MenuRow::action(
@@ -306,116 +571,156 @@ pub fn build(view: &TrayView) -> MenuModel {
     MenuModel { rows }
 }
 
-/// The set-up / unlock / lock block, which depends only on where the account is.
-fn account_actions(account: &AccountState) -> Vec<MenuRow> {
-    let can_create = matches!(account, AccountState::Absent);
-    let unlocked = matches!(account, AccountState::Unlocked { .. });
-    vec![
-        MenuRow::action(
+/// The ONE thing the account most needs from the user right now, at the top of the menu.
+///
+/// Exactly one row, chosen by state, rather than the four-row set-up/restore/unlock/lock block where
+/// three were always greyed. The rare verbs moved to [`management_actions`], which is what lets this
+/// stay a single, always-clickable row.
+fn primary_account_actions(account: &AccountState) -> Vec<MenuRow> {
+    match account {
+        // The one honestly-disabled row left in the menu, and it names its own reason (rule 3).
+        AccountState::Unsupported => vec![MenuRow::action(
             TrayAction::SetUpAccount,
-            "Set up my DIG Account…",
-            can_create,
-        ),
-        // The label names the TERMINAL because that is where restore actually happens. A tray menu has
-        // no text field, so this item cannot take 24 words itself — it explains and hands over the exact
-        // `dign account restore` command. Labelling it plainly "Restore from a recovery phrase…" promised
-        // an action the item does not perform, which reads as a broken menu entry even though a window
-        // does open (dig_ecosystem#1773). Tray-native restore needs a real per-OS input dialog; until
-        // that exists the label tells the truth rather than the intention.
-        MenuRow::action(
-            TrayAction::RestoreFromPhrase,
-            "Restore from a recovery phrase (in a terminal)…",
-            can_create,
-        ),
-        MenuRow::action(
-            TrayAction::Unlock,
-            "Unlock…",
-            matches!(account, AccountState::Locked),
-        ),
-        MenuRow::action(TrayAction::LockNow, "Lock now", unlocked),
-    ]
+            "Set up my DIG Account (not supported on this system yet)",
+            false,
+        )],
+        AccountState::Absent => vec![
+            MenuRow::action(TrayAction::SetUpAccount, "Set up my DIG Account…", true),
+            MenuRow::action(
+                TrayAction::RestoreFromPhrase,
+                "Restore from a recovery phrase…",
+                true,
+            ),
+        ],
+        AccountState::Locked => vec![MenuRow::action(TrayAction::Unlock, "Unlock…", true)],
+        // NOT an `Unlock…` row: unlocking is what already failed, so offering it again would be a button
+        // guaranteed to fail. The one thing the app can do here is explain and point at the remedy.
+        AccountState::Unopenable => vec![MenuRow::action(
+            TrayAction::ExplainUnopenable,
+            "This account cannot be opened — what to do…",
+            true,
+        )],
+        AccountState::Unlocked { .. } => {
+            vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)]
+        }
+    }
 }
 
-/// The identity block: the recovery phrase, the DIG ID, and the on-chain DID.
+/// The identity block: the recovery phrase and the DIG ID.
+///
+/// Omitted entirely when there is no account to have an identity — five greyed rows for an account that
+/// does not exist is the defect this rewrite removes, and a user with no account has nothing to do here.
 ///
 /// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering
 /// a disabled "show my recovery phrase" to someone who has none tells them nothing about why.
 fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
-    let mut rows = match account {
-        AccountState::Unlocked { recoverable: false } => vec![MenuRow::action(
+    if !account.exists() {
+        return Vec::new();
+    }
+    let mut rows = vec![MenuRow::Separator];
+    match account {
+        // An account that will not open cannot have its phrase read either — the vault is sealed under the
+        // same seed. The primary row above already explains the situation, so nothing is added here.
+        AccountState::Unopenable => rows.clear(),
+        AccountState::Unlocked { recoverable: false } => rows.push(MenuRow::action(
             TrayAction::FixMissingPhrase,
             "This account has NO recovery phrase — what to do…",
             true,
-        )],
-        _ => vec![MenuRow::action(
+        )),
+        // Locked: the row stays, so the capability is visibly there, and its label names the ONE thing
+        // standing in the way — which the enabled `Unlock…` row directly above then does (rule 3). This is
+        // one of the two legitimately-disabled rows in the whole surface; see the module docs.
+        AccountState::Locked => rows.push(MenuRow::action(
+            TrayAction::ShowRecoveryPhrase,
+            "Show my recovery phrase (unlock first)",
+            false,
+        )),
+        _ => rows.push(MenuRow::action(
             TrayAction::ShowRecoveryPhrase,
             "Show my recovery phrase…",
             matches!(account, AccountState::Unlocked { recoverable: true }),
-        )],
-    };
-    rows.push(MenuRow::action(
-        TrayAction::CopyDigId,
-        "Copy my DIG ID",
-        view.profile_id.is_some(),
-    ));
-    // On-chain minting is not implemented (`dig-account`'s minter is a Phase-2 stub), so the menu does not
-    // offer to mint — it offers to EXPLAIN, which is something it can actually do (see
-    // [`TrayAction::AboutDid`] for why an explainer beat the disabled mint row it replaced).
-    //
-    // The label names the cost rather than hiding it in the dialog, so a person knows before they open it
-    // that a DID is a real spend (§3.7 — mainnet is real money), and names it optional so an absent DID
-    // never reads as something they have failed to do.
-    rows.push(MenuRow::action(
-        TrayAction::AboutDid,
-        "About on-chain DIDs (optional, costs XCH)…",
-        true,
-    ));
+        )),
+    }
+    if view.profile_id.is_some() {
+        rows.push(MenuRow::action(
+            TrayAction::CopyDigId,
+            "Copy my DIG ID",
+            true,
+        ));
+    }
     rows
 }
 
-/// Fit `full` into one status row: its first line, bounded to [`MAX_STATUS_ROW_CHARS`].
+/// The `Manage my DIG Account` submenu — **reachable in every state**, which is the whole point.
 ///
-/// Counts and cuts by CHARACTER, not by byte — the connected summary contains `·`, so a byte-indexed
-/// slice would panic on a multi-byte boundary. The ellipsis is what tells the reader there is more,
-/// and [`TrayAction::ShowNodeDetails`] is where they get it.
-fn status_row_text(full: &str) -> String {
-    let first_line = full.lines().next().unwrap_or("");
-    if first_line.chars().count() <= MAX_STATUS_ROW_CHARS && first_line == full {
-        return full.to_string();
+/// Before #1800, `Set up` and `Restore` were enabled only while `account == Absent`, so the machine this
+/// was measured on — which had an account with no recovery phrase — offered setup greyed, restore greyed,
+/// show-phrase greyed, and a single explainer whose advice ("create a new account") named a control that
+/// was greyed out. Four dead rows and no way forward.
+///
+/// The verbs here are therefore gated on their REAL precondition — whether an account exists, which
+/// decides whether the verb CREATES or REPLACES — never on it being absent.
+fn management_actions(account: &AccountState) -> Vec<MenuRow> {
+    // A host with no credential store can neither create nor destroy an account, so the submenu holds
+    // only what it can actually deliver: the explanation.
+    if !account.supported() {
+        return vec![MenuRow::action(TrayAction::AboutDid, DID_LABEL, true)];
     }
-    let kept: String = first_line.chars().take(MAX_STATUS_ROW_CHARS).collect();
-    format!("{}…", kept.trim_end())
-}
-
-/// Whether [`status_row_text`] would have to leave something out of the row — i.e. whether a details
-/// window has anything to add.
-fn was_truncated(full: &str) -> bool {
-    status_row_text(full) != full
-}
-
-/// The agent's own liveness line.
-fn running_label(running: bool) -> &'static str {
-    if running {
-        "DIG — running"
+    let mut rows = if account.exists() {
+        vec![
+            MenuRow::action(
+                TrayAction::ReplaceWithNewAccount,
+                "Replace this account with a NEW one…",
+                true,
+            ),
+            MenuRow::action(
+                TrayAction::ReplaceFromPhrase,
+                "Replace it with an account from a recovery phrase…",
+                true,
+            ),
+            MenuRow::action(
+                TrayAction::RemoveAccount,
+                "Remove this account from this computer…",
+                true,
+            ),
+        ]
     } else {
-        "DIG — starting…"
+        // With no account there is nothing to replace, so the create/restore verbs read plainly — and
+        // they are the SAME actions the top level offers, so the submenu does not repeat them.
+        Vec::new()
+    };
+    if !rows.is_empty() {
+        rows.push(MenuRow::Separator);
     }
+    rows.push(MenuRow::action(TrayAction::AboutDid, DID_LABEL, true));
+    rows
 }
 
-/// A DIG ID abbreviated for a menu row. The full value goes to the clipboard; a 64-character hex key
-/// pasted into a tray menu is unreadable and would push the menu off the screen.
-fn dig_id_label(profile_id: Option<&str>) -> String {
-    match profile_id {
-        Some(id) if id.len() > 16 => format!("{}…{}", &id[..8], &id[id.len() - 8..]),
-        Some(id) => id.to_string(),
-        None => "(not set up yet)".to_string(),
-    }
-}
+/// The DID explainer's label.
+///
+/// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
+/// DID is a real spend (§3.7 — mainnet is real money), and names it optional so an absent DID never reads
+/// as something they have failed to do. It must not promise to CREATE one: nothing can mint yet.
+const DID_LABEL: &str = "About on-chain DIDs (optional, costs XCH)…";
 
 /// The DID line. Absent is the NORMAL state — minting one costs money and is never automatic — so it is
 /// phrased as a choice not yet made, not as an error.
 fn did_label(did: Option<&str>) -> String {
     did.unwrap_or("not created yet (optional)").to_string()
+}
+
+/// A DIG ID abbreviated for display beside a full copy. The full value goes to the clipboard and into
+/// the details window; this is for anywhere a 96-character hex key would not fit.
+pub fn short_dig_id(profile_id: &str) -> String {
+    if profile_id.len() > 16 {
+        format!(
+            "{}…{}",
+            &profile_id[..8],
+            &profile_id[profile_id.len() - 8..]
+        )
+    } else {
+        profile_id.to_string()
+    }
 }
 
 /// What to tell a user whose tray icon never appeared, for `os`, given the shell's `reason`.
@@ -443,8 +748,8 @@ pub fn tray_unavailable_advice(reason: &str, os: crate::Os) -> String {
     };
     format!(
         "DIG is running, but its menu-bar icon could not be shown ({reason}), so the DIG menu is \
-         not reachable on this desktop.{cause}\n\nUntil that is fixed, use the `dign` command-line \
-         tool for your account: `dign account status` and `dign account restore`."
+         not reachable on this desktop.{cause}\n\nRestart DIG once that is fixed — every account \
+         action lives in the DIG menu."
     )
 }
 
@@ -454,6 +759,7 @@ impl fmt::Display for AccountState {
             AccountState::Unsupported => "not available on this system yet",
             AccountState::Absent => "not set up yet",
             AccountState::Locked => "locked",
+            AccountState::Unopenable => "cannot be opened on this computer",
             AccountState::Unlocked { recoverable: true } => "unlocked",
             AccountState::Unlocked { recoverable: false } => "unlocked — NO recovery phrase",
         };
@@ -465,46 +771,199 @@ impl fmt::Display for AccountState {
 mod tests {
     use super::*;
 
+    /// Every account state, so a rule can be asserted across all of them rather than on one fixture.
+    ///
+    /// Iterating is what makes the rules below load-bearing: the trap this module was rewritten for
+    /// (`can_create = account == Absent`) looked correct from an `Absent` fixture and was wrong in every
+    /// other state, which is where real users live.
+    const EVERY_STATE: [AccountState; 6] = [
+        AccountState::Unsupported,
+        AccountState::Absent,
+        AccountState::Locked,
+        AccountState::Unopenable,
+        AccountState::Unlocked { recoverable: true },
+        AccountState::Unlocked { recoverable: false },
+    ];
+
+    /// The states in which an account EXISTS — the ones the old gate locked out of management.
+    const STATES_WITH_AN_ACCOUNT: [AccountState; 4] = [
+        AccountState::Locked,
+        // The wedged legacy-seed state is deliberately IN this list: an account that cannot be opened is
+        // exactly the one a user most needs to be able to replace.
+        AccountState::Unopenable,
+        AccountState::Unlocked { recoverable: true },
+        AccountState::Unlocked { recoverable: false },
+    ];
+
     fn view(account: AccountState) -> TrayView {
         TrayView {
             running: true,
-            node: "Node: connected".to_string(),
+            node_connected: true,
+            node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
             account: Some(account),
             profile_id: Some("a".repeat(96)),
             did: None,
         }
     }
 
-    /// The regression this whole module exists for: the tray must offer the account journey, not just
-    /// lock + quit. Named for the gap so it is obvious what breaks if these rows disappear.
+    // ---- Rule 1: a menu item is an ACTION. ----
+
+    /// **The headline regression (#1800).** No row may exist purely to display text.
+    ///
+    /// Asserted structurally — `MenuRow` has no status variant, so this is a compile-time guarantee that
+    /// this test restates as an executable one: every row is a separator, an action, or a submenu.
+    /// A future lane reaching for "just one greyed label" has to change the type to do it.
     #[test]
-    fn the_menu_offers_the_account_journey_not_just_lock_and_quit() {
-        let menu = build(&view(AccountState::Absent));
-        for action in [
-            TrayAction::SetUpAccount,
-            TrayAction::RestoreFromPhrase,
-            TrayAction::Unlock,
-            TrayAction::LockNow,
-            TrayAction::CopyDigId,
-            TrayAction::AboutDid,
-            TrayAction::OpenLogs,
-            TrayAction::Quit,
-        ] {
-            assert!(menu.offers(action), "the menu must offer {action:?}");
+    fn the_menu_contains_only_actions_separators_and_submenus() {
+        for account in EVERY_STATE {
+            for row in &build(&view(account.clone())).rows {
+                match row {
+                    MenuRow::Separator | MenuRow::Action { .. } | MenuRow::Submenu { .. } => {}
+                }
+            }
         }
     }
 
-    /// Never trap the user: from EVERY account state, the escapes stay clickable. Iterating all states
-    /// is the point — a single-state fixture could not catch an escape that is disabled in one of them.
+    /// The five facts that used to be greyed menu rows must all still be reachable — in the details
+    /// window. Removing them from the menu is only correct because nothing was lost.
+    #[test]
+    fn every_fact_the_status_rows_carried_is_in_the_details_window() {
+        let mut v = view(AccountState::Unlocked { recoverable: false });
+        v.did = Some("did:chia:1abc".to_string());
+        let details = details_text(&v);
+
+        assert!(details.contains("running"), "{details}");
+        assert!(
+            details.contains("unlocked — NO recovery phrase"),
+            "{details}"
+        );
+        assert!(
+            details.contains(&"a".repeat(96)),
+            "the DIG ID must be here IN FULL, not abbreviated: {details}"
+        );
+        assert!(details.contains("did:chia:1abc"), "{details}");
+        assert!(details.contains("Node v0.65.0"), "{details}");
+    }
+
+    /// The details window is the one surface with no width limit, so it must carry the engine's real
+    /// diagnosis WHOLE. The fixture is the ~700-character control-token reason observed from a live run —
+    /// the text the old 72-character menu row had to throw away.
+    #[test]
+    fn the_details_window_carries_the_full_untruncated_node_diagnosis() {
+        let observed = "No node: the node at http://dig.local refused this app (the node refused the \
+             request: control.* requires the local control token (X-Dig-Control-Token header or \
+             params._control_token, from C:\\ProgramData\\DigNode\\control-token), or a paired \
+             controller token (see `dig-node pair`). no control token found at \
+             C:\\ProgramData\\DigNode\\control-token. Start the node so it mints one (`dig-node run`, \
+             or `dig-node start` for the installed service), then retry.)";
+        assert!(
+            observed.chars().count() > MAX_TOOLTIP_CHARS * 3,
+            "fixture guard: the point is that real reasons are FAR over any row/tooltip bound, got {}",
+            observed.chars().count()
+        );
+
+        let mut v = view(AccountState::Locked);
+        v.node = observed.to_string();
+        let details = details_text(&v);
+
+        assert!(
+            details.contains(observed),
+            "the diagnosis must arrive whole: {details}"
+        );
+        // And the tooltip — the bounded surface — must NOT, which is what makes the window load-bearing.
+        assert!(status(&v).tooltip.chars().count() <= MAX_TOOLTIP_CHARS + 1);
+    }
+
+    /// `Status and details…` is clickable in every state, because explaining what is wrong is the one
+    /// thing that must work when everything else is wrong.
+    #[test]
+    fn the_details_window_is_reachable_in_every_state() {
+        for account in EVERY_STATE {
+            assert!(
+                build(&view(account.clone())).is_enabled(TrayAction::ShowStatus),
+                "{account:?}"
+            );
+        }
+    }
+
+    // ---- Rule 2: never trap the user. Account management is ALWAYS available. ----
+
+    /// **The trap this rewrite exists to fix (#1800/#1799).** On the machine this was measured on, an
+    /// account existed with no recovery phrase, so `Set up`, `Restore` and `Show phrase` were ALL greyed
+    /// and the one live row explained that the remedy was a new account — which nothing could create.
+    ///
+    /// So: in every state where an account EXISTS, a way to replace it and a way to remove it must be
+    /// clickable. Iterating the three account-present states is what makes this load-bearing — the old
+    /// rule was satisfied by `Absent` alone, which is the one state a real user is not in.
+    #[test]
+    fn an_existing_account_can_always_be_replaced_or_removed() {
+        for account in STATES_WITH_AN_ACCOUNT {
+            let menu = build(&view(account.clone()));
+            for action in [
+                TrayAction::ReplaceWithNewAccount,
+                TrayAction::ReplaceFromPhrase,
+                TrayAction::RemoveAccount,
+            ] {
+                assert!(
+                    menu.is_enabled(action),
+                    "{account:?}: {action:?} must be reachable — an account the user cannot change is a trap"
+                );
+            }
+        }
+    }
+
+    /// The control that proves the test above is reading `exists` rather than always enabling the
+    /// destructive verbs: with NO account there is nothing to replace or remove, so those rows are absent
+    /// entirely (not greyed — a greyed "Remove this account" on a machine with no account is a mystery,
+    /// and rule 3 would demand a reason there is none to give).
+    #[test]
+    fn a_host_with_no_account_offers_creation_and_no_destruction() {
+        let menu = build(&view(AccountState::Absent));
+
+        assert!(menu.is_enabled(TrayAction::SetUpAccount));
+        assert!(menu.is_enabled(TrayAction::RestoreFromPhrase));
+        for action in [
+            TrayAction::ReplaceWithNewAccount,
+            TrayAction::ReplaceFromPhrase,
+            TrayAction::RemoveAccount,
+        ] {
+            assert!(
+                !menu.offers(action),
+                "{action:?} has nothing to act on when no account exists"
+            );
+        }
+    }
+
+    /// A phrase-less account is told so AND pointed at the remedy — and the remedy must be a row that is
+    /// actually clickable, which is precisely what the measured install lacked.
+    #[test]
+    fn a_phrase_less_account_is_pointed_at_a_remedy_that_is_clickable() {
+        let menu = build(&view(AccountState::Unlocked { recoverable: false }));
+
+        assert!(menu.is_enabled(TrayAction::FixMissingPhrase));
+        assert!(
+            !menu.offers(TrayAction::ShowRecoveryPhrase),
+            "a dead reveal row explains nothing; the remedy row replaces it"
+        );
+        assert!(
+            menu.is_enabled(TrayAction::ReplaceWithNewAccount),
+            "the explainer says the remedy is a new account, so a new account must be creatable"
+        );
+    }
+
+    /// A recoverable account must NOT be nagged with the remedy row — the control that proves the test
+    /// above reads `recoverable` rather than always warning.
+    #[test]
+    fn a_recoverable_account_is_not_shown_the_remedy_row() {
+        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
+        assert!(!menu.offers(TrayAction::FixMissingPhrase));
+        assert!(menu.is_enabled(TrayAction::ShowRecoveryPhrase));
+    }
+
+    /// Never trap the user: from EVERY account state, the escapes stay clickable.
     #[test]
     fn the_escapes_are_enabled_in_every_account_state() {
-        for account in [
-            AccountState::Unsupported,
-            AccountState::Absent,
-            AccountState::Locked,
-            AccountState::Unlocked { recoverable: true },
-            AccountState::Unlocked { recoverable: false },
-        ] {
+        for account in EVERY_STATE {
             let menu = build(&view(account.clone()));
             assert!(
                 menu.is_enabled(TrayAction::Quit),
@@ -517,35 +976,90 @@ mod tests {
         }
     }
 
-    /// **Regression (#1773).** Every ENABLED row must be able to perform what its label says. Restore
-    /// cannot take 24 words from a menu, so its label must say where restore happens instead of promising
-    /// an action the row does not carry out.
+    // ---- Rule 3: no row defers to a terminal, and a disabled row says why. ----
+
+    /// **Regression (#1798).** No row may hand the user off to a command line. The tray IS the app.
+    ///
+    /// Sweeping EVERY label in EVERY state is the point: the defect was one row
+    /// ("Restore from a recovery phrase (in a terminal)…"), and a test naming that row could not stop the
+    /// next one appearing elsewhere.
     #[test]
-    fn the_restore_row_says_where_restoring_actually_happens() {
-        let menu = build(&view(AccountState::Absent));
-        let label = menu.label_of(TrayAction::RestoreFromPhrase).unwrap();
-        assert!(
-            label.contains("terminal"),
-            "an enabled row must not promise more than it does: {label}"
-        );
+    fn no_row_anywhere_defers_to_a_terminal_or_a_command() {
+        for account in EVERY_STATE {
+            for (label, _) in build(&view(account.clone())).all_actions() {
+                let lowered = label.to_lowercase();
+                for banned in ["terminal", "command line", "console", "dign ", "cmd"] {
+                    assert!(
+                        !lowered.contains(banned),
+                        "{account:?}: a tray row must not defer to {banned:?}: {label}"
+                    );
+                }
+            }
+        }
     }
 
+    /// A disabled row must state its own reason, so a greyed control is never an unexplained mystery.
+    ///
+    /// Asserted over every row in every state, which also enforces the design goal that disabled rows are
+    /// now RARE — the only one left is the unsupported-host row.
     #[test]
-    fn setup_and_restore_are_offered_only_when_no_account_exists() {
-        let absent = build(&view(AccountState::Absent));
-        assert!(absent.is_enabled(TrayAction::SetUpAccount));
-        assert!(absent.is_enabled(TrayAction::RestoreFromPhrase));
+    fn every_disabled_row_names_the_reason_it_cannot_be_used() {
+        for account in EVERY_STATE {
+            for (label, enabled) in build(&view(account.clone())).all_actions() {
+                if enabled {
+                    continue;
+                }
+                assert!(
+                    label.contains('(') && label.contains(')'),
+                    "{account:?}: a greyed row must carry its reason in parentheses: {label}"
+                );
+            }
+        }
+    }
+
+    /// A host with no per-application credential store genuinely cannot hold an account — the one
+    /// legitimately-disabled row — and must not be offered destruction verbs either.
+    #[test]
+    fn an_unsupported_host_explains_itself_and_offers_no_account_action() {
+        let menu = build(&view(AccountState::Unsupported));
+
+        let label = menu.label_of(TrayAction::SetUpAccount).unwrap();
+        assert!(!menu.is_enabled(TrayAction::SetUpAccount));
+        assert!(
+            label.contains("not supported on this system yet"),
+            "the one greyed row must say why: {label}"
+        );
+        for action in [
+            TrayAction::ReplaceWithNewAccount,
+            TrayAction::ReplaceFromPhrase,
+            TrayAction::RemoveAccount,
+            TrayAction::ShowRecoveryPhrase,
+        ] {
+            assert!(!menu.is_enabled(action), "{action:?} must be inert here");
+        }
+        // Still not a dead end: the details window and the escapes work.
+        assert!(menu.is_enabled(TrayAction::ShowStatus));
+        assert!(menu.is_enabled(TrayAction::Quit));
+    }
+
+    // ---- The custody gates, unchanged in strictness. ----
+
+    /// The reveal gate: the phrase is offered ONLY to an unlocked, recoverable account.
+    #[test]
+    fn showing_the_phrase_requires_both_unlocked_and_recoverable() {
+        assert!(build(&view(AccountState::Unlocked { recoverable: true }))
+            .is_enabled(TrayAction::ShowRecoveryPhrase));
 
         for account in [
+            AccountState::Absent,
             AccountState::Locked,
-            AccountState::Unlocked { recoverable: true },
+            AccountState::Unsupported,
+            AccountState::Unlocked { recoverable: false },
         ] {
-            let menu = build(&view(account.clone()));
             assert!(
-                !menu.is_enabled(TrayAction::SetUpAccount),
-                "{account:?} must not offer a second enrolment — that would overwrite a custody root"
+                !build(&view(account.clone())).is_enabled(TrayAction::ShowRecoveryPhrase),
+                "{account:?} must not reveal a recovery phrase"
             );
-            assert!(!menu.is_enabled(TrayAction::RestoreFromPhrase));
         }
     }
 
@@ -560,391 +1074,349 @@ mod tests {
         assert!(unlocked.is_enabled(TrayAction::LockNow));
     }
 
-    /// The reveal gate: the phrase is offered ONLY to an unlocked, recoverable account. The fixture
-    /// varies ONE thing at a time across the four combinations, so a rule that ignored either
-    /// `unlocked` or `recoverable` fails here.
-    #[test]
-    fn showing_the_phrase_requires_both_unlocked_and_recoverable() {
-        assert!(build(&view(AccountState::Unlocked { recoverable: true }))
-            .is_enabled(TrayAction::ShowRecoveryPhrase));
-
-        for account in [
-            AccountState::Absent,
-            AccountState::Locked,
-            AccountState::Unsupported,
-        ] {
-            assert!(
-                !build(&view(account.clone())).is_enabled(TrayAction::ShowRecoveryPhrase),
-                "{account:?} must not reveal a recovery phrase"
-            );
-        }
-        // The recoverable=false case swaps the row entirely; see the next test.
-        assert!(!build(&view(AccountState::Unlocked { recoverable: false }))
-            .is_enabled(TrayAction::ShowRecoveryPhrase));
-    }
-
-    /// A phrase-less account is told so, plainly, in two places — the status line and its own action
-    /// row — and is NOT shown a dead "show my recovery phrase" item.
-    #[test]
-    fn a_phrase_less_account_is_named_and_offered_the_remedy() {
-        let menu = build(&view(AccountState::Unlocked { recoverable: false }));
-
-        assert!(menu.is_enabled(TrayAction::FixMissingPhrase));
-        assert!(
-            !menu.offers(TrayAction::ShowRecoveryPhrase),
-            "a dead reveal row explains nothing; the remedy row replaces it"
-        );
-        assert!(
-            menu.rows.contains(&MenuRow::Status(
-                "Account: unlocked — NO recovery phrase".to_string()
-            )),
-            "the status line must state the risk: {:?}",
-            menu.rows
-        );
-    }
-
-    /// A recoverable account must NOT be nagged with the remedy row — the control that proves the test
-    /// above is reading `recoverable` and not simply always showing the warning.
-    #[test]
-    fn a_recoverable_account_is_not_shown_the_remedy_row() {
-        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
-        assert!(!menu.offers(TrayAction::FixMissingPhrase));
-        assert!(menu
-            .rows
-            .contains(&MenuRow::Status("Account: unlocked".to_string())));
-    }
-
-    /// **Regression (#1773).** No tray row may offer to MINT a DID, in any account state — minting does not
-    /// exist (`dig-account`'s minter is a Phase-2 stub), and a control for a capability that cannot run is
-    /// the defect this ticket closes.
-    ///
-    /// Iterating EVERY account state is what makes this load-bearing: the original defect was
-    /// `enabled: unlocked && did.is_none()`, which a fixture in only the locked state would have scored as
-    /// already-correct. The unlocked state is the one that was wrong.
-    ///
-    /// The guarantee is now STRUCTURAL — there is no `TrayAction` that mints at all — so this test also
-    /// guards against a future lane reintroducing one before the minter exists.
-    #[test]
-    fn no_row_offers_to_mint_a_did_because_minting_does_not_exist_yet() {
-        for account in [
-            AccountState::Unsupported,
-            AccountState::Absent,
-            AccountState::Locked,
-            AccountState::Unlocked { recoverable: true },
-            AccountState::Unlocked { recoverable: false },
-        ] {
-            let menu = build(&view(account.clone()));
-            let mints = menu.rows.iter().any(|row| match row {
-                MenuRow::Action { label, .. } => {
-                    let label = label.to_lowercase();
-                    label.starts_with("create") && label.contains("did")
-                }
-                _ => false,
-            });
-            assert!(
-                !mints,
-                "{account:?}: no row may offer to mint a DID: {menu:?}"
-            );
-        }
-    }
-
-    /// The DID row is ENABLED in every state, because what it promises — an explanation — is something it can
-    /// always deliver. A person is entitled to know the capability exists and costs money before it lands.
-    #[test]
-    fn the_did_explainer_is_clickable_in_every_account_state() {
-        for account in [
-            AccountState::Unsupported,
-            AccountState::Absent,
-            AccountState::Locked,
-            AccountState::Unlocked { recoverable: true },
-        ] {
-            assert!(
-                build(&view(account.clone())).is_enabled(TrayAction::AboutDid),
-                "{account:?}: an explanation needs no account to be readable"
-            );
-        }
-    }
-
-    /// The label must carry BOTH facts a person needs before they open it: that a DID costs money (§3.7 —
-    /// mainnet is real money) and that it is optional, so an absent DID never reads as a task they failed to
-    /// do. It must also not promise to CREATE one, since it cannot.
-    #[test]
-    fn the_did_label_names_the_cost_and_stays_optional() {
-        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
-        let label = menu.label_of(TrayAction::AboutDid).unwrap();
-        assert!(
-            label.contains("XCH"),
-            "the label must name the cost, not hide it in a dialog: {label}"
-        );
-        assert!(label.contains("optional"), "{label}");
-        assert!(
-            !label.to_lowercase().starts_with("create"),
-            "an enabled row must not promise an action it cannot perform: {label}"
-        );
-    }
-
-    /// With no minted DID the row must say so rather than showing something DID-shaped.
-    ///
-    /// The model's job is to render what it is given (that is what will display a real minted DID the day
-    /// one exists — `a_minted_did_is_shown_in_full` covers that direction). The rule this pins is the
-    /// other direction: an ABSENT DID must read as an unmade choice, and the shell is what must never
-    /// supply a locally-written profile reference here — see [`TrayView::did`], which is now documented as
-    /// requiring chain evidence, and `snapshot` in the shell, which passes `None` for that reason.
-    #[test]
-    fn an_absent_did_is_never_dressed_up_as_a_minted_one() {
-        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
-        assert!(
-            menu.rows.contains(&MenuRow::Status(
-                "On-chain DID: not created yet (optional)".to_string()
-            )),
-            "with no minted DID the row must say so: {:?}",
-            menu.rows
-        );
-    }
-
-    /// An absent DID reads as an unmade choice, not a failure — it is the normal state.
-    #[test]
-    fn a_missing_did_reads_as_optional_not_broken() {
-        let rows = build(&view(AccountState::Unlocked { recoverable: true })).rows;
-        assert!(rows.contains(&MenuRow::Status(
-            "On-chain DID: not created yet (optional)".to_string()
-        )));
-    }
-
-    #[test]
-    fn a_minted_did_is_shown_in_full() {
-        let did = "did:chia:1abcdef";
-        let menu = build(&TrayView {
-            did: Some(did.to_string()),
-            ..view(AccountState::Unlocked { recoverable: true })
-        });
-        assert!(menu
-            .rows
-            .contains(&MenuRow::Status(format!("On-chain DID: {did}"))));
-    }
-
-    /// A 96-character hex key must be abbreviated — but must keep BOTH ends, so a user can eyeball that
-    /// the id in the menu matches the one they pasted. A prefix-only rendering would fail this.
-    #[test]
-    fn a_long_dig_id_is_abbreviated_at_both_ends() {
-        let id = format!("{}{}{}", "1".repeat(8), "0".repeat(80), "9".repeat(8));
-        let label = dig_id_label(Some(&id));
-        assert_eq!(label, "11111111…99999999");
-        assert!(label.len() < id.len());
-    }
-
-    #[test]
-    fn a_short_dig_id_is_shown_verbatim_and_an_absent_one_is_named() {
-        assert_eq!(dig_id_label(Some("abcd")), "abcd");
-        assert_eq!(dig_id_label(None), "(not set up yet)");
-    }
-
     #[test]
     fn copying_the_dig_id_needs_a_profile() {
         let mut v = view(AccountState::Unlocked { recoverable: true });
         assert!(build(&v).is_enabled(TrayAction::CopyDigId));
         v.profile_id = None;
-        assert!(!build(&v).is_enabled(TrayAction::CopyDigId));
+        assert!(
+            !build(&v).is_enabled(TrayAction::CopyDigId),
+            "there is nothing to copy"
+        );
     }
 
-    /// A host that cannot hold an account says so instead of offering a button that would fail — and
-    /// still offers nothing destructive.
+    /// **Regression (#1773).** No tray row may offer to MINT a DID, in any account state — minting does
+    /// not exist (`dig-account`'s minter is a Phase-2 stub). The guarantee is STRUCTURAL (no `TrayAction`
+    /// mints), so this also guards a future lane reintroducing one before the minter exists.
     #[test]
-    fn an_unsupported_host_explains_itself_and_offers_no_account_action() {
-        let menu = build(&view(AccountState::Unsupported));
-        assert!(menu.rows.contains(&MenuRow::Status(
-            "Account: not available on this system yet".to_string()
-        )));
-        for action in [
-            TrayAction::SetUpAccount,
-            TrayAction::RestoreFromPhrase,
-            TrayAction::Unlock,
-            TrayAction::LockNow,
-            TrayAction::ShowRecoveryPhrase,
-        ] {
-            assert!(!menu.is_enabled(action), "{action:?} must be inert here");
+    fn no_row_offers_to_mint_a_did_because_minting_does_not_exist_yet() {
+        for account in EVERY_STATE {
+            for (label, _) in build(&view(account.clone())).all_actions() {
+                let lowered = label.to_lowercase();
+                assert!(
+                    !(lowered.starts_with("create") && lowered.contains("did")),
+                    "{account:?}: no row may offer to mint a DID: {label}"
+                );
+            }
         }
     }
 
-    /// A node line that fits is passed through unmodified, and the details row is ABSENT — the control that
-    /// proves the bounding below is reading the length rather than always truncating.
-    ///
-    /// Absent, not disabled: a greyed `Node details…` with no reason in its label would be a small mystery on
-    /// every healthy install, and this module's own rule is that a disabled row must say why (#1773 review).
+    /// The DID explainer is reachable in every state — an explanation needs no account to be readable —
+    /// and its label carries both facts a person needs before opening it.
     #[test]
-    fn a_node_line_that_fits_is_passed_through_verbatim_and_offers_no_details_row() {
-        let mut v = view(AccountState::Absent);
-        v.node = "Node: not connected — no node is running on this machine".to_string();
-        assert!(
-            v.node.chars().count() <= MAX_STATUS_ROW_CHARS,
-            "fixture guard"
-        );
+    fn the_did_explainer_is_reachable_everywhere_and_names_its_cost() {
+        for account in EVERY_STATE {
+            let menu = build(&view(account.clone()));
+            assert!(menu.is_enabled(TrayAction::AboutDid), "{account:?}");
+            let label = menu.label_of(TrayAction::AboutDid).unwrap();
+            assert!(label.contains("XCH"), "{account:?}: {label}");
+            assert!(label.contains("optional"), "{account:?}: {label}");
+        }
+    }
 
-        let menu = build(&v);
-        assert!(menu.rows.contains(&MenuRow::Status(v.node.clone())));
+    /// A destructive verb must SAY it is destructive in its own label, so the menu itself is a warning.
+    #[test]
+    fn the_destructive_verbs_name_what_they_destroy() {
+        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
+        for (action, expected) in [
+            (TrayAction::ReplaceWithNewAccount, "Replace"),
+            (TrayAction::ReplaceFromPhrase, "Replace"),
+            (TrayAction::RemoveAccount, "Remove"),
+        ] {
+            let label = menu.label_of(action).unwrap();
+            assert!(
+                label.starts_with(expected),
+                "{action:?} must lead with its verb: {label}"
+            );
+        }
+    }
+
+    /// The destructive verbs live in the submenu, not the top level — reachable, but not somewhere a
+    /// mis-click lands. Asserted on PLACEMENT (the top-level rows), which is the property; a test that
+    /// only checked `is_enabled` would be satisfied by them sitting at the top of the menu.
+    #[test]
+    fn the_destructive_verbs_are_one_level_down_not_on_the_top_level() {
+        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
+        let mut top_level = Vec::new();
+        for row in &menu.rows {
+            if let MenuRow::Action { action, .. } = row {
+                top_level.push(*action);
+            }
+        }
+
+        for action in [
+            TrayAction::ReplaceWithNewAccount,
+            TrayAction::ReplaceFromPhrase,
+            TrayAction::RemoveAccount,
+        ] {
+            assert!(
+                !top_level.contains(&action),
+                "{action:?} destroys custody and must not sit next to Lock now: {top_level:?}"
+            );
+            assert!(
+                menu.is_enabled(action),
+                "{action:?} must still be reachable in the submenu"
+            );
+        }
         assert!(
-            !menu.offers(TrayAction::ShowNodeDetails),
-            "the row already says everything; an unexplained greyed item would add only confusion"
+            top_level.contains(&TrayAction::LockNow),
+            "the primary action stays on the top level: {top_level:?}"
         );
     }
 
-    /// **Regression (#1773).** The row is bounded, because ONE long item stretches the whole native menu
-    /// past the screen edge.
+    /// The top-level menu must stay SHORT — a native menu the length of the old one is a wall of text.
     ///
-    /// The fixture is the REAL disconnected reason observed from a live run — the control-token
-    /// explanation with its reinstall recipe — not a synthetic `"x".repeat(n)`, because its actual length
-    /// (~700 chars, an order of magnitude over the bound) is the fact that makes this a defect rather
-    /// than a nicety.
+    /// The bound is 7, which is what the richest state legitimately needs (details · the primary account
+    /// action · the phrase row · copy-id · the management submenu · logs · quit) and two fewer rows than
+    /// the menu this replaced, which reached 12 with five of them greyed. Every further verb goes in the
+    /// submenu or the details window, which is the rule this number enforces.
     #[test]
-    fn a_long_node_line_is_bounded_and_hands_the_rest_to_a_details_window() {
-        let observed_reason = "No node: the node at http://dig.local refused this app (the node \
-             refused the request: control.* requires the local control token (X-Dig-Control-Token \
-             header or params._control_token, from C:\\ProgramData\\DigNode\\control-token), or a \
-             paired controller token (see `dig-node pair`). no control token found at \
-             C:\\ProgramData\\DigNode\\control-token. Start the node so it mints one (`dig-node run`, \
-             or `dig-node start` for the installed service), then retry.)";
-        assert!(
-            observed_reason.chars().count() > MAX_STATUS_ROW_CHARS * 4,
-            "fixture guard: the point is that real reasons are FAR over the bound, got {}",
-            observed_reason.chars().count()
-        );
-
-        let mut v = view(AccountState::Absent);
-        v.node = observed_reason.to_string();
-        let menu = build(&v);
-
-        let row = menu
-            .rows
-            .iter()
-            .find_map(|row| match row {
-                MenuRow::Status(text) if text.starts_with("No node") => Some(text),
-                _ => None,
-            })
-            .expect("the node row must still be present");
-
-        assert!(
-            row.chars().count() <= MAX_STATUS_ROW_CHARS + 1,
-            "the row must fit the bound (+1 for the ellipsis), got {}: {row}",
-            row.chars().count()
-        );
-        assert!(
-            row.ends_with('…'),
-            "the reader must be told there is more: {row}"
-        );
-        assert!(
-            menu.is_enabled(TrayAction::ShowNodeDetails),
-            "the cut text must be reachable — never trap the user with a truncated diagnosis"
-        );
+    fn the_top_level_menu_stays_short_in_every_state() {
+        for account in EVERY_STATE {
+            let menu = build(&view(account.clone()));
+            let clickable = menu
+                .rows
+                .iter()
+                .filter(|row| matches!(row, MenuRow::Action { .. } | MenuRow::Submenu { .. }))
+                .count();
+            assert!(
+                clickable <= 7,
+                "{account:?}: {clickable} top-level rows is a wall, not a menu"
+            );
+        }
     }
 
-    /// The bound pinned from BOTH sides. A bound tested only from above can only confirm itself: an
-    /// implementation that truncated at 40 would pass the long-line test and fail here.
+    // ---- The tray icon + tooltip: state's new home. ----
+
+    /// The glyph must distinguish all five situations, so the icon genuinely carries the state the menu
+    /// rows used to print. A table over every input combination that matters, because a glyph rule tested
+    /// on one state could collapse every case to `Ready` and still pass.
     #[test]
-    fn the_row_bound_holds_exactly_at_the_limit_and_cuts_one_character_over() {
-        let at_bound = "a".repeat(MAX_STATUS_ROW_CHARS);
+    fn the_glyph_reports_the_most_actionable_problem() {
+        let starting = TrayView {
+            running: false,
+            ..view(AccountState::Unlocked { recoverable: true })
+        };
+        assert_eq!(status(&starting).glyph, TrayGlyph::Starting);
+
+        for account in [AccountState::Absent, AccountState::Unsupported] {
+            assert_eq!(
+                status(&view(account.clone())).glyph,
+                TrayGlyph::NeedsAccount,
+                "{account:?}"
+            );
+        }
+        assert_eq!(status(&view(AccountState::Locked)).glyph, TrayGlyph::Locked);
+
+        let no_node = TrayView {
+            node_connected: false,
+            node: "No node: nothing is listening on this machine".to_string(),
+            ..view(AccountState::Unlocked { recoverable: true })
+        };
+        assert_eq!(status(&no_node).glyph, TrayGlyph::NoNode);
+
         assert_eq!(
-            status_row_text(&at_bound),
-            at_bound,
-            "a line exactly at the bound must not be touched"
+            status(&view(AccountState::Unlocked { recoverable: true })).glyph,
+            TrayGlyph::Ready
         );
-        assert!(!was_truncated(&at_bound));
-
-        let one_over = "a".repeat(MAX_STATUS_ROW_CHARS + 1);
-        assert_ne!(
-            status_row_text(&one_over),
-            one_over,
-            "one character over the bound must be cut"
-        );
-        assert!(was_truncated(&one_over));
     }
 
-    /// Cutting must count CHARACTERS, not bytes: the connected summary contains `·`, so a byte-indexed
+    /// A locked account with a perfectly healthy node still shows LOCKED, because the lock is what stops
+    /// the user. The fixture varies ONLY the account state against an otherwise-ideal world, which is what
+    /// distinguishes this priority rule from an implementation that just reports the node.
+    #[test]
+    fn a_lock_outranks_a_healthy_node_in_the_icon() {
+        let mut v = view(AccountState::Locked);
+        v.node_connected = true;
+        assert_eq!(status(&v).glyph, TrayGlyph::Locked);
+    }
+
+    /// The tooltip must be bounded, because Windows silently truncates `szTip` at 128 units — an
+    /// unbounded tooltip is cut with no ellipsis and no clue anything is missing.
+    ///
+    /// Pinned from BOTH sides: at the bound nothing is touched, one character over is cut. A bound tested
+    /// only from above would pass for an implementation that truncated at 40.
+    #[test]
+    fn the_tooltip_bound_holds_at_the_limit_and_cuts_one_character_over() {
+        let at_bound = "a".repeat(MAX_TOOLTIP_CHARS);
+        assert_eq!(bound_tooltip(&at_bound), at_bound);
+
+        let one_over = "a".repeat(MAX_TOOLTIP_CHARS + 1);
+        let cut = bound_tooltip(&one_over);
+        assert_ne!(cut, one_over);
+        assert!(cut.ends_with('…'), "the reader must be told there is more");
+        assert!(cut.chars().count() <= MAX_TOOLTIP_CHARS + 1);
+    }
+
+    /// Bounding must count CHARACTERS, not bytes: the connected summary contains `·`, so a byte-indexed
     /// slice would panic on a multi-byte boundary. The fixture puts multi-byte characters exactly ACROSS
     /// the cut point, which an all-ASCII fixture could never exercise.
     #[test]
     fn bounding_never_splits_a_multi_byte_character() {
-        let line = "·".repeat(MAX_STATUS_ROW_CHARS * 2);
+        let line = "·".repeat(MAX_TOOLTIP_CHARS * 2);
         assert!(
             line.len() > line.chars().count(),
             "fixture guard: multi-byte"
         );
 
-        let row = status_row_text(&line);
-        assert!(row.chars().count() <= MAX_STATUS_ROW_CHARS + 1);
-        // Reaching here without a panic is half the assertion; the other half is that we kept real
-        // characters rather than mangling them.
-        assert!(row.starts_with('·'), "{row}");
+        let bounded = bound_tooltip(&line);
+        assert!(bounded.chars().count() <= MAX_TOOLTIP_CHARS + 1);
+        assert!(bounded.starts_with('·'), "{bounded}");
     }
 
-    /// A multi-line status collapses to its first line — a menu row cannot show a paragraph, and the
-    /// remaining lines are what the details window is for.
+    /// The tooltip must name the state in words too — the icon alone cannot be read by someone using a
+    /// screen reader or a high-contrast theme that flattens the badge colours (§6.6 a11y).
     #[test]
-    fn a_multi_line_status_shows_only_its_first_line_and_offers_the_rest() {
-        let mut v = view(AccountState::Absent);
-        v.node = "No node: not running\nStart it with `dig-node start`.".to_string();
-        let menu = build(&v);
+    fn the_tooltip_names_the_state_in_words_not_only_in_colour() {
+        for (account, expected) in [
+            (AccountState::Absent, "no account"),
+            (AccountState::Locked, "locked"),
+            (AccountState::Unlocked { recoverable: true }, "ready"),
+        ] {
+            let tooltip = status(&view(account.clone())).tooltip;
+            assert!(
+                tooltip.to_lowercase().contains(expected),
+                "{account:?}: {tooltip}"
+            );
+        }
+    }
 
-        assert!(menu
-            .rows
-            .contains(&MenuRow::Status("No node: not running…".to_string())));
+    /// A tooltip must never say the same thing twice — the node line is dropped when the headline already
+    /// reports the node, so the 120-character budget is not spent repeating itself.
+    #[test]
+    fn a_no_node_tooltip_does_not_repeat_itself() {
+        let v = TrayView {
+            node_connected: false,
+            node: "No node: nothing is listening on this machine".to_string(),
+            ..view(AccountState::Unlocked { recoverable: true })
+        };
+        let tooltip = status(&v).tooltip;
+        assert!(!tooltip.contains('\n'), "one fact, one line: {tooltip:?}");
+        assert!(tooltip.to_lowercase().contains("no node"));
+    }
+
+    /// A healthy tray still shows the node summary on the second line — the control that proves the rule
+    /// above suppresses the line only for the redundant case rather than always.
+    #[test]
+    fn a_healthy_tooltip_carries_the_node_summary() {
+        let tooltip = status(&view(AccountState::Unlocked { recoverable: true })).tooltip;
+        assert!(tooltip.contains("Node v0.65.0"), "{tooltip}");
+    }
+
+    // ---- Presentation helpers. ----
+
+    /// A 96-character hex key must be abbreviated — but must keep BOTH ends, so a user can eyeball that
+    /// the id matches the one they pasted. A prefix-only rendering would fail this.
+    #[test]
+    fn a_long_dig_id_is_abbreviated_at_both_ends() {
+        let id = format!("{}{}{}", "1".repeat(8), "0".repeat(80), "9".repeat(8));
+        assert_eq!(short_dig_id(&id), "11111111…99999999");
+        assert_eq!(short_dig_id("abcd"), "abcd", "a short id is shown verbatim");
+    }
+
+    /// With no minted DID the details window must say so rather than showing something DID-shaped.
+    #[test]
+    fn an_absent_did_is_never_dressed_up_as_a_minted_one() {
+        let details = details_text(&view(AccountState::Unlocked { recoverable: true }));
         assert!(
-            menu.is_enabled(TrayAction::ShowNodeDetails),
-            "the second line must be reachable"
+            details.contains("On-chain DID: not created yet (optional)"),
+            "{details}"
         );
     }
 
+    /// **Regression.** The advice must name the fix, not merely the symptom — and must NOT send the user
+    /// to a `dign` command, because the installed `dign` on a shared bin dir is dig-node's alias, not
+    /// dig-app's CLI (dig_ecosystem#1788), so that advice hands them the wrong tool.
     #[test]
-    fn a_not_yet_running_agent_says_starting() {
-        let mut v = view(AccountState::Absent);
-        v.running = false;
-        assert!(build(&v)
-            .rows
-            .contains(&MenuRow::Status("DIG — starting…".to_string())));
-        v.running = true;
-        assert!(build(&v)
-            .rows
-            .contains(&MenuRow::Status("DIG — running".to_string())));
-    }
-
-    /// The advice must name the fix, not merely the symptom — a user told only "the tray failed" has
-    /// nowhere to go, which is the failure this message exists to prevent.
-    #[test]
-    fn linux_tray_advice_names_the_missing_library_and_a_way_in() {
+    fn linux_tray_advice_names_the_missing_library_and_not_a_wrong_cli() {
         let advice = tray_unavailable_advice("no display", crate::Os::Linux);
         assert!(advice.contains("libayatana-appindicator3-1"), "{advice}");
-        assert!(
-            advice.contains("dign"),
-            "the CLI fallback must be offered: {advice}"
-        );
         assert!(
             advice.contains("no display"),
             "the real reason must survive: {advice}"
         );
+        assert!(
+            !advice.contains("dign"),
+            "`dign` on a shared bin dir is dig-node's alias (#1788), not dig-app's CLI: {advice}"
+        );
     }
 
-    /// The Linux-specific package advice must NOT be shown on Windows/macOS, where it is wrong and
-    /// would send the user chasing a library their OS does not have. Two platforms are needed to see
-    /// this at all — a Linux-only fixture would pass for a function that always appended it.
+    /// The Linux-specific package advice must NOT be shown on Windows/macOS, where it is wrong. Two
+    /// platforms are needed to see this at all — a Linux-only fixture would pass for a function that
+    /// always appended it.
     #[test]
     fn desktop_platforms_get_no_linux_package_advice() {
         for os in [crate::Os::Windows, crate::Os::MacOs] {
             let advice = tray_unavailable_advice("tray build failed", os);
             assert!(!advice.contains("appindicator"), "{os:?}: {advice}");
-            assert!(
-                advice.contains("dign"),
-                "{os:?} still needs the way in: {advice}"
-            );
+            assert!(advice.contains("DIG menu"), "{os:?}: {advice}");
         }
+    }
+
+    // ---- account_state: the lock-state derivation, unchanged. ----
+
+    /// **Regression (#1799 review).** An account that cannot be OPENED must not be reported as merely
+    /// LOCKED, must explain itself, and must be replaceable — the three things the old silent
+    /// `tracing::warn!` denied a user whose legacy raw-seed blob will not unlock.
+    ///
+    /// The fixture is the state itself rather than a boot failure, because the boot is impure; what this
+    /// pins is that the state, once derived, produces a menu with a way OUT. `an_unopenable_account_is_never_
+    /// reported_as_locked` pins the derivation.
+    #[test]
+    fn an_unopenable_account_explains_itself_and_can_be_replaced() {
+        let menu = build(&view(AccountState::Unopenable));
+
+        assert!(
+            menu.is_enabled(TrayAction::ExplainUnopenable),
+            "the user must be told why signing is unavailable"
+        );
+        assert!(
+            !menu.offers(TrayAction::Unlock),
+            "unlocking is what already failed; offering it again is a button guaranteed to fail"
+        );
+        assert!(
+            !menu.offers(TrayAction::ShowRecoveryPhrase),
+            "the phrase vault is sealed under the seed that will not open"
+        );
+        // The remedy, and the escape hatches.
+        assert!(menu.is_enabled(TrayAction::ReplaceWithNewAccount));
+        assert!(menu.is_enabled(TrayAction::ReplaceFromPhrase));
+        assert!(menu.is_enabled(TrayAction::RemoveAccount));
+        assert!(menu.is_enabled(TrayAction::ShowStatus));
+        assert!(menu.is_enabled(TrayAction::Quit));
+    }
+
+    /// The tray must SAY the account cannot be opened, on the surfaces a user actually looks at — not only
+    /// in a log file, which is what the boot did before this state existed.
+    #[test]
+    fn an_unopenable_account_says_so_in_the_tooltip_and_the_details_window() {
+        let view = view(AccountState::Unopenable);
+        let status = status(&view);
+
+        assert_eq!(
+            status.glyph,
+            TrayGlyph::NeedsAccount,
+            "this needs the user, so the icon must say so"
+        );
+        assert!(
+            status.tooltip.to_lowercase().contains("cannot be opened"),
+            "{}",
+            status.tooltip
+        );
+        assert!(
+            details_text(&view).contains("cannot be opened on this computer"),
+            "{}",
+            details_text(&view)
+        );
     }
 
     /// **Regression (#1752 security gate).** After `Lock now` — or an idle auto-lock — the session is
     /// still held but its KEYS are gone. The menu previously keyed on the session's existence, so it
-    /// reported `Account: unlocked`, kept the reveal enabled, and left `Unlock…` disabled: a false state
-    /// report AND a dead end (`SPEC.md` §3.1c).
+    /// reported unlocked, kept the reveal enabled, and left `Unlock…` disabled: a false state report AND
+    /// a dead end (`SPEC.md` §3.1c).
     ///
     /// The fixture varies ONLY `keys_unlocked` across two otherwise identical sessions, because that is
-    /// the single input the bug ignored — a fixture with no session, or with a different `recoverable`,
-    /// could not tell the two apart.
+    /// the single input the bug ignored.
     #[test]
     fn a_session_whose_keys_were_dropped_reports_locked() {
         let unlocked = SessionFacts {
@@ -957,24 +1429,23 @@ mod tests {
         };
 
         assert_eq!(
-            account_state(true, true, Some(unlocked)),
+            account_state(true, AtRest::Present, Some(unlocked)),
             AccountState::Unlocked { recoverable: true }
         );
         assert_eq!(
-            account_state(true, true, Some(after_lock)),
+            account_state(true, AtRest::Present, Some(after_lock)),
             AccountState::Locked,
             "a session that has dropped its keys is LOCKED, not unlocked"
         );
     }
 
-    /// The user-visible consequence of the state above, asserted on the MENU rather than the enum: after
-    /// Lock now the reveal must be gone and `Unlock…` must be the way back in. This is the assertion that
-    /// would have caught the defect on stage.
+    /// The user-visible consequence, asserted on the MENU: after Lock now the reveal must be gone and
+    /// `Unlock…` must be the way back in.
     #[test]
     fn the_menu_after_lock_now_offers_unlock_and_no_reveal() {
         let after_lock = account_state(
             true,
-            true,
+            AtRest::Present,
             Some(SessionFacts {
                 keys_unlocked: false,
                 recoverable: true,
@@ -982,54 +1453,55 @@ mod tests {
         );
         let menu = build(&view(after_lock));
 
-        assert!(
-            menu.is_enabled(TrayAction::Unlock),
-            "the way back in must be clickable"
-        );
-        assert!(
-            !menu.is_enabled(TrayAction::ShowRecoveryPhrase),
-            "a locked account must not offer to reveal its phrase"
-        );
-        assert!(
-            !menu.is_enabled(TrayAction::LockNow),
-            "there is nothing left to lock"
-        );
-        assert!(
-            menu.rows
-                .contains(&MenuRow::Status("Account: locked".to_string())),
-            "the status line must say locked: {:?}",
-            menu.rows
-        );
+        assert!(menu.is_enabled(TrayAction::Unlock));
+        assert!(!menu.is_enabled(TrayAction::ShowRecoveryPhrase));
+        assert!(!menu.is_enabled(TrayAction::LockNow));
     }
 
-    /// A locked session must NOT be mistaken for an absent account — that would offer `Set up my DIG
-    /// Account…` over an account that already exists, and enrolment refuses on an existing custody root.
+    /// A locked session must NOT be mistaken for an absent account — that would offer first-run
+    /// enrolment over an account that already exists.
     #[test]
     fn a_locked_session_is_never_reported_as_absent() {
         let state = account_state(
             true,
-            true,
+            AtRest::Present,
             Some(SessionFacts {
                 keys_unlocked: false,
                 recoverable: false,
             }),
         );
         assert_eq!(state, AccountState::Locked);
-        assert!(!build(&view(state)).is_enabled(TrayAction::SetUpAccount));
+        let menu = build(&view(state));
+        assert!(
+            !menu.is_enabled(TrayAction::SetUpAccount),
+            "first-run enrolment refuses on an existing custody root; REPLACE is the honest verb"
+        );
+        assert!(menu.is_enabled(TrayAction::ReplaceWithNewAccount));
     }
 
     /// With no session, `enrolled` is what separates "locked" from "not set up yet".
     #[test]
     fn with_no_session_enrolment_separates_locked_from_absent() {
-        assert_eq!(account_state(true, true, None), AccountState::Locked);
-        assert_eq!(account_state(true, false, None), AccountState::Absent);
+        assert_eq!(
+            account_state(true, AtRest::Present, None),
+            AccountState::Locked
+        );
+        assert_eq!(
+            account_state(true, AtRest::None, None),
+            AccountState::Absent
+        );
+        assert_eq!(
+            account_state(true, AtRest::PresentButUnopenable, None),
+            AccountState::Unopenable,
+            "an account that would not open must NOT be reported as merely locked"
+        );
     }
 
     /// An unsupported host wins over everything else — it cannot hold an account, so no amount of
     /// session or enrolment state changes what the user is told.
     #[test]
     fn an_unsupported_host_overrides_every_other_input() {
-        for enrolled in [true, false] {
+        for at_rest in [AtRest::None, AtRest::Present, AtRest::PresentButUnopenable] {
             for session in [
                 None,
                 Some(SessionFacts {
@@ -1038,7 +1510,7 @@ mod tests {
                 }),
             ] {
                 assert_eq!(
-                    account_state(false, enrolled, session),
+                    account_state(false, at_rest, session),
                     AccountState::Unsupported
                 );
             }
@@ -1052,7 +1524,7 @@ mod tests {
             assert_eq!(
                 account_state(
                     true,
-                    true,
+                    AtRest::Present,
                     Some(SessionFacts {
                         keys_unlocked: true,
                         recoverable
@@ -1063,14 +1535,66 @@ mod tests {
         }
     }
 
-    /// Before the first boot reports, the menu must render — defaulting to "no account" rather than
-    /// panicking or showing a blank row.
+    /// Before the first boot reports, the tray must render — defaulting to "no account" rather than
+    /// panicking or showing a blank menu.
     #[test]
     fn an_unreported_account_defaults_to_absent() {
         let menu = build(&TrayView::default());
-        assert!(menu
-            .rows
-            .contains(&MenuRow::Status("Account: not set up yet".to_string())));
         assert!(menu.is_enabled(TrayAction::SetUpAccount));
+        assert!(details_text(&TrayView::default()).contains("not set up yet"));
+    }
+
+    /// **The count in the module docs, asserted rather than claimed.** Exactly two rows are disabled across
+    /// the five account states, and each one is in the state that explains it.
+    ///
+    /// A count is precisely the kind of claim that drifts as rows move: an earlier revision of the module
+    /// docs said "exactly one" while the model already rendered two. Pinning it means the docs, the SPEC and
+    /// the code cannot disagree again without a red test.
+    ///
+    /// The assertion is on the (state, label) PAIRS, not the total, because a bare total of two would also
+    /// be satisfied by two greyed rows in one state and none in the other — which would leave a state with a
+    /// dead end and no remedy beside it.
+    #[test]
+    fn the_disabled_rows_are_exactly_the_two_that_name_their_reason() {
+        let mut disabled = Vec::new();
+        for account in EVERY_STATE {
+            for (label, enabled) in build(&view(account.clone())).all_actions() {
+                if !enabled {
+                    disabled.push((format!("{account}"), label.to_string()));
+                }
+            }
+        }
+
+        assert_eq!(
+            disabled,
+            vec![
+                (
+                    "not available on this system yet".to_string(),
+                    "Set up my DIG Account (not supported on this system yet)".to_string()
+                ),
+                (
+                    "locked".to_string(),
+                    "Show my recovery phrase (unlock first)".to_string()
+                ),
+            ],
+            "the disabled set changed; update the module docs and SPEC §3.1c to match"
+        );
+    }
+
+    /// Neither disabled row is a DEAD END: each state that has one also offers an enabled row that resolves
+    /// it. This is the property that makes two greyed rows acceptable rather than a defect — the count alone
+    /// says nothing about whether the user can get anywhere.
+    #[test]
+    fn every_state_with_a_disabled_row_offers_the_remedy_beside_it() {
+        // A locked account: the reveal is greyed, and `Unlock…` — which is what un-greys it — is clickable.
+        let locked = build(&view(AccountState::Locked));
+        assert!(!locked.is_enabled(TrayAction::ShowRecoveryPhrase));
+        assert!(locked.is_enabled(TrayAction::Unlock));
+
+        // An unsupported host: setup is greyed, and the details window that explains the host is clickable.
+        let unsupported = build(&view(AccountState::Unsupported));
+        assert!(!unsupported.is_enabled(TrayAction::SetUpAccount));
+        assert!(unsupported.is_enabled(TrayAction::ShowStatus));
+        assert!(unsupported.is_enabled(TrayAction::Quit));
     }
 }

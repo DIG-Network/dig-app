@@ -36,7 +36,10 @@ use crate::storage;
 
 /// The vault file name inside the profile directory. `.seal` marks it as DIGOP1 ciphertext, matching
 /// the other sealed stores in the same directory.
-const VAULT_FILE: &str = "recovery-phrase.seal";
+/// Crate-visible so [`discard_account`](crate::account::boot::discard_account) can sweep for it by name
+/// when an account is removed: at that point the account is locked, so the per-profile directory it lives
+/// in can no longer be computed from the profile id.
+pub(crate) const VAULT_FILE: &str = "recovery-phrase.seal";
 
 /// Why a vault operation failed.
 #[derive(Debug, thiserror::Error)]

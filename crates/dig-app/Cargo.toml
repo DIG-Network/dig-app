@@ -43,6 +43,13 @@ png = { workspace = true, optional = true }
 dig-logging.workspace = true
 tracing.workspace = true
 
+# `AttachConsole`/`SetStdHandle` for `src/console.rs` (dig_ecosystem#1797). The shell is a GUI-subsystem
+# binary, so it has no console of its own; the informational CLI paths (`--version`, which the update
+# beacon health-gates on, and `--help`) attach to their launcher's console before printing. Target-specific
+# so it never taxes the macOS/Linux builds, which need no such thing.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
 [dev-dependencies]
 tempfile.workspace = true
 # In-memory keystore + credential backends for the integration tests, so a REAL AccountResidency holding

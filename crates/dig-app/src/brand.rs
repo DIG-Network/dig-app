@@ -15,6 +15,8 @@
 
 use std::fmt;
 
+use dig_app_core::tray_menu::TrayGlyph;
+
 /// The mark at the size Windows paints a notification-area icon at.
 ///
 /// Windows asks for 16 logical px, which is 32 device px at the 200% scaling a modern laptop panel
@@ -120,6 +122,84 @@ pub fn decode(png_bytes: &[u8]) -> Result<Bitmap, MarkError> {
         width: frame.width,
         height: frame.height,
     })
+}
+
+/// The colour of the state badge painted over the brand mark, as `[r, g, b]`.
+///
+/// # Why the icon carries state at all (dig_ecosystem#1800)
+///
+/// A tray application's icon is the only part of it a user sees without clicking, so it is where "am I
+/// connected / locked / set up?" belongs — the tray previously answered that with five greyed menu rows,
+/// which read as a broken app. One badged mark per state, drawn from the SAME embedded asset, so the tray
+/// still needs no extra files and a decode failure still costs only the picture.
+///
+/// The colours are chosen to survive the two things a tray icon is subject to: a 16-logical-pixel paint
+/// size, and a user who cannot distinguish them. Hue is therefore never the only signal — the tooltip
+/// states the same fact in words ([`TrayStatus::tooltip`](dig_app_core::tray_menu::TrayStatus::tooltip)),
+/// which is what makes the badge an at-a-glance convenience rather than the only way to know (§6.6).
+fn badge_colour(glyph: TrayGlyph) -> Option<[u8; 3]> {
+    match glyph {
+        // Working: no badge at all. A permanent mark on a healthy tray is noise, and its absence is the
+        // clearest possible "nothing needs you".
+        TrayGlyph::Ready => None,
+        // Amber — busy, not broken.
+        TrayGlyph::Starting => Some([0xE0, 0xA0, 0x20]),
+        // Red — the user must act before anything works.
+        TrayGlyph::NeedsAccount => Some([0xD0, 0x35, 0x35]),
+        // Blue — deliberate and safe, not an error: the user (or the idle timer) locked it.
+        TrayGlyph::Locked => Some([0x35, 0x7A, 0xD0]),
+        // Grey — degraded: the account is fine, the network is not.
+        TrayGlyph::NoNode => Some([0x80, 0x86, 0x8C]),
+    }
+}
+
+/// Paint `glyph`'s state badge onto `mark`, returning the icon the tray should show.
+///
+/// The badge is a filled square in the bottom-right quadrant with a transparent gutter around it, so it
+/// reads as a distinct dot at 16 px rather than blending into the mark's own edge. [`TrayGlyph::Ready`]
+/// returns the mark untouched.
+///
+/// Pure, and taking the mark by value, so the composition is unit-tested on pixels rather than trusted from
+/// a screenshot.
+pub fn badged(mut mark: Bitmap, glyph: TrayGlyph) -> Bitmap {
+    let Some(colour) = badge_colour(glyph) else {
+        return mark;
+    };
+    let badge = BadgeBox::of(&mark);
+    for y in badge.top..mark.height {
+        for x in badge.left..mark.width {
+            let start = 4 * (y as usize * mark.width as usize + x as usize);
+            if let Some(pixel) = mark.rgba.get_mut(start..start + 4) {
+                // Fully opaque: a translucent badge over a dark mark is invisible at tray size.
+                pixel.copy_from_slice(&[colour[0], colour[1], colour[2], 0xFF]);
+            }
+        }
+    }
+    mark
+}
+
+/// Where the badge sits, in pixels, for a mark of a given size.
+///
+/// Expressed as a fraction of the mark rather than a pixel count because the two embedded assets are 32 px
+/// and 64 px: a fixed 8-pixel badge would be a quarter of the small mark and a sixteenth of the large one,
+/// so the same tray would look different on Windows and Linux.
+struct BadgeBox {
+    /// First badge column.
+    left: u32,
+    /// First badge row.
+    top: u32,
+}
+
+impl BadgeBox {
+    /// The badge occupies the bottom-right `1/3` of the mark, leaving the DIG glyph itself readable.
+    const FRACTION: u32 = 3;
+
+    fn of(mark: &Bitmap) -> Self {
+        Self {
+            left: mark.width - mark.width / Self::FRACTION,
+            top: mark.height - mark.height / Self::FRACTION,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -292,5 +372,97 @@ mod tests {
         assert!(rendered.contains("bad signature"), "got {rendered}");
         let rendered = MarkError::NotRgba8("Grayscale/Eight".into()).to_string();
         assert!(rendered.contains("Grayscale/Eight"), "got {rendered}");
+    }
+
+    /// Every state that needs the user's attention must produce a DIFFERENT icon, and a healthy tray must
+    /// produce the mark untouched.
+    ///
+    /// Comparing every pair is what makes this load-bearing: an implementation that badged all four
+    /// attention states the same colour would pass "the badge appears" and leave the icon unable to
+    /// distinguish "locked" from "no account", which is the whole reason state moved into the icon.
+    #[test]
+    fn every_attention_state_paints_a_distinguishable_icon() {
+        let mark = decode(MARK_32).expect("the embedded mark must decode");
+        let states = [
+            TrayGlyph::Starting,
+            TrayGlyph::NeedsAccount,
+            TrayGlyph::Locked,
+            TrayGlyph::NoNode,
+        ];
+
+        let badged: Vec<Bitmap> = states
+            .iter()
+            .map(|glyph| super::badged(mark.clone(), *glyph))
+            .collect();
+        for (index, first) in badged.iter().enumerate() {
+            for second in &badged[index + 1..] {
+                assert_ne!(
+                    first.rgba, second.rgba,
+                    "two states must not look identical in the tray"
+                );
+            }
+        }
+    }
+
+    /// **The control.** A healthy tray shows the plain mark — byte-identical to the asset. Without this, a
+    /// function that badged every state (including Ready) would satisfy the test above while putting a
+    /// permanent mark on a tray that has nothing to report.
+    #[test]
+    fn a_ready_tray_shows_the_unmodified_mark() {
+        let mark = decode(MARK_32).expect("the embedded mark must decode");
+        assert_eq!(
+            super::badged(mark.clone(), TrayGlyph::Ready).rgba,
+            mark.rgba
+        );
+    }
+
+    /// The badge must land in the BOTTOM-RIGHT and leave the mark's top-left alone, so the DIG glyph stays
+    /// recognisable. Checked on both assets, because the badge is sized as a FRACTION and a pixel-count
+    /// implementation would place it differently on the 32px and 64px marks.
+    #[test]
+    fn the_badge_covers_the_bottom_right_and_spares_the_glyph() {
+        for bytes in [MARK_32, MARK_64] {
+            let mark = decode(bytes).expect("the embedded mark must decode");
+            let plain = mark.clone();
+            let badged = super::badged(mark, TrayGlyph::NeedsAccount);
+
+            let corner = badged
+                .pixel(badged.width - 1, badged.height - 1)
+                .expect("bottom-right");
+            assert_eq!(
+                corner[3], 0xFF,
+                "the badge must be fully opaque at tray size"
+            );
+            assert_eq!(
+                corner,
+                [0xD0, 0x35, 0x35, 0xFF],
+                "the bottom-right pixel must be the badge colour"
+            );
+
+            assert_eq!(
+                badged.pixel(0, 0),
+                plain.pixel(0, 0),
+                "the top-left of the mark must be untouched"
+            );
+            assert_eq!(
+                badged.pixel(badged.width / 4, badged.height / 4),
+                plain.pixel(plain.width / 4, plain.height / 4),
+                "the glyph's own area must be untouched"
+            );
+        }
+    }
+
+    /// Badging must never change the bitmap's SHAPE — `Icon::from_rgba` rejects a buffer whose length does
+    /// not match its declared dimensions, and a tray with no icon is the failure this whole module avoids.
+    #[test]
+    fn badging_preserves_the_bitmap_dimensions_and_buffer_length() {
+        let mark = decode(MARK_64).expect("the embedded mark must decode");
+        let badged = super::badged(mark.clone(), TrayGlyph::Locked);
+
+        assert_eq!((badged.width, badged.height), (mark.width, mark.height));
+        assert_eq!(
+            badged.rgba.len(),
+            4 * badged.width as usize * badged.height as usize
+        );
     }
 }

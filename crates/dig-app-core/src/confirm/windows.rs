@@ -13,8 +13,8 @@
 use windows::core::{HSTRING, PCWSTR};
 use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MessageBoxW, IDOK, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL, MB_SETFOREGROUND,
-    MB_SYSTEMMODAL, MB_TOPMOST, MESSAGEBOX_STYLE,
+    MessageBoxW, IDOK, MB_DEFBUTTON2, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_OKCANCEL,
+    MB_SETFOREGROUND, MB_SYSTEMMODAL, MB_TOPMOST, MESSAGEBOX_STYLE,
 };
 
 use super::{
@@ -57,7 +57,18 @@ impl ForegroundWindow for MessageBoxWindow {
 fn buttons_and_icon(presentation: &Presentation) -> MESSAGEBOX_STYLE {
     match presentation {
         Presentation::Acknowledge => MESSAGEBOX_STYLE(MB_OK.0 | MB_ICONINFORMATION.0),
-        Presentation::Decide { .. } => MESSAGEBOX_STYLE(MB_OKCANCEL.0 | MB_ICONWARNING.0),
+        Presentation::Decide {
+            refusal_is_default, ..
+        } => {
+            let mut style = MB_OKCANCEL.0 | MB_ICONWARNING.0;
+            // `MB_OKCANCEL` pre-selects OK, so a focused destroy window would confirm irreversible key
+            // destruction on a bare Enter (dig_ecosystem#1799). `MB_DEFBUTTON2` moves the default to Cancel
+            // for exactly the windows that say so.
+            if *refusal_is_default {
+                style |= MB_DEFBUTTON2.0;
+            }
+            MESSAGEBOX_STYLE(style)
+        }
     }
 }
 
@@ -71,7 +82,7 @@ fn buttons_and_icon(presentation: &Presentation) -> MESSAGEBOX_STYLE {
 fn message_text(content: &ConfirmContent) -> String {
     match &content.presentation {
         Presentation::Acknowledge => format!("{}\n\n{}", content.heading, content.body),
-        Presentation::Decide { choice_hint } => {
+        Presentation::Decide { choice_hint, .. } => {
             format!("{}\n\n{}\n\n{choice_hint}", content.heading, content.body)
         }
     }
@@ -116,10 +127,15 @@ fn outcome_from_consent(result: UserConsentVerificationResult) -> VerifyOutcome 
 }
 
 /// The Windows confirmer (always available for an interactive user; see the module docs).
+///
+/// The third component is the input window: `MessageBoxW` cannot take typed text, so the
+/// recovery-phrase field is a hand-built Win32 window in
+/// [`windows_input`](super::windows_input) (dig_ecosystem#1798).
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
     Some(Box::new(BackedConfirmer::new(
         MessageBoxWindow,
         HelloVerifier,
+        super::windows_input::InputWindow,
     )))
 }
 
@@ -243,5 +259,44 @@ mod tests {
             decide_text.contains("Cancel to reject"),
             "MessageBoxW cannot relabel buttons, so a real choice must be spelled out: {decide_text}"
         );
+    }
+
+    /// **Regression (#1799).** `MB_OKCANCEL` pre-selects OK, so a focused destroy window would confirm
+    /// irreversible key destruction on a bare Enter. The destroy window must pre-select CANCEL instead.
+    #[test]
+    fn a_destroy_window_pre_selects_cancel_not_ok() {
+        let style = buttons_and_icon(&destroy().presentation);
+        assert_ne!(
+            style.0 & MB_DEFBUTTON2.0,
+            0,
+            "Enter on a destroy window must not destroy an account"
+        );
+        // It is still a real either/or with the honest warning icon — the default moved, nothing else.
+        assert_ne!(style.0 & MB_OKCANCEL.0, 0);
+        assert_ne!(style.0 & MB_ICONWARNING.0, 0);
+    }
+
+    /// **The control.** An ORDINARY authorization keeps OK as its default: the user just asked for the
+    /// action, and making every signature need a deliberate extra click would be its own defect. Without
+    /// this pair, defaulting EVERY window to Cancel would satisfy the test above.
+    #[test]
+    fn an_ordinary_authorization_keeps_ok_as_its_default() {
+        assert_eq!(
+            buttons_and_icon(&authorization().presentation).0 & MB_DEFBUTTON2.0,
+            0,
+            "a reveal is not destructive; OK stays the default"
+        );
+        assert_eq!(
+            buttons_and_icon(&notice().presentation).0 & MB_DEFBUTTON2.0,
+            0
+        );
+    }
+
+    fn destroy() -> ConfirmContent {
+        ConfirmContent::destroy(&crate::confirm::DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: false,
+        })
     }
 }

@@ -187,6 +187,112 @@ pub fn account_exists(brand_dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// What happened when an account was discarded.
+///
+/// A three-state outcome rather than a `bool`, because "there was nothing here" and "it would not go" call
+/// for different things to say to the user, and the tray must not report a successful removal for either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// The sealed seed is gone. This is irreversible.
+    Discarded,
+    /// There was no account on this host to begin with, so nothing changed.
+    NothingToDiscard,
+    /// The seed could not be removed; the account is still here and still works.
+    Failed,
+}
+
+/// **Irreversibly** discard the default account's custody root from `brand_dir`.
+///
+/// # Why this primitive exists
+///
+/// `open_account` OPENS an account that already exists and ignores its `seeding`, so "replace this account
+/// with a different one" is not expressible as an enrolment — the old seed has to go first. That makes this
+/// the one function that destroys custody, which is exactly why it is one function: a single place to
+/// audit, and a single place the authorization gate must be in front of (it is —
+/// [`replace_account`](crate::account::journey::replace_account) runs
+/// [`confirm_destroy`](crate::confirm::NativeConfirmer::confirm_destroy) first, and is itself tested against
+/// a recording custodian so a refusal is PROVEN not to reach this function).
+///
+/// # What it removes, and in what order
+///
+/// 1. the **sealed master seed** (`AccountStore::delete`) — the custody root, and the thing whose absence
+///    makes the account gone;
+/// 2. the **stored unlock password** in the OS credential store — otherwise a credential entry for an
+///    account that no longer exists lingers in Windows Credential Manager / the macOS Keychain forever;
+/// 3. the **sealed recovery-phrase vault**, which is a copy of the same secret.
+///
+/// The seed goes FIRST and its failure aborts the rest: leaving a live seed beside a deleted password is
+/// the one combination that produces an account that exists and can never be unlocked again. The two later
+/// steps are best-effort — once the seed is gone the account IS gone, and a leftover file must not make
+/// the tray report a failure that would send the user looking for an account that no longer exists.
+///
+/// This function does NOT ask the user anything. Every caller MUST hold an approving
+/// [`confirm_destroy`](crate::confirm::NativeConfirmer::confirm_destroy) first.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
+    use crate::keystore::{CredentialStore, OsCredentialStore};
+    use dig_session::FileBackend;
+
+    if !account_exists(brand_dir) {
+        return DiscardOutcome::NothingToDiscard;
+    }
+    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    let id = AccountId::new(DEFAULT_ACCOUNT_ID);
+    if let Err(e) = account_store(backend).delete(&id) {
+        tracing::error!(error = %e, "the account's sealed seed could not be removed — nothing was changed");
+        return DiscardOutcome::Failed;
+    }
+    tracing::warn!("the DIG account's sealed master seed was discarded at the user's request");
+
+    if let Some(cred) = OsCredentialStore::open(DEFAULT_ACCOUNT_ID) {
+        if let Err(e) = cred.delete(DEFAULT_ACCOUNT_ID) {
+            // Harmless on its own — the seed it unlocked is already gone — but worth a line, because a
+            // stale credential entry is confusing to anyone auditing their own credential store.
+            tracing::warn!(error = %e, "the stored account password could not be removed");
+        }
+    }
+    discard_phrase_vaults(brand_dir);
+    DiscardOutcome::Discarded
+}
+
+/// Linux (and any host without a per-application-ACL credential store) never enrols an account, so there
+/// is never one to discard — see [`open_account`].
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn discard_account(_brand_dir: &std::path::Path) -> DiscardOutcome {
+    DiscardOutcome::NothingToDiscard
+}
+
+/// Remove every sealed recovery-phrase copy under `brand_dir`.
+///
+/// The vault lives in a per-profile directory keyed by a hash of the profile id, and by the time an account
+/// is being discarded it is locked — so the profile id is no longer readable and the exact directory cannot
+/// be computed. Sweeping for the vault FILE NAME instead is what makes this work at all, and it is safe
+/// because the name is specific to this one artifact.
+///
+/// Best-effort by design: the vault holds a COPY of the seed that was just destroyed, so a leftover file is
+/// undecryptable ciphertext rather than exposure. It is still removed, because a file named
+/// `recovery-phrase.seal` sitting in the data directory of an account that no longer exists is exactly the
+/// kind of residue that makes a user doubt a removal happened.
+///
+/// Gated to the same targets as [`discard_account`], its only caller: a host with no per-application
+/// credential store never enrols an account, so it never has one to discard either.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn discard_phrase_vaults(brand_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(brand_dir.join("profiles")) else {
+        return;
+    };
+    for profile in entries.flatten() {
+        let vault = profile
+            .path()
+            .join(crate::account::phrase_vault::VAULT_FILE);
+        if vault.exists() {
+            if let Err(e) = std::fs::remove_file(&vault) {
+                tracing::warn!(error = %e, "a sealed recovery-phrase copy could not be removed");
+            }
+        }
+    }
+}
+
 /// Open the default account from `brand_dir`, enrolling it from `seeding` if it does not exist yet.
 ///
 /// Uses the host's [`OsCredentialStore`](crate::keystore::OsCredentialStore) for the zero-prompt
@@ -210,7 +316,14 @@ pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option
     let (residency, fresh_phrase) = match assembled {
         Ok(pair) => pair,
         Err(e) => {
-            tracing::warn!(error = %e, "account not opened");
+            // ERROR, not warn: an account that exists and will not open means this host has NO signing for
+            // the rest of the session, which is an outage rather than a curiosity. The tray reports it as
+            // `AccountState::Unopenable` and offers the replace path — before that state existed this line
+            // was the ONLY trace of it, and the user silently lost signing (dig_ecosystem#1799 review).
+            tracing::error!(
+                error = %e,
+                "the DIG account could not be opened — signing is unavailable until it is replaced"
+            );
             return None;
         }
     };
@@ -246,7 +359,7 @@ pub fn boot_existing_account(_brand_dir: &std::path::Path) -> Option<BootedAccou
 
 /// Complete a boot: vault a first run's phrase and read back whether the account is recoverable.
 ///
-/// Public so the integration suite can drive it on any platform (the cfg-gated [`boot_account`] above
+/// Public so the integration suite can drive it on any platform (the cfg-gated [`open_account`] above
 /// is the only production caller).
 ///
 /// Split out (and platform-independent) so the vaulting rule — *a fresh phrase is sealed immediately,
