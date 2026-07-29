@@ -23,6 +23,7 @@
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
+//! | `open` | the tray's "Open…" DIG-link field (dig_ecosystem#1821) — unmasked, a link is not secret |
 //! | `passphrase` | the same field, masked |
 //! | `unopenable` | the wedged-legacy-account explainer (dig_ecosystem#1799) — the ONLY window that state
 //!   offers, so its copy is checked by eye here as well as by its rendering test |
@@ -98,6 +99,27 @@ fn main() {
                 revealable: !masked,
             });
             // `InputOutcome`'s Debug redacts the text by design, so this is safe to print.
+            println!("{which}: {outcome:?}");
+            return;
+        }
+        // The tray's "Open…" field (#1821). A DIG link is not secret, so unlike the phrase field it is
+        // neither masked nor revealable — this case exists so the wording and layout of the window a user
+        // actually meets can be LOOKED AT, which is the only way spacing and clipping are ever caught.
+        "open" => {
+            let outcome = confirmer.request_input(&InputPrompt {
+                title: "DIG — Open",
+                heading: "Which DIG link would you like to open?",
+                body: concat!(
+                    "Paste a DIG link. Both forms work:\n\n",
+                    "chia://<store id>[:<generation root>]/<path>\n",
+                    "urn:dig:chia:<store id>[:<generation root>]/<path>\n\n",
+                    "It opens in your browser, served by your own DIG node."
+                ),
+                field_label: "DIG link:",
+                submit: "Open",
+                masked: false,
+                revealable: false,
+            });
             println!("{which}: {outcome:?}");
             return;
         }
