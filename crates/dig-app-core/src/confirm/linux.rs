@@ -14,9 +14,11 @@
 
 use std::process::Command;
 
+use zeroize::{Zeroize, Zeroizing};
+
 use super::{
-    BackedConfirmer, BiometricVerifier, ConfirmContent, ForegroundWindow, NativeConfirmer,
-    Presentation, VerifyOutcome, WindowIntent,
+    BackedConfirmer, BiometricVerifier, ConfirmContent, ForegroundInput, ForegroundWindow,
+    InputContent, InputOutcome, NativeConfirmer, Presentation, VerifyOutcome, WindowIntent,
 };
 
 /// The polkit action the sign/connect/pair confirm authorizes against (reverse-DNS, canonical). A
@@ -32,6 +34,13 @@ trait CommandRunner: Send + Sync {
     /// Run `program args…` to completion and return its process exit code, or `None` if it could not
     /// be spawned (missing binary, no permission).
     fn run(&self, program: &str, args: &[String]) -> Option<i32>;
+
+    /// Run `program args…` and return its exit code **plus its standard output**.
+    ///
+    /// Needed only by the input helpers (dig_ecosystem#1798), whose ANSWER is the text on stdout rather
+    /// than a code: `zenity --entry` and `kdialog --password` print what the user typed. The output is
+    /// [`Zeroizing`] because for DIG that text is a recovery phrase.
+    fn run_capturing(&self, program: &str, args: &[String]) -> Option<(i32, Zeroizing<String>)>;
 }
 
 /// The production runner: actually spawns the helper process.
@@ -40,6 +49,18 @@ struct SystemCommandRunner;
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[String]) -> Option<i32> {
         Command::new(program).args(args).status().ok()?.code()
+    }
+
+    fn run_capturing(&self, program: &str, args: &[String]) -> Option<(i32, Zeroizing<String>)> {
+        // `output()` inherits stderr, so a helper's own diagnostics still reach the log, while only the
+        // typed answer is captured.
+        let mut output = Command::new(program).args(args).output().ok()?;
+        // The RAW bytes are the recovery phrase, so the `Vec` `Command` allocated is wiped too — not just
+        // the `String` copied out of it (dig_ecosystem#1799 review). `from_utf8_lossy` borrows, so without
+        // this the phrase would sit in that buffer until the allocator happened to reuse it.
+        let text = Zeroizing::new(String::from_utf8_lossy(&output.stdout).to_string());
+        output.stdout.zeroize();
+        Some((output.status.code()?, text))
     }
 }
 
@@ -74,6 +95,11 @@ impl DialogTool {
     /// the rich-text trigger characters so `mightBeRichText` can never fire. This holds for BOTH dialog
     /// kinds — a notice also carries caller-composed text, and losing the neutralization on one branch
     /// would reintroduce the whole class.
+    /// **`refusal_is_default` is deliberately not honoured here, and that is currently unreachable rather
+    /// than a gap.** Neither helper has a "make Cancel the default" flag, and the only window that asks for
+    /// one is the destroy authorization — which cannot be drawn on Linux at all: with no per-application
+    /// credential store the account state is always `Unsupported`, and the management submenu offers only the
+    /// DID explainer there. A Linux credential store MUST NOT land without revisiting this (`SPEC.md` §3.1d).
     fn args(self, content: &ConfirmContent) -> Vec<String> {
         let text = format!("{}\n\n{}", content.heading, content.body);
         let decides = matches!(content.presentation, Presentation::Decide { .. });
@@ -140,6 +166,84 @@ impl<R: CommandRunner> ForegroundWindow for DialogWindow<R> {
             self.runner
                 .run(self.tool.program(), &self.tool.args(content)),
         )
+    }
+}
+
+impl DialogTool {
+    /// The argument vector that asks the user to TYPE something (dig_ecosystem#1798).
+    ///
+    /// Both helpers print the typed text on stdout and exit `0`; cancelling exits non-zero with no output.
+    /// **Markup safety** is handled the same way as [`args`](Self::args) — `zenity` is forced to
+    /// `--no-markup` and `kdialog`'s rich-text triggers are escaped — because this text is also
+    /// caller-composed and the class of defect does not care which dialog kind it lands in.
+    ///
+    /// Neither helper offers a MULTI-LINE entry, so a 24-word phrase is typed on one line. That is what the
+    /// `dign` prompt did too, and it is the one place the Linux window is poorer than the Win32 one; it is
+    /// still a native GUI field, which is the property that matters.
+    fn input_args(self, content: &InputContent) -> Vec<String> {
+        let text = format!(
+            "{}\n\n{}\n\n{}",
+            content.heading, content.body, content.field_label
+        );
+        match self {
+            Self::Zenity => {
+                let mut args = vec![
+                    "--entry".into(),
+                    "--no-markup".into(),
+                    format!("--title={}", content.title),
+                    format!("--text={text}"),
+                    format!("--ok-label={}", content.submit),
+                    "--cancel-label=Cancel".into(),
+                ];
+                if content.masked {
+                    args.push("--hide-text".into());
+                }
+                args
+            }
+            Self::Kdialog => vec![
+                "--title".into(),
+                content.title.clone(),
+                match content.masked {
+                    true => "--password".into(),
+                    false => "--inputbox".into(),
+                },
+                escape_kdialog_plain(&text),
+            ],
+        }
+    }
+}
+
+/// A [`ForegroundInput`] backed by a desktop dialog helper's entry dialog.
+struct EntryWindow<R: CommandRunner> {
+    runner: R,
+    tool: DialogTool,
+}
+
+impl<R: CommandRunner> ForegroundInput for EntryWindow<R> {
+    fn ask(&self, content: &InputContent) -> InputOutcome {
+        let captured = self
+            .runner
+            .run_capturing(self.tool.program(), &self.tool.input_args(content));
+        outcome_from_entry(captured)
+    }
+}
+
+/// Map an entry helper's (exit code, stdout) to an outcome.
+///
+/// Only exit `0` means the user submitted. A non-zero code is a cancel — and any text captured alongside it
+/// is DISCARDED rather than returned, because a helper that failed may have printed a usage message that
+/// must never be mistaken for a recovery phrase. A helper that could not be spawned is
+/// [`InputOutcome::Unavailable`], so the caller fails closed.
+///
+/// The trailing newline the helpers add is stripped here, at the boundary, so no caller has to know that
+/// these particular helpers append one.
+fn outcome_from_entry(captured: Option<(i32, Zeroizing<String>)>) -> InputOutcome {
+    match captured {
+        Some((0, text)) => InputOutcome::Provided(Zeroizing::new(
+            text.trim_end_matches(['\n', '\r']).to_string(),
+        )),
+        Some(_) => InputOutcome::Cancelled,
+        None => InputOutcome::Unavailable,
     }
 }
 
@@ -273,24 +377,43 @@ pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
         PolkitVerifier {
             runner: SystemCommandRunner,
         },
+        EntryWindow {
+            runner: SystemCommandRunner,
+            tool,
+        },
     )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::confirm::{ConfirmDecision, NativeConfirmer, SignPrompt};
+    use crate::confirm::{ConfirmDecision, NativeConfirmer, NoInputWindow, SignPrompt};
 
-    /// A runner scripted to return a fixed exit code and record what it was asked to run.
+    /// A runner scripted to return a fixed exit code — and, for the input helpers, a fixed stdout — while
+    /// recording what it was asked to run.
+    ///
+    /// `stdout` is a SEPARATE field from `code` on purpose: the entry helpers can exit non-zero while still
+    /// having printed something, and a double that could only vary one of the two could not express that
+    /// case — which is the one where a usage message must NOT be mistaken for a recovery phrase.
     struct FakeRunner {
         code: Option<i32>,
+        stdout: String,
         last: std::sync::Mutex<Option<(String, Vec<String>)>>,
     }
     impl FakeRunner {
         fn new(code: Option<i32>) -> Self {
             Self {
                 code,
+                stdout: String::new(),
                 last: std::sync::Mutex::new(None),
+            }
+        }
+
+        /// The same runner, but printing `stdout` — for the entry helpers, whose answer is their output.
+        fn printing(code: Option<i32>, stdout: &str) -> Self {
+            Self {
+                stdout: stdout.to_string(),
+                ..Self::new(code)
             }
         }
     }
@@ -299,6 +422,116 @@ mod tests {
             *self.last.lock().unwrap() = Some((program.to_string(), args.to_vec()));
             self.code
         }
+
+        fn run_capturing(
+            &self,
+            program: &str,
+            args: &[String],
+        ) -> Option<(i32, Zeroizing<String>)> {
+            *self.last.lock().unwrap() = Some((program.to_string(), args.to_vec()));
+            Some((self.code?, Zeroizing::new(self.stdout.clone())))
+        }
+    }
+
+    fn input_content(masked: bool) -> InputContent {
+        InputContent {
+            title: "DIG - Restore".to_string(),
+            heading: "Type your 24-word recovery phrase.".to_string(),
+            body: "Words in order, separated by spaces.".to_string(),
+            field_label: "Your 24 words:".to_string(),
+            submit: "Restore",
+            masked,
+            revealable: true,
+        }
+    }
+
+    /// The entry helper's typed answer must come back, with the trailing newline both helpers append
+    /// stripped at this boundary — a phrase carrying a stray newline would fail BIP-39 parsing for a
+    /// reason the user could never see.
+    #[test]
+    fn a_submitted_entry_returns_the_typed_text_without_its_trailing_newline() {
+        let window = EntryWindow {
+            // A CRLF, not just a newline: `kdialog` on some desktops appends one, and a fixture using only
+            // "\n" would pass for a trim that removed a single character.
+            runner: FakeRunner::printing(Some(0), "abandon abandon ability\r\n"),
+            tool: DialogTool::Zenity,
+        };
+        match window.ask(&input_content(false)) {
+            InputOutcome::Provided(text) => {
+                assert_eq!(&*text, "abandon abandon ability")
+            }
+            other => panic!("expected the typed text, got {other:?}"),
+        }
+    }
+
+    /// **The control that makes the test above load-bearing.** A helper that exits non-zero has CANCELLED,
+    /// and anything it printed (a usage message, a warning) must be discarded rather than returned — an
+    /// implementation that read stdout regardless of the code would pass the test above and fail here.
+    #[test]
+    fn a_cancelled_entry_discards_anything_the_helper_printed() {
+        let window = EntryWindow {
+            runner: FakeRunner::printing(Some(1), "Usage: zenity [OPTION...]\n"),
+            tool: DialogTool::Zenity,
+        };
+        assert!(matches!(
+            window.ask(&input_content(false)),
+            InputOutcome::Cancelled
+        ));
+    }
+
+    /// A helper that could not be spawned must report UNAVAILABLE, never an empty answer — the caller has
+    /// to be able to tell "the user typed nothing" from "the user was never asked".
+    #[test]
+    fn an_unspawnable_entry_helper_is_unavailable_not_an_empty_answer() {
+        let window = EntryWindow {
+            runner: FakeRunner::printing(None, ""),
+            tool: DialogTool::Kdialog,
+        };
+        assert!(matches!(
+            window.ask(&input_content(false)),
+            InputOutcome::Unavailable
+        ));
+    }
+
+    /// Masking must be requested only when asked for, on BOTH helpers — a phrase field forced to
+    /// `--hide-text` makes 24 words untypeable, and a passphrase field that echoes leaks it to the room.
+    #[test]
+    fn the_entry_helpers_mask_only_when_the_prompt_asks() {
+        for (tool, masked_marker) in [
+            (DialogTool::Zenity, "--hide-text"),
+            (DialogTool::Kdialog, "--password"),
+        ] {
+            let masked = tool.input_args(&input_content(true));
+            let plain = tool.input_args(&input_content(false));
+            assert!(
+                masked.iter().any(|a| a == masked_marker),
+                "{tool:?} must mask when asked: {masked:?}"
+            );
+            assert!(
+                !plain.iter().any(|a| a == masked_marker),
+                "{tool:?} must NOT mask a 24-word phrase: {plain:?}"
+            );
+        }
+    }
+
+    /// **Markup safety.** The entry dialog carries caller-composed text too, so it must be forced to plain
+    /// text exactly like the confirm dialog is — losing the neutralization on this branch would reintroduce
+    /// the whole class on a new surface.
+    #[test]
+    fn the_entry_dialog_is_forced_to_plain_text() {
+        let zenity = DialogTool::Zenity.input_args(&input_content(false));
+        assert!(zenity.iter().any(|a| a == "--no-markup"), "{zenity:?}");
+
+        let hostile = InputContent {
+            heading: "<b>Type</b> your phrase".to_string(),
+            ..input_content(false)
+        };
+        let kdialog = DialogTool::Kdialog.input_args(&hostile);
+        assert!(
+            kdialog.iter().any(|a| a.contains("&lt;b&gt;")),
+            "kdialog's rich-text triggers must be escaped: {kdialog:?}"
+        );
+        assert!(!kdialog.iter().any(|a| a.contains("<b>")), "{kdialog:?}");
     }
 
     fn content() -> ConfirmContent {
@@ -362,6 +595,9 @@ mod tests {
             PolkitVerifier {
                 runner: FakeRunner::new(Some(0)),
             },
+            // These two tests exercise the CONFIRM path only, so the input window is the fail-closed
+            // `NoInputWindow` rather than a live entry helper.
+            NoInputWindow,
         );
         assert_eq!(
             confirmer.confirm_sign(&SignPrompt {
@@ -383,6 +619,9 @@ mod tests {
             PolkitVerifier {
                 runner: FakeRunner::new(Some(1)),
             },
+            // These two tests exercise the CONFIRM path only, so the input window is the fail-closed
+            // `NoInputWindow` rather than a live entry helper.
+            NoInputWindow,
         );
         assert_eq!(
             confirmer.confirm_sign(&SignPrompt {

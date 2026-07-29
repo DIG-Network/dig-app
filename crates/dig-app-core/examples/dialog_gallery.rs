@@ -14,11 +14,26 @@
 //! cargo run -p dig-app-core --example dialog_gallery -- notice
 //! ```
 //!
-//! `which` selects the window: `notice` (informational, one button), `claim` (the enrolment retention
-//! either/or) or `authorization` (the reveal gate). Dismissing with Escape denies, so the `authorization`
-//! case never reaches the biometric step and nothing is revealed.
+//! `which` selects the window:
+//!
+//! | `which` | the window |
+//! |---|---|
+//! | `notice` | informational, one button |
+//! | `claim` | the enrolment retention either/or |
+//! | `authorization` | the reveal gate |
+//! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
+//! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
+//! | `passphrase` | the same field, masked |
+//! | `unopenable` | the wedged-legacy-account explainer (dig_ecosystem#1799) — the ONLY window that state
+//!   offers, so its copy is checked by eye here as well as by its rendering test |
+//!
+//! Dismissing with Escape denies, so `authorization` and `destroy` never reach the biometric step and
+//! nothing is revealed or destroyed — this example only ever DRAWS. The `input` cases print the LENGTH of
+//! what was typed, never the text, so a screenshot session cannot leak a phrase into a terminal.
 
-use dig_app_core::confirm::{native_confirmer, ClaimPrompt, NoticePrompt, RevealPrompt};
+use dig_app_core::confirm::{
+    native_confirmer, ClaimPrompt, DestroyPrompt, InputPrompt, NoticePrompt, RevealPrompt,
+};
 
 fn main() {
     let which = std::env::args().nth(1).unwrap_or_else(|| "notice".into());
@@ -45,8 +60,51 @@ fn main() {
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
             secret: "your 24-word DIG recovery phrase",
         }),
+        // The one window an account that cannot be opened offers. Drawn here because its copy previously
+        // rendered with a ten-space hole mid-sentence, which no substring assertion could see.
+        "unopenable" => dig_app_core::account::journey::explain_unopenable(confirmer.as_ref()),
+        // The destructive authorization (#1799): the window a user sees before their custody root is
+        // discarded. It must wear the warning icon, keep a real Cancel, and name the irreversible loss.
+        "destroy" => confirmer.confirm_destroy(&DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            // Copied from `Replacement::WithNewAccount.promise()` rather than referenced, because that
+            // method is private to the journey module and this example exists to show the WINDOW.
+            replacement: concat!(
+                "A brand-new DIG Account will be created in its place, with a new recovery phrase, ",
+                "a new identity and a new address."
+            ),
+            recoverable: false,
+        }),
+        // The native input FIELD (#1798) — the window that replaced "(in a terminal)". Nothing typed here
+        // is echoed back: only its length is reported.
+        "input" | "passphrase" => {
+            let masked = which == "passphrase";
+            let outcome = confirmer.request_input(&InputPrompt {
+                title: "DIG — Recovery phrase",
+                heading: "Restore your DIG Account from its recovery phrase.",
+                body: concat!(
+                    "Type or paste all 24 words in order, separated by spaces. Capitals do not ",
+                    "matter.\n\n",
+                    "Use the words DIG gave you. A recovery phrase from a Chia wallet such as Sage ",
+                    "is NOT a DIG recovery phrase — DIG would accept it and build a DIFFERENT, ",
+                    "empty account from it."
+                ),
+                field_label: match masked {
+                    true => "Passphrase:",
+                    false => "Your 24 words:",
+                },
+                submit: "Continue",
+                masked,
+                revealable: !masked,
+            });
+            // `InputOutcome`'s Debug redacts the text by design, so this is safe to print.
+            println!("{which}: {outcome:?}");
+            return;
+        }
         other => {
-            eprintln!("unknown window `{other}` — expected notice, claim or authorization");
+            eprintln!(
+                "unknown window `{other}` — expected notice, claim, authorization, destroy, unopenable, input or passphrase"
+            );
             std::process::exit(2);
         }
     };

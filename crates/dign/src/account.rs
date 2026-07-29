@@ -194,7 +194,15 @@ mod tests {
             recoverable: false,
         });
         assert!(text.contains("NO recovery phrase"), "{text}");
-        assert!(text.contains("cannot \n                 be recovered") || text.contains("cannot"));
+        // Asserted on the RENDERED sentence. The previous form expected a literal newline and indentation
+        // that the line-continuation removes, so its first clause could never match — and its
+        // `|| text.contains("cannot")` fallback made the whole assertion unfailable. A substring test that
+        // cannot fail is not a test; review found the same class in the tray's own copy
+        // (dig_ecosystem#1799).
+        assert!(
+            text.contains("cannot be recovered if you lose it"),
+            "{text}"
+        );
     }
 
     /// A recoverable account must NOT carry the warning — the control proving the description reads the

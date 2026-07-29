@@ -28,23 +28,30 @@ Those 24 words ARE your account. The account itself is sealed to this machine (i
 in your OS credential store), so the words are the only thing that can bring it back on a different
 computer. Nobody, including DIG, can recover an account without them.
 
-The tray menu also lets you see your account state, **show your recovery phrase again** (behind your
-Windows Hello / Touch ID / system authentication), copy your DIG ID, lock the session, and open the log
-folder.
+**Everything about your account is in the tray menu** — there is nothing you need a terminal for. The menu
+holds actions only; how DIG is doing is shown by the tray ICON, by its tooltip, and by
+**Status and details…**, which opens a window with the whole picture (including the node's full diagnosis
+when something is wrong).
 
-To bring an account back on another computer:
+From the menu you can:
 
-```bash
-dign account restore   # asks for your 24 words, without showing them
-dign account status    # what account this machine has, and whether it has a phrase
-```
+- **show your recovery phrase again**, behind your Windows Hello / Touch ID / system authentication
+- **copy your DIG ID**, and lock the session
+- **Restore from a recovery phrase** — DIG asks for your 24 words in a real window, hidden as you type with
+  a *Show the words while I type* box when you want to check them
+- under **Manage my DIG Account**: replace this account with a new one, replace it with an account from a
+  recovery phrase, or remove it from this computer
+
+Replacing or removing an account destroys the key it is sealed to, so DIG asks you to authenticate first —
+and offers to show you the current account's 24 words before anything is lost. Those verbs are always
+available: an account you cannot change is a trap, not a safeguard.
 
 An on-chain `did:chia:` DID is optional and costs XCH; DIG never mints one without you asking, and your
 account, phrase and address all work fully without it.
 
 If the tray icon never appears, DIG is probably running but unable to draw it — on Linux that is almost
-always a missing `libayatana-appindicator3-1`. DIG logs that and prints the cause; meanwhile `dign` still
-works.
+always a missing `libayatana-appindicator3-1`. DIG logs that and prints the cause; install the library and
+start DIG again.
 
 Architecture + design: DIG-Network/dig_ecosystem#908 (epic). Boundary invariant: the node is the
 identity-agnostic engine; dig-app is the identity + user interaction.

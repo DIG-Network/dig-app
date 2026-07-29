@@ -26,7 +26,7 @@ use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::account::AccountId;
 use dig_app_core::keystore::{CredentialStore, KeystoreError};
 use dig_app_core::session_lock::SessionKeys;
-use dig_app_core::tray_menu::{self, AccountState, MenuRow, SessionFacts, TrayAction, TrayView};
+use dig_app_core::tray_menu::{self, AccountState, SessionFacts, TrayAction, TrayView};
 use dig_keystore::MemoryBackend;
 use dig_session::KeychainBackend;
 
@@ -73,17 +73,26 @@ fn live_residency() -> AccountResidency {
 
 /// The state the shell would report for `residency`, via exactly the path the shell uses.
 fn state_for(residency: &AccountResidency) -> AccountState {
-    tray_menu::account_state(true, true, Some(SessionFacts::of(residency, true)))
+    tray_menu::account_state(
+        true,
+        tray_menu::AtRest::Present,
+        Some(SessionFacts::of(residency, true)),
+    )
 }
 
-fn menu_for(state: AccountState) -> tray_menu::MenuModel {
-    tray_menu::build(&TrayView {
+fn view_for(state: AccountState) -> TrayView {
+    TrayView {
         running: true,
-        node: "Node: connected".to_string(),
+        node_connected: true,
+        node: "Node v0.65.0 - 3 capsule(s) cached - 1 store(s) hosted".to_string(),
         account: Some(state),
         profile_id: Some("a".repeat(96)),
         did: None,
-    })
+    }
+}
+
+fn menu_for(state: AccountState) -> tray_menu::MenuModel {
+    tray_menu::build(&view_for(state))
 }
 
 /// The headline regression: a real `lock_all()` must flip the reported state, and the SESSION IS STILL
@@ -118,11 +127,20 @@ fn the_menu_after_a_real_lock_is_truthful_and_offers_a_way_back_in() {
     residency.lock_all();
     let menu = menu_for(state_for(&residency));
 
+    // The lock state is reported on the tray's OWN surfaces now, not as a greyed menu row
+    // (dig_ecosystem#1800): the icon, the tooltip, and the details window. All three are checked, because
+    // "the user can see they are locked" is exactly the property that moved.
+    let view = view_for(state_for(&residency));
+    assert_eq!(tray_menu::status(&view).glyph, tray_menu::TrayGlyph::Locked);
     assert!(
-        menu.rows
-            .contains(&MenuRow::Status("Account: locked".to_string())),
-        "the status line must not claim the account is unlocked: {:?}",
-        menu.rows
+        tray_menu::status(&view).tooltip.contains("locked"),
+        "the tooltip must not claim the account is unlocked: {:?}",
+        tray_menu::status(&view).tooltip
+    );
+    assert!(
+        tray_menu::details_text(&view).contains("Account: locked"),
+        "the details window must not claim the account is unlocked: {}",
+        tray_menu::details_text(&view)
     );
     assert!(
         menu.is_enabled(TrayAction::Unlock),

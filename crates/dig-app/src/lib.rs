@@ -8,7 +8,10 @@
 //!   beacon's health probe parses.
 //! * [`autostart`] — the per-user platform artifacts that make the shell start itself at login, per
 //!   SPEC §4's form-factor table.
-//! * [`brand`] — the embedded DIG mark the tray paints, and its decoder (tray builds only).
+//! * [`brand`] — the embedded DIG mark the tray paints, its state badges, and its decoder (tray builds
+//!   only).
+//! * [`console`] — where a GUI-subsystem binary prints, so `dig-app --version` still answers the update
+//!   beacon's health probe (dig_ecosystem#1797).
 //! * [`logging`] — the shared dual-sink field log the shell installs for the user's whole session.
 //! * [`tray_guard`] — surviving a desktop stack that panics instead of failing (tray builds only).
 
@@ -20,6 +23,7 @@ pub mod autostart;
 /// decoder.
 #[cfg(feature = "tray")]
 pub mod brand;
+pub mod console;
 pub mod logging;
 /// Surviving a desktop stack that panics instead of failing.
 ///

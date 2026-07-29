@@ -124,6 +124,94 @@ pub struct ClaimPrompt<'a> {
     pub affirm: &'static str,
 }
 
+/// A **destroy** prompt: the user is about to lose key material for good (dig_ecosystem#1799).
+///
+/// Replacing or removing a DIG Account discards its master seed, and everything sealed under it becomes
+/// unreadable. That is at least as consequential as one signature, so it goes through the same two-step
+/// AUTHORIZATION gate — a foreground window naming exactly what is lost, then an OS re-authentication —
+/// and never through [`NoticePrompt`] (one button, no decision) or [`ClaimPrompt`] (two buttons, no
+/// biometric). A user who has walked away from an unlocked machine must not lose their account to a
+/// passer-by clicking two menu items.
+#[derive(Debug, Clone, Copy)]
+pub struct DestroyPrompt<'a> {
+    /// What is about to be destroyed, in the user's words (e.g. `"the DIG Account on this computer"`).
+    pub subject: &'a str,
+    /// What happens next, if anything (e.g. `"A brand-new account will be created in its place."`).
+    /// Empty when the action only destroys.
+    pub replacement: &'a str,
+    /// Whether the account being destroyed has a recovery phrase.
+    ///
+    /// Drives the WARNING, not the permission: without a phrase the loss is absolute and the window says
+    /// so in the strongest terms; with one, the words still restore it elsewhere. Never used to skip the
+    /// gate — both cases are irreversible on THIS computer.
+    pub recoverable: bool,
+}
+
+/// A request for the user to TYPE something in a native window (dig_ecosystem#1798).
+///
+/// # Why this seam exists
+///
+/// A recovery phrase is 24 words of typed input, and a tray menu has no text field: the OS hands a tray
+/// only menu items. That is a property of the tray API, not a reason to send a person to a terminal — and
+/// the tray shipped `"Restore from a recovery phrase (in a terminal)…"` for exactly that reason. The
+/// honest destination is a real OS window with a real input control, which is what every backend behind
+/// this seam draws (Win32 `EDIT`, `NSAlert` accessory field, `zenity --entry`).
+///
+/// **The subprocess-helper alternative was rejected on security grounds.** Shelling out to a small
+/// "ask for a phrase" binary would need a verify-the-helper-is-ours check, or a `PATH` impostor
+/// harvests recovery phrases. Every backend here draws the window IN THIS PROCESS.
+#[derive(Debug, Clone, Copy)]
+pub struct InputPrompt<'a> {
+    /// The window title.
+    pub title: &'a str,
+    /// The primary line — what is being asked for.
+    pub heading: &'a str,
+    /// The body: the format expected, and the consequence of getting it wrong.
+    pub body: &'a str,
+    /// The label beside the field itself (e.g. `"Your 24 words:"`).
+    pub field_label: &'a str,
+    /// The label of the submit button (e.g. `"Restore"`).
+    pub submit: &'static str,
+    /// Whether the typed characters start out hidden.
+    ///
+    /// Secret material is masked by DEFAULT (`SPEC.md` §3.1d): the words already exist on paper, so a
+    /// person who can see the screen is the live risk, and a typo costs only a retry.
+    pub masked: bool,
+    /// Whether the window offers a reveal-while-typing control.
+    ///
+    /// §3.1d's own escape from the masking rule, and what makes it humane: masking is right by default, but
+    /// 24 words typed entirely blind cannot be checked, so the field is masked AND deliberately un-maskable
+    /// rather than defaulting to clear text. A short passphrase needs no such control.
+    pub revealable: bool,
+}
+
+/// What came back from an [`InputPrompt`].
+///
+/// [`Debug`] is implemented by hand and REDACTS the text: this type carries recovery phrases, and a
+/// derived `Debug` would put one into any log line, panic message or test failure that formatted it
+/// (`tests/never_log.rs` pins the rule).
+pub enum InputOutcome {
+    /// The user typed something and submitted it. Wrapped in [`Zeroizing`] so the buffer is wiped when
+    /// the caller drops it.
+    Provided(zeroize::Zeroizing<String>),
+    /// The user cancelled or closed the window. Nothing was typed that the caller may act on.
+    Cancelled,
+    /// No input window could be drawn (a headless host, no dialog helper). Callers MUST fail closed —
+    /// never treat it as an empty answer.
+    Unavailable,
+}
+
+impl std::fmt::Debug for InputOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // The LENGTH is safe and is what a debugging session actually needs ("did anything arrive?").
+            Self::Provided(text) => write!(f, "Provided(<{} redacted chars>)", text.len()),
+            Self::Cancelled => f.write_str("Cancelled"),
+            Self::Unavailable => f.write_str("Unavailable"),
+        }
+    }
+}
+
 /// The terminal human authorization for the identity channel. The one production implementation is
 /// the per-OS native confirm (SIGN-3); [`HeadlessConfirmer`] is the fail-closed default, and tests
 /// use a scripted double. There is deliberately no default-approve — an unimplemented backend denies.
@@ -168,6 +256,23 @@ pub trait NativeConfirmer: Send + Sync {
     fn confirm_claim(&self, _prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Unavailable
     }
+
+    /// Authorize destroying key material — replacing or removing an account (dig_ecosystem#1799).
+    ///
+    /// Runs the SAME two-step gate as a signature (foreground window + OS re-authentication), because a
+    /// destroyed master seed is unrecoverable. Defaults to [`ConfirmDecision::Unavailable`] so a backend
+    /// that cannot authorize refuses to destroy rather than destroying unguarded.
+    fn confirm_destroy(&self, _prompt: &DestroyPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    /// Ask the user to TYPE something in a native window (dig_ecosystem#1798).
+    ///
+    /// Defaults to [`InputOutcome::Unavailable`] so a backend with no input window reports that it could
+    /// not ask, rather than an empty answer a caller might treat as submitted text.
+    fn request_input(&self, _prompt: &InputPrompt<'_>) -> InputOutcome {
+        InputOutcome::Unavailable
+    }
 }
 
 /// The fail-closed confirmer for a host with no desktop session — the SIGN-1 default until the per-OS
@@ -201,6 +306,14 @@ impl NativeConfirmer for HeadlessConfirmer {
     fn confirm_claim(&self, _prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Unavailable
     }
+
+    fn confirm_destroy(&self, _prompt: &DestroyPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    fn request_input(&self, _prompt: &InputPrompt<'_>) -> InputOutcome {
+        InputOutcome::Unavailable
+    }
 }
 
 // The per-OS backends (SIGN-3). Each is compiled only for its own target and provides a
@@ -214,6 +327,10 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+// Windows keeps its input window in its own module: it is a hand-built window class with a message loop,
+// which has nothing in common with the `MessageBoxW` confirm beside it.
+#[cfg(target_os = "windows")]
+mod windows_input;
 
 /// Select the confirmer this host uses as the terminal identity gate (SIGN-3).
 ///
@@ -284,6 +401,14 @@ pub(crate) enum Presentation {
     Acknowledge,
     /// TWO labelled choices, because refusing genuinely changes what happens.
     Decide {
+        /// Whether the REFUSING choice must be the pre-selected default.
+        ///
+        /// `MessageBoxW` and `NSAlert` both default to their FIRST button, so a destroy window would confirm
+        /// irreversible key destruction on a bare Enter — a review finding (dig_ecosystem#1799). For a
+        /// destroy the safe answer is therefore pre-selected; for a sign, a pairing or a connect the
+        /// affirmative stays the default, because those are the actions the user just asked for and refusing
+        /// them costs nothing but a retry.
+        refusal_is_default: bool,
         /// The sentence naming both choices, for a backend whose buttons cannot be RELABELLED.
         ///
         /// macOS and the Linux helpers put [`ConfirmContent::action`] directly on the button, so they
@@ -361,14 +486,52 @@ impl ConfirmContent {
             // authorization, it says the claim is not true yet.
             presentation: Presentation::Decide {
                 choice_hint: format!("Choose OK — {} — or Cancel if not yet.", prompt.affirm),
+                refusal_is_default: false,
+            },
+        }
+    }
+
+    /// The content for a destroy confirm (dig_ecosystem#1799): authorize losing key material.
+    ///
+    /// The body states the irreversible consequence FIRST and in the user's own terms, because this is the
+    /// last screen before the seed is gone. `recoverable` changes the SEVERITY of the warning, never the
+    /// gate: an account with a phrase can be brought back from the words *somewhere else*, but on this
+    /// computer both cases are equally final.
+    fn destroy(prompt: &DestroyPrompt<'_>) -> Self {
+        let loss = if prompt.recoverable {
+            "Everything sealed under it on this computer becomes unreadable. You can only get this \
+             account back with its 24-word recovery phrase — if you do not have those words written \
+             down, it is gone for good."
+        } else {
+            "This account has NO recovery phrase, so it exists ONLY on this computer. Once it is \
+             destroyed, it and everything sealed under it are gone for good — not recoverable by you \
+             and not by DIG."
+        };
+        Self {
+            title: "DIG — Destroy this account".to_string(),
+            heading: format!("Permanently destroy {}?", prompt.subject),
+            body: match prompt.replacement.is_empty() {
+                true => loss.to_string(),
+                false => format!("{loss}\n\n{}", prompt.replacement),
+            },
+            action: "Destroy",
+            // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
+            // platform dialogs default to their first button, so the refusal is pre-selected here.
+            presentation: Presentation::Decide {
+                choice_hint: "Choose Cancel to keep this account, or OK to destroy it.".to_string(),
+                refusal_is_default: true,
             },
         }
     }
 
     /// The two-choice presentation for an AUTHORIZATION prompt, whose `action` is an imperative verb.
+    ///
+    /// The affirmative stays the default: the user asked for this, and a refusal costs only a retry. The one
+    /// exception is a DESTROY, which composes its presentation directly (see [`ConfirmContent::destroy`]).
     fn authorize(action: &str) -> Presentation {
         Presentation::Decide {
             choice_hint: format!("Choose OK to {action}, or Cancel to reject."),
+            refusal_is_default: false,
         }
     }
 
@@ -459,6 +622,74 @@ pub(crate) enum VerifyOutcome {
     Unavailable,
 }
 
+/// What one native INPUT window must display, built purely from an [`InputPrompt`].
+///
+/// The same reason [`ConfirmContent`] is owned: a backend may need to move it across an FFI or thread
+/// boundary to the UI, and centralizing the render keeps "what the user is shown" in one tested place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InputContent {
+    /// The window title bar text.
+    pub title: String,
+    /// The primary line — what is being asked for.
+    pub heading: String,
+    /// The detail beneath it: the expected format and the consequence of getting it wrong.
+    pub body: String,
+    /// The label beside the field.
+    pub field_label: String,
+    /// The submit button's label.
+    pub submit: &'static str,
+    /// Whether typed characters start out hidden.
+    pub masked: bool,
+    /// Whether a reveal-while-typing control is offered.
+    pub revealable: bool,
+}
+
+impl InputContent {
+    /// Compose the window content for `prompt`, passed through verbatim: the caller owns this copy
+    /// because it is asking for material it will handle itself.
+    fn of(prompt: &InputPrompt<'_>) -> Self {
+        Self {
+            title: prompt.title.to_string(),
+            heading: prompt.heading.to_string(),
+            body: prompt.body.to_string(),
+            field_label: prompt.field_label.to_string(),
+            submit: prompt.submit,
+            masked: prompt.masked,
+            revealable: prompt.revealable,
+        }
+    }
+}
+
+/// Raises a foreground window with a real text-input control and returns what the user typed.
+///
+/// Separate from [`ForegroundWindow`] because the platform mechanisms are genuinely different — Windows
+/// `MessageBoxW` has no input control at all, so its input window is a hand-built `EDIT`-bearing window
+/// while its confirm window stays a message box.
+pub(crate) trait ForegroundInput: Send + Sync {
+    /// Show `content` as a real, focus-stealing OS window and block until the user submits or cancels.
+    fn ask(&self, content: &InputContent) -> InputOutcome;
+}
+
+/// A [`ForegroundInput`] for a platform that has no input window yet: it always reports that it could not
+/// ask, so a caller fails closed rather than reading a phantom empty answer.
+///
+/// Kept as the explicit, named alternative to silently omitting the seam, so a backend that has not built
+/// its input window says so in its own construction rather than inheriting a default nobody notices.
+///
+/// No production backend uses it today — Windows, macOS and Linux all draw a real input window — so it is
+/// reachable only from the seam's own tests. It is kept rather than deleted because it is the named,
+/// fail-closed thing a FUTURE backend (a new platform, a stripped build) must pass, and the alternative is
+/// that backend silently omitting the seam.
+#[derive(Debug, Default, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct NoInputWindow;
+
+impl ForegroundInput for NoInputWindow {
+    fn ask(&self, _content: &InputContent) -> InputOutcome {
+        InputOutcome::Unavailable
+    }
+}
+
 /// Raises the foreground confirm window showing decoded content and returns the user's intent.
 pub(crate) trait ForegroundWindow: Send + Sync {
     /// Show `content` as a real, focus-stealing OS window and block until the user answers or the
@@ -503,15 +734,24 @@ pub(crate) fn gated_consent(
 /// the three trait prompts to its [`ConfirmContent`] and runs the shared [`gated_consent`]. Keeping
 /// the composition here means a backend cannot diverge in its security logic — it only implements the
 /// two thin OS adapters.
-pub(crate) struct BackedConfirmer<W: ForegroundWindow, V: BiometricVerifier> {
+pub(crate) struct BackedConfirmer<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> {
     window: W,
     verifier: V,
+    input: I,
 }
 
-impl<W: ForegroundWindow, V: BiometricVerifier> BackedConfirmer<W, V> {
-    /// Assemble a confirmer over the given OS window + biometric verifier.
-    pub(crate) fn new(window: W, verifier: V) -> Self {
-        Self { window, verifier }
+impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfirmer<W, V, I> {
+    /// Assemble a confirmer over the given OS confirm window, biometric verifier and input window.
+    ///
+    /// The input window is a required constructor argument rather than an optional extra: a platform that
+    /// has not built one must pass [`NoInputWindow`] and say so out loud, because a silently-absent input
+    /// seam is how the tray came to point at a terminal (dig_ecosystem#1798).
+    pub(crate) fn new(window: W, verifier: V, input: I) -> Self {
+        Self {
+            window,
+            verifier,
+            input,
+        }
     }
 
     /// Draw `content` and report what came back, with NO biometric step — the shared body of the two
@@ -526,7 +766,9 @@ impl<W: ForegroundWindow, V: BiometricVerifier> BackedConfirmer<W, V> {
     }
 }
 
-impl<W: ForegroundWindow, V: BiometricVerifier> NativeConfirmer for BackedConfirmer<W, V> {
+impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfirmer
+    for BackedConfirmer<W, V, I>
+{
     fn confirm_pair(&self, prompt: &PairPrompt<'_>) -> ConfirmDecision {
         gated_consent(&ConfirmContent::pair(prompt), &self.window, &self.verifier)
     }
@@ -559,6 +801,24 @@ impl<W: ForegroundWindow, V: BiometricVerifier> NativeConfirmer for BackedConfir
         // Two choices, still no biometric: the user is asserting something about the world (their words
         // are written down), not authorizing DIG to act with their key.
         self.draw(&ConfirmContent::claim(prompt))
+    }
+
+    fn confirm_destroy(&self, prompt: &DestroyPrompt<'_>) -> ConfirmDecision {
+        // The SAME gate as a signature, deliberately: the window states the irreversible loss, the
+        // biometric proves it is the machine's owner asking. Destroying a master seed must never be
+        // reachable by a passer-by at an unlocked desk clicking two menu items (dig_ecosystem#1799).
+        gated_consent(
+            &ConfirmContent::destroy(prompt),
+            &self.window,
+            &self.verifier,
+        )
+    }
+
+    fn request_input(&self, prompt: &InputPrompt<'_>) -> InputOutcome {
+        // No biometric: typing a recovery phrase is not an authorization to act with an existing key —
+        // it SUPPLIES one. What the typed words then authorize (a restore, which destroys any account
+        // already here) is gated separately by `confirm_destroy` in the journey.
+        self.input.ask(&InputContent::of(prompt))
     }
 
     fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision {
@@ -695,8 +955,8 @@ mod tests {
     fn confirmer(
         intent: WindowIntent,
         outcome: VerifyOutcome,
-    ) -> BackedConfirmer<FakeWindow, FakeVerifier> {
-        BackedConfirmer::new(FakeWindow(intent), FakeVerifier(outcome))
+    ) -> BackedConfirmer<FakeWindow, FakeVerifier, NoInputWindow> {
+        BackedConfirmer::new(FakeWindow(intent), FakeVerifier(outcome), NoInputWindow)
     }
 
     #[test]
@@ -727,7 +987,11 @@ mod tests {
         // A window that would approve — but a missing decoded tx must short-circuit to Deny so a
         // caller can never coax a blind-sign approval (§5.6.5, defense-in-depth over dispatch).
         let recorder = RecordingWindow(std::sync::Mutex::new(None));
-        let confirmer = BackedConfirmer::new(recorder, FakeVerifier(VerifyOutcome::Verified));
+        let confirmer = BackedConfirmer::new(
+            recorder,
+            FakeVerifier(VerifyOutcome::Verified),
+            NoInputWindow,
+        );
         assert_eq!(
             confirmer.confirm_sign(&sign_prompt(None)),
             ConfirmDecision::Deny
@@ -788,7 +1052,7 @@ mod tests {
     fn hint_of(content: &ConfirmContent) -> Option<&str> {
         match &content.presentation {
             Presentation::Acknowledge => None,
-            Presentation::Decide { choice_hint } => Some(choice_hint),
+            Presentation::Decide { choice_hint, .. } => Some(choice_hint),
         }
     }
 

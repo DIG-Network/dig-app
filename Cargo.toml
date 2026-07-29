@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "3.5.0"
+version = "4.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -204,6 +204,18 @@ windows = { version = "0.58", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_RemoteDesktop",
     "Win32_UI_WindowsAndMessaging",
+    # The native input window (dig_ecosystem#1798) needs `SetFocus` to put the caret in the field it just
+    # created — a window that opens with no focus makes the user click before they can type.
+    "Win32_UI_Input_KeyboardAndMouse",
+    # `EM_SETPASSWORDCHAR` / `BM_GETCHECK` for the reveal-while-typing checkbox (SPEC §3.1d).
+    "Win32_UI_Controls",
+    # `AttachConsole`/`SetStdHandle` (dig_ecosystem#1797): a GUI-subsystem process has no console, so
+    # `dig-app --version` — which the update beacon health-gates on — must attach to its parent's. Opening
+    # `CONOUT$` to re-point the standard handles is a `CreateFileW`, hence the file-system feature.
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    # `CreateFileW`'s `SECURITY_ATTRIBUTES` parameter lives here, so the file-system feature needs it.
+    "Win32_Security",
 ] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
@@ -221,6 +233,11 @@ objc2-app-kit = { version = "0.3", features = [
     "NSControl",
     "NSResponder",
     "NSView",
+    # The native input window's accessory field (dig_ecosystem#1798): a recovery phrase is typed into an
+    # echoing `NSTextField`, a passphrase into a masked `NSSecureTextField`. An `NSAlert` accessory view is
+    # how macOS takes typed input in the same window type every other DIG prompt already uses.
+    "NSTextField",
+    "NSSecureTextField",
 ] }
 objc2-local-authentication = { version = "0.3", features = ["LAContext", "block2"] }
 block2 = "0.6"

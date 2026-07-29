@@ -15,13 +15,29 @@
 //! the §5.3 endpoint ladder and asks a running dig-node for `control.status` over its loopback
 //! JSON-RPC surface, so the tray shows the node's real version, cache and hosted-store counts — and,
 //! when no node is running, says so with the reason rather than spinning.
+//!
+//! # Why this is a GUI-subsystem binary (dig_ecosystem#1797)
+//!
+//! `windows_subsystem = "windows"` is what stops Windows allocating a console for a tray application: at
+//! subsystem 3 (`WINDOWS_CUI`, what this shipped as through 3.4.0) a black console window appeared at every
+//! launch AND the tray's lifetime was tied to it, so closing the console killed the agent. WireGuard's tray
+//! app on the same machine is subsystem 2; `dig-node` is 3 and correctly so, being a service and a CLI.
+//!
+//! The consequence is that this process has **no console**, so the informational paths below attach to
+//! their launcher's one before printing ([`dig_app::console`]) — `dig-app --version` is health-gated by the
+//! update beacon and must still put exactly one line on stdout. `tests/gui_subsystem.rs` parses the built
+//! binary's PE header and fails if the subsystem regresses.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, boot_existing_account, open_account, reboot_reunlock, BootedAccount,
+    account_exists, boot_existing_account, discard_account, open_account, reboot_reunlock,
+    vault_for, BootedAccount, DiscardOutcome,
 };
 #[cfg(feature = "tray")]
-use dig_app_core::account::journey::WindowedPresenter;
+use dig_app_core::account::journey::{
+    ask_for_phrase, AccountCustodian, Replacement, WindowedPresenter,
+};
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
 #[cfg(feature = "tray")]
@@ -46,7 +62,7 @@ use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
 #[cfg(feature = "tray")]
 use dig_app_core::storage::did_hash;
 #[cfg(feature = "tray")]
-use dig_app_core::tray_menu::{self, AccountState, SessionFacts};
+use dig_app_core::tray_menu::{self, AccountState, AtRest, SessionFacts};
 #[cfg(feature = "tray")]
 use dig_app_core::Os;
 #[cfg(feature = "tray")]
@@ -93,10 +109,16 @@ fn main() {
     //    you?", on every single update check.
     let unrecognized = match dig_app::argv::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
         dig_app::argv::Invocation::Version => {
+            // This binary is GUI-subsystem, so it has no console of its own and `println!` would go
+            // nowhere. Attaching to the launcher's console is what keeps `dig-app --version` answerable
+            // from a real terminal; a REDIRECTED stdout (how the update beacon reads it) is left untouched
+            // — see `dig_app::console` for why that distinction is load-bearing.
+            dig_app::console::attach_to_parent();
             println!("{}", dig_app::argv::version_line());
             return;
         }
         dig_app::argv::Invocation::Help => {
+            dig_app::console::attach_to_parent();
             println!("{}", dig_app::argv::help_text());
             return;
         }
@@ -329,6 +351,13 @@ fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
         .ok()
 }
 
+/// Whether an account exists at rest on this host — the cheap, side-effect-free half of "is this account
+/// wedged?", asked only when there is no live session to ask instead.
+#[cfg(feature = "tray")]
+fn account_is_enrolled(env: &AppEnvironment) -> bool {
+    brand_dir(env).is_some_and(|dir| account_exists(&dir))
+}
+
 /// The account state the tray shows: read the impure host facts, then let the tested rules decide.
 ///
 /// The lock state is read FRESH from the residency on every repaint via [`SessionFacts::of`], never
@@ -337,16 +366,24 @@ fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
 /// function therefore holds no logic of its own; [`tray_menu::account_state`] owns every rule, where it
 /// is covered by tests rather than sitting untested in a binary.
 #[cfg(feature = "tray")]
-fn account_state(env: &AppEnvironment, session: Option<&TraySession>) -> AccountState {
+fn account_state(
+    env: &AppEnvironment,
+    session: Option<&TraySession>,
+    boot_failed: bool,
+) -> AccountState {
     let supported = matches!(env.os, Os::Windows | Os::MacOs);
     // Only worth a filesystem check when there is no session to ask: with one, the account provably
     // exists, and this runs on every repaint tick.
-    let enrolled = match session {
-        Some(_) => true,
-        None => brand_dir(env).is_some_and(|dir| account_exists(&dir)),
+    let at_rest = match session {
+        Some(_) => AtRest::Present,
+        None if !brand_dir(env).is_some_and(|dir| account_exists(&dir)) => AtRest::None,
+        // An account IS here and we tried to open it and could not. Reporting this as merely `Locked` would
+        // offer an `Unlock…` that is guaranteed to fail — the silent-signing-outage defect (#1799 review).
+        None if boot_failed => AtRest::PresentButUnopenable,
+        None => AtRest::Present,
     };
     let facts = session.map(|s| SessionFacts::of(&s.residency, s.account.recoverable));
-    tray_menu::account_state(supported, enrolled, facts)
+    tray_menu::account_state(supported, at_rest, facts)
 }
 
 /// Create a brand-new account: generate a recovery phrase, show it once, confirm retention, enrol.
@@ -381,29 +418,52 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     session
 }
 
-/// Tell the user how to restore an account from their recovery phrase.
+/// Restore an account onto a host that has none, from a recovery phrase typed into a native window.
 ///
-/// **Interim (`SPEC.md` §3.1d).** The specified end state is a NATIVE INPUT DIALOG raised from the tray:
-/// a tray menu has no text field of its own, but that is a property of the tray API and not a reason to
-/// hand the user off to a terminal. Until that dialog is built, restore is served by `dign account
-/// restore` (masked entry) and this window hands over the exact command rather than leaving the user to
-/// search for it (§6.1: point at the way forward, never a dead end).
+/// **This replaces the terminal hand-off (dig_ecosystem#1798).** The tray used to show
+/// *"Restore from a recovery phrase (in a terminal)…"* and print a `dign account restore` command, because
+/// a tray menu has no text field. That is a property of the tray API, not a reason to send a person to a
+/// console — and on a machine where dig-node's byte-identical `dign` alias wins the shared bin directory
+/// (dig_ecosystem#1788) it handed them the WRONG TOOL. The words are now typed into a real OS window.
+///
+/// Returns the live session on success, and `None` on any refusal or failure — always after telling the
+/// user which, because they pressed a button and are waiting for an answer.
 #[cfg(feature = "tray")]
-fn explain_restore(confirmer: &dyn NativeConfirmer) {
-    notify(
+fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
+    let dir = brand_dir(env)?;
+    let phrase = ask_for_phrase(
         confirmer,
-        "DIG — Restore from a recovery phrase",
-        "Restoring an account is done from the command line.",
-        "Open a terminal and run:\n\n    dign account restore\n\nIt will ask for your 24 words, \
-         privately, and will not echo them. When it finishes, restart DIG and your account will be \
-         here.\n\nThis machine currently has no DIG Account, so nothing will be overwritten.\n\n\
-         Use the words DIG gave you. A recovery phrase from a Chia wallet such as Sage is NOT a DIG \
-         recovery phrase — DIG would accept it and build a DIFFERENT, empty account from it.",
-    );
+        "Restore your DIG Account from its recovery phrase.",
+    )?;
+    if open_account(&dir, Seeding::Restore(&phrase)).is_none() {
+        notify(
+            confirmer,
+            "DIG — Restore did not complete",
+            "Your DIG Account could not be restored.",
+            "Nothing was changed on this computer. The log folder (in the DIG menu) has the details, \
+             and you can try again from the DIG menu whenever you are ready.",
+        );
+        return None;
+    }
+    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+    // assembled exactly as on every other start — one code path, no special-cased restore.
+    let session = start_sign_service(env);
+    if session.is_some() {
+        notify(
+            confirmer,
+            "DIG — Account restored",
+            "Your DIG Account is back on this computer.",
+            "You can view your recovery phrase again at any time from the DIG menu.",
+        );
+    }
+    session
 }
 
-/// Draw a plain informational window. A helper so every one of the tray's messages goes through the same
-/// OS-owned surface rather than a mix of dialogs, notifications and silence.
+/// Draw a plain informational window. A helper so every one of the shell's own messages goes through the
+/// same OS-owned surface rather than a mix of dialogs, notifications and silence.
+///
+/// The destructive-verb messages are NOT here — they live with the flow that decides them, in
+/// [`dig_app_core::account::journey`], so they are covered by that flow's tests.
 #[cfg(feature = "tray")]
 fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &str) {
     confirmer.show_notice(&NoticePrompt {
@@ -414,9 +474,9 @@ fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &st
     });
 }
 
-/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the account (a
-/// zero-prompt re-unlock from the OS credential store) and re-installs it into the shared `residency`
-/// before the signature proceeds — restoring the live-view signer so the pending sign can complete
+/// The production sign-path re-auth gate: on a sign after a lock it re-unlocks the account (a zero-prompt
+/// re-unlock from the OS credential store) and re-installs it into the shared `residency` before the
+/// signature proceeds — restoring the live-view signer so the pending sign can complete
 /// (dig_ecosystem#967 / #1547). A failed re-unlock leaves the residency locked, so the sign is refused.
 #[cfg(feature = "tray")]
 fn build_reauth_gate(
@@ -427,6 +487,88 @@ fn build_reauth_gate(
     Arc::new(SessionReauthGate::new(lock, move || {
         reboot_reunlock(&brand_dir, &residency)
     }))
+}
+
+/// The shell's [`AccountCustodian`]: the four host effects a destructive account verb has.
+///
+/// **This type holds NO ordering logic.** Authorize, collect the replacement, lock, discard, enrol is
+/// decided by [`journey::replace_account`] in `dig-app-core`, where it is unit-tested against a recording
+/// custodian. That split is a review finding (dig_ecosystem#1799): while the ordering lived here, in a `bin`
+/// target behind `#[cfg(feature = "tray")]`, no test could reach it — inverting one character so a REFUSED
+/// destroy destroyed the account left the whole workspace green.
+///
+/// The live session sits behind a [`RefCell`] because the trait takes `&self` (the ordering must not be able
+/// to swap the session out of turn) while these methods genuinely have to replace it.
+#[cfg(feature = "tray")]
+struct ShellCustodian<'a> {
+    env: &'a AppEnvironment,
+    confirmer: &'a dyn NativeConfirmer,
+    brand_dir: std::path::PathBuf,
+    /// The tray's live session, replaced in place as the account is locked, discarded and re-enrolled.
+    session: std::cell::RefCell<&'a mut Option<TraySession>>,
+}
+
+#[cfg(feature = "tray")]
+impl AccountCustodian for ShellCustodian<'_> {
+    fn lock_current(&self) {
+        // Taking the session drops the tray's handle on it; locking first drops the KEY MATERIAL, so the
+        // residency is not holding a seed that is about to be deleted underneath it.
+        if let Some(live) = self.session.borrow_mut().take() {
+            live.lock.lock_now();
+        }
+    }
+
+    fn discard(&self) -> DiscardOutcome {
+        discard_account(&self.brand_dir)
+    }
+
+    fn enrol_new(&self) -> bool {
+        let session = set_up_account(self.env, self.confirmer);
+        let enrolled = session.is_some();
+        **self.session.borrow_mut() = session;
+        enrolled
+    }
+
+    fn enrol_from(&self, phrase: &dig_app_core::account::recovery::RecoveryPhrase) -> bool {
+        if open_account(&self.brand_dir, Seeding::Restore(phrase)).is_none() {
+            return false;
+        }
+        // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+        // assembled exactly as on every other start — one code path, no special-cased restore.
+        let session = start_sign_service(self.env);
+        let live = session.is_some();
+        **self.session.borrow_mut() = session;
+        live
+    }
+
+    fn reopen(&self) {
+        **self.session.borrow_mut() = start_sign_service(self.env);
+    }
+}
+
+/// Run a destructive account verb through the core flow.
+///
+/// Everything this function does is ASSEMBLE: resolve the directory, find the phrase vault, build the
+/// custodian, and hand all of it to [`journey::replace_account`]. The outcome is discarded here because every
+/// branch of that flow already ends in a window the user acknowledged.
+#[cfg(feature = "tray")]
+fn replace_account(
+    session: &mut Option<TraySession>,
+    env: &AppEnvironment,
+    confirmer: &dyn NativeConfirmer,
+    what: Replacement,
+) {
+    let Some(dir) = brand_dir(env) else { return };
+    let vault = session
+        .as_ref()
+        .and_then(|session| vault_for(&dir, &session.residency));
+    let custodian = ShellCustodian {
+        env,
+        confirmer,
+        brand_dir: dir,
+        session: std::cell::RefCell::new(session),
+    };
+    dig_app_core::account::journey::replace_account(confirmer, &custodian, what, vault.as_ref());
 }
 
 /// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
@@ -463,12 +605,15 @@ fn current_os() -> Os {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, explain_restore, notify, set_up_account, start_sign_service, AppEnvironment,
-        TraySession,
+        account_state, notify, replace_account, restore_account, set_up_account,
+        start_sign_service, AppEnvironment, TraySession,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app_core::account::boot::vault_for;
-    use dig_app_core::account::journey::{explain_missing_phrase, reveal_phrase};
+    use dig_app_core::account::journey::Replacement;
+    use dig_app_core::account::journey::{
+        explain_missing_phrase, explain_unopenable, reveal_phrase,
+    };
     use dig_app_core::agent::{Agent, SharedStatus};
     use dig_app_core::confirm::{native_confirmer, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;
@@ -476,7 +621,7 @@ mod tray {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     /// How long to let the agent thread flush + stop after "Quit" before the loop exits the process.
@@ -507,15 +652,25 @@ mod tray {
     fn render(model: &MenuModel) -> Result<RenderedMenu, String> {
         let menu = Menu::new();
         let mut actions = HashMap::new();
-        for row in &model.rows {
+        append_rows(&menu, &model.rows, &mut actions)?;
+        Ok(RenderedMenu { menu, actions })
+    }
+
+    /// Append `rows` to `parent`, recording each action row's native id in `actions`.
+    ///
+    /// Recursive because [`MenuRow::Submenu`] nests: the rare and destructive account verbs live one level
+    /// down so the top level stays short (dig_ecosystem#1800). `muda`'s `Submenu` and `Menu` are different
+    /// types with the same `append`, so the recursion is expressed over the [`ContainerMenu`] trait below
+    /// rather than duplicated per level.
+    fn append_rows(
+        parent: &dyn ContainerMenu,
+        rows: &[MenuRow],
+        actions: &mut HashMap<MenuId, TrayAction>,
+    ) -> Result<(), String> {
+        for row in rows {
             match row {
-                // Status rows are disabled items: they read as text, and cannot be clicked.
-                MenuRow::Status(text) => {
-                    menu.append(&MenuItem::new(text, false, None))
-                        .map_err(|e| format!("menu status row failed: {e}"))?;
-                }
-                MenuRow::Separator => menu
-                    .append(&PredefinedMenuItem::separator())
+                MenuRow::Separator => parent
+                    .add(&PredefinedMenuItem::separator())
                     .map_err(|e| format!("menu separator failed: {e}"))?,
                 MenuRow::Action {
                     action,
@@ -524,12 +679,50 @@ mod tray {
                 } => {
                     let item = MenuItem::new(label, *enabled, None);
                     actions.insert(item.id().clone(), *action);
-                    menu.append(&item)
+                    parent
+                        .add(&item)
                         .map_err(|e| format!("menu action row failed: {e}"))?;
+                }
+                MenuRow::Submenu { label, rows } => {
+                    // Enabled unconditionally: a submenu is not an action, and its own rows carry whatever
+                    // gating applies. A greyed submenu would hide the way out of a bad state.
+                    let submenu = Submenu::new(label, true);
+                    append_rows(&submenu, rows, actions)?;
+                    parent
+                        .add(&submenu)
+                        .map_err(|e| format!("menu submenu failed: {e}"))?;
                 }
             }
         }
-        Ok(RenderedMenu { menu, actions })
+        Ok(())
+    }
+
+    /// Anything rows can be appended to — the root [`Menu`] or a [`Submenu`].
+    ///
+    /// `muda` gives both an inherent `append` rather than a shared trait, so this is the one-method bridge
+    /// that lets [`append_rows`] recurse instead of being written once per nesting level.
+    trait ContainerMenu {
+        /// Append one already-built native item.
+        fn add(&self, item: &dyn tray_icon::menu::IsMenuItem)
+            -> Result<(), tray_icon::menu::Error>;
+    }
+
+    impl ContainerMenu for Menu {
+        fn add(
+            &self,
+            item: &dyn tray_icon::menu::IsMenuItem,
+        ) -> Result<(), tray_icon::menu::Error> {
+            self.append(item)
+        }
+    }
+
+    impl ContainerMenu for Submenu {
+        fn add(
+            &self,
+            item: &dyn tray_icon::menu::IsMenuItem,
+        ) -> Result<(), tray_icon::menu::Error> {
+            self.append(item)
+        }
     }
 
     /// Read the current state of the world into the one snapshot the menu is built from.
@@ -537,17 +730,31 @@ mod tray {
         status: &SharedStatus,
         env: &AppEnvironment,
         session: Option<&TraySession>,
+        boot_failed: bool,
     ) -> TrayView {
-        let account = account_state(env, session);
-        let (running, node) = match status.read() {
-            Ok(status) => (status.running, status.engine.summary()),
+        use dig_app_core::engine::EngineState;
+
+        let account = account_state(env, session, boot_failed);
+        let (running, node, node_connected) = match status.read() {
+            Ok(status) => (
+                status.running,
+                status.engine.summary(),
+                // Read from the engine's own STATE, never sniffed out of the summary text: the icon and the
+                // tooltip must not disagree with the engine because a message was reworded.
+                matches!(status.engine, EngineState::Connected { .. }),
+            ),
             // A poisoned status lock is not a reason to show a blank menu: say what we can, and let the
             // rest read as "starting".
-            Err(_) => (false, "Node: status unavailable".to_string()),
+            Err(_) => (
+                false,
+                "The node status could not be read.".to_string(),
+                false,
+            ),
         };
         TrayView {
             running,
             node,
+            node_connected,
             account: Some(account),
             profile_id: session.map(|s| s.account.profile_id.clone()),
             // No on-chain DID can exist yet: minting is unimplemented, so there is nothing that could
@@ -574,7 +781,11 @@ mod tray {
         let event_loop = EventLoopBuilder::new().build();
         let status = agent.status_handle();
 
-        let mut model = snapshot(&status, &env, session.as_ref());
+        // `boot_failed` is the observable half of a wedged account: an open was attempted and did not
+        // produce a session. Sticky until an open SUCCEEDS, so the tray keeps telling the truth rather than
+        // flickering back to "locked" on the next repaint tick.
+        let mut boot_failed = session.is_none() && super::account_is_enrolled(&env);
+        let mut model = snapshot(&status, &env, session.as_ref(), boot_failed);
         // Guarded for the same reason as the mount below: creating native menu objects touches the
         // platform's desktop stack, and a missing library there panics rather than failing.
         let mut menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
@@ -582,12 +793,17 @@ mod tray {
             Err(e) => return Err((e, agent)),
         };
 
-        // The icon is attached only if it decoded. A tray with no picture is still a working tray, so
-        // a bad brand mark must never be the reason the user has no agent at all.
+        // The icon and tooltip are the tray's OTHER two surfaces, and since #1800 they are where the app's
+        // state lives — the menu carries actions only. Both are set from the same snapshot the menu was
+        // built from, so all three can never disagree.
+        //
+        // The icon is attached only if it decoded. A tray with no picture is still a working tray, so a bad
+        // brand mark must never be the reason the user has no agent at all.
+        let mut presence = tray_menu::status(&model);
         let mut builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu.menu.clone()))
-            .with_tooltip("DIG — user identity agent");
-        if let Some(icon) = brand_icon() {
+            .with_tooltip(&presence.tooltip);
+        if let Some(icon) = brand_icon(presence.glyph) {
             builder = builder.with_icon(icon);
         }
         // Mounting is the step that touches the platform's tray library, and on Linux that library
@@ -647,8 +863,20 @@ mod tray {
 
             // Repaint only when something actually changed: rebuilding a native menu every 500ms would
             // close the menu under the user's cursor while they are reading it.
-            let latest = snapshot(&status, &env, session.as_ref());
+            if session.is_some() {
+                boot_failed = false;
+            }
+            let latest = snapshot(&status, &env, session.as_ref(), boot_failed);
             if !view_eq(&latest, &model) {
+                // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
+                // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
+                // menu, see `repaint`) must not also leave a stale picture. `set_icon`/`set_tooltip` touch
+                // only the already-mounted tray, not the desktop's menu stack.
+                let fresh = tray_menu::status(&latest);
+                if fresh != presence {
+                    show_presence(&tray, &fresh);
+                    presence = fresh;
+                }
                 if let Some(rendered) = repaint(&tray, &tray_menu::build(&latest)) {
                     menu = rendered;
                     model = latest;
@@ -657,10 +885,24 @@ mod tray {
         });
     }
 
+    /// Put the app's state on the tray's two non-menu surfaces: its picture and its hover text.
+    ///
+    /// Failures are logged and swallowed on purpose — a tooltip the platform refused is a cosmetic loss, and
+    /// the `Status and details…` window says the same thing in full either way.
+    fn show_presence(tray: &TrayIcon, presence: &tray_menu::TrayStatus) {
+        if let Err(e) = tray.set_tooltip(Some(&presence.tooltip)) {
+            tracing::warn!(error = %e, "the tray tooltip could not be updated");
+        }
+        if let Err(e) = tray.set_icon(brand_icon(presence.glyph)) {
+            tracing::warn!(error = %e, "the tray icon could not be updated");
+        }
+    }
+
     /// Whether two snapshots would render the same menu. [`TrayView`] is not `PartialEq` (it is a
     /// display model whose equality is only ever this question), so the comparison is spelled out.
     fn view_eq(a: &TrayView, b: &TrayView) -> bool {
         a.running == b.running
+            && a.node_connected == b.node_connected
             && a.node == b.node
             && a.account == b.account
             && a.profile_id == b.profile_id
@@ -686,7 +928,24 @@ mod tray {
                     *session = set_up_account(env, confirmer);
                 }
             }
-            TrayAction::RestoreFromPhrase => explain_restore(confirmer),
+            TrayAction::RestoreFromPhrase => {
+                if session.is_none() {
+                    *session = restore_account(env, confirmer);
+                }
+            }
+            // The three destructive verbs. Each destroys the account here FIRST (behind the biometric
+            // authorization gate) and then does whatever comes next, so they share one implementation and
+            // differ only in what they promise the user afterwards.
+            TrayAction::ReplaceWithNewAccount => {
+                replace_account(session, env, confirmer, Replacement::WithNewAccount)
+            }
+            TrayAction::ReplaceFromPhrase => {
+                replace_account(session, env, confirmer, Replacement::FromPhrase)
+            }
+            TrayAction::RemoveAccount => {
+                replace_account(session, env, confirmer, Replacement::Nothing)
+            }
+            TrayAction::ShowStatus => show_status(status, env, session.as_ref(), confirmer),
             TrayAction::Unlock => {
                 // The account exists but did not unlock at boot. Re-running the boot path is the whole
                 // unlock: on Windows/macOS it is zero-prompt from the OS credential store.
@@ -707,12 +966,14 @@ mod tray {
                 }
             }
             TrayAction::ShowRecoveryPhrase => show_phrase(session.as_ref(), env, confirmer),
+            TrayAction::ExplainUnopenable => {
+                explain_unopenable(confirmer);
+            }
             TrayAction::FixMissingPhrase => {
                 explain_missing_phrase(confirmer);
             }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
-            TrayAction::ShowNodeDetails => show_node_details(status, confirmer),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
                 shutdown.trigger();
@@ -759,23 +1020,27 @@ mod tray {
         }
     }
 
-    /// Show the node status in full, in a window that can hold it.
+    /// Show EVERYTHING the tray knows, in full, in a window that can hold it.
     ///
-    /// The menu row is bounded to [`tray_menu::MAX_STATUS_ROW_CHARS`] so one long line cannot stretch the
-    /// menu past the screen edge, and the engine's disconnected reason — the app's single most actionable
-    /// message, naming the node to start or reinstall — is regularly far longer than that. Read LIVE from
-    /// the status handle rather than from the snapshot the menu was built from, so a node that came up
+    /// This is where the five greyed status rows went (dig_ecosystem#1800), and the reason removing them
+    /// lost nothing: a window has no width limit, so the engine's disconnected reason — the app's single
+    /// most actionable message, naming the node to start or reinstall, and ~700 characters in the field —
+    /// arrives whole instead of cut at 72.
+    ///
+    /// Re-snapshotted LIVE rather than read from the model the menu was built from, so a node that came up
     /// while the menu was open is reported as connected instead of replaying a stale reason.
-    fn show_node_details(status: &SharedStatus, confirmer: &dyn NativeConfirmer) {
-        let detail = match status.read() {
-            Ok(status) => status.engine.summary(),
-            Err(_) => "The node status could not be read.".to_string(),
-        };
+    fn show_status(
+        status: &SharedStatus,
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+    ) {
+        let view = snapshot(status, env, session, false);
         notify(
             confirmer,
-            "DIG — Node",
-            "This is your node connection.",
-            &detail,
+            "DIG — Status",
+            "This is what DIG is doing right now.",
+            &tray_menu::details_text(&view),
         );
     }
 
@@ -911,15 +1176,15 @@ mod tray {
         }
     }
 
-    /// The DIG brand mark, decoded from the PNG embedded in this binary at the size this platform's
-    /// tray paints (see [`dig_app::brand`]).
+    /// The DIG brand mark for `glyph`, decoded from the PNG embedded in this binary at the size this
+    /// platform's tray paints and badged with the app's state (see [`dig_app::brand`]).
     ///
     /// Returns `None` rather than panicking on any decoding problem: the icon is decoration, and a
     /// user whose agent refused to start because of a bad picture would be far worse served than one
     /// whose tray is briefly unlabelled. The caller mounts the tray either way.
-    fn brand_icon() -> Option<Icon> {
+    fn brand_icon(glyph: tray_menu::TrayGlyph) -> Option<Icon> {
         let mark = match dig_app::brand::decode(dig_app::brand::TRAY_MARK) {
-            Ok(mark) => mark,
+            Ok(mark) => dig_app::brand::badged(mark, glyph),
             Err(e) => {
                 tracing::warn!(error = %e, "tray icon unavailable — mounting the tray without one");
                 return None;

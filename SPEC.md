@@ -216,8 +216,9 @@ value that merely has DID-shaped text in it — a profile reference, a config en
 an on-chain DID, because doing so tells the user they have a published, verifiable identity they do not
 have.
 
-**Current state:** minting is not implemented, so no profile can have a DID and the tray's mint action is
-disabled with that reason in its label (§3.1c).
+**Current state:** minting is not implemented, so no profile can have a DID and there is no tray action that
+mints — the menu offers an EXPLANATION of what a DID is and costs instead (§3.1c). The absence is
+structural: no `TrayAction` mints, so it cannot be re-enabled by accident.
 
 ### 3.1c The tray account surface (normative)
 
@@ -225,10 +226,33 @@ The tray is the only surface a person has on a fresh install, so it MUST expose 
 journey, not merely lock and quit. The menu is built from ONE pure model (`dig_app_core::tray_menu`) so
 these rules are testable independently of any desktop.
 
-The menu MUST offer, at minimum: the agent's own state, the node connection line, the account state, the
-profile's DIG ID, the on-chain DID state, and actions to set up an account, restore from a recovery
-phrase, unlock, lock now, reveal the recovery phrase, copy the DIG ID, explain the on-chain DID, show the
-node connection in full, open the log folder, and quit.
+**A menu item is an ACTION (MUST).** A native menu offers only clickable items, separators and submenus, so
+read-only text can be rendered ONLY as a disabled item — and a disabled item means *"something you cannot do
+right now"*. Using disabled items as labels therefore tells every new user the application is broken. The
+menu MUST NOT contain a row whose only purpose is to display text; the model has no variant that could
+(`MenuRow` is a separator, an action or a submenu).
+
+State lives on the tray's other two surfaces plus one window, all three built from the SAME snapshot as the
+menu so they can never disagree:
+
+| what the user needs to know | where it MUST live |
+|---|---|
+| connected / locked / not-set-up / starting | the tray ICON, as a distinguishable per-state image |
+| the one-line summary | the tray TOOLTIP, bounded and visibly marked when cut |
+| everything, in full and untruncated | a `Status and details…` window, enabled in EVERY state |
+
+The ICON MUST NOT be the only signal for a state: the tooltip MUST name the same state in words, so a user
+who cannot distinguish the icons — or whose theme flattens them — still has the fact (§6.6).
+
+The menu MUST offer actions to: show the status details, set up an account, restore from a recovery phrase,
+unlock, lock now, reveal the recovery phrase, copy the DIG ID, replace the account (with a new one, or with
+one from a recovery phrase), remove the account, explain an account that cannot be opened, explain the
+on-chain DID, open the log folder, and quit.
+
+The account has SIX user-visible states, and an implementation MUST distinguish all of them: this host cannot
+hold an account · no account yet · locked · **cannot be opened** · unlocked · unlocked with no recovery
+phrase. The fourth is the one most easily and most damagingly collapsed into "locked" — see the rule below.
+The top level MUST stay short; rare and destructive verbs belong in a submenu, not beside `Lock now`.
 
 Minting an on-chain DID is deliberately NOT among them: no implementation exists (§3.1b), so the menu
 offers an EXPLANATION of what a DID is and costs, and there is no tray action that mints — the absence is
@@ -239,44 +263,89 @@ Binding rules:
 - **Boot MUST NOT enrol.** Creating an account displays a recovery phrase, and a phrase window that
   appears unbidden at login is a window people dismiss. An account is created only by an explicit user
   action, so a host with no account boots to a tray offering to set one up.
+- **Account management MUST be reachable in EVERY state (MUST).** Creating an account, replacing the one
+  that is here (with a new account, or with one restored from a recovery phrase), and removing it MUST all be
+  reachable whenever the host can hold an account — never gated on there being no account. Gating them on
+  absence is the defect this rule exists to forbid: on a measured install with an account that had no
+  recovery phrase, set-up, restore and reveal were all disabled and the one live row explained that the
+  remedy was a new account, which nothing could create. A user MUST NOT have to edit files to change which
+  account is on their computer.
+  Each verb is gated on its REAL precondition, which is whether an account EXISTS — that decides whether the
+  verb creates or REPLACES, and therefore what its label must say. A verb with nothing to act on (removing an
+  account on a host that has none) is OMITTED, not disabled.
+- **A destructive account verb MUST be authorized, not merely confirmed (MUST).** Replacing or removing an
+  account discards its master seed and makes everything sealed under it unreadable. Each MUST therefore go
+  through the same two-step AUTHORIZATION gate as a signature — a foreground window naming the irreversible
+  loss, then an OS re-authentication (§5.6.1) — and MUST NOT be drawn as a notice (one button, no decision)
+  or as a claim (two buttons, no biometric). Before the point of no return the flow MUST offer to display the
+  account's recovery phrase where one exists, and where a replacement phrase is being supplied it MUST be
+  collected and validated BEFORE anything is destroyed. The verb's own LABEL MUST say "Replace" or "Remove",
+  and it MUST NOT be the default or an accidental path.
 - **Never trap the user.** "Quit" and the log folder MUST be enabled in EVERY state, including when the
   account is unsupported, absent, locked, or broken. No state may leave the menu with nothing actionable.
 - **Say the true state.** An account with no recovery phrase MUST be labelled as such in the account
   status line AND offered the explainer, and MUST NOT be shown an inert "show my recovery phrase" item.
   An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
   existence is discoverable — **but only when the label can say WHY.** A disabled row with no reason in it
-  is a small unexplained mystery; where there is no reason worth printing (a details window for a status
-  line that was not abbreviated has nothing to add), the row MUST be omitted instead.
+  is a small unexplained mystery; where there is no reason worth printing, the row MUST be omitted instead.
+  A disabled row MUST also sit beside an ENABLED row that resolves it, so no state is a dead end. Two rows
+  currently qualify: setting up an account on a host with no per-application credential store, and revealing
+  the recovery phrase while the account is locked (whose remedy, `Unlock…`, is directly above it).
 - **Every ENABLED item MUST be able to perform what its label says (MUST).** This is the strong form of the
   rule above, and it binds two cases that are easy to get wrong:
   - A capability that does not EXIST YET is either absent or shown DISABLED **with the reason in its
     label**. It MUST NOT be enabled and handled by a dialog that apologises for the feature's absence: an
     enabled control that cannot act reads as a broken application, which is worse than an honest gap.
-  - An item that cannot itself carry out the action it names MUST say where the action happens (for
-    example, restore, which needs a text field the tray API does not provide — §3.1d). A label promising
-    an action the item merely explains is the same defect in milder form.
-- **A status row MUST fit one menu row (MUST).** A native menu sizes itself to its widest item, so ONE long
-  status line stretches the whole menu — past the screen edge on a real desktop, taking the action rows out
-  of reach. Status text MUST therefore be bounded to a single line of bounded width, and MUST be visibly
-  marked as abbreviated when it was cut.
-  Bounding MUST NOT lose information: whenever text is cut, the menu MUST offer an enabled action that
-  presents it in FULL in a window that can hold it (never trap the user with a truncated diagnosis). This
-  matters most for the node connection line, whose disconnected reasons are deliberately verbose and
-  actionable — a real one names the token file to create and the reinstall to run, and runs to hundreds of
-  characters. The full text MUST be read at the moment it is requested, not replayed from the snapshot the
-  menu was built from, so a node that came up while the menu was open is reported as connected.
+  - **No row may defer to a terminal (MUST).** A tray menu having no text field is a property of the tray
+    API, not a reason to hand the user off: an input need is met by raising a native input window from the
+    tray (§3.1d). A row labelled "(in a terminal)" is not an acceptable end state even though it is honest,
+    and on a host where another component owns the `dign` name on the shared bin directory it hands the user
+    the WRONG TOOL. No label may name a terminal, a console or a command to run.
+- **The TOOLTIP MUST be bounded, and bounding MUST NOT lose information (MUST).** The Windows notification
+  area truncates its tooltip silently, so an unbounded one is cut at an arbitrary point with no sign anything
+  is missing. The tooltip MUST therefore be bounded to a single-line budget and visibly marked when cut, and
+  the full text MUST be reachable through the always-enabled `Status and details…` window. This matters most
+  for the node connection line, whose disconnected reasons are deliberately verbose and actionable — a real
+  one names the token file to create and the reinstall to run, and runs to hundreds of characters, which no
+  menu row or tooltip could ever hold. The details window MUST read the state LIVE at the moment it is
+  requested, not replay the snapshot the menu was built from, so a node that came up while the menu was open
+  is reported as connected.
 - **Read the lock state from the KEYS, never from the session (MUST).** A session deliberately outlives
   its key material — lock-now and the idle auto-lock drop the keys and keep the session so the sign path
   can re-unlock into it. The reported state MUST therefore be derived from whether key material is held
   RIGHT NOW; a session with no keys is `Locked`, identically to a not-yet-unlocked account, so the way
   back in (`Unlock…`) is the same. Inferring "unlocked" from the session's existence reports a lock that
   is not there and offers no route out of it.
+- **An account that cannot be OPENED is `Unopenable`, never `Locked` (MUST).** These are different
+  situations and MUST NOT be collapsed: a locked account has a way back in (`Unlock…`), and an unopenable one
+  does not, so reporting it as locked offers a control that is guaranteed to fail and says nothing about why.
+  The distinction is not hypothetical — every Windows/macOS host that has run dig-app auto-enrols the default
+  account at first boot, so legacy raw-seed blobs exist in the field, and a custody model that can no longer
+  read them leaves such an account WEDGED: it neither unlocks nor re-enrols at the same id. An implementation
+  MUST therefore carry a three-state at-rest fact (no account / present / present-but-unopenable) rather than
+  a boolean, and the tray MUST name the state on the surfaces a person looks at — the icon, the tooltip and
+  the details window — never only in a log record. Reducing this to a log line costs the user signing
+  permanently and silently, which is the defect the state exists to prevent.
+  - **The state offers the remedy, and nothing else.** `Unopenable` MUST offer an explainer naming the
+    situation and the exact menu path to replacing the account, and MUST NOT offer `Unlock…` (it is what
+    already failed) or the recovery-phrase reveal (its vault is sealed under the same unreadable key). The
+    replace and remove verbs MUST be enabled, because this is the state a user most needs to escape.
+  - **The state is STICKY until an open SUCCEEDS.** It MUST NOT clear on a repaint tick, or the tray flickers
+    back to reporting a lock that cannot be lifted. It MUST be cleared at exactly one place — the moment a
+    live session exists — and the no-account case MUST be evaluated BEFORE it, so a successful removal reports
+    "not set up yet" rather than a stale unopenable.
+  - **Reaching the state MUST delete nothing (MUST).** Detecting an unopenable account, reporting it, and
+    showing its explainer MUST leave the sealed blob, the credential-store entry and any sealed artifacts
+    exactly as they were — the only path that removes them stays the authorized destroy (§3.1c above). The
+    explainer's copy promises the user precisely this ("Nothing has been changed or deleted"), so the promise
+    is a contract, not an implementation detail that may be refactored away.
 - **Price before the click.** An action that spends funds MUST name the cost in its LABEL, not only in a
   confirmation dialog (§3.1b).
 - **A tray that cannot mount MUST report itself.** On Linux the indicator library is dlopened, so a
   missing library is discovered at run time rather than at link time. The shell MUST log the failure and
-  print the likely cause plus a working alternative (`dign`), because an invisible tray is otherwise
-  indistinguishable from a broken application.
+  print the likely cause plus the remedy, because an invisible tray is otherwise indistinguishable from a
+  broken application. The message MUST NOT point at `dign` as the way in: on a host where another component
+  owns that name on the shared bin directory it names the wrong tool.
 - **A tray that cannot mount MUST NOT take the agent down with it (MUST).** Mounting MUST be guarded
   against a PANIC, not merely against an error return. This is not defensive padding: the Linux
   indicator binding panics inside its `dlopen` when the library is absent
@@ -294,6 +363,16 @@ Binding rules:
   unresolved library, so fixing them one at a time reads as a fresh regression on each attempt. The
   dlopened indicator (`libayatana-appindicator3-1` / `libappindicator-gtk3`) is additionally required for
   the icon to appear, and is NOT visible to `ldd`.
+- **The shell binary MUST declare the platform's GUI subsystem (MUST).** On Windows the PE optional header
+  MUST report `IMAGE_SUBSYSTEM_WINDOWS_GUI` (2). At `WINDOWS_CUI` (3) the OS allocates a console for a tray
+  application: a console window appears at every launch AND the tray's lifetime becomes tied to it, so
+  closing that window kills the agent. This binds the tray shell only — a service or CLI binary is correctly
+  subsystem 3. The claim MUST be gated by a check that PARSES the produced binary's header, because it rests
+  on one attribute that a refactor can drop while everything still builds and runs.
+  A GUI-subsystem process has NO CONSOLE, so the informational CLI paths (`--version`, `--help`) MUST attach
+  to their launcher's console before printing. That attachment MUST NOT re-point a standard handle that was
+  already INHERITED: a redirected stdout is how the update beacon health-probes this component (§4), and
+  overwriting it sends the version line to a console nobody is reading.
 - **The tray icon MUST be the DIG brand mark, carried inside the binary.** The mark is embedded as PNG
   artwork and decoded to RGBA at mount time; the shell MUST NOT read it from disk or from another
   component's files, so any `dig-app` binary shows the right icon however it was packaged. The shell
@@ -329,6 +408,12 @@ Binding rules, which matter more for an input control than for a notice:
   A second button nobody reads asks the user to make a decision that does not exist, and a warning icon on
   a success ("your DIG ID is on the clipboard") reads as an error they must resolve. Both are defects.
 
+  **A window whose affirmative is IRREVERSIBLE MUST pre-select the refusal (MUST).** Both platform dialogs
+  default to their first button, so a focused destroy window would confirm the destruction of key material on
+  a bare Enter/Return. The destroy window therefore pre-selects Cancel (`MB_DEFBUTTON2`; the Return key
+  equivalent moved onto Cancel on macOS). Ordinary authorizations — a sign, a pairing, a connect — keep the
+  affirmative as their default: the user just asked for the action, and refusing costs only a retry.
+
   This MUST be classified per call site, never applied in bulk: the enrolment retention screens ARE
   decisions — refusing either abandons setup — so converting every window to a notice would destroy a real
   user choice, and drawing every window as a decision is the defect being ruled out. A backend that cannot
@@ -345,15 +430,37 @@ Binding rules, which matter more for an input control than for a notice:
   **masked**, matching `dign account restore`'s suppressed echo: the words already exist on paper, so
   shoulder-surfing is the live risk and a typo is recoverable by retrying (a wrong phrase cannot silently
   damage anything — restore refuses when an account exists, and a bad checksum is rejected outright,
-  §3.1a). Where a mistyped phrase would be costly rather than merely fruitless, the prompt MUST offer an
-  explicit reveal-while-typing affordance rather than defaulting to clear text.
+  §3.1a). Because 24 words typed entirely blind cannot be checked, the phrase prompt MUST offer an explicit
+  reveal-while-typing affordance — masked by default, deliberately un-maskable — rather than defaulting to
+  clear text. Where a backend cannot offer that control, masked entry still wins: the default is never
+  relaxed to compensate for a missing affordance.
+- **A rejected phrase MUST be re-asked with the REASON, within a bound (MUST).** A mistyped word is the
+  normal case, and a window that closes on the first mistake and leaves the user to find the menu item again
+  is a surface people abandon. The prompt MUST re-ask, MUST state what was wrong ("that is 23 words, not
+  24"), and MUST stop after a bounded number of attempts with a message saying nothing was changed — bounded
+  so a backend that answers instantly cannot spin windows forever. A CANCEL is NOT a rejected phrase and
+  MUST NOT be re-asked, and a backend that could not draw the window at all MUST be treated as a refusal,
+  never as an empty answer.
 - **The words a user types are DIG's, not a Chia wallet's (MUST).** Both the restore prompt and the setup
   screen MUST state that a DIG recovery phrase is not a Chia wallet phrase and vice versa, because DIG
   will accept a Sage phrase and silently build a different, empty account from it (§3.1a).
 
-**Current state:** restore is served by `dign account restore` (masked terminal entry) while the native
-input dialog is built; the tray's restore item hands over that exact command. That is a documented
-interim, not the specified end state.
+**Current state:** implemented on all three platforms. Windows draws a registered-class window with an
+`EDIT` control (`MessageBoxW` cannot take input) plus the reveal checkbox; macOS uses an `NSAlert` with a
+text-field accessory view; Linux drives `zenity --entry` / `kdialog`. A subprocess input helper is
+explicitly REJECTED: it would need a verify-the-helper-is-ours check, or a `PATH` impostor harvests recovery
+phrases, so every backend draws its window IN-PROCESS.
+
+The destroy window's pre-selected refusal is honoured on Windows (`MB_DEFBUTTON2`) and macOS (the Return key
+equivalent moves to Cancel). The Linux dialog helpers offer no equivalent, which is currently unreachable
+rather than a gap — Linux has no per-application credential store, so it is always the unsupported-host state
+and no destroy window can be drawn there. A Linux credential store MUST NOT land without addressing it.
+
+Platform limits, recorded rather than papered over: Win32 ignores `ES_PASSWORD` on a multiline `EDIT`, so a
+maskable field is single-line and scrolls horizontally; and the reveal-while-typing control exists only on
+Windows — neither Linux dialog helper offers one, and an `NSAlert` accessory would need a custom view
+hierarchy for it — so on macOS and Linux the phrase field is masked with no un-mask control, which is the
+direction §3.1d requires a backend to fail in.
 
 ### 3.2 Profiles and the Accounts registry
 
