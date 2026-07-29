@@ -43,7 +43,7 @@
 use std::sync::OnceLock;
 
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, InvalidateRect, MonitorFromPoint, ANSI_CHARSET, CLEARTYPE_QUALITY,
     COLOR_WINDOW, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HFONT,
@@ -363,18 +363,29 @@ pub(super) struct InputWindow;
 
 impl ForegroundInput for InputWindow {
     fn ask(&self, content: &InputContent) -> InputOutcome {
-        match show(&spec_for_input(content)) {
-            Ok(Answer::Affirmed(Some(text))) => InputOutcome::Provided(text),
-            // Submit with an unreadable field is not an empty answer — the caller must not act on it.
-            Ok(Answer::Affirmed(None)) => InputOutcome::Unavailable,
-            Ok(Answer::Refused) => InputOutcome::Cancelled,
-            Err(e) => {
-                // A window that could not be created means the user was never asked, which callers MUST
-                // treat as fail-closed rather than as an empty answer.
-                tracing::warn!(error = %e, "the native input window could not be shown");
-                InputOutcome::Unavailable
-            }
+        let result = show(&spec_for_input(content));
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "the native input window could not be shown");
         }
+        input_outcome_from(result)
+    }
+}
+
+/// Map a field window's result to the caller's outcome.
+///
+/// Pure and separate from [`InputWindow::ask`] so the FAIL-CLOSED property is unit-testable. It is the
+/// distinction that matters here, and it is easy to lose: "the user declined" and "the window never appeared"
+/// are different facts, and only the first is an answer. A caller that renders a cancel as *nothing happened*
+/// would silently swallow a broken prompt if the two collapsed — which is precisely the regression that
+/// reaching this module's error path as a refusal introduced, and that this function exists to pin.
+fn input_outcome_from(result: Result<Answer, windows::core::Error>) -> InputOutcome {
+    match result {
+        Ok(Answer::Affirmed(Some(text))) => InputOutcome::Provided(text),
+        // Submit with an unreadable field is not an empty answer — the caller must not act on it.
+        Ok(Answer::Affirmed(None)) => InputOutcome::Unavailable,
+        Ok(Answer::Refused) => InputOutcome::Cancelled,
+        // Never asked, so never answered. Callers MUST fail closed rather than read a phantom empty string.
+        Err(_) => InputOutcome::Unavailable,
     }
 }
 
@@ -387,15 +398,20 @@ pub(super) struct DialogWindow;
 
 impl ForegroundWindow for DialogWindow {
     fn show(&self, content: &ConfirmContent) -> WindowIntent {
-        match show(&spec_for_confirm(content)) {
-            Ok(Answer::Affirmed(_)) => WindowIntent::Approve,
-            Ok(Answer::Refused) => WindowIntent::Deny,
-            Err(e) => {
-                // A window that could not be drawn means the user never consented. Fail closed.
-                tracing::warn!(error = %e, "the native confirm window could not be shown");
-                WindowIntent::Deny
-            }
+        let result = show(&spec_for_confirm(content));
+        if let Err(e) = &result {
+            tracing::warn!(error = %e, "the native confirm window could not be shown");
         }
+        intent_from(result)
+    }
+}
+
+/// Map a consent window's result to the user's intent. Only an affirmative approves; everything else — a
+/// refusal, a closed frame, a window that could not be drawn at all — denies.
+fn intent_from(result: Result<Answer, windows::core::Error>) -> WindowIntent {
+    match result {
+        Ok(Answer::Affirmed(_)) => WindowIntent::Approve,
+        _ => WindowIntent::Deny,
     }
 }
 
@@ -494,12 +510,32 @@ fn class_registered() -> bool {
     })
 }
 
+/// The window class, as a `Result` rather than a `bool`.
+///
+/// # Why this is not `if !class_registered() { ... }`
+///
+/// A class that will not register means the window was never drawn and the user was never asked — which is
+/// NOT the same as them declining. While unifying these windows (dig_ecosystem#1832) that early return was
+/// briefly written as a refusal, which reaches `InputOutcome::Cancelled`: a caller that renders a cancel as
+/// *the user chose not to, show nothing* would then silently swallow a completely broken prompt.
+///
+/// Returning a `Result` and using `?` at the call site makes that mistake **unexpressible** rather than merely
+/// tested against. A test cannot reach this branch — `RegisterClassW` succeeds in a test process, so the
+/// failure is not forceable in-process — so the protection has to be structural: `?` on a `Result<(), _>`
+/// cannot produce an `Answer`, and both callers already route every `Err` to their fail-closed outcome.
+fn require_class() -> Result<(), windows::core::Error> {
+    match class_registered() {
+        true => Ok(()),
+        false => Err(windows::core::Error::new(
+            E_FAIL,
+            "the DIG window class could not be registered",
+        )),
+    }
+}
+
 /// Create the window, pump its messages until the user answers, and report what they chose.
 fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
-    if !class_registered() {
-        // A window that cannot be registered was never shown, so nothing was affirmed.
-        return Ok(Answer::Refused);
-    }
+    require_class()?;
     // SAFETY: every call below is a documented Win32 entry point given valid handles; the boxed state is
     // adopted by the window on WM_NCCREATE and dropped exactly once, at the end of this function, after
     // the message loop has returned and the window has been destroyed.
@@ -1377,6 +1413,61 @@ mod tests {
     // (dig_ecosystem#1832), so the guarantees are re-pinned here on `ButtonSpec` — the value that replaced the
     // bits. Asserting on named buttons is STRONGER than asserting on flags: `MB_OKCANCEL` said only "two
     // buttons", while these say two buttons WITH THESE WORDS and THIS default.
+
+    /// **Regression.** A window that could NOT BE DRAWN must not be reported as the user declining.
+    ///
+    /// Introduced while unifying the windows (dig_ecosystem#1832): the class-registration failure path started
+    /// returning a refusal, which reaches `InputOutcome::Cancelled`. That is a different fact from
+    /// `Unavailable` — a caller that treats a cancel as *the user chose not to, show nothing* would silently
+    /// swallow a completely broken prompt. `Unavailable`'s own contract says callers MUST fail closed and never
+    /// read it as an empty answer, so the two cannot be merged.
+    ///
+    /// Caught by review rather than by a test. Note what this test does and does not cover: it pins the
+    /// MAPPING, not the call site where the mistake was actually made. That branch is unreachable from a test
+    /// (`RegisterClassW` succeeds in a test process), so the call site is protected structurally instead —
+    /// [`require_class`] returns a `Result` and `show` uses `?`, so "cannot draw" can no longer be spelled as
+    /// an `Answer` at all. This test guards the other half: that an `Err`, however it arrives, stays
+    /// fail-closed.
+    #[test]
+    fn a_window_that_could_not_be_drawn_is_unavailable_not_cancelled() {
+        let failed = || Err(windows::core::Error::new(E_FAIL, "no window"));
+
+        assert!(
+            matches!(input_outcome_from(failed()), InputOutcome::Unavailable),
+            "a window that never appeared was never answered"
+        );
+        // The control: a REAL cancel is still a cancel. Without this pair, mapping everything to
+        // `Unavailable` would satisfy the assertion above while destroying the ordinary path.
+        assert!(matches!(
+            input_outcome_from(Ok(Answer::Refused)),
+            InputOutcome::Cancelled
+        ));
+        assert!(matches!(
+            input_outcome_from(Ok(Answer::Affirmed(Some(Zeroizing::new("x".to_string()))))),
+            InputOutcome::Provided(_)
+        ));
+        // Submit with a field that could not be read is NOT an empty answer.
+        assert!(matches!(
+            input_outcome_from(Ok(Answer::Affirmed(None))),
+            InputOutcome::Unavailable
+        ));
+    }
+
+    /// The same property on the consent path: every non-affirmative, including an undrawable window, DENIES.
+    #[test]
+    fn a_consent_window_denies_unless_it_was_affirmed() {
+        assert_eq!(
+            intent_from(Err(windows::core::Error::new(E_FAIL, "no window"))),
+            WindowIntent::Deny,
+            "a consent window that never appeared cannot have consented"
+        );
+        assert_eq!(intent_from(Ok(Answer::Refused)), WindowIntent::Deny);
+        assert_eq!(
+            intent_from(Ok(Answer::Affirmed(None))),
+            WindowIntent::Approve,
+            "a fieldless window affirms with no text, which is not a failure"
+        );
+    }
 
     /// Every window's buttons align with its text block, and a notice's lone button sits exactly where a
     /// decision's affirmative does — so the two kinds are visibly one design rather than two dialogs.
