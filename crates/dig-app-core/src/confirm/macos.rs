@@ -22,7 +22,7 @@ use objc2_local_authentication::{LAContext, LAPolicy};
 
 use super::{
     BackedConfirmer, BiometricVerifier, ConfirmContent, ForegroundWindow, NativeConfirmer,
-    VerifyOutcome, WindowIntent,
+    Presentation, VerifyOutcome, WindowIntent,
 };
 
 /// AppKit's `NSModalResponse` for the first (default) alert button — the approve action.
@@ -43,18 +43,30 @@ impl ForegroundWindow for AlertWindow {
         let heading = content.heading.clone();
         let body = content.body.clone();
         let action = content.action;
+        let offers_a_way_out = alert_offers_cancel(&content.presentation);
         run_on_main(move |mtm| {
             let alert = NSAlert::new(mtm);
             alert.setMessageText(&NSString::from_str(&heading));
             alert.setInformativeText(&NSString::from_str(&body));
             alert.addButtonWithTitle(&NSString::from_str(action));
-            alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            // A Cancel is added ONLY when refusing means something (dig_ecosystem#1773). AppKit relabels
+            // buttons freely, so the affirmative one already reads correctly either way ("Sign", "OK") —
+            // what a notice must not have is a second button offering a decision no caller reads.
+            if offers_a_way_out {
+                alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+            }
             // Bring the app forward so the consent window is truly foreground, never hidden behind the
             // browser that triggered it.
             NSApplication::sharedApplication(mtm).activate();
             intent_from_alert_response(alert.runModal())
         })
     }
+}
+
+/// Whether this window needs a second, declining button. Pure so the rule is tested on every platform
+/// rather than only where AppKit can run.
+fn alert_offers_cancel(presentation: &Presentation) -> bool {
+    matches!(presentation, Presentation::Decide { .. })
 }
 
 /// A [`BiometricVerifier`] backed by `LAContext` device-owner authentication (Touch ID + password).
@@ -113,5 +125,17 @@ mod tests {
         );
         assert_eq!(intent_from_alert_response(1001), WindowIntent::Deny);
         assert_eq!(intent_from_alert_response(0), WindowIntent::Deny);
+    }
+
+    /// **Regression (#1773).** A notice must be a one-button alert; a real either/or keeps its way out.
+    /// Both directions in one test, because a rule tested from one side only cannot tell "notices lose
+    /// Cancel" from "nothing ever has Cancel" — and the second would silently remove the reveal gate's
+    /// decline.
+    #[test]
+    fn only_a_two_choice_alert_adds_cancel() {
+        assert!(!alert_offers_cancel(&Presentation::Acknowledge));
+        assert!(alert_offers_cancel(&Presentation::Decide {
+            choice_hint: "Choose OK to Sign, or Cancel to reject.".into(),
+        }));
     }
 }

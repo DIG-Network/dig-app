@@ -78,12 +78,19 @@ pub struct RevealPrompt<'a> {
     pub secret: &'a str,
 }
 
-/// A display-only notice: text the user must acknowledge, with no biometric step (dig_ecosystem#1752).
+/// A display-only notice: text the user acknowledges once, with no decision and no biometric step
+/// (dig_ecosystem#1752).
 ///
-/// This is how the recovery phrase itself reaches the screen. It is NOT an authorization surface — the
-/// authorization already happened (a [`RevealPrompt`] confirm, or a first-run setup the user initiated)
-/// — so it carries no verifier; it exists so the words are drawn by the same OS-owned, focus-stealing,
-/// never-logged window every other DIG prompt uses, rather than a console print or a log line.
+/// This is how the recovery phrase itself reaches the screen, and how every tray message is drawn. It is
+/// NOT an authorization surface — the authorization already happened (a [`RevealPrompt`] confirm, or a
+/// first-run setup the user initiated) — so it carries no verifier; it exists so the words are drawn by
+/// the same OS-owned, focus-stealing, never-logged window every other DIG prompt uses, rather than a
+/// console print or a log line.
+///
+/// **A notice has ONE choice.** Nothing downstream of a notice branches on how it was dismissed, so a
+/// second button would be a decision the user is invited to make and that no code reads — see
+/// [`Presentation`]. A screen where the negative answer genuinely changes the outcome is a
+/// [`ClaimPrompt`], not a notice.
 #[derive(Debug, Clone, Copy)]
 pub struct NoticePrompt<'a> {
     /// The window title.
@@ -92,8 +99,29 @@ pub struct NoticePrompt<'a> {
     pub heading: &'a str,
     /// The body — for a phrase reveal, the numbered words.
     pub body: &'a str,
-    /// The label of the acknowledge button (e.g. `"I have written these down"`).
+    /// The label of the single dismiss button (e.g. `"OK"`, `"Done"`).
     pub acknowledge: &'static str,
+}
+
+/// A **claim** prompt: a real either/or where the user asserts something about the world, and refusing
+/// changes what happens (dig_ecosystem#1773).
+///
+/// The distinguishing property, and the reason this is not a [`NoticePrompt`]: the caller BRANCHES on the
+/// answer. The enrolment flow asks "do you have your 24 words written down?" and abandons setup on a
+/// refusal — so the negative choice is load-bearing and must be offered as a real, labelled way out.
+///
+/// It is not a [`RevealPrompt`]/[`SignPrompt`] either: nothing is being authorized, so there is no
+/// biometric step. It sits deliberately between the two.
+#[derive(Debug, Clone, Copy)]
+pub struct ClaimPrompt<'a> {
+    /// The window title.
+    pub title: &'a str,
+    /// The question being put to the user.
+    pub heading: &'a str,
+    /// The consequence of each answer, in the user's words.
+    pub body: &'a str,
+    /// The label of the affirming choice — a first-person claim (e.g. `"I have written these down"`).
+    pub affirm: &'static str,
 }
 
 /// The terminal human authorization for the identity channel. The one production implementation is
@@ -119,13 +147,25 @@ pub trait NativeConfirmer: Send + Sync {
         ConfirmDecision::Unavailable
     }
 
-    /// Draw a display-only notice and return whether the user acknowledged it.
+    /// Draw a display-only notice — ONE dismiss button, no decision — and report whether it reached the
+    /// screen.
     ///
-    /// Returns [`ConfirmDecision::Approve`] when acknowledged, [`ConfirmDecision::Deny`] when dismissed.
-    /// Defaults to [`ConfirmDecision::Unavailable`], which callers MUST treat as "the user never saw
-    /// this" — the display-once enrolment path relies on that to refuse creating an account whose phrase
-    /// could not be shown.
+    /// Returns [`ConfirmDecision::Approve`] when the user saw and dismissed it, and
+    /// [`ConfirmDecision::Unavailable`] when no window could be drawn, which callers MUST treat as "the
+    /// user never saw this". A notice offers nothing to decline, so [`ConfirmDecision::Deny`] means only
+    /// that the window was closed by its frame rather than its button — the same "it was seen" outcome.
     fn show_notice(&self, _prompt: &NoticePrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    /// Put a real either/or to the user, where refusing changes what happens (dig_ecosystem#1773).
+    ///
+    /// Unlike [`show_notice`](Self::show_notice) this draws two labelled choices, because the caller
+    /// branches on the answer; unlike [`confirm_reveal`](Self::confirm_reveal) it runs no biometric,
+    /// because nothing is being authorized. Defaults to [`ConfirmDecision::Unavailable`] so a backend that
+    /// cannot ask refuses to proceed rather than assuming a "yes" — the enrolment path relies on that to
+    /// refuse creating an account whose retention could not be confirmed.
+    fn confirm_claim(&self, _prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Unavailable
     }
 }
@@ -155,6 +195,10 @@ impl NativeConfirmer for HeadlessConfirmer {
     }
 
     fn show_notice(&self, _prompt: &NoticePrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    fn confirm_claim(&self, _prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Unavailable
     }
 }
@@ -213,17 +257,42 @@ pub(crate) struct ConfirmContent {
     /// The detail body the window shows beneath the heading — the decoded transaction for a sign, the
     /// extension id for a pairing, already formatted for a human. Never raw signable bytes.
     pub body: String,
-    /// The label of the approve action (`"Pair"`, `"Connect"`, `"Sign"`), reused as the reason string
-    /// the biometric prompt shows.
+    /// The label of the affirmative action (`"Pair"`, `"Connect"`, `"Sign"`, `"OK"`), reused as the reason
+    /// string the biometric prompt shows.
     pub action: &'static str,
-    /// The sentence explaining the two buttons, for a backend whose buttons cannot be RELABELLED.
-    ///
-    /// macOS and the Linux helper put [`action`](Self::action) directly on the button, so they ignore
-    /// this. Windows `MessageBoxW` is stuck with OK/Cancel, so it must spell the choice out in the body —
-    /// and the right sentence differs between an authorization ("Choose OK to Sign") and an
-    /// acknowledgement, where the same template produced the unreadable *"Choose OK to I have written
-    /// these down"* found in a live window during #1752 review.
-    pub choice_hint: String,
+    /// How many choices this window offers, and how they read — see [`Presentation`].
+    pub presentation: Presentation,
+}
+
+/// Whether a confirm window asks the user to DECIDE something or merely to acknowledge it.
+///
+/// # Why this is a type and not a flag
+///
+/// Every DIG confirm window used to be drawn with two buttons and, on Windows, a warning triangle —
+/// including the eleven purely informational tray messages ("Your DIG ID is on the clipboard", "DIG could
+/// not open the folder for you"). A window with a Cancel nobody reads asks the user to make a decision
+/// that does not exist, and a triangle on "here is your DIG ID" reads as an error the user must resolve;
+/// both were visible only in a screenshot, since every code path involved was working correctly
+/// (dig_ecosystem#1773).
+///
+/// The presentation is therefore part of the CONTENT, decided once where the content is composed and
+/// unit-tested, rather than a per-backend styling choice. Because the choice sentence lives inside
+/// [`Decide`](Self::Decide), a notice cannot carry one even by accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Presentation {
+    /// ONE dismiss button. Informational: nothing branches on the answer, so nothing is asked.
+    Acknowledge,
+    /// TWO labelled choices, because refusing genuinely changes what happens.
+    Decide {
+        /// The sentence naming both choices, for a backend whose buttons cannot be RELABELLED.
+        ///
+        /// macOS and the Linux helpers put [`ConfirmContent::action`] directly on the button, so they
+        /// ignore this. Windows `MessageBoxW` is stuck with OK/Cancel, so it must spell the choice out in
+        /// the body — and the right sentence differs between an authorization ("Choose OK to Sign") and a
+        /// claim, where the same template produced the unreadable *"Choose OK to I have written these
+        /// down"* found in a live window during #1752 review.
+        choice_hint: String,
+    },
 }
 
 impl ConfirmContent {
@@ -241,7 +310,7 @@ impl ConfirmContent {
                    your DIG identity. You approve every signature individually."
                     .to_string(),
             action: "Pair",
-            choice_hint: Self::authorize_hint("Pair"),
+            presentation: Self::authorize("Pair"),
         }
     }
 
@@ -259,28 +328,48 @@ impl ConfirmContent {
                    alone before continuing."
                 .to_string(),
             action: "Reveal",
-            choice_hint: Self::authorize_hint("Reveal"),
+            presentation: Self::authorize("Reveal"),
         }
     }
 
     /// The content for a display-only notice (dig_ecosystem#1752), passed through verbatim: the caller
     /// owns this copy because it is showing secret material it composed itself.
+    ///
+    /// [`Presentation::Acknowledge`] is the whole point of the type — an informational window gets one
+    /// button and an informational icon, so it does not read as a question the user must answer or an
+    /// error they must resolve (dig_ecosystem#1773).
     fn notice(prompt: &NoticePrompt<'_>) -> Self {
         Self {
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
             action: prompt.acknowledge,
-            // An acknowledgement, not an authorization: the button label is a CLAIM the user is making
-            // ("I have written these down"), so it is quoted as a choice rather than slotted into a
-            // "Choose OK to <verb>" sentence that cannot read correctly.
-            choice_hint: format!("Choose OK — {} — or Cancel to go back.", prompt.acknowledge),
+            presentation: Presentation::Acknowledge,
         }
     }
 
-    /// The two-button sentence for an AUTHORIZATION prompt, whose `action` is an imperative verb.
-    fn authorize_hint(action: &str) -> String {
-        format!("Choose OK to {action}, or Cancel to reject.")
+    /// The content for a claim prompt (dig_ecosystem#1773): a real either/or with no biometric.
+    fn claim(prompt: &ClaimPrompt<'_>) -> Self {
+        Self {
+            title: prompt.title.to_string(),
+            heading: prompt.heading.to_string(),
+            body: prompt.body.to_string(),
+            action: prompt.affirm,
+            // The affirming label is a first-person CLAIM ("I have written these down"), so it is quoted as
+            // a choice rather than slotted into a "Choose OK to <verb>" sentence that cannot read
+            // correctly (#1752). "Not yet" names what Cancel actually does here — it does not reject an
+            // authorization, it says the claim is not true yet.
+            presentation: Presentation::Decide {
+                choice_hint: format!("Choose OK — {} — or Cancel if not yet.", prompt.affirm),
+            },
+        }
+    }
+
+    /// The two-choice presentation for an AUTHORIZATION prompt, whose `action` is an imperative verb.
+    fn authorize(action: &str) -> Presentation {
+        Presentation::Decide {
+            choice_hint: format!("Choose OK to {action}, or Cancel to reject."),
+        }
     }
 
     /// The content for a first-connect confirm (§5.6.4): approve a dapp origin talking to this identity.
@@ -298,7 +387,7 @@ impl ConfirmContent {
                 prompt.origin
             ),
             action: "Connect",
-            choice_hint: Self::authorize_hint("Connect"),
+            presentation: Self::authorize("Connect"),
         }
     }
 
@@ -319,7 +408,7 @@ impl ConfirmContent {
                 prompt.payload_type
             ),
             action: "Sign",
-            choice_hint: Self::authorize_hint("Sign"),
+            presentation: Self::authorize("Sign"),
         })
     }
 }
@@ -424,6 +513,17 @@ impl<W: ForegroundWindow, V: BiometricVerifier> BackedConfirmer<W, V> {
     pub(crate) fn new(window: W, verifier: V) -> Self {
         Self { window, verifier }
     }
+
+    /// Draw `content` and report what came back, with NO biometric step — the shared body of the two
+    /// non-authorizing prompts (a notice and a claim).
+    fn draw(&self, content: &ConfirmContent) -> ConfirmDecision {
+        match self.window.show(content) {
+            WindowIntent::Approve => ConfirmDecision::Approve,
+            WindowIntent::Deny => ConfirmDecision::Deny,
+            WindowIntent::Timeout => ConfirmDecision::Timeout,
+            WindowIntent::Unavailable => ConfirmDecision::Unavailable,
+        }
+    }
 }
 
 impl<W: ForegroundWindow, V: BiometricVerifier> NativeConfirmer for BackedConfirmer<W, V> {
@@ -452,12 +552,13 @@ impl<W: ForegroundWindow, V: BiometricVerifier> NativeConfirmer for BackedConfir
     fn show_notice(&self, prompt: &NoticePrompt<'_>) -> ConfirmDecision {
         // Display only: no biometric, because nothing is being authorized here — the authorization
         // happened before we composed the content this window is showing.
-        match self.window.show(&ConfirmContent::notice(prompt)) {
-            WindowIntent::Approve => ConfirmDecision::Approve,
-            WindowIntent::Deny => ConfirmDecision::Deny,
-            WindowIntent::Timeout => ConfirmDecision::Timeout,
-            WindowIntent::Unavailable => ConfirmDecision::Unavailable,
-        }
+        self.draw(&ConfirmContent::notice(prompt))
+    }
+
+    fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
+        // Two choices, still no biometric: the user is asserting something about the world (their words
+        // are written down), not authorizing DIG to act with their key.
+        self.draw(&ConfirmContent::claim(prompt))
     }
 
     fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision {
@@ -683,43 +784,114 @@ mod tests {
         let _ = confirmer.confirm_sign(&sign_prompt(None));
     }
 
-    /// **Regression (#1752).** The notice window must not slot its acknowledge label into an
-    /// authorization sentence. This was found by reading the LIVE Windows window out of a running
-    /// process, which showed *"Choose OK to I have written these down, or Cancel to reject."*
+    /// The choice sentence of `content`, or `None` when it offers no choice.
+    fn hint_of(content: &ConfirmContent) -> Option<&str> {
+        match &content.presentation {
+            Presentation::Acknowledge => None,
+            Presentation::Decide { choice_hint } => Some(choice_hint),
+        }
+    }
+
+    /// **Regression (#1752).** A CLAIM window must not slot its first-person affirming label into an
+    /// authorization sentence. This was found by reading the LIVE Windows window out of a running process,
+    /// which showed *"Choose OK to I have written these down, or Cancel to reject."*
     ///
-    /// The fixture is the real acknowledge label from the display-once phrase screen — a first-person
-    /// CLAIM rather than an imperative verb — because a verb-shaped label ("Done", "OK") reads fine in
-    /// EITHER sentence and so cannot distinguish the bug from the fix.
+    /// The fixture is the real label from the display-once phrase screen — a first-person claim rather than
+    /// an imperative verb — because a verb-shaped label ("Done", "OK") reads fine in EITHER sentence and so
+    /// cannot distinguish the bug from the fix.
     #[test]
-    fn a_notice_hint_reads_as_a_claim_not_an_imperative() {
-        let content = ConfirmContent::notice(&NoticePrompt {
+    fn a_claim_hint_reads_as_a_claim_not_an_imperative() {
+        let content = ConfirmContent::claim(&ClaimPrompt {
             title: "DIG — Your recovery phrase",
             heading: "Write these 24 words down.",
             body: " 1. abandon",
-            acknowledge: "I have written these down",
+            affirm: "I have written these down",
         });
 
+        let hint =
+            hint_of(&content).expect("a claim is a real either/or, so it names both choices");
         assert!(
-            !content.choice_hint.contains("Choose OK to I have"),
-            "the notice hint must not read as an imperative: {}",
-            content.choice_hint
+            !hint.contains("Choose OK to I have"),
+            "the claim hint must not read as an imperative: {hint}"
         );
         assert_eq!(
-            content.choice_hint,
-            "Choose OK — I have written these down — or Cancel to go back."
+            hint,
+            "Choose OK — I have written these down — or Cancel if not yet."
         );
     }
 
-    /// The control: an AUTHORIZATION prompt still gets the imperative sentence, so fixing the notice did
-    /// not flatten both into one wording.
+    /// The control: an AUTHORIZATION prompt still gets the imperative sentence, so fixing the claim wording
+    /// did not flatten both into one.
     #[test]
     fn an_authorization_hint_stays_imperative() {
         assert_eq!(
-            ConfirmContent::reveal(&RevealPrompt {
+            hint_of(&ConfirmContent::reveal(&RevealPrompt {
                 secret: "your recovery phrase"
-            })
-            .choice_hint,
-            "Choose OK to Reveal, or Cancel to reject."
+            })),
+            Some("Choose OK to Reveal, or Cancel to reject.")
+        );
+    }
+
+    /// **Regression (#1773).** A notice carries NO choice sentence at all, on any platform — there is no
+    /// second button for one to describe.
+    ///
+    /// Paired with `an_authorization_hint_stays_imperative` above: together they pin that the presentation
+    /// distinguishes the two kinds rather than collapsing them, which a one-sided assertion could not.
+    #[test]
+    fn a_notice_carries_no_choice_sentence() {
+        let content = ConfirmContent::notice(&NoticePrompt {
+            title: "DIG — DIG ID copied",
+            heading: "Your DIG ID is on the clipboard.",
+            body: "abc123",
+            acknowledge: "OK",
+        });
+
+        assert_eq!(content.presentation, Presentation::Acknowledge);
+        assert_eq!(hint_of(&content), None);
+    }
+
+    /// A claim is drawn WITHOUT a biometric step: the user is asserting something about the world, not
+    /// authorizing DIG to act with their key. Asserted by scripting a verifier that would REFUSE — if the
+    /// claim path consulted it, the approval could not come back.
+    #[test]
+    fn a_claim_is_answered_by_the_window_alone_with_no_biometric() {
+        let confirmer = confirmer(WindowIntent::Approve, VerifyOutcome::Unavailable);
+        assert_eq!(
+            confirmer.confirm_claim(&ClaimPrompt {
+                title: "DIG — Confirm you saved it",
+                heading: "Do you have your 24 words written down somewhere safe?",
+                body: "If you continue without them…",
+                affirm: "Yes, I have them",
+            }),
+            ConfirmDecision::Approve
+        );
+    }
+
+    /// …and the control: an AUTHORIZATION with that same refusing verifier fails closed. Without this, a
+    /// confirmer that ignored the biometric everywhere would pass the test above.
+    #[test]
+    fn an_authorization_with_the_same_unavailable_verifier_fails_closed() {
+        let confirmer = confirmer(WindowIntent::Approve, VerifyOutcome::Unavailable);
+        assert_eq!(
+            confirmer.confirm_reveal(&RevealPrompt {
+                secret: "your recovery phrase"
+            }),
+            ConfirmDecision::Unavailable
+        );
+    }
+
+    /// The fail-closed default: a backend that has not implemented `confirm_claim` refuses rather than
+    /// assuming a "yes", so enrolment cannot proceed on an unasked retention claim.
+    #[test]
+    fn an_unimplemented_claim_backend_refuses_rather_than_assuming_yes() {
+        assert_eq!(
+            HeadlessConfirmer.confirm_claim(&ClaimPrompt {
+                title: "t",
+                heading: "h",
+                body: "b",
+                affirm: "Yes",
+            }),
+            ConfirmDecision::Unavailable
         );
     }
 }

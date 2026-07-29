@@ -227,8 +227,12 @@ these rules are testable independently of any desktop.
 
 The menu MUST offer, at minimum: the agent's own state, the node connection line, the account state, the
 profile's DIG ID, the on-chain DID state, and actions to set up an account, restore from a recovery
-phrase, unlock, lock now, reveal the recovery phrase, copy the DIG ID, create an on-chain DID, show the
+phrase, unlock, lock now, reveal the recovery phrase, copy the DIG ID, explain the on-chain DID, show the
 node connection in full, open the log folder, and quit.
+
+Minting an on-chain DID is deliberately NOT among them: no implementation exists (§3.1b), so the menu
+offers an EXPLANATION of what a DID is and costs, and there is no tray action that mints — the absence is
+structural, not an `enabled: false` that a later change could flip on by accident.
 
 Binding rules:
 
@@ -240,7 +244,9 @@ Binding rules:
 - **Say the true state.** An account with no recovery phrase MUST be labelled as such in the account
   status line AND offered the explainer, and MUST NOT be shown an inert "show my recovery phrase" item.
   An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
-  existence is discoverable.
+  existence is discoverable — **but only when the label can say WHY.** A disabled row with no reason in it
+  is a small unexplained mystery; where there is no reason worth printing (a details window for a status
+  line that was not abbreviated has nothing to add), the row MUST be omitted instead.
 - **Every ENABLED item MUST be able to perform what its label says (MUST).** This is the strong form of the
   rule above, and it binds two cases that are easy to get wrong:
   - A capability that does not EXIST YET is either absent or shown DISABLED **with the reason in its
@@ -312,9 +318,25 @@ not by printing a command for them to run.
 
 Binding rules, which matter more for an input control than for a notice:
 
-- **Cancel MUST always work.** An unescapable modal on a background tray agent is the worst available
-  failure mode (§3.1c, never trap the user). Dismissal MUST be a first-class outcome, and MUST leave
-  nothing half-created.
+- **A window MUST offer exactly the choices its caller reads (MUST).** Every prompt is classified, at the
+  point its content is composed, as one of two kinds, and the classification — not the per-OS backend —
+  decides its presentation:
+  - a **notice** is informational: nothing downstream branches on the answer, so it MUST be drawn with ONE
+    dismiss button and an INFORMATIONAL icon, and MUST NOT carry a sentence describing a second button;
+  - a **decision** (an authorization, or a claim the user makes about the world) MUST be drawn with two
+    labelled choices, and MAY carry the warning icon, because refusing has a real cost.
+
+  A second button nobody reads asks the user to make a decision that does not exist, and a warning icon on
+  a success ("your DIG ID is on the clipboard") reads as an error they must resolve. Both are defects.
+
+  This MUST be classified per call site, never applied in bulk: the enrolment retention screens ARE
+  decisions — refusing either abandons setup — so converting every window to a notice would destroy a real
+  user choice, and drawing every window as a decision is the defect being ruled out. A backend that cannot
+  present a decision MUST fail closed (report it could not ask) rather than assume the affirmative.
+- **Cancel MUST always work — wherever there IS a Cancel.** An unescapable modal on a background tray agent
+  is the worst available failure mode (§3.1c, never trap the user). For a decision, dismissal MUST be a
+  first-class outcome and MUST leave nothing half-created. A notice's single button is itself the escape,
+  and closing its window MUST be equivalent to pressing it.
 - **Entered secrets MUST go straight into the zeroizing path.** Typed key material (a recovery phrase, a
   passphrase) MUST be moved into its `Zeroizing`/`RecoveryPhrase` home and MUST NOT be left in a control
   buffer, a window title, a process argument, or any log record. The never-log gate covers the restore

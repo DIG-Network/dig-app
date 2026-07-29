@@ -1,3 +1,31 @@
+## #1773 — presentation is a contract, and only a live window proves it
+
+- **A working code path can still be the wrong UI, and no unit test could have said so.** Every dig-app
+  confirm window was drawn `MB_OKCANCEL | MB_ICONWARNING` on Windows, so all eleven informational tray
+  messages arrived as a warning triangle with a Cancel that no caller reads. Every path involved was
+  correct; the defect was the presentation, and it was found by looking at a screenshot. The lesson is
+  where the classification lives: `Presentation` is now part of `ConfirmContent`, decided once where the
+  content is composed and unit-tested, so a per-OS backend cannot style a notice as an alarm.
+- **Classify per call site — a blanket conversion destroys a real decision.** The two enrolment retention
+  screens look like notices and are not: refusing either abandons setup. They needed a THIRD seam
+  (`confirm_claim`: two choices, no biometric, fail-closed by default) rather than being swept into either
+  existing one. A mutation that flattened every window to one button was caught by three tests; a mutation
+  that routed the retention screens back through `show_notice` was caught by exactly ONE, because the
+  returned `RetentionDecision` is identical either way — only the SEAM changes. Assert the seam.
+- **Probing the live Win32 dialog is cheap, scriptable, and better evidence than a screenshot.**
+  `EnumWindows` for class `#32770` owned by the process, then `EnumChildWindows` for `Button` children:
+  their COUNT and `GetDlgCtrlID` answer "one button or two" exactly, and the `Static` child's text is the
+  full body. `PrintWindow` renders the window to a bitmap even when the desktop is LOCKED, where
+  `CopyFromScreen` captures only wallpaper — which is what a headless-ish agent session usually has. Note
+  `$pid` is read-only in PowerShell, so the out-param needs another name.
+- **A dismissed `MB_OK` notice returns `IDOK`,** so `show_notice` still reports `Approve` and callers keep
+  distinguishing "the user saw it" from "no window could be drawn". Verified by `BM_CLICK` on the live
+  button and reading the process's stdout, not from the docs.
+- **A carefully-written message that cannot print is worse than none.** The DID explainer became
+  unreachable the moment its row was correctly disabled. The fix was not to re-enable a control that
+  cannot act but to change what the row PROMISES — an explanation, which it can always deliver — and to
+  delete the minting action outright so its absence is structural.
+
 ## #1752 — the recovery phrase, and what a tray can and cannot do
 
 - **`dig_session::SEED_LEN` is 32, and a 24-word BIP-39 phrase carries exactly 32 bytes of entropy — so

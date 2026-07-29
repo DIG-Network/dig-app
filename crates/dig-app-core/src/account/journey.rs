@@ -17,7 +17,7 @@
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
-use crate::confirm::{ConfirmDecision, NativeConfirmer, NoticePrompt, RevealPrompt};
+use crate::confirm::{ClaimPrompt, ConfirmDecision, NativeConfirmer, NoticePrompt, RevealPrompt};
 use crate::sealer::ProfileSealer;
 
 /// How the user's own phrase is described to them, in one place so setup and reveal agree.
@@ -55,7 +55,10 @@ impl<'a> WindowedPresenter<'a> {
 impl PhrasePresenter for WindowedPresenter<'_> {
     fn present_new_phrase(&self, phrase: &RecoveryPhrase) -> RetentionDecision {
         let words = phrase.numbered_lines();
-        let shown = self.confirmer.show_notice(&NoticePrompt {
+        // Both enrolment screens are CLAIMS, not notices: backing out of either abandons setup, so the
+        // declining choice is load-bearing and must be offered as a real, labelled way out
+        // (dig_ecosystem#1773 — this is the one place a two-button window is correct in this flow).
+        let shown = self.confirmer.confirm_claim(&ClaimPrompt {
             title: "DIG — Your recovery phrase",
             heading: "Write these 24 words down, in order, and keep them somewhere safe.",
             body: &format!(
@@ -63,7 +66,7 @@ impl PhrasePresenter for WindowedPresenter<'_> {
                  nobody — including DIG — can recover your account without them.",
                 *words
             ),
-            acknowledge: "I have written these down",
+            affirm: "I have written these down",
         });
         if shown != ConfirmDecision::Approve {
             return decision_for(shown);
@@ -71,13 +74,13 @@ impl PhrasePresenter for WindowedPresenter<'_> {
 
         // The second screen is not a formality: it is the moment the user is asked to make a claim about
         // the world (the words are somewhere other than this screen) rather than to dismiss a dialog.
-        let confirmed = self.confirmer.show_notice(&NoticePrompt {
+        let confirmed = self.confirmer.confirm_claim(&ClaimPrompt {
             title: "DIG — Confirm you saved it",
             heading: "Do you have your 24 words written down somewhere safe?",
             body: "If you continue without them and later lose this computer, your DIG Account, its \
                    address and everything sealed under it are gone for good. You can view the words \
                    again later from the DIG tray menu.",
-            acknowledge: "Yes, I have them",
+            affirm: "Yes, I have them",
         });
         decision_for(confirmed)
     }
@@ -170,6 +173,14 @@ mod tests {
         reveal: Mutex<Vec<ConfirmDecision>>,
         notices: Mutex<Vec<ConfirmDecision>>,
         drawn: Mutex<Vec<String>>,
+        /// Which SEAM each window came through, in order — `"notice"` (one button) or `"claim"` (two).
+        ///
+        /// Recorded because the seam IS the user-visible presentation (dig_ecosystem#1773): a screen sent
+        /// through `show_notice` gets one button and an information icon on every platform, and a screen sent
+        /// through `confirm_claim` gets a real way out. A test that only inspected the drawn TEXT could not
+        /// tell the two apart, which is exactly how every tray message came to be drawn as a warning with a
+        /// meaningless Cancel.
+        kinds: Mutex<Vec<&'static str>>,
     }
 
     impl ScriptedConfirmer {
@@ -178,7 +189,13 @@ mod tests {
                 reveal: Mutex::new(reveal),
                 notices: Mutex::new(notices),
                 drawn: Mutex::new(Vec::new()),
+                kinds: Mutex::new(Vec::new()),
             }
+        }
+
+        /// The seams every window was drawn through, in order.
+        fn kinds(&self) -> Vec<&'static str> {
+            self.kinds.lock().unwrap().clone()
         }
 
         fn notices() -> Self {
@@ -207,6 +224,7 @@ mod tests {
             ConfirmDecision::Unavailable
         }
         fn confirm_reveal(&self, prompt: &RevealPrompt<'_>) -> ConfirmDecision {
+            self.kinds.lock().unwrap().push("REVEAL-GATE");
             self.drawn
                 .lock()
                 .unwrap()
@@ -219,10 +237,33 @@ mod tests {
             }
         }
         fn show_notice(&self, prompt: &NoticePrompt<'_>) -> ConfirmDecision {
-            self.drawn.lock().unwrap().push(format!(
-                "{}\n{}\n{}",
-                prompt.title, prompt.heading, prompt.body
-            ));
+            self.record("notice", prompt.title, prompt.heading, prompt.body);
+            self.next_window_answer()
+        }
+
+        fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
+            self.record("claim", prompt.title, prompt.heading, prompt.body);
+            self.next_window_answer()
+        }
+    }
+
+    impl ScriptedConfirmer {
+        /// Note that a window was drawn, through which seam, and what it displayed.
+        fn record(&self, kind: &'static str, title: &str, heading: &str, body: &str) {
+            self.kinds.lock().unwrap().push(kind);
+            self.drawn
+                .lock()
+                .unwrap()
+                .push(format!("{title}\n{heading}\n{body}"));
+        }
+
+        /// The next scripted answer for a drawn window.
+        ///
+        /// Notices and claims share ONE script on purpose: the flows under test draw them in a fixed
+        /// sequence, and a shared script keeps "the third window the user saw" expressible whichever kind it
+        /// was — which is what lets `setup_shows_the_words_and_asks_twice…` distinguish two screens from one.
+        /// Running dry answers `Deny`, so an unexpected extra window fails rather than passing silently.
+        fn next_window_answer(&self) -> ConfirmDecision {
             let mut script = self.notices.lock().unwrap();
             if script.is_empty() {
                 ConfirmDecision::Deny
@@ -464,6 +505,56 @@ mod tests {
         vault: &'a PhraseVault<PassthroughSealer>,
     ) -> std::sync::MutexGuard<'a, bool> {
         vault.sealer_for_test().locked.lock().unwrap()
+    }
+
+    /// **Regression (#1773).** Both enrolment screens are real either/ors, so both must go through the
+    /// two-button CLAIM seam — a Cancel here abandons setup, which is a decision the user must be able to
+    /// make.
+    ///
+    /// This asserts the SEAM, not the returned decision: `RetentionDecision::Declined` comes back
+    /// identically whichever seam drew the window, so an implementation that routed these through
+    /// `show_notice` — one button, nothing to decline, the user trapped into "yes" — would leave every
+    /// other test in this module green. Only the seam changes.
+    #[test]
+    fn both_enrolment_screens_offer_a_real_way_out() {
+        let confirmer = ScriptedConfirmer::notices();
+
+        WindowedPresenter::new(&confirmer).present_new_phrase(&RecoveryPhrase::generate());
+
+        assert_eq!(
+            confirmer.kinds(),
+            vec!["claim", "claim"],
+            "declining either enrolment screen abandons setup, so neither may be a one-button notice"
+        );
+    }
+
+    /// The control that makes the test above load-bearing: the purely informational screens go through the
+    /// ONE-button notice seam. Without this pair, routing every window through `confirm_claim` — the old
+    /// behaviour, a Cancel on "here are your words" that no caller reads — would satisfy the test above.
+    #[test]
+    fn the_informational_screens_are_one_button_notices() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path());
+        vault.store(&RecoveryPhrase::generate()).unwrap();
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Approve],
+            vec![ConfirmDecision::Approve],
+        );
+
+        assert_eq!(reveal_phrase(&confirmer, &vault), RevealOutcome::Shown);
+        assert_eq!(
+            confirmer.kinds(),
+            vec!["REVEAL-GATE", "notice"],
+            "the reveal is gated (two choices), then the words are merely displayed (one)"
+        );
+
+        let explainer = ScriptedConfirmer::notices();
+        explain_missing_phrase(&explainer);
+        assert_eq!(
+            explainer.kinds(),
+            vec!["notice"],
+            "an explanation asks nothing, so it offers one dismissal"
+        );
     }
 
     /// The legacy explainer must name the CONSEQUENCE and must not act. Asserting the copy mentions the

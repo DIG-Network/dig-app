@@ -16,7 +16,7 @@ use std::process::Command;
 
 use super::{
     BackedConfirmer, BiometricVerifier, ConfirmContent, ForegroundWindow, NativeConfirmer,
-    VerifyOutcome, WindowIntent,
+    Presentation, VerifyOutcome, WindowIntent,
 };
 
 /// The polkit action the sign/connect/pair confirm authorizes against (reverse-DNS, canonical). A
@@ -61,8 +61,9 @@ impl DialogTool {
         }
     }
 
-    /// The argument vector that shows `content` as a modal question dialog with an approve/cancel
-    /// choice, self-dismissing after [`DIALOG_TIMEOUT_SECS`].
+    /// The argument vector that shows `content`: a modal **question** dialog with an approve/cancel choice
+    /// for a real either/or, or a one-button **information** dialog for a notice (dig_ecosystem#1773). Both
+    /// self-dismiss after [`DIALOG_TIMEOUT_SECS`] where the helper supports it.
     ///
     /// **Markup safety (security-critical).** The displayed text carries attacker-influenced fields
     /// (the dapp name / extension label, and — once the loopback wires them — the decoded transaction
@@ -70,11 +71,14 @@ impl DialogTool {
     /// Pango markup; `kdialog` renders the string as Qt rich text when it looks HTML-ish), so a hostile
     /// field could cosmetically distort what the user believes they are approving. Each helper is
     /// therefore forced to treat the text as PLAIN: `zenity` via `--no-markup`, `kdialog` by escaping
-    /// the rich-text trigger characters so `mightBeRichText` can never fire.
+    /// the rich-text trigger characters so `mightBeRichText` can never fire. This holds for BOTH dialog
+    /// kinds — a notice also carries caller-composed text, and losing the neutralization on one branch
+    /// would reintroduce the whole class.
     fn args(self, content: &ConfirmContent) -> Vec<String> {
         let text = format!("{}\n\n{}", content.heading, content.body);
+        let decides = matches!(content.presentation, Presentation::Decide { .. });
         match self {
-            Self::Zenity => vec![
+            Self::Zenity if decides => vec![
                 "--question".into(),
                 "--no-markup".into(),
                 format!("--title={}", content.title),
@@ -83,7 +87,15 @@ impl DialogTool {
                 "--cancel-label=Cancel".into(),
                 format!("--timeout={DIALOG_TIMEOUT_SECS}"),
             ],
-            Self::Kdialog => vec![
+            Self::Zenity => vec![
+                "--info".into(),
+                "--no-markup".into(),
+                format!("--title={}", content.title),
+                format!("--text={text}"),
+                format!("--ok-label={}", content.action),
+                format!("--timeout={DIALOG_TIMEOUT_SECS}"),
+            ],
+            Self::Kdialog if decides => vec![
                 "--title".into(),
                 content.title.clone(),
                 "--yesno".into(),
@@ -92,6 +104,15 @@ impl DialogTool {
                 content.action.into(),
                 "--no-label".into(),
                 "Cancel".into(),
+            ],
+            // `--msgbox` is kdialog's one-button information dialog. It has no `--ok-label`, so the
+            // affirmative label is not carried through here; a notice's label is always a plain dismissal
+            // ("OK", "Done"), so nothing a user needs is lost.
+            Self::Kdialog => vec![
+                "--title".into(),
+                content.title.clone(),
+                "--msgbox".into(),
+                escape_kdialog_plain(&text),
             ],
         }
     }
@@ -406,6 +427,71 @@ mod tests {
         assert!(!text.contains('>'), "no tag closer may survive: {text}");
         assert!(text.contains("&lt;a href=x&gt;"));
         assert!(text.contains("&amp; co"));
+    }
+
+    /// The notice content the tray draws eleven of — informational, nothing to decline.
+    fn notice_content() -> ConfirmContent {
+        ConfirmContent::notice(&crate::confirm::NoticePrompt {
+            title: "DIG — DIG ID copied",
+            heading: "Your DIG ID is on the clipboard.",
+            body: "abc123",
+            acknowledge: "OK",
+        })
+    }
+
+    /// **Regression (#1773).** A notice is an INFORMATION dialog with one button on both helpers; a real
+    /// either/or keeps its question framing and its Cancel.
+    ///
+    /// Both directions are asserted together deliberately: a test that only checked "the notice has no
+    /// Cancel" would pass just as well on an implementation that stripped Cancel from EVERY dialog,
+    /// silently destroying the way out of the reveal gate and the retention claim.
+    #[test]
+    fn a_notice_is_an_information_dialog_and_a_decision_keeps_its_cancel() {
+        let notice = notice_content();
+        let decision = content(); // a sign authorization
+
+        let zenity_notice = DialogTool::Zenity.args(&notice);
+        assert!(zenity_notice.iter().any(|a| a == "--info"));
+        assert!(
+            !zenity_notice.iter().any(|a| a.contains("cancel-label")),
+            "a notice offers nothing to cancel: {zenity_notice:?}"
+        );
+
+        let zenity_decision = DialogTool::Zenity.args(&decision);
+        assert!(zenity_decision.iter().any(|a| a == "--question"));
+        assert!(zenity_decision.iter().any(|a| a == "--cancel-label=Cancel"));
+
+        let kdialog_notice = DialogTool::Kdialog.args(&notice);
+        assert!(kdialog_notice.iter().any(|a| a == "--msgbox"));
+        assert!(!kdialog_notice.iter().any(|a| a == "--no-label"));
+
+        assert!(DialogTool::Kdialog
+            .args(&decision)
+            .iter()
+            .any(|a| a == "--yesno"));
+    }
+
+    /// The markup neutralization must survive on the notice branch too. The fixture puts hostile markup in
+    /// a NOTICE's body — the branch that did not exist before this change — because the pre-existing tests
+    /// only ever exercised the question branch and would score a notice that renders raw HTML as fine.
+    #[test]
+    fn the_notice_branch_neutralizes_markup_on_both_helpers() {
+        let hostile = ConfirmContent::notice(&crate::confirm::NoticePrompt {
+            title: "DIG — Logs",
+            heading: "DIG could not open the folder for you.",
+            body: "<b>C:\\evil</b> & co",
+            acknowledge: "OK",
+        });
+
+        assert!(DialogTool::Zenity
+            .args(&hostile)
+            .iter()
+            .any(|a| a == "--no-markup"));
+
+        let kdialog = DialogTool::Kdialog.args(&hostile);
+        let text = &kdialog[3];
+        assert!(!text.contains('<'), "no tag opener may survive: {text}");
+        assert!(text.contains("&lt;b&gt;"));
     }
 
     #[test]
