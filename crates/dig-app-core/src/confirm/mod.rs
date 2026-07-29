@@ -327,8 +327,8 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
-// Windows keeps its input window in its own module: it is a hand-built window class with a message loop,
-// which has nothing in common with the `MessageBoxW` confirm beside it.
+// Windows keeps every window in `windows_input`: one hand-built window class with a message loop, drawn with
+// or without a field. `windows` holds only the Windows Hello step and the backend's construction.
 #[cfg(target_os = "windows")]
 mod windows_input;
 
@@ -403,20 +403,11 @@ pub(crate) enum Presentation {
     Decide {
         /// Whether the REFUSING choice must be the pre-selected default.
         ///
-        /// `MessageBoxW` and `NSAlert` both default to their FIRST button, so a destroy window would confirm
-        /// irreversible key destruction on a bare Enter — a review finding (dig_ecosystem#1799). For a
-        /// destroy the safe answer is therefore pre-selected; for a sign, a pairing or a connect the
-        /// affirmative stays the default, because those are the actions the user just asked for and refusing
-        /// them costs nothing but a retry.
+        /// A dialog defaults to its FIRST button, so a destroy window would confirm irreversible key
+        /// destruction on a bare Enter — a review finding (dig_ecosystem#1799). For a destroy the safe answer
+        /// is therefore pre-selected; for a sign, a pairing or a connect the affirmative stays the default,
+        /// because those are the actions the user just asked for and refusing them costs nothing but a retry.
         refusal_is_default: bool,
-        /// The sentence naming both choices, for a backend whose buttons cannot be RELABELLED.
-        ///
-        /// macOS and the Linux helpers put [`ConfirmContent::action`] directly on the button, so they
-        /// ignore this. Windows `MessageBoxW` is stuck with OK/Cancel, so it must spell the choice out in
-        /// the body — and the right sentence differs between an authorization ("Choose OK to Sign") and a
-        /// claim, where the same template produced the unreadable *"Choose OK to I have written these
-        /// down"* found in a live window during #1752 review.
-        choice_hint: String,
     },
 }
 
@@ -435,7 +426,7 @@ impl ConfirmContent {
                    your DIG identity. You approve every signature individually."
                     .to_string(),
             action: "Pair",
-            presentation: Self::authorize("Pair"),
+            presentation: Self::authorize(),
         }
     }
 
@@ -453,7 +444,7 @@ impl ConfirmContent {
                    alone before continuing."
                 .to_string(),
             action: "Reveal",
-            presentation: Self::authorize("Reveal"),
+            presentation: Self::authorize(),
         }
     }
 
@@ -485,7 +476,6 @@ impl ConfirmContent {
             // correctly (#1752). "Not yet" names what Cancel actually does here — it does not reject an
             // authorization, it says the claim is not true yet.
             presentation: Presentation::Decide {
-                choice_hint: format!("Choose OK — {} — or Cancel if not yet.", prompt.affirm),
                 refusal_is_default: false,
             },
         }
@@ -518,19 +508,21 @@ impl ConfirmContent {
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
             presentation: Presentation::Decide {
-                choice_hint: "Choose Cancel to keep this account, or OK to destroy it.".to_string(),
                 refusal_is_default: true,
             },
         }
     }
 
-    /// The two-choice presentation for an AUTHORIZATION prompt, whose `action` is an imperative verb.
+    /// The two-choice presentation for an AUTHORIZATION prompt.
     ///
     /// The affirmative stays the default: the user asked for this, and a refusal costs only a retry. The one
     /// exception is a DESTROY, which composes its presentation directly (see [`ConfirmContent::destroy`]).
-    fn authorize(action: &str) -> Presentation {
+    ///
+    /// Named rather than written inline at each call site so that "an authorization defaults to its
+    /// affirmative" is stated ONCE. Four prompts sharing a literal is four places for the destroy window's
+    /// rule to be copied into by mistake.
+    fn authorize() -> Presentation {
         Presentation::Decide {
-            choice_hint: format!("Choose OK to {action}, or Cancel to reject."),
             refusal_is_default: false,
         }
     }
@@ -550,7 +542,7 @@ impl ConfirmContent {
                 prompt.origin
             ),
             action: "Connect",
-            presentation: Self::authorize("Connect"),
+            presentation: Self::authorize(),
         }
     }
 
@@ -571,7 +563,7 @@ impl ConfirmContent {
                 prompt.payload_type
             ),
             action: "Sign",
-            presentation: Self::authorize("Sign"),
+            presentation: Self::authorize(),
         })
     }
 }
@@ -662,9 +654,10 @@ impl InputContent {
 
 /// Raises a foreground window with a real text-input control and returns what the user typed.
 ///
-/// Separate from [`ForegroundWindow`] because the platform mechanisms are genuinely different — Windows
-/// `MessageBoxW` has no input control at all, so its input window is a hand-built `EDIT`-bearing window
-/// while its confirm window stays a message box.
+/// Separate from [`ForegroundWindow`] because the RESULT is different in kind: this one returns text the
+/// caller must handle as a secret, and conflating "the user consented" with "the user typed this" is how a
+/// window's answer gets acted on as an empty string. On Windows both are now drawn by the same window class
+/// (dig_ecosystem#1832); the seams stay separate because the outcomes do.
 pub(crate) trait ForegroundInput: Send + Sync {
     /// Show `content` as a real, focus-stealing OS window and block until the user submits or cancels.
     fn ask(&self, content: &InputContent) -> InputOutcome;
@@ -1048,23 +1041,32 @@ mod tests {
         let _ = confirmer.confirm_sign(&sign_prompt(None));
     }
 
-    /// The choice sentence of `content`, or `None` when it offers no choice.
-    fn hint_of(content: &ConfirmContent) -> Option<&str> {
+    /// The label on `content`'s affirmative BUTTON, or `None` when it offers no choice.
+    ///
+    /// This replaced a `hint_of` that returned the choice SENTENCE. Windows drew its own window from
+    /// dig_ecosystem#1832 onward, so there is no longer a sentence anywhere — every platform now puts
+    /// `action` directly on the button, which is what macOS and Linux always did.
+    fn affirm_label_of(content: &ConfirmContent) -> Option<&str> {
         match &content.presentation {
             Presentation::Acknowledge => None,
-            Presentation::Decide { choice_hint, .. } => Some(choice_hint),
+            Presentation::Decide { .. } => Some(content.action),
         }
     }
 
-    /// **Regression (#1752).** A CLAIM window must not slot its first-person affirming label into an
-    /// authorization sentence. This was found by reading the LIVE Windows window out of a running process,
-    /// which showed *"Choose OK to I have written these down, or Cancel to reject."*
+    /// **Regression (#1752, now structural).** A CLAIM window's first-person affirming label must reach the
+    /// user VERBATIM. The original defect was a live Windows window reading *"Choose OK to I have written
+    /// these down, or Cancel to reject."* — the label slotted into an authorization sentence.
     ///
-    /// The fixture is the real label from the display-once phrase screen — a first-person claim rather than
-    /// an imperative verb — because a verb-shaped label ("Done", "OK") reads fine in EITHER sentence and so
-    /// cannot distinguish the bug from the fix.
+    /// The sentence is gone: from dig_ecosystem#1832 Windows draws its own window and puts `action` on the
+    /// button, so there is no template left to slot a label into. This test pins the property that replaced
+    /// it — the label passes through untouched — which is a stronger assertion than the old one, because it
+    /// fails on ANY rewording, not only on the one wrong template.
+    ///
+    /// The fixture is the real label from the display-once phrase screen: a first-person claim rather than an
+    /// imperative verb, because a verb-shaped label ("Done", "OK") reads fine either way and so could not
+    /// distinguish the bug from the fix.
     #[test]
-    fn a_claim_hint_reads_as_a_claim_not_an_imperative() {
+    fn a_claim_puts_its_first_person_label_on_the_button_verbatim() {
         let content = ConfirmContent::claim(&ClaimPrompt {
             title: "DIG — Your recovery phrase",
             heading: "Write these 24 words down.",
@@ -1072,37 +1074,34 @@ mod tests {
             affirm: "I have written these down",
         });
 
-        let hint =
-            hint_of(&content).expect("a claim is a real either/or, so it names both choices");
-        assert!(
-            !hint.contains("Choose OK to I have"),
-            "the claim hint must not read as an imperative: {hint}"
-        );
+        let label = affirm_label_of(&content)
+            .expect("a claim is a real either/or, so it has an affirmative button");
         assert_eq!(
-            hint,
-            "Choose OK — I have written these down — or Cancel if not yet."
+            label, "I have written these down",
+            "the claim's own words must reach the button unchanged"
         );
     }
 
-    /// The control: an AUTHORIZATION prompt still gets the imperative sentence, so fixing the claim wording
-    /// did not flatten both into one.
+    /// The control: an AUTHORIZATION prompt puts its imperative VERB on the button, so the two kinds of
+    /// affirmative stay distinguishable rather than collapsing into one generic label.
     #[test]
-    fn an_authorization_hint_stays_imperative() {
+    fn an_authorization_puts_its_imperative_verb_on_the_button() {
         assert_eq!(
-            hint_of(&ConfirmContent::reveal(&RevealPrompt {
+            affirm_label_of(&ConfirmContent::reveal(&RevealPrompt {
                 secret: "your recovery phrase"
             })),
-            Some("Choose OK to Reveal, or Cancel to reject.")
+            Some("Reveal")
         );
     }
 
-    /// **Regression (#1773).** A notice carries NO choice sentence at all, on any platform — there is no
-    /// second button for one to describe.
+    /// **Regression (#1773).** A notice offers NO second choice at all, on any platform — so it has no
+    /// affirmative-versus-refusal to label, only a dismiss.
     ///
-    /// Paired with `an_authorization_hint_stays_imperative` above: together they pin that the presentation
-    /// distinguishes the two kinds rather than collapsing them, which a one-sided assertion could not.
+    /// Paired with `an_authorization_puts_its_imperative_verb_on_the_button` above: together they pin that the
+    /// presentation distinguishes the two kinds rather than collapsing them, which a one-sided assertion
+    /// could not.
     #[test]
-    fn a_notice_carries_no_choice_sentence() {
+    fn a_notice_offers_no_second_choice() {
         let content = ConfirmContent::notice(&NoticePrompt {
             title: "DIG — DIG ID copied",
             heading: "Your DIG ID is on the clipboard.",
@@ -1111,7 +1110,7 @@ mod tests {
         });
 
         assert_eq!(content.presentation, Presentation::Acknowledge);
-        assert_eq!(hint_of(&content), None);
+        assert_eq!(affirm_label_of(&content), None);
     }
 
     /// A claim is drawn WITHOUT a biometric step: the user is asserting something about the world, not

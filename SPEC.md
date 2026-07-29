@@ -446,13 +446,14 @@ Binding rules, which matter more for an input control than for a notice:
   will accept a Sage phrase and silently build a different, empty account from it (§3.1a).
 
 **Current state:** implemented on all three platforms. Windows draws a registered-class window with an
-`EDIT` control (`MessageBoxW` cannot take input) plus the reveal checkbox; macOS uses an `NSAlert` with a
-text-field accessory view; Linux drives `zenity --entry` / `kdialog`. A subprocess input helper is
+`EDIT` control plus the reveal checkbox — the same window class it draws every consent prompt with, with the
+field omitted; macOS uses an `NSAlert` with a text-field accessory view; Linux drives `zenity --entry` /
+`kdialog`. A subprocess input helper is
 explicitly REJECTED: it would need a verify-the-helper-is-ours check, or a `PATH` impostor harvests recovery
 phrases, so every backend draws its window IN-PROCESS.
 
-The destroy window's pre-selected refusal is honoured on Windows (`MB_DEFBUTTON2`) and macOS (the Return key
-equivalent moves to Cancel). The Linux dialog helpers offer no equivalent, which is currently unreachable
+The destroy window's pre-selected refusal is honoured on Windows (the refusing button holds the focus and
+carries `BS_DEFPUSHBUTTON`) and macOS (the Return key equivalent moves to Cancel). The Linux dialog helpers offer no equivalent, which is currently unreachable
 rather than a gap — Linux has no per-application credential store, so it is always the unsupported-host state
 and no destroy window can be drawn there. A Linux credential store MUST NOT land without addressing it.
 

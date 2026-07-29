@@ -298,9 +298,6 @@ mod tests {
 
     /// A two-choice presentation whose refusal is, or is not, the default.
     fn decision(refusal_is_default: bool) -> Presentation {
-        Presentation::Decide {
-            choice_hint: "Choose OK to Sign, or Cancel to reject.".into(),
-            refusal_is_default,
-        }
+        Presentation::Decide { refusal_is_default }
     }
 }
