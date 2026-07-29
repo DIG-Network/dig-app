@@ -36,7 +36,29 @@ use dig_app_core::confirm::{
     native_confirmer, ClaimPrompt, DestroyPrompt, InputPrompt, NoticePrompt, RevealPrompt,
 };
 
+/// Match the tray's DPI posture, so a screenshot taken here is what the user actually sees.
+///
+/// `dig-app` is per-monitor DPI-aware because tao sets that when it builds the tray, and that is what makes
+/// the windows responsible for their own scaling (dig_ecosystem#1832). This example has no tao, so without
+/// this call Windows DPI-virtualises it, `GetDpiForMonitor` reports 96, and the gallery would render the
+/// 100% layout on a scaled display — a preview that quietly disagrees with the thing it previews, which is
+/// worse than no preview.
+#[cfg(windows)]
+fn match_the_trays_dpi_awareness() {
+    // SAFETY: a documented, idempotent process-wide call with a constant argument; a failure (an older
+    // Windows, or awareness already set) is reported by the return value and is harmless — the gallery then
+    // renders exactly as it did before.
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    match_the_trays_dpi_awareness();
+
     let which = std::env::args().nth(1).unwrap_or_else(|| "notice".into());
     let confirmer = native_confirmer();
 

@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "4.1.0"
+version = "4.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -209,6 +209,11 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     # `EM_SETPASSWORDCHAR` / `BM_GETCHECK` for the reveal-while-typing checkbox (SPEC §3.1d).
     "Win32_UI_Controls",
+    # `GetDpiForMonitor`/`MDT_EFFECTIVE_DPI` (dig_ecosystem#1832): this process is DPI-AWARE, because tao
+    # sets per-monitor awareness when it builds the tray, so Windows does NOT scale our hand-built windows
+    # for us. Without reading the real monitor DPI every dialog renders at a fraction of its intended
+    # physical size on a scaled display.
+    "Win32_UI_HiDpi",
     # `AttachConsole`/`SetStdHandle` (dig_ecosystem#1797): a GUI-subsystem process has no console, so
     # `dig-app --version` — which the update beacon health-gates on — must attach to its parent's. Opening
     # `CONOUT$` to re-point the standard handles is a `CreateFileW`, hence the file-system feature.
