@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [3.5.0] - 2026-07-29
+
+### Bug Fixes
+- **tray:** Present notices as notices, not warnings with a meaningless Cancel (#38)
+
 ## [3.4.0] - 2026-07-29
 
 ### Features
