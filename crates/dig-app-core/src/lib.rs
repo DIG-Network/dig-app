@@ -57,6 +57,7 @@ pub mod gateway;
 pub mod identity;
 pub mod ipc;
 pub mod keystore;
+pub mod link;
 pub mod loopback;
 pub mod notify;
 pub mod pairing;

@@ -237,6 +237,15 @@ pub enum TrayAction {
     /// it promises — telling the user what is going on — is something the app can always do, even (and
     /// especially) when everything else is broken.
     ShowStatus,
+    /// Ask for a DIG link in a native input window, then open it through the local node.
+    ///
+    /// The tray equivalent of `dign open` (dig_ecosystem#1821). Enabled in EVERY state, deliberately:
+    /// reading content is the product's core function and needs no account (§6.0 — consumption stays
+    /// frictionless and must never be gated on custody), and when there is no node to resolve through,
+    /// the handler says so precisely rather than the menu offering a greyed row that explains nothing
+    /// (§1800). The link is validated before anything is opened — store content is attacker-controlled
+    /// (#745), so the scheme allowlist is a security boundary, not a convenience.
+    Open,
     /// Create the FIRST account on a host that has none: generate a recovery phrase, show it, confirm,
     /// enrol. Offered only while no account exists; replacing one that does is
     /// [`ReplaceWithNewAccount`](Self::ReplaceWithNewAccount), which destroys custody and must say so.
@@ -550,6 +559,10 @@ pub fn build(view: &TrayView) -> MenuModel {
     let account = view.account();
     let mut rows = vec![
         MenuRow::action(TrayAction::ShowStatus, "Status and details…", true),
+        // Opening content sits ABOVE the account block and outside it: it is what the product is for,
+        // and it works with no account at all. Putting it below "Manage my DIG Account" would imply a
+        // dependency that does not exist.
+        MenuRow::action(TrayAction::Open, "Open…", true),
         MenuRow::Separator,
     ];
     rows.extend(primary_account_actions(&account));
@@ -969,6 +982,13 @@ mod tests {
                 menu.is_enabled(TrayAction::Quit),
                 "quit must work in {account:?}"
             );
+            // Reading content is not a custody action: it must be reachable with no account, with a
+            // locked one, and with one that cannot be opened at all (§6.0 — a $DIG-movement
+            // opportunity must never gate consuming data).
+            assert!(
+                menu.is_enabled(TrayAction::Open),
+                "opening a DIG link must work in {account:?} — it needs no account"
+            );
             assert!(
                 menu.is_enabled(TrayAction::OpenLogs),
                 "the logs escape must work in {account:?}"
@@ -1166,10 +1186,16 @@ mod tests {
 
     /// The top-level menu must stay SHORT — a native menu the length of the old one is a wall of text.
     ///
-    /// The bound is 7, which is what the richest state legitimately needs (details · the primary account
-    /// action · the phrase row · copy-id · the management submenu · logs · quit) and two fewer rows than
-    /// the menu this replaced, which reached 12 with five of them greyed. Every further verb goes in the
-    /// submenu or the details window, which is the rule this number enforces.
+    /// The bound is 8: details · **open** · the primary account action · the phrase row · copy-id · the
+    /// management submenu · logs · quit. Still four fewer rows than the menu this replaced, which reached
+    /// 12 with five of them greyed.
+    ///
+    /// It was 7 before `Open` (dig_ecosystem#1821). Raising it is a judgement, not an accommodation, so
+    /// the reason is recorded rather than left as a bumped constant: **opening content is what the
+    /// product is FOR**, it needs no account, and burying it in the account-management submenu would put
+    /// the one verb a content consumer wants behind the custody menu they may never use. The rule this
+    /// number enforces is unchanged — every *further* verb goes in the submenu or the details window —
+    /// and a primary capability arriving is exactly the case that should move the number, once.
     #[test]
     fn the_top_level_menu_stays_short_in_every_state() {
         for account in EVERY_STATE {
@@ -1180,7 +1206,7 @@ mod tests {
                 .filter(|row| matches!(row, MenuRow::Action { .. } | MenuRow::Submenu { .. }))
                 .count();
             assert!(
-                clickable <= 7,
+                clickable <= 8,
                 "{account:?}: {clickable} top-level rows is a wall, not a menu"
             );
         }
