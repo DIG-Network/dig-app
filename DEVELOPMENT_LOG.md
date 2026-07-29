@@ -241,3 +241,30 @@ Sharp edges that cost time here:
   through the later default candidates, so "no token here" assertions passed a real token. Make the
   lookup take an explicit candidate list and assert on that, rather than mutating global env and
   hoping the machine is clean.
+
+## The Linux tray does not fade — it PANICS (dig_ecosystem#1756, measured 2026-07-28)
+
+Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app` built inside it.
+
+- **The dlopened indicator library panics; it does not return an error.** With GTK installed and
+  `libayatana-appindicator3-1` absent, `libappindicator-sys-0.9.0/src/lib.rs:41` panics
+  (*"Failed to load ayatana-appindicator3 or appindicator3 dynamic library"*) and the process DIES. The
+  long-standing assumption — recorded in `SPEC.md` and in the shell's own comments — was that a missing
+  indicator yields a *running* process with no icon. It does not. A panic unwinds past the `Result` the
+  whole degrade path is written around, so `tray_unavailable_advice` and its two unit tests were dead
+  code on the one platform they were written for: green tests, perfect message, unreachable. Mounting is
+  now wrapped in `catch_unwind` (`dig_app::tray_render::mount_or_degrade`).
+- **`ldd` names ALL missing link-time libraries; the loader names only the FIRST.** The `tray` build
+  needs **seven**: `libgtk-3.so.0`, `libgdk-3.so.0`, `libgdk_pixbuf-2.0.so.0`, `libcairo.so.2`,
+  `libglib-2.0.so.0`, `libgobject-2.0.so.0`, `libgio-2.0.so.0`. Running the binary reports only
+  `libgdk-3.so.0`, so fixing them one at a time looks like a fresh regression on every attempt — the
+  same trap the earlier libxdo hunt fell into. Four packages cover all seven: `libgtk-3-0t64`,
+  `libgdk-pixbuf-2.0-0`, `libcairo2`, `libglib2.0-0t64` (verified: installing them leaves `ldd` clean).
+  Note the Ubuntu 24.04 `t64` suffixes — `libgtk-3-0` and `libglib2.0-0` are the wrong names there.
+- **A dlopened dependency is invisible to `ldd`.** The indicator library never appears in `ldd` output or
+  `DT_NEEDED`, so a dependency audit based on `ldd` alone will always miss it. It has to be listed by
+  hand, alongside the runtime *executables* the tray shells out to (`xclip` for the clipboard,
+  `xdg-open` for the log folder).
+- **Reproducing this needs a DISPLAY, not just a container.** Without one, `FormFactor::detect` returns
+  `Headless` and the tray is never attempted, so the bug hides. `Xvfb :99` + `DISPLAY=:99` is what makes
+  it appear.

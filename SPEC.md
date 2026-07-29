@@ -211,6 +211,14 @@ the user did not explicitly initiate for that purpose, and MUST show the cost be
 account is fully functional without a DID; a profile is identified by its seed-derived identity public
 key until one is minted (§3.1).
 
+The reported DID state MUST rest on evidence that a DID was actually minted on chain. A locally-written
+value that merely has DID-shaped text in it — a profile reference, a config entry — MUST NOT be reported as
+an on-chain DID, because doing so tells the user they have a published, verifiable identity they do not
+have.
+
+**Current state:** minting is not implemented, so no profile can have a DID and the tray's mint action is
+disabled with that reason in its label (§3.1c).
+
 ### 3.1c The tray account surface (normative)
 
 The tray is the only surface a person has on a fresh install, so it MUST expose the whole account
@@ -219,8 +227,8 @@ these rules are testable independently of any desktop.
 
 The menu MUST offer, at minimum: the agent's own state, the node connection line, the account state, the
 profile's DIG ID, the on-chain DID state, and actions to set up an account, restore from a recovery
-phrase, unlock, lock now, reveal the recovery phrase, copy the DIG ID, create an on-chain DID, open the
-log folder, and quit.
+phrase, unlock, lock now, reveal the recovery phrase, copy the DIG ID, create an on-chain DID, show the
+node connection in full, open the log folder, and quit.
 
 Binding rules:
 
@@ -233,6 +241,24 @@ Binding rules:
   status line AND offered the explainer, and MUST NOT be shown an inert "show my recovery phrase" item.
   An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
   existence is discoverable.
+- **Every ENABLED item MUST be able to perform what its label says (MUST).** This is the strong form of the
+  rule above, and it binds two cases that are easy to get wrong:
+  - A capability that does not EXIST YET is either absent or shown DISABLED **with the reason in its
+    label**. It MUST NOT be enabled and handled by a dialog that apologises for the feature's absence: an
+    enabled control that cannot act reads as a broken application, which is worse than an honest gap.
+  - An item that cannot itself carry out the action it names MUST say where the action happens (for
+    example, restore, which needs a text field the tray API does not provide — §3.1d). A label promising
+    an action the item merely explains is the same defect in milder form.
+- **A status row MUST fit one menu row (MUST).** A native menu sizes itself to its widest item, so ONE long
+  status line stretches the whole menu — past the screen edge on a real desktop, taking the action rows out
+  of reach. Status text MUST therefore be bounded to a single line of bounded width, and MUST be visibly
+  marked as abbreviated when it was cut.
+  Bounding MUST NOT lose information: whenever text is cut, the menu MUST offer an enabled action that
+  presents it in FULL in a window that can hold it (never trap the user with a truncated diagnosis). This
+  matters most for the node connection line, whose disconnected reasons are deliberately verbose and
+  actionable — a real one names the token file to create and the reinstall to run, and runs to hundreds of
+  characters. The full text MUST be read at the moment it is requested, not replayed from the snapshot the
+  menu was built from, so a node that came up while the menu was open is reported as connected.
 - **Read the lock state from the KEYS, never from the session (MUST).** A session deliberately outlives
   its key material — lock-now and the idle auto-lock drop the keys and keep the session so the sign path
   can re-unlock into it. The reported state MUST therefore be derived from whether key material is held
@@ -242,9 +268,26 @@ Binding rules:
 - **Price before the click.** An action that spends funds MUST name the cost in its LABEL, not only in a
   confirmation dialog (§3.1b).
 - **A tray that cannot mount MUST report itself.** On Linux the indicator library is dlopened, so a
-  missing library yields a running process with no icon and no error. The shell MUST log the failure and
+  missing library is discovered at run time rather than at link time. The shell MUST log the failure and
   print the likely cause plus a working alternative (`dign`), because an invisible tray is otherwise
   indistinguishable from a broken application.
+- **A tray that cannot mount MUST NOT take the agent down with it (MUST).** Mounting MUST be guarded
+  against a PANIC, not merely against an error return. This is not defensive padding: the Linux
+  indicator binding panics inside its `dlopen` when the library is absent
+  (`libappindicator-sys`: *"Failed to load ayatana-appindicator3 or appindicator3 dynamic library"*),
+  and a panic unwinds past any `Result` the degrade path is written around. Unguarded, a host that is
+  merely missing a desktop package loses the tray, the agent, the headless fallback AND the advice
+  message — the worst outcome available, from the most common cause. The panic's reason MUST survive into
+  the reported cause, because it names the exact libraries that were tried.
+- **Every LINK-time desktop dependency MUST be satisfied by packaging, not by advice.** A missing
+  link-time library stops the binary before `main`, so no in-app message can help. On a pristine
+  `ubuntu:24.04` the `tray` build requires seven such libraries — `libgtk-3.so.0`, `libgdk-3.so.0`,
+  `libgdk_pixbuf-2.0.so.0`, `libcairo.so.2`, `libglib-2.0.so.0`, `libgobject-2.0.so.0`,
+  `libgio-2.0.so.0` — supplied on Debian/Ubuntu by `libgtk-3-0t64`, `libgdk-pixbuf-2.0-0`, `libcairo2`
+  and `libglib2.0-0t64`. Packaging MUST declare the whole set: the dynamic loader reports only the FIRST
+  unresolved library, so fixing them one at a time reads as a fresh regression on each attempt. The
+  dlopened indicator (`libayatana-appindicator3-1` / `libappindicator-gtk3`) is additionally required for
+  the icon to appear, and is NOT visible to `ldd`.
 - **The tray icon MUST be the DIG brand mark, carried inside the binary.** The mark is embedded as PNG
   artwork and decoded to RGBA at mount time; the shell MUST NOT read it from disk or from another
   component's files, so any `dig-app` binary shows the right icon however it was packaged. The shell
@@ -1236,6 +1279,30 @@ agent reaches a node through the `EngineConnector` seam, whose production implem
 
 The engine-side of the IPC contract (the `control.session.*` methods + the `sign` callback) is
 implemented in the dig-node repo (U2/U6), not here.
+
+### 8.1 The `--version` contract (normative)
+
+**Every dig-app binary — `dig-app` and `dign` — MUST answer `--version`.** This is not a convenience: it is
+the interface the ecosystem's update beacon uses to health-gate an installed component, by spawning
+`<binary> --version` and reading its output. A binary that ignores the flag does not fail loudly — it does
+whatever it would have done with no arguments and prints nothing the probe can read, so the beacon
+concludes the install is unverifiable and keeps reinstalling it.
+
+The contract the probe imposes:
+
+- **`--version` MUST write to STDOUT and exit 0.** A non-zero exit is discarded, and stderr is not read.
+- **The last whitespace-separated token of the FIRST line MUST be a bare `MAJOR.MINOR.PATCH`** (an
+  optional `v` prefix is accepted). Extra dot-segments, a pre-release suffix, or any trailing text after
+  the number makes the version unparseable. The conventional form is `"<binary-name> <semver>"`.
+- **The version MUST be read from the crate metadata**, never written out as a literal, so a release bump
+  cannot leave the binary reporting a stale number.
+- **`--version` MUST have no side effects.** It MUST NOT start the agent, mount a tray, open a signing
+  channel, or create log files — an update check runs it routinely, and on every installed component.
+- `-V` MUST be accepted as its short form, and `--version` MUST win over any other argument on the line,
+  so the probe is answerable regardless of what else a launcher passes.
+
+`--help`/`-h` MUST likewise print to stdout and exit 0 without side effects, and MUST name both ways into
+the app: the tray menu for a person at a desktop, and `dign` for a terminal.
 
 ---
 

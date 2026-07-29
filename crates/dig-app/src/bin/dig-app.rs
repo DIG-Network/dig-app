@@ -83,12 +83,41 @@ struct AccountFacts {
 }
 
 fn main() {
+    // Answer `--version`/`--help` BEFORE anything else — before the logging stack, before the agent,
+    // before any tray. Two reasons this ordering is load-bearing:
+    //
+    //  * The update beacon health-gates this component by spawning `dig-app --version` and reading
+    //    STDOUT (dig_ecosystem#1749). Anything else printed there, or any side effect that starts the
+    //    agent, breaks the gate — so the informational paths return without touching the world.
+    //  * Installing the logging stack first would create log files just to answer "what version are
+    //    you?", on every single update check.
+    let unrecognized = match dig_app::argv::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        dig_app::argv::Invocation::Version => {
+            println!("{}", dig_app::argv::version_line());
+            return;
+        }
+        dig_app::argv::Invocation::Help => {
+            println!("{}", dig_app::argv::help_text());
+            return;
+        }
+        dig_app::argv::Invocation::Run { unrecognized } => unrecognized,
+    };
+
     // Install the shared logging stack FIRST, before anything else can emit an event that would
     // otherwise be silently dropped. Held for the whole process lifetime; see `logging`'s docs for
     // why a plain local guard is enough here (this is the crate's one entrypoint).
     let _log_guard = dig_app::logging::init();
 
-    let version = env!("CARGO_PKG_VERSION");
+    // An argument we did not understand never stops the agent, but it is never swallowed either: a
+    // launcher passing a flag that silently does nothing is exactly how a misconfiguration hides.
+    if !unrecognized.is_empty() {
+        tracing::warn!(
+            arguments = ?unrecognized,
+            "ignoring unrecognized command-line arguments — run `dig-app --help` for the supported options"
+        );
+    }
+
+    let version = dig_app::argv::version();
     let env = resolve_environment();
     tracing::info!(version, os = ?env.os, has_display = env.has_display, "dig-app starting");
 
@@ -426,15 +455,18 @@ fn current_os() -> Os {
 ///
 /// The shell is deliberately dumb about WHAT the menu should contain: it asks
 /// [`dig_app_core::tray_menu::build`] for a [`MenuModel`] and renders it, so every rule about which items
-/// appear and when lives in one unit-tested place (dig_ecosystem#1752). What lives here is only the two
-/// things that cannot be tested without a desktop: turning rows into native menu items, and running each
-/// [`TrayAction`]'s handler.
+/// appear and when lives in one unit-tested place (dig_ecosystem#1752). What lives here is only what
+/// genuinely cannot run without a desktop: turning rows into native menu items, the platform event loop,
+/// and running each [`TrayAction`]'s handler — all of it guarded by
+/// [`dig_app::tray_guard::mount_or_degrade`], because the Linux desktop stack panics rather than failing
+/// when a library is absent (dig_ecosystem#1756).
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
         account_state, explain_restore, notify, set_up_account, start_sign_service, AppEnvironment,
         TraySession,
     };
+    use dig_app::tray_guard::mount_or_degrade;
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::{explain_missing_phrase, reveal_phrase};
     use dig_app_core::agent::{Agent, SharedStatus};
@@ -452,7 +484,7 @@ mod tray {
     /// How often the tray re-reads the agent status and, if anything changed, repaints its menu.
     const REFRESH: Duration = Duration::from_millis(500);
 
-    /// A rendered menu plus the map from each native item id back to the action it stands for.
+    /// A rendered native menu plus the map from each native item id back to the action it stands for.
     ///
     /// The map is what lets the shell stay ignorant of the menu's shape: a click arrives as an opaque
     /// [`MenuId`], and this translates it into the [`TrayAction`] the model named.
@@ -465,13 +497,20 @@ mod tray {
     ///
     /// Returns an error string (not a panic) if the platform refuses an item, so a menu that cannot be
     /// built degrades the shell to headless rather than killing the process.
+    ///
+    /// This lives in the shell rather than the library on purpose: it does nothing but construct platform
+    /// objects, and constructing them is not possible inside a test process — `muda` menus crash with
+    /// `STATUS_ACCESS_VIOLATION` even from a `harness = false` main thread. Exercising it needs the real
+    /// event loop, so it belongs with the event loop, where the coverage gate correctly excludes platform
+    /// glue rather than inviting a test that only pretends to check it. Every RULE about what the menu
+    /// contains is separately tested in [`dig_app_core::tray_menu`].
     fn render(model: &MenuModel) -> Result<RenderedMenu, String> {
         let menu = Menu::new();
         let mut actions = HashMap::new();
         for row in &model.rows {
             match row {
+                // Status rows are disabled items: they read as text, and cannot be clicked.
                 MenuRow::Status(text) => {
-                    // Status rows are disabled items: they read as text, and cannot be clicked.
                     menu.append(&MenuItem::new(text, false, None))
                         .map_err(|e| format!("menu status row failed: {e}"))?;
                 }
@@ -500,22 +539,23 @@ mod tray {
         session: Option<&TraySession>,
     ) -> TrayView {
         let account = account_state(env, session);
-        let (running, node, did) = match status.read() {
-            Ok(status) => (
-                status.running,
-                status.engine.summary(),
-                status.active_profile.as_ref().map(|p| p.did.clone()),
-            ),
+        let (running, node) = match status.read() {
+            Ok(status) => (status.running, status.engine.summary()),
             // A poisoned status lock is not a reason to show a blank menu: say what we can, and let the
             // rest read as "starting".
-            Err(_) => (false, "Node: status unavailable".to_string(), None),
+            Err(_) => (false, "Node: status unavailable".to_string()),
         };
         TrayView {
             running,
             node,
             account: Some(account),
             profile_id: session.map(|s| s.account.profile_id.clone()),
-            did,
+            // No on-chain DID can exist yet: minting is unimplemented, so there is nothing that could
+            // have produced one. This was previously filled from `config.active_profile` — a LOCAL
+            // string, not chain evidence — which would have made the tray report an on-chain identity
+            // the user does not have as soon as anything started writing that field. See
+            // [`TrayView::did`].
+            did: None,
         }
     }
 
@@ -535,7 +575,9 @@ mod tray {
         let status = agent.status_handle();
 
         let mut model = snapshot(&status, &env, session.as_ref());
-        let mut menu = match render(&tray_menu::build(&model)) {
+        // Guarded for the same reason as the mount below: creating native menu objects touches the
+        // platform's desktop stack, and a missing library there panics rather than failing.
+        let mut menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
             Ok(rendered) => rendered,
             Err(e) => return Err((e, agent)),
         };
@@ -548,10 +590,17 @@ mod tray {
         if let Some(icon) = brand_icon() {
             builder = builder.with_icon(icon);
         }
-        let tray_icon = builder.build();
-        let tray: TrayIcon = match tray_icon {
+        // Mounting is the step that touches the platform's tray library, and on Linux that library
+        // PANICS when it is absent rather than returning an error (dig_ecosystem#1756) — which used to
+        // kill the process outright, past every degrade path. Guarded so a missing desktop library costs
+        // the user their tray, not their agent.
+        let tray: TrayIcon = match mount_or_degrade(|| {
+            builder
+                .build()
+                .map_err(|e| format!("tray build failed: {e}"))
+        }) {
             Ok(tray) => tray,
-            Err(e) => return Err((format!("tray build failed: {e}"), agent)),
+            Err(e) => return Err((e, agent)),
         };
 
         // The shell mounted — run the agent core on its own thread. We hand it owned handles for the
@@ -663,7 +712,10 @@ mod tray {
                 explain_missing_phrase(confirmer);
             }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
+            // Unreachable while the row is disabled, but kept honest rather than silent: if the row is
+            // ever enabled before minting works, the user gets the explanation instead of nothing.
             TrayAction::CreateDid => explain_did_mint(confirmer),
+            TrayAction::ShowNodeDetails => show_node_details(status, confirmer),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
                 shutdown.trigger();
@@ -708,6 +760,26 @@ mod tray {
                 "Your account is fine and still works. The log folder (in this menu) has the details.",
             ),
         }
+    }
+
+    /// Show the node status in full, in a window that can hold it.
+    ///
+    /// The menu row is bounded to [`tray_menu::MAX_STATUS_ROW_CHARS`] so one long line cannot stretch the
+    /// menu past the screen edge, and the engine's disconnected reason — the app's single most actionable
+    /// message, naming the node to start or reinstall — is regularly far longer than that. Read LIVE from
+    /// the status handle rather than from the snapshot the menu was built from, so a node that came up
+    /// while the menu was open is reported as connected instead of replaying a stale reason.
+    fn show_node_details(status: &SharedStatus, confirmer: &dyn NativeConfirmer) {
+        let detail = match status.read() {
+            Ok(status) => status.engine.summary(),
+            Err(_) => "The node status could not be read.".to_string(),
+        };
+        notify(
+            confirmer,
+            "DIG — Node",
+            "This is your node connection.",
+            &detail,
+        );
     }
 
     /// Put the profile's DIG ID on the clipboard, telling the user either way.
