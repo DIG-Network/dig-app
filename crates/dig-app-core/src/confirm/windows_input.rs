@@ -33,17 +33,19 @@
 use std::sync::OnceLock;
 
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, InvalidateRect, ANSI_CHARSET, CLEARTYPE_QUALITY, COLOR_WINDOW,
-    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HBRUSH, HFONT, OUT_TT_PRECIS,
+    CreateFontW, DeleteObject, InvalidateRect, MonitorFromPoint, ANSI_CHARSET, CLEARTYPE_QUALITY,
+    COLOR_WINDOW, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HFONT,
+    MONITOR_DEFAULTTONEAREST, OUT_TT_PRECIS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 // `BM_GETCHECK`/`BST_CHECKED`/`EM_SETPASSWORDCHAR` live in the Controls module, not WindowsAndMessaging.
 use windows::Win32::UI::Controls::{BST_CHECKED, EM_SETPASSWORDCHAR};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW,
     LoadCursorW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BS_AUTOCHECKBOX,
@@ -60,15 +62,32 @@ use super::{ForegroundInput, InputContent, InputOutcome};
 /// The window class this module registers. Namespaced so it can never collide with another component's.
 const CLASS_NAME: PCWSTR = windows::core::w!("DigAppNativeInputWindow");
 
-/// The pixel geometry of the window. Named constants rather than magic numbers inline, because the
-/// layout is arithmetic over them and a stray literal is impossible to review.
+/// The window's geometry in DESIGN UNITS — pixels at 96 DPI, the reference scale.
+///
+/// Nothing here is used directly for drawing. [`Metrics::for_dpi`] scales every value by the DPI of the
+/// monitor the window will appear on, and the drawing code reads only the scaled result. That indirection
+/// is the whole point: this process is DPI-AWARE (tao calls `SetProcessDpiAwarenessContext` when it builds
+/// the tray), so Windows does NOT scale it for us — a raw pixel written here would render at a fraction of
+/// its intended physical size on any display above 100%, which is exactly how these windows came to read
+/// as "too small" on a 3840x2400 panel (dig_ecosystem#1832).
+///
+/// Named constants rather than magic numbers inline, because the layout is arithmetic over them and a
+/// stray literal is impossible to review.
 mod layout {
     /// Outer width — wide enough that 24 words wrap into a readable block rather than a ribbon.
-    pub const WIDTH: i32 = 620;
+    pub const WIDTH: i32 = 660;
     /// Uniform margin around and between the controls.
-    pub const MARGIN: i32 = 16;
-    /// Height of a one-line label.
-    pub const LINE: i32 = 20;
+    pub const MARGIN: i32 = 20;
+    /// Height of a one-line body label.
+    pub const LINE: i32 = 22;
+    /// Height of the heading line, which uses a larger, semibold face.
+    pub const HEADING_LINE: i32 = 30;
+    /// Body text height for `CreateFontW` (negative = character height). The `CHAR_WIDTH` estimate below
+    /// is calibrated to THIS size, so the two move together or the wrap maths stops protecting the text.
+    pub const FONT_BODY: i32 = 15;
+    /// Heading text height — larger and semibold, so the window has an actual type hierarchy instead of
+    /// one size for everything.
+    pub const FONT_HEADING: i32 = 21;
     /// Approximate width of one character at the window's font, in pixels.
     ///
     /// Used only to work out how many lines the body will wrap to. A `STATIC` control does not scroll and
@@ -88,13 +107,159 @@ mod layout {
     pub const BODY_MAX_LINES: i32 = 10;
     /// Height of the input field. One value, because the field can never be multiline: Win32 ignores
     /// `ES_PASSWORD` on a multiline `EDIT`, and §3.1d requires secret entry to be maskable.
-    pub const FIELD_SINGLE: i32 = 26;
+    pub const FIELD_SINGLE: i32 = 30;
     /// Button size.
-    pub const BUTTON_W: i32 = 110;
+    pub const BUTTON_W: i32 = 124;
     /// Button height.
-    pub const BUTTON_H: i32 = 30;
+    pub const BUTTON_H: i32 = 34;
     /// Extra vertical space the caption and frame consume, so the CLIENT area fits the controls.
     pub const CHROME: i32 = 44;
+}
+
+/// The reference DPI every value in [`layout`] is expressed at.
+const BASE_DPI: u32 = 96;
+
+/// [`layout`]'s design units scaled to one monitor's DPI. Every drawing call reads these, never `layout`.
+///
+/// `Copy` and tiny, so it is passed by value and the layout functions stay pure — which is what lets the
+/// scaling itself be unit-tested at 96, 144 and 192 DPI without a display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Metrics {
+    dpi: u32,
+    /// The factor every design unit was multiplied by, as a percentage. Carried so it can be asserted.
+    scale_pct: i32,
+    width: i32,
+    margin: i32,
+    line: i32,
+    heading_line: i32,
+    char_width: i32,
+    field_single: i32,
+    button_w: i32,
+    button_h: i32,
+    chrome: i32,
+    font_body: i32,
+    font_heading: i32,
+}
+
+impl Metrics {
+    /// The reference display width the design units are drawn for.
+    ///
+    /// Not arbitrary: 1920 is the width at which a 660 px dialog occupies about a third of the screen, which
+    /// is the proportion the layout was designed at.
+    const REFERENCE_WIDTH: i32 = 1920;
+
+    /// The most the RESOLUTION fallback alone may enlarge the layout.
+    ///
+    /// Bounds only the heuristic, never DPI: a real DPI of 250% must produce a 250% dialog, because every
+    /// other window on that desktop is 250% and a capped one reads as the small thing among big ones. The
+    /// fallback is capped because "the panel is wide" is a weaker signal than "the user set a scale", and an
+    /// 8K panel should not get a 4x dialog on that basis alone.
+    const MAX_SCALE_NUMERATOR: i32 = 2;
+
+    /// Scale the design units for the display this window will appear on.
+    ///
+    /// # Why DPI alone is not enough
+    ///
+    /// DPI covers the case Windows knows about — a scaled display, where an aware process must scale itself
+    /// or render at a fraction of its intended physical size. But a 3840x2400 panel run at **100%** reports
+    /// 96 DPI, and there a 660 px dialog is genuinely tiny: about a sixth of the screen width. Windows says
+    /// nothing is unusual, and DPI-only scaling would leave it exactly as small as before. That configuration
+    /// is what "the GUI components appear too small" actually was (dig_ecosystem#1832).
+    ///
+    /// So the scale is the LARGER of the two signals — the monitor's DPI ratio, and the display's width
+    /// against the reference the layout was drawn for. Taking the larger means neither configuration is
+    /// missed, and a scaled 4K display (high DPI *and* wide) is not enlarged twice over.
+    ///
+    /// # Why one scalar, applied to everything
+    ///
+    /// `char_width` is the divisor the body-wrap estimate uses, and a `STATIC` control clips silently. If the
+    /// font grew while that estimate did not, a bigger window would think more characters fit per line than
+    /// really do and clip its own warning — the defect a screenshot caught once already. Deriving every
+    /// metric from a single factor makes that class unrepresentable.
+    fn for_display(dpi: u32, screen_width: i32) -> Self {
+        // Both signals as a percentage, so the arithmetic stays in integers.
+        let dpi_pct = (dpi.max(BASE_DPI) as i64 * 100) / BASE_DPI as i64;
+        let width_pct = if screen_width > 0 {
+            (screen_width as i64 * 100) / Self::REFERENCE_WIDTH as i64
+        } else {
+            100
+        };
+        // DPI is honoured EXACTLY and is NOT capped: on a 250% display every other application is 2.5x, and
+        // a dialog capped at 2x is visibly smaller than the shell around it — which is the complaint, not the
+        // fix. The cap belongs only on the resolution FALLBACK, which is a heuristic for the case Windows
+        // does not describe (a high-resolution panel at 100%) and could otherwise enlarge without bound.
+        let pct = dpi_pct
+            .max(width_pct.min(Self::MAX_SCALE_NUMERATOR as i64 * 100))
+            .max(100);
+
+        let s = |v: i32| -> i32 { (((v as i64 * pct) + 50) / 100) as i32 };
+        Self {
+            dpi: dpi.max(BASE_DPI),
+            scale_pct: pct as i32,
+            width: s(layout::WIDTH),
+            margin: s(layout::MARGIN),
+            line: s(layout::LINE),
+            heading_line: s(layout::HEADING_LINE),
+            char_width: s(layout::CHAR_WIDTH).max(1),
+            field_single: s(layout::FIELD_SINGLE),
+            button_w: s(layout::BUTTON_W),
+            button_h: s(layout::BUTTON_H),
+            chrome: s(layout::CHROME),
+            font_body: s(layout::FONT_BODY),
+            font_heading: s(layout::FONT_HEADING),
+        }
+    }
+
+    /// The DPI-only scale, for tests and for a caller with no display metrics.
+    #[cfg(test)]
+    fn for_dpi(dpi: u32) -> Self {
+        Self::for_display(dpi, 0)
+    }
+}
+
+/// What every control on this window is created against: its parent, the module, the font it wears, and
+/// the scaled metrics it lays out in.
+///
+/// Grouped rather than passed as four positional arguments to each helper. Four identical arguments repeated
+/// at every call site is where a transposition hides — and once the metrics joined them, the helpers crossed
+/// clippy's argument-count threshold, which was the honest signal that they wanted a context rather than an
+/// allow.
+#[derive(Clone, Copy)]
+struct ControlCtx {
+    parent: HWND,
+    instance: HINSTANCE,
+    font: HFONT,
+    m: Metrics,
+}
+
+/// The effective DPI of the monitor the window is about to appear on.
+///
+/// Taken from the monitor under the CURSOR rather than the primary display, because the user reached this
+/// window by clicking the tray icon — the cursor is on the screen they are looking at, which on a
+/// multi-monitor setup with mixed scaling is the only one whose DPI is correct for them.
+///
+/// Falls back to [`BASE_DPI`] if anything is unavailable (no cursor, no monitor, a session with no display),
+/// which yields the 100% layout — undersized on a scaled display, but never zero-sized or off-screen.
+///
+/// # Safety
+///
+/// Calls documented Win32 entry points with valid out-params; every failure path falls back.
+unsafe fn dpi_for_cursor_monitor() -> u32 {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return BASE_DPI;
+    }
+    let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if monitor.is_invalid() {
+        return BASE_DPI;
+    }
+    let mut x: u32 = 0;
+    let mut y: u32 = 0;
+    match GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) {
+        // The horizontal value is the one Windows scales UI by; they are equal on every shipping display.
+        Ok(()) if x > 0 => x,
+        _ => BASE_DPI,
+    }
 }
 
 /// Per-window state, owned by the window for its lifetime and reached through `GWLP_USERDATA`.
@@ -168,11 +333,14 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
     // the message loop has returned and the window has been destroyed.
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-        let font = gui_font();
-        let field_height = field_height(content);
-        let body = body_height(content);
-        let height = window_height(content);
-        let (x, y) = centred(layout::WIDTH, height);
+        // Scale to the display the user is actually looking at, BEFORE anything is sized (#1832).
+        let m = Metrics::for_display(dpi_for_cursor_monitor(), GetSystemMetrics(SM_CXSCREEN));
+        let font = gui_font(m.font_body, FW_NORMAL.0 as i32);
+        let heading_font = gui_font(m.font_heading, FW_SEMIBOLD.0 as i32);
+        let field_height = field_height(content, m);
+        let body = body_height(content, m);
+        let height = window_height(content, m);
+        let (x, y) = centred(m.width, height);
 
         let mut state = Box::new(WindowState {
             edit: HWND::default(),
@@ -190,7 +358,7 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WINDOW_STYLE(0),
             x,
             y,
-            layout::WIDTH,
+            m.width,
             height,
             HWND::default(),
             HMENU::default(),
@@ -198,37 +366,34 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
             Some(state_ptr.cast()),
         )?;
 
-        let mut top = layout::MARGIN;
-        let inner = layout::WIDTH - layout::MARGIN * 4;
-        add_static(
-            window,
+        // Two contexts over the same window: the heading wears the larger semibold face, everything else the
+        // body face. Nothing else differs between them.
+        let ctx = ControlCtx {
+            parent: window,
             instance,
             font,
-            &content.heading,
-            top,
-            inner,
-            layout::LINE,
-        );
-        top += layout::LINE + layout::MARGIN / 2;
-        add_static(window, instance, font, &content.body, top, inner, body);
-        top += body + layout::MARGIN / 2;
-        add_static(
-            window,
-            instance,
-            font,
-            &content.field_label,
-            top,
-            inner,
-            layout::LINE,
-        );
-        top += layout::LINE;
+            m,
+        };
+        let heading_ctx = ControlCtx {
+            font: heading_font,
+            ..ctx
+        };
+
+        let mut top = m.margin;
+        let inner = m.width - m.margin * 4;
+        add_static(&heading_ctx, &content.heading, top, inner, m.heading_line);
+        top += m.heading_line + m.margin / 2;
+        add_static(&ctx, &content.body, top, inner, body);
+        top += body + m.margin / 2;
+        add_static(&ctx, &content.field_label, top, inner, m.line);
+        top += m.line;
 
         let edit = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             windows::core::w!("EDIT"),
             PCWSTR::null(),
             edit_style(content),
-            layout::MARGIN,
+            m.margin,
             top,
             inner,
             field_height,
@@ -239,31 +404,21 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
         )?;
         set_font(edit, font);
         (*state_ptr).edit = edit;
-        top += field_height + layout::MARGIN / 2;
+        top += field_height + m.margin / 2;
 
         // §3.1d's reveal-while-typing affordance: masked by default, un-maskable on purpose. Without it a
         // person typing 24 words into a masked field cannot check their own work, which is how a restore
         // fails for a reason nobody can see.
         if content.revealable {
-            add_checkbox(
-                window,
-                instance,
-                font,
-                "Show the words while I type",
-                REVEAL_ID,
-                top,
-                inner,
-            );
+            add_checkbox(&ctx, "Show the words while I type", REVEAL_ID, top, inner);
         }
-        top += reveal_height(content) + layout::MARGIN / 2;
+        top += reveal_height(content, m) + m.margin / 2;
 
         // Submit is the DEFAULT button, so Enter on a single-line field submits; Cancel sits left of it so
         // the destructive-adjacent action is never under the cursor's resting position.
-        let buttons_left = layout::WIDTH - layout::MARGIN * 3 - layout::BUTTON_W * 2;
+        let buttons_left = m.width - m.margin * 3 - m.button_w * 2;
         add_button(
-            window,
-            instance,
-            font,
+            &ctx,
             "Cancel",
             IDCANCEL.0,
             buttons_left,
@@ -271,12 +426,10 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
             BS_PUSHBUTTON as u32,
         );
         add_button(
-            window,
-            instance,
-            font,
+            &ctx,
             content.submit,
             IDOK.0,
-            buttons_left + layout::BUTTON_W + layout::MARGIN,
+            buttons_left + m.button_w + m.margin,
             top,
             BS_DEFPUSHBUTTON as u32,
         );
@@ -300,14 +453,14 @@ fn show(content: &InputContent) -> Result<InputOutcome, windows::core::Error> {
 }
 
 /// How tall the input field is. One line always — see [`edit_style`] for why it cannot be multiline.
-fn field_height(_content: &InputContent) -> i32 {
-    layout::FIELD_SINGLE
+fn field_height(_content: &InputContent, m: Metrics) -> i32 {
+    m.field_single
 }
 
 /// The vertical space the reveal checkbox occupies, or zero when the window does not offer one.
-fn reveal_height(content: &InputContent) -> i32 {
+fn reveal_height(content: &InputContent, m: Metrics) -> i32 {
     match content.revealable {
-        true => layout::LINE + layout::MARGIN / 2,
+        true => m.line + m.margin / 2,
         false => 0,
     }
 }
@@ -320,8 +473,8 @@ fn reveal_height(content: &InputContent) -> i32 {
 /// paragraph is divided by how many characters fit on a line.
 ///
 /// Pure, so the estimate is unit-tested against the real copy this window actually shows.
-fn body_lines(body: &str, width: i32) -> i32 {
-    let per_line = ((width / layout::CHAR_WIDTH).max(1)) as usize;
+fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
+    let per_line = ((width / m.char_width).max(1)) as usize;
     let wrapped: usize = body
         .split('\n')
         .map(|line| line.chars().count().div_ceil(per_line).max(1))
@@ -330,22 +483,24 @@ fn body_lines(body: &str, width: i32) -> i32 {
 }
 
 /// The pixel height of the body block for `content`.
-fn body_height(content: &InputContent) -> i32 {
-    body_lines(&content.body, layout::WIDTH - layout::MARGIN * 4) * layout::LINE
+fn body_height(content: &InputContent, m: Metrics) -> i32 {
+    body_lines(&content.body, m.width - m.margin * 4, m) * m.line
 }
 
 /// The outer window height that fits `content`'s controls, with the caption and frame accounted for.
 ///
 /// A function rather than an expression inline in [`show`] so the layout arithmetic is unit-tested: a window
 /// too short to show its own Submit button — or its own warning — is a defect no compiler catches.
-fn window_height(content: &InputContent) -> i32 {
-    layout::CHROME
-        + layout::MARGIN * 5
-        + layout::LINE * 2
-        + body_height(content)
-        + field_height(content)
-        + reveal_height(content)
-        + layout::BUTTON_H
+fn window_height(content: &InputContent, m: Metrics) -> i32 {
+    m.chrome
+        + m.margin * 5
+        // The heading is its own, taller line; the field label is an ordinary one.
+        + m.heading_line
+        + m.line
+        + body_height(content, m)
+        + field_height(content, m)
+        + reveal_height(content, m)
+        + m.button_h
 }
 
 /// The style bits for the input field.
@@ -495,24 +650,17 @@ unsafe fn toggle_mask(edit: HWND, _wparam: isize, lparam: isize) {
 /// # Safety
 ///
 /// `parent` must be a live window.
-unsafe fn add_checkbox(
-    parent: HWND,
-    instance: HINSTANCE,
-    font: HFONT,
-    text: &str,
-    id: i32,
-    top: i32,
-    width: i32,
-) {
+unsafe fn add_checkbox(ctx: &ControlCtx, text: &str, id: i32, top: i32, width: i32) {
+    let (parent, instance, font, m) = (ctx.parent, ctx.instance, ctx.font, ctx.m);
     let created = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         windows::core::w!("BUTTON"),
         &HSTRING::from(text),
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
-        layout::MARGIN,
+        m.margin,
         top,
         width,
-        layout::LINE,
+        m.line,
         parent,
         HMENU(id as isize as *mut _),
         instance,
@@ -572,14 +720,14 @@ unsafe fn read_edit(edit: HWND) -> Option<Zeroizing<String>> {
 /// # Safety
 ///
 /// `CreateFontW` allocates a GDI object; the returned handle must be passed to `DeleteObject`.
-unsafe fn gui_font() -> HFONT {
+unsafe fn gui_font(height: i32, weight: i32) -> HFONT {
     CreateFontW(
-        // Negative height = character height in logical units, the convention for point-ish sizing.
-        -15,
+        // Negative height = character height, already DPI-scaled by the caller.
+        -height,
         0,
         0,
         0,
-        FW_NORMAL.0 as i32,
+        weight,
         0,
         0,
         0,
@@ -607,21 +755,14 @@ unsafe fn set_font(control: HWND, font: HFONT) {
 /// # Safety
 ///
 /// `parent` must be a live window.
-unsafe fn add_static(
-    parent: HWND,
-    instance: HINSTANCE,
-    font: HFONT,
-    text: &str,
-    top: i32,
-    width: i32,
-    height: i32,
-) {
+unsafe fn add_static(ctx: &ControlCtx, text: &str, top: i32, width: i32, height: i32) {
+    let (parent, instance, font, m) = (ctx.parent, ctx.instance, ctx.font, ctx.m);
     let created = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         windows::core::w!("STATIC"),
         &HSTRING::from(text),
         WS_CHILD | WS_VISIBLE,
-        layout::MARGIN,
+        m.margin,
         top,
         width,
         height,
@@ -645,15 +786,14 @@ unsafe fn add_static(
 /// `parent` must be a live window.
 #[allow(clippy::too_many_arguments)]
 unsafe fn add_button(
-    parent: HWND,
-    instance: HINSTANCE,
-    font: HFONT,
+    ctx: &ControlCtx,
     text: &str,
     id: i32,
     left: i32,
     top: i32,
     button_style: u32,
 ) {
+    let (parent, instance, font, m) = (ctx.parent, ctx.instance, ctx.font, ctx.m);
     let created = CreateWindowExW(
         WINDOW_EX_STYLE(0),
         windows::core::w!("BUTTON"),
@@ -661,8 +801,8 @@ unsafe fn add_button(
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | WINDOW_STYLE(button_style),
         left,
         top,
-        layout::BUTTON_W,
-        layout::BUTTON_H,
+        m.button_w,
+        m.button_h,
         parent,
         HMENU(id as isize as *mut _),
         instance,
@@ -705,10 +845,11 @@ mod tests {
     /// passphrase window from carrying a blank strip where a control it does not have would go.
     #[test]
     fn the_reveal_control_takes_space_only_when_it_is_offered() {
-        assert!(reveal_height(&content(true, true)) > 0);
-        assert_eq!(reveal_height(&content(true, false)), 0);
+        let m = Metrics::for_dpi(BASE_DPI);
+        assert!(reveal_height(&content(true, true), m) > 0);
+        assert_eq!(reveal_height(&content(true, false), m), 0);
         assert!(
-            window_height(&content(true, true)) > window_height(&content(true, false)),
+            window_height(&content(true, true), m) > window_height(&content(true, false), m),
             "the window must grow to fit the checkbox"
         );
     }
@@ -769,18 +910,19 @@ mod tests {
             ..content(false, true)
         };
 
+        let m = Metrics::for_dpi(BASE_DPI);
         const OLD_FIXED_HEIGHT: i32 = 84;
         assert!(
-            body_height(&content) > OLD_FIXED_HEIGHT,
+            body_height(&content, m) > OLD_FIXED_HEIGHT,
             "the real copy does not fit the height that clipped it: {}",
-            body_height(&content)
+            body_height(&content, m)
         );
         // And every line of it must be accounted for: the estimate is per-character, so this is the check
         // that the arithmetic reaches the last sentence rather than merely being "bigger".
-        let usable = layout::WIDTH - layout::MARGIN * 4;
-        let needed = REAL_BODY.chars().count() as i32 / (usable / layout::CHAR_WIDTH);
+        let usable = m.width - m.margin * 4;
+        let needed = REAL_BODY.chars().count() as i32 / (usable / m.char_width);
         assert!(
-            body_lines(REAL_BODY, usable) >= needed,
+            body_lines(REAL_BODY, usable, m) >= needed,
             "the estimate must cover the whole paragraph"
         );
     }
@@ -790,13 +932,14 @@ mod tests {
     /// empty space. Both ends of the clamp are pinned here.
     #[test]
     fn a_short_body_stays_compact_and_a_huge_one_is_bounded() {
+        let m = Metrics::for_dpi(BASE_DPI);
         let short = InputContent {
             body: "One line.".to_string(),
             ..content(false, false)
         };
         assert_eq!(
-            body_height(&short),
-            layout::BODY_MIN_LINES * layout::LINE,
+            body_height(&short, m),
+            layout::BODY_MIN_LINES * m.line,
             "a one-line body must not reserve the tall block"
         );
 
@@ -805,19 +948,138 @@ mod tests {
             ..content(false, false)
         };
         assert_eq!(
-            body_height(&huge),
-            layout::BODY_MAX_LINES * layout::LINE,
+            body_height(&huge, m),
+            layout::BODY_MAX_LINES * m.line,
             "the window must stay on a small display"
         );
+    }
+
+    /// Every metric scales with the monitor's DPI — the #1832 fix.
+    ///
+    /// This process is DPI-AWARE (tao sets per-monitor awareness for the tray), so Windows does not scale
+    /// these windows for us. A layout that ignored DPI rendered at a fraction of its physical size on a
+    /// scaled display, which is what "the GUI components appear too small" was.
+    #[test]
+    fn every_metric_scales_with_the_monitors_dpi() {
+        let at96 = Metrics::for_dpi(96);
+        let at192 = Metrics::for_dpi(192);
+        for (name, lo, hi) in [
+            ("width", at96.width, at192.width),
+            ("margin", at96.margin, at192.margin),
+            ("line", at96.line, at192.line),
+            ("heading_line", at96.heading_line, at192.heading_line),
+            ("char_width", at96.char_width, at192.char_width),
+            ("field_single", at96.field_single, at192.field_single),
+            ("button_w", at96.button_w, at192.button_w),
+            ("button_h", at96.button_h, at192.button_h),
+            ("chrome", at96.chrome, at192.chrome),
+            ("font_body", at96.font_body, at192.font_body),
+            ("font_heading", at96.font_heading, at192.font_heading),
+        ] {
+            assert_eq!(hi, lo * 2, "{name} must double from 96 to 192 DPI");
+        }
+    }
+
+    /// ...and the whole window scales, not just the parts — the sum has to grow too, or a scaled window
+    /// would clip its own controls.
+    #[test]
+    fn the_window_grows_with_dpi_for_the_same_content() {
+        let c = content(false, true);
+        let h96 = window_height(&c, Metrics::for_dpi(96));
+        let h150 = window_height(&c, Metrics::for_dpi(144));
+        let h200 = window_height(&c, Metrics::for_dpi(192));
+        assert!(h150 > h96, "150% must be taller than 100%: {h150} vs {h96}");
+        assert!(
+            h200 > h150,
+            "200% must be taller than 150%: {h200} vs {h150}"
+        );
+    }
+
+    /// The clip protection must survive scaling. `char_width` is the divisor the wrap estimate uses, so it
+    /// scales with the font; if it did not, a high-DPI window would think more characters fit per line than
+    /// really do and clip the tail — reintroducing the defect a screenshot caught once already.
+    #[test]
+    fn the_body_reserves_the_same_number_of_lines_at_every_scale() {
+        const BODY: &str = "A sentence long enough to wrap more than once in the body block of this                             window, so the line count is a real measurement rather than the clamp floor.";
+        let lines_at = |dpi: u32| {
+            let m = Metrics::for_dpi(dpi);
+            body_lines(BODY, m.width - m.margin * 4, m)
+        };
+        assert_eq!(
+            lines_at(96),
+            lines_at(192),
+            "the same text must reserve the same LINE COUNT at any scale — only their pixel height changes"
+        );
+    }
+
+    /// A HIGH-RESOLUTION display at 100% must still enlarge the window — the case DPI cannot see.
+    ///
+    /// This is the configuration that produced the complaint: 3840x2400 at 100% scaling reports 96 DPI, so a
+    /// DPI-only layout stays at its reference size and occupies about a sixth of the screen. Windows reports
+    /// nothing unusual, which is exactly why the width has to be consulted as well.
+    #[test]
+    fn a_high_resolution_display_at_100_percent_still_scales_up() {
+        let unaware = Metrics::for_display(96, 1920);
+        let panel_4k_at_100 = Metrics::for_display(96, 3840);
+        assert_eq!(
+            unaware.scale_pct, 100,
+            "the reference display is the baseline"
+        );
+        assert_eq!(
+            panel_4k_at_100.scale_pct, 200,
+            "a 4K panel at 96 DPI must still be scaled — DPI alone reports nothing here"
+        );
+        assert!(panel_4k_at_100.width > unaware.width);
+        assert!(panel_4k_at_100.font_body > unaware.font_body);
+    }
+
+    /// The two signals are the LARGER of, not the product — a scaled 4K display is high-DPI *and* wide, and
+    /// multiplying them would enlarge it twice over into something absurd.
+    #[test]
+    fn dpi_and_resolution_do_not_compound() {
+        let scaled_4k = Metrics::for_display(192, 3840);
+        assert_eq!(
+            scaled_4k.scale_pct, 200,
+            "200% DPI on a 4K panel is 2x, never 4x"
+        );
+        assert_eq!(
+            scaled_4k.width,
+            Metrics::for_display(192, 1920).width,
+            "whichever signal is larger wins; they do not stack"
+        );
+    }
+
+    /// The RESOLUTION fallback is capped; DPI is not.
+    ///
+    /// The distinction matters and an earlier version of this got it wrong: capping DPI at 2x on this
+    /// machine's 250% display produced a dialog visibly smaller than every other window on the desktop —
+    /// the very complaint the change was meant to fix. A user-set scale is an instruction; a wide panel is
+    /// only a hint.
+    #[test]
+    fn dpi_is_honoured_exactly_while_the_resolution_fallback_is_capped() {
+        // A real 400% display gets a 400% dialog.
+        assert_eq!(Metrics::for_display(384, 1920).scale_pct, 400);
+        // An enormous panel at 100% gets the capped fallback, not 800%.
+        assert_eq!(Metrics::for_display(96, 15360).scale_pct, 200);
+        // This machine: 3840x2400 at 250%.
+        assert_eq!(Metrics::for_display(240, 3840).scale_pct, 250);
+    }
+
+    /// A nonsense DPI must not shrink the window below the reference layout.
+    #[test]
+    fn a_dpi_below_the_reference_is_clamped_up() {
+        assert_eq!(Metrics::for_dpi(0), Metrics::for_dpi(BASE_DPI));
+        assert_eq!(Metrics::for_dpi(48), Metrics::for_dpi(BASE_DPI));
     }
 
     /// Explicit newlines must each cost a line: the body is two paragraphs separated by a blank line, and an
     /// estimate that only divided by the character count would lose both breaks and clip the tail.
     #[test]
     fn explicit_line_breaks_are_counted_not_just_wrapped_characters() {
-        let usable = layout::WIDTH - layout::MARGIN * 4;
-        let one_paragraph = body_lines("short", usable);
-        let three_lines = body_lines("short\n\nshort", usable);
+        let m = Metrics::for_dpi(BASE_DPI);
+        let usable = m.width - m.margin * 4;
+        let one_paragraph = body_lines("short", usable, m);
+        let three_lines = body_lines("short\n\nshort", usable, m);
         assert!(
             three_lines > one_paragraph,
             "blank lines take vertical space too: {three_lines} vs {one_paragraph}"
