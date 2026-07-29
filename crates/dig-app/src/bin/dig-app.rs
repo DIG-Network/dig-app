@@ -974,6 +974,7 @@ mod tray {
             }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
+            TrayAction::Open => open_dig_link(status, confirmer),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
                 shutdown.trigger();
@@ -1141,6 +1142,130 @@ mod tray {
 
     /// Open the log folder in the platform file manager — the escape hatch when the menu cannot explain
     /// what went wrong.
+    /// Ask for a DIG link and open it through the local node (dig_ecosystem#1821).
+    ///
+    /// The tray equivalent of `dign open`, and the reason it exists: a tray-only user had no way to
+    /// open a `chia://` or `urn:dig:chia:` link at all, and telling them to use a terminal is the
+    /// pattern #1798 closed.
+    ///
+    /// Order matters and is deliberate:
+    /// 1. **The node first.** With nothing to resolve through, asking for a link and *then* failing
+    ///    wastes the user's typing. A refusal that names the reason beats a greyed menu row (§1800).
+    /// 2. **`validate_open_link` before anything is built or opened.** Store content is
+    ///    attacker-controlled (#745), so the scheme allowlist is a security boundary. Only
+    ///    `chia://` and `urn:dig:chia:` reach the resolver.
+    /// 3. **`link::serve_url` builds an `http://` URL under the NODE's own origin** — the host and
+    ///    scheme are ours, never the user's, so a pasted link cannot redirect the browser elsewhere.
+    /// 4. The browser is spawned with the URL as ONE argument, never through a shell.
+    fn open_dig_link(status: &SharedStatus, confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::engine::EngineState;
+
+        // 1. Is there a node to resolve through?
+        let endpoint = match status.read() {
+            Ok(s) => match &s.engine {
+                EngineState::Connected { endpoint, .. } => endpoint.clone(),
+                EngineState::Disconnected { reason } => {
+                    notify(
+                        confirmer,
+                        "DIG — Open",
+                        "DIG has no node to open content through.",
+                        &format!(
+                            "A DIG link is resolved by your local node, and none is reachable \
+                             right now.\n\n{reason}\n\nOpen \"Status and details…\" to see what \
+                             DIG is trying."
+                        ),
+                    );
+                    return;
+                }
+            },
+            Err(_) => {
+                notify(
+                    confirmer,
+                    "DIG — Open",
+                    "DIG could not read the node status.",
+                    "Try again in a moment. If it keeps happening, the log folder has the detail.",
+                );
+                return;
+            }
+        };
+
+        // 2. Ask for the link. Not secret, so neither masked nor revealable.
+        let typed = match confirmer.request_input(&dig_app_core::confirm::InputPrompt {
+            title: "DIG — Open",
+            heading: "Which DIG link would you like to open?",
+            body: "Paste a DIG link. Both forms work:\n\n\
+                   chia://<store id>[:<generation root>]/<path>\n\
+                   urn:dig:chia:<store id>[:<generation root>]/<path>\n\n\
+                   It opens in your browser, served by your own DIG node.",
+            field_label: "DIG link:",
+            submit: "Open",
+            masked: false,
+            revealable: false,
+        }) {
+            dig_app_core::confirm::InputOutcome::Provided(text) => text,
+            dig_app_core::confirm::InputOutcome::Cancelled => return,
+            dig_app_core::confirm::InputOutcome::Unavailable => {
+                notify(
+                    confirmer,
+                    "DIG — Open",
+                    "DIG could not open an input window on this system.",
+                    "This host has no desktop dialog available, so there is nowhere to type the link.",
+                );
+                return;
+            }
+        };
+        let link = typed.trim();
+
+        // 3. The security boundary, before the link is used for anything.
+        if let Err(e) = dig_app_core::gateway::validate_open_link(link) {
+            notify(
+                confirmer,
+                "DIG — Open",
+                "That is not a DIG link.",
+                &format!(
+                    "{}\n\nA DIG link starts with chia:// or urn:dig:chia:",
+                    e.message
+                ),
+            );
+            return;
+        }
+
+        // 4. Map it onto the node's serve route.
+        let url = match dig_app_core::link::serve_url(&endpoint, link) {
+            Ok(url) => url,
+            Err(reason) => {
+                notify(
+                    confirmer,
+                    "DIG — Open",
+                    "That DIG link could not be read.",
+                    &format!("{reason}\n\nCheck the link and try again."),
+                );
+                return;
+            }
+        };
+
+        // 5. Hand the URL to the browser as a single argument — no shell, ever.
+        let opener = if cfg!(target_os = "windows") {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        if std::process::Command::new(opener)
+            .arg(&url)
+            .spawn()
+            .is_err()
+        {
+            notify(
+                confirmer,
+                "DIG — Open",
+                "DIG could not launch your browser.",
+                &format!("The content is here:\n\n{url}"),
+            );
+        }
+    }
+
     fn open_log_folder(confirmer: &dyn NativeConfirmer) {
         let dir = dig_app::logging::log_dir();
         let opener = if cfg!(target_os = "windows") {
