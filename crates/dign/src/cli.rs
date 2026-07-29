@@ -15,7 +15,12 @@ use dig_app_core::gateway::{
 #[derive(Parser)]
 #[command(
     name = "dign",
-    about = "The DIG user CLI — your identity, profiles, wallet, and node."
+    about = "The DIG user CLI — your identity, profiles, wallet, and node.",
+    // `version` makes clap emit `--version`/`-V` printing `"dign <semver>"`. Required, not cosmetic:
+    // the update beacon health-gates every installed DIG binary by spawning `<path> --version` and
+    // parsing the last token of the first line (dig_ecosystem#1749). Without this attribute clap
+    // generates no such flag at all, and the probe reads nothing.
+    version
 )]
 pub struct Cli {
     /// Emit a single machine-readable JSON object to stdout (human prose → stderr).

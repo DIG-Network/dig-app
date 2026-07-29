@@ -22,6 +22,20 @@
 
 use std::fmt;
 
+/// The widest a status row may be, in characters.
+///
+/// A native tray menu sizes itself to its widest item, so ONE long row stretches the whole menu —
+/// past the screen edge on a real desktop, where it is unreadable and can push the action rows out of
+/// reach. The engine's disconnected reasons are deliberately verbose and actionable (a real one
+/// observed in the field runs to ~700 characters: the control-token explanation, complete with a
+/// reinstall recipe), which is exactly right for a log or a details window and impossible in a menu
+/// row.
+///
+/// 72 is chosen to sit inside the narrowest surface that must render it — a macOS menu-bar dropdown
+/// near the right edge of a 1280-pt display — with the full text always one click away via
+/// [`TrayAction::ShowNodeDetails`], so nothing is lost by bounding it.
+pub const MAX_STATUS_ROW_CHARS: usize = 72;
+
 /// Where the account is, as far as the user is concerned. This is the four-state async surface for the
 /// account: not-possible-here, none-yet, locked, and live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +67,14 @@ pub struct TrayView {
     pub account: Option<AccountState>,
     /// The root profile's stable id (the hex identity public key until the on-chain DID mint lands).
     pub profile_id: Option<String>,
-    /// The profile's on-chain `did:chia:` DID, once one has been minted.
+    /// The profile's **minted on-chain** `did:chia:` DID, or `None` when it has none.
+    ///
+    /// This must be set from evidence that a DID was actually minted on chain — never from a local
+    /// profile reference that merely has DID-shaped text in it. The shell previously filled it from
+    /// `config.active_profile`, a locally-written string; that field is never populated today so the row
+    /// was inert, but the moment profile selection began writing it the tray would have claimed an
+    /// on-chain identity that does not exist. Since minting is unimplemented, the honest value is
+    /// always `None` (see the `never_claims_an_on_chain_did_from_a_local_profile_reference` test).
     pub did: Option<String>,
 }
 
@@ -148,6 +169,13 @@ pub enum TrayAction {
     CopyDigId,
     /// Mint the profile's on-chain `did:chia:` DID — spends real XCH, so never automatic.
     CreateDid,
+    /// Show the node status line in full, in a window that can hold it.
+    ///
+    /// The menu row is bounded to [`MAX_STATUS_ROW_CHARS`], and the engine's reason for not being
+    /// connected is the one status text that regularly exceeds it — and is also the most actionable
+    /// thing the app can tell a user, since it names what to start or reinstall. This is where the
+    /// bounded row hands back the part it had to cut.
+    ShowNodeDetails,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.
@@ -231,7 +259,7 @@ pub fn build(view: &TrayView) -> MenuModel {
     let account = view.account();
     let mut rows = vec![
         MenuRow::Status(running_label(view.running).to_string()),
-        MenuRow::Status(view.node.clone()),
+        MenuRow::Status(status_row_text(&view.node)),
         MenuRow::Status(format!("Account: {account}")),
         MenuRow::Status(format!(
             "DIG ID: {}",
@@ -244,6 +272,14 @@ pub fn build(view: &TrayView) -> MenuModel {
     rows.push(MenuRow::Separator);
     rows.extend(identity_actions(view, &account));
     rows.push(MenuRow::Separator);
+    // The diagnostics block. `Node details…` is enabled only when the bounded row actually cut
+    // something — otherwise the row already says everything the window would, and an enabled item that
+    // re-shows visible text is noise.
+    rows.push(MenuRow::action(
+        TrayAction::ShowNodeDetails,
+        "Node details…",
+        was_truncated(&view.node),
+    ));
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
     rows.push(MenuRow::action(
@@ -265,9 +301,15 @@ fn account_actions(account: &AccountState) -> Vec<MenuRow> {
             "Set up my DIG Account…",
             can_create,
         ),
+        // The label names the TERMINAL because that is where restore actually happens. A tray menu has
+        // no text field, so this item cannot take 24 words itself — it explains and hands over the exact
+        // `dign account restore` command. Labelling it plainly "Restore from a recovery phrase…" promised
+        // an action the item does not perform, which reads as a broken menu entry even though a window
+        // does open (dig_ecosystem#1773). Tray-native restore needs a real per-OS input dialog; until
+        // that exists the label tells the truth rather than the intention.
         MenuRow::action(
             TrayAction::RestoreFromPhrase,
-            "Restore from a recovery phrase…",
+            "Restore from a recovery phrase (in a terminal)…",
             can_create,
         ),
         MenuRow::action(
@@ -284,7 +326,6 @@ fn account_actions(account: &AccountState) -> Vec<MenuRow> {
 /// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering
 /// a disabled "show my recovery phrase" to someone who has none tells them nothing about why.
 fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
-    let unlocked = matches!(account, AccountState::Unlocked { .. });
     let mut rows = match account {
         AccountState::Unlocked { recoverable: false } => vec![MenuRow::action(
             TrayAction::FixMissingPhrase,
@@ -302,14 +343,44 @@ fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
         "Copy my DIG ID",
         view.profile_id.is_some(),
     ));
-    // The cost is in the LABEL, not only in the confirm dialog: a person deciding whether to click
-    // should know it spends money before they click, not after (§6.1, and §3.7 — mainnet is real money).
+    // On-chain minting is not implemented (`dig-account`'s minter is a Phase-2 stub), so this row is
+    // DISABLED and says why, right in the label.
+    //
+    // It was previously enabled whenever the account was unlocked, and clicking it opened a dialog whose
+    // own text admitted the feature does not exist — an enabled control for a capability that cannot
+    // run, which is the precise defect dig_ecosystem#1773 closes. The row still SHOWS, because the
+    // capability is real and coming and a person is entitled to know it exists; what it must not do is
+    // invite a click it cannot honour (§6.1).
+    //
+    // The cost stays in the label rather than only in a dialog: when this does light up, a person
+    // deciding whether to click should know it spends money before they click (§3.7 — mainnet is real
+    // money).
     rows.push(MenuRow::action(
         TrayAction::CreateDid,
-        "Create my on-chain DID… (spends XCH)",
-        unlocked && view.did.is_none(),
+        "Create my on-chain DID (spends XCH) — not in this version yet",
+        false,
     ));
     rows
+}
+
+/// Fit `full` into one status row: its first line, bounded to [`MAX_STATUS_ROW_CHARS`].
+///
+/// Counts and cuts by CHARACTER, not by byte — the connected summary contains `·`, so a byte-indexed
+/// slice would panic on a multi-byte boundary. The ellipsis is what tells the reader there is more,
+/// and [`TrayAction::ShowNodeDetails`] is where they get it.
+fn status_row_text(full: &str) -> String {
+    let first_line = full.lines().next().unwrap_or("");
+    if first_line.chars().count() <= MAX_STATUS_ROW_CHARS && first_line == full {
+        return full.to_string();
+    }
+    let kept: String = first_line.chars().take(MAX_STATUS_ROW_CHARS).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// Whether [`status_row_text`] would have to leave something out of the row — i.e. whether a details
+/// window has anything to add.
+fn was_truncated(full: &str) -> bool {
+    status_row_text(full) != full
 }
 
 /// The agent's own liveness line.
@@ -436,6 +507,19 @@ mod tests {
         }
     }
 
+    /// **Regression (#1773).** Every ENABLED row must be able to perform what its label says. Restore
+    /// cannot take 24 words from a menu, so its label must say where restore happens instead of promising
+    /// an action the row does not carry out.
+    #[test]
+    fn the_restore_row_says_where_restoring_actually_happens() {
+        let menu = build(&view(AccountState::Absent));
+        let label = menu.label_of(TrayAction::RestoreFromPhrase).unwrap();
+        assert!(
+            label.contains("terminal"),
+            "an enabled row must not promise more than it does: {label}"
+        );
+    }
+
     #[test]
     fn setup_and_restore_are_offered_only_when_no_account_exists() {
         let absent = build(&view(AccountState::Absent));
@@ -520,26 +604,66 @@ mod tests {
             .contains(&MenuRow::Status("Account: unlocked".to_string())));
     }
 
-    /// Minting spends real money, so the cost must be legible BEFORE the click (§3.7).
+    /// **Regression (#1773).** DID minting is not implemented, so the row must be DISABLED and must say
+    /// why — never an enabled control whose handler can only apologise.
+    ///
+    /// Iterating EVERY account state is what makes this load-bearing: the defect was
+    /// `enabled: unlocked && did.is_none()`, which a fixture in only the locked state would have scored
+    /// as already-correct. The unlocked state is the one that was wrong.
     #[test]
-    fn the_did_item_names_its_cost_and_is_offered_only_to_an_unlocked_account_without_one() {
+    fn creating_a_did_is_disabled_everywhere_because_minting_does_not_exist_yet() {
+        for account in [
+            AccountState::Unsupported,
+            AccountState::Absent,
+            AccountState::Locked,
+            AccountState::Unlocked { recoverable: true },
+            AccountState::Unlocked { recoverable: false },
+        ] {
+            let menu = build(&view(account.clone()));
+            assert!(
+                menu.offers(TrayAction::CreateDid),
+                "{account:?}: the row must still SHOW — the capability is real and coming"
+            );
+            assert!(
+                !menu.is_enabled(TrayAction::CreateDid),
+                "{account:?}: an enabled control for an unimplemented capability is the #1773 defect"
+            );
+        }
+    }
+
+    /// The label must carry BOTH facts a person needs before they reach for it: that it is unavailable
+    /// (so a disabled row is not a mystery) and that it costs money (§3.7 — mainnet is real money), so the
+    /// cost is legible before the click on the day the row lights up.
+    #[test]
+    fn the_did_label_states_both_its_unavailability_and_its_cost() {
         let menu = build(&view(AccountState::Unlocked { recoverable: true }));
-        assert!(menu.is_enabled(TrayAction::CreateDid));
         let label = menu.label_of(TrayAction::CreateDid).unwrap();
         assert!(
             label.contains("XCH"),
             "the label must name the cost, not hide it in a dialog: {label}"
         );
-
-        assert!(!build(&view(AccountState::Locked)).is_enabled(TrayAction::CreateDid));
-
-        let minted = TrayView {
-            did: Some("did:chia:abc".to_string()),
-            ..view(AccountState::Unlocked { recoverable: true })
-        };
         assert!(
-            !build(&minted).is_enabled(TrayAction::CreateDid),
-            "an account that already has a DID must not be offered a second mint — that would spend again"
+            label.contains("not in this version yet"),
+            "a disabled row must say WHY it is disabled: {label}"
+        );
+    }
+
+    /// With no minted DID the row must say so rather than showing something DID-shaped.
+    ///
+    /// The model's job is to render what it is given (that is what will display a real minted DID the day
+    /// one exists — `a_minted_did_is_shown_in_full` covers that direction). The rule this pins is the
+    /// other direction: an ABSENT DID must read as an unmade choice, and the shell is what must never
+    /// supply a locally-written profile reference here — see [`TrayView::did`], which is now documented as
+    /// requiring chain evidence, and `snapshot` in the shell, which passes `None` for that reason.
+    #[test]
+    fn an_absent_did_is_never_dressed_up_as_a_minted_one() {
+        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
+        assert!(
+            menu.rows.contains(&MenuRow::Status(
+                "On-chain DID: not created yet (optional)".to_string()
+            )),
+            "with no minted DID the row must say so: {:?}",
+            menu.rows
         );
     }
 
@@ -608,13 +732,128 @@ mod tests {
         }
     }
 
-    /// The node line is passed through verbatim, so the engine's own four-state summary (connecting /
-    /// connected+detail / the reason it is not / no node) reaches the user unmodified.
+    /// A node line that fits is passed through unmodified, and needs no details window — the control
+    /// that proves the bounding below is reading the length rather than always truncating.
     #[test]
-    fn the_node_line_is_passed_through_verbatim() {
+    fn a_node_line_that_fits_is_passed_through_verbatim_and_needs_no_details() {
         let mut v = view(AccountState::Absent);
         v.node = "Node: not connected — no node is running on this machine".to_string();
-        assert!(build(&v).rows.contains(&MenuRow::Status(v.node.clone())));
+        assert!(
+            v.node.chars().count() <= MAX_STATUS_ROW_CHARS,
+            "fixture guard"
+        );
+
+        let menu = build(&v);
+        assert!(menu.rows.contains(&MenuRow::Status(v.node.clone())));
+        assert!(
+            !menu.is_enabled(TrayAction::ShowNodeDetails),
+            "the row already says everything; a details window would add nothing"
+        );
+    }
+
+    /// **Regression (#1773).** The row is bounded, because ONE long item stretches the whole native menu
+    /// past the screen edge.
+    ///
+    /// The fixture is the REAL disconnected reason observed from a live run — the control-token
+    /// explanation with its reinstall recipe — not a synthetic `"x".repeat(n)`, because its actual length
+    /// (~700 chars, an order of magnitude over the bound) is the fact that makes this a defect rather
+    /// than a nicety.
+    #[test]
+    fn a_long_node_line_is_bounded_and_hands_the_rest_to_a_details_window() {
+        let observed_reason = "No node: the node at http://dig.local refused this app (the node \
+             refused the request: control.* requires the local control token (X-Dig-Control-Token \
+             header or params._control_token, from C:\\ProgramData\\DigNode\\control-token), or a \
+             paired controller token (see `dig-node pair`). no control token found at \
+             C:\\ProgramData\\DigNode\\control-token. Start the node so it mints one (`dig-node run`, \
+             or `dig-node start` for the installed service), then retry.)";
+        assert!(
+            observed_reason.chars().count() > MAX_STATUS_ROW_CHARS * 4,
+            "fixture guard: the point is that real reasons are FAR over the bound, got {}",
+            observed_reason.chars().count()
+        );
+
+        let mut v = view(AccountState::Absent);
+        v.node = observed_reason.to_string();
+        let menu = build(&v);
+
+        let row = menu
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                MenuRow::Status(text) if text.starts_with("No node") => Some(text),
+                _ => None,
+            })
+            .expect("the node row must still be present");
+
+        assert!(
+            row.chars().count() <= MAX_STATUS_ROW_CHARS + 1,
+            "the row must fit the bound (+1 for the ellipsis), got {}: {row}",
+            row.chars().count()
+        );
+        assert!(
+            row.ends_with('…'),
+            "the reader must be told there is more: {row}"
+        );
+        assert!(
+            menu.is_enabled(TrayAction::ShowNodeDetails),
+            "the cut text must be reachable — never trap the user with a truncated diagnosis"
+        );
+    }
+
+    /// The bound pinned from BOTH sides. A bound tested only from above can only confirm itself: an
+    /// implementation that truncated at 40 would pass the long-line test and fail here.
+    #[test]
+    fn the_row_bound_holds_exactly_at_the_limit_and_cuts_one_character_over() {
+        let at_bound = "a".repeat(MAX_STATUS_ROW_CHARS);
+        assert_eq!(
+            status_row_text(&at_bound),
+            at_bound,
+            "a line exactly at the bound must not be touched"
+        );
+        assert!(!was_truncated(&at_bound));
+
+        let one_over = "a".repeat(MAX_STATUS_ROW_CHARS + 1);
+        assert_ne!(
+            status_row_text(&one_over),
+            one_over,
+            "one character over the bound must be cut"
+        );
+        assert!(was_truncated(&one_over));
+    }
+
+    /// Cutting must count CHARACTERS, not bytes: the connected summary contains `·`, so a byte-indexed
+    /// slice would panic on a multi-byte boundary. The fixture puts multi-byte characters exactly ACROSS
+    /// the cut point, which an all-ASCII fixture could never exercise.
+    #[test]
+    fn bounding_never_splits_a_multi_byte_character() {
+        let line = "·".repeat(MAX_STATUS_ROW_CHARS * 2);
+        assert!(
+            line.len() > line.chars().count(),
+            "fixture guard: multi-byte"
+        );
+
+        let row = status_row_text(&line);
+        assert!(row.chars().count() <= MAX_STATUS_ROW_CHARS + 1);
+        // Reaching here without a panic is half the assertion; the other half is that we kept real
+        // characters rather than mangling them.
+        assert!(row.starts_with('·'), "{row}");
+    }
+
+    /// A multi-line status collapses to its first line — a menu row cannot show a paragraph, and the
+    /// remaining lines are what the details window is for.
+    #[test]
+    fn a_multi_line_status_shows_only_its_first_line_and_offers_the_rest() {
+        let mut v = view(AccountState::Absent);
+        v.node = "No node: not running\nStart it with `dig-node start`.".to_string();
+        let menu = build(&v);
+
+        assert!(menu
+            .rows
+            .contains(&MenuRow::Status("No node: not running…".to_string())));
+        assert!(
+            menu.is_enabled(TrayAction::ShowNodeDetails),
+            "the second line must be reachable"
+        );
     }
 
     #[test]
