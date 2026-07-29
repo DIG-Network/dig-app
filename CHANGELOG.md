@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [4.2.0] - 2026-07-29
+
+### Features
+- **confirm:** Scale the input window to the monitor's real DPI (#41)
+
 ## [4.1.0] - 2026-07-29
 
 ### Features
