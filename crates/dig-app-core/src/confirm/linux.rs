@@ -95,6 +95,11 @@ impl DialogTool {
     /// the rich-text trigger characters so `mightBeRichText` can never fire. This holds for BOTH dialog
     /// kinds — a notice also carries caller-composed text, and losing the neutralization on one branch
     /// would reintroduce the whole class.
+    /// **`refusal_is_default` is deliberately not honoured here, and that is currently unreachable rather
+    /// than a gap.** Neither helper has a "make Cancel the default" flag, and the only window that asks for
+    /// one is the destroy authorization — which cannot be drawn on Linux at all: with no per-application
+    /// credential store the account state is always `Unsupported`, and the management submenu offers only the
+    /// DID explainer there. A Linux credential store MUST NOT land without revisiting this (`SPEC.md` §3.1d).
     fn args(self, content: &ConfirmContent) -> Vec<String> {
         let text = format!("{}\n\n{}", content.heading, content.body);
         let decides = matches!(content.presentation, Presentation::Decide { .. });

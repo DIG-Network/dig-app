@@ -24,6 +24,8 @@
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
 //! | `passphrase` | the same field, masked |
+//! | `unopenable` | the wedged-legacy-account explainer (dig_ecosystem#1799) — the ONLY window that state
+//!   offers, so its copy is checked by eye here as well as by its rendering test |
 //!
 //! Dismissing with Escape denies, so `authorization` and `destroy` never reach the biometric step and
 //! nothing is revealed or destroyed — this example only ever DRAWS. The `input` cases print the LENGTH of
@@ -58,6 +60,9 @@ fn main() {
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
             secret: "your 24-word DIG recovery phrase",
         }),
+        // The one window an account that cannot be opened offers. Drawn here because its copy previously
+        // rendered with a ten-space hole mid-sentence, which no substring assertion could see.
+        "unopenable" => dig_app_core::account::journey::explain_unopenable(confirmer.as_ref()),
         // The destructive authorization (#1799): the window a user sees before their custody root is
         // discarded. It must wear the warning icon, keep a real Cancel, and name the irreversible loss.
         "destroy" => confirmer.confirm_destroy(&DestroyPrompt {
@@ -98,7 +103,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, authorization, destroy, input or passphrase"
+                "unknown window `{other}` — expected notice, claim, authorization, destroy, unopenable, input or passphrase"
             );
             std::process::exit(2);
         }

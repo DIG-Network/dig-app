@@ -246,7 +246,12 @@ who cannot distinguish the icons — or whose theme flattens them — still has 
 
 The menu MUST offer actions to: show the status details, set up an account, restore from a recovery phrase,
 unlock, lock now, reveal the recovery phrase, copy the DIG ID, replace the account (with a new one, or with
-one from a recovery phrase), remove the account, explain the on-chain DID, open the log folder, and quit.
+one from a recovery phrase), remove the account, explain an account that cannot be opened, explain the
+on-chain DID, open the log folder, and quit.
+
+The account has SIX user-visible states, and an implementation MUST distinguish all of them: this host cannot
+hold an account · no account yet · locked · **cannot be opened** · unlocked · unlocked with no recovery
+phrase. The fourth is the one most easily and most damagingly collapsed into "locked" — see the rule below.
 The top level MUST stay short; rare and destructive verbs belong in a submenu, not beside `Lock now`.
 
 Minting an on-chain DID is deliberately NOT among them: no implementation exists (§3.1b), so the menu
@@ -311,6 +316,29 @@ Binding rules:
   RIGHT NOW; a session with no keys is `Locked`, identically to a not-yet-unlocked account, so the way
   back in (`Unlock…`) is the same. Inferring "unlocked" from the session's existence reports a lock that
   is not there and offers no route out of it.
+- **An account that cannot be OPENED is `Unopenable`, never `Locked` (MUST).** These are different
+  situations and MUST NOT be collapsed: a locked account has a way back in (`Unlock…`), and an unopenable one
+  does not, so reporting it as locked offers a control that is guaranteed to fail and says nothing about why.
+  The distinction is not hypothetical — every Windows/macOS host that has run dig-app auto-enrols the default
+  account at first boot, so legacy raw-seed blobs exist in the field, and a custody model that can no longer
+  read them leaves such an account WEDGED: it neither unlocks nor re-enrols at the same id. An implementation
+  MUST therefore carry a three-state at-rest fact (no account / present / present-but-unopenable) rather than
+  a boolean, and the tray MUST name the state on the surfaces a person looks at — the icon, the tooltip and
+  the details window — never only in a log record. Reducing this to a log line costs the user signing
+  permanently and silently, which is the defect the state exists to prevent.
+  - **The state offers the remedy, and nothing else.** `Unopenable` MUST offer an explainer naming the
+    situation and the exact menu path to replacing the account, and MUST NOT offer `Unlock…` (it is what
+    already failed) or the recovery-phrase reveal (its vault is sealed under the same unreadable key). The
+    replace and remove verbs MUST be enabled, because this is the state a user most needs to escape.
+  - **The state is STICKY until an open SUCCEEDS.** It MUST NOT clear on a repaint tick, or the tray flickers
+    back to reporting a lock that cannot be lifted. It MUST be cleared at exactly one place — the moment a
+    live session exists — and the no-account case MUST be evaluated BEFORE it, so a successful removal reports
+    "not set up yet" rather than a stale unopenable.
+  - **Reaching the state MUST delete nothing (MUST).** Detecting an unopenable account, reporting it, and
+    showing its explainer MUST leave the sealed blob, the credential-store entry and any sealed artifacts
+    exactly as they were — the only path that removes them stays the authorized destroy (§3.1c above). The
+    explainer's copy promises the user precisely this ("Nothing has been changed or deleted"), so the promise
+    is a contract, not an implementation detail that may be refactored away.
 - **Price before the click.** An action that spends funds MUST name the cost in its LABEL, not only in a
   confirmation dialog (§3.1b).
 - **A tray that cannot mount MUST report itself.** On Linux the indicator library is dlopened, so a
@@ -422,6 +450,11 @@ Binding rules, which matter more for an input control than for a notice:
 text-field accessory view; Linux drives `zenity --entry` / `kdialog`. A subprocess input helper is
 explicitly REJECTED: it would need a verify-the-helper-is-ours check, or a `PATH` impostor harvests recovery
 phrases, so every backend draws its window IN-PROCESS.
+
+The destroy window's pre-selected refusal is honoured on Windows (`MB_DEFBUTTON2`) and macOS (the Return key
+equivalent moves to Cancel). The Linux dialog helpers offer no equivalent, which is currently unreachable
+rather than a gap — Linux has no per-application credential store, so it is always the unsupported-host state
+and no destroy window can be drawn there. A Linux credential store MUST NOT land without addressing it.
 
 Platform limits, recorded rather than papered over: Win32 ignores `ES_PASSWORD` on a multiline `EDIT`, so a
 maskable field is single-line and scrolls horizontally; and the reveal-while-typing control exists only on

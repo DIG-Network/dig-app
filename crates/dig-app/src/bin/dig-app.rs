@@ -358,32 +358,6 @@ fn account_is_enrolled(env: &AppEnvironment) -> bool {
     brand_dir(env).is_some_and(|dir| account_exists(&dir))
 }
 
-/// What a user whose account will not open is told, and where to go.
-///
-/// # Why this window exists (dig_ecosystem#1799 review)
-///
-/// Every Windows/macOS host that has run dig-app auto-enrolled `account.default` at first boot, so real
-/// legacy raw-seed blobs exist in the field — one was found on a developer machine. Those blobs will not
-/// unlock under the newer custody model AND cannot re-enrol at the same id, so they are WEDGED, not merely
-/// fail-closed. The boot used to reduce that to a `tracing::warn!` and return `None`, which cost the user
-/// signing permanently and silently, with no route out.
-///
-/// This is the route out. It names the situation, states plainly that the account's data cannot be recovered,
-/// and points at the replace verbs — which is the only remedy that exists.
-#[cfg(feature = "tray")]
-fn explain_unopenable(confirmer: &dyn NativeConfirmer) {
-    notify(
-        confirmer,
-        "DIG — This account cannot be opened",
-        "DIG cannot open the account stored on this computer.",
-        "The account is here, but the key that unlocks it cannot be read, so DIG cannot sign anything or          show you its recovery phrase. This normally means the account was created by an older version of          DIG whose format this version can no longer open.
-
-         Nothing has been changed or deleted. The only way forward is to put a different account on this          computer: in the DIG menu choose \"Manage my DIG Account\", then either \"Replace this account with          a NEW one…\" or, if you have 24 words for an account you want back, \"Replace it with an account          from a recovery phrase…\".
-
-         If you kept this account's 24 words, restoring from them will bring it back exactly as it was.",
-    );
-}
-
 /// The account state the tray shows: read the impure host facts, then let the tested rules decide.
 ///
 /// The lock state is read FRESH from the residency on every repaint via [`SessionFacts::of`], never
@@ -631,13 +605,15 @@ fn current_os() -> Os {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, explain_unopenable, notify, replace_account, restore_account,
-        set_up_account, start_sign_service, AppEnvironment, TraySession,
+        account_state, notify, replace_account, restore_account, set_up_account,
+        start_sign_service, AppEnvironment, TraySession,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::Replacement;
-    use dig_app_core::account::journey::{explain_missing_phrase, reveal_phrase};
+    use dig_app_core::account::journey::{
+        explain_missing_phrase, explain_unopenable, reveal_phrase,
+    };
     use dig_app_core::agent::{Agent, SharedStatus};
     use dig_app_core::confirm::{native_confirmer, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;

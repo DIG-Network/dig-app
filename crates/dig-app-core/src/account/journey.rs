@@ -326,6 +326,49 @@ pub fn ask_for_phrase(confirmer: &dyn NativeConfirmer, purpose: &str) -> Option<
     None
 }
 
+/// What a user whose account will not open is told, and where to go (`SPEC.md` §3.1c).
+///
+/// # Why this window exists
+///
+/// Every Windows/macOS host that has run dig-app auto-enrols `account.default` at first boot, so real
+/// legacy raw-seed blobs exist in the field — one was found on a developer machine. Such a blob will not
+/// unlock under a newer custody model AND cannot re-enrol at the same id, so it is WEDGED, not merely
+/// fail-closed. The boot used to reduce that to a `tracing::warn!` and return `None`, which cost the user
+/// signing permanently and silently, with no route out.
+///
+/// This is the route out, and it is the ONLY window an [`Unopenable`](crate::tray_menu::AccountState::Unopenable)
+/// account offers — so it carries the whole explanation, the "nothing has been changed or deleted"
+/// guarantee, and the exact menu path to the remedy.
+///
+/// # Why the copy is `concat!` and why it lives here
+///
+/// `cargo fmt` collapses a `\`-continued literal onto one line and KEEPS the source indentation as real
+/// spaces, so a continued body grows multi-space holes in the middle of sentences. That happened to this
+/// very window: the rendered text read *"cannot sign anything or&nbsp;&nbsp;… show you its recovery phrase"*
+/// with a ten-space gap, in the highest-stakes message in the app. `concat!` cannot be reflowed, so what is
+/// written is what renders — and the copy lives in the LIBRARY rather than the tray binary so
+/// [`the_unopenable_copy_renders_without_holes`] can actually read it.
+pub fn explain_unopenable(confirmer: &dyn NativeConfirmer) -> ConfirmDecision {
+    confirmer.show_notice(&NoticePrompt {
+        title: "DIG — This account cannot be opened",
+        heading: "DIG cannot open the account stored on this computer.",
+        body: UNOPENABLE_BODY,
+        acknowledge: "I understand",
+    })
+}
+
+/// The body [`explain_unopenable`] shows, as a `const` so a test can render and inspect it.
+const UNOPENABLE_BODY: &str = concat!(
+    "The account is here, but the key that unlocks it cannot be read, so DIG cannot sign anything or ",
+    "show you its recovery phrase. This normally means the account was created by an older version of ",
+    "DIG whose format this version can no longer open.\n\n",
+    "Nothing has been changed or deleted. The only way forward is to put a different account on this ",
+    "computer: in the DIG menu choose \"Manage my DIG Account\", then either \"Replace this account with ",
+    "a NEW one…\" or, if you have 24 words for an account you want back, \"Replace it with an account ",
+    "from a recovery phrase…\".\n\n",
+    "If you kept this account's 24 words, restoring from them will bring it back exactly as it was."
+);
+
 /// The host effects a destructive account verb has, behind a trait so the ORDER can be tested.
 ///
 /// # Why this trait exists (a review finding, dig_ecosystem#1799)
@@ -1550,5 +1593,94 @@ mod tests {
         ] {
             assert!(!safe.destroyed_custody(), "{safe:?}");
         }
+    }
+
+    // ---- The RENDERED copy, not the source (review finding, dig_ecosystem#1799). ----
+
+    /// **Regression.** No window's rendered body may contain a run of three or more spaces.
+    ///
+    /// # Why a whole class, and why a `contains()` assertion could never catch it
+    ///
+    /// `cargo fmt` collapses a `\`-continued string literal onto one line and KEEPS the source indentation
+    /// as real spaces. The result is a body that reads *"cannot sign anything or&nbsp;&nbsp;&nbsp;… show you
+    /// its recovery phrase"* with a ten-space hole mid-sentence — and it landed in the highest-stakes message
+    /// in the app, the only window an unopenable account offers. Every substring assertion still passed,
+    /// because the words are all present and in order; only the SPACING is wrong, and only a reader (or this)
+    /// can see it.
+    ///
+    /// So the rule is asserted over the rendered text of EVERY window this module draws, not over the one
+    /// that broke: the defect is a property of how the copy is written, so any future window written the same
+    /// way fails here rather than shipping.
+    #[test]
+    fn no_rendered_notice_body_contains_a_run_of_spaces() {
+        let confirmer = ScriptedConfirmer::notices();
+        explain_unopenable(&confirmer);
+        explain_missing_phrase(&confirmer);
+
+        // Plus every window the destructive flow draws, in the shape that draws the most of them.
+        let custodian = RecordingCustodian::failing_enrol();
+        replace_account(
+            &ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![None]),
+            &custodian,
+            Replacement::WithNewAccount,
+            None::<&PhraseVault<PassthroughSealer>>,
+        );
+
+        for window in [confirmer.drawn(), RETENTION_AND_REVEAL_COPY.to_string()] {
+            for (index, line) in window.lines().enumerate() {
+                assert!(
+                    !line.contains("   "),
+                    "line {index} renders a run of spaces — a `\\`-continued literal that `cargo fmt` \
+                     flattened? Use `concat!`:\n{line:?}"
+                );
+                assert!(
+                    !line.starts_with(' '),
+                    "line {index} renders a leading space:\n{line:?}"
+                );
+            }
+        }
+    }
+
+    /// The copy every OTHER window in this module shows, concatenated, so the rule above covers them too
+    /// without needing to drive each flow.
+    ///
+    /// Kept beside the test rather than derived, because the point is to inspect the literals as they will
+    /// RENDER; anything that reaches a user through this module belongs in this list.
+    const RETENTION_AND_REVEAL_COPY: &str = concat!(
+        "Write these 24 words down, in order, and keep them somewhere safe.\n",
+        "Do you have your 24 words written down somewhere safe?\n",
+        "These 24 words are your DIG Account. Keep them secret."
+    );
+
+    /// The unopenable body must also SAY the three things it exists to say — the words, not just their
+    /// spacing. Read together with the test above: that one proves it is legible, this one proves it is
+    /// correct.
+    #[test]
+    fn the_unopenable_copy_renders_without_holes() {
+        // The reassurance the state's whole design rests on: reaching it destroys nothing.
+        assert!(
+            UNOPENABLE_BODY.contains("Nothing has been changed or deleted"),
+            "{UNOPENABLE_BODY}"
+        );
+        // The exact menu path to the only remedy, by the labels the user will actually see.
+        assert!(
+            UNOPENABLE_BODY.contains("Manage my DIG Account"),
+            "{UNOPENABLE_BODY}"
+        );
+        assert!(
+            UNOPENABLE_BODY.contains("Replace this account with a NEW one"),
+            "{UNOPENABLE_BODY}"
+        );
+        // And that a kept phrase brings the account back, which is the one good outcome available here.
+        assert!(
+            UNOPENABLE_BODY.contains("bring it back exactly as it was"),
+            "{UNOPENABLE_BODY}"
+        );
+        // Three paragraphs, so the wall of text is broken up where it was written to be.
+        assert_eq!(
+            UNOPENABLE_BODY.split("\n\n").count(),
+            3,
+            "the paragraph breaks must survive: {UNOPENABLE_BODY:?}"
+        );
     }
 }
