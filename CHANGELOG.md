@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [4.0.0] - 2026-07-29
+
+### Features
+- **tray:** Make the tray a real tray application (#39)
+
 ## [3.5.0] - 2026-07-29
 
 ### Bug Fixes
