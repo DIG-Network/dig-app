@@ -649,8 +649,7 @@ mod tray {
             // close the menu under the user's cursor while they are reading it.
             let latest = snapshot(&status, &env, session.as_ref());
             if !view_eq(&latest, &model) {
-                if let Ok(rendered) = render(&tray_menu::build(&latest)) {
-                    tray.set_menu(Some(Box::new(rendered.menu.clone())));
+                if let Some(rendered) = repaint(&tray, &tray_menu::build(&latest)) {
                     menu = rendered;
                     model = latest;
                 }
@@ -712,9 +711,7 @@ mod tray {
                 explain_missing_phrase(confirmer);
             }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
-            // Unreachable while the row is disabled, but kept honest rather than silent: if the row is
-            // ever enabled before minting works, the user gets the explanation instead of nothing.
-            TrayAction::CreateDid => explain_did_mint(confirmer),
+            TrayAction::AboutDid => explain_did(confirmer),
             TrayAction::ShowNodeDetails => show_node_details(status, confirmer),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
@@ -834,13 +831,13 @@ mod tray {
         written && child.wait().map(|s| s.success()).unwrap_or(false)
     }
 
-    /// What the user is told when they ask for an on-chain DID.
+    /// What an on-chain DID is, what it would cost, and why the account is complete without one.
     ///
-    /// Minting a `did:chia:` is a real mainnet spend, and `dig-account`'s minter is still a Phase-2
-    /// stub, so this NEVER spends and never pretends to. It says what a DID is for, that it costs money,
-    /// and that the account works fully without one — which is true, and is the honest alternative to a
-    /// button that fails obscurely (§3.7).
-    fn explain_did_mint(confirmer: &dyn NativeConfirmer) {
+    /// Minting a `did:chia:` is a real mainnet spend and `dig-account`'s minter is still a Phase-2 stub, so
+    /// the tray offers no way to mint one at all (see [`tray_menu::TrayAction::AboutDid`]). It offers this
+    /// explanation instead, which is something it can actually deliver — the honest alternative both to a
+    /// button that fails obscurely and to a permanently-greyed row (§3.7).
+    fn explain_did(confirmer: &dyn NativeConfirmer) {
         notify(
             confirmer,
             "DIG — On-chain DID",
@@ -852,6 +849,29 @@ mod tray {
              On-chain minting is not available in this version yet — when it is, this is where you \
              will start it, and you will see the exact cost before anything is spent.",
         );
+    }
+
+    /// Repaint the tray with a freshly-built menu, or leave the current one in place.
+    ///
+    /// Guarded by [`mount_or_degrade`] for the same reason the initial mount is: building native menu
+    /// objects touches the platform's desktop stack, and on Linux a missing library there PANICS rather than
+    /// failing (dig_ecosystem#1756). Without the guard the panic protection was startup-only, so a desktop
+    /// that mounted successfully and then lost its indicator — or hit the library's intermittent dlopen
+    /// failure on a later repaint — would still take the whole process down.
+    ///
+    /// A failed repaint is not fatal: the previously-rendered menu is still mounted and still correct about
+    /// everything except the status lines, so the user keeps a working tray and the next tick tries again.
+    fn repaint(tray: &TrayIcon, model: &MenuModel) -> Option<RenderedMenu> {
+        match mount_or_degrade(|| render(model)) {
+            Ok(rendered) => {
+                tray.set_menu(Some(Box::new(rendered.menu.clone())));
+                Some(rendered)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "tray repaint failed — keeping the menu already on screen");
+                None
+            }
+        }
     }
 
     /// Open the log folder in the platform file manager — the escape hatch when the menu cannot explain

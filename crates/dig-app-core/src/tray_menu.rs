@@ -167,8 +167,16 @@ pub enum TrayAction {
     FixMissingPhrase,
     /// Copy the profile's DIG ID to the clipboard.
     CopyDigId,
-    /// Mint the profile's on-chain `did:chia:` DID — spends real XCH, so never automatic.
-    CreateDid,
+    /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
+    ///
+    /// There is deliberately no `CreateDid` action: `dig-account`'s minter is a Phase-2 stub, so an action
+    /// that mints does not exist and therefore is not offered — not even disabled. A disabled row was the
+    /// first fix (dig_ecosystem#1773), but it left a carefully-written explanation permanently unreachable
+    /// and a control on the menu that could never be clicked. An ENABLED row that promises an explanation
+    /// and delivers one is honest, keeps the user informed that the capability is coming and costs money,
+    /// and — because no `TrayAction` can mint — makes "the tray cannot spend XCH on a DID" structural
+    /// rather than a property of one `enabled: false`.
+    AboutDid,
     /// Show the node status line in full, in a window that can hold it.
     ///
     /// The menu row is bounded to [`MAX_STATUS_ROW_CHARS`], and the engine's reason for not being
@@ -272,14 +280,21 @@ pub fn build(view: &TrayView) -> MenuModel {
     rows.push(MenuRow::Separator);
     rows.extend(identity_actions(view, &account));
     rows.push(MenuRow::Separator);
-    // The diagnostics block. `Node details…` is enabled only when the bounded row actually cut
-    // something — otherwise the row already says everything the window would, and an enabled item that
-    // re-shows visible text is noise.
-    rows.push(MenuRow::action(
-        TrayAction::ShowNodeDetails,
-        "Node details…",
-        was_truncated(&view.node),
-    ));
+    // The diagnostics block. `Node details…` appears ONLY when the bounded status row actually cut
+    // something; otherwise the row above already says everything the window would.
+    //
+    // It is OMITTED rather than shown-disabled, because this module's own rule is that a disabled row must
+    // say WHY it is disabled (see `the_did_label_states_both_its_unavailability_and_its_cost`) and there is
+    // no sensible reason to print here: "nothing was truncated" is a fact about the row above, not about
+    // this control. A greyed "Node details…" with no explanation is a small mystery on every healthy
+    // install; absent, the menu simply has nothing more to offer, which is the truth.
+    if was_truncated(&view.node) {
+        rows.push(MenuRow::action(
+            TrayAction::ShowNodeDetails,
+            "Node details…",
+            true,
+        ));
+    }
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
     rows.push(MenuRow::action(
@@ -343,22 +358,17 @@ fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
         "Copy my DIG ID",
         view.profile_id.is_some(),
     ));
-    // On-chain minting is not implemented (`dig-account`'s minter is a Phase-2 stub), so this row is
-    // DISABLED and says why, right in the label.
+    // On-chain minting is not implemented (`dig-account`'s minter is a Phase-2 stub), so the menu does not
+    // offer to mint — it offers to EXPLAIN, which is something it can actually do (see
+    // [`TrayAction::AboutDid`] for why an explainer beat the disabled mint row it replaced).
     //
-    // It was previously enabled whenever the account was unlocked, and clicking it opened a dialog whose
-    // own text admitted the feature does not exist — an enabled control for a capability that cannot
-    // run, which is the precise defect dig_ecosystem#1773 closes. The row still SHOWS, because the
-    // capability is real and coming and a person is entitled to know it exists; what it must not do is
-    // invite a click it cannot honour (§6.1).
-    //
-    // The cost stays in the label rather than only in a dialog: when this does light up, a person
-    // deciding whether to click should know it spends money before they click (§3.7 — mainnet is real
-    // money).
+    // The label names the cost rather than hiding it in the dialog, so a person knows before they open it
+    // that a DID is a real spend (§3.7 — mainnet is real money), and names it optional so an absent DID
+    // never reads as something they have failed to do.
     rows.push(MenuRow::action(
-        TrayAction::CreateDid,
-        "Create my on-chain DID (spends XCH) — not in this version yet",
-        false,
+        TrayAction::AboutDid,
+        "About on-chain DIDs (optional, costs XCH)…",
+        true,
     ));
     rows
 }
@@ -476,7 +486,7 @@ mod tests {
             TrayAction::Unlock,
             TrayAction::LockNow,
             TrayAction::CopyDigId,
-            TrayAction::CreateDid,
+            TrayAction::AboutDid,
             TrayAction::OpenLogs,
             TrayAction::Quit,
         ] {
@@ -604,14 +614,18 @@ mod tests {
             .contains(&MenuRow::Status("Account: unlocked".to_string())));
     }
 
-    /// **Regression (#1773).** DID minting is not implemented, so the row must be DISABLED and must say
-    /// why — never an enabled control whose handler can only apologise.
+    /// **Regression (#1773).** No tray row may offer to MINT a DID, in any account state — minting does not
+    /// exist (`dig-account`'s minter is a Phase-2 stub), and a control for a capability that cannot run is
+    /// the defect this ticket closes.
     ///
-    /// Iterating EVERY account state is what makes this load-bearing: the defect was
-    /// `enabled: unlocked && did.is_none()`, which a fixture in only the locked state would have scored
-    /// as already-correct. The unlocked state is the one that was wrong.
+    /// Iterating EVERY account state is what makes this load-bearing: the original defect was
+    /// `enabled: unlocked && did.is_none()`, which a fixture in only the locked state would have scored as
+    /// already-correct. The unlocked state is the one that was wrong.
+    ///
+    /// The guarantee is now STRUCTURAL — there is no `TrayAction` that mints at all — so this test also
+    /// guards against a future lane reintroducing one before the minter exists.
     #[test]
-    fn creating_a_did_is_disabled_everywhere_because_minting_does_not_exist_yet() {
+    fn no_row_offers_to_mint_a_did_because_minting_does_not_exist_yet() {
         for account in [
             AccountState::Unsupported,
             AccountState::Absent,
@@ -620,31 +634,52 @@ mod tests {
             AccountState::Unlocked { recoverable: false },
         ] {
             let menu = build(&view(account.clone()));
+            let mints = menu.rows.iter().any(|row| match row {
+                MenuRow::Action { label, .. } => {
+                    let label = label.to_lowercase();
+                    label.starts_with("create") && label.contains("did")
+                }
+                _ => false,
+            });
             assert!(
-                menu.offers(TrayAction::CreateDid),
-                "{account:?}: the row must still SHOW — the capability is real and coming"
-            );
-            assert!(
-                !menu.is_enabled(TrayAction::CreateDid),
-                "{account:?}: an enabled control for an unimplemented capability is the #1773 defect"
+                !mints,
+                "{account:?}: no row may offer to mint a DID: {menu:?}"
             );
         }
     }
 
-    /// The label must carry BOTH facts a person needs before they reach for it: that it is unavailable
-    /// (so a disabled row is not a mystery) and that it costs money (§3.7 — mainnet is real money), so the
-    /// cost is legible before the click on the day the row lights up.
+    /// The DID row is ENABLED in every state, because what it promises — an explanation — is something it can
+    /// always deliver. A person is entitled to know the capability exists and costs money before it lands.
     #[test]
-    fn the_did_label_states_both_its_unavailability_and_its_cost() {
+    fn the_did_explainer_is_clickable_in_every_account_state() {
+        for account in [
+            AccountState::Unsupported,
+            AccountState::Absent,
+            AccountState::Locked,
+            AccountState::Unlocked { recoverable: true },
+        ] {
+            assert!(
+                build(&view(account.clone())).is_enabled(TrayAction::AboutDid),
+                "{account:?}: an explanation needs no account to be readable"
+            );
+        }
+    }
+
+    /// The label must carry BOTH facts a person needs before they open it: that a DID costs money (§3.7 —
+    /// mainnet is real money) and that it is optional, so an absent DID never reads as a task they failed to
+    /// do. It must also not promise to CREATE one, since it cannot.
+    #[test]
+    fn the_did_label_names_the_cost_and_stays_optional() {
         let menu = build(&view(AccountState::Unlocked { recoverable: true }));
-        let label = menu.label_of(TrayAction::CreateDid).unwrap();
+        let label = menu.label_of(TrayAction::AboutDid).unwrap();
         assert!(
             label.contains("XCH"),
             "the label must name the cost, not hide it in a dialog: {label}"
         );
+        assert!(label.contains("optional"), "{label}");
         assert!(
-            label.contains("not in this version yet"),
-            "a disabled row must say WHY it is disabled: {label}"
+            !label.to_lowercase().starts_with("create"),
+            "an enabled row must not promise an action it cannot perform: {label}"
         );
     }
 
@@ -726,16 +761,18 @@ mod tests {
             TrayAction::Unlock,
             TrayAction::LockNow,
             TrayAction::ShowRecoveryPhrase,
-            TrayAction::CreateDid,
         ] {
             assert!(!menu.is_enabled(action), "{action:?} must be inert here");
         }
     }
 
-    /// A node line that fits is passed through unmodified, and needs no details window — the control
-    /// that proves the bounding below is reading the length rather than always truncating.
+    /// A node line that fits is passed through unmodified, and the details row is ABSENT — the control that
+    /// proves the bounding below is reading the length rather than always truncating.
+    ///
+    /// Absent, not disabled: a greyed `Node details…` with no reason in its label would be a small mystery on
+    /// every healthy install, and this module's own rule is that a disabled row must say why (#1773 review).
     #[test]
-    fn a_node_line_that_fits_is_passed_through_verbatim_and_needs_no_details() {
+    fn a_node_line_that_fits_is_passed_through_verbatim_and_offers_no_details_row() {
         let mut v = view(AccountState::Absent);
         v.node = "Node: not connected — no node is running on this machine".to_string();
         assert!(
@@ -746,8 +783,8 @@ mod tests {
         let menu = build(&v);
         assert!(menu.rows.contains(&MenuRow::Status(v.node.clone())));
         assert!(
-            !menu.is_enabled(TrayAction::ShowNodeDetails),
-            "the row already says everything; a details window would add nothing"
+            !menu.offers(TrayAction::ShowNodeDetails),
+            "the row already says everything; an unexplained greyed item would add only confusion"
         );
     }
 
