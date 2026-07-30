@@ -974,6 +974,7 @@ mod tray {
             }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
+            TrayAction::AboutWallet => explain_wallet(confirmer),
             TrayAction::Open => open_dig_link(status, confirmer),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
@@ -1114,6 +1115,31 @@ mod tray {
              Your account, your recovery phrase and your address all work fully without a DID. \
              On-chain minting is not available in this version yet — when it is, this is where you \
              will start it, and you will see the exact cost before anything is spent.",
+        );
+    }
+
+    /// Explain what the DIG wallet is, what it can do today, and what it cannot yet.
+    ///
+    /// This is the whole **Wallet** submenu for now, and that is deliberate. The tray offers no `Send` and
+    /// no `Copy my receive address`, because it can perform neither: spending needs the money path (parked,
+    /// dig_ecosystem#1702), and the address needs a field `TrayView` does not carry — it holds the identity
+    /// public key, which is NOT a Chia address. A row that copied that string would hand someone the wrong
+    /// value with total confidence, which is worse than no row.
+    ///
+    /// So the menu says what is true and names what is coming, rather than offering greyed verbs that
+    /// cannot say when they will work (dig_ecosystem#1800, #1841).
+    fn explain_wallet(confirmer: &dyn NativeConfirmer) {
+        notify(
+            confirmer,
+            "DIG — Wallet",
+            "Your DIG Account holds keys, and the wallet is being built around them.",
+            "Your account already owns the keys a wallet needs — they were created with it, and your \
+             recovery phrase restores them. What is not built yet is the part that USES them: showing \
+             your balance, giving you an address to receive $DIG, and sending it.\n\n\
+             DIG does not show you a balance it cannot verify, or an address it is not certain of, so \
+             those are absent rather than shown as something you cannot click. When they work, they \
+             will appear here.\n\n\
+             Nothing about this affects reading DIG content — that never needs an account or a wallet.",
         );
     }
 
