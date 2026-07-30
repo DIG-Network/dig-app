@@ -76,7 +76,8 @@ impl dig_app_core::wallet::engine::WalletEngine for FixedBalances {
     fn coins(
         &self,
         _: dig_app_core::wallet::engine::CoinsRequest,
-    ) -> Result<dig_app_core::wallet::engine::CoinsResponse, dig_app_core::wallet::WalletError> {
+    ) -> Result<dig_app_core::wallet::engine::CoinsResponse, dig_app_core::wallet::WalletError>
+    {
         unreachable!("the wallet window reads balances, not coins")
     }
 

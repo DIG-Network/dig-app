@@ -843,9 +843,7 @@ fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
             None => MenuRow::action(
                 TrayAction::CopyReceiveAddress,
                 match account {
-                    AccountState::NeedsPassword => {
-                        "Copy my receive address (set a password first)"
-                    }
+                    AccountState::NeedsPassword => "Copy my receive address (set a password first)",
                     _ => "Copy my receive address (unlock first)",
                 },
                 false,

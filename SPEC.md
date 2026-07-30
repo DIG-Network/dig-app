@@ -265,9 +265,10 @@ nothing that moves money — no tray action spends, so the absence of `Send` is 
 - The copied address MUST be the account's derived `xch1…` money address (§3.3's wallet key), never the
   profile's identity public key. Funds sent to a well-formed address for the wrong key are unrecoverable,
   so the derivation MUST be pinned against an independent derivation of the same seed.
-- A receive address is PUBLIC, so a LOCKED account MUST still show the row, disabled, naming unlocking as
-  the one thing in the way. Where no address can exist at all — no account, or an account that cannot be
-  opened — the row MUST be omitted and the wallet window MUST explain the situation.
+- A receive address is PUBLIC, so a state that merely WITHHOLDS the key — locked, or never given a
+  password — MUST still show the row, disabled, with its label naming that state's own remedy. Where no
+  address can exist at all — no account, or an account that cannot be opened — the row MUST be omitted and
+  the wallet window MUST explain the situation.
 - **A balance that could not be read MUST NOT be rendered as a zero.** The surface MUST distinguish a
   balance READ from a chain source (where `0` means nothing is held) from one that is UNKNOWN, and every
   unknown MUST name which thing is missing — no address, no node, a node that does not serve wallet reads,
@@ -313,10 +314,12 @@ Binding rules:
   An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
   existence is discoverable — **but only when the label can say WHY.** A disabled row with no reason in it
   is a small unexplained mystery; where there is no reason worth printing, the row MUST be omitted instead.
-  A disabled row MUST also sit beside an ENABLED row that resolves it, so no state is a dead end. Three rows
-  currently qualify: setting up an account on a host with no per-application credential store, and — while
-  the account is locked — revealing the recovery phrase and copying the receive address (whose remedy in
-  both cases, `Unlock…`, is offered enabled in the same menu).
+  A disabled row MUST also sit beside an ENABLED row that resolves it, so no state is a dead end. Five rows
+  currently qualify: setting up an account on a host with no per-application credential store, plus
+  revealing the recovery phrase and copying the receive address in each of the two states that withhold key
+  material — locked (remedy: `Unlock…`) and never-given-a-password (remedy: `Set a password…`). A disabled
+  row's label MUST name the remedy that state actually has: offering "unlock first" to an account that has
+  never had a password names a control that cannot help.
 - **Every ENABLED item MUST be able to perform what its label says (MUST).** This is the strong form of the
   rule above, and it binds two cases that are easy to get wrong:
   - A capability that does not EXIST YET is either absent or shown DISABLED **with the reason in its
