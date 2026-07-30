@@ -65,6 +65,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_COMMAND, WM_DESTROY, WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
     WS_EX_TOPMOST, WS_GROUP, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, WS_VSCROLL,
+};
 use zeroize::Zeroizing;
 
 use super::{
@@ -739,7 +742,14 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                 m.heading_line,
             );
         }
-        add_static(&ctx, spec.body, l.body_top, inner, l.body_height);
+        add_body(
+            &ctx,
+            spec.body,
+            l.body_top,
+            inner,
+            l.body_height,
+            l.body_scrolls,
+        );
 
         if let Some(field) = &spec.field {
             if let Some(label_top) = l.field_label_top {
@@ -901,6 +911,18 @@ struct Layout {
     buttons_top: i32,
     /// The OUTER window height, caption and frame included.
     total_height: i32,
+    /// Whether the body has MORE text than the reserved lines can show, so it must be drawn as a
+    /// scrollable control rather than a `STATIC`.
+    ///
+    /// A `STATIC` neither scrolls nor reports that it truncated — it clips, in silence. That is how the
+    /// recovery-phrase window showed part of a phrase and then asked the user to confirm they had written
+    /// it all down (dig_ecosystem#49). Deriving the height from the display made that rarer without making
+    /// it impossible: on 1920x1080 at 150% the budget is 13 lines, and on a small high-DPI panel it can
+    /// reach the 2-line floor — both well under the phrase window's 26.
+    ///
+    /// So the height is no longer the only defence. When the text does not fit, the control CHANGES to one
+    /// that can be scrolled, and a scrollbar is a visible promise that there is more.
+    body_scrolls: bool,
     /// The OUTER window width.
     width: i32,
     /// Width of the controls that span the window.
@@ -957,6 +979,9 @@ impl Layout {
             buttons_top,
             // No caption and no frame to account for: `WS_POPUP` client area IS the window.
             total_height: buttons_top + m.button_h + m.margin,
+            // The bar's body is ONE fixed hint line of its own copy, not caller text, so there is nothing
+            // that can overflow it. A scrollbar on a launcher hint would be noise.
+            body_scrolls: false,
             width,
             inner,
             field_height: m.bar_field,
@@ -972,7 +997,10 @@ impl Layout {
 
         let heading_top = m.margin;
         let body_top = heading_top + m.heading_line + gap;
-        let body_height = body_lines(spec.body, inner, m) * m.line;
+        let wanted_lines = body_wanted_lines(spec.body, inner, m);
+        let shown_lines = body_lines(spec.body, inner, m);
+        let body_height = shown_lines * m.line;
+        let body_scrolls = wanted_lines > shown_lines;
         let mut top = body_top + body_height + gap;
 
         let (mut field_label_top, mut field_top, mut reveal_top) = (None, None, None);
@@ -1000,6 +1028,7 @@ impl Layout {
             reveal_top,
             buttons_top,
             total_height,
+            body_scrolls,
             width: Chrome::Dialog.width(m),
             inner,
             field_height: m.field_single,
@@ -1017,13 +1046,22 @@ impl Layout {
 /// paragraph is divided by how many characters fit on a line.
 ///
 /// Pure, so the estimate is unit-tested against the real copy this window actually shows.
-fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
+/// How many lines the body ACTUALLY needs — unclamped by the display budget.
+///
+/// Separate from [`body_lines`], which answers how many are RESERVED. The difference between the two is
+/// exactly the text a `STATIC` would hide, and [`Layout::body_scrolls`] turns that difference into a
+/// scrollbar instead of a silence (dig_ecosystem#49).
+fn body_wanted_lines(body: &str, width: i32, m: Metrics) -> i32 {
     let per_line = ((width / m.char_width).max(1)) as usize;
     let wrapped: usize = body
         .split('\n')
         .map(|line| line.chars().count().div_ceil(per_line).max(1))
         .sum();
-    (wrapped as i32).clamp(layout::BODY_MIN_LINES, m.body_line_budget)
+    (wrapped as i32).max(layout::BODY_MIN_LINES)
+}
+
+fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
+    body_wanted_lines(body, width, m).clamp(layout::BODY_MIN_LINES, m.body_line_budget)
 }
 
 /// The style bits for the input field.
@@ -1349,6 +1387,60 @@ unsafe fn set_font(control: HWND, font: HFONT) {
 /// # Safety
 ///
 /// `parent` must be a live window.
+/// Draw the body — as a plain `STATIC` when it fits, and as a SCROLLABLE read-only field when it does not.
+///
+/// # Why the control changes
+///
+/// A `STATIC` cannot scroll and does not report that it truncated; it simply clips. That is the mechanism
+/// behind dig_ecosystem#49, where the recovery-phrase window showed part of a 24-word phrase and then asked
+/// the user to confirm they had written all of it down. Deriving the reserved height from the display made
+/// that rarer, not impossible — at 1920x1080 and 150% the budget is 13 lines against the phrase window's 26.
+///
+/// So when the text will not fit, it is drawn in a read-only multiline `EDIT` with a vertical scrollbar.
+/// **The scrollbar is the point**: it is a visible, unmissable promise that there is more text, which is
+/// precisely what silent clipping fails to make. `ES_READONLY` keeps it non-editable and `WS_TABSTOP` keeps
+/// it keyboard-reachable, so a user can scroll it without a mouse (§6.6).
+///
+/// # Safety
+///
+/// `ctx.parent` must be a live window and `ctx.instance` this module's instance.
+unsafe fn add_body(ctx: &ControlCtx, text: &str, top: i32, width: i32, height: i32, scrolls: bool) {
+    if !scrolls {
+        add_static(ctx, text, top, width, height);
+        return;
+    }
+    let (parent, instance, font, m) = (ctx.parent, ctx.instance, ctx.font, ctx.m);
+    let created = CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        windows::core::w!("EDIT"),
+        &HSTRING::from(text),
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | WS_VSCROLL
+            | WINDOW_STYLE(ES_MULTILINE as u32)
+            | WINDOW_STYLE(ES_READONLY as u32)
+            | WINDOW_STYLE(ES_AUTOVSCROLL as u32),
+        m.margin,
+        top,
+        width,
+        height,
+        parent,
+        HMENU::default(),
+        instance,
+        None,
+    );
+    match created {
+        Ok(control) => set_font(control, font),
+        // Falling back to a STATIC would restore the silent clipping this function exists to remove, so the
+        // failure is loud instead. The window still shows its heading and buttons, so the user is not
+        // trapped — they can decline, which is the safe answer for every window that has one.
+        Err(e) => {
+            tracing::error!(error = %e, "the scrollable body could not be created; text may be incomplete")
+        }
+    }
+}
+
 unsafe fn add_static(ctx: &ControlCtx, text: &str, top: i32, width: i32, height: i32) {
     let (parent, instance, font, m) = (ctx.parent, ctx.instance, ctx.font, ctx.m);
     let created = CreateWindowExW(
@@ -1999,7 +2091,7 @@ mod tests {
     }
 
     /// A field window's spec, the shape `InputWindow::ask` builds.
-    fn field_spec(masked: bool, revealable: bool) -> WindowSpec<'static> {
+    pub(super) fn field_spec(masked: bool, revealable: bool) -> WindowSpec<'static> {
         WindowSpec {
             title: "DIG — Restore",
             heading: "Type your 24-word recovery phrase.",
@@ -2224,6 +2316,67 @@ mod phrase_window_fit {
              including DIG — can recover your account without them.",
         );
         body
+    }
+
+    /// **P0, the class fix.** No body may EVER be hidden without a scrollbar — on ANY display.
+    ///
+    /// Reserving lines from the screen height (dig_ecosystem#49) made the phrase window's clipping rarer,
+    /// not impossible. Measured against real displays, the reserved budget is 27 lines at 1920x1080/100%
+    /// but only 23 at 3840x2400/250%, 13 at 1920x1080/150%, and the 2-line FLOOR on a small high-DPI panel
+    /// — against a recovery-phrase body of 26. On five of six common displays the phrase still lost words,
+    /// and on the smallest it lost more than the flat constant it replaced.
+    ///
+    /// So the height stopped being the defence. When the text does not fit, the control becomes scrollable
+    /// and the scrollbar says so. This asserts the invariant across the whole range of displays rather than
+    /// at one convenient size, because "fits on the machine I tested" is exactly the reasoning that shipped
+    /// the original defect.
+    #[test]
+    fn no_display_can_hide_body_text_without_a_scrollbar() {
+        let phrase = phrase_body();
+        // width x height x scale, spanning a budget laptop through this machine's 4K panel.
+        for (w, h, dpi) in [
+            (1920, 1080, 96),
+            (1366, 768, 96),
+            (1920, 1080, 144),
+            (2256, 1504, 192),
+            (1280, 800, 192),
+            (3840, 2400, 240),
+        ] {
+            let m = Metrics::for_display(dpi, w, h);
+            let spec = WindowSpec {
+                body: &phrase,
+                ..super::tests::field_spec(false, false)
+            };
+            let l = Layout::compute(&spec, m);
+            let wanted = body_wanted_lines(&phrase, l.inner, m);
+            let shown = l.body_height / m.line;
+
+            if wanted > shown {
+                assert!(
+                    l.body_scrolls,
+                    "{w}x{h}@{dpi}dpi shows {shown} of {wanted} lines and does NOT scroll —                      {} lines would be invisible",
+                    wanted - shown
+                );
+            }
+            // Whether it scrolls or not, the window must still fit its own screen.
+            assert!(
+                l.total_height <= h,
+                "{w}x{h}@{dpi}dpi makes a {}px window",
+                l.total_height
+            );
+        }
+    }
+
+    /// **The control.** A SHORT body must NOT scroll — otherwise "always scrollable" would satisfy the test
+    /// above while putting a scrollbar on every one-line notice.
+    #[test]
+    fn a_body_that_fits_does_not_scroll() {
+        let m = Metrics::for_display(96, 1920, 1080);
+        let spec = WindowSpec {
+            body: "One short line.",
+            ..super::tests::field_spec(false, false)
+        };
+        assert!(!Layout::compute(&spec, m).body_scrolls);
     }
 
     #[test]
