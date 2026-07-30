@@ -114,10 +114,18 @@ mod layout {
     /// The fewest body lines to reserve, so a one-line body still looks deliberate rather than cramped.
     pub const BODY_MIN_LINES: i32 = 2;
 
-    /// The most body lines to reserve, bounding the window to something that fits a small display. Text
-    /// past this is still clipped — but the body is caller-composed copy, and every real one fits well
-    /// inside it (the longest is 6 lines).
-    pub const BODY_MAX_LINES: i32 = 10;
+    /// The ceiling on body lines, and the answer when the screen's height cannot be read.
+    ///
+    /// 32 is not arbitrary: the longest real body in the product is the recovery-phrase window's 24 numbered
+    /// words plus its warning — about 27 lines — and this leaves headroom above it. The previous value was
+    /// **10**, with a comment claiming every real body fitted "well inside it (the longest is 6 lines)".
+    /// That claim was never checked against the phrase window, so that window silently showed roughly ten
+    /// words of twenty-four and then asked the user to confirm they had written them all down.
+    ///
+    /// This is the FALLBACK and the ceiling; the operative limit is [`Metrics::body_line_budget`], derived
+    /// from the actual display, because a value that fits a phrase on a desktop can still overflow a 250%
+    /// laptop.
+    pub const BODY_LINES_FALLBACK: i32 = 32;
     /// Height of the input field. One value, because the field can never be multiline: Win32 ignores
     /// `ES_PASSWORD` on a multiline `EDIT`, and §3.1d requires secret entry to be maskable.
     pub const FIELD_SINGLE: i32 = 30;
@@ -171,6 +179,17 @@ struct Metrics {
     bar_width: i32,
     bar_field: i32,
     font_bar_field: i32,
+    /// The most body lines this DISPLAY can show without the window growing past it.
+    ///
+    /// Derived, not a constant. `BODY_MAX_LINES` used to be a flat 10, documented as fitting "every real
+    /// body (the longest is 6 lines)" — a claim made about the callers without checking the recovery-phrase
+    /// window, whose body is 24 numbered words plus a warning. A `STATIC` clips in silence, so that window
+    /// showed about ten words of twenty-four and then asked the user to confirm they had written them down.
+    ///
+    /// A flat constant cannot be right for both: raise it enough for the phrase and a 250% laptop gets a
+    /// window taller than its screen (which hides the buttons — the same defect, moved). So the budget is
+    /// whatever the screen can actually hold.
+    body_line_budget: i32,
 }
 
 impl Metrics {
@@ -187,6 +206,12 @@ impl Metrics {
     /// fallback is capped because "the panel is wide" is a weaker signal than "the user set a scale", and an
     /// 8K panel should not get a 4x dialog on that basis alone.
     const MAX_SCALE_NUMERATOR: i32 = 2;
+
+    /// The most of the screen's height one window may occupy.
+    ///
+    /// Not the whole screen: a window flush to the top and bottom edges reads as broken, and the taskbar
+    /// takes a slice Windows does not report here.
+    const MAX_SCREEN_SHARE_PCT: i32 = 85;
 
     /// Scale the design units for the display this window will appear on.
     ///
@@ -208,7 +233,7 @@ impl Metrics {
     /// font grew while that estimate did not, a bigger window would think more characters fit per line than
     /// really do and clip its own warning — the defect a screenshot caught once already. Deriving every
     /// metric from a single factor makes that class unrepresentable.
-    fn for_display(dpi: u32, screen_width: i32) -> Self {
+    fn for_display(dpi: u32, screen_width: i32, screen_height: i32) -> Self {
         // Both signals as a percentage, so the arithmetic stays in integers.
         let dpi_pct = (dpi.max(BASE_DPI) as i64 * 100) / BASE_DPI as i64;
         let width_pct = if screen_width > 0 {
@@ -242,13 +267,37 @@ impl Metrics {
             bar_width: s(layout::BAR_WIDTH),
             bar_field: s(layout::BAR_FIELD),
             font_bar_field: s(layout::BAR_FONT_FIELD),
+            body_line_budget: Self::body_budget(s(layout::LINE), s(layout::CHROME), screen_height),
         }
+    }
+
+    /// How many body lines fit on a screen `screen_height` tall, once the window's fixed furniture is paid
+    /// for.
+    ///
+    /// The window must never exceed the display: a window taller than the screen hides its own buttons,
+    /// which is the same defect as clipping the body, just moved. So the budget is what is left of
+    /// `MAX_SCREEN_SHARE` of the screen after the caption, heading, field block and button row.
+    ///
+    /// `screen_height <= 0` means the metrics are unreadable (a headless or racing session), and there the
+    /// honest answer is the generous fallback rather than a guess that might clip a phrase.
+    fn body_budget(line: i32, chrome: i32, screen_height: i32) -> i32 {
+        if screen_height <= 0 || line <= 0 {
+            return layout::BODY_LINES_FALLBACK;
+        }
+        // Everything that is not body: caption + frame, the heading, a field block, buttons, margins.
+        // Approximated generously (12 lines' worth) so the estimate errs toward a SHORTER body rather than
+        // one that overflows the screen.
+        let furniture = chrome + line * 12;
+        let usable = (screen_height * Self::MAX_SCREEN_SHARE_PCT / 100) - furniture;
+        (usable / line).clamp(layout::BODY_MIN_LINES, layout::BODY_LINES_FALLBACK)
     }
 
     /// The DPI-only scale, for tests and for a caller with no display metrics.
     #[cfg(test)]
     fn for_dpi(dpi: u32) -> Self {
-        Self::for_display(dpi, 0)
+        // A 1440p-tall display: big enough that the budget is not the binding constraint, so the existing
+        // scaling tests keep measuring scaling rather than screen fit.
+        Self::for_display(dpi, 0, 2560)
     }
 }
 
@@ -628,7 +677,11 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
     unsafe {
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
         // Scale to the display the user is actually looking at, BEFORE anything is sized (#1832).
-        let m = Metrics::for_display(dpi_for_cursor_monitor(), GetSystemMetrics(SM_CXSCREEN));
+        let m = Metrics::for_display(
+            dpi_for_cursor_monitor(),
+            GetSystemMetrics(SM_CXSCREEN),
+            GetSystemMetrics(SM_CYSCREEN),
+        );
         let font = gui_font(m.font_body, FW_NORMAL.0 as i32);
         let heading_font = gui_font(m.font_heading, FW_SEMIBOLD.0 as i32);
         // ONE walk of the layout: the drawing code below and the window's own height both read this, so a
@@ -970,7 +1023,7 @@ fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
         .split('\n')
         .map(|line| line.chars().count().div_ceil(per_line).max(1))
         .sum();
-    (wrapped as i32).clamp(layout::BODY_MIN_LINES, layout::BODY_MAX_LINES)
+    (wrapped as i32).clamp(layout::BODY_MIN_LINES, m.body_line_budget)
 }
 
 /// The style bits for the input field.
@@ -1523,7 +1576,7 @@ mod tests {
         };
         assert_eq!(
             Layout::compute(&huge, m).body_height,
-            layout::BODY_MAX_LINES * m.line,
+            m.body_line_budget * m.line,
             "the window must stay on a small display"
         );
     }
@@ -1593,8 +1646,8 @@ mod tests {
     /// nothing unusual, which is exactly why the width has to be consulted as well.
     #[test]
     fn a_high_resolution_display_at_100_percent_still_scales_up() {
-        let unaware = Metrics::for_display(96, 1920);
-        let panel_4k_at_100 = Metrics::for_display(96, 3840);
+        let unaware = Metrics::for_display(96, 1920, 2560);
+        let panel_4k_at_100 = Metrics::for_display(96, 3840, 2560);
         assert_eq!(
             unaware.scale_pct, 100,
             "the reference display is the baseline"
@@ -1611,14 +1664,14 @@ mod tests {
     /// multiplying them would enlarge it twice over into something absurd.
     #[test]
     fn dpi_and_resolution_do_not_compound() {
-        let scaled_4k = Metrics::for_display(192, 3840);
+        let scaled_4k = Metrics::for_display(192, 3840, 2560);
         assert_eq!(
             scaled_4k.scale_pct, 200,
             "200% DPI on a 4K panel is 2x, never 4x"
         );
         assert_eq!(
             scaled_4k.width,
-            Metrics::for_display(192, 1920).width,
+            Metrics::for_display(192, 1920, 2560).width,
             "whichever signal is larger wins; they do not stack"
         );
     }
@@ -1632,11 +1685,11 @@ mod tests {
     #[test]
     fn dpi_is_honoured_exactly_while_the_resolution_fallback_is_capped() {
         // A real 400% display gets a 400% dialog.
-        assert_eq!(Metrics::for_display(384, 1920).scale_pct, 400);
+        assert_eq!(Metrics::for_display(384, 1920, 2560).scale_pct, 400);
         // An enormous panel at 100% gets the capped fallback, not 800%.
-        assert_eq!(Metrics::for_display(96, 15360).scale_pct, 200);
+        assert_eq!(Metrics::for_display(96, 15360, 2560).scale_pct, 200);
         // This machine: 3840x2400 at 250%.
-        assert_eq!(Metrics::for_display(240, 3840).scale_pct, 250);
+        assert_eq!(Metrics::for_display(240, 3840, 2560).scale_pct, 250);
     }
 
     /// A nonsense DPI must not shrink the window below the reference layout.
@@ -2141,5 +2194,115 @@ mod tests {
             buttons,
             chrome: Chrome::Dialog,
         }
+    }
+}
+
+#[cfg(test)]
+mod phrase_window_fit {
+    use super::*;
+
+    /// **P0 regression (custody loss).** The recovery-phrase window's body must be shown IN FULL.
+    ///
+    /// `BODY_MAX_LINES` was 10, documented as "every real one fits well inside it (the longest is 6
+    /// lines)". That claim was made about the callers WITHOUT checking this one: `present_new_phrase`
+    /// puts 24 numbered words plus two sentences into the body — around 27 lines. A `STATIC` clips
+    /// silently, so the window showed roughly ten words of a twenty-four word phrase.
+    ///
+    /// The user then writes down what they can see and clicks "I have written these down" — an explicit
+    /// claim the app accepts. The account becomes unrecoverable at the moment the user is told it is safe.
+    /// That is the worst failure this program has.
+    ///
+    /// The fixture is the REAL shape of that body (24 numbered lines + the warning), not a synthetic
+    /// string, because its actual length is the whole defect.
+    fn phrase_body() -> String {
+        let mut body = String::new();
+        for i in 1..=24 {
+            body.push_str(&format!("{i:>2}. abandon\n"));
+        }
+        body.push_str(
+            "\nThese words ARE your DIG Account. Anyone who has them can take it, and nobody — \
+             including DIG — can recover your account without them.",
+        );
+        body
+    }
+
+    #[test]
+    fn the_recovery_phrase_window_reserves_a_line_for_every_word() {
+        let m = Metrics::for_dpi(BASE_DPI);
+        let body = phrase_body();
+        let inner = m.width - m.margin * 4;
+
+        let reserved = body_lines(&body, inner, m);
+        let needed = body.lines().count() as i32;
+
+        assert!(
+            reserved >= needed,
+            "the phrase window reserves {reserved} lines for {needed} — {} words would be invisible, \
+             and the user is asked to confirm they wrote them down",
+            needed - reserved
+        );
+    }
+
+    /// The budget must ADAPT to the display, not just be bigger. A 250% laptop cannot show what a 4K
+    /// desktop can, and a window taller than its screen hides its own buttons — the same defect as
+    /// clipping the body, moved somewhere less obvious.
+    ///
+    /// So: a tall screen affords more body lines than a short one, and the phrase still fits where it
+    /// reasonably can.
+    #[test]
+    fn the_body_budget_follows_the_screen_height() {
+        let tall = Metrics::for_display(96, 1920, 2160);
+        let short = Metrics::for_display(96, 1920, 900);
+
+        assert!(
+            tall.body_line_budget > short.body_line_budget,
+            "a taller screen must afford more body: {} vs {}",
+            tall.body_line_budget,
+            short.body_line_budget
+        );
+
+        // The window must fit its own screen at BOTH, which is the property the budget exists for.
+        for m in [tall, short] {
+            let height =
+                m.chrome + m.heading_line + m.body_line_budget * m.line + m.button_h + m.margin * 5;
+            let screen = if m.body_line_budget == tall.body_line_budget {
+                2160
+            } else {
+                900
+            };
+            assert!(
+                height <= screen,
+                "a {}-line body makes a {height}px window on a {screen}px screen",
+                m.body_line_budget
+            );
+        }
+    }
+
+    /// An unreadable screen height must fall back GENEROUSLY, not conservatively. Guessing small is what
+    /// clips a recovery phrase; guessing large only makes a window that may need moving.
+    #[test]
+    fn an_unknown_screen_height_falls_back_generously() {
+        let unknown = Metrics::for_display(96, 0, 0);
+        assert_eq!(unknown.body_line_budget, layout::BODY_LINES_FALLBACK);
+        assert!(
+            body_lines(&phrase_body(), unknown.width - unknown.margin * 4, unknown)
+                >= phrase_body().lines().count() as i32,
+            "the phrase must survive an unreadable display"
+        );
+    }
+
+    /// **The control.** The bound must still BOUND: an unbounded body would make a window taller than
+    /// the display, which is its own way of hiding the buttons. Raising the cap to fit the phrase must
+    /// not turn it off.
+    #[test]
+    fn a_runaway_body_is_still_bounded() {
+        let m = Metrics::for_dpi(BASE_DPI);
+        let runaway = "word ".repeat(5000);
+        let inner = m.width - m.margin * 4;
+
+        assert!(
+            body_lines(&runaway, inner, m) < 200,
+            "the clamp must still cap a runaway body"
+        );
     }
 }
