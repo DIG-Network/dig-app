@@ -38,6 +38,11 @@ fn main() {
                 "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4".into(),
             ),
             did: None,
+            // The gallery photographs the account states; the shortcut is live in the real shell and its
+            // own row label is asserted in `tray_menu`'s tests.
+            hotkey: Some(dig_app_core::hotkey::HotkeyState::Registered(
+                dig_app_core::hotkey::Hotkey::default(),
+            )),
         };
         let status = tray_menu::status(&view);
 

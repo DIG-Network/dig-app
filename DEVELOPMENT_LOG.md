@@ -296,3 +296,26 @@ Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app
 - **Reproducing this needs a DISPLAY, not just a container.** Without one, `FormFactor::detect` returns
   `Headless` and the tray is never attempted, so the bug hides. `Xvfb :99` + `DISPLAY=:99` is what makes
   it appear.
+
+## The global shortcut (dig_ecosystem#1839)
+
+- **`Alt+Space` is not free on Windows — it opens the focused window's system menu** (Move / Size /
+  Minimize / Close), and has since Windows 3.x. A successful `RegisterHotKey(NULL, id, MOD_ALT, VK_SPACE)`
+  takes precedence and suppresses that menu **globally**, for every application, for the app's whole
+  lifetime. Claiming it is a real trade, taken with precedent (PowerToys Run ships the same default) and
+  disclosed in `Status` — not a free win.
+- **`MOD_NOREPEAT` is not optional.** Without it, holding the chord down delivers `WM_HOTKEY` at the
+  keyboard auto-repeat rate, which opens one bar per tick.
+- **`WM_HOTKEY` from `RegisterHotKey(NULL, …)` is a THREAD message with no window**, posted to the queue
+  of the thread that registered it. It cannot reach a window procedure, so a shortcut cannot be handled by
+  adding a case to an existing `wnd_proc`, and depending on tao to surface it would be depending on tao
+  forwarding a message it has no reason to. A dedicated thread with its own `GetMessageW` loop is the
+  shape. Windows releases a thread's hotkeys when the thread ends, so process exit frees the chord.
+- **`WS_CAPTION` is `WS_BORDER | WS_DLGFRAME`, so `style & WS_CAPTION != 0` does NOT mean "has a caption".**
+  A frameless window that deliberately keeps `WS_BORDER` for its edge trips that test. The assertion has to
+  be against the FULL mask. This cost a red test on the first run and would otherwise have been a screenshot
+  bug.
+- **A locked desktop makes `SendInput` succeed and deliver nothing.** The call returns the full event count
+  — it queued them — but a locked session's input goes to the Winlogon desktop, so a global-hotkey test
+  synthesizing its own keystroke times out looking exactly like a broken shortcut. Rule out the lock before
+  believing that failure.

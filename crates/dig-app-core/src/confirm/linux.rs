@@ -442,6 +442,9 @@ mod tests {
             submit: "Restore",
             masked,
             revealable: true,
+            // Linux draws every input on its dialog helper, which has no frameless mode — the launcher
+            // bar falls back to the ordinary dialog here (see `InputStyle`).
+            style: crate::confirm::InputStyle::Dialog,
         }
     }
 

@@ -383,6 +383,37 @@ Binding rules:
   actionable tray without a picture. A user whose agent refused to start over artwork would be far worse
   served than one whose tray is briefly unlabelled.
 
+### 3.1c-i The global shortcut to the URN bar (normative)
+
+While the tray is mounted on a desktop OS, dig-app MUST offer a **global keyboard shortcut that opens a
+floating URN bar** — one keystroke from anywhere to "paste a DIG link and go", because reading content is
+the product's core function and needs no account.
+
+- **The bar MUST reach the SAME open path as the tray's `Open URL…` row.** Node check, then
+  `validate_open_link`, then the node serve-URL mapping, then the browser, in that order. The scheme
+  allowlist is a security boundary (store content is attacker-controlled), so there MUST NOT be a second
+  copy of it: the two entry points differ ONLY in how the window is presented.
+- **The bar is a PRESENTATION of the native input window (§3.1d), not a second window stack.** Frameless,
+  always on top, centred horizontally and placed above the vertical centre, with an enlarged field. It
+  MUST be dismissible by Escape AND by losing focus — it has no close box, so a bar that outlived a click
+  elsewhere would be a window the user cannot get rid of without answering it.
+- **The default chord is `Alt+Space`, and it MUST be user-configurable and persisted.** On Windows this
+  DISPLACES the system window menu for as long as dig-app runs; the app MUST disclose that in its status
+  surface rather than leaving the user to discover it.
+- **A chord MUST include at least one modifier.** A bare key registered globally stops that key working in
+  every application on the desktop, so a modifier-less setting MUST be refused with a reason.
+- **Registration failure MUST degrade, never fail startup.** A chord another application already holds, an
+  unparseable setting, or a platform with no global-shortcut mechanism MUST each be reported in the status
+  surface with its reason, leaving the tray route working unchanged.
+- **A live shortcut MUST be discoverable** from the tray's own `Open URL…` row; a shortcut that did NOT
+  register MUST NOT be advertised anywhere, since a chord the menu promises and the OS refused is a lie the
+  user acts on.
+
+Platform reach: Windows registers the chord today. macOS (a global event monitor, which requires the user
+to grant Accessibility permission) and Linux (where a Wayland compositor owns shortcuts and may not offer
+a global grab at all) report the unsupported state rather than claiming a chord that would silently do
+nothing.
+
 ### 3.1d Native input, modals and prompts (normative)
 
 **Whenever dig-app needs input from the user it MUST use the platform's native input box, modal or

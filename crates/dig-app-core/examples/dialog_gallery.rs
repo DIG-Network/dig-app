@@ -25,6 +25,7 @@
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
 //! | `open` | the tray's "Open…" DIG-link field (dig_ecosystem#1821) — unmasked, a link is not secret |
 //! | `passphrase` | the same field, masked |
+//! | `bar` | the Alt+Space launcher bar (dig_ecosystem#1839) — the same field, frameless and centred high |
 //! | `unopenable` | the wedged-legacy-account explainer (dig_ecosystem#1799) — the ONLY window that state
 //!   offers, so its copy is checked by eye here as well as by its rendering test |
 //!
@@ -33,7 +34,8 @@
 //! what was typed, never the text, so a screenshot session cannot leak a phrase into a terminal.
 
 use dig_app_core::confirm::{
-    native_confirmer, ClaimPrompt, DestroyPrompt, InputPrompt, NoticePrompt, RevealPrompt,
+    native_confirmer, ClaimPrompt, DestroyPrompt, InputPrompt, InputStyle, NoticePrompt,
+    RevealPrompt,
 };
 
 /// Match the tray's DPI posture, so a screenshot taken here is what the user actually sees.
@@ -119,6 +121,7 @@ fn main() {
                 submit: "Continue",
                 masked,
                 revealable: !masked,
+                style: InputStyle::Dialog,
             });
             // `InputOutcome`'s Debug redacts the text by design, so this is safe to print.
             println!("{which}: {outcome:?}");
@@ -141,13 +144,31 @@ fn main() {
                 submit: "Open",
                 masked: false,
                 revealable: false,
+                style: InputStyle::Dialog,
+            });
+            println!("{which}: {outcome:?}");
+            return;
+        }
+        // The Alt+Space launcher bar (#1839) — the SAME prompt as "open" above, presented as the
+        // frameless bar. Having both in one gallery is what makes the two presentations comparable at a
+        // glance, and it is how the bar gets photographed at each display scale without a global hotkey.
+        "bar" => {
+            let outcome = confirmer.request_input(&InputPrompt {
+                title: "DIG",
+                heading: "Open a DIG link",
+                body: "Paste a chia:// or urn:dig:chia: link and press Enter. Esc closes this.",
+                field_label: "DIG link:",
+                submit: "Open",
+                masked: false,
+                revealable: false,
+                style: InputStyle::Bar,
             });
             println!("{which}: {outcome:?}");
             return;
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, authorization, destroy, unopenable, input or passphrase"
+                "unknown window `{other}` — expected notice, claim, authorization, destroy, unopenable, input, passphrase, open or bar"
             );
             std::process::exit(2);
         }
