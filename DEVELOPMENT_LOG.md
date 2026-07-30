@@ -319,3 +319,29 @@ Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app
   — it queued them — but a locked session's input goes to the Winlogon desktop, so a global-hotkey test
   synthesizing its own keystroke times out looking exactly like a broken shortcut. Rule out the lock before
   believing that failure.
+
+## The wallet's receive address and balance (dig_ecosystem#1850)
+
+- **dig-app has NO chain source for a balance today, and the reason is one level down.**
+  `dig-node-control-interface` 0.2.0's method catalog carries no `control.wallet.*` entry, and the
+  `WalletEngine` seam has no production implementation — so a node can be running, reachable and healthy
+  and still be unable to answer "what do I hold?". That is why the wallet window distinguishes *no node*
+  from *a node that does not serve wallet reads*: the two look identical from the app and call for
+  completely different things from the user. Adding a balance read means adding the method to the node's
+  published contract first (release-first), not reaching for a chain from the app.
+- **An address that is merely `xch1`-shaped proves nothing.** Every wrong derivation — the wrong profile
+  index, a dropped `.derive_synthetic()`, a seed one bit out — produces a perfectly well-formed address
+  that receives nothing recoverable. The check that has teeth is a SECOND derivation, in-test, from
+  `chia-bls` + `chia-puzzle-types` + a locally-written bech32m encoder, plus a frozen literal. The encoder
+  is worth writing by hand: it makes the bech32m half independent of the `chia-wallet-sdk` `Address` type
+  that produced the value under test.
+- **Bech32 vs bech32m is a checksum constant, and both encode the same payload.** The two differ only in
+  the final XOR (`1` vs `0x2bc830a3`), so a wrong-variant address has an identical body and six different
+  trailing characters — invisible by eye. When reproducing an address vector out of tree, check the
+  constant before concluding the derivation drifted.
+- **A `PrintWindow` capture of a Win32 dialog can silently drop later-drawn text.** Photographing the
+  wallet window with `PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)` showed the first two paragraphs and an
+  empty slab where the rest belonged — indistinguishable from the body-clipping bug #49 fixed. A
+  DPI-aware `CopyFromScreen` over the same window rect showed the whole thing. Make the capturing process
+  DPI-aware (`SetProcessDpiAwarenessContext(-4)`) or its screen coordinates are scaled and it photographs
+  the wrong rectangle.

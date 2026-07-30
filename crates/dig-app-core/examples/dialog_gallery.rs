@@ -26,6 +26,9 @@
 //! | `open` | the tray's "Open…" DIG-link field (dig_ecosystem#1821) — unmasked, a link is not secret |
 //! | `passphrase` | the same field, masked |
 //! | `bar` | the Alt+Space launcher bar (dig_ecosystem#1839) — the same field, frameless and centred high |
+//! | `wallet-balance` | the wallet window with a balance that WAS read (dig_ecosystem#1850) |
+//! | `wallet-no-node` | the same window with no chain source — the balance is unknown, not zero |
+//! | `wallet-not-synced` | the same window with a source still catching up |
 //! | `unopenable` | the wedged-legacy-account explainer (dig_ecosystem#1799) — the ONLY window that state
 //!   offers, so its copy is checked by eye here as well as by its rendering test |
 //!
@@ -57,6 +60,40 @@ fn match_the_trays_dpi_awareness() {
     }
 }
 
+/// A balance source that always answers with the same figures — enough to DRAW the read-balance window
+/// without a node. It exists only for the gallery; nothing here reaches a chain.
+struct FixedBalances(dig_app_core::wallet::overview::Balances);
+
+impl dig_app_core::wallet::engine::WalletEngine for FixedBalances {
+    fn broadcast(
+        &self,
+        _: dig_app_core::wallet::engine::BroadcastRequest,
+    ) -> Result<dig_app_core::wallet::engine::BroadcastResponse, dig_app_core::wallet::WalletError>
+    {
+        unreachable!("the gallery never broadcasts")
+    }
+
+    fn coins(
+        &self,
+        _: dig_app_core::wallet::engine::CoinsRequest,
+    ) -> Result<dig_app_core::wallet::engine::CoinsResponse, dig_app_core::wallet::WalletError>
+    {
+        unreachable!("the wallet window reads balances, not coins")
+    }
+
+    fn balance(
+        &self,
+        request: dig_app_core::wallet::engine::BalanceRequest,
+    ) -> Result<dig_app_core::wallet::engine::BalanceResponse, dig_app_core::wallet::WalletError>
+    {
+        let balance = match request.asset {
+            dig_app_core::wallet::state::Asset::Xch => self.0.xch_mojos,
+            dig_app_core::wallet::state::Asset::Dig => self.0.dig_units,
+        };
+        Ok(dig_app_core::wallet::engine::BalanceResponse { balance })
+    }
+}
+
 fn main() {
     #[cfg(windows)]
     match_the_trays_dpi_awareness();
@@ -72,6 +109,36 @@ fn main() {
             body: "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4",
             acknowledge: "OK",
         }),
+        // The wallet window in the three states whose DIFFERENCE is the point (dig_ecosystem#1850): a
+        // balance that was read, and two that were not. A screenshot is how "an unknown balance never
+        // renders as a zero" is checked by eye as well as by its rendering tests — the failure being
+        // guarded against is a person reading `0` and concluding their money is gone.
+        "wallet-balance" | "wallet-no-node" | "wallet-not-synced" => {
+            use dig_app_core::wallet::overview::{
+                window_body, AddressReading, Balances, ChainSource, WalletOverview,
+            };
+
+            let address = AddressReading::Known(
+                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string(),
+            );
+            // A read balance needs a source that answers; the gallery supplies a fixed one, because what
+            // is being photographed is the WINDOW, not a chain read.
+            let funded = FixedBalances(Balances {
+                xch_mojos: 1_250_000_000_000,
+                dig_units: 3_400_000_000_000,
+            });
+            let source = match which.as_str() {
+                "wallet-balance" => ChainSource::Ready(&funded),
+                "wallet-not-synced" => ChainSource::NotSynced,
+                _ => ChainSource::Absent,
+            };
+            confirmer.show_notice(&NoticePrompt {
+                title: "DIG — Wallet",
+                heading: "This is your DIG wallet.",
+                body: &window_body(&WalletOverview::read(address, &source)),
+                acknowledge: "OK",
+            })
+        }
         // The enrolment retention claim: a genuine either/or where Cancel abandons setup.
         "claim" => confirmer.confirm_claim(&ClaimPrompt {
             title: "DIG — Confirm you saved it",

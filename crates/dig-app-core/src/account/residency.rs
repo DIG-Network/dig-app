@@ -248,12 +248,17 @@ mod tests {
         use rand_core::RngCore;
         let mut seed = [0u8; SEED_LEN];
         rand_core::OsRng.fill_bytes(&mut seed);
+        residency_from_seed(&seed)
+    }
+
+    /// Enrol a residency over an EXACT seed, so a test can pin what the account derives from.
+    fn residency_from_seed(seed: &[u8; SEED_LEN]) -> AccountResidency {
         let store = StdArc::new(AccountStore::new(StdArc::new(MemoryBackend::new())));
         let unlocked = AccountSession::enroll(
             store,
             AccountId::new("primary"),
             Password::new("residency-test-pw"),
-            &seed,
+            seed,
             ProfileIx::ROOT,
         )
         .unwrap();
@@ -286,6 +291,113 @@ mod tests {
             mine_residency.receiving_address().is_none(),
             "a locked residency must not derive an address from key material it no longer holds"
         );
+    }
+
+    /// The address the tray hands out is the address that actually RECEIVES — pinned against a SECOND,
+    /// independent derivation of the same seed.
+    ///
+    /// "It starts with `xch1`" proves nothing: money sent to a well-formed address for the wrong key is
+    /// gone. So this recomputes the whole chain here — canonical synthetic wallet key → standard p2
+    /// puzzle hash → bech32m — using chia-bls / chia-puzzle-types and a local bech32m encoder, touching
+    /// none of dig-account's code, and requires the residency to agree with it. A drifted profile index,
+    /// a dropped `derive_synthetic()`, or a swapped HRP all break this and only this.
+    ///
+    /// The literal is belt-and-braces on top: independently reproduced with an out-of-tree bech32m
+    /// implementation, and identical to dig-account's own frozen `GOLDEN_ADDRESS` for this seed. A
+    /// derivation change that moved BOTH implementations together would still have to move the literal.
+    #[test]
+    fn the_receiving_address_matches_an_independent_derivation_of_the_same_seed() {
+        const SEED: [u8; SEED_LEN] = [0x42; SEED_LEN];
+        const GOLDEN: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+
+        let derived = residency_from_seed(&SEED)
+            .receiving_address()
+            .expect("unlocked")
+            .expect("an address encodes");
+
+        assert_eq!(derived, independent_address(&SEED), "second implementation");
+        assert_eq!(derived, GOLDEN, "frozen cross-checked vector");
+
+        // Non-vacuity: the comparison above must be able to FAIL. An address derived from a seed one
+        // BIT away is well-formed, `xch1`-prefixed, indistinguishable by eye, and wrong — precisely
+        // the class of mistake that sends funds nowhere.
+        let mut near_miss = SEED;
+        near_miss[0] ^= 0x01;
+        assert_ne!(derived, independent_address(&near_miss));
+    }
+
+    /// Derive the canonical Chia receive address for `seed` at the root profile WITHOUT dig-account:
+    /// `master_to_wallet_unhardened(master, 0).derive_synthetic()` → `StandardArgs::curry_tree_hash` →
+    /// bech32m under the `xch` HRP.
+    fn independent_address(seed: &[u8]) -> String {
+        use chia_bls::{master_to_wallet_unhardened, SecretKey};
+        use chia_puzzle_types::{standard::StandardArgs, DeriveSynthetic};
+
+        let master = SecretKey::from_seed(seed);
+        let synthetic = master_to_wallet_unhardened(&master, ProfileIx::ROOT.0).derive_synthetic();
+        let puzzle_hash = StandardArgs::curry_tree_hash(synthetic.public_key());
+        bech32m("xch", puzzle_hash.to_bytes().as_ref())
+    }
+
+    /// A self-contained BIP-350 bech32m encoder, so the encoding half of the address is checked by
+    /// something other than the encoder under test.
+    fn bech32m(hrp: &str, data: &[u8]) -> String {
+        const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        const BECH32M_CONST: u32 = 0x2bc8_30a3;
+
+        fn polymod(values: &[u8]) -> u32 {
+            const GEN: [u32; 5] = [
+                0x3b6a_57b2,
+                0x2650_8e6d,
+                0x1ea1_19fa,
+                0x3d42_33dd,
+                0x2a14_62b3,
+            ];
+            let mut chk: u32 = 1;
+            for &v in values {
+                let top = chk >> 25;
+                chk = ((chk & 0x1ff_ffff) << 5) ^ u32::from(v);
+                for (i, g) in GEN.iter().enumerate() {
+                    if (top >> i) & 1 == 1 {
+                        chk ^= g;
+                    }
+                }
+            }
+            chk
+        }
+
+        // 8-bit bytes → 5-bit groups, zero-padded to a whole group (the payload is 32 bytes = 52
+        // groups + 4 padding bits, exactly as an address carries it).
+        let mut five_bit = Vec::new();
+        let (mut acc, mut bits) = (0u32, 0u32);
+        for &byte in data {
+            acc = (acc << 8) | u32::from(byte);
+            bits += 8;
+            while bits >= 5 {
+                bits -= 5;
+                five_bit.push(((acc >> bits) & 31) as u8);
+            }
+        }
+        if bits > 0 {
+            five_bit.push(((acc << (5 - bits)) & 31) as u8);
+        }
+
+        let mut values: Vec<u8> = hrp.bytes().map(|c| c >> 5).collect();
+        values.push(0);
+        values.extend(hrp.bytes().map(|c| c & 31));
+        values.extend_from_slice(&five_bit);
+        values.extend_from_slice(&[0; 6]);
+        let checksum = polymod(&values) ^ BECH32M_CONST;
+
+        let mut out = format!("{hrp}1");
+        for group in five_bit
+            .iter()
+            .copied()
+            .chain((0..6).map(|i| ((checksum >> (5 * (5 - i))) & 31) as u8))
+        {
+            out.push(CHARSET[group as usize] as char);
+        }
+        out
     }
 
     #[test]

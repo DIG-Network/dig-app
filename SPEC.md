@@ -254,9 +254,26 @@ The ICON MUST NOT be the only signal for a state: the tooltip MUST name the same
 who cannot distinguish the icons — or whose theme flattens them — still has the fact (§6.6).
 
 The menu MUST offer actions to: show the status details, set up an account, restore from a recovery phrase,
-unlock, lock now, reveal the recovery phrase, copy the DIG ID, replace the account (with a new one, or with
-one from a recovery phrase), remove the account, explain an account that cannot be opened, explain the
-on-chain DID, open the log folder, and quit.
+unlock, lock now, reveal the recovery phrase, copy the DIG ID, copy the receive address, show the wallet,
+replace the account (with a new one, or with one from a recovery phrase), remove the account, explain an
+account that cannot be opened, explain the on-chain DID, open the log folder, and quit.
+
+**The Wallet surface (MUST).** The Wallet submenu offers the receive address and a wallet window, and
+nothing that moves money — no tray action spends, so the absence of `Send` is structural rather than an
+`enabled: false` (§3.3, the money path). Binding rules:
+
+- The copied address MUST be the account's derived `xch1…` money address (§3.3's wallet key), never the
+  profile's identity public key. Funds sent to a well-formed address for the wrong key are unrecoverable,
+  so the derivation MUST be pinned against an independent derivation of the same seed.
+- A receive address is PUBLIC, so a state that merely WITHHOLDS the key — locked, or never given a
+  password — MUST still show the row, disabled, with its label naming that state's own remedy. Where no
+  address can exist at all — no account, or an account that cannot be opened — the row MUST be omitted and
+  the wallet window MUST explain the situation.
+- **A balance that could not be read MUST NOT be rendered as a zero.** The surface MUST distinguish a
+  balance READ from a chain source (where `0` means nothing is held) from one that is UNKNOWN, and every
+  unknown MUST name which thing is missing — no address, no node, a node that does not serve wallet reads,
+  a source still syncing, or a read that failed. Showing a zero for an unreadable balance is how a person
+  concludes their funds are gone, and is forbidden.
 
 The account has SIX user-visible states, and an implementation MUST distinguish all of them: this host cannot
 hold an account · no account yet · locked · **cannot be opened** · unlocked · unlocked with no recovery
@@ -297,9 +314,12 @@ Binding rules:
   An action whose precondition is unmet is shown DISABLED rather than hidden, so the capability's
   existence is discoverable — **but only when the label can say WHY.** A disabled row with no reason in it
   is a small unexplained mystery; where there is no reason worth printing, the row MUST be omitted instead.
-  A disabled row MUST also sit beside an ENABLED row that resolves it, so no state is a dead end. Two rows
-  currently qualify: setting up an account on a host with no per-application credential store, and revealing
-  the recovery phrase while the account is locked (whose remedy, `Unlock…`, is directly above it).
+  A disabled row MUST also sit beside an ENABLED row that resolves it, so no state is a dead end. Five rows
+  currently qualify: setting up an account on a host with no per-application credential store, plus
+  revealing the recovery phrase and copying the receive address in each of the two states that withhold key
+  material — locked (remedy: `Unlock…`) and never-given-a-password (remedy: `Set a password…`). A disabled
+  row's label MUST name the remedy that state actually has: offering "unlock first" to an account that has
+  never had a password names a control that cannot help.
 - **Every ENABLED item MUST be able to perform what its label says (MUST).** This is the strong form of the
   rule above, and it binds two cases that are easy to get wrong:
   - A capability that does not EXIST YET is either absent or shown DISABLED **with the reason in its
@@ -684,6 +704,14 @@ puzzle; that puzzle's tree hash is the wallet's `xch1…` receive address. The k
 `dig-account` and derived on demand from the unlocked account by the money path
 (`account::money::MoneyPath` over the `AccountResidency`); it is never stored per profile, never
 exposed to callers, and never crosses the IPC boundary to the engine.
+
+**Reading the wallet (normative).** The account's receive address is derived LIVE from the unlocked
+account (`AccountResidency::receiving_address`) and MUST fail closed — no address — once the account
+locks, so no surface can hand out an address read from key material a lock was meant to drop. A balance
+MUST be reported only when a chain source actually answered; otherwise the reading is UNKNOWN and carries
+the reason (no address · no node · a node without wallet reads · still syncing · the read failed). A
+partial read — one asset answered, another failed — is NOT a balance and MUST be reported as unknown,
+because showing the half that succeeded states a total the wallet does not have.
 
 **Spend building — chip35 only.** Every `$DIG` spend bundle is constructed by the canonical chip35
 spend builder (`chip35_dl_coin::build_dig_store_payment`); dig-app MUST NOT hand-roll a spend bundle.

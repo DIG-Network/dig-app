@@ -31,15 +31,15 @@
 //! for — **account management is reachable at all times**: creating, replacing, restoring and removing
 //! an account are offered whenever the host can hold one, never gated on the account being absent.
 //!
-//! **3. A row that IS legitimately disabled says why in its own label.** Three rows are disabled across
+//! **3. A row that IS legitimately disabled says why in its own label.** Five rows are disabled across
 //! the account states — `Set up my DIG Account (not supported on this system yet)` on a host with no
-//! per-application credential store, and the two `Show my recovery phrase (…)` rows naming what stands in
-//! the way (an unlock, or a password that has never been set). Each names its own reason, and each sits
-//! beside an ENABLED remedy (the management submenu; the `Unlock…` or `Set a password…` row directly
-//! above), so none is a dead end. That set is asserted by
-//! [`the_disabled_rows_are_exactly_the_two_that_name_their_reason`], because "rare" is the kind of claim
-//! that drifts silently — an earlier revision of this comment said "exactly one" while the model rendered
-//! two.
+//! per-application credential store, plus `Show my recovery phrase (…)` and `Copy my receive address (…)`
+//! in each of the two states that withhold key material, every one naming what stands in the way (an
+//! unlock, or a password that has never been set). Each sits beside an ENABLED remedy (the management
+//! submenu; the `Unlock…` or `Set a password…` row), so none is a dead end. That set is
+//! asserted by [`the_disabled_rows_are_exactly_the_ones_that_name_their_reason`], because "rare" is the
+//! kind of claim that drifts silently — an earlier revision of this comment said "exactly one" while the
+//! model rendered two.
 //!
 //! # Destroying custody is deliberately awkward
 //!
@@ -146,6 +146,14 @@ pub struct TrayView {
     pub account: Option<AccountState>,
     /// The root profile's stable id (the hex identity public key until the on-chain DID mint lands).
     pub profile_id: Option<String>,
+    /// The account's `xch1…` receive address, derived from its MONEY key, or `None` when there is no
+    /// unlocked account to derive one from (dig_ecosystem#1850).
+    ///
+    /// Deliberately a separate field from [`profile_id`](Self::profile_id) rather than a reuse of it: the
+    /// two are different keys, and the reason the Wallet menu carried no address row until now was that
+    /// only the identity key was on hand. A `Copy my receive address` wired to that would hand out a
+    /// string that receives nothing.
+    pub receive_address: Option<String>,
     /// The profile's **minted on-chain** `did:chia:` DID, or `None` when it has none.
     ///
     /// This must be set from evidence that a DID was actually minted on chain — never from a local
@@ -347,16 +355,20 @@ pub enum TrayAction {
     /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
     /// of one `enabled: false`.
     AboutDid,
-    /// EXPLAIN what the wallet is, what it can do today, and what it cannot.
+    /// Copy the account's `xch1…` receive address to the clipboard (dig_ecosystem#1850).
     ///
-    /// There is deliberately NO `Send`, and no `Copy my receive address` either. Spending needs the money
-    /// path, which is parked (#1702); the receive address needs a field [`TrayView`] does not yet carry —
-    /// it holds the identity public key, which is NOT a Chia address, and inventing a row that copies the
-    /// wrong string would be worse than having none.
+    /// The address comes from [`TrayView::receive_address`], which the shell fills from the account's own
+    /// MONEY key — never from [`profile_id`](TrayView::profile_id), which is the identity public key and
+    /// would be a confidently wrong string to hand someone who means to pay you. Offered only where an
+    /// address can exist; see [`wallet_actions`].
+    CopyReceiveAddress,
+    /// Show the wallet: the receive address, the balance (or precisely why it is not known), and what the
+    /// wallet cannot do yet.
     ///
-    /// Because no [`TrayAction`] can move funds or hand out an address, both facts are STRUCTURAL rather
-    /// than one `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid)
-    /// follows for minting (dig_ecosystem#1841).
+    /// There is deliberately no `Send`: spending needs the money path, which is parked (#1702). Because no
+    /// [`TrayAction`] can move funds, "the tray cannot spend" is STRUCTURAL rather than one
+    /// `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid) follows
+    /// for minting (dig_ecosystem#1841).
     AboutWallet,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
@@ -680,7 +692,7 @@ pub fn build(view: &TrayView) -> MenuModel {
         "Manage Account",
         management_actions(&account),
     ));
-    rows.push(MenuRow::submenu("Wallet", wallet_actions()));
+    rows.push(MenuRow::submenu("Wallet", wallet_actions(view, &account)));
     rows.push(MenuRow::submenu(
         "Security",
         security_actions(&account, view.second_factor),
@@ -795,6 +807,18 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
 
 /// **Wallet** — what the account can do with money, which today is receive and understand.
 ///
+/// # The address row
+///
+/// A receive address is PUBLIC, so a locked account is not a reason to drop the row — it is a reason to
+/// say so, and the label names the ONE thing in the way (rule 3), with the enabled `Unlock…` row sitting
+/// in Security as the remedy.
+///
+/// Two states have no row at all rather than a permanently-greyed one. With NO account there is no key
+/// to derive from and nothing to wait for, so [`AboutWallet`](TrayAction::AboutWallet) explains it in a
+/// window with room; with an UNOPENABLE account the key is unreachable and its urgent top-level row
+/// already gives the remedy. In both, a greyed row that could not say when it would work is exactly the
+/// dead end #1800 removed.
+///
 /// # Why there is no `Send`
 ///
 /// The money path is PARKED (#1702). A `Send…` row would therefore be permanently greyed, and a greyed row
@@ -805,12 +829,30 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
 ///
 /// The same reasoning already governs DIDs ([`AboutDid`](TrayAction::AboutDid)): the tray does not offer
 /// verbs the app cannot perform.
-fn wallet_actions() -> Vec<MenuRow> {
-    vec![MenuRow::action(
-        TrayAction::AboutWallet,
-        "About the DIG wallet…",
-        true,
-    )]
+fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
+    if account.exists() && !matches!(account, AccountState::Unopenable) {
+        rows.push(match &view.receive_address {
+            Some(_) => MenuRow::action(
+                TrayAction::CopyReceiveAddress,
+                "Copy my receive address",
+                true,
+            ),
+            // The reason differs by state, and naming the wrong remedy is as much a dead end as naming
+            // none: an account that has never had a password cannot be "unlocked", it must be given one.
+            None => MenuRow::action(
+                TrayAction::CopyReceiveAddress,
+                match account {
+                    AccountState::NeedsPassword => "Copy my receive address (set a password first)",
+                    _ => "Copy my receive address (unlock first)",
+                },
+                false,
+            ),
+        });
+        rows.push(MenuRow::Separator);
+    }
+    rows.push(MenuRow::action(TrayAction::AboutWallet, "My wallet…", true));
+    rows
 }
 
 /// **Security** — locking, and the custody-state explainers.
@@ -1074,12 +1116,21 @@ mod tests {
         AccountState::Unlocked { recoverable: false },
     ];
 
+    /// A derived-looking receive address for the fixture views. Its exact value does not matter here —
+    /// the derivation is proven in `account::residency`; what the menu cares about is present vs absent.
+    const FIXTURE_ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+
     fn view(account: AccountState) -> TrayView {
+        // Only an UNLOCKED account can derive an address, so the fixture mirrors that rather than handing
+        // every state an address the shell could never have produced for it.
+        let receive_address =
+            matches!(account, AccountState::Unlocked { .. }).then(|| FIXTURE_ADDRESS.to_string());
         TrayView {
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
             account: Some(account),
+            receive_address,
             profile_id: Some("a".repeat(96)),
             did: None,
             second_factor: false,
@@ -2150,8 +2201,8 @@ mod tests {
         assert!(details_text(&TrayView::default()).contains("not set up yet"));
     }
 
-    /// **The count in the module docs, asserted rather than claimed.** Exactly two rows are disabled across
-    /// the five account states, and each one is in the state that explains it.
+    /// **The set in the module docs, asserted rather than claimed.** Exactly five rows are disabled
+    /// across the account states, and each one is in the state that explains it.
     ///
     /// A count is precisely the kind of claim that drifts as rows move: an earlier revision of the module
     /// docs said "exactly one" while the model already rendered two. Pinning it means the docs, the SPEC and
@@ -2161,7 +2212,7 @@ mod tests {
     /// be satisfied by two greyed rows in one state and none in the other — which would leave a state with a
     /// dead end and no remedy beside it.
     #[test]
-    fn the_disabled_rows_are_exactly_the_two_that_name_their_reason() {
+    fn the_disabled_rows_are_exactly_the_ones_that_name_their_reason() {
         let mut disabled = Vec::new();
         for account in EVERY_STATE {
             for (label, enabled) in build(&view(account.clone())).all_actions() {
@@ -2183,8 +2234,16 @@ mod tests {
                     "Show my recovery phrase (unlock first)".to_string()
                 ),
                 (
+                    "locked".to_string(),
+                    "Copy my receive address (unlock first)".to_string()
+                ),
+                (
                     "needs a password — anyone using this computer can open it".to_string(),
                     "Show my recovery phrase (set a password first)".to_string()
+                ),
+                (
+                    "needs a password — anyone using this computer can open it".to_string(),
+                    "Copy my receive address (set a password first)".to_string()
                 ),
             ],
             "the disabled set changed; update the module docs and SPEC §3.1c to match"
@@ -2209,6 +2268,54 @@ mod tests {
             account_state(true, AtRest::Present, None),
             AccountState::Locked
         );
+    }
+
+    /// **The address row copies the MONEY key's address, and nothing else.**
+    ///
+    /// The fixture is the whole point: `profile_id` is present in EVERY state, so an implementation that
+    /// wired the row to the identity public key — the mistake #1841 refused to make — would offer an
+    /// enabled `Copy my receive address` for a locked account too, and pass any test that only checked
+    /// the unlocked one. Varying ONLY `receive_address` is what makes the row's source observable.
+    #[test]
+    fn the_copy_address_row_follows_the_address_and_not_the_identity_key() {
+        let unlocked = build(&view(AccountState::Unlocked { recoverable: true }));
+        assert!(unlocked.is_enabled(TrayAction::CopyReceiveAddress));
+
+        let locked_view = view(AccountState::Locked);
+        assert!(
+            locked_view.profile_id.is_some() && locked_view.receive_address.is_none(),
+            "the fixture must hold an identity key and no address, or it cannot tell them apart"
+        );
+        let locked = build(&locked_view);
+        assert!(
+            locked.offers(TrayAction::CopyReceiveAddress),
+            "an address is public — being locked is a reason to explain, not to hide the row"
+        );
+        assert!(!locked.is_enabled(TrayAction::CopyReceiveAddress));
+        assert!(
+            locked.is_enabled(TrayAction::Unlock),
+            "the label names `unlock first`, so the remedy must be clickable"
+        );
+    }
+
+    /// The states with no derivable address at all get an EXPLANATION, never a greyed row that cannot say
+    /// when it would work.
+    ///
+    /// Both states are checked together because they fail differently: a brand-new user has nothing to
+    /// wait for, and an unopenable account's key is gone — neither is "unlock first".
+    #[test]
+    fn a_wallet_with_no_derivable_address_explains_instead_of_greying_a_row() {
+        for account in [AccountState::Absent, AccountState::Unopenable] {
+            let menu = build(&view(account.clone()));
+            assert!(
+                !menu.offers(TrayAction::CopyReceiveAddress),
+                "{account:?}: a row that can never work is a dead end, not a menu item"
+            );
+            assert!(
+                menu.is_enabled(TrayAction::AboutWallet),
+                "{account:?}: the wallet must still be able to explain itself"
+            );
+        }
     }
 
     /// Neither disabled row is a DEAD END: each state that has one also offers an enabled row that resolves
