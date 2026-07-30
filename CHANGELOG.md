@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.3.0] - 2026-07-30
+
+### Features
+- **confirm:** Draw every Windows consent window ourselves, with labelled buttons (#42)- **tray:** The five named top-level options (#44)- **tray:** A Wallet submenu on the spine (#45)- **hotkey:** Alt+Space opens a floating URN bar from any application (#46)- **security:** Set up two-factor codes from the tray, with a real enrolment window (#48)- **account:** An account exists only when the user asks, and unlocking requires their password (#47)- **wallet:** A real receive address, and a balance that never lies about being unknown (#52)- **2fa:** Show a scannable QR code during two-factor enrolment (#51)- **pairing:** Third-party apps pair with a code, and the user can see and revoke them (#50)
+
+### Bug Fixes
+- **confirm:** One layout walk, and buttons sized to their labels (#43)- **confirm:** Show the WHOLE recovery phrase — 16 of 24 words were invisible (#49)- **confirm:** A body that does not fit now SCROLLS — the phrase still clipped on most displays (#53)
+
 ## [4.2.0] - 2026-07-29
 
 ### Features
