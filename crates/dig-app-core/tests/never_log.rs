@@ -393,7 +393,7 @@ fn the_second_factor_key_and_recovery_codes_never_reach_a_log_record() {
     let confirmer = EnrolsSecondFactor::new();
 
     let logged = capture(|| {
-        let (residency, phrase) = boot(backend.clone(), MemCred::seeded());
+        let (residency, phrase) = boot(backend.clone());
         let booted = finish_boot(dir.path(), residency, phrase);
         let vault =
             dig_app_core::account::boot::second_factor_vault_for(dir.path(), &booted.residency)

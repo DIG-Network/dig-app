@@ -20,7 +20,9 @@
 
 use zeroize::Zeroizing;
 
-use crate::confirm::{ConfirmDecision, InputOutcome, InputPrompt, NativeConfirmer, NoticePrompt};
+use crate::confirm::{
+    ConfirmDecision, InputOutcome, InputPrompt, InputStyle, NativeConfirmer, NoticePrompt,
+};
 
 /// The shortest account password accepted.
 ///
@@ -183,6 +185,10 @@ fn ask(
         // be checked at all if they are typed blind (`SPEC.md` §3.1d).
         masked: true,
         revealable: false,
+        // A titled dialog, never the frameless launcher bar: this window is asking for the secret that
+        // opens the master seed, and it needs the room to say which account it is for and why. A bar
+        // that appeared asking for a password would be indistinguishable from something spoofing one.
+        style: InputStyle::Dialog,
     }) {
         InputOutcome::Provided(text) => Ok(text),
         InputOutcome::Cancelled => Err(PasswordOutcome::Cancelled),

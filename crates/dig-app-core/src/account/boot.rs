@@ -158,7 +158,7 @@ pub fn second_factor_vault_for(
 /// In production the ceremony asks the user for their password, so a signature after an idle lock costs
 /// a password entry. That is the point: before #1817 this path re-opened the seed from the credential
 /// store with no human involved, which made the lock decorative.
-pub fn reunlock_into<A>
+pub fn reunlock_into<A>(
     backend: Arc<dyn KeychainBackend>,
     ceremony: A,
     account: AccountId,
@@ -668,6 +668,7 @@ mod tests {
         for path in planted {
             assert!(!path.exists(), "{} survived the discard", path.display());
         }
+    }
 
     /// **The #1817 core.** An account sealed under the password its owner chose must NOT open under a
     /// different one — the property that makes "Unlock…" a gate rather than a ceremony.
