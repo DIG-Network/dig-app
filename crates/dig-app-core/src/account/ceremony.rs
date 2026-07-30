@@ -142,6 +142,52 @@ impl<C: CredentialStore + Send + Sync> AuthCeremony for CredentialCeremony<C> {
     }
 }
 
+/// An [`AuthCeremony`] over a password the caller ALREADY holds.
+///
+/// It asks nothing and decides nothing — it hands over the bytes it was given. That makes it the right
+/// seam for the two callers that legitimately have a password in hand and no user to ask:
+///
+/// - [`migration`](crate::account::migration), which has just read the retired machine password out of
+///   the credential store and needs to open the account with it once;
+/// - tests, which stand in for a person typing.
+///
+/// It is deliberately NOT a way to skip the password prompt: it cannot obtain a password, only relay
+/// one, so anything using it must already have solved the custody question elsewhere. It refuses spend
+/// confirmations outright, so it can never become a silent money path.
+#[doc(hidden)]
+pub struct PreCollectedPassword(Zeroizing<Vec<u8>>);
+
+impl PreCollectedPassword {
+    /// Relay `password` on every unlock. The bytes are held in a scrubbing buffer.
+    pub fn new(password: impl AsRef<[u8]>) -> Self {
+        Self(Zeroizing::new(password.as_ref().to_vec()))
+    }
+}
+
+#[async_trait]
+impl AuthCeremony for PreCollectedPassword {
+    async fn collect_unlock_factors(
+        &self,
+        _account: &AccountId,
+        _reason: Option<&str>,
+    ) -> Result<AuthFactors, CeremonyError> {
+        Ok(AuthFactors::password_only(Password::new(&self.0)))
+    }
+
+    async fn confirm_spend(
+        &self,
+        _account: &AccountId,
+        _profile: ProfileIx,
+        _summary: &SpendSummary,
+    ) -> Result<SpendDecision, CeremonyError> {
+        // Refusing (rather than approving) keeps this unusable as a money path if it is ever wired
+        // somewhere it does not belong.
+        Err(CeremonyError::Unavailable(
+            "a pre-collected password does not authorize spends".to_string(),
+        ))
+    }
+}
+
 /// Which password question a [`PromptedCeremony`] puts to the user.
 ///
 /// A ceremony cannot work this out for itself: `open_or_enroll` calls the SAME
@@ -212,15 +258,13 @@ impl AuthCeremony for PromptedCeremony {
         _reason: Option<&str>,
     ) -> Result<AuthFactors, CeremonyError> {
         let outcome = match &self.intent {
-            PasswordIntent::Establish { purpose } => {
-                establish_password(&*self.confirmer, purpose)
-            }
+            PasswordIntent::Establish { purpose } => establish_password(&*self.confirmer, purpose),
             PasswordIntent::Unlock { reason } => request_password(&*self.confirmer, reason),
         };
         match outcome {
-            PasswordOutcome::Provided(text) => Ok(AuthFactors::password_only(Password::new(
-                text.as_bytes(),
-            ))),
+            PasswordOutcome::Provided(text) => {
+                Ok(AuthFactors::password_only(Password::new(text.as_bytes())))
+            }
             // Fail-closed, and DISTINCTLY: a cancellation is the user's choice, while an undrawable
             // window is the host's inability — the boot reports them differently.
             PasswordOutcome::Cancelled => Err(CeremonyError::Cancelled),
@@ -593,9 +637,7 @@ mod tests {
             Arc::new(TypingConfirmer::refusing(
                 crate::confirm::InputOutcome::Cancelled,
             )),
-            PasswordIntent::Unlock {
-                reason: "r".into(),
-            },
+            PasswordIntent::Unlock { reason: "r".into() },
         );
         assert!(matches!(
             ceremony.collect_unlock_factors(&account(), None).await,
@@ -612,9 +654,7 @@ mod tests {
             Arc::new(TypingConfirmer::refusing(
                 crate::confirm::InputOutcome::Unavailable,
             )),
-            PasswordIntent::Unlock {
-                reason: "r".into(),
-            },
+            PasswordIntent::Unlock { reason: "r".into() },
         );
         assert!(matches!(
             ceremony.collect_unlock_factors(&account(), None).await,

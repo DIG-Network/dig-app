@@ -32,7 +32,7 @@ use dig_account::{AccountId, AccountSession, ProfileIx};
 use dig_session::{KeychainBackend, Password};
 
 use crate::account::boot::{assemble_residency, vault_for, DEFAULT_ACCOUNT_ID};
-use crate::account::ceremony::{machine_password_key, CredentialCeremony};
+use crate::account::ceremony::{machine_password_key, PreCollectedPassword};
 use crate::account::lifecycle::{account_store, PhrasePresenter, RetentionDecision, Seeding};
 use crate::account::recovery::RecoveryPhrase;
 use crate::keystore::CredentialStore;
@@ -94,7 +94,7 @@ pub fn is_sealed_under_machine_password<C: CredentialStore>(cred: &C, account: &
 ///
 /// The credential entry is deleted LAST, and only after the new seal has been proven to open, because
 /// deleting it first would strand the account if any later step failed.
-pub fn reseal_under<C: CredentialStore + Clone + Send + Sync + 'static>(
+pub fn reseal_under<C: CredentialStore>(
     backend: Arc<dyn KeychainBackend>,
     cred: &C,
     account: &AccountId,
@@ -111,7 +111,7 @@ pub fn reseal_under<C: CredentialStore + Clone + Send + Sync + 'static>(
     // happen before anything is deleted.
     let opened = assemble_residency(
         backend.clone(),
-        CredentialCeremony::new(cred.clone()),
+        PreCollectedPassword::new(old.as_bytes()),
         account.clone(),
         Seeding::NewPhrase(&NeverEnrols),
     );
@@ -129,7 +129,9 @@ pub fn reseal_under<C: CredentialStore + Clone + Send + Sync + 'static>(
         }
         Some(Err(e)) => {
             residency.lock_all();
-            return MigrationOutcome::Failed(format!("the recovery-phrase vault did not open: {e}"));
+            return MigrationOutcome::Failed(format!(
+                "the recovery-phrase vault did not open: {e}"
+            ));
         }
     };
     let seed = phrase.master_seed();
@@ -172,6 +174,49 @@ pub fn reseal_under<C: CredentialStore + Clone + Send + Sync + 'static>(
     MigrationOutcome::Migrated
 }
 
+/// Re-seal THIS host's default account under `chosen` — the production wrapper.
+///
+/// Wires the host's real [`OsCredentialStore`](crate::keystore::OsCredentialStore) and per-user
+/// [`FileBackend`](dig_session::FileBackend), so the tray shell states the intent and this module owns
+/// every piece of platform plumbing (and stays the single audited place custody is re-sealed).
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn adopt_user_password(brand_dir: &Path, chosen: Password) -> MigrationOutcome {
+    use crate::account::boot::DEFAULT_ACCOUNT_ID;
+    use crate::keystore::OsCredentialStore;
+    use dig_session::FileBackend;
+
+    let Some(cred) = OsCredentialStore::open(DEFAULT_ACCOUNT_ID) else {
+        return MigrationOutcome::NotNeeded;
+    };
+    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    reseal_under(backend, &cred, &default_account(), brand_dir, chosen)
+}
+
+/// A host with no per-application credential store never had a machine password to migrate off.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn adopt_user_password(_brand_dir: &Path, _chosen: Password) -> MigrationOutcome {
+    MigrationOutcome::NotNeeded
+}
+
+/// Whether THIS host's default account is still sealed under the machine-generated password.
+///
+/// Cheap and side-effect-free — one credential-store lookup, no unlock and no prompt — so the tray may
+/// ask it on a repaint.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn host_account_needs_a_password() -> bool {
+    use crate::account::boot::DEFAULT_ACCOUNT_ID;
+    use crate::keystore::OsCredentialStore;
+
+    OsCredentialStore::open(DEFAULT_ACCOUNT_ID)
+        .is_some_and(|cred| is_sealed_under_machine_password(&cred, &default_account()))
+}
+
+/// See [`host_account_needs_a_password`].
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn host_account_needs_a_password() -> bool {
+    false
+}
+
 /// The account id the app migrates — the one account the tray boots.
 pub fn default_account() -> AccountId {
     AccountId::new(DEFAULT_ACCOUNT_ID)
@@ -181,6 +226,7 @@ pub fn default_account() -> AccountId {
 mod tests {
     use super::*;
     use crate::account::boot::finish_boot;
+    use crate::account::ceremony::CredentialCeremony;
     use crate::account::lifecycle::PhrasePresenter;
     use crate::keystore::KeystoreError;
     use dig_ipc_protocol::signer::SessionSigner;
@@ -228,7 +274,7 @@ mod tests {
     /// computed value, not a hard-coded secret.
     fn chosen() -> Password {
         use sha2::{Digest, Sha256};
-        Password::new(Sha256::digest(b"the-password-they-chose").as_slice())
+        Password::new(&Sha256::digest(b"the-password-they-chose")[..])
     }
 
     /// Build a machine (a backend + credential store + brand dir) holding an account enrolled the OLD
@@ -262,10 +308,7 @@ mod tests {
 
     /// Open the account with `password` and report the identity it derives, or `None` if it will not
     /// open. This is the whole observable question a migration must answer correctly, from both sides.
-    fn opens_with(
-        backend: Arc<dyn KeychainBackend>,
-        password: &Password,
-    ) -> Option<String> {
+    fn opens_with(backend: Arc<dyn KeychainBackend>, password: &Password) -> Option<String> {
         use crate::account::auth::{AuthCeremony, CeremonyError};
         use async_trait::async_trait;
         use dig_account::{AuthFactors, SpendDecision, SpendSummary};
@@ -330,7 +373,9 @@ mod tests {
             "the machine password must no longer open the account"
         );
         assert!(
-            cred.get(&machine_password_key(&account())).unwrap().is_none(),
+            cred.get(&machine_password_key(&account()))
+                .unwrap()
+                .is_none(),
             "the machine password must be removed from the credential store"
         );
     }
@@ -381,7 +426,9 @@ mod tests {
         )
         .unwrap();
         let before = residency.signing_public_key_hex(ProfileIx::ROOT).unwrap();
-        finish_boot(dir.path(), residency, phrase).residency.lock_all();
+        finish_boot(dir.path(), residency, phrase)
+            .residency
+            .lock_all();
 
         assert_eq!(
             reseal_under(
@@ -424,7 +471,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            reseal_under(backend.clone(), &cred, &account(), empty_dir.path(), chosen()),
+            reseal_under(
+                backend.clone(),
+                &cred,
+                &account(),
+                empty_dir.path(),
+                chosen()
+            ),
             MigrationOutcome::NoRecoveryPhrase
         );
 
@@ -434,7 +487,9 @@ mod tests {
             "an account that cannot be migrated must still be there and still open"
         );
         assert!(
-            cred.get(&machine_password_key(&account())).unwrap().is_some(),
+            cred.get(&machine_password_key(&account()))
+                .unwrap()
+                .is_some(),
             "the password that still opens the account must not be deleted"
         );
     }
@@ -498,6 +553,9 @@ mod tests {
             Seeding::NewPhrase(&NeverEnrols),
         )
         .unwrap();
-        assert!(residency.signer(ProfileIx::ROOT).try_sign(b"challenge").is_some());
+        assert!(residency
+            .signer(ProfileIx::ROOT)
+            .try_sign(b"challenge")
+            .is_some());
     }
 }

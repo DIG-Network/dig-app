@@ -262,7 +262,10 @@ mod tests {
             unreachable!("collecting a password never signs")
         }
         fn show_notice(&self, prompt: &NoticePrompt<'_>) -> ConfirmDecision {
-            self.notices.lock().unwrap().push(prompt.heading.to_string());
+            self.notices
+                .lock()
+                .unwrap()
+                .push(prompt.heading.to_string());
             self.notice_decision
         }
         fn request_input(&self, prompt: &InputPrompt<'_>) -> InputOutcome {
@@ -342,7 +345,11 @@ mod tests {
             OTHER,
             "the password that survives must be the one typed twice in agreement"
         );
-        assert_eq!(confirmer.asked_count(), 4, "the mismatch forced a full re-ask");
+        assert_eq!(
+            confirmer.asked_count(),
+            4,
+            "the mismatch forced a full re-ask"
+        );
         assert_eq!(
             confirmer.notices.lock().unwrap().len(),
             1,
@@ -372,8 +379,15 @@ mod tests {
         let at_bound = "b".repeat(MIN_PASSWORD_LEN);
         let confirmer = ScriptedInput::typing(&[&at_bound, &at_bound]);
 
-        assert_eq!(provided(establish_password(&confirmer, "purpose")), at_bound);
-        assert_eq!(confirmer.asked_count(), 2, "at the bound nothing is re-asked");
+        assert_eq!(
+            provided(establish_password(&confirmer, "purpose")),
+            at_bound
+        );
+        assert_eq!(
+            confirmer.asked_count(),
+            2,
+            "at the bound nothing is re-asked"
+        );
     }
 
     /// The length floor counts CHARACTERS, not bytes: a 10-character passphrase in a non-Latin script
@@ -384,7 +398,10 @@ mod tests {
         // Nine multi-byte characters: 27 bytes, comfortably over a byte-counted floor, and one
         // character UNDER the real one.
         let nine_chars = "パスワードテスト用語".chars().take(9).collect::<String>();
-        assert!(nine_chars.len() > MIN_PASSWORD_LEN, "the fixture must pass a byte count");
+        assert!(
+            nine_chars.len() > MIN_PASSWORD_LEN,
+            "the fixture must pass a byte count"
+        );
         let confirmer = ScriptedInput::typing(&[&nine_chars, GOOD, GOOD]);
 
         assert_eq!(provided(establish_password(&confirmer, "purpose")), GOOD);

@@ -525,8 +525,10 @@ pub fn status(view: &TrayView) -> TrayStatus {
     let account = view.account();
     let glyph = if !view.running {
         TrayGlyph::Starting
-    } else if matches!(account, AccountState::Unopenable | AccountState::NeedsPassword)
-        || !account.exists()
+    } else if matches!(
+        account,
+        AccountState::Unopenable | AccountState::NeedsPassword
+    ) || !account.exists()
     {
         TrayGlyph::NeedsAccount
     } else if !matches!(account, AccountState::Unlocked { .. }) {
@@ -952,11 +954,6 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     rows
 }
 
-/// The DID explainer's label.
-///
-/// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
-/// DID is a real spend (§3.7 — mainnet is real money), and names it optional so an absent DID never reads
-/// as something they have failed to do. It must not promise to CREATE one: nothing can mint yet.
 /// The `Open URL…` row, carrying the global shortcut when there IS one.
 ///
 /// A shortcut nobody can discover is a shortcut nobody uses, and a tray menu is the one place every user
@@ -970,12 +967,20 @@ fn open_url_label(view: &TrayView) -> String {
     }
 }
 
-const DID_LABEL: &str = "About on-chain DIDs (optional, costs XCH)…";
+/// The DID explainer's label.
+///
+/// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
+/// DID is a real spend (§3.7 — mainnet is real money). It deliberately no longer says "optional": a DID
+/// is the bedrock of a DIG Account (dig_ecosystem#1820), and calling it optional was the copy that made a
+/// required step look like a nicety. It must not promise to CREATE one either: nothing can mint yet.
+const DID_LABEL: &str = "About on-chain DIDs (required, costs XCH)…";
 
-/// The DID line. Absent is the NORMAL state — minting one costs money and is never automatic — so it is
-/// phrased as a choice not yet made, not as an error.
+/// The DID line. Absent is the state of every account today, because minting is not implemented — so it
+/// names the remaining step AND why it cannot be taken, rather than reading as something the user has
+/// neglected (dig_ecosystem#1820).
 fn did_label(did: Option<&str>) -> String {
-    did.unwrap_or("not created yet (optional)").to_string()
+    did.unwrap_or("not created yet — on-chain minting is not available in this version")
+        .to_string()
 }
 
 /// A DIG ID abbreviated for display beside a full copy. The full value goes to the clipboard and into
@@ -1029,7 +1034,9 @@ impl fmt::Display for AccountState {
             AccountState::Absent => "not set up yet",
             AccountState::Locked => "locked",
             AccountState::Unopenable => "cannot be opened on this computer",
-            AccountState::NeedsPassword => "needs a password — anyone using this computer can open it",
+            AccountState::NeedsPassword => {
+                "needs a password — anyone using this computer can open it"
+            }
             AccountState::Unlocked { recoverable: true } => "unlocked",
             AccountState::Unlocked { recoverable: false } => "unlocked — NO recovery phrase",
         };
@@ -1585,7 +1592,10 @@ mod tests {
             assert!(menu.is_enabled(TrayAction::AboutDid), "{account:?}");
             let label = menu.label_of(TrayAction::AboutDid).unwrap();
             assert!(label.contains("XCH"), "{account:?}: {label}");
-            assert!(label.contains("optional"), "{account:?}: {label}");
+            // "required", never "optional": a DID is the bedrock of the account (dig_ecosystem#1820),
+            // and the retired label described the one mandatory remaining step as a nicety.
+            assert!(label.contains("required"), "{account:?}: {label}");
+            assert!(!label.contains("optional"), "{account:?}: {label}");
         }
     }
 
@@ -1913,7 +1923,9 @@ mod tests {
     fn an_absent_did_is_never_dressed_up_as_a_minted_one() {
         let details = details_text(&view(AccountState::Unlocked { recoverable: true }));
         assert!(
-            details.contains("On-chain DID: not created yet (optional)"),
+            details.contains(
+                "On-chain DID: not created yet — on-chain minting is not available in this version"
+            ),
             "{details}"
         );
     }

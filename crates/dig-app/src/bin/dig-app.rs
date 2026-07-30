@@ -31,15 +31,18 @@
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, boot_existing_account, discard_account, open_account, reboot_reunlock,
+    account_exists, discard_account, open_account, reboot_reunlock, unlock_existing_account,
     vault_for, BootedAccount, DiscardOutcome,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::journey::{
-    ask_for_phrase, AccountCustodian, Replacement, WindowedPresenter,
+    ask_for_phrase, first_run_wizard, AccountCustodian, FirstRunOutcome, Replacement,
+    WindowedPresenter,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
+#[cfg(feature = "tray")]
+use dig_app_core::account::migration;
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
@@ -166,8 +169,12 @@ fn main() {
             // A `--no-default-features` (headless) build has no tray, no confirm windows and therefore
             // no way for a human to authorize a signature, so it starts no signing channel at all
             // rather than one that could only ever fail closed.
+            // The app starts with the account LOCKED, like a password manager (dig_ecosystem#1817).
+            // Unlocking needs the user's password, so it happens when they ask for it — never at login
+            // — and the APP-SIGN loopback stays down until then rather than serving with a seed it has
+            // no business holding unprompted.
             #[cfg(feature = "tray")]
-            let tray_session = start_sign_service(&env);
+            let tray_session: Option<TraySession> = None;
             #[cfg(not(feature = "tray"))]
             let tray_session = None::<()>;
             run_tray_or_headless(agent, tray_session, env)
@@ -275,15 +282,21 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     };
 
     // Unlock the master-HD account (#1547): the seed is sealed in a per-user file backend under the
-    // OS-credential-store password, and housed in a lockable residency. The residency owns the sole
-    // unlocked account; the live-view signer + sealer below read through it, so a tray lock relocks
-    // them at once.
+    // password THE USER CHOSE, and housed in a lockable residency. The residency owns the sole unlocked
+    // account; the live-view signer + sealer below read through it, so a tray lock relocks them at once.
     //
     // This path NEVER enrols (dig_ecosystem#1752). A host with no account yet gets no session, and the
     // tray offers "Set up my DIG Account…" — because creating an account means showing a recovery
     // phrase, and a recovery-phrase window that appears unbidden at login is a window people click
     // away. Setup is something the user asks for.
-    let booted = boot_existing_account(&brand_dir)?;
+    //
+    // It also never runs at START-UP any more (dig_ecosystem#1817): it draws a password window, so it
+    // runs only when the user clicks `Unlock…` (or a signature needs the account). A password prompt at
+    // login would be exactly the unbidden window the paragraph above rejects.
+    let booted = unlock_existing_account(
+        &brand_dir,
+        "DIG needs your password to unlock your account.",
+    )?;
     let BootedAccount {
         residency,
         profile_id,
@@ -377,6 +390,10 @@ fn account_state(
     let at_rest = match session {
         Some(_) => AtRest::Present,
         None if !brand_dir(env).is_some_and(|dir| account_exists(&dir)) => AtRest::None,
+        // An account still sealed under the machine-generated password has no user-known secret on it.
+        // Reporting it as merely `Locked` would offer `Unlock…`, which asks for a password its owner
+        // has never chosen (dig_ecosystem#1817).
+        None if account_needs_a_password() => AtRest::PresentUnderMachinePassword,
         // An account IS here and we tried to open it and could not. Reporting this as merely `Locked` would
         // offer an `Unlock…` that is guaranteed to fail — the silent-signing-outage defect (#1799 review).
         None if boot_failed => AtRest::PresentButUnopenable,
@@ -393,29 +410,124 @@ fn account_state(
 #[cfg(feature = "tray")]
 fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
     let dir = brand_dir(env)?;
-    let presenter = WindowedPresenter::new(confirmer);
-    if open_account(&dir, Seeding::NewPhrase(&presenter)).is_none() {
-        notify(
-            confirmer,
-            "DIG — Setup not completed",
-            "Your DIG Account was not created.",
-            "Nothing was changed on this computer. You can start again from the DIG tray menu \
-             whenever you are ready.",
-        );
-        return None;
+
+    // The FIRST-RUN flow (dig_ecosystem#1826) owns the order and the copy; this closure is its one
+    // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
+    // closure produced, which is why it hands back the account's REAL receiving address rather than a
+    // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
+    let outcome = first_run_wizard(confirmer, || {
+        let presenter = WindowedPresenter::new(confirmer);
+        let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
+        let address = booted.residency.receiving_address()?.ok()?;
+        use dig_app_core::session_lock::SessionKeys;
+        // The account was created unlocked. Relock it here so the tray's ONE unlock path — the user
+        // typing the password they just chose — is also the first proof that password works.
+        booted.residency.lock_all();
+        Some(address)
+    });
+
+    match outcome {
+        // Re-open through the normal unlock path so the session, signer, sealer and screen-lock guard
+        // are assembled exactly as on every other unlock — one code path, no special-cased first run.
+        FirstRunOutcome::WalletCreated => start_sign_service(env),
+        // A person who chose to stop must not be shown an error; only a genuine failure gets one.
+        FirstRunOutcome::Declined => None,
+        FirstRunOutcome::Failed => {
+            notify(
+                confirmer,
+                "DIG — Setup not completed",
+                "Your DIG Account was not created.",
+                "Nothing was changed on this computer. You can start again from the DIG tray menu \
+                 whenever you are ready.",
+            );
+            None
+        }
     }
-    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
-    // assembled exactly as they are on every other start — one code path, no special-cased first run.
-    let session = start_sign_service(env);
-    if session.is_some() {
-        notify(
-            confirmer,
-            "DIG — Account ready",
-            "Your DIG Account is set up.",
-            "You can view your recovery phrase again at any time from the DIG tray menu.",
-        );
+}
+
+/// Whether this host's account is still sealed under the machine-generated password.
+#[cfg(feature = "tray")]
+fn account_needs_a_password() -> bool {
+    migration::host_account_needs_a_password()
+}
+
+/// Give an account that is still sealed under the machine-generated password one the USER chooses
+/// (dig_ecosystem#1817).
+///
+/// The SAME seed is re-sealed, so the account keeps its identity, its address, its recovery phrase and
+/// everything sealed under it — only the lock changes. Every failure arm leaves the account exactly as
+/// it was; see [`migration::reseal_under`] for the ordering that guarantees it.
+#[cfg(feature = "tray")]
+fn adopt_user_password(
+    env: &AppEnvironment,
+    confirmer: &dyn NativeConfirmer,
+) -> Option<TraySession> {
+    use dig_app_core::account::lifecycle::password_from_bytes;
+    use dig_app_core::account::password::{establish_password, PasswordOutcome};
+
+    let dir = brand_dir(env)?;
+    let chosen = match establish_password(
+        confirmer,
+        "Choose a password for your DIG Account. Your account, address and recovery phrase all stay \
+         exactly as they are — only the lock on them changes.",
+    ) {
+        PasswordOutcome::Provided(text) => password_from_bytes(text.as_bytes()),
+        // Backing out changes nothing at all, and needs no error window.
+        PasswordOutcome::Cancelled => return None,
+        PasswordOutcome::Unavailable => {
+            notify(
+                confirmer,
+                "DIG — Could not ask for a password",
+                "DIG could not open a window to ask for a password.",
+                "Nothing was changed. The log folder, in this menu, has the details.",
+            );
+            return None;
+        }
+    };
+
+    match migration::adopt_user_password(&dir, chosen) {
+        migration::MigrationOutcome::Migrated => {
+            notify(
+                confirmer,
+                "DIG — Password set",
+                "Your DIG Account now has your password on it.",
+                "It is the same account, with the same address and the same 24 words. From now on DIG \
+                 will ask for this password whenever it needs to unlock your account, and nothing on \
+                 this computer can open it without you.",
+            );
+            start_sign_service(env)
+        }
+        migration::MigrationOutcome::NotNeeded => start_sign_service(env),
+        // The one arm that cannot be fixed in place: with no stored recovery phrase the seed cannot be
+        // read back out, so there is nothing to re-seal. The account is untouched, and the remedy —
+        // replacing it — is NAMED, because advice pointing at a control the user cannot find is a dead
+        // end (dig_ecosystem#1800).
+        migration::MigrationOutcome::NoRecoveryPhrase => {
+            notify(
+                confirmer,
+                "DIG — This account cannot take a password",
+                "This account has no recovery phrase, so its password cannot be changed.",
+                "It was created before DIG had recovery phrases. Nothing has changed and your account \
+                 still works exactly as before.\n\n\
+                 To get an account with a password of your own, replace this one: in the DIG menu \
+                 choose \"Manage Account\" then \"Replace this account with a NEW one…\". You will be \
+                 shown 24 words to write down, and you will get a NEW identity and address — this \
+                 account's data stays sealed to its old key and becomes unreadable.",
+            );
+            None
+        }
+        migration::MigrationOutcome::Failed(why) => {
+            tracing::error!(reason = %why, "the account password could not be changed");
+            notify(
+                confirmer,
+                "DIG — Password not changed",
+                "Your DIG Account password could not be changed.",
+                "Your account was left exactly as it was and still works. The log folder, in this \
+                 menu, has the details.",
+            );
+            None
+        }
     }
-    session
 }
 
 /// Restore an account onto a host that has none, from a recovery phrase typed into a native window.
@@ -702,8 +814,8 @@ fn current_os() -> Os {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, notify, replace_account, restore_account, set_up_account,
-        start_sign_service, AppEnvironment, TraySession,
+        account_state, adopt_user_password, notify, replace_account, restore_account,
+        set_up_account, start_sign_service, AppEnvironment, TraySession,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app_core::account::boot::vault_for;
@@ -1087,6 +1199,9 @@ mod tray {
                     );
                 }
             }
+            TrayAction::SetAccountPassword => {
+                *session = adopt_user_password(env, confirmer);
+            }
             TrayAction::LockNow => {
                 if let Some(session) = session {
                     session.lock.lock_now();
@@ -1353,12 +1468,12 @@ mod tray {
         notify(
             confirmer,
             "DIG — On-chain DID",
-            "An on-chain DID is optional, and it costs XCH.",
+            "An on-chain DID is the remaining step, and it costs XCH.",
             "A DID publishes your identity on the Chia blockchain so others can find and verify it. \
              Creating one is a real transaction that spends real XCH from your DIG Account, so DIG \
              will never create one without you asking.\n\n\
-             Your account, your recovery phrase and your address all work fully without a DID. \
-             On-chain minting is not available in this version yet — when it is, this is where you \
+             It is what turns the wallet on this computer into a full DIG Account. \
+             On-chain minting is not available in this version — when it arrives, this is where you \
              will start it, and you will see the exact cost before anything is spent.",
         );
     }

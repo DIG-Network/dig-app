@@ -364,10 +364,7 @@ pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option
 /// unexplained demand for a secret. Returns `None` when there is no account, when the user cancels, or
 /// when the password does not open the seal — in every case leaving the account locked.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-pub fn unlock_existing_account(
-    brand_dir: &std::path::Path,
-    reason: &str,
-) -> Option<BootedAccount> {
+pub fn unlock_existing_account(brand_dir: &std::path::Path, reason: &str) -> Option<BootedAccount> {
     if !account_exists(brand_dir) {
         tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
         return None;
@@ -397,8 +394,12 @@ where
     use dig_session::FileBackend;
 
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
-    let assembled =
-        assemble_residency(backend, ceremony, AccountId::new(DEFAULT_ACCOUNT_ID), seeding);
+    let assembled = assemble_residency(
+        backend,
+        ceremony,
+        AccountId::new(DEFAULT_ACCOUNT_ID),
+        seeding,
+    );
     let (residency, fresh_phrase) = match assembled {
         Ok(pair) => pair,
         Err(e) => {
@@ -576,7 +577,13 @@ mod tests {
         backend: Arc<dyn KeychainBackend>,
         password: Types,
     ) -> (AccountResidency, Option<RecoveryPhrase>) {
-        assemble_residency(backend, password, account(), Seeding::NewPhrase(&AlwaysKeeps)).unwrap()
+        assemble_residency(
+            backend,
+            password,
+            account(),
+            Seeding::NewPhrase(&AlwaysKeeps),
+        )
+        .unwrap()
     }
 
     /// The password the tests' notional user types.
@@ -821,7 +828,12 @@ mod tests {
         residency.lock_all();
 
         assert!(
-            !reunlock_into(backend, Types::password("a-different-password"), account(), &residency),
+            !reunlock_into(
+                backend,
+                Types::password("a-different-password"),
+                account(),
+                &residency
+            ),
             "a re-unlock with the wrong (freshly-generated) password must fail closed"
         );
         assert!(!residency.is_any_unlocked());
