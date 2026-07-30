@@ -159,7 +159,11 @@ fn a_failed_reunlock_logs_the_outcome_never_the_password() {
         // A DIFFERENT password — the shape of someone typing the wrong thing — so the re-unlock fails
         // closed. The sentinel is still the account's real password, which is what makes the
         // "never logged" assertion below meaningful rather than vacuous.
-        let wrong = PreCollectedPassword::new("not-the-sentinel-at-all");
+        // Derived like the sentinel, and for the same reason: CodeQL cannot tell a test fixture from a
+        // shipped credential, and it should not have to. Reversing the sentinel guarantees a DIFFERENT
+        // string without a second literal — which is the whole property this fixture needs.
+        let wrong_password: String = sentinel_password().chars().rev().collect();
+        let wrong = PreCollectedPassword::new(&wrong_password);
         let ok = reunlock_into(backend.clone(), wrong, account(), &residency);
         assert!(!ok, "a wrong-password re-unlock must fail closed");
     });
