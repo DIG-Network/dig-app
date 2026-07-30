@@ -147,6 +147,27 @@ pub struct DestroyPrompt<'a> {
     pub recoverable: bool,
 }
 
+/// A **security-change** prompt: the user is about to change how this account is protected
+/// (dig_ecosystem#1840).
+///
+/// Turning a second factor OFF is the motivating case, and it is why this is not a [`ClaimPrompt`]:
+/// weakening the protection on an account is an ACT with a consequence, so it gets the same two-step
+/// gate as a signature — a window naming what will be weakened, then an OS re-authentication. A
+/// passer-by at an unlocked machine must not be able to remove the factor that was there to stop
+/// exactly them.
+///
+/// It is not a [`DestroyPrompt`] either: nothing is destroyed and nothing becomes unrecoverable, so
+/// borrowing that window would tell the user their key material was at risk when it is not.
+#[derive(Debug, Clone, Copy)]
+pub struct SecurityPrompt<'a> {
+    /// The change, in the user's words (e.g. `"turn off two-factor codes"`).
+    pub change: &'a str,
+    /// What is weakened by it, stated plainly.
+    pub consequence: &'a str,
+    /// The label of the affirming button — a verb naming the change (e.g. `"Turn it off"`).
+    pub affirm: &'static str,
+}
+
 /// A request for the user to TYPE something in a native window (dig_ecosystem#1798).
 ///
 /// # Why this seam exists
@@ -297,6 +318,17 @@ pub trait NativeConfirmer: Send + Sync {
         ConfirmDecision::Unavailable
     }
 
+    /// Authorize WEAKENING how this account is protected — turning a second factor off
+    /// (dig_ecosystem#1840).
+    ///
+    /// Runs the same two-step gate as a signature, for the same reason [`confirm_destroy`](Self::confirm_destroy)
+    /// does: an unattended unlocked machine is precisely the situation a second factor exists for, so
+    /// removing one must not be reachable by clicking two menu items. Defaults to
+    /// [`ConfirmDecision::Unavailable`] so a backend that cannot authorize refuses to weaken anything.
+    fn confirm_security_change(&self, _prompt: &SecurityPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
     /// Ask the user to TYPE something in a native window (dig_ecosystem#1798).
     ///
     /// Defaults to [`InputOutcome::Unavailable`] so a backend with no input window reports that it could
@@ -339,6 +371,10 @@ impl NativeConfirmer for HeadlessConfirmer {
     }
 
     fn confirm_destroy(&self, _prompt: &DestroyPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
+
+    fn confirm_security_change(&self, _prompt: &SecurityPrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Unavailable
     }
 
@@ -538,6 +574,24 @@ impl ConfirmContent {
             action: "Destroy",
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
+            presentation: Presentation::Decide {
+                refusal_is_default: true,
+            },
+        }
+    }
+
+    /// The content for a security-change confirm (dig_ecosystem#1840): authorize weakening a protection.
+    ///
+    /// The affirmative is NOT the default here. Every other authorization is something the user just
+    /// asked for, where refusing costs a retry; this one REMOVES a guard, and the guard's whole purpose
+    /// is the moment when the person at the keyboard is not the owner. So, as with a destroy, a bare
+    /// Enter keeps the protection.
+    fn security(prompt: &SecurityPrompt<'_>) -> Self {
+        Self {
+            title: "DIG — Change your account security".to_string(),
+            heading: format!("Do you want to {}?", prompt.change),
+            body: prompt.consequence.to_string(),
+            action: prompt.affirm,
             presentation: Presentation::Decide {
                 refusal_is_default: true,
             },
@@ -836,6 +890,16 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfir
         // reachable by a passer-by at an unlocked desk clicking two menu items (dig_ecosystem#1799).
         gated_consent(
             &ConfirmContent::destroy(prompt),
+            &self.window,
+            &self.verifier,
+        )
+    }
+
+    fn confirm_security_change(&self, prompt: &SecurityPrompt<'_>) -> ConfirmDecision {
+        // The same gate as a destroy, and for the same reason: the window names what is being weakened,
+        // the biometric proves it is the owner asking (dig_ecosystem#1840).
+        gated_consent(
+            &ConfirmContent::security(prompt),
             &self.window,
             &self.verifier,
         )

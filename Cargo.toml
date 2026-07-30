@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "4.6.1"
+version = "4.7.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -104,6 +104,11 @@ dig-constants = "0.8"
 # wordlists are not compiled in.
 bip39 = { version = "2", default-features = false, features = ["std", "zeroize", "rand"] }
 hkdf = "0.12"
+# HMAC-SHA1, the MAC RFC 6238 TOTP is defined over (`account::second_factor::totp`). SHA-1 is used here
+# ONLY as the keyed MAC every shipping authenticator app implements — never as a collision-resistant
+# hash — so its collision weakness does not apply. RustCrypto, the same family as the `sha2`/`hmac`
+# deps already in the graph; no hand-rolled crypto.
+sha1 = "0.10"
 # sha256 — the per-profile DEK HKDF (U4) and the per-profile AppData directory key (U5, a hash of the
 # profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
 # slot-key derivation.

@@ -22,8 +22,8 @@ use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seedi
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::confirm::{
-    ConfirmDecision, ConnectPrompt, NativeConfirmer, NoticePrompt, PairPrompt, RevealPrompt,
-    SignPrompt,
+    ClaimPrompt, ConfirmDecision, ConnectPrompt, InputOutcome, InputPrompt, NativeConfirmer,
+    NoticePrompt, PairPrompt, RevealPrompt, SecurityPrompt, SignPrompt,
 };
 use dig_app_core::keystore::{CredentialStore, KeystoreError};
 use dig_app_core::session_lock::SessionKeys;
@@ -235,6 +235,200 @@ fn the_recovery_phrase_never_reaches_a_log_record() {
     });
 
     assert_no_phrase_in(&logged, &words);
+}
+
+/// A confirmer that drives the second-factor enrolment to completion, learning the key from the window
+/// exactly as a phone would and recording every secret it was shown.
+///
+/// It has to LEARN the key rather than be handed it, because the enrolment generates the secret
+/// internally and never returns it — which is the point. Scraping it out of the window is the only way a
+/// test can then assert that same secret never appears in a log line.
+struct EnrolsSecondFactor {
+    /// The base32 key the enrolment window presented.
+    key: Mutex<Option<String>>,
+    /// The recovery codes the enrolment window presented.
+    codes: Mutex<Vec<String>>,
+    /// A code that verifies against the learned key, computed on demand at the verify step.
+    code: Mutex<Option<String>>,
+}
+
+impl EnrolsSecondFactor {
+    fn new() -> Self {
+        Self {
+            key: Mutex::new(None),
+            codes: Mutex::new(Vec::new()),
+            code: Mutex::new(None),
+        }
+    }
+
+    /// Everything the flow showed that must never be logged: the key and every recovery code.
+    fn secrets(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.codes.lock().unwrap().clone();
+        if let Some(key) = self.key.lock().unwrap().clone() {
+            out.push(key);
+        }
+        out
+    }
+}
+
+impl NativeConfirmer for EnrolsSecondFactor {
+    fn confirm_pair(&self, _p: &PairPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn confirm_connect(&self, _p: &ConnectPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn confirm_sign(&self, _p: &SignPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn show_notice(&self, _p: &NoticePrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+    fn confirm_security_change(&self, _p: &SecurityPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Approve
+    }
+
+    fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
+        // The key window presents the base32 key as eight space-separated groups of four; reading it
+        // off the window is exactly what a person does, and it is the only way this fixture can learn
+        // a secret the enrolment never returns.
+        if let Some(line) = prompt
+            .body
+            .lines()
+            .map(str::trim)
+            .find(|line| line.len() == 39 && line.split(' ').all(|g| g.len() == 4))
+        {
+            let key: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            *self.code.lock().unwrap() = Some(totp_code(&key));
+            *self.key.lock().unwrap() = Some(key);
+        }
+        // The recovery-code window: ten dashed 5+5 codes, one per line.
+        let codes: Vec<String> = prompt
+            .body
+            .split_whitespace()
+            .filter(|token| token.len() == 11 && token.chars().nth(5) == Some('-'))
+            .map(str::to_string)
+            .collect();
+        if !codes.is_empty() {
+            *self.codes.lock().unwrap() = codes;
+        }
+        ConfirmDecision::Approve
+    }
+
+    fn request_input(&self, _p: &InputPrompt<'_>) -> InputOutcome {
+        let code = self
+            .code
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the key window comes before the verify window");
+        InputOutcome::Provided(zeroize::Zeroizing::new(code))
+    }
+}
+
+/// The current TOTP code for a base32 key, computed independently of the code under test.
+///
+/// Deliberately a SEPARATE implementation from `account::second_factor::totp` — RFC 4226 dynamic
+/// truncation written out here — so this fixture agrees with the RFC rather than with whatever the crate
+/// happens to do. A fixture that called the crate's own `code_at` would still pass if both were wrong
+/// together, and the point of an integration test is to be an outside observer.
+fn totp_code(base32_key: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    let mut key = Vec::new();
+    let (mut buffer, mut bits) = (0u16, 0u32);
+    for ch in base32_key.chars() {
+        let value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+            .find(ch)
+            .expect("an RFC 4648 base32 character") as u16;
+        buffer = (buffer << 5) | value;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            key.push((buffer >> bits) as u8);
+        }
+    }
+
+    let step = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs()
+        / 30;
+    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key).expect("any key length");
+    mac.update(&step.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = (digest[digest.len() - 1] & 0x0f) as usize;
+    let binary = u32::from_be_bytes([
+        digest[offset] & 0x7f,
+        digest[offset + 1],
+        digest[offset + 2],
+        digest[offset + 3],
+    ]);
+    format!("{:06}", binary % 1_000_000)
+}
+
+/// **The second factor's key and recovery codes must never reach a log record** (dig_ecosystem#1840).
+///
+/// The key is a long-lived credential and the recovery codes are an account's last way in, so either in
+/// a log file is as bad as the recovery phrase being there.
+///
+/// The fixture drives every path that HANDLES them — enrolment, a passing challenge, a spent recovery
+/// code, and turning the factor off — rather than only the happy path, because the realistic leak is in
+/// an error or diagnostic branch, which a happy-path-only run never reaches.
+#[test]
+fn the_second_factor_key_and_recovery_codes_never_reach_a_log_record() {
+    use dig_app_core::account::second_factor::journey::{
+        challenge, disable, enrol, ChallengeVerdict, EnrolOutcome, SystemClock,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
+    let confirmer = EnrolsSecondFactor::new();
+
+    let logged = capture(|| {
+        let (residency, phrase) = boot(backend.clone(), MemCred::seeded());
+        let booted = finish_boot(dir.path(), residency, phrase);
+        let vault =
+            dig_app_core::account::boot::second_factor_vault_for(dir.path(), &booted.residency)
+                .expect("the account is unlocked");
+
+        let outcome = enrol(&confirmer, &vault, &SystemClock);
+        assert!(
+            matches!(outcome, EnrolOutcome::Enrolled { .. }),
+            "the fixture must actually enrol, or it proves nothing: {outcome:?}"
+        );
+
+        // A passing challenge, then a recovery code, then the disable path.
+        assert_eq!(
+            challenge(&confirmer, &vault, "do the thing", &SystemClock),
+            ChallengeVerdict::Passed
+        );
+        let code = confirmer.codes.lock().unwrap()[0].clone();
+        let spender = EnrolsSecondFactor::new();
+        *spender.code.lock().unwrap() = Some(code);
+        assert!(matches!(
+            challenge(&spender, &vault, "do the thing", &SystemClock),
+            ChallengeVerdict::PassedWithRecoveryCode { .. }
+        ));
+        assert_eq!(
+            disable(&confirmer, &vault),
+            dig_app_core::account::second_factor::journey::DisableOutcome::Disabled
+        );
+    });
+
+    let secrets = confirmer.secrets();
+    assert_eq!(
+        secrets.len(),
+        11,
+        "the fixture must have learned the key and all ten codes, or it is asserting on nothing"
+    );
+    for secret in secrets {
+        assert!(
+            !logged.contains(&secret),
+            "a second-factor secret reached a log record: {logged}"
+        );
+    }
 }
 
 /// Assert that none of `words` (a recovery phrase, in order) leaked into `logged`.

@@ -549,8 +549,9 @@ impl AccountCustodian for ShellCustodian<'_> {
 /// Run a destructive account verb through the core flow.
 ///
 /// Everything this function does is ASSEMBLE: resolve the directory, find the phrase vault, build the
-/// custodian, and hand all of it to [`journey::replace_account`]. The outcome is discarded here because every
-/// branch of that flow already ends in a window the user acknowledged.
+/// custodian, and hand all of it to [`journey::replace_account`] — after clearing the second-factor gate.
+/// The outcome is discarded here because every branch of that flow already ends in a window the user
+/// acknowledged.
 #[cfg(feature = "tray")]
 fn replace_account(
     session: &mut Option<TraySession>,
@@ -559,6 +560,9 @@ fn replace_account(
     what: Replacement,
 ) {
     let Some(dir) = brand_dir(env) else { return };
+    if !second_factor_cleared(&dir, session.as_ref(), confirmer, what) {
+        return;
+    }
     let vault = session
         .as_ref()
         .and_then(|session| vault_for(&dir, &session.residency));
@@ -569,6 +573,99 @@ fn replace_account(
         session: std::cell::RefCell::new(session),
     };
     dig_app_core::account::journey::replace_account(confirmer, &custodian, what, vault.as_ref());
+}
+
+/// The second-factor vault for the live session, or `None` when the account is locked.
+#[cfg(feature = "tray")]
+fn second_factor_vault(
+    dir: &std::path::Path,
+    session: Option<&TraySession>,
+) -> Option<
+    dig_app_core::account::second_factor::vault::SecondFactorVault<
+        dig_app_core::account::residency::ResidencySealer,
+    >,
+> {
+    session.and_then(|session| {
+        dig_app_core::account::boot::second_factor_vault_for(dir, &session.residency)
+    })
+}
+
+/// Whether a destructive verb may proceed: either no second factor is enrolled, or the user just
+/// answered a challenge (dig_ecosystem#1840).
+///
+/// # Why the destructive verbs specifically
+///
+/// This is the threat the second factor is actually FOR. Ordinary reads and signatures stay on the
+/// platform biometric, because a code demanded for everything is a code people turn off. Replacing or
+/// removing an account destroys the master seed, and it is exactly what a passer-by at an unlocked
+/// machine can reach — so it is the action worth a factor that lives on another device.
+///
+/// # Why "enrolled" is read WITHOUT an unlock
+///
+/// The enrolment is read from the file's existence rather than from the unlocked vault, so clicking
+/// `Lock now` first cannot walk around the gate. When a factor IS enrolled but the account is locked,
+/// the challenge cannot be judged — so the user is told the two things that DO work (unlock, or turn the
+/// factor off from the same Security menu) rather than being silently refused.
+#[cfg(feature = "tray")]
+fn second_factor_cleared(
+    dir: &std::path::Path,
+    session: Option<&TraySession>,
+    confirmer: &dyn NativeConfirmer,
+    what: Replacement,
+) -> bool {
+    use dig_app_core::account::second_factor::journey::{
+        challenge, report_recovery_code_spent, ChallengeVerdict, SystemClock,
+    };
+    use dig_app_core::account::second_factor::vault::enrolment_present;
+
+    if !enrolment_present(dir) {
+        return true;
+    }
+    let Some(vault) = second_factor_vault(dir, session) else {
+        notify(
+            confirmer,
+            "DIG — Two-factor code needed",
+            "Unlock your DIG Account first.",
+            "This account has two-factor codes turned on, so DIG needs a code from your              authenticator before it can do this — and it can only check one while the account is              unlocked.
+
+Use Unlock in this menu and try again. If you no longer have your              authenticator or your recovery codes, turn two-factor off from the Security menu first.",
+        );
+        return false;
+    };
+
+    let purpose = match what {
+        Replacement::Nothing => "remove this account",
+        _ => "replace this account",
+    };
+    match challenge(confirmer, &vault, purpose, &SystemClock) {
+        ChallengeVerdict::Passed => true,
+        ChallengeVerdict::PassedWithRecoveryCode { remaining } => {
+            report_recovery_code_spent(confirmer, remaining);
+            true
+        }
+        // A cancel is the user changing their mind about an irreversible action; saying nothing here is
+        // right, because they already know what they did.
+        ChallengeVerdict::Cancelled => false,
+        ChallengeVerdict::Failed => {
+            notify(
+                confirmer,
+                "DIG — Two-factor code needed",
+                "That code was not right, so nothing was changed.",
+                "Codes change every 30 seconds — open your authenticator, wait for a fresh one, and                  try again. A recovery code works too, and each of those works once.",
+            );
+            false
+        }
+        // Fail closed: a factor is enrolled and could not be judged.
+        ChallengeVerdict::NotEnrolled | ChallengeVerdict::Unavailable => {
+            notify(
+                confirmer,
+                "DIG — Two-factor code needed",
+                "DIG could not check your code, so nothing changed.",
+                "Your account is unchanged. The log folder (in this menu) has the details.",
+            );
+            false
+        }
+    }
 }
 
 /// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
@@ -765,6 +862,11 @@ mod tray {
             // the user does not have as soon as anything started writing that field. See
             // [`TrayView::did`].
             did: None,
+            // Read WITHOUT an unlock, so a locked account still reports its factor honestly and the
+            // `Turn off...` escape stays reachable (dig_ecosystem#1840).
+            second_factor: super::brand_dir(env)
+                .map(|dir| dig_app_core::account::second_factor::vault::enrolment_present(&dir))
+                .unwrap_or(false),
             hotkey: Some(hotkey.clone()),
         }
     }
@@ -928,6 +1030,9 @@ mod tray {
             && a.account == b.account
             && a.profile_id == b.profile_id
             && a.did == b.did
+            // Without this the Security submenu would keep offering "Set up..." after an enrolment
+            // completed, because nothing else in the view changed and the menu would not repaint.
+            && a.second_factor == b.second_factor
     }
 
     /// Run one menu action. Returns `true` when the process should exit.
@@ -988,6 +1093,8 @@ mod tray {
                 }
             }
             TrayAction::ShowRecoveryPhrase => show_phrase(session.as_ref(), env, confirmer),
+            TrayAction::SetUpTwoFactor => set_up_two_factor(session.as_ref(), env, confirmer),
+            TrayAction::TurnOffTwoFactor => turn_off_two_factor(session.as_ref(), env, confirmer),
             TrayAction::ExplainUnopenable => {
                 explain_unopenable(confirmer);
             }
@@ -1008,6 +1115,119 @@ mod tray {
             }
         }
         false
+    }
+
+    /// Run the second-factor enrolment: explain, show the key, verify a code, hand over recovery codes.
+    ///
+    /// The flow itself lives in [`second_factor::journey::enrol`]; this handler does nothing but address
+    /// the vault and turn the outcome into a sentence. Two outcomes end in no window on purpose — a
+    /// deliberate back-out (the user knows what they just did) and a host that could draw no window at
+    /// all (a second window would fail identically).
+    fn set_up_two_factor(
+        session: Option<&TraySession>,
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
+    ) {
+        use dig_app_core::account::second_factor::journey::{enrol, EnrolOutcome, SystemClock};
+
+        // `second_factor_vault` yields `None` on a locked account, so an idle auto-lock between opening
+        // the menu and clicking the row lands in the locked branch rather than half-enrolling.
+        let vault = super::brand_dir(env).and_then(|dir| super::second_factor_vault(&dir, session));
+        let Some(vault) = vault else {
+            notify(
+                confirmer,
+                "DIG - Two-factor codes",
+                "Your DIG Account is locked.",
+                "Unlock it from this menu first, then try again. The key is kept sealed under your \
+                 account, so DIG can only set one up while the account is open.",
+            );
+            return;
+        };
+
+        match enrol(confirmer, &vault, &SystemClock) {
+            EnrolOutcome::Enrolled { recovery_codes } => notify(
+                confirmer,
+                "DIG - Two-factor codes are on",
+                "Two-factor codes are on for this account.",
+                &format!(
+                    "From now on, replacing or removing this account on this computer will ask for a \
+                     code from your authenticator.\n\nYou have {recovery_codes} recovery codes. Keep \
+                     them somewhere other than your phone - they are the only way in if you lose it.\n\n\
+                     You can turn this off at any time from the Security menu."
+                ),
+            ),
+            EnrolOutcome::NotVerified => notify(
+                confirmer,
+                "DIG - Two-factor codes",
+                "Nothing was turned on — no code was accepted.",
+                "Your account is exactly as it was. This usually means the key was not copied into \
+                 the authenticator correctly, or your phone's clock is off - check the phone's \
+                 automatic time setting and start again from the Security menu.",
+            ),
+            EnrolOutcome::AlreadyEnrolled => notify(
+                confirmer,
+                "DIG - Two-factor codes",
+                "Two-factor codes are already on.",
+                "To issue a new key and a fresh set of recovery codes, turn two-factor off from the \
+                 Security menu first, then set it up again. DIG will not quietly replace the codes \
+                 you are already holding.",
+            ),
+            EnrolOutcome::Failed => notify(
+                confirmer,
+                "DIG - Two-factor codes",
+                "Two-factor codes could not be turned on.",
+                "Your account is unchanged and still works. The log folder (in this menu) has the \
+                 details.",
+            ),
+            EnrolOutcome::Abandoned | EnrolOutcome::Unavailable => {}
+        }
+    }
+
+    /// Turn the second factor off, behind the biometric authorization seam.
+    ///
+    /// Works on a LOCKED account on purpose: the enrolment record is only deleted, never read, and the
+    /// authorization is the platform biometric rather than the account. That is what keeps an account
+    /// which cannot be opened from becoming permanently unremovable - see
+    /// [`tray_menu::TrayAction::TurnOffTwoFactor`].
+    fn turn_off_two_factor(
+        session: Option<&TraySession>,
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
+    ) {
+        use dig_app_core::account::second_factor::journey::{disable, DisableOutcome};
+        use dig_app_core::account::second_factor::vault::DirectoryEnrolment;
+
+        let Some(dir) = super::brand_dir(env) else {
+            return;
+        };
+        // An unlocked account addresses its own vault; a locked one cannot, so it falls back to the
+        // unlock-free view over the same directory. Both delete the same file.
+        let vault = super::second_factor_vault(&dir, session);
+        let outcome = match &vault {
+            Some(vault) => disable(confirmer, vault),
+            None => disable(confirmer, &DirectoryEnrolment::new(&dir)),
+        };
+
+        match outcome {
+            DisableOutcome::Disabled => notify(
+                confirmer,
+                "DIG - Two-factor codes are off",
+                "Two-factor codes are off for this account.",
+                "Replacing or removing this account will no longer ask for a code, and your old \
+                 recovery codes no longer work. You can set it up again at any time from the Security \
+                 menu - that issues a new key and a new set of codes.",
+            ),
+            DisableOutcome::Failed => notify(
+                confirmer,
+                "DIG - Two-factor codes",
+                "Two-factor codes could not be turned off.",
+                "They are still on and your account is unchanged. The log folder (in this menu) has \
+                 the details.",
+            ),
+            // A refusal is the authorization doing its job, and "nothing was enrolled" can only happen
+            // if the menu was open while an enrolment was removed elsewhere. Neither needs a window.
+            DisableOutcome::Refused | DisableOutcome::NotEnrolled => {}
+        }
     }
 
     /// Re-display the account's recovery phrase, behind the OS re-authentication gate.

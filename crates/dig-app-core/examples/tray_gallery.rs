@@ -20,13 +20,19 @@
 use dig_app_core::tray_menu::{self, AccountState, MenuRow, TrayView};
 
 fn main() {
-    for account in [
+    // Both halves of the second-factor axis, because the Security submenu's row depends on it: a gallery
+    // that rendered only one would stop showing half the menu the moment two-factor shipped.
+    let states = [
         AccountState::Unsupported,
         AccountState::Absent,
         AccountState::Locked,
         AccountState::Unlocked { recoverable: true },
         AccountState::Unlocked { recoverable: false },
-    ] {
+    ];
+    for (account, second_factor) in states
+        .iter()
+        .flat_map(|account| [false, true].map(|enrolled| (account.clone(), enrolled)))
+    {
         // A connected node and a present profile, so the menu is shown at its FULLEST: any row missing here
         // is missing because of the account state, not because the fixture starved it.
         let view = TrayView {
@@ -38,6 +44,7 @@ fn main() {
                 "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4".into(),
             ),
             did: None,
+            second_factor,
             // The gallery photographs the account states; the shortcut is live in the real shell and its
             // own row label is asserted in `tray_menu`'s tests.
             hotkey: Some(dig_app_core::hotkey::HotkeyState::Registered(
@@ -46,7 +53,7 @@ fn main() {
         };
         let status = tray_menu::status(&view);
 
-        println!("\n═══ account: {account} ═══");
+        println!("\n═══ account: {account} · two-factor: {second_factor} ═══");
         println!("icon    : {:?}", status.glyph);
         println!("tooltip : {}", status.tooltip.replace('\n', " ⏎ "));
         println!("menu    :");

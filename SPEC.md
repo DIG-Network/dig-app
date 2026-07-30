@@ -494,6 +494,53 @@ Windows — neither Linux dialog helper offers one, and an `NSAlert` accessory w
 hierarchy for it — so on macOS and Linux the phrase field is masked with no un-mask control, which is the
 direction §3.1d requires a backend to fail in.
 
+### 3.1e The second factor — authenticator codes (normative)
+
+An account MAY additionally be protected by a **TOTP second factor**: a code from an authenticator app on
+a device other than this computer.
+
+**What it is for, and what it is not.** Verifying a code requires the shared secret to be present
+locally, so an attacker who can already unlock the account can in principle read that secret and mint
+codes. The second factor is therefore NOT protection against full local compromise, and an
+implementation MUST NOT present it as such. What it raises the bar against is a shoulder-surfed, guessed,
+phished or reused unlock credential; an unattended unlocked machine; and someone who knows the password
+but does not have the phone. The platform biometric (§3.1d) is already a factor, but it is bound to THIS
+machine and THIS logon session — the authenticator is not, and that difference is the whole justification.
+The enrolment UI MUST state both halves of this in the user's own words.
+
+- **Algorithm (MUST).** RFC 6238 TOTP: HMAC-SHA1, a 160-bit secret, a 30-second step, 6 digits, and a
+  tolerance of ±1 step. These are the parameters every shipping authenticator implements; a
+  conformant implementation reproduces RFC 6238 Appendix B's published vectors.
+- **Single use (MUST).** A step MUST be accepted at most once. An implementation records the most
+  recently accepted step and refuses any step at or before it, so a code read off a screen cannot be
+  replayed for the remainder of its window.
+- **Enrolment order (MUST).** Enrolment MUST: explain what the factor does and does not protect,
+  generate a secret, present it so it can be transferred to an authenticator (the base32 key MUST be
+  shown for anyone who cannot scan; a QR code is optional), **require a correct code to be verified
+  before anything is stored**, issue recovery codes, and obtain an explicit claim that they were saved.
+  Every screen MUST be escapable, and any exit before the final store MUST leave NOTHING enrolled — a
+  flow that enrols before verifying is how a user is locked out by the feature meant to protect them.
+- **Recovery codes (MUST).** Enrolment MUST issue single-use recovery codes, display them exactly once,
+  and take a claim-you-saved-them confirmation. They MUST be stored so the app cannot re-display them
+  (a salted digest per code) and MUST be marked spent on use. Without them, a lost device is a lost
+  account, which this app cannot undo.
+- **At rest (MUST).** The enrolment record is sealed under the ROOT profile's DEK through the same
+  DIGOP1 container as the phrase vault (§3.4), inside a domain-separated versioned envelope so a blob
+  from another vault cannot be read as an enrolment. Neither the secret nor a recovery code may be
+  logged, transmitted, or written anywhere but that record.
+- **What it gates (MUST).** At minimum, the DESTRUCTIVE account verbs — replacing and removing the
+  account. Ordinary reads and signatures stay on the platform biometric: a factor demanded for
+  everything is a factor users turn off. Whether the enrolment exists MUST be determined WITHOUT
+  unlocking the account, so locking first cannot walk around the gate.
+- **Turning it off (MUST).** Disabling MUST run the same authorization gate as a signature (a foreground
+  window naming what is weakened, then an OS re-authentication). It MUST NOT additionally require a
+  code: requiring the factor to remove the factor turns a lost phone plus lost codes into an account
+  that can never be replaced or removed on this computer. Disabling MUST work while the account is
+  LOCKED or unopenable, for the same reason — it deletes the record rather than reading it.
+- **Account removal (MUST).** Discarding an account MUST remove its enrolment record. A leftover would
+  make the next account report a factor it cannot satisfy, blocking every destructive verb with no way
+  out.
+
 ### 3.2 Profiles and the Accounts registry
 
 A **profile** is one HD identity within the account: `{ HD index (`ProfileIx`), derived BLS12-381 G1
@@ -1379,6 +1426,11 @@ When a work unit satisfies an NC item, it MUST update that item's "Satisfied by"
   - **Accepted (out of scope):** malware running AS U1 can drive dig-app / read U1's decrypted
     in-memory data; a live-session SYSTEM compromise sees that session's in-memory key while attached.
     These are the-user-is-the-user / SYSTEM-dominates cases.
+  - **The second factor (§3.1e) does not change that boundary, and MUST NOT be described as if it
+    did.** Its secret is verified locally, so an attacker at the-user-is-the-user level can read it.
+    What it adds is a factor on ANOTHER DEVICE for the destructive verbs, which is what makes a
+    shoulder-surfed unlock credential or an unattended unlocked machine insufficient to destroy an
+    account.
 
 ### 7.1 The paired-loopback signing channel (§5.6)
 
