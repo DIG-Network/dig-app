@@ -968,6 +968,21 @@ mod tray {
             node_connected,
             account: Some(account),
             profile_id: session.map(|s| s.account.profile_id.clone()),
+            // Derived LIVE from the residency on each repaint rather than cached at unlock, so a lock
+            // takes the address away with the keys it comes from. Unlike `profile_id` (cached because
+            // reading it touches the disk), this is a pure in-memory derivation, so the twice-a-second
+            // cost is arithmetic, not I/O. A derivation that FAILS reports no address rather than a
+            // wrong one — the menu then says "unlock first", which is the only wrong-but-harmless case
+            // here, and the wallet window states the real reason.
+            receive_address: session
+                .and_then(|s| s.residency.receiving_address())
+                .and_then(|derived| match derived {
+                    Ok(address) => Some(address),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "the account's receive address could not be derived");
+                        None
+                    }
+                }),
             // No on-chain DID can exist yet: minting is unimplemented, so there is nothing that could
             // have produced one. This was previously filled from `config.active_profile` — a LOCAL
             // string, not chain evidence — which would have made the tray report an on-chain identity
@@ -1141,6 +1156,9 @@ mod tray {
             && a.node == b.node
             && a.account == b.account
             && a.profile_id == b.profile_id
+            // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
+            // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
+            && a.receive_address == b.receive_address
             && a.did == b.did
             // Without this the Security submenu would keep offering "Set up..." after an enrolment
             // completed, because nothing else in the view changed and the menu would not repaint.
@@ -1218,7 +1236,17 @@ mod tray {
             }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
-            TrayAction::AboutWallet => explain_wallet(confirmer),
+            // Both wallet arms re-snapshot LIVE for the same reason `show_status` does: a node that came
+            // up — or a lock that dropped the keys — while the menu sat open must be reflected, not
+            // replayed from the model the row was drawn from.
+            TrayAction::AboutWallet => explain_wallet(
+                &snapshot(status, env, session.as_ref(), false, hotkey),
+                confirmer,
+            ),
+            TrayAction::CopyReceiveAddress => copy_receive_address(
+                &snapshot(status, env, session.as_ref(), false, hotkey),
+                confirmer,
+            ),
             // The tray row asks in the framed dialog; the Alt+Space chord asks in the bar. Same handler,
             // same validation, same resolution — only the presentation differs.
             TrayAction::Open => open_dig_link(status, confirmer, InputStyle::Dialog),
@@ -1478,29 +1506,57 @@ mod tray {
         );
     }
 
-    /// Explain what the DIG wallet is, what it can do today, and what it cannot yet.
+    /// Show the wallet: where money arrives, what is held, and what the wallet still cannot do
+    /// (dig_ecosystem#1850).
     ///
-    /// This is the whole **Wallet** submenu for now, and that is deliberate. The tray offers no `Send` and
-    /// no `Copy my receive address`, because it can perform neither: spending needs the money path (parked,
-    /// dig_ecosystem#1702), and the address needs a field `TrayView` does not carry — it holds the identity
-    /// public key, which is NOT a Chia address. A row that copied that string would hand someone the wrong
-    /// value with total confidence, which is worse than no row.
-    ///
-    /// So the menu says what is true and names what is coming, rather than offering greyed verbs that
-    /// cannot say when they will work (dig_ecosystem#1800, #1841).
-    fn explain_wallet(confirmer: &dyn NativeConfirmer) {
+    /// The window is assembled by [`wallet_window_body`] from a `WalletOverview`, whose whole purpose is
+    /// that an unreadable balance can never be rendered as a zero. Sending is absent because the money
+    /// path is parked (#1702) — no tray action can spend, so that is structural rather than a greyed row.
+    fn explain_wallet(view: &TrayView, confirmer: &dyn NativeConfirmer) {
         notify(
             confirmer,
             "DIG — Wallet",
-            "Your DIG Account holds keys, and the wallet is being built around them.",
-            "Your account already owns the keys a wallet needs — they were created with it, and your \
-             recovery phrase restores them. What is not built yet is the part that USES them: showing \
-             your balance, giving you an address to receive $DIG, and sending it.\n\n\
-             DIG does not show you a balance it cannot verify, or an address it is not certain of, so \
-             those are absent rather than shown as something you cannot click. When they work, they \
-             will appear here.\n\n\
-             Nothing about this affects reading DIG content — that never needs an account or a wallet.",
+            "This is your DIG wallet.",
+            &dig_app_core::wallet::overview::window_body(
+                &dig_app_core::wallet::overview::WalletOverview::of_tray(view),
+            ),
         );
+    }
+
+    /// Put the account's receive address on the clipboard, telling the user either way.
+    ///
+    /// Reads the address off the SNAPSHOT the menu was built from, so the string copied is the same one
+    /// the row was enabled for. On a clipboard failure the address is displayed instead — a person can
+    /// still select it by hand, which beats being told "no" about the one string they need.
+    fn copy_receive_address(view: &TrayView, confirmer: &dyn NativeConfirmer) {
+        let Some(address) = view.receive_address.as_deref() else {
+            // The row is disabled without an address, so this is only reachable via a stale click; say
+            // the true reason rather than silently doing nothing.
+            notify(
+                confirmer,
+                "DIG — Receive address",
+                "Your address is not available right now.",
+                &dig_app_core::wallet::overview::address_line(
+                    &dig_app_core::wallet::overview::WalletOverview::of_tray(view).address,
+                ),
+            );
+            return;
+        };
+        if write_clipboard(address) {
+            notify(
+                confirmer,
+                "DIG — Address copied",
+                "Your receive address is on the clipboard.",
+                address,
+            );
+        } else {
+            notify(
+                confirmer,
+                "DIG — Your receive address",
+                "Here is your receive address (select it to copy).",
+                address,
+            );
+        }
     }
 
     /// Repaint the tray with a freshly-built menu, or leave the current one in place.

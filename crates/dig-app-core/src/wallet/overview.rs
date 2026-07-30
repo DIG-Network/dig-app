@@ -123,9 +123,9 @@ impl WalletOverview {
     /// for, and the address's reason is the actionable one.
     pub fn read(address: AddressReading, source: &ChainSource<'_>) -> Self {
         let balance = match (&address, source) {
-            (AddressReading::Unavailable(why), _) => BalanceReading::Unknown(
-                BalanceUnknown::NoAddress(*why),
-            ),
+            (AddressReading::Unavailable(why), _) => {
+                BalanceReading::Unknown(BalanceUnknown::NoAddress(*why))
+            }
             (_, ChainSource::Absent) => BalanceReading::Unknown(BalanceUnknown::NoNode),
             (_, ChainSource::WithoutWalletReads) => {
                 BalanceReading::Unknown(BalanceUnknown::NodeCannotRead)
@@ -137,6 +137,49 @@ impl WalletOverview {
         };
         Self { address, balance }
     }
+
+    /// The overview the tray's Wallet window renders, derived from the snapshot the menu was built from.
+    ///
+    /// Lives here rather than in the `dig-app` shell because a binary is a test-free zone and this
+    /// mapping is exactly where an unknown could quietly become a zero: it decides which reason the
+    /// window states.
+    pub fn of_tray(view: &crate::tray_menu::TrayView) -> Self {
+        use crate::tray_menu::AccountState;
+
+        let address = match (&view.receive_address, view.account.as_ref()) {
+            (Some(address), _) => AddressReading::Known(address.clone()),
+            // No account, or none reported yet: there is no key to derive from and nothing to wait for.
+            (None, None | Some(AccountState::Absent)) => {
+                AddressReading::Unavailable(AddressUnavailable::NoAccount)
+            }
+            // Locked, unopenable, or an unsupported host — in all three the key material is out of
+            // reach, and unlocking is the route back for the one a person can act on.
+            (None, Some(_)) => AddressReading::Unavailable(AddressUnavailable::Locked),
+        };
+
+        // dig-node's published control catalog carries no wallet method, so even a reachable node
+        // cannot answer a balance read today. Which of the two applies matters: "start your node" and
+        // "your node cannot do this yet" ask different things of the user.
+        let source = if view.node_connected {
+            ChainSource::WithoutWalletReads
+        } else {
+            ChainSource::Absent
+        };
+        Self::read(address, &source)
+    }
+}
+
+/// The Wallet window's whole text: where money arrives, what is held, and what the wallet still cannot
+/// do.
+pub fn window_body(overview: &WalletOverview) -> String {
+    format!(
+        "{}\n\n{}\n\nSending is not available yet — DIG will not offer a button that moves money until \
+         the path behind it is finished. Receiving works now: anything sent to the address above \
+         arrives in this account, and your recovery phrase restores it.\n\n\
+         Reading DIG content never needs an account or a wallet.",
+        address_line(&overview.address),
+        balance_line(&overview.balance),
+    )
 }
 
 /// Read both assets for `address`. A failure in EITHER makes the whole reading unknown — a window
@@ -155,9 +198,9 @@ fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
             xch_mojos,
             dig_units,
         }),
-        (Err(e), _) | (_, Err(e)) => BalanceReading::Unknown(BalanceUnknown::ReadFailed(
-            e.to_string(),
-        )),
+        (Err(e), _) | (_, Err(e)) => {
+            BalanceReading::Unknown(BalanceUnknown::ReadFailed(e.to_string()))
+        }
     }
 }
 
@@ -249,9 +292,7 @@ fn unknown_reason(why: &BalanceUnknown) -> String {
 mod tests {
     use super::*;
     use crate::wallet::engine::test_support::FakeWalletEngine;
-    use crate::wallet::engine::{
-        BroadcastRequest, BroadcastResponse, CoinsRequest, CoinsResponse,
-    };
+    use crate::wallet::engine::{BroadcastRequest, BroadcastResponse, CoinsRequest, CoinsResponse};
     use crate::wallet::state::CoinRecord;
     use crate::wallet::WalletError;
 
@@ -279,7 +320,10 @@ mod tests {
         fn coins(&self, _: CoinsRequest) -> Result<CoinsResponse, WalletError> {
             Err(WalletError::Engine("upstream refused".to_string()))
         }
-        fn balance(&self, _: BalanceRequest) -> Result<super::super::engine::BalanceResponse, WalletError> {
+        fn balance(
+            &self,
+            _: BalanceRequest,
+        ) -> Result<super::super::engine::BalanceResponse, WalletError> {
             Err(WalletError::Engine("upstream refused".to_string()))
         }
     }
@@ -292,10 +336,8 @@ mod tests {
     /// identical text here and fail.
     #[test]
     fn an_empty_wallet_and_an_unreadable_one_never_read_the_same() {
-        let empty = WalletOverview::read(
-            known(),
-            &ChainSource::Ready(&FakeWalletEngine::default()),
-        );
+        let empty =
+            WalletOverview::read(known(), &ChainSource::Ready(&FakeWalletEngine::default()));
         let unreadable = WalletOverview::read(known(), &ChainSource::Absent);
 
         assert_eq!(
@@ -502,6 +544,69 @@ mod tests {
         assert_eq!(format_amount(UNITS_PER_COIN * 3 / 2), "1.5");
         assert_eq!(format_amount(1), "0.000000000001");
         assert_eq!(format_amount(u64::MAX), "18446744.073709551615");
+    }
+
+    /// **The window a user actually reads must not turn an unknown balance into a zero either.**
+    ///
+    /// Asserted on the rendered BODY rather than the `BalanceReading`, because the mapping from the tray
+    /// snapshot to that reading is itself a place the distinction could be lost — and the body is what a
+    /// person acts on. Two views differing ONLY in whether a node is connected must both say "not known",
+    /// each for its own reason.
+    #[test]
+    fn the_wallet_window_never_states_a_balance_it_could_not_read() {
+        let mut view = crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            node_connected: false,
+            ..Default::default()
+        };
+
+        let offline = window_body(&WalletOverview::of_tray(&view));
+        view.node_connected = true;
+        let online = window_body(&WalletOverview::of_tray(&view));
+
+        for body in [&offline, &online] {
+            assert!(body.contains(ADDRESS), "the address is readable in both");
+            assert!(body.contains("Balance: not known"), "{body}");
+            assert!(
+                !body.contains("0 $DIG"),
+                "an unread balance must never appear as zero: {body}"
+            );
+        }
+        assert!(offline.contains("no DIG node is running"));
+        assert!(online.contains("does not read wallet balances yet"));
+        assert_ne!(offline, online, "the two reasons are different facts");
+    }
+
+    /// A locked account and an account that does not exist reach DIFFERENT windows — the remedies are
+    /// unlocking and setting one up, and telling either user the other's story is a dead end.
+    #[test]
+    fn the_window_tells_a_locked_user_and_a_new_user_different_things() {
+        let locked = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Locked),
+            receive_address: None,
+            ..Default::default()
+        }));
+        let brand_new = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Absent),
+            receive_address: None,
+            ..Default::default()
+        }));
+
+        assert!(locked.contains("account is locked"), "{locked}");
+        assert!(
+            brand_new.contains("do not have a DIG Account"),
+            "{brand_new}"
+        );
+        assert_ne!(locked, brand_new);
+    }
+
+    /// The window never advertises a verb the app cannot perform — sending is parked (#1702), so it is
+    /// named as absent rather than implied.
+    #[test]
+    fn the_window_says_sending_is_not_available() {
+        let body = window_body(&WalletOverview::read(known(), &ChainSource::Absent));
+        assert!(body.contains("Sending is not available yet"), "{body}");
     }
 
     /// `address()` reads through only when there IS one.

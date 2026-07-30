@@ -64,6 +64,10 @@ fn view_for(state: AccountState) -> TrayView {
         running: true,
         node_connected: true,
         node: "Node v0.65.0 - 3 capsule(s) cached - 1 store(s) hosted".to_string(),
+        // The shell derives this from the residency, so it is present exactly while unlocked — the same
+        // axis this suite is about, and what makes the Wallet row's copy/(unlock first) flip observable.
+        receive_address: matches!(state, AccountState::Unlocked { .. })
+            .then(|| "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()),
         account: Some(state),
         profile_id: Some("a".repeat(96)),
         did: None,

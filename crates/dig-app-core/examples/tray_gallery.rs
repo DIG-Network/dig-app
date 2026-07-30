@@ -40,6 +40,10 @@ fn main() {
             node_connected: true,
             node: "Node v0.66.0 · 0 capsule(s) cached · 0 store(s) hosted".to_string(),
             account: Some(account.clone()),
+            // Present exactly while unlocked, as the shell's live derivation off the residency is.
+            receive_address: matches!(account, AccountState::Unlocked { .. }).then(|| {
+                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()
+            }),
             profile_id: Some(
                 "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4".into(),
             ),
