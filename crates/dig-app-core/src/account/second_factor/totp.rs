@@ -10,13 +10,18 @@
 //! configuration. HMAC-SHA1 here is a keyed MAC over a counter, not a collision-resistance claim, so
 //! SHA-1's collision weakness does not apply to it.
 //!
-//! # Why there is no `otpauth://` URI here
+//! # The `otpauth://` URI, and why it went away and came back
 //!
-//! That URI exists to be carried by a QR code or the clipboard, and this window offers neither (see
-//! [`super`] for the QR decision). Rendered as TEXT it is 130 unbreakable characters, which the native
-//! window's `STATIC` control silently CLIPS — a screenshot of the first build caught exactly that,
-//! showing a user a truncated link that would import nothing. The base32 key is the transfer mechanism,
-//! and every authenticator's manual-entry field accepts it.
+//! That URI exists to be carried by a QR code, and the first build of this feature offered no QR — so
+//! the URI had no consumer, and it was removed rather than left as public API nobody called. It was
+//! also unshowable: rendered as TEXT it is ~130 unbreakable characters, which the native window's
+//! `STATIC` control silently CLIPS, and a screenshot of that build caught exactly that.
+//!
+//! The QR is now drawn (dig_ecosystem#1849), so [`TotpSecret::provisioning_uri`] is back — for the QR
+//! encoder and for nothing else. It is deliberately NOT shown as text: the QR is the machine path and
+//! the grouped base32 key is the human one, and a third rendering of the same secret would be a third
+//! place it can be photographed. (The clipping itself is fixed at its root in the window layer, which
+//! now breaks any unwrappable run rather than trusting callers to pass short strings.)
 //!
 //! # What this module does NOT do
 //!
@@ -128,6 +133,38 @@ impl TotpSecret {
         Zeroizing::new(out)
     }
 
+    /// The `otpauth://totp/...` URI an authenticator imports when it scans the enrolment QR.
+    ///
+    /// # What is in it, and what deliberately is not
+    ///
+    /// The label is the ISSUER ALONE — no account name, no DID, no profile. The user names the entry
+    /// themselves, so nothing identifying this DIG Account needs to reach a phone's screen or its
+    /// backup, and the enrolment flow was already written that way for the typed path.
+    ///
+    /// Every parameter is derived from this module's own constants rather than written as a literal.
+    /// `digits=6` typed by hand next to a `CODE_DIGITS` that later became 8 is a QR that imports
+    /// cleanly and then disagrees with this code forever, which is indistinguishable to the user from
+    /// a broken phone.
+    ///
+    /// The secret is the FLAT base32, never [`base32_grouped`](Self::base32_grouped): a query parameter
+    /// containing spaces is not the same URI, and an authenticator that does not strip them imports a
+    /// different secret.
+    ///
+    /// # Secret handling
+    ///
+    /// The URI CONTAINS the secret in the clear, so it is [`Zeroizing`] like the secret itself. It must
+    /// not be logged, written to a file, or put on the clipboard — see the module docs.
+    pub fn provisioning_uri(&self) -> Zeroizing<String> {
+        let issuer = percent_encode(ISSUER);
+        Zeroizing::new(format!(
+            "otpauth://totp/{issuer}?secret={secret}&issuer={issuer}\
+             &algorithm=SHA1&digits={digits}&period={period}",
+            secret = *self.base32(),
+            digits = CODE_DIGITS,
+            period = STEP_SECONDS,
+        ))
+    }
+
     /// The code for the step containing `unix_seconds`, zero-padded to [`CODE_DIGITS`].
     pub fn code_at(&self, unix_seconds: u64) -> Zeroizing<String> {
         self.code_for_step(unix_seconds / STEP_SECONDS)
@@ -200,6 +237,29 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Percent-encode `text` for use inside a URI path segment or query value (RFC 3986 §2.3).
+///
+/// Everything outside the unreserved set becomes `%XX`. Hand-written for the same reason
+/// [`base32_encode`] is: this is an ENCODING, not a primitive, and the alternative was a dependency in
+/// a binary holding master seeds in order to turn one space into `%20`.
+///
+/// It is deliberately CONSERVATIVE — it escapes everything it is not certain about, including
+/// characters some encoders leave alone. Over-escaping is always readable by the other side; under-
+/// escaping produces a URI that parses into a different string, which for a `secret=` parameter means
+/// an authenticator that imports silently and never agrees with this code again.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// The RFC 4648 base32 alphabet, unpadded — the encoding every authenticator's manual-entry field uses.
@@ -388,6 +448,159 @@ mod tests {
             "grouping must not change the secret"
         );
         assert!(grouped.contains(' '), "it must actually be grouped");
+    }
+
+    /// The URI's `secret=` parameter, decoded back to bytes with a base32 DECODER written for this test
+    /// alone.
+    ///
+    /// Deliberately not `base32_encode` run forwards: comparing the URI against the same encoder that
+    /// built it proves only that the function is self-consistent, which it would also be if it were
+    /// encoding the wrong twenty bytes. Going the other way — URI text back to a secret, and then
+    /// asking whether that secret mints THE SAME CODES — is the only check that fails when the URI
+    /// carries something other than this secret.
+    fn secret_parsed_out_of(uri: &str) -> TotpSecret {
+        let value = uri
+            .split("secret=")
+            .nth(1)
+            .expect("the URI carries a secret")
+            .split('&')
+            .next()
+            .expect("the parameter ends");
+        let mut bytes = Vec::new();
+        let (mut buffer, mut bits) = (0u16, 0u32);
+        for ch in value.chars() {
+            let index = BASE32_ALPHABET
+                .iter()
+                .position(|c| *c as char == ch)
+                .unwrap_or_else(|| panic!("{ch:?} is not in the base32 alphabet"));
+            buffer = (buffer << 5) | index as u16;
+            bits += 5;
+            if bits >= 8 {
+                bits -= 8;
+                bytes.push((buffer >> bits) as u8);
+            }
+        }
+        TotpSecret::from_bytes(&bytes).expect("the URI's secret is 20 bytes")
+    }
+
+    /// The URI carries THIS secret — proved by minting codes from the secret parsed back out of it and
+    /// checking they are the codes this secret accepts, at several instants.
+    ///
+    /// A phone imports the URI and nothing else, so this is the only property that decides whether
+    /// enrolment works: a URI that is well-formed but carries a different, a truncated, or a
+    /// space-separated secret produces an authenticator that looks correctly set up and whose every
+    /// code is refused.
+    #[test]
+    fn the_uri_carries_the_same_secret_this_object_holds() {
+        let secret = TotpSecret::generate();
+        let imported = secret_parsed_out_of(&secret.provisioning_uri());
+
+        for now in [1_700_000_000u64, 1_700_000_031, 2_000_000_000] {
+            let code = imported.code_at(now);
+            assert!(
+                secret.matching_step(&code, now).is_some(),
+                "a code minted from the URI's secret must be accepted at t={now}"
+            );
+        }
+    }
+
+    /// A secret imported the way a PHONE imports one — read out of a provisioning URI — produces codes
+    /// this crate accepts, checked against values computed by a different implementation entirely.
+    ///
+    /// The expected codes were produced by Python's `hmac`/`hashlib` from the URI decoded off a
+    /// PHOTOGRAPH of the rendered enrolment window (dig_ecosystem#1849), not by this crate. That is the
+    /// point: every other test here compares this code against itself, and a wrong dynamic truncation
+    /// or a wrong counter endianness is perfectly self-consistent. Pinning the numbers a foreign
+    /// implementation produced is what makes the round trip — pixels, to URI, to secret, to a code the
+    /// app accepts — a claim rather than an assertion about our own arithmetic.
+    ///
+    /// The secret is `JBSWY3DPEHPK3PXP` twice, a published example value; nothing here is a live
+    /// credential.
+    #[test]
+    fn a_secret_imported_from_a_scanned_uri_produces_the_codes_a_phone_would() {
+        const SCANNED: &str = "otpauth://totp/DIG%20Network?secret=JBSWY3DPEHPK3PXPJBSWY3DP\
+                               EHPK3PXP&issuer=DIG%20Network&algorithm=SHA1&digits=6&period=30";
+        let imported = secret_parsed_out_of(SCANNED);
+
+        for (at, expected) in [
+            (59u64, "503347"),
+            (1_111_111_109, "088309"),
+            (1_700_000_000, "406058"),
+        ] {
+            assert_eq!(&*imported.code_at(at), expected, "at t={at}");
+            assert!(
+                imported.matching_step(expected, at).is_some(),
+                "the app must ACCEPT the code its own scanned secret mints, at t={at}"
+            );
+        }
+    }
+
+    /// The URI's parameters come from this module's constants, and the label carries no account.
+    ///
+    /// The digits and period are asserted against `CODE_DIGITS`/`STEP_SECONDS` rather than against `6`
+    /// and `30`, so changing either constant without changing the URI fails here instead of in a user's
+    /// authenticator. The scheme and the encoded issuer are pinned because a raw space in the label is
+    /// a URI most scanners reject outright.
+    #[test]
+    fn the_uri_states_this_modules_parameters_and_names_no_account() {
+        let uri = rfc_secret().provisioning_uri();
+
+        assert!(uri.starts_with("otpauth://totp/"), "{}", uri.as_str());
+        assert!(uri.contains("issuer=DIG%20Network"), "{}", uri.as_str());
+        assert!(
+            !uri.contains("DIG Network"),
+            "a raw space is not percent-encoded: {}",
+            uri.as_str()
+        );
+        assert!(
+            uri.contains(&format!("digits={CODE_DIGITS}")),
+            "{}",
+            uri.as_str()
+        );
+        assert!(
+            uri.contains(&format!("period={STEP_SECONDS}")),
+            "{}",
+            uri.as_str()
+        );
+        assert!(uri.contains("algorithm=SHA1"), "{}", uri.as_str());
+        // The label is the issuer and nothing else — no `Issuer:account` pair — so no DIG identifier
+        // reaches the phone's screen or its cloud backup.
+        let label = uri
+            .trim_start_matches("otpauth://totp/")
+            .split('?')
+            .next()
+            .expect("a label");
+        assert_eq!(label, "DIG%20Network");
+    }
+
+    /// The secret in the URI is the FLAT base32, never the space-grouped human rendering.
+    ///
+    /// The grouped form is the nearest wrong implementation — it is the one already on screen, and
+    /// substituting it produces a URI that still parses, still names the right issuer, and imports a
+    /// secret truncated at the first space.
+    #[test]
+    fn the_uri_carries_the_flat_secret_not_the_grouped_one() {
+        let secret = rfc_secret();
+        let uri = secret.provisioning_uri();
+
+        assert!(uri.contains(&*secret.base32()), "{}", uri.as_str());
+        assert!(
+            !uri.contains(' ') && !uri.contains("%20&") && !uri.contains("secret=%20"),
+            "the secret parameter must not be grouped: {}",
+            uri.as_str()
+        );
+    }
+
+    /// The conservative percent-encoder, against RFC 3986's unreserved set and the characters an issuer
+    /// or a query value could plausibly carry. Reserved and non-ASCII bytes both escape; the unreserved
+    /// set passes through untouched, because escaping THOSE would also be wrong.
+    #[test]
+    fn percent_encoding_escapes_everything_outside_the_unreserved_set() {
+        assert_eq!(percent_encode("DIG Network"), "DIG%20Network");
+        assert_eq!(percent_encode("aZ09-._~"), "aZ09-._~");
+        assert_eq!(percent_encode("a&b=c?d/e#f"), "a%26b%3Dc%3Fd%2Fe%23f");
+        // Multi-byte UTF-8 escapes per BYTE, which is what RFC 3986 §2.5 requires.
+        assert_eq!(percent_encode("é"), "%C3%A9");
     }
 
     /// A secret of the wrong length is rejected, so a corrupt vault blob never becomes a secret that

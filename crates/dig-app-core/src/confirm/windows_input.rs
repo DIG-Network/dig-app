@@ -43,11 +43,13 @@
 use std::sync::OnceLock;
 
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, InvalidateRect, MonitorFromPoint, ANSI_CHARSET, CLEARTYPE_QUALITY,
-    COLOR_WINDOW, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HFONT,
-    MONITOR_DEFAULTTONEAREST, OUT_TT_PRECIS,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect,
+    MonitorFromPoint, ANSI_CHARSET, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_PITCH, FF_DONTCARE,
+    FW_NORMAL, FW_SEMIBOLD, HBRUSH, HFONT, MONITOR_DEFAULTTONEAREST, OUT_TT_PRECIS, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -62,14 +64,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CW_USEDEFAULT,
     ES_AUTOHSCROLL, ES_PASSWORD, GWLP_USERDATA, HMENU, IDCANCEL, IDC_ARROW, IDOK, MSG, SM_CXSCREEN,
     SM_CYSCREEN, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_EX_TOPMOST, WS_GROUP, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WM_COMMAND, WM_DESTROY, WM_NCCREATE, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION,
+    WS_CHILD, WS_EX_TOPMOST, WS_GROUP, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, WS_VSCROLL,
 };
 use zeroize::Zeroizing;
 
+use super::qr::QrArt;
 use super::{
     ConfirmContent, ForegroundInput, ForegroundWindow, InputContent, InputOutcome, InputStyle,
     Presentation, WindowIntent,
@@ -129,6 +132,17 @@ mod layout {
     /// from the actual display, because a value that fits a phrase on a desktop can still overflow a 250%
     /// laptop.
     pub const BODY_LINES_FALLBACK: i32 = 32;
+    /// The side of the square a QR code is allotted, in design units (dig_ecosystem#1849).
+    ///
+    /// Sized to be scannable rather than to look tidy: it is comfortably larger than the body text so a
+    /// phone held at reading distance resolves individual modules, and small enough that the enrolment
+    /// window still fits on a laptop screen beside its heading, its key and its buttons.
+    ///
+    /// This is the ALLOTMENT, not the drawn size. The QR takes the largest whole number of pixels per
+    /// module that fits inside it (`QrArt::module_pixels`) and leaves the remainder as margin, because a
+    /// fractional module size is what makes a symbol photograph cleanly and refuse to scan.
+    pub const QR_SIDE: i32 = 260;
+
     /// Height of the input field. One value, because the field can never be multiline: Win32 ignores
     /// `ES_PASSWORD` on a multiline `EDIT`, and §3.1d requires secret entry to be maskable.
     pub const FIELD_SINGLE: i32 = 30;
@@ -182,6 +196,10 @@ struct Metrics {
     bar_width: i32,
     bar_field: i32,
     font_bar_field: i32,
+    /// The side of the square a QR is allotted, scaled. A QR that stayed a fixed pixel size while the
+    /// rest of the window grew would be a postage stamp at 250% — the #1832 defect, on the one element
+    /// where being small also means being unreadable BY A MACHINE.
+    qr_side: i32,
     /// The most body lines this DISPLAY can show without the window growing past it.
     ///
     /// Derived, not a constant. `BODY_MAX_LINES` used to be a flat 10, documented as fitting "every real
@@ -270,6 +288,7 @@ impl Metrics {
             bar_width: s(layout::BAR_WIDTH),
             bar_field: s(layout::BAR_FIELD),
             font_bar_field: s(layout::BAR_FONT_FIELD),
+            qr_side: s(layout::QR_SIDE),
             body_line_budget: Self::body_budget(s(layout::LINE), s(layout::CHROME), screen_height),
         }
     }
@@ -367,6 +386,13 @@ struct WindowSpec<'a> {
     body: &'a str,
     /// The typed field, or `None` for a window that only asks the user to choose.
     field: Option<FieldSpec<'a>>,
+    /// A QR code drawn between the body and the buttons, or `None` — which is every window but
+    /// two-factor enrolment (dig_ecosystem#1849).
+    ///
+    /// An ELEMENT of the one window spec, not a second window implementation: the DPI scaling, the
+    /// placement arithmetic and the message loop are the ones every other DIG window already uses, so
+    /// there is no second layout path to drift.
+    qr: Option<&'a QrArt>,
     /// What the buttons say and which one Enter activates.
     buttons: ButtonSpec<'a>,
     /// How the window is framed and placed. Six windows, one class, two presentations.
@@ -487,6 +513,28 @@ struct WindowState {
     accepted: bool,
     /// Whether losing the foreground dismisses this window — see [`Chrome::dismiss_on_blur`].
     dismiss_on_blur: bool,
+    /// The QR square this window paints on `WM_PAINT`, or `None`.
+    ///
+    /// Owned by the window's state rather than borrowed from the spec, so the pattern's lifetime is
+    /// exactly the window's: the state is dropped when [`show`] returns, and `QrArt`'s buffer is
+    /// [`Zeroizing`], so the modules — which ARE the TOTP secret — are wiped when the window closes
+    /// rather than left in the heap.
+    qr: Option<QrPaint>,
+}
+
+/// A QR code and where on the window it goes.
+///
+/// The geometry is resolved ONCE, in [`Layout::compute`], and carried here — `WM_PAINT` fires many
+/// times (every uncover, every DPI change, every restore) and recomputing a layout inside a paint is
+/// how a symbol drifts a pixel between repaints.
+struct QrPaint {
+    /// The code. Wiped on drop.
+    art: QrArt,
+    /// The reserved square's top-left corner, in client coordinates.
+    left: i32,
+    top: i32,
+    /// Pixels per module — a whole number, so module edges land on pixel boundaries.
+    module_px: i32,
 }
 
 /// A [`ForegroundInput`] that draws the Win32 window with a typed field.
@@ -528,6 +576,12 @@ fn input_outcome_from(result: Result<Answer, windows::core::Error>) -> InputOutc
 pub(super) struct DialogWindow;
 
 impl ForegroundWindow for DialogWindow {
+    /// This window paints the QR itself, in `WM_PAINT` — see [`paint_qr`]. It is the only DIG backend
+    /// that can, which is why the capability is asked for rather than assumed.
+    fn draws_qr(&self) -> bool {
+        true
+    }
+
     fn show(&self, content: &ConfirmContent) -> WindowIntent {
         let result = show(&spec_for_confirm(content));
         if let Err(e) = &result {
@@ -562,6 +616,8 @@ fn spec_for_input(content: &InputContent) -> WindowSpec<'_> {
             masked: content.masked,
             revealable: content.revealable,
         }),
+        // A typed-input window asks the user to give something, never to take one — nothing to scan.
+        qr: None,
         // A field window's affirmative is its own submit verb; refusing to type is a plain Cancel.
         buttons: ButtonSpec::Decide {
             affirm: content.submit,
@@ -597,6 +653,9 @@ fn spec_for_confirm(content: &ConfirmContent) -> WindowSpec<'_> {
         heading: &content.heading,
         body: &content.body,
         field: None,
+        // Borrowed from the content, so the ONE place that decides what the user is shown
+        // (`ConfirmContent`) also decides whether there is a QR — a backend cannot add or drop one.
+        qr: content.qr.as_ref(),
         buttons,
         // A consent window is never a launcher: it must keep its frame, its title and its place on the
         // screen, and it must NOT evaporate when the user looks at something else.
@@ -701,6 +760,16 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
             submitted: None,
             accepted: false,
             dismiss_on_blur: spec.chrome.dismiss_on_blur(),
+            qr: spec.qr.and_then(|art| {
+                // Centred in the same text block the heading, body and buttons align to, so the square
+                // reads as part of the window rather than an image dropped onto it.
+                l.qr_top.map(|top| QrPaint {
+                    art: art.clone(),
+                    left: m.margin + (l.inner - l.qr_side) / 2,
+                    top,
+                    module_px: l.qr_module_px,
+                })
+            }),
         });
         let state_ptr: *mut WindowState = &mut *state;
 
@@ -742,9 +811,13 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                 m.heading_line,
             );
         }
+        // From the LAYOUT, never from the spec: the height beside it was computed for exactly these
+        // characters, and a control given any others clips the difference in silence. And when even the
+        // broken text does not fit the display's budget, `body_scrolls` makes it scrollable rather than
+        // truncated — the two guards compose, they do not overlap.
         add_body(
             &ctx,
-            spec.body,
+            &l.body_text,
             l.body_top,
             inner,
             l.body_height,
@@ -896,13 +969,27 @@ unsafe fn focus_first(window: HWND, edit: HWND, buttons: &ButtonSpec<'_>) {
 ///
 /// One walk, used by both, is the fix: a position and the total height cannot disagree when they come from the
 /// same arithmetic. Pure, so the whole layout is unit-testable without a display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It carries the body's TEXT for the same reason it carries the body's height: the two have to agree.
+/// A `STATIC` clips in silence, so a body MEASURED after its unbreakable runs were broken and DRAWN
+/// unbroken is clipped exactly as it was before the fix — and the drawing code reading `spec.body`
+/// rather than this field is a one-word mistake that no assertion about heights can see. Taking both
+/// from one field makes that pair unrepresentable apart, which is the same reasoning that put the
+/// positions and the total height here.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Layout {
     /// Top of the heading line.
     heading_top: i32,
-    /// Top of the body block, and how tall it is.
+    /// Top of the body block, how tall it is, and the exact text to draw into it.
     body_top: i32,
     body_height: i32,
+    body_text: String,
+    /// Top of the QR square, its drawn side in pixels, and the pixels per module — `None`/zero on a
+    /// window with no QR. All three come from ONE walk, so the square painted and the space reserved
+    /// for it cannot disagree.
+    qr_top: Option<i32>,
+    qr_side: i32,
+    qr_module_px: i32,
     /// Top of the field's label, the field itself, and the reveal checkbox — `None` on a fieldless window.
     field_label_top: Option<i32>,
     field_top: Option<i32>,
@@ -941,7 +1028,7 @@ impl Layout {
     fn compute(spec: &WindowSpec<'_>, m: Metrics) -> Self {
         match spec.chrome {
             Chrome::Dialog => Self::dialog(spec, m),
-            Chrome::Bar => Self::bar(m),
+            Chrome::Bar => Self::bar(spec, m),
         }
     }
 
@@ -955,7 +1042,7 @@ impl Layout {
     /// window's default push button, so a bar with no buttons would depend on the undefaulted fallback
     /// path instead of the same tested one every other DIG window uses — and a visible `Open` button also
     /// tells a first-time user what Enter is going to do.
-    fn bar(m: Metrics) -> Self {
+    fn bar(spec: &WindowSpec<'_>, m: Metrics) -> Self {
         let gap = m.margin / 2;
         let width = Chrome::Bar.width(m);
         let inner = width - m.margin * 2;
@@ -963,6 +1050,9 @@ impl Layout {
         let field_top = m.margin;
         let mut top = field_top + m.bar_field + gap;
         let body_top = top;
+        // The bar's hint is one line by construction, but it goes through the same breaking as every
+        // other body, so there is exactly ONE path from a spec's text to the text a window draws.
+        let body_text = break_long_runs(spec.body, chars_per_line(inner, m));
         let body_height = m.line;
         top += body_height + gap;
 
@@ -972,6 +1062,12 @@ impl Layout {
             heading_top: field_top,
             body_top,
             body_height,
+            body_text,
+            // A launcher never carries a QR: it is a place to paste a link, not a place to be handed a
+            // credential.
+            qr_top: None,
+            qr_side: 0,
+            qr_module_px: 0,
             field_label_top: None,
             field_top: Some(field_top),
             // A URN is not a secret, so there is nothing to reveal.
@@ -997,11 +1093,25 @@ impl Layout {
 
         let heading_top = m.margin;
         let body_top = heading_top + m.heading_line + gap;
-        let wanted_lines = body_wanted_lines(spec.body, inner, m);
-        let shown_lines = body_lines(spec.body, inner, m);
+        // Break unbreakable runs FIRST, then measure what will actually be drawn. Measuring the raw
+        // string and drawing the broken one is how a height ends up computed for different characters
+        // than the control receives.
+        let body_text = break_long_runs(spec.body, chars_per_line(inner, m));
+        let wanted_lines = body_wanted_lines(&body_text, inner, m);
+        let shown_lines = body_lines(&body_text, inner, m);
         let body_height = shown_lines * m.line;
         let body_scrolls = wanted_lines > shown_lines;
         let mut top = body_top + body_height + gap;
+
+        // The QR sits between what the window SAYS and what it ASKS: after the instruction that tells
+        // the user to point their camera at it, and before the buttons that assume they have.
+        let (mut qr_top, mut qr_side, mut qr_module_px) = (None, 0, 0);
+        if let Some(art) = spec.qr {
+            qr_module_px = art.module_pixels(m.qr_side);
+            qr_side = art.drawn_pixels(qr_module_px);
+            qr_top = Some(top);
+            top += qr_side + gap;
+        }
 
         let (mut field_label_top, mut field_top, mut reveal_top) = (None, None, None);
         if let Some(field) = &spec.field {
@@ -1023,6 +1133,10 @@ impl Layout {
             heading_top,
             body_top,
             body_height,
+            body_text,
+            qr_top,
+            qr_side,
+            qr_module_px,
             field_label_top,
             field_top,
             reveal_top,
@@ -1049,19 +1163,79 @@ impl Layout {
 /// How many lines the body ACTUALLY needs — unclamped by the display budget.
 ///
 /// Separate from [`body_lines`], which answers how many are RESERVED. The difference between the two is
-/// exactly the text a `STATIC` would hide, and [`Layout::body_scrolls`] turns that difference into a
+/// exactly the text a control would hide, and [`Layout::body_scrolls`] turns that difference into a
 /// scrollbar instead of a silence (dig_ecosystem#49).
 fn body_wanted_lines(body: &str, width: i32, m: Metrics) -> i32 {
-    let per_line = ((width / m.char_width).max(1)) as usize;
     let wrapped: usize = body
         .split('\n')
-        .map(|line| line.chars().count().div_ceil(per_line).max(1))
+        .map(|line| {
+            line.chars()
+                .count()
+                .div_ceil(chars_per_line(width, m))
+                .max(1)
+        })
         .sum();
     (wrapped as i32).max(layout::BODY_MIN_LINES)
 }
 
 fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
     body_wanted_lines(body, width, m).clamp(layout::BODY_MIN_LINES, m.body_line_budget)
+}
+
+/// How many characters of the body font fit across `width` pixels.
+///
+/// One expression, read by both the height estimate and the word-breaking below, because those two
+/// disagreeing is precisely how text gets clipped: a height computed for 90 characters a line under
+/// text broken at 110 reserves too few lines, and a `STATIC` says nothing when it runs out.
+fn chars_per_line(width: i32, m: Metrics) -> usize {
+    ((width / m.char_width).max(1)) as usize
+}
+
+/// Insert a break inside any run of non-space characters too long to fit on one line.
+///
+/// # Why this is necessary at all
+///
+/// A `STATIC` control wraps at SPACES. Give it a 130-character URI with no space in it and there is no
+/// wrap opportunity, so it puts the whole run on one line and clips whatever overflows — silently, as
+/// always. The height estimate above cannot save it, because that estimate divides a character count
+/// by a line width and concludes (correctly) that the text needs two lines; the control simply refuses
+/// to use them.
+///
+/// This is the same silent-clip family as dig_ecosystem#49, where sixteen of a user's twenty-four
+/// recovery words were invisible, and dig_ecosystem#1840, where the `otpauth://` URI was DELETED
+/// rather than drawn because of it. Fixing it in the layer that draws — so no caller has to know that
+/// long tokens are dangerous — is what stops it recurring a third time.
+///
+/// Runs that already fit are left exactly as they are, so ordinary prose is untouched.
+fn break_long_runs(body: &str, per_line: usize) -> String {
+    // Lines already delimited by explicit newlines are handled independently; the caller's paragraph
+    // structure is a layout decision this must not change.
+    body.split('\n')
+        .map(|line| break_line(line, per_line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Break one line's over-long words, leaving everything else alone.
+fn break_line(line: &str, per_line: usize) -> String {
+    if line.split(' ').all(|word| word.chars().count() <= per_line) {
+        return line.to_string();
+    }
+    line.split(' ')
+        .map(|word| match word.chars().count() > per_line {
+            // Chunked at the line width rather than at a URI's own separators: this runs on any long
+            // token, and a rule about `?` and `&` would not help a 64-character store id.
+            true => word
+                .chars()
+                .collect::<Vec<_>>()
+                .chunks(per_line)
+                .map(|chunk| chunk.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            false => word.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The style bits for the input field.
@@ -1173,6 +1347,60 @@ unsafe fn pump(window: HWND) {
     }
 }
 
+/// Paint the QR square: a white field, then one filled rectangle per dark module.
+///
+/// # Why the white field is explicit rather than the window's own background
+///
+/// A decoder finds the finder patterns by their CONTRAST against light space. The window's background
+/// is whatever the system window colour happens to be — light today, and something else the moment
+/// this window learns dark mode or a user picks a high-contrast theme. A QR drawn dark-on-dark
+/// photographs fine and scans never, so the light half of the symbol is painted, not assumed.
+///
+/// # Why filled rectangles rather than a bitmap
+///
+/// A bitmap has a size, and this window does not: it scales from design units at the display's DPI
+/// (dig_ecosystem#1832), so a bitmap would have to be stretched — and a stretched QR has module edges
+/// on fractional pixels, which is exactly the symbol a camera cannot resolve. Rectangles of
+/// `module_px` are crisp at every scale.
+///
+/// # Safety
+///
+/// `window` must be live and inside a `WM_PAINT`; the brushes are created and deleted here, and
+/// `BeginPaint`/`EndPaint` are paired on every path.
+unsafe fn paint_qr(window: HWND, qr: &QrPaint) {
+    let mut paint = PAINTSTRUCT::default();
+    let dc = BeginPaint(window, &mut paint);
+    let light = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+    let dark = CreateSolidBrush(COLORREF(0x0000_0000));
+
+    let side = qr.art.drawn_pixels(qr.module_px);
+    let field = RECT {
+        left: qr.left,
+        top: qr.top,
+        right: qr.left + side,
+        bottom: qr.top + side,
+    };
+    FillRect(dc, &field, light);
+
+    for (column, row) in qr.art.dark_modules() {
+        let (x, y) = (
+            qr.left + column as i32 * qr.module_px,
+            qr.top + row as i32 * qr.module_px,
+        );
+        let module = RECT {
+            left: x,
+            top: y,
+            right: x + qr.module_px,
+            bottom: y + qr.module_px,
+        };
+        FillRect(dc, &module, dark);
+    }
+
+    let _ = DeleteObject(light);
+    let _ = DeleteObject(dark);
+    let _ = EndPaint(window, &paint);
+}
+
 /// The window procedure.
 ///
 /// # Safety
@@ -1235,6 +1463,20 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(0);
             }
             DefWindowProcW(window, message, wparam, lparam)
+        }
+        // The QR is the ONE thing on this window Windows cannot draw for us: there is no control that
+        // renders a bit matrix, so the parent paints it. Every other element is a child control that
+        // paints itself, and the reserved square holds no children, so this cannot overdraw them.
+        WM_PAINT => {
+            match state_of(window).and_then(|state| state.qr.as_ref()) {
+                Some(qr) => {
+                    paint_qr(window, qr);
+                    LRESULT(0)
+                }
+                // No QR: let Windows validate the region with the class background brush, exactly as
+                // before. Painting nothing here would leave the region invalid and loop forever.
+                None => DefWindowProcW(window, message, wparam, lparam),
+            }
         }
         WM_CLOSE => {
             // Closing by the frame is a cancel: `accepted` stays false, so no text is acted on.
@@ -2049,6 +2291,7 @@ mod tests {
             heading: "Do you have your 24 words written down?",
             body: "...",
             affirm: "Yes, I have them",
+            scannable: None,
         });
         let spec = spec_for_confirm(&content);
 
@@ -2101,12 +2344,214 @@ mod tests {
                 masked,
                 revealable,
             }),
+            qr: None,
             buttons: ButtonSpec::Decide {
                 affirm: "Restore",
                 refuse: "Cancel",
                 refusal_is_default: false,
             },
             chrome: Chrome::Dialog,
+        }
+    }
+
+    // ──────────────── The enrolment QR (dig_ecosystem#1849) ────────────────
+
+    /// A realistic `otpauth://` provisioning URI — the string the enrolment window really encodes, so
+    /// every size assertion below is made against the symbol that is really drawn.
+    const PROVISIONING_URI: &str = "otpauth://totp/DIG%20Network?secret=JBSWY3DPEHPK3PXPJBSWY3DP\
+                                    EHPK3PXP&issuer=DIG%20Network&algorithm=SHA1&digits=6&period=30";
+
+    /// A consent window carrying a QR, and the same window without one.
+    ///
+    /// One fixture parameterised on the QR alone, so a comparison between them varies exactly the thing
+    /// under test: identical copy, identical buttons, identical chrome.
+    fn qr_spec<'a>(art: Option<&'a QrArt>) -> WindowSpec<'a> {
+        WindowSpec {
+            title: "DIG — Add DIG to your authenticator",
+            heading: "Add DIG to your authenticator app.",
+            body: "Scan the square below with your authenticator app.",
+            field: None,
+            qr: art,
+            buttons: ButtonSpec::Decide {
+                affirm: "I've added it",
+                refuse: "Cancel",
+                refusal_is_default: false,
+            },
+            chrome: Chrome::Dialog,
+        }
+    }
+
+    /// The QR gets its own reserved band, and the window GROWS by exactly that band.
+    ///
+    /// The control fixture is what makes this able to fail: a layout that reserved a position for the
+    /// QR without adding its height to the window would place the square on top of the buttons, and a
+    /// test that only checked `qr_top.is_some()` would call that a pass. Comparing the two heights is
+    /// what sees it.
+    #[test]
+    fn a_qr_is_given_its_own_band_and_the_window_grows_to_hold_it() {
+        let art = QrArt::encode(PROVISIONING_URI).expect("encodes");
+        let m = Metrics::for_dpi(BASE_DPI);
+        let with = Layout::compute(&qr_spec(Some(&art)), m);
+        let without = Layout::compute(&qr_spec(None), m);
+
+        assert_eq!(without.qr_top, None, "no QR, no band");
+        let top = with.qr_top.expect("a QR gets a position");
+        assert!(with.qr_side > 0, "and a size");
+        assert_eq!(
+            with.total_height - without.total_height,
+            with.qr_side + m.margin / 2,
+            "the window must grow by the square plus its gap, or the QR overlaps what follows"
+        );
+        // The square must sit BELOW the body and ABOVE the buttons — the order the copy assumes.
+        assert!(top >= with.body_top + with.body_height);
+        assert!(top + with.qr_side <= with.buttons_top);
+    }
+
+    /// The QR scales with the display, in whole pixels per module.
+    ///
+    /// The postage-stamp defect (dig_ecosystem#1832) is a fixed-pixel element on a window that scales,
+    /// and on a QR it is not merely ugly — below a few pixels a module a phone camera cannot resolve
+    /// the symbol at all. So the drawn side must GROW with DPI, and each module must stay a whole
+    /// number of pixels at every one of them.
+    ///
+    /// 240 DPI (250%) is in the list because it is what the machine this was built on runs at.
+    #[test]
+    fn the_qr_grows_with_the_display_and_stays_on_whole_pixels() {
+        let art = QrArt::encode(PROVISIONING_URI).expect("encodes");
+        let mut previous = 0;
+        for dpi in [96u32, 144, 192, 240] {
+            let m = Metrics::for_dpi(dpi);
+            let l = Layout::compute(&qr_spec(Some(&art)), m);
+
+            assert!(
+                l.qr_side > previous,
+                "the QR must grow from {previous} px at {dpi} DPI, drew {}",
+                l.qr_side
+            );
+            assert_eq!(
+                l.qr_side,
+                l.qr_module_px * art.total_modules() as i32,
+                "the drawn side must be a whole number of modules at {dpi} DPI"
+            );
+            assert!(
+                l.qr_module_px >= 3,
+                "{}px per module at {dpi} DPI is below what a camera resolves",
+                l.qr_module_px
+            );
+            previous = l.qr_side;
+        }
+    }
+
+    /// The QR fits INSIDE the text block it is centred in, at every scale.
+    ///
+    /// A square wider than the block would be clipped by the window frame — the same silent-clip family
+    /// as the body text, on an element where losing a few modules means losing the whole credential.
+    #[test]
+    fn the_qr_fits_inside_the_window_at_every_scale() {
+        let art = QrArt::encode(PROVISIONING_URI).expect("encodes");
+        for dpi in [96u32, 144, 192, 240] {
+            let m = Metrics::for_dpi(dpi);
+            let l = Layout::compute(&qr_spec(Some(&art)), m);
+            assert!(
+                l.qr_side <= l.inner,
+                "the QR ({} px) overflows the {} px text block at {dpi} DPI",
+                l.qr_side,
+                l.inner
+            );
+        }
+    }
+
+    /// A bar never carries a QR — it is a place to paste a link, not to be handed a credential.
+    #[test]
+    fn the_launcher_bar_reserves_no_qr_band() {
+        let art = QrArt::encode(PROVISIONING_URI).expect("encodes");
+        let l = Layout::compute(
+            &WindowSpec {
+                qr: Some(&art),
+                ..bar_spec()
+            },
+            Metrics::for_dpi(BASE_DPI),
+        );
+        assert_eq!(l.qr_top, None);
+        assert_eq!(l.qr_side, 0);
+    }
+
+    // ──────────────── Unbreakable text (dig_ecosystem#49, #1840) ────────────────
+
+    /// A run with no space in it is broken so a `STATIC` — which wraps at spaces and clips otherwise —
+    /// has somewhere to wrap.
+    ///
+    /// The input is a real provisioning URI at a real line width, because that is the string that
+    /// caused `provisioning_uri` to be DELETED rather than drawn (#1840). Every resulting line must be
+    /// within the width: asserting merely that a newline appeared would pass on a single break in the
+    /// middle of a 260-character token, which still clips.
+    #[test]
+    fn an_unbreakable_run_is_broken_to_fit_the_line() {
+        const PER_LINE: usize = 40;
+        let broken = break_long_runs(PROVISIONING_URI, PER_LINE);
+
+        assert!(
+            broken.contains('\n'),
+            "the URI must gain wrap opportunities"
+        );
+        for line in broken.split('\n') {
+            assert!(
+                line.chars().count() <= PER_LINE,
+                "{:?} is {} characters, over the {PER_LINE} the control can draw",
+                line,
+                line.chars().count()
+            );
+        }
+        // Nothing may be lost or invented: the URI must be recoverable character-for-character.
+        assert_eq!(broken.replace('\n', ""), PROVISIONING_URI);
+    }
+
+    /// Ordinary prose is left exactly alone, and the author's own paragraph breaks survive.
+    ///
+    /// Without this the fix trades one defect for another: a body re-flowed on every render would break
+    /// the numbered recovery-phrase list into a shape nobody wrote, which is the #49 window again.
+    #[test]
+    fn prose_and_deliberate_line_breaks_are_untouched() {
+        let prose = "1. abandon  2. ability\n3. able  4. about\n\nWrite these down.";
+        assert_eq!(break_long_runs(prose, 40), prose);
+    }
+
+    /// The text the layout says to DRAW is broken, and the height beside it is measured from THAT text.
+    ///
+    /// This is the seam where the fix could be complete on paper and still clip: break the text for the
+    /// measurement but hand the control the ORIGINAL, and a URI needing four lines is drawn into a
+    /// space sized for two — clipped, in silence, exactly as before. An assertion about the height
+    /// alone cannot see that, so this asserts the PAIR, read off the one struct the drawing code takes
+    /// both from.
+    ///
+    /// Checked at several DPIs because the line width — and so where the breaks fall — is derived from
+    /// the display; a pairing that holds only at 100% is not the property.
+    #[test]
+    fn the_body_a_window_draws_is_broken_and_its_height_is_measured_from_it() {
+        let unbreakable = WindowSpec {
+            body: PROVISIONING_URI,
+            ..qr_spec(None)
+        };
+        for dpi in [96u32, 144, 240] {
+            let m = Metrics::for_dpi(dpi);
+            let l = Layout::compute(&unbreakable, m);
+            let per_line = chars_per_line(l.inner, m);
+            let drawn: Vec<&str> = l.body_text.split('\n').collect();
+
+            for line in &drawn {
+                assert!(
+                    line.chars().count() <= per_line,
+                    "at {dpi} DPI the drawn line {line:?} is wider than the control"
+                );
+            }
+            assert!(
+                l.body_height / m.line >= drawn.len() as i32,
+                "at {dpi} DPI, {} px holds fewer than the {} lines it will draw",
+                l.body_height,
+                drawn.len()
+            );
+            // Nothing lost or invented on the way to the screen.
+            assert_eq!(l.body_text.replace('\n', ""), PROVISIONING_URI);
         }
     }
 
@@ -2283,6 +2728,7 @@ mod tests {
             heading: "Something happened.",
             body,
             field: None,
+            qr: None,
             buttons,
             chrome: Chrome::Dialog,
         }

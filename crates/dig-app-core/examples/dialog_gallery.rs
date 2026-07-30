@@ -20,6 +20,8 @@
 //! |---|---|
 //! | `notice` | informational, one button |
 //! | `claim` | the enrolment retention either/or |
+//! | `qr` | the two-factor enrolment window WITH its scannable QR (dig_ecosystem#1849) — the one window
+//!   whose correctness a screenshot cannot settle, since a camera has to read it |
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
@@ -37,7 +39,7 @@
 //! what was typed, never the text, so a screenshot session cannot leak a phrase into a terminal.
 
 use dig_app_core::confirm::{
-    native_confirmer, ClaimPrompt, DestroyPrompt, InputPrompt, InputStyle, NoticePrompt,
+    native_confirmer, ClaimPrompt, DestroyPrompt, InputPrompt, InputStyle, NoticePrompt, QrArt,
     RevealPrompt,
 };
 
@@ -48,8 +50,20 @@ use dig_app_core::confirm::{
 /// this call Windows DPI-virtualises it, `GetDpiForMonitor` reports 96, and the gallery would render the
 /// 100% layout on a scaled display — a preview that quietly disagrees with the thing it previews, which is
 /// worse than no preview.
+/// # Photographing the 100% layout on a scaled display
+///
+/// Setting `DIG_GALLERY_DPI_UNAWARE=1` SKIPS this call, which is the only way to see the reference
+/// (96 DPI) layout without owning a 96 DPI monitor: Windows then virtualises the process,
+/// `GetDpiForMonitor` reports 96, and the window lays itself out exactly as it would at 100% — the
+/// shell upscales the result for display, so the screenshot shows the right LAYOUT at the wrong
+/// sharpness. That is a fair way to check proportions and a useless one for checking a QR's
+/// scannability, so it is opt-in and named for what it does.
 #[cfg(windows)]
 fn match_the_trays_dpi_awareness() {
+    if std::env::var("DIG_GALLERY_DPI_UNAWARE").is_ok_and(|v| v == "1") {
+        eprintln!("DIG_GALLERY_DPI_UNAWARE=1 — rendering the 100% layout, upscaled by Windows");
+        return;
+    }
     // SAFETY: a documented, idempotent process-wide call with a constant argument; a failure (an older
     // Windows, or awareness already set) is reported by the return value and is harmless — the gallery then
     // renders exactly as it did before.
@@ -147,7 +161,37 @@ fn main() {
                    address and everything sealed under it are gone for good. You can view the words \
                    again later from the DIG tray menu.",
             affirm: "Yes, I have them",
+            scannable: None,
         }),
+        // The two-factor enrolment window (#1849). The URI below is a FIXED, PUBLISHED test vector —
+        // RFC 4648's `JBSWY3DPEHPK3PXP...` — not a generated secret, so a photograph of this window,
+        // and anything a camera reads off it, exposes nothing. The point of drawing it here is that a
+        // QR is the one element whose correctness a screenshot cannot settle: it has to be SCANNED.
+        "qr" => {
+            // `concat!` rather than backslash line-continuations: this file has been bitten before by
+            // a literal that acquired a hole mid-sentence, which no assertion could see and only a
+            // photograph caught. A URI is worse than prose there — spaces would silently make it an
+            // `otpauth://` string no authenticator can parse, in a square that still LOOKS like a QR.
+            const DEMO_URI: &str = concat!(
+                "otpauth://totp/DIG%20Network",
+                "?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+                "&issuer=DIG%20Network&algorithm=SHA1&digits=6&period=30",
+            );
+            let art = QrArt::encode(DEMO_URI).expect("the demo URI encodes");
+            confirmer.confirm_claim(&ClaimPrompt {
+                title: "DIG — Add DIG to your authenticator",
+                heading: "Add DIG to your authenticator app.",
+                body: concat!(
+                    "Scan the square below with your authenticator app.\n\n",
+                    "Or add it by hand — choose to add an account by ENTERING A KEY, and type:\n\n",
+                    "JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP\n\n",
+                    "Name it anything you like — DIG will appear as \"DIG Network\". If your app ",
+                    "asks for settings, they are: time-based, 6 digits, 30 seconds.",
+                ),
+                affirm: "I've added it",
+                scannable: Some(&art),
+            })
+        }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
             secret: "your 24-word DIG recovery phrase",

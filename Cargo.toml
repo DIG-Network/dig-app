@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "5.1.1"
+version = "5.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -109,6 +109,26 @@ hkdf = "0.12"
 # hash — so its collision weakness does not apply. RustCrypto, the same family as the `sha2`/`hmac`
 # deps already in the graph; no hand-rolled crypto.
 sha1 = "0.10"
+# The QR encoder for the two-factor enrolment window (dig_ecosystem#1849).
+#
+# #1840 shipped 2FA with NO QR, on the explicit ground that a QR encoder is a new dependency inside a
+# binary that holds the user's master seed. The user has since asked for the QR directly, so the
+# convenience is wanted — but the supply-chain argument still decides WHICH encoder, and the bar it
+# sets is severe: a QR is pure computation over a byte string, so anything reaching for I/O, a
+# network, `unsafe`, or a dependency tree has been mis-chosen.
+#
+# `qrcodegen` is Nayuki's reference generator, the implementation the other language ports are checked
+# against. It has **zero** transitive dependencies (`cargo tree` shows one node), the published crate
+# is 15 KB of source, and it is `#![forbid(unsafe_code)]` — so taking it adds exactly one auditable
+# unit to the graph rather than a subtree. Vendoring a single file was priced against it and lost:
+# vendoring buys nothing here (a zero-dep crate IS the vendored file, with provenance and a version to
+# audit) while making US responsible for Reed-Solomon and mask-pattern selection, where a silent
+# arithmetic error renders a QR that scans into the WRONG secret.
+#
+# It declares no features and no optional deps, so there is no configuration surface to get wrong, and
+# nothing in it can open a file, resolve a name or spawn a thread — which is the property that matters
+# for a binary holding a master seed.
+qrcodegen = "1.8"
 # sha256 — the per-profile DEK HKDF (U4) and the per-profile AppData directory key (U5, a hash of the
 # profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
 # slot-key derivation.
