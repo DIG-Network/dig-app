@@ -550,11 +550,25 @@ The enrolment UI MUST state both halves of this in the user's own words.
   recently accepted step and refuses any step at or before it, so a code read off a screen cannot be
   replayed for the remainder of its window.
 - **Enrolment order (MUST).** Enrolment MUST: explain what the factor does and does not protect,
-  generate a secret, present it so it can be transferred to an authenticator (the base32 key MUST be
-  shown for anyone who cannot scan; a QR code is optional), **require a correct code to be verified
-  before anything is stored**, issue recovery codes, and obtain an explicit claim that they were saved.
+  generate a secret, present it so it can be transferred to an authenticator, **require a correct code
+  to be verified before anything is stored**, issue recovery codes, and obtain an explicit claim that
+  they were saved.
   Every screen MUST be escapable, and any exit before the final store MUST leave NOTHING enrolled — a
   flow that enrols before verifying is how a user is locked out by the feature meant to protect them.
+- **Presenting the secret (MUST).** Enrolment MUST show the secret as the base32 key, grouped for
+  transcription, on every platform. A platform whose window can draw an image MUST ALSO show a QR code
+  of the `otpauth://totp/` provisioning URI, and MUST say so in the copy — a window that offers a scan
+  and draws no square reads as broken. The QR is an ADDITION and MUST NOT replace the key: it is
+  unreadable to a screen-reader user, to a user whose authenticator runs on the same machine, and to a
+  camera that will not focus.
+  - The provisioning URI's label MUST be the issuer ALONE, carrying no account, profile or DID, so
+    nothing identifying the account reaches a phone's screen or its cloud backup. Its `digits` and
+    `period` MUST agree with the parameters above.
+  - The URI MUST NOT be logged, written to a file, placed on the clipboard by default, or retained
+    beyond the window that shows it — it carries the secret in the clear, as do the QR's own modules.
+  - The QR MUST be rendered at a whole number of pixels per module and MUST scale with the display, so
+    it stays resolvable by a camera at every DPI. It MUST carry a quiet zone of at least four modules
+    and MUST be drawn on an explicitly light field rather than on whatever the window background is.
 - **Recovery codes (MUST).** Enrolment MUST issue single-use recovery codes, display them exactly once,
   and take a claim-you-saved-them confirmation. They MUST be stored so the app cannot re-display them
   (a salted digest per code) and MUST be marked spent on use. Without them, a lost device is a lost

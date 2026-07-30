@@ -345,3 +345,42 @@ Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app
   DPI-aware `CopyFromScreen` over the same window rect showed the whole thing. Make the capturing process
   DPI-aware (`SetProcessDpiAwarenessContext(-4)`) or its screen coordinates are scaled and it photographs
   the wrong rectangle.
+## A `STATIC` clips a run it cannot wrap, and text can arrive with holes in it (dig_ecosystem#1849)
+
+Two distinct silent-text failures, both invisible to `contains(...)` assertions and both found only in a
+photograph. They are worth writing down together because they look identical on screen — a sentence that
+is wrong in a way no test noticed.
+
+**1. A `STATIC` wraps at SPACES, and clips what it cannot wrap.** Give it a 130-character `otpauth://`
+URI and there is no wrap opportunity, so it draws one line and silently discards the rest — no error, no
+ellipsis, no return value. This is the same family as the recovery-phrase window that showed ten of
+twenty-four words (#49), and it is the reason `provisioning_uri` was DELETED rather than drawn in #1840.
+The height estimate cannot save it: the estimate divides a character count by a line width and correctly
+concludes the text needs three lines; the control simply refuses to use them.
+
+The fix is `break_long_runs` in `confirm::windows_input` — insert breaks inside any whitespace-free run
+longer than a line, leaving prose alone. The sharp edge is that fixing it is only HALF a fix: measuring
+the broken text while drawing the raw text reproduces the clip exactly, and no assertion about heights
+can see the difference. So the `Layout` now carries the body's TEXT as well as its height, and the
+drawing code takes both from there — the pair is unrepresentable apart, which is the same reasoning that
+already put the control positions and the total height on one struct.
+
+**2. A string literal can acquire a run of spaces mid-sentence.** Rust's `\`-at-end-of-line continuation
+strips the following indentation, so a hand-written literal is fine — but a literal written by ANY tool
+that treats the backslash as its own line continuation (a Python heredoc doing string surgery on a source
+file, for one) keeps the indentation, and ships `"Or add it by hand —          choose to add…"`. Every
+substring assertion still matches. This has now happened three times in `dig-app-core`; the destroy
+window's copy uses `concat!` for exactly this reason.
+
+`no_screens_copy_carries_a_hole_mid_sentence` is the cheap guard: walk everything a journey showed, skip
+the deliberately column-aligned code blocks (identified by carrying no lower-case letters), and refuse
+any prose line containing three consecutive spaces. Worse than prose is a URI: the same mangling turned
+a demo `otpauth://` string into one with spaces in it, which still encoded into a square that LOOKS
+exactly like a QR code and that no authenticator can parse.
+
+**How a QR is actually verified.** Not by looking at it. Render the window, screenshot the REAL pixels
+(the capturing process must be per-monitor DPI-aware, or Windows virtualises 3840x2400 down to 1536x960
+and the modules blur into each other — you then measure your screenshotter, not your window), and decode
+with an implementation that is not the encoder. Degrading the capture first — perspective warp, downscale,
+Gaussian blur, lossy JPEG — approximates the camera path, which is the one that matters: a QR that
+decodes from a pristine bitmap and not from a photograph is the exact failure worth catching.

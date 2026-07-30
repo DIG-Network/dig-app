@@ -65,6 +65,10 @@ sha2.workspace = true
 # HMAC-SHA1 for RFC 6238 TOTP (`account::second_factor`) — see the workspace manifest for why SHA-1 is
 # the right (and only interoperable) choice for a keyed one-time-password MAC.
 sha1.workspace = true
+# The QR encoder for the two-factor enrolment window (#1849) — see the workspace manifest for the
+# supply-chain reasoning that picked a zero-dependency, unsafe-free encoder over both a larger crate
+# and a vendored copy.
+qrcodegen.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true

@@ -17,6 +17,7 @@
 //!   ([`NativeConfirmer::confirm_security_change`]).
 //! - **Nothing here logs the key or a code.**
 
+use crate::confirm::QrArt;
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, InputStyle, NativeConfirmer,
     NoticePrompt, SecurityPrompt,
@@ -97,6 +98,43 @@ pub enum EnrolOutcome {
     Failed,
 }
 
+/// The body of the "add DIG to your authenticator" screen.
+///
+/// # Why the typed key is here whether or not there is a QR
+///
+/// The QR is a convenience for one kind of user in one kind of moment: sighted, with a second device,
+/// with a camera that focuses. It is useless to someone using a screen reader, to someone whose
+/// authenticator is a password manager on THIS machine, and to anyone whose camera will not lock onto
+/// a glowing panel. Those people are not edge cases and they do not get a lesser flow, so the base32
+/// key stays on the screen and stays typeable — the QR was ADDED beside it (dig_ecosystem#1849), it did
+/// not replace it.
+///
+/// # Why the copy changes with `has_qr`
+///
+/// "Scan the code below" printed over an empty space is worse than never offering a scan: it reads as
+/// a window that failed to load, and the user goes looking for the missing picture instead of using
+/// the key that is right there. `has_qr` comes from the confirmer's own
+/// [`draws_qr`](crate::confirm::NativeConfirmer::draws_qr), so the sentence and the square agree.
+///
+/// Pure, so both bodies are unit-testable without a display.
+fn add_to_authenticator_body(secret: &TotpSecret, has_qr: bool) -> String {
+    let opening = match has_qr {
+        true => {
+            "Scan the square below with your authenticator app.\n\nOr add it by hand — choose to \
+                 add an account by ENTERING A KEY, and type:"
+        }
+        false => "Choose to add an account by ENTERING A KEY, and type:",
+    };
+    format!(
+        "{opening}\n\n{key}\n\nName it anything you like — DIG will appear as \"{issuer}\". If your \
+         app asks for settings, they are: time-based, {digits} digits, {period} seconds.",
+        key = *secret.base32_grouped(),
+        issuer = super::totp::ISSUER,
+        digits = CODE_DIGITS,
+        period = super::totp::STEP_SECONDS,
+    )
+}
+
 /// What happened when the user was challenged for a code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChallengeVerdict {
@@ -153,6 +191,7 @@ pub fn enrol<S: ProfileSealer>(
         heading: "Add a code from your phone to this account?",
         body: EXPLAINER,
         affirm: "Set it up",
+        scannable: None,
     }) {
         ConfirmDecision::Approve => {}
         ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
@@ -160,17 +199,18 @@ pub fn enrol<S: ProfileSealer>(
     }
 
     let secret = TotpSecret::generate();
+    // The URI carries the secret in the clear. It is built here, consumed by the encoder on the next
+    // line, and dropped at the end of this screen — it is never logged, stored, or shown as text.
+    let scannable = confirmer
+        .draws_qr()
+        .then(|| QrArt::encode(&secret.provisioning_uri()))
+        .flatten();
     match confirmer.confirm_claim(&ClaimPrompt {
         title: "DIG — Add DIG to your authenticator",
-        heading: "Type this key into your authenticator app.",
-        body: &format!(
-            "Choose to add an account by ENTERING A KEY (not by scanning), and type:\n\n{key}\n\n\
-             Name it anything you like — DIG will appear as \"{issuer}\". If your app asks for \
-             settings, they are: time-based, 6 digits, 30 seconds.",
-            key = *secret.base32_grouped(),
-            issuer = super::totp::ISSUER,
-        ),
+        heading: "Add DIG to your authenticator app.",
+        body: &add_to_authenticator_body(&secret, scannable.is_some()),
         affirm: "I've added it",
+        scannable: scannable.as_ref(),
     }) {
         ConfirmDecision::Approve => {}
         ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
@@ -195,6 +235,7 @@ pub fn enrol<S: ProfileSealer>(
             codes = *codes.printable(),
         ),
         affirm: "I have saved these",
+        scannable: None,
     }) {
         ConfirmDecision::Approve => {}
         ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
@@ -478,6 +519,11 @@ mod tests {
         /// Every HEADING drawn, kept apart from the bodies because the heading has its own (much
         /// tighter) width budget and is clipped silently when it overruns.
         headings: Mutex<Vec<String>>,
+        /// Whether this double claims it can DRAW a QR — the capability the enrolment copy branches on.
+        draws_qr: bool,
+        /// The QR the flow handed to a window, so a test can check WHAT it encodes rather than merely
+        /// that one was passed.
+        scanned: Mutex<Option<QrArt>>,
         now: u64,
     }
 
@@ -488,7 +534,18 @@ mod tests {
                 secret: Mutex::new(None),
                 shown: Mutex::new(Vec::new()),
                 headings: Mutex::new(Vec::new()),
+                draws_qr: false,
+                scanned: Mutex::new(None),
                 now,
+            }
+        }
+
+        /// The same double, but able to draw a QR — one field varied, so a comparison between the two
+        /// isolates the QR from everything else about the flow.
+        fn drawing_qr(now: u64, acts: &[Act]) -> Self {
+            Self {
+                draws_qr: true,
+                ..Self::new(now, acts)
             }
         }
 
@@ -551,6 +608,10 @@ mod tests {
     }
 
     impl NativeConfirmer for ScriptedConfirmer {
+        fn draws_qr(&self) -> bool {
+            self.draws_qr
+        }
+
         fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
             unreachable!("this journey never pairs")
         }
@@ -577,6 +638,9 @@ mod tests {
             self.record(prompt.body);
             self.record_heading(prompt.heading);
             self.learn_secret(prompt.body);
+            if let Some(art) = prompt.scannable {
+                *self.scanned.lock().unwrap() = Some(art.clone());
+            }
             match self.next() {
                 Act::Decide(decision) => decision,
                 Act::NoWindow => ConfirmDecision::Unavailable,
@@ -614,6 +678,179 @@ mod tests {
         let confirmer = ScriptedConfirmer::new(NOW, acts);
         let outcome = enrol(&confirmer, &vault(dir), &FixedClock(NOW));
         (outcome, confirmer)
+    }
+
+    // ──────────────── The enrolment QR (dig_ecosystem#1849) ────────────────
+
+    /// The QR handed to the window encodes a provisioning URI for THE SAME secret the window shows as
+    /// text.
+    ///
+    /// This is the property the whole feature rests on, and it is the one a screenshot cannot check: a
+    /// square that is a perfectly valid QR of the WRONG string photographs identically to the right
+    /// one, imports without complaint, and produces an authenticator whose every code is refused.
+    ///
+    /// It is checked by rebuilding the expected QR from the key scraped OFF THE SCREEN — the same
+    /// characters a person would type — and comparing matrices. Comparing against the secret the flow
+    /// generated internally would be weaker: it would still pass if the text and the QR came from two
+    /// different secrets, which is exactly the failure that leaves a user enrolled on a code their
+    /// phone will never produce.
+    #[test]
+    fn the_qr_encodes_a_uri_for_the_key_the_window_shows_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
+        assert_eq!(
+            enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            EnrolOutcome::Enrolled { recovery_codes: 10 }
+        );
+
+        let on_screen = confirmer
+            .secret
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the key was shown as text");
+        let drawn = confirmer
+            .scanned
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a QR was handed to the window");
+
+        assert_eq!(
+            drawn,
+            QrArt::encode(&on_screen.provisioning_uri()).expect("the URI encodes"),
+            "the QR must encode the provisioning URI of the key on screen"
+        );
+        // ...and NOT the key alone, nor its grouped rendering — both are strings an authenticator
+        // cannot import, and both would still draw a plausible-looking square.
+        assert_ne!(drawn, QrArt::encode(&on_screen.base32()).expect("encodes"));
+        assert_ne!(
+            drawn,
+            QrArt::encode(&on_screen.base32_grouped()).expect("encodes")
+        );
+    }
+
+    /// The typed key is on the screen whether or not a QR is.
+    ///
+    /// Both runs are asserted, because the regression this guards against is one-directional: adding a
+    /// QR and quietly dropping the key would leave the flow working perfectly for everyone with a
+    /// phone camera and impossible for everyone using a screen reader, a same-machine authenticator, or
+    /// a camera that will not focus.
+    #[test]
+    fn the_typed_key_stays_on_screen_with_and_without_a_qr() {
+        for drawing in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let confirmer = match drawing {
+                true => ScriptedConfirmer::drawing_qr(NOW, &happy_path()),
+                false => ScriptedConfirmer::new(NOW, &happy_path()),
+            };
+            assert_eq!(
+                enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+                EnrolOutcome::Enrolled { recovery_codes: 10 },
+                "drawing a QR: {drawing}"
+            );
+
+            let secret = confirmer.secret.lock().unwrap().clone();
+            let secret = secret.expect("the key must be readable off the screen");
+            assert!(
+                confirmer.transcript().contains(&*secret.base32_grouped()),
+                "the grouped key must be shown as text (drawing a QR: {drawing})"
+            );
+            assert!(
+                confirmer.transcript().contains("ENTERING A KEY"),
+                "the manual path must stay offered (drawing a QR: {drawing})"
+            );
+        }
+    }
+
+    /// A confirmer that cannot draw a QR is never given one, and is never told to scan.
+    ///
+    /// Two distinct failures, and the second is the visible one: a window that says "scan the square
+    /// below" over empty space reads as broken, and sends the user looking for a missing picture
+    /// instead of typing the key that is right in front of them. The first matters too — encoding a URI
+    /// that will never be drawn puts the secret through an encoder for no reason at all.
+    #[test]
+    fn a_window_that_cannot_draw_a_qr_is_neither_given_one_nor_told_to_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(NOW, &happy_path());
+        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
+
+        assert!(confirmer.scanned.lock().unwrap().is_none());
+        assert!(
+            !confirmer.transcript().to_lowercase().contains("scan"),
+            "no scan instruction without a square to scan:\n{}",
+            confirmer.transcript()
+        );
+    }
+
+    /// The window that DOES draw one says so — otherwise the square is an unexplained picture on a
+    /// security screen, which is a thing people are right to distrust.
+    #[test]
+    fn a_window_that_draws_a_qr_tells_the_user_to_scan_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
+        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
+
+        assert!(
+            confirmer.transcript().contains("Scan the square below"),
+            "{}",
+            confirmer.transcript()
+        );
+    }
+
+    /// The `otpauth://` URI is never SHOWN — not in a body, not in a heading.
+    ///
+    /// It is a third rendering of the same secret and it buys nothing beside the QR and the key, so it
+    /// is a third place the credential can be photographed or read over a shoulder. It is also the
+    /// string whose unbreakable 130 characters made the first build clip (#1840); the window layer now
+    /// breaks such runs, but not putting it on screen at all is the stronger guarantee.
+    #[test]
+    fn the_provisioning_uri_is_never_drawn_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
+        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
+
+        assert!(
+            !confirmer.transcript().contains("otpauth://"),
+            "{}",
+            confirmer.transcript()
+        );
+        assert!(!confirmer
+            .headings
+            .lock()
+            .unwrap()
+            .join("\n")
+            .contains("otpauth://"));
+    }
+
+    /// No screen carries a run of spaces mid-sentence.
+    ///
+    /// A source literal broken across lines with a trailing `\` resolves cleanly in Rust — but a body
+    /// assembled by any tool that does NOT strip the indentation ships a sentence with a hole in the
+    /// middle of it. That has already happened twice in this codebase, and both times it was invisible
+    /// to every substring assertion (`contains("…")` still matched) and obvious in a photograph. This
+    /// is the cheap assertion that would have caught it: prose has single spaces.
+    ///
+    /// Three is the threshold, not two: an author may legitimately double-space after a full stop, and
+    /// the numbered recovery-code block aligns its columns with runs it means.
+    #[test]
+    fn no_screens_copy_carries_a_hole_mid_sentence() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
+        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
+
+        for line in confirmer.transcript().lines() {
+            // Only PROSE is checked. The recovery-code block and the base32 key are column-aligned
+            // runs of upper-case tokens whose spacing is deliberate — and both have their own tests.
+            // A sentence is identified by carrying lower-case letters, which no code block does.
+            if !line.contains(char::is_lowercase) {
+                continue;
+            }
+            assert!(
+                !line.contains("   "),
+                "a run of spaces mid-sentence: {line:?}"
+            );
+        }
     }
 
     /// The affirmative answer to every screen, with a live code at the verify step.

@@ -122,6 +122,18 @@ pub struct ClaimPrompt<'a> {
     pub body: &'a str,
     /// The label of the affirming choice — a first-person claim (e.g. `"I have written these down"`).
     pub affirm: &'static str,
+    /// Something to be SCANNED, drawn as a QR code between the body and the buttons — `None` on every
+    /// claim but two-factor enrolment (dig_ecosystem#1849).
+    ///
+    /// It is an ADDITION to the body, never a replacement for it. A QR is unreadable to anyone using a
+    /// screen reader, anyone whose authenticator lives on this same machine, and anyone whose camera
+    /// will not focus, so the same secret must always remain available as text the user can read and
+    /// type. The window draws both.
+    ///
+    /// Only the Windows backend draws it; macOS and Linux drive OS dialogs that cannot carry an image,
+    /// and there the typed key in the body is the whole path — which is what it was on every platform
+    /// before this.
+    pub scannable: Option<&'a QrArt>,
 }
 
 /// A **destroy** prompt: the user is about to lose key material for good (dig_ecosystem#1799).
@@ -309,6 +321,15 @@ pub trait NativeConfirmer: Send + Sync {
         ConfirmDecision::Unavailable
     }
 
+    /// Whether a [`ClaimPrompt::scannable`] handed to this confirmer will actually be DRAWN.
+    ///
+    /// A caller uses this to decide what its body text may promise. Defaults to FALSE so a confirmer
+    /// that cannot draw a QR — including the headless one, which draws nothing at all — never has copy
+    /// written on its behalf pointing at a picture that is not there.
+    fn draws_qr(&self) -> bool {
+        false
+    }
+
     /// Authorize destroying key material — replacing or removing an account (dig_ecosystem#1799).
     ///
     /// Runs the SAME two-step gate as a signature (foreground window + OS re-authentication), because a
@@ -388,6 +409,10 @@ impl NativeConfirmer for HeadlessConfirmer {
 // `None` on a headless host so [`native_confirmer`] falls back to the fail-closed
 // [`HeadlessConfirmer`]. They are thin adapters: they build the OS foreground window + the OS
 // biometric verifier and delegate all decision logic to the shared, unit-tested [`gated_consent`].
+pub mod qr;
+
+pub use qr::QrArt;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -446,6 +471,8 @@ pub(crate) struct ConfirmContent {
     pub action: &'static str,
     /// How many choices this window offers, and how they read — see [`Presentation`].
     pub presentation: Presentation,
+    /// A QR code to draw beneath the body, or `None`. See [`ClaimPrompt::scannable`].
+    pub qr: Option<QrArt>,
 }
 
 /// Whether a confirm window asks the user to DECIDE something or merely to acknowledge it.
@@ -493,6 +520,7 @@ impl ConfirmContent {
                    your DIG identity. You approve every signature individually."
                     .to_string(),
             action: "Pair",
+            qr: None,
             presentation: Self::authorize(),
         }
     }
@@ -511,6 +539,7 @@ impl ConfirmContent {
                    alone before continuing."
                 .to_string(),
             action: "Reveal",
+            qr: None,
             presentation: Self::authorize(),
         }
     }
@@ -527,6 +556,7 @@ impl ConfirmContent {
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
             action: prompt.acknowledge,
+            qr: None,
             presentation: Presentation::Acknowledge,
         }
     }
@@ -538,6 +568,7 @@ impl ConfirmContent {
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
             action: prompt.affirm,
+            qr: prompt.scannable.cloned(),
             // The affirming label is a first-person CLAIM ("I have written these down"), so it is quoted as
             // a choice rather than slotted into a "Choose OK to <verb>" sentence that cannot read
             // correctly (#1752). "Not yet" names what Cancel actually does here — it does not reject an
@@ -574,6 +605,7 @@ impl ConfirmContent {
             action: "Destroy",
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
+            qr: None,
             presentation: Presentation::Decide {
                 refusal_is_default: true,
             },
@@ -592,6 +624,7 @@ impl ConfirmContent {
             heading: format!("Do you want to {}?", prompt.change),
             body: prompt.consequence.to_string(),
             action: prompt.affirm,
+            qr: None,
             presentation: Presentation::Decide {
                 refusal_is_default: true,
             },
@@ -627,6 +660,7 @@ impl ConfirmContent {
                 prompt.origin
             ),
             action: "Connect",
+            qr: None,
             presentation: Self::authorize(),
         }
     }
@@ -648,6 +682,7 @@ impl ConfirmContent {
                 prompt.payload_type
             ),
             action: "Sign",
+            qr: None,
             presentation: Self::authorize(),
         })
     }
@@ -776,6 +811,18 @@ pub(crate) trait ForegroundWindow: Send + Sync {
     /// Show `content` as a real, focus-stealing OS window and block until the user answers or the
     /// window's deadline elapses.
     fn show(&self, content: &ConfirmContent) -> WindowIntent;
+
+    /// Whether this window can DRAW a [`ConfirmContent::qr`].
+    ///
+    /// Not every backend can: macOS and Linux drive OS dialogs that carry text and buttons and no
+    /// image. This is asked rather than assumed because the COPY depends on it — a window that says
+    /// "scan the code below" over no code is worse than one that never mentions scanning, and a caller
+    /// composing that sentence needs to know before it writes it.
+    ///
+    /// Defaults to FALSE, so a new backend describes itself honestly by saying nothing.
+    fn draws_qr(&self) -> bool {
+        false
+    }
 }
 
 /// Performs the OS user re-authentication (biometric + built-in password fallback).
@@ -850,6 +897,10 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfir
 impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfirmer
     for BackedConfirmer<W, V, I>
 {
+    fn draws_qr(&self) -> bool {
+        self.window.draws_qr()
+    }
+
     fn confirm_pair(&self, prompt: &PairPrompt<'_>) -> ConfirmDecision {
         gated_consent(&ConfirmContent::pair(prompt), &self.window, &self.verifier)
     }
@@ -1170,6 +1221,7 @@ mod tests {
             heading: "Write these 24 words down.",
             body: " 1. abandon",
             affirm: "I have written these down",
+            scannable: None,
         });
 
         let label = affirm_label_of(&content)
@@ -1223,6 +1275,7 @@ mod tests {
                 heading: "Do you have your 24 words written down somewhere safe?",
                 body: "If you continue without them…",
                 affirm: "Yes, I have them",
+                scannable: None,
             }),
             ConfirmDecision::Approve
         );
@@ -1251,6 +1304,7 @@ mod tests {
                 heading: "h",
                 body: "b",
                 affirm: "Yes",
+                scannable: None,
             }),
             ConfirmDecision::Unavailable
         );

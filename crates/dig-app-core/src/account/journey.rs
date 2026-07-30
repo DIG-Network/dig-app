@@ -71,6 +71,7 @@ impl PhrasePresenter for WindowedPresenter<'_> {
                 *words
             ),
             affirm: "I have written these down",
+            scannable: None,
         });
         if shown != ConfirmDecision::Approve {
             return decision_for(shown);
@@ -85,6 +86,7 @@ impl PhrasePresenter for WindowedPresenter<'_> {
                    address and everything sealed under it are gone for good. You can view the words \
                    again later from the DIG tray menu.",
             affirm: "Yes, I have them",
+            scannable: None,
         });
         decision_for(confirmed)
     }
@@ -260,6 +262,7 @@ fn offer_a_last_look<S: ProfileSealer>(
                only somewhere else, since it will be gone from this computer. If you are not certain \
                you have them written down, look now.",
         affirm: "Show me the words first",
+        scannable: None,
     });
     if wants_to_see != ConfirmDecision::Approve {
         return;
@@ -639,6 +642,7 @@ pub fn first_run_wizard(
 
                You do not need an account to read content on the DIG Network — that already works.",
         affirm: "Create my account",
+        scannable: None,
     }) != ConfirmDecision::Approve
     {
         return FirstRunOutcome::Declined;

@@ -267,10 +267,20 @@ impl EnrolsSecondFactor {
         }
     }
 
-    /// Everything the flow showed that must never be logged: the key and every recovery code.
+    /// Everything the flow handled that must never be logged: the key, every recovery code, and the
+    /// `otpauth://` provisioning URI the QR carries (dig_ecosystem#1849).
+    ///
+    /// The URI is included because it is a THIRD rendering of the same secret, built on the enrolment
+    /// path and handed to an encoder — a new string, in a new place, carrying a credential in the
+    /// clear. It is reconstructed here from the key scraped off the window rather than read from the
+    /// flow, so this fixture stays an outside observer: it asserts on the URI the enrolment must have
+    /// built, not on one the crate handed it.
     fn secrets(&self) -> Vec<String> {
         let mut out: Vec<String> = self.codes.lock().unwrap().clone();
         if let Some(key) = self.key.lock().unwrap().clone() {
+            out.push(format!(
+                "otpauth://totp/DIG%20Network?secret={key}&issuer=DIG%20Network                 &algorithm=SHA1&digits=6&period=30"
+            ));
             out.push(key);
         }
         out
@@ -278,6 +288,13 @@ impl EnrolsSecondFactor {
 }
 
 impl NativeConfirmer for EnrolsSecondFactor {
+    /// Claim the QR capability, so enrolment really builds the provisioning URI on this run. Left at
+    /// the default `false`, the URI would never be constructed and the assertion below would be
+    /// vacuously true — a never-log test that never exercises the secret it names.
+    fn draws_qr(&self) -> bool {
+        true
+    }
+
     fn confirm_pair(&self, _p: &PairPrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Approve
     }
@@ -426,8 +443,9 @@ fn the_second_factor_key_and_recovery_codes_never_reach_a_log_record() {
     let secrets = confirmer.secrets();
     assert_eq!(
         secrets.len(),
-        11,
-        "the fixture must have learned the key and all ten codes, or it is asserting on nothing"
+        12,
+        "the fixture must have learned the key, its provisioning URI and all ten codes, or it is \
+         asserting on nothing"
     );
     for secret in secrets {
         assert!(
