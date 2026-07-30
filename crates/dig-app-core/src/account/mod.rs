@@ -31,6 +31,7 @@ pub mod ceremony;
 pub mod journey;
 pub mod lifecycle;
 pub mod money;
+pub mod password;
 pub mod phrase_vault;
 pub mod recovery;
 pub mod registry;
