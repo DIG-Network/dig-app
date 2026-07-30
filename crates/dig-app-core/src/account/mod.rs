@@ -30,6 +30,7 @@ pub mod boot;
 pub mod ceremony;
 pub mod journey;
 pub mod lifecycle;
+pub mod migration;
 pub mod money;
 pub mod password;
 pub mod phrase_vault;

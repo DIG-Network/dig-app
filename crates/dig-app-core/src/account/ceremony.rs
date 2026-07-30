@@ -76,11 +76,10 @@ impl<C: CredentialStore> CredentialCeremony<C> {
         Self { store, confirmer }
     }
 
-    /// The credential-store key the account's master password is filed under. Stable across restarts
-    /// (that is how a later boot finds it) and namespaced per account so multiple accounts never
-    /// collide.
+    /// The credential-store key the account's master password is filed under — see
+    /// [`machine_password_key`].
     fn password_key(account: &AccountId) -> String {
-        format!("{account}.master-password")
+        machine_password_key(account)
     }
 
     /// Fetch the stored master password for `account`, or generate + persist one on first run.
@@ -102,6 +101,17 @@ impl<C: CredentialStore> CredentialCeremony<C> {
             .map_err(|e| CeremonyError::Unavailable(e.to_string()))?;
         Ok(Password::new(generated.as_bytes()))
     }
+}
+
+/// The credential-store key a MACHINE-GENERATED account password is filed under.
+///
+/// Stable across restarts (that is how the retired zero-prompt boot found it) and namespaced per account
+/// so several accounts never collide. It is public to the crate because its PRESENCE is now the signal
+/// that an account still needs migrating off the machine password
+/// ([`migration`](crate::account::migration)) — and because that migration is the one thing that
+/// legitimately deletes it.
+pub(crate) fn machine_password_key(account: &AccountId) -> String {
+    format!("{account}.master-password")
 }
 
 /// Generate a hex-encoded 256-bit account password from the OS CSPRNG, holding the raw bytes in a
