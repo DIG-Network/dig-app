@@ -545,8 +545,10 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
         let m = Metrics::for_display(dpi_for_cursor_monitor(), GetSystemMetrics(SM_CXSCREEN));
         let font = gui_font(m.font_body, FW_NORMAL.0 as i32);
         let heading_font = gui_font(m.font_heading, FW_SEMIBOLD.0 as i32);
-        let body = body_height(spec, m);
-        let height = window_height(spec, m);
+        // ONE walk of the layout: the drawing code below and the window's own height both read this, so a
+        // control can never be placed outside the frame that was sized for it.
+        let l = Layout::compute(spec, m);
+        let height = l.total_height;
         let (x, y) = centred(m.width, height);
 
         let mut state = Box::new(WindowState {
@@ -584,16 +586,24 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
             ..ctx
         };
 
-        let mut top = m.margin;
-        let inner = m.width - m.margin * 4;
-        add_static(&heading_ctx, spec.heading, top, inner, m.heading_line);
-        top += m.heading_line + m.margin / 2;
-        add_static(&ctx, spec.body, top, inner, body);
-        top += body + m.margin / 2;
+        let inner = l.inner;
+        add_static(
+            &heading_ctx,
+            spec.heading,
+            l.heading_top,
+            inner,
+            m.heading_line,
+        );
+        add_static(&ctx, spec.body, l.body_top, inner, l.body_height);
 
         if let Some(field) = &spec.field {
-            add_static(&ctx, field.label, top, inner, m.line);
-            top += m.line;
+            add_static(
+                &ctx,
+                field.label,
+                l.field_label_top.unwrap_or(l.body_top),
+                inner,
+                m.line,
+            );
 
             let edit = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -601,7 +611,7 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                 PCWSTR::null(),
                 edit_style(field),
                 m.margin,
-                top,
+                l.field_top.unwrap_or(l.buttons_top),
                 inner,
                 m.field_single,
                 window,
@@ -611,30 +621,35 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
             )?;
             set_font(edit, font);
             (*state_ptr).edit = edit;
-            top += m.field_single + m.margin / 2;
 
             // §3.1d's reveal-while-typing affordance: masked by default, un-maskable on purpose. Without it
             // a person typing 24 words into a masked field cannot check their own work, which is how a
             // restore fails for a reason nobody can see.
-            if field.revealable {
-                add_checkbox(&ctx, "Show the words while I type", REVEAL_ID, top, inner);
-                top += m.line + m.margin / 2;
+            if let Some(reveal_top) = l.reveal_top {
+                add_checkbox(
+                    &ctx,
+                    "Show the words while I type",
+                    REVEAL_ID,
+                    reveal_top,
+                    inner,
+                );
             }
-            top += m.margin / 2;
         }
+        let top = l.buttons_top;
 
         // Both windows right-align to the SAME edge — the text block's — so a notice's lone button sits
         // exactly where a decision's affirmative does. Derived once rather than per-arm: two arms computing
         // the same edge from different expressions is an alignment that drifts the first time one is edited.
-        let affirm_left = affirm_button_left(m);
         match &spec.buttons {
             ButtonSpec::Acknowledge { label } => {
+                let w = button_width(label, m);
                 add_button(
                     &ctx,
                     label,
                     IDOK.0,
-                    affirm_left,
+                    affirm_button_left(w, m),
                     top,
+                    w,
                     BS_DEFPUSHBUTTON as u32,
                 );
             }
@@ -649,15 +664,26 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                     true => (BS_DEFPUSHBUTTON, BS_PUSHBUTTON),
                     false => (BS_PUSHBUTTON, BS_DEFPUSHBUTTON),
                 };
+                let (affirm_w, refuse_w) = (button_width(affirm, m), button_width(refuse, m));
+                let affirm_left = affirm_button_left(affirm_w, m);
                 add_button(
                     &ctx,
                     refuse,
                     IDCANCEL.0,
-                    affirm_left - m.button_w - m.margin,
+                    affirm_left - refuse_w - m.margin,
                     top,
+                    refuse_w,
                     refuse_style as u32,
                 );
-                add_button(&ctx, affirm, IDOK.0, affirm_left, top, affirm_style as u32);
+                add_button(
+                    &ctx,
+                    affirm,
+                    IDOK.0,
+                    affirm_left,
+                    top,
+                    affirm_w,
+                    affirm_style as u32,
+                );
             }
         }
 
@@ -706,22 +732,76 @@ unsafe fn focus_first(window: HWND, edit: HWND, buttons: &ButtonSpec<'_>) {
     }
 }
 
-/// The vertical space the field, its label and its reveal checkbox occupy together, or zero on a window with
-/// no field.
+/// Where every control goes, and how tall the window must be to hold them.
 ///
-/// One block rather than three functions because they stand or fall together: a window with no field has no
-/// label to place above it and no checkbox to place below it, and the three heights being separate is how a
-/// window ends up reserving room for a control it never draws.
-fn field_block_height(spec: &WindowSpec<'_>, m: Metrics) -> i32 {
-    let Some(field) = &spec.field else {
-        return 0;
-    };
-    // The label line, the field itself (always one line — see `edit_style`), and the gap beneath.
-    let mut height = m.line + m.field_single + m.margin / 2;
-    if field.revealable {
-        height += m.line + m.margin / 2;
+/// # Why this exists
+///
+/// `window_height` and the drawing code used to walk the same vertical sequence SEPARATELY, and they
+/// disagreed: the height reserved five margins because that suited the window WITH a field, while a fieldless
+/// window consumed three — so every notice, claim and destroy shipped with a visible slab of dead space under
+/// its buttons. That was invisible to the tests (the height was "big enough", which is all they asked) and
+/// obvious the moment the windows were photographed.
+///
+/// One walk, used by both, is the fix: a position and the total height cannot disagree when they come from the
+/// same arithmetic. Pure, so the whole layout is unit-testable without a display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Layout {
+    /// Top of the heading line.
+    heading_top: i32,
+    /// Top of the body block, and how tall it is.
+    body_top: i32,
+    body_height: i32,
+    /// Top of the field's label, the field itself, and the reveal checkbox — `None` on a fieldless window.
+    field_label_top: Option<i32>,
+    field_top: Option<i32>,
+    reveal_top: Option<i32>,
+    /// Top of the button row.
+    buttons_top: i32,
+    /// The OUTER window height, caption and frame included.
+    total_height: i32,
+    /// Width of the controls that span the window.
+    inner: i32,
+}
+
+impl Layout {
+    /// Walk `spec`'s controls top to bottom at `m`'s scale.
+    fn compute(spec: &WindowSpec<'_>, m: Metrics) -> Self {
+        let gap = m.margin / 2;
+        let inner = m.width - m.margin * 4;
+
+        let heading_top = m.margin;
+        let body_top = heading_top + m.heading_line + gap;
+        let body_height = body_lines(spec.body, inner, m) * m.line;
+        let mut top = body_top + body_height + gap;
+
+        let (mut field_label_top, mut field_top, mut reveal_top) = (None, None, None);
+        if let Some(field) = &spec.field {
+            field_label_top = Some(top);
+            top += m.line;
+            field_top = Some(top);
+            top += m.field_single + gap;
+            if field.revealable {
+                reveal_top = Some(top);
+                top += m.line + gap;
+            }
+        }
+
+        let buttons_top = top;
+        // The client area ends a full margin below the buttons; the caption and frame sit outside it.
+        let total_height = buttons_top + m.button_h + m.margin + m.chrome;
+
+        Self {
+            heading_top,
+            body_top,
+            body_height,
+            field_label_top,
+            field_top,
+            reveal_top,
+            buttons_top,
+            total_height,
+            inner,
+        }
     }
-    height
 }
 
 /// How tall the body paragraph's `STATIC` control must be to show all of `body`.
@@ -739,25 +819,6 @@ fn body_lines(body: &str, width: i32, m: Metrics) -> i32 {
         .map(|line| line.chars().count().div_ceil(per_line).max(1))
         .sum();
     (wrapped as i32).clamp(layout::BODY_MIN_LINES, layout::BODY_MAX_LINES)
-}
-
-/// The pixel height of the body block for `spec`.
-fn body_height(spec: &WindowSpec<'_>, m: Metrics) -> i32 {
-    body_lines(spec.body, m.width - m.margin * 4, m) * m.line
-}
-
-/// The outer window height that fits `content`'s controls, with the caption and frame accounted for.
-///
-/// A function rather than an expression inline in [`show`] so the layout arithmetic is unit-tested: a window
-/// too short to show its own Submit button — or its own warning — is a defect no compiler catches.
-fn window_height(spec: &WindowSpec<'_>, m: Metrics) -> i32 {
-    m.chrome
-        + m.margin * 5
-        // The heading is its own, taller line.
-        + m.heading_line
-        + body_height(spec, m)
-        + field_block_height(spec, m)
-        + m.button_h
 }
 
 /// The style bits for the input field.
@@ -795,15 +856,30 @@ fn centred_in(width: i32, height: i32, screen_w: i32, screen_h: i32) -> (i32, i3
     ((screen_w - width) / 2, (screen_h - height) / 2)
 }
 
+/// How wide a button must be to wear `label` without cramping it.
+///
+/// The buttons were a FIXED width, which was fine while every label was "OK" or "Cancel" and wrong the moment
+/// they carried real words: "Keep my account" and "Yes, I have them" rendered with their text touching both
+/// borders — legible, but visibly squeezed, and one longer label away from clipping.
+///
+/// Uses the same per-character estimate the body wrap does, deliberately: one estimate is reviewable, two
+/// different ones drift. Both are replaced together when the window moves to real `DT_CALCRECT` measurement.
+/// `BUTTON_W` becomes the MINIMUM rather than the size, so short labels keep the comfortable target they had.
+fn button_width(label: &str, m: Metrics) -> i32 {
+    let text = label.chars().count() as i32 * m.char_width;
+    // A margin of padding each side: enough that a descender or an italic never meets the border.
+    (text + m.margin * 2).max(m.button_w)
+}
+
 /// The left edge of the AFFIRMATIVE button — the rightmost control on every window.
 ///
 /// It is flush with the right edge of the text block above it (`margin + inner`, where `inner` is
 /// `width - margin * 4`), so the buttons line up with the heading and body rather than overhanging them.
 /// A notice's single button and a decision's affirmative both sit here, which is what makes the two window
 /// kinds read as one design.
-fn affirm_button_left(m: Metrics) -> i32 {
+fn affirm_button_left(affirm_width: i32, m: Metrics) -> i32 {
     let text_block_right = m.margin + (m.width - m.margin * 4);
-    text_block_right - m.button_w
+    text_block_right - affirm_width
 }
 
 /// The extended style every DIG window carries.
@@ -1077,6 +1153,7 @@ unsafe fn add_button(
     id: i32,
     left: i32,
     top: i32,
+    width: i32,
     button_style: u32,
 ) {
     let (parent, instance, font, m) = (ctx.parent, ctx.instance, ctx.font, ctx.m);
@@ -1087,7 +1164,7 @@ unsafe fn add_button(
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | WINDOW_STYLE(button_style),
         left,
         top,
-        m.button_w,
+        width,
         m.button_h,
         parent,
         HMENU(id as isize as *mut _),
@@ -1132,12 +1209,15 @@ mod tests {
     #[test]
     fn the_reveal_control_takes_space_only_when_it_is_offered() {
         let m = Metrics::for_dpi(BASE_DPI);
+        assert!(Layout::compute(&field_spec(true, true), m)
+            .reveal_top
+            .is_some());
+        assert!(Layout::compute(&field_spec(true, false), m)
+            .reveal_top
+            .is_none());
         assert!(
-            field_block_height(&field_spec(true, true), m)
-                > field_block_height(&field_spec(true, false), m)
-        );
-        assert!(
-            window_height(&field_spec(true, true), m) > window_height(&field_spec(true, false), m),
+            Layout::compute(&field_spec(true, true), m).total_height
+                > Layout::compute(&field_spec(true, false), m).total_height,
             "the window must grow to fit the checkbox"
         );
     }
@@ -1155,9 +1235,12 @@ mod tests {
             ButtonSpec::Acknowledge { label: "OK" },
         );
 
-        assert_eq!(field_block_height(&message, m), 0);
+        let l = Layout::compute(&message, m);
+        assert!(l.field_label_top.is_none());
+        assert!(l.field_top.is_none());
+        assert!(l.reveal_top.is_none());
         assert!(
-            window_height(&message, m) < window_height(&field_spec(false, false), m),
+            l.total_height < Layout::compute(&field_spec(false, false), m).total_height,
             "a fieldless window must be shorter than the same window with a field"
         );
     }
@@ -1221,9 +1304,9 @@ mod tests {
         let m = Metrics::for_dpi(BASE_DPI);
         const OLD_FIXED_HEIGHT: i32 = 84;
         assert!(
-            body_height(&spec, m) > OLD_FIXED_HEIGHT,
+            Layout::compute(&spec, m).body_height > OLD_FIXED_HEIGHT,
             "the real copy does not fit the height that clipped it: {}",
-            body_height(&spec, m)
+            Layout::compute(&spec, m).body_height
         );
         // And every line of it must be accounted for: the estimate is per-character, so this is the check
         // that the arithmetic reaches the last sentence rather than merely being "bigger".
@@ -1246,7 +1329,7 @@ mod tests {
             ..field_spec(false, false)
         };
         assert_eq!(
-            body_height(&short, m),
+            Layout::compute(&short, m).body_height,
             layout::BODY_MIN_LINES * m.line,
             "a one-line body must not reserve the tall block"
         );
@@ -1257,7 +1340,7 @@ mod tests {
             ..field_spec(false, false)
         };
         assert_eq!(
-            body_height(&huge, m),
+            Layout::compute(&huge, m).body_height,
             layout::BODY_MAX_LINES * m.line,
             "the window must stay on a small display"
         );
@@ -1294,9 +1377,9 @@ mod tests {
     #[test]
     fn the_window_grows_with_dpi_for_the_same_content() {
         let c = field_spec(false, true);
-        let h96 = window_height(&c, Metrics::for_dpi(96));
-        let h150 = window_height(&c, Metrics::for_dpi(144));
-        let h200 = window_height(&c, Metrics::for_dpi(192));
+        let h96 = Layout::compute(&c, Metrics::for_dpi(96)).total_height;
+        let h150 = Layout::compute(&c, Metrics::for_dpi(144)).total_height;
+        let h200 = Layout::compute(&c, Metrics::for_dpi(192)).total_height;
         assert!(h150 > h96, "150% must be taller than 100%: {h150} vs {h96}");
         assert!(
             h200 > h150,
@@ -1472,6 +1555,9 @@ mod tests {
     /// Every window's buttons align with its text block, and a notice's lone button sits exactly where a
     /// decision's affirmative does — so the two kinds are visibly one design rather than two dialogs.
     ///
+    /// The real labels are used, not synthetic ones: a fixed-width button was legible with "OK" and visibly
+    /// squeezed with "Keep my account", so a test on short labels would have passed through the defect.
+    ///
     /// Pinned at several scales because the alignment is arithmetic over scaled metrics: a rounding change
     /// that broke it at 150% only would otherwise be invisible.
     #[test]
@@ -1480,15 +1566,23 @@ mod tests {
             let m = Metrics::for_dpi(dpi);
             let text_block_right = m.margin + (m.width - m.margin * 4);
 
-            assert_eq!(
-                affirm_button_left(m) + m.button_w,
-                text_block_right,
-                "the affirmative's right edge must meet the text block's at {dpi} DPI"
+            // Whatever the label, the affirmative's right edge meets the text block's.
+            for label in ["OK", "Destroy", "Yes, I have them"] {
+                let w = button_width(label, m);
+                assert_eq!(
+                    affirm_button_left(w, m) + w,
+                    text_block_right,
+                    "'{label}' must right-align to the text block at {dpi} DPI"
+                );
+            }
+            // ...and the widest real pair must still fit side by side inside the frame.
+            let (affirm_w, refuse_w) = (
+                button_width("Yes, I have them", m),
+                button_width("Keep my account", m),
             );
-            // ...and the refusal, one button plus a gap to its left, must still start inside the frame.
             assert!(
-                affirm_button_left(m) - m.button_w - m.margin > m.margin,
-                "two buttons must fit beside each other at {dpi} DPI"
+                affirm_button_left(affirm_w, m) - refuse_w - m.margin > m.margin,
+                "two long-labelled buttons must fit beside each other at {dpi} DPI"
             );
         }
     }
