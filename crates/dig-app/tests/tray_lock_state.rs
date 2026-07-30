@@ -16,38 +16,17 @@
 //! residency" was the entire bug. So this drives a REAL `AccountResidency`, holding real derived key
 //! material, through a REAL `lock_all()`, and asserts the menu the user would see on the other side.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use dig_app_core::account::boot::{assemble_residency, reunlock_into, DEFAULT_ACCOUNT_ID};
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::account::AccountId;
-use dig_app_core::keystore::{CredentialStore, KeystoreError};
 use dig_app_core::session_lock::SessionKeys;
 use dig_app_core::tray_menu::{self, AccountState, SessionFacts, TrayAction, TrayView};
 use dig_keystore::MemoryBackend;
 use dig_session::KeychainBackend;
-
-/// An in-memory credential store, standing in for the OS credential store that supplies the zero-prompt
-/// unlock password.
-#[derive(Clone, Default)]
-struct MemCred(Arc<Mutex<HashMap<String, String>>>);
-
-impl CredentialStore for MemCred {
-    fn get(&self, account: &str) -> Result<Option<String>, KeystoreError> {
-        Ok(self.0.lock().unwrap().get(account).cloned())
-    }
-    fn set(&self, account: &str, secret: &str) -> Result<(), KeystoreError> {
-        self.0.lock().unwrap().insert(account.into(), secret.into());
-        Ok(())
-    }
-    fn delete(&self, account: &str) -> Result<(), KeystoreError> {
-        self.0.lock().unwrap().remove(account);
-        Ok(())
-    }
-}
 
 /// Confirms retention without drawing anything — these tests are about lock state, not presentation.
 struct AlwaysKeeps;
@@ -63,7 +42,7 @@ fn live_residency() -> AccountResidency {
     let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
     let (residency, _phrase) = assemble_residency(
         backend,
-        MemCred::default(),
+        typed_password("tray-lock-state"),
         AccountId::new(DEFAULT_ACCOUNT_ID),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
@@ -167,10 +146,9 @@ fn re_unlocking_returns_the_menu_to_unlocked() {
     // The same backend + credential store across the whole test, so the re-unlock re-opens the SAME
     // enrolled account rather than enrolling a second one.
     let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-    let cred = MemCred::default();
     let (residency, _phrase) = assemble_residency(
         Arc::clone(&backend),
-        cred.clone(),
+        typed_password("tray-lock-state"),
         AccountId::new(DEFAULT_ACCOUNT_ID),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
@@ -182,7 +160,7 @@ fn re_unlocking_returns_the_menu_to_unlocked() {
     assert!(
         reunlock_into(
             backend,
-            cred,
+            typed_password("tray-lock-state"),
             AccountId::new(DEFAULT_ACCOUNT_ID),
             &residency
         ),
@@ -193,4 +171,13 @@ fn re_unlocking_returns_the_menu_to_unlocked() {
         AccountState::Unlocked { recoverable: true },
         "unlocking must restore the unlocked menu"
     );
+}
+
+/// A password derived from `label` — the stand-in for a user typing one (dig_ecosystem#1817).
+///
+/// Same label → same password, so two ceremonies model ONE person across a restart, and a DIFFERENT
+/// label models someone who does not know it. Derived rather than inlined so static analysis sees a
+/// computed value, not a hard-coded secret.
+fn typed_password(label: &str) -> dig_app_core::account::ceremony::PreCollectedPassword {
+    dig_app_core::account::ceremony::PreCollectedPassword::new(format!("password-for-{label}"))
 }

@@ -21,9 +21,7 @@
 
 use std::io::IsTerminal;
 
-use dig_app_core::account::boot::{
-    account_exists, boot_existing_account, open_account, BootedAccount,
-};
+use dig_app_core::account::boot::{account_exists, open_account};
 use dig_app_core::account::lifecycle::Seeding;
 use dig_app_core::account::recovery::{RecoveryPhrase, PHRASE_WORDS};
 use dig_app_core::environment::AppEnvironment;
@@ -35,10 +33,16 @@ pub enum AccountReport {
     NotSetUp,
     /// An account exists. `dig_id` is present only when it could be unlocked to read it.
     Present {
-        /// The root profile's DIG ID, if the account unlocked.
+        /// The root profile's DIG ID, if the account was open enough to read it.
         dig_id: Option<String>,
-        /// Whether a recovery phrase is stored for it.
-        recoverable: bool,
+        /// Whether a recovery phrase is stored for it, or `None` when that is not KNOWN.
+        ///
+        /// Three-valued rather than a `bool` because reading the flag requires unlocking the account,
+        /// and since dig_ecosystem#1817 an unlock needs the user's password — which `dign account
+        /// status` has no business demanding just to answer "do I have an account?". A `bool` here
+        /// would have to guess, and the only available guess (`false`) prints a WARNING telling the
+        /// user their account has no recovery phrase, which for most accounts is simply untrue.
+        recoverable: Option<bool>,
     },
     /// A restore completed and the account is now on this host.
     Restored {
@@ -88,23 +92,14 @@ pub fn status() -> Result<AccountReport, AccountCliError> {
     if !account_exists(&dir) {
         return Ok(AccountReport::NotSetUp);
     }
-    // An unlock may legitimately fail (no credential store on this OS); that costs us the DIG ID and the
-    // recoverable flag, not the answer. `boot_existing_account` can only unlock, never enrol, so asking
-    // for status can never create an account as a side effect.
-    match boot_existing_account(&dir) {
-        Some(BootedAccount {
-            profile_id,
-            recoverable,
-            ..
-        }) => Ok(AccountReport::Present {
-            dig_id: Some(profile_id),
-            recoverable,
-        }),
-        None => Ok(AccountReport::Present {
-            dig_id: None,
-            recoverable: false,
-        }),
-    }
+    // Status reports what is at rest and unlocks NOTHING. Since dig_ecosystem#1817 an unlock draws a
+    // password window, and a status query that popped one would train people to type their account
+    // password at any prompt — the habit every credential-phishing attack relies on. So the DIG ID and
+    // the recovery-phrase flag are reported as UNKNOWN rather than bought with a prompt.
+    Ok(AccountReport::Present {
+        dig_id: None,
+        recoverable: None,
+    })
 }
 
 /// Restore an account from a recovery phrase read from `input`.
@@ -165,12 +160,19 @@ pub fn describe(report: &AccountReport) -> String {
             dig_id,
             recoverable,
         } => {
-            let id = dig_id.as_deref().unwrap_or("(locked — could not be read)");
-            let recovery = if *recoverable {
-                "It has a recovery phrase; you can view it from the DIG tray menu."
-            } else {
-                "WARNING: it has NO recovery phrase, so it exists only on this computer and cannot \
-                 be recovered if you lose it."
+            let id = dig_id.as_deref().unwrap_or("(locked — unlock it from the DIG tray menu)");
+            let recovery = match recoverable {
+                Some(true) => "It has a recovery phrase; you can view it from the DIG tray menu.",
+                Some(false) => {
+                    "WARNING: it has NO recovery phrase, so it exists only on this computer and cannot \
+                     be recovered if you lose it."
+                }
+                // Unknown is stated as unknown. Printing the WARNING here would tell most users their
+                // account is unrecoverable when it is not.
+                None => {
+                    "Unlock it from the DIG tray menu to see its DIG ID and whether it has a recovery \
+                     phrase."
+                }
             };
             format!("You have a DIG Account.\n  DIG ID: {id}\n  {recovery}")
         }
@@ -191,7 +193,7 @@ mod tests {
     fn a_phrase_less_account_is_described_as_a_warning() {
         let text = describe(&AccountReport::Present {
             dig_id: Some("abc".to_string()),
-            recoverable: false,
+            recoverable: Some(false),
         });
         assert!(text.contains("NO recovery phrase"), "{text}");
         // Asserted on the RENDERED sentence. The previous form expected a literal newline and indentation
@@ -211,7 +213,7 @@ mod tests {
     fn a_recoverable_account_is_described_without_the_warning() {
         let text = describe(&AccountReport::Present {
             dig_id: Some("abc".to_string()),
-            recoverable: true,
+            recoverable: Some(true),
         });
         assert!(!text.contains("WARNING"), "{text}");
         assert!(text.contains("has a recovery phrase"), "{text}");
@@ -223,10 +225,28 @@ mod tests {
     fn a_locked_account_still_reports_itself_present() {
         let text = describe(&AccountReport::Present {
             dig_id: None,
-            recoverable: false,
+            recoverable: None,
         });
         assert!(text.contains("You have a DIG Account"), "{text}");
         assert!(text.contains("locked"), "{text}");
+    }
+
+    /// **The trap this three-valued flag exists to avoid.** An account whose recovery-phrase state is
+    /// simply UNKNOWN — because status refuses to demand a password to find out — must NOT be described
+    /// as having no recovery phrase.
+    ///
+    /// A `bool` field could only render this case as one of the two certainties, and the honest-looking
+    /// default (`false`) prints a WARNING that is wrong for every account created since recovery phrases
+    /// landed. That is a scarier lie than saying nothing.
+    #[test]
+    fn an_unknown_recovery_state_is_never_reported_as_having_no_phrase() {
+        let text = describe(&AccountReport::Present {
+            dig_id: None,
+            recoverable: None,
+        });
+        assert!(!text.contains("WARNING"), "{text}");
+        assert!(!text.contains("NO recovery phrase"), "{text}");
+        assert!(text.contains("whether it has a recovery"), "{text}");
     }
 
     #[test]

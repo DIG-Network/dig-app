@@ -102,8 +102,8 @@ account master seed:
 **Custody root: the master-HD account (`dig-account`).** The custody object model — enrol/unlock,
 the keystore crypto, per-profile identity signing + DEK derivation, and the wallet money path — is
 owned by the **`dig-account`** crate and consumed here (never re-implemented). The at-rest ROOT is a
-SINGLE account **master seed**, sealed in a per-user file backend under the bootstrap-unlock password
-(held zero-prompt in the OS credential store on Windows/macOS), and from which every profile's
+SINGLE account **master seed**, sealed in a per-user file backend under a **user-chosen password**
+(§3.2a), and from which every profile's
 identity key AND its DEK are derived at that profile's HD index (`ProfileIx`). This REPLACES the
 retired model in which each profile held an independently-generated random identity scalar. The
 sealing container (DIGOP1) and the DEK derivation contract (HKDF-SHA256 over `DEK_SALT` /
@@ -207,9 +207,12 @@ can carry to a new machine.
 
 Minting a profile's `did:chia:` DID is a real Chia mainnet transaction that spends real funds. It is
 therefore **never automatic**: an implementation MUST NOT mint a DID during enrolment, boot, or any flow
-the user did not explicitly initiate for that purpose, and MUST show the cost before spending. An
-account is fully functional without a DID; a profile is identified by its seed-derived identity public
-key until one is minted (§3.1).
+the user did not explicitly initiate for that purpose, and MUST show the cost before spending. A DID is the bedrock of a DIG Account and is a REQUIRED step, not an optional
+extra: an implementation MUST NOT describe an account without one as complete, and MUST NOT tell the user
+their account "fully works without a DID". Until one is minted a profile is identified by its
+seed-derived identity public key (§3.1), and the account is reported as
+`AccountCompleteness::WalletOnly` — a wallet that holds funds, signs and reads content, but is not the
+finished article.
 
 The reported DID state MUST rest on evidence that a DID was actually minted on chain. A locally-written
 value that merely has DID-shaped text in it — a profile reference, a config entry — MUST NOT be reported as
@@ -219,6 +222,12 @@ have.
 **Current state:** minting is not implemented, so no profile can have a DID and there is no tray action that
 mints — the menu offers an EXPLANATION of what a DID is and costs instead (§3.1c). The absence is
 structural: no `TrayAction` mints, so it cannot be re-enabled by accident.
+
+Because that absence is universal and permanent for this version, "no DID yet" MUST NOT be modelled as an
+`AccountState` (§3.1c): every account on every host would sit in it for ever, with no control that could
+ever leave it, which would make the lock states lie. It is reported as completeness
+(`account::journey::AccountCompleteness`) — a fact about the account — and the first-run flow (§3.2b)
+names the DID as the remaining REQUIRED step while stating plainly that it cannot be taken yet.
 
 ### 3.1c The tray account surface (normative)
 
@@ -322,14 +331,20 @@ Binding rules:
   The distinction is not hypothetical — every Windows/macOS host that has run dig-app auto-enrols the default
   account at first boot, so legacy raw-seed blobs exist in the field, and a custody model that can no longer
   read them leaves such an account WEDGED: it neither unlocks nor re-enrols at the same id. An implementation
-  MUST therefore carry a three-state at-rest fact (no account / present / present-but-unopenable) rather than
-  a boolean, and the tray MUST name the state on the surfaces a person looks at — the icon, the tooltip and
+  MUST therefore carry a multi-state at-rest fact (no account / present / present-but-unopenable /
+  present-under-a-machine-password) rather than a boolean, and the tray MUST name the state on the surfaces a person looks at — the icon, the tooltip and
   the details window — never only in a log record. Reducing this to a log line costs the user signing
   permanently and silently, which is the defect the state exists to prevent.
   - **The state offers the remedy, and nothing else.** `Unopenable` MUST offer an explainer naming the
     situation and the exact menu path to replacing the account, and MUST NOT offer `Unlock…` (it is what
     already failed) or the recovery-phrase reveal (its vault is sealed under the same unreadable key). The
     replace and remove verbs MUST be enabled, because this is the state a user most needs to escape.
+- **An account with no USER password is `NeedsPassword`, never `Locked` (MUST).** An account still sealed
+  under a machine-generated password (§3.2a) opens perfectly well — which is precisely the problem — so it
+  is not `Unopenable`; and offering `Unlock…` would ask for a password its owner has never chosen, so it is
+  not `Locked` either. The one honest offer is to SET a password, and the state that produces that offer
+  MUST exist. In this state the tray MUST NOT offer `Unlock…`, MUST NOT enable the recovery-phrase reveal,
+  and MUST offer the re-seal (§3.2a) as the top-level contextual row.
   - **The state is STICKY until an open SUCCEEDS.** It MUST NOT clear on a repaint tick, or the tray flickers
     back to reporting a lock that cannot be lifted. It MUST be cleared at exactly one place — the moment a
     live session exists — and the no-account case MUST be evaluated BEFORE it, so a successful removal reports
@@ -596,10 +611,30 @@ account" through ONE boot primitive (`account::lifecycle::open_or_enroll`, assem
   the SAME injected ceremony + policy, recovering the enrolled seed and yielding the live
   `UnlockedAccount`. A returning unlock re-derives the identical master-seed-derived identity key.
 
-On Windows/macOS the bootstrap password is sourced zero-prompt from the per-application OS credential
-store (§3.1), so a returning boot unlocks with no prompt. Linux — and any host with no
-per-application-ACL credential store — DEFERS zero-prompt unlock: the account boot yields no residency
-and the signing channel stays down until a Linux unlock UX lands (dig_ecosystem#962).
+**The unlock password MUST be supplied by the user (MUST).** It is typed into the app's own native
+masked window (§3.1d, `account::password`) and exists nowhere else — not on disk, not in the OS
+credential store, not in a log. An implementation MUST NOT source it from any store the logged-in user's
+own code can read, and MUST NOT keep such a path as a fallback: a fallback needing no password defeats
+the requirement entirely. A new password is typed TWICE and must be at least 10 characters (counted as
+CHARACTERS, not bytes); an unlock is asked once, and a wrong answer fails the seal.
+
+**The app MUST start LOCKED.** Nothing unlocks at start-up. The account opens only when the user asks
+(the tray's `Unlock…`) or when a signature needs it, and the APP-SIGN loopback channel refuses while
+locked rather than serving from a seed it has no business holding unprompted.
+
+**Migration off the machine-generated password (MUST).** Accounts sealed by earlier versions under a
+machine-generated credential-store password are reported as `AccountState::NeedsPassword` (§3.1c) — not
+as `Locked`, which would offer an `Unlock…` asking for a password its owner never chose. The remedy is an
+in-place re-seal (`account::migration`): open with the old password, read the master seed back out of the
+account's own recovery-phrase vault, re-seal that SAME seed under the chosen password, and only then
+delete the credential entry. The seed is preserved, so the identity, address, phrase and sealed data all
+survive. Every failure arm MUST leave the account exactly as it was; an account with no vaulted phrase
+CANNOT be re-sealed and MUST be left intact and working, with the replace path named — never deleted to
+satisfy this rule.
+
+Linux — and any host with no window stack for the prompt — DEFERS the account paths entirely: the boot
+yields no residency and the signing channel stays down until a Linux unlock UX lands
+(dig_ecosystem#962).
 
 The unlocked account is never held as a snapshot: it lives in the shared, lockable
 `account::residency::AccountResidency` (§3.6) — a single `Arc<Mutex<Option<UnlockedAccount>>>` that
@@ -611,6 +646,29 @@ password, `dig-account` seals/unlocks the seed, and callers receive only capabil
 
 Fail-closed everywhere: any ceremony, policy, or keystore error — a wrong password, a cancelled prompt,
 a tampered blob, a policy refusal — aborts with NO unlocked account and no partial key material.
+
+### 3.2b First run (normative)
+
+An account exists ONLY because a user asked for one. An implementation MUST NOT auto-enrol an account at
+boot, at install, or on any path the user did not initiate — a silently created account is one whose
+recovery phrase nobody has seen.
+
+The first-run flow (`account::journey::first_run_wizard`), reached from the tray's
+`Set up my DIG Account…` row, is ordered so nothing becomes load-bearing before the words are written
+down:
+
+1. **Orient** — a two-choice screen stating what will happen. Refusing creates nothing.
+2. **Create** — generate the 24-word BIP-39 phrase, show it, take the retention claim, ask the user to
+   CHOOSE a password, and seal the seed under it. Any refusal at any point leaves the host untouched
+   (§3.1a, §3.2a).
+3. **Fund** — show the account's OWN derived receiving address. It is SHOWN, not awaited: the flow is a
+   chain of OS-owned modal windows (§3.1d) and a modal cannot poll a chain, so an implementation MUST NOT
+   present a "waiting for funds" screen it cannot actually be waiting on.
+4. **DID** — name the on-chain DID as the remaining REQUIRED step (§3.1b) and state plainly that minting
+   is not available in this version. It MUST NOT present a control that appears to mint.
+
+Every step MUST be escapable without half-creating an account. Reading content is NOT gated on any of
+this: `Open URL…` stays enabled in every account state (§6.0 — consumption is never gated on custody).
 
 ### 3.3 Wallet
 

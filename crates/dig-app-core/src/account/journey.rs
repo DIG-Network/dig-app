@@ -550,6 +550,135 @@ pub fn replace_account<S: ProfileSealer>(
     }
 }
 
+/// How far a DIG account has actually got (dig_ecosystem#1820).
+///
+/// #1820 is explicit that a DID is the bedrock of an account and that an account is not complete without
+/// one — so "wallet exists, no DID yet" MUST NOT be collapsed into any existing account state, and the
+/// app must stop telling people their account "fully works without a DID".
+///
+/// It is modelled here, beside the journey that produces it, rather than as another
+/// [`AccountState`](crate::tray_menu::AccountState) variant. The reason is arithmetic: `dig-account`'s
+/// minter is a Phase-2 stub and no code path can mint, so an `AccountState` for "no DID yet" would be the
+/// state EVERY account on every machine sits in permanently — a tray that tells every user, for ever,
+/// that they are half-finished, with no control that could ever finish it. Completeness is a real fact
+/// about an account and is reported as one; it is not a lock state, and pretending otherwise would make
+/// the lock states lie.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountCompleteness {
+    /// A wallet exists — a seed, a recovery phrase, an address, a working signer — but no on-chain DID
+    /// is bound to it. Usable for reading content and for holding funds; NOT the finished article.
+    WalletOnly,
+    /// An on-chain `did:chia:` DID is bound to the account. Only ever set from evidence of a real mint.
+    DidBound,
+}
+
+impl AccountCompleteness {
+    /// Read completeness off the DID the tray holds. `None` means no DID has been minted — the honest
+    /// reading, since a DID is recorded only from evidence of an actual on-chain mint.
+    pub fn of(did: Option<&str>) -> Self {
+        match did {
+            Some(_) => Self::DidBound,
+            None => Self::WalletOnly,
+        }
+    }
+}
+
+/// What a first run ended in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstRunOutcome {
+    /// A wallet was created. It has a seed, a confirmed recovery phrase and a password, and it can read
+    /// content and hold funds — but it has no DID yet, so it is [`AccountCompleteness::WalletOnly`].
+    WalletCreated,
+    /// The user backed out. Nothing was created and the host is exactly as it was.
+    Declined,
+    /// Creation was attempted and did not complete. The creating step has already told the user why.
+    Failed,
+}
+
+/// Run the FIRST-RUN flow: orient the user, create the wallet, show them where to send funds, and tell
+/// them the truth about the DID step (dig_ecosystem#1826).
+///
+/// `create` is the account-creating step — in production the shell's setup path, which shows the 24
+/// words, takes the retention claim, asks for a password and enrols. It returns the new account's
+/// receiving address, or `None` if it did not complete.
+///
+/// # The four steps, and why the last two are what they are
+///
+/// The directive asks for *create seed → fund → detect funding → mint DID*. Two of those are things this
+/// app cannot yet do, and the flow says so rather than miming them:
+///
+/// - **Funding is shown, not awaited.** The wizard is a chain of OS-owned modal windows — dig-app has no
+///   window toolkit and adding one to a custody-holding binary is a security surface, not a crate pick —
+///   and a modal cannot poll a chain or update itself. So the user is given their address and told to
+///   fund it when they are ready, which is honest and works today, instead of a "waiting for funds…"
+///   screen that could never actually be waiting.
+/// - **The DID step cannot mint, and says so.** `dig-account`'s minter is a Phase-2 stub and no
+///   [`TrayAction`](crate::tray_menu::TrayAction) can mint — that is structural, not an oversight. #1820
+///   requires that a DID is presented as REQUIRED rather than optional, so the step names it as the
+///   remaining, required step and states plainly that it is not available in this version. What it must
+///   not do is either present a button that silently does nothing, or repeat the retired copy claiming
+///   the account "fully works without a DID".
+///
+/// Escapable at every step: each screen is a two-choice claim whose refusal ends the flow, and backing
+/// out before `create` leaves nothing behind at all.
+pub fn first_run_wizard(
+    confirmer: &dyn NativeConfirmer,
+    create: impl FnOnce() -> Option<String>,
+) -> FirstRunOutcome {
+    // 1. Orient. A person who opened the menu out of curiosity can leave here having changed nothing.
+    if confirmer.confirm_claim(&ClaimPrompt {
+        title: "DIG — Set up your DIG Account",
+        heading: "Let's set up your DIG Account.",
+        body: "Three things happen next:
+
+               1. You are shown 24 words — your recovery phrase. Write them down.
+               2. You choose a password. You will type it whenever DIG needs to unlock your account.
+               3. You are shown your address, so you can add funds when you want to publish.
+
+               Nothing is created until you have written the words down, and you can stop at any point.
+
+               You do not need an account to read content on the DIG Network — that already works.",
+        affirm: "Create my account",
+    }) != ConfirmDecision::Approve
+    {
+        return FirstRunOutcome::Declined;
+    }
+
+    // 2. Create. Everything load-bearing happens in here: words shown, retention claimed, password
+    // chosen, seed sealed. It reports its own failures, so this function adds nothing on that path.
+    let Some(address) = create() else {
+        return FirstRunOutcome::Failed;
+    };
+
+    // 3. Fund. Shown, not awaited — see the note above.
+    notify(
+        confirmer,
+        "DIG — Your DIG address",
+        "Your account is ready, and this is its address.",
+        &format!(
+            "{address}
+
+             Send XCH or $DIG here when you want to publish content or mint an on-chain DID. You do              not need any funds to read content, and DIG will never spend anything without showing you              exactly what it is spending first.
+
+             You can see this address again at any time from the DIG menu.",
+        ),
+    );
+
+    // 4. The DID step — named as required, and honest that it cannot run yet.
+    notify(
+        confirmer,
+        "DIG — One step still to come",
+        "Your wallet is set up. Your on-chain DID is not.",
+        "A DID is what publishes your identity on the Chia blockchain so others can find and verify          it, and it is the step that turns this wallet into a full DIG Account.
+
+         Minting one is not available in this version of DIG. Nothing is missing from your setup and          there is nothing for you to do — when minting arrives, the DIG menu will offer it here, and          you will see the exact cost before anything is spent.
+
+         Until then your account holds funds, signs, and reads content normally.",
+    );
+
+    FirstRunOutcome::WalletCreated
+}
+
 /// Draw a plain informational window, so every message this module shows goes through the same OS-owned
 /// surface rather than a mix of dialogs and silence.
 fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &str) {
@@ -575,6 +704,124 @@ mod tests {
     use crate::sealer::SealError;
     use std::sync::Mutex;
     use zeroize::Zeroizing;
+
+    // ---- The first-run wizard (dig_ecosystem#1826) ------------------------------------------------
+
+    /// A distinctive address so "the real address reached the screen" is checkable, and no substring of
+    /// the surrounding copy could satisfy the assertion by accident.
+    const ADDRESS: &str = "xch1firstrunwizardfixtureaddress0000000000000000000000000000000";
+
+    /// Approving the welcome runs the creating step and finishes the flow, and the user's ACTUAL
+    /// address reaches the screen.
+    #[test]
+    fn a_first_run_creates_the_wallet_and_shows_its_address() {
+        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
+        let created = Mutex::new(false);
+
+        let outcome = first_run_wizard(&confirmer, || {
+            *created.lock().unwrap() = true;
+            Some(ADDRESS.to_string())
+        });
+
+        assert_eq!(outcome, FirstRunOutcome::WalletCreated);
+        assert!(*created.lock().unwrap(), "the creating step must have run");
+        assert!(
+            confirmer.drawn().contains(ADDRESS),
+            "the account's own address must reach the screen, not a placeholder"
+        );
+    }
+
+    /// Backing out of the welcome must create NOTHING.
+    ///
+    /// The recorded flag is the load-bearing assertion: checking only that the outcome is `Declined`
+    /// would pass identically for an implementation that created an account and then reported a
+    /// decline, which is the one behaviour a first run must never have.
+    #[test]
+    fn declining_the_welcome_never_reaches_the_creating_step() {
+        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Deny]);
+        let created = Mutex::new(false);
+
+        let outcome = first_run_wizard(&confirmer, || {
+            *created.lock().unwrap() = true;
+            Some(ADDRESS.to_string())
+        });
+
+        assert_eq!(outcome, FirstRunOutcome::Declined);
+        assert!(
+            !*created.lock().unwrap(),
+            "a declined welcome must not create an account"
+        );
+        assert_eq!(
+            confirmer.windows_drawn(),
+            1,
+            "nothing after the welcome may be shown"
+        );
+    }
+
+    /// The welcome is a CLAIM, not a notice: a one-button window would be a screen a person cannot say
+    /// no to, at the exact moment they are being asked to commit to creating custody.
+    #[test]
+    fn the_welcome_offers_a_real_way_out() {
+        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Deny]);
+        first_run_wizard(&confirmer, || Some(ADDRESS.to_string()));
+        assert_eq!(confirmer.kinds(), vec!["claim"]);
+    }
+
+    /// A creating step that did not complete must not be followed by "your account is ready" — the
+    /// screens after it are all statements about an account that does not exist.
+    #[test]
+    fn a_failed_creation_shows_no_success_screens() {
+        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
+
+        assert_eq!(
+            first_run_wizard(&confirmer, || None),
+            FirstRunOutcome::Failed
+        );
+        assert_eq!(
+            confirmer.windows_drawn(),
+            1,
+            "only the welcome was drawn; the creating step reports its own failure"
+        );
+    }
+
+    /// **The #1820 copy correction.** The DID step must name the DID as the remaining REQUIRED step and
+    /// must not repeat the retired claim that the account "fully works without a DID".
+    ///
+    /// Asserted on the drawn text because that claim is exactly what the user reads, and it was a
+    /// sentence in the product — not a behaviour — that made a mandatory step look optional.
+    #[test]
+    fn the_did_step_names_it_as_required_and_admits_it_cannot_mint() {
+        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
+        first_run_wizard(&confirmer, || Some(ADDRESS.to_string()));
+        let drawn = confirmer.drawn().to_lowercase();
+
+        assert!(
+            drawn.contains("not available in this version"),
+            "the DID step must admit minting cannot run yet: {drawn}"
+        );
+        assert!(
+            !drawn.contains("fully works without"),
+            "the retired 'works without a DID' copy must not come back: {drawn}"
+        );
+        assert!(
+            !drawn.contains("optional"),
+            "a DID is the bedrock of the account and must not be described as optional: {drawn}"
+        );
+    }
+
+    /// Completeness is read from a MINTED DID and nothing else — an account with no DID is
+    /// `WalletOnly`, which is every account today.
+    #[test]
+    fn completeness_follows_the_minted_did() {
+        assert_eq!(
+            AccountCompleteness::of(None),
+            AccountCompleteness::WalletOnly
+        );
+        assert_eq!(
+            AccountCompleteness::of(Some("did:chia:abc")),
+            AccountCompleteness::DidBound
+        );
+    }
 
     /// A confirmer that plays a SCRIPT of decisions and records every window it drew.
     ///

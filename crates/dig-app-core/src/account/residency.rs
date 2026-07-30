@@ -120,6 +120,18 @@ impl AccountResidency {
             .map(|acct| acct.wallet_ops().money_signer(network))
     }
 
+    /// The account's receiving address, in `xch1…` form — where a user sends XCH or $DIG.
+    ///
+    /// Derived live from the unlocked account, so it fails closed to `None` the moment the residency
+    /// locks: an address is public information, but reading it from a locked account would mean the
+    /// residency was still holding key material after a lock, which is the invariant that matters here.
+    /// The inner `Result` is dig-account's own (an address-encoding failure).
+    pub fn receiving_address(&self) -> Option<AccountResult<String>> {
+        self.guard()
+            .as_ref()
+            .map(|acct| acct.wallet_ops().address())
+    }
+
     /// The 48-byte identity signing public key of profile `ix`, as hex — for the connect-handle
     /// advertisement at assembly time (read while unlocked). `None` if the residency is locked.
     pub fn signing_public_key_hex(&self, ix: ProfileIx) -> Option<String> {
@@ -246,6 +258,34 @@ mod tests {
         )
         .unwrap();
         AccountResidency::new(unlocked)
+    }
+
+    /// The receiving address is a real derived `xch1…` address, differs per account, and fails closed
+    /// once the residency locks.
+    ///
+    /// Two DIFFERENT residencies are compared because a fixed placeholder — or an address derived from
+    /// something other than this account's key — would satisfy "it looks like an address" identically.
+    /// The differing values are what prove it is derived from the seed in hand.
+    #[test]
+    fn the_receiving_address_is_derived_per_account_and_locks_with_it() {
+        let mine_residency = residency();
+        let mine = mine_residency
+            .receiving_address()
+            .expect("unlocked")
+            .expect("an address encodes");
+        assert!(mine.starts_with("xch1"), "{mine}");
+
+        let other = residency()
+            .receiving_address()
+            .expect("unlocked")
+            .expect("an address encodes");
+        assert_ne!(mine, other, "each account has its own address");
+
+        mine_residency.lock_all();
+        assert!(
+            mine_residency.receiving_address().is_none(),
+            "a locked residency must not derive an address from key material it no longer holds"
+        );
     }
 
     #[test]

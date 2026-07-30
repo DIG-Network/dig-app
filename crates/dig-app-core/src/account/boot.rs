@@ -1,18 +1,27 @@
 //! The production account BOOT glue — assembles the master-HD unlock/enroll flow the tray shell mounts
 //! (#1547, custody switchover).
 //!
-//! [`open_account`] is the production journey: enrol-or-unlock, and on a FIRST run show the user their
-//! 24-word recovery phrase, require them to confirm they kept it, and seal a copy into the phrase vault
-//! so the tray can show it again (dig_ecosystem#1752).
+//! Two verbs, deliberately separate (dig_ecosystem#1820, #1817):
 //!
-//! [`assemble_residency`] is the testable core: over any keystore backend + credential store it
-//! enrols-or-unlocks the account (through [`open_or_enroll`](crate::account::lifecycle::open_or_enroll)
-//! with a [`CredentialCeremony`](crate::account::ceremony::CredentialCeremony)) and houses the result
-//! in an [`AccountResidency`]. [`open_account`] / [`boot_existing_account`] / [`reunlock_into`] are the thin, cfg-gated
-//! production wrappers that wire the host's real [`OsCredentialStore`](crate::keystore::OsCredentialStore)
-//! (Windows/macOS zero-prompt) + a per-user [`FileBackend`](dig_session::FileBackend) — deferring on
-//! Linux exactly as the retired path did (no per-application-ACL credential store to unlock without a
-//! prompt).
+//! - [`open_account`] CREATES an account — the first-run/restore path, reached only because a user
+//!   asked. It shows the 24-word recovery phrase, requires them to confirm they kept it, asks them to
+//!   CHOOSE a password, seals the seed under it, and vaults a copy of the phrase so the tray can show it
+//!   again (dig_ecosystem#1752).
+//! - [`unlock_existing_account`] OPENS one that already exists, asking for that password.
+//!
+//! **Nothing here runs at start-up.** The app boots with the account LOCKED and unlocks on demand, like
+//! a password manager: an account is never opened without the person who owns it, and the signing
+//! channel stays refused until they turn up. Before #1817 the boot unlocked with a machine-generated
+//! password out of the OS credential store, which meant "Unlock…" asked for nothing and any code in the
+//! user's session could reach the master seed.
+//!
+//! [`assemble_residency`] is the testable core: over any keystore backend and any
+//! [`AuthCeremony`](crate::account::auth::AuthCeremony) it enrols-or-unlocks the account (through
+//! [`open_or_enroll`](crate::account::lifecycle::open_or_enroll)) and houses the result in an
+//! [`AccountResidency`]. The cfg-gated wrappers wire the host's real
+//! [`PromptedCeremony`](crate::account::ceremony::PromptedCeremony) + a per-user
+//! [`FileBackend`](dig_session::FileBackend), and defer on Linux, which has no window stack for the
+//! prompt yet.
 //!
 //! This is the ONE place the app turns "a brand directory" into "a live, lockable unlocked account",
 //! so the tray shell stays a thin caller and every piece underneath (lifecycle, ceremony, residency)
@@ -34,8 +43,9 @@ impl PhrasePresenter for NeverEnrols {
 }
 use dig_session::KeychainBackend;
 
-use crate::account::auth::HarnessAuthProvider;
-use crate::account::ceremony::CredentialCeremony;
+use crate::account::auth::{AuthCeremony, HarnessAuthProvider};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use crate::account::ceremony::PromptedCeremony;
 use crate::account::lifecycle::{
     account_store, open_or_enroll, Opened, PhrasePresenter, RetentionDecision, Seeding,
 };
@@ -43,30 +53,31 @@ use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::residency::{AccountResidency, ResidencySealer};
 use crate::account::second_factor::vault::SecondFactorVault;
-use crate::keystore::CredentialStore;
 
 /// The single-account id the app boots by default. The account model supports many accounts (the
 /// [`registry`](crate::account::registry)); the tray boot currently opens the one default account, so
 /// its id is fixed here rather than derived from key material (an app-local handle, not a DID).
 pub const DEFAULT_ACCOUNT_ID: &str = "default";
 
-/// Enrol-or-unlock `account` over `backend` + `cred`, returning what the boot did.
+/// Enrol-or-unlock `account` over `backend`, collecting the password through `ceremony`.
 ///
-/// The password is sourced zero-prompt from `cred` ([`CredentialCeremony`]); a first run settles its
-/// custody root from `seeding` (a shown-and-confirmed new recovery phrase, or one the user is restoring
-/// from) and seals it, a later boot unlocks it. Fail-closed: any ceremony/keystore error — or a
-/// recovery phrase the user did not confirm — yields no account at all.
-pub fn unlock_account<C>(
+/// The ceremony is the whole custody question: in production it is a
+/// [`PromptedCeremony`](crate::account::ceremony::PromptedCeremony), so the password comes from the
+/// USER (dig_ecosystem#1817) and this call cannot succeed without them. A first run settles its custody
+/// root from `seeding` (a shown-and-confirmed new recovery phrase, or one the user is restoring from)
+/// and seals it under that password; a later unlock reproduces it. Fail-closed: any ceremony/keystore
+/// error — or a recovery phrase the user did not confirm — yields no account at all.
+pub fn unlock_account<A>(
     backend: Arc<dyn KeychainBackend>,
-    cred: C,
+    ceremony: A,
     account: AccountId,
     seeding: Seeding<'_>,
 ) -> AccountResult<Opened>
 where
-    C: CredentialStore + Send + Sync + 'static,
+    A: AuthCeremony + 'static,
 {
     let store = account_store(backend);
-    let provider = HarnessAuthProvider::new(CredentialCeremony::new(cred));
+    let provider = HarnessAuthProvider::new(ceremony);
     block_on(open_or_enroll(
         store,
         account,
@@ -82,16 +93,16 @@ where
 /// The second element is the enrolment phrase, present ONLY on a first run. The caller must vault it
 /// (see [`vault_for`]) so the account can show its phrase again later; dropping it instead leaves an
 /// account that works but can never re-display its words.
-pub fn assemble_residency<C>(
+pub fn assemble_residency<A>(
     backend: Arc<dyn KeychainBackend>,
-    cred: C,
+    ceremony: A,
     account: AccountId,
     seeding: Seeding<'_>,
 ) -> AccountResult<(AccountResidency, Option<RecoveryPhrase>)>
 where
-    C: CredentialStore + Send + Sync + 'static,
+    A: AuthCeremony + 'static,
 {
-    match unlock_account(backend, cred, account, seeding)? {
+    match unlock_account(backend, ceremony, account, seeding)? {
         Opened::Existing(unlocked) => Ok((AccountResidency::new(unlocked), None)),
         Opened::Enrolled { account, phrase } => Ok((AccountResidency::new(account), Some(phrase))),
     }
@@ -141,22 +152,26 @@ pub fn second_factor_vault_for(
     ))
 }
 
-/// Re-unlock `account` and INSTALL it into an existing `residency` — the sign-path re-auth after a
-/// lock (a zero-prompt re-unlock on Windows/macOS). Returns whether the re-unlock succeeded.
-pub fn reunlock_into<C>(
+/// Re-unlock `account` through `ceremony` and INSTALL it into an existing `residency` — the sign-path
+/// re-auth after a lock. Returns whether the re-unlock succeeded.
+///
+/// In production the ceremony asks the user for their password, so a signature after an idle lock costs
+/// a password entry. That is the point: before #1817 this path re-opened the seed from the credential
+/// store with no human involved, which made the lock decorative.
+pub fn reunlock_into<A>(
     backend: Arc<dyn KeychainBackend>,
-    cred: C,
+    ceremony: A,
     account: AccountId,
     residency: &AccountResidency,
 ) -> bool
 where
-    C: CredentialStore + Send + Sync + 'static,
+    A: AuthCeremony + 'static,
 {
     // A re-unlock is never an enrolment: the account provably exists (we just locked it), so the
     // seeding arm is unreachable. `NeverEnrols` makes that a type-level guarantee rather than a comment
     // — if the invariant ever broke, this path would refuse rather than silently mint a second account
     // with a phrase nobody saw.
-    match unlock_account(backend, cred, account, Seeding::NewPhrase(&NeverEnrols)) {
+    match unlock_account(backend, ceremony, account, Seeding::NewPhrase(&NeverEnrols)) {
         Ok(opened) => {
             residency.install(opened.into_account());
             true
@@ -322,26 +337,84 @@ fn discard_sealed_vaults(brand_dir: &std::path::Path) {
     }
 }
 
-/// Open the default account from `brand_dir`, enrolling it from `seeding` if it does not exist yet.
+/// CREATE the default account in `brand_dir` from `seeding`, sealed under a password the user chooses.
 ///
-/// Uses the host's [`OsCredentialStore`](crate::keystore::OsCredentialStore) for the zero-prompt
-/// password and a per-user [`FileBackend`](dig_session::FileBackend) under `<brand_dir>/account` for the
-/// sealed master seed. On a first run the phrase is shown, retention is confirmed, and a copy is sealed
-/// into the phrase vault so the tray can show it again later.
+/// This is the deliberate first-run/restore path and nothing else calls it: an account comes into
+/// existence because a person asked for one (dig_ecosystem#1820). The phrase is shown and its retention
+/// confirmed BEFORE the password is asked for and before anything is sealed, so a user who backs out at
+/// any point leaves the host exactly as it was — the ordering that matters most here is that nothing
+/// becomes load-bearing until the words are written down.
 ///
-/// Returns `None` when there is no usable OS credential store, when the user cancels setup, or on any
-/// keystore failure — in every case leaving the host exactly as it was.
+/// Returns `None` when the account already exists, when the user cancels, or on any keystore failure.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option<BootedAccount> {
-    use crate::keystore::OsCredentialStore;
+    open_account_with(
+        brand_dir,
+        seeding,
+        PromptedCeremony::establishing(
+            "Choose a password for your DIG account. You will type it to unlock the account \
+             whenever DIG needs to sign something.",
+        ),
+    )
+}
+
+/// UNLOCK the default account in `brand_dir`, asking the user for its password.
+///
+/// `reason` says why the account is being opened right now, so the password window is never an
+/// unexplained demand for a secret. Returns `None` when there is no account, when the user cancels, or
+/// when the password does not open the seal — in every case leaving the account locked.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn unlock_existing_account(brand_dir: &std::path::Path, reason: &str) -> Option<BootedAccount> {
+    if !account_exists(brand_dir) {
+        tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
+        return None;
+    }
+    unlock_existing_account_with(brand_dir, PromptedCeremony::unlocking(reason))
+}
+
+/// UNLOCK the default account in `brand_dir` through `ceremony` — the testable form of
+/// [`unlock_existing_account`].
+///
+/// Refuses when no account exists, and can NEVER enrol one ([`NeverEnrols`]), so an unlock is
+/// structurally incapable of creating an account with a recovery phrase nobody saw.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn unlock_existing_account_with<A>(
+    brand_dir: &std::path::Path,
+    ceremony: A,
+) -> Option<BootedAccount>
+where
+    A: AuthCeremony + 'static,
+{
+    if !account_exists(brand_dir) {
+        return None;
+    }
+    open_account_with(brand_dir, Seeding::NewPhrase(&NeverEnrols), ceremony)
+}
+
+/// The shared body of [`open_account`] and [`unlock_existing_account`]: assemble the residency over the
+/// host's file backend using `ceremony`, then finish the boot.
+///
+/// Public so the integration suite can drive the real production assembly with a scripted ceremony —
+/// the two wrappers above differ only in the question they ask, and a path that only ever runs behind a
+/// live native window is a path no test can reach.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn open_account_with<A>(
+    brand_dir: &std::path::Path,
+    seeding: Seeding<'_>,
+    ceremony: A,
+) -> Option<BootedAccount>
+where
+    A: AuthCeremony + 'static,
+{
     use dig_session::FileBackend;
 
-    let Some(cred) = OsCredentialStore::open(DEFAULT_ACCOUNT_ID) else {
-        tracing::info!("account boot deferred: no usable OS credential store on this host");
-        return None;
-    };
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
-    let assembled = assemble_residency(backend, cred, AccountId::new(DEFAULT_ACCOUNT_ID), seeding);
+    let assembled = assemble_residency(
+        backend,
+        ceremony,
+        AccountId::new(DEFAULT_ACCOUNT_ID),
+        seeding,
+    );
     let (residency, fresh_phrase) = match assembled {
         Ok(pair) => pair,
         Err(e) => {
@@ -349,9 +422,12 @@ pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option
             // the rest of the session, which is an outage rather than a curiosity. The tray reports it as
             // `AccountState::Unopenable` and offers the replace path — before that state existed this line
             // was the ONLY trace of it, and the user silently lost signing (dig_ecosystem#1799 review).
+            //
+            // A WRONG PASSWORD lands here too, and must not be read as a wedged account: the tray
+            // distinguishes them by whether the account had ever opened in this session (`SPEC.md` §3.1c).
             tracing::error!(
                 error = %e,
-                "the DIG account could not be opened — signing is unavailable until it is replaced"
+                "the DIG account could not be opened"
             );
             return None;
         }
@@ -359,30 +435,20 @@ pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option
     Some(finish_boot(brand_dir, residency, fresh_phrase))
 }
 
-/// Unlock the default account only if it ALREADY exists — the boot-time path.
-///
-/// Never enrols: a host with no account yet gets `None` and a tray that offers to set one up, rather
-/// than a recovery-phrase window nobody asked for.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-pub fn boot_existing_account(brand_dir: &std::path::Path) -> Option<BootedAccount> {
-    if !account_exists(brand_dir) {
-        tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
-        return None;
-    }
-    open_account(brand_dir, Seeding::NewPhrase(&NeverEnrols))
-}
-
-/// Linux (and any host without a per-application-ACL credential store) defers zero-prompt unlock, so
-/// the account boot yields no account — mirroring the retired path's Linux deferral.
+/// Linux (and any host without a per-application-ACL credential store) has no account paths yet, so
+/// setup yields nothing — mirroring the retired path's Linux deferral.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn open_account(_brand_dir: &std::path::Path, _seeding: Seeding<'_>) -> Option<BootedAccount> {
-    tracing::info!("account boot deferred: no zero-prompt credential store on this OS yet");
+    tracing::info!("account setup deferred: accounts are not supported on this OS yet");
     None
 }
 
 /// Linux stub — see [`open_account`].
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn boot_existing_account(_brand_dir: &std::path::Path) -> Option<BootedAccount> {
+pub fn unlock_existing_account(
+    _brand_dir: &std::path::Path,
+    _reason: &str,
+) -> Option<BootedAccount> {
     None
 }
 
@@ -419,16 +485,19 @@ pub fn finish_boot(
 }
 
 /// Re-unlock the default account into `residency` from `brand_dir` — the production sign-path re-auth.
+///
+/// Asks the user for their password, because that is what a re-auth after a lock now means.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn reboot_reunlock(brand_dir: &std::path::Path, residency: &AccountResidency) -> bool {
-    use crate::keystore::OsCredentialStore;
     use dig_session::FileBackend;
 
-    let Some(cred) = OsCredentialStore::open(DEFAULT_ACCOUNT_ID) else {
-        return false;
-    };
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
-    reunlock_into(backend, cred, AccountId::new(DEFAULT_ACCOUNT_ID), residency)
+    reunlock_into(
+        backend,
+        PromptedCeremony::unlocking("DIG needs to unlock your account to sign a request."),
+        AccountId::new(DEFAULT_ACCOUNT_ID),
+        residency,
+    )
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -439,28 +508,69 @@ pub fn reboot_reunlock(_brand_dir: &std::path::Path, _residency: &AccountResiden
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keystore::KeystoreError;
+    use crate::account::auth::CeremonyError;
     use crate::session_lock::SessionKeys;
+    use async_trait::async_trait;
+    use dig_account::{AuthFactors, SpendDecision, SpendSummary};
     use dig_ipc_protocol::signer::SessionSigner;
     use dig_keystore::MemoryBackend;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use dig_session::Password;
 
-    /// An in-memory credential store that persists across a "restart" (a second call over the same
-    /// shared map), so first-run enrol vs a returning unlock are both exercised.
-    #[derive(Clone, Default)]
-    struct MemCred(Arc<Mutex<HashMap<String, String>>>);
-    impl CredentialStore for MemCred {
-        fn get(&self, a: &str) -> Result<Option<String>, KeystoreError> {
-            Ok(self.0.lock().unwrap().get(a).cloned())
+    /// An [`AuthCeremony`] double that supplies a fixed password — the stand-in for a user typing the
+    /// same thing every time.
+    ///
+    /// It is constructed from a LABEL and hashes it, so the tests can hold several distinct passwords
+    /// apart without any inline secret for static analysis to flag, and so "the right password" and
+    /// "a different one" are trivially expressible. A double that could only ever produce one value
+    /// could not express a wrong-password unlock at all.
+    #[derive(Clone)]
+    struct Types(String);
+
+    impl Types {
+        fn password(label: &str) -> Self {
+            use sha2::{Digest, Sha256};
+            Self(hex::encode(Sha256::digest(label.as_bytes())))
         }
-        fn set(&self, a: &str, s: &str) -> Result<(), KeystoreError> {
-            self.0.lock().unwrap().insert(a.into(), s.into());
-            Ok(())
+    }
+
+    #[async_trait]
+    impl AuthCeremony for Types {
+        async fn collect_unlock_factors(
+            &self,
+            _account: &AccountId,
+            _reason: Option<&str>,
+        ) -> Result<AuthFactors, CeremonyError> {
+            Ok(AuthFactors::password_only(Password::new(self.0.as_bytes())))
         }
-        fn delete(&self, a: &str) -> Result<(), KeystoreError> {
-            self.0.lock().unwrap().remove(a);
-            Ok(())
+        async fn confirm_spend(
+            &self,
+            _account: &AccountId,
+            _profile: ProfileIx,
+            _summary: &SpendSummary,
+        ) -> Result<SpendDecision, CeremonyError> {
+            Ok(SpendDecision::Approve)
+        }
+    }
+
+    /// A ceremony the user backs out of — nothing may be enrolled or unlocked through it.
+    struct Refuses;
+
+    #[async_trait]
+    impl AuthCeremony for Refuses {
+        async fn collect_unlock_factors(
+            &self,
+            _account: &AccountId,
+            _reason: Option<&str>,
+        ) -> Result<AuthFactors, CeremonyError> {
+            Err(CeremonyError::Cancelled)
+        }
+        async fn confirm_spend(
+            &self,
+            _account: &AccountId,
+            _profile: ProfileIx,
+            _summary: &SpendSummary,
+        ) -> Result<SpendDecision, CeremonyError> {
+            Err(CeremonyError::Cancelled)
         }
     }
 
@@ -477,12 +587,23 @@ mod tests {
         }
     }
 
-    /// Assemble over a shared backend + credential store, confirming any recovery phrase.
+    /// Assemble over a shared backend with the user typing `password`, confirming any recovery phrase.
     fn assemble(
         backend: Arc<dyn KeychainBackend>,
-        cred: MemCred,
+        password: Types,
     ) -> (AccountResidency, Option<RecoveryPhrase>) {
-        assemble_residency(backend, cred, account(), Seeding::NewPhrase(&AlwaysKeeps)).unwrap()
+        assemble_residency(
+            backend,
+            password,
+            account(),
+            Seeding::NewPhrase(&AlwaysKeeps),
+        )
+        .unwrap()
+    }
+
+    /// The password the tests' notional user types.
+    fn typed() -> Types {
+        Types::password("the-password-the-user-chose")
     }
 
     #[test]
@@ -490,7 +611,7 @@ mod tests {
         // A shared backend + credential store models one machine across a restart. Both boots must
         // yield the SAME master-seed-derived identity — proving zero-prompt enrol-then-unlock.
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let cred = MemCred::default();
+        let cred = typed();
 
         let (first, first_phrase) = assemble(backend.clone(), cred.clone());
         let first_pk = first
@@ -549,6 +670,61 @@ mod tests {
         }
     }
 
+    /// **The #1817 core.** An account sealed under the password its owner chose must NOT open under a
+    /// different one — the property that makes "Unlock…" a gate rather than a ceremony.
+    ///
+    /// The fixture is a shared backend across two assemblies with DIFFERENT passwords: the second
+    /// stands for anyone (or anything) that has the machine but not the secret. Asserting only that the
+    /// right password works would pass identically against the old zero-prompt path, which accepted
+    /// whatever the credential store handed it — the WRONG-password arm is the load-bearing half.
+    #[test]
+    fn an_account_does_not_open_under_a_password_it_was_not_sealed_under() {
+        let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
+        let (first, _) = assemble(backend.clone(), typed());
+        let enrolled_pk = first
+            .signing_public_key_hex(ProfileIx::ROOT)
+            .expect("unlocked");
+
+        let wrong = assemble_residency(
+            backend.clone(),
+            Types::password("not-the-password-they-chose"),
+            account(),
+            Seeding::NewPhrase(&AlwaysKeeps),
+        );
+        assert!(
+            wrong.is_err(),
+            "a wrong password must not open the sealed seed"
+        );
+
+        // The control: the RIGHT password still opens the same account, so the test above measures the
+        // password and not some incidental breakage of the store.
+        let (right, _) = assemble(backend, typed());
+        assert_eq!(
+            right.signing_public_key_hex(ProfileIx::ROOT),
+            Some(enrolled_pk)
+        );
+    }
+
+    /// A user who backs out of the password window must leave NO account behind. Asserting only the
+    /// error would pass for an implementation that sealed a seed and then reported a failure, so the
+    /// blob's absence is what carries this test.
+    #[test]
+    fn backing_out_of_the_password_window_creates_no_account() {
+        let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
+
+        assert!(assemble_residency(
+            backend.clone(),
+            Refuses,
+            account(),
+            Seeding::NewPhrase(&AlwaysKeeps),
+        )
+        .is_err());
+        assert!(
+            !account_store(backend).exists(&account()).unwrap(),
+            "no seed blob may be left behind by a cancelled password prompt"
+        );
+    }
+
     /// A cancelled setup must leave the machine exactly as it was, so the user can try again.
     #[test]
     fn a_declined_phrase_yields_no_account() {
@@ -562,7 +738,7 @@ mod tests {
 
         assert!(assemble_residency(
             backend.clone(),
-            MemCred::default(),
+            typed(),
             account(),
             Seeding::NewPhrase(&AlwaysDeclines),
         )
@@ -579,7 +755,7 @@ mod tests {
     fn a_first_run_vaults_the_phrase_it_showed() {
         let dir = tempfile::tempdir().unwrap();
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let (residency, phrase) = assemble(backend, MemCred::default());
+        let (residency, phrase) = assemble(backend, typed());
         let shown = phrase.as_ref().unwrap().words().join(" ");
 
         let booted = finish_boot(dir.path(), residency, phrase);
@@ -600,7 +776,7 @@ mod tests {
     fn an_account_with_no_vaulted_phrase_is_reported_unrecoverable() {
         let dir = tempfile::tempdir().unwrap();
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let cred = MemCred::default();
+        let cred = typed();
         // Enrol, then boot AGAIN so the second boot carries no phrase — the shape of every account
         // enrolled before recovery phrases existed.
         let _ = assemble(backend.clone(), cred.clone());
@@ -619,7 +795,7 @@ mod tests {
     #[test]
     fn the_root_profile_id_is_stable_across_boots() {
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let cred = MemCred::default();
+        let cred = typed();
 
         let (first, _) = assemble(backend.clone(), cred.clone());
         let (second, _) = assemble(backend, cred);
@@ -632,7 +808,7 @@ mod tests {
     fn a_locked_residency_has_no_profile_id_and_no_vault() {
         let dir = tempfile::tempdir().unwrap();
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let (residency, _) = assemble(backend, MemCred::default());
+        let (residency, _) = assemble(backend, typed());
         residency.lock_all();
 
         assert!(root_profile_id(&residency).is_none());
@@ -645,7 +821,7 @@ mod tests {
     #[test]
     fn reunlock_refills_a_locked_residency() {
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let cred = MemCred::default();
+        let cred = typed();
 
         let (residency, _) = assemble(backend.clone(), cred.clone());
         let signer = residency.signer(ProfileIx::ROOT);
@@ -664,11 +840,16 @@ mod tests {
         // Enrol under one credential store, then attempt a re-unlock with an EMPTY one: the ceremony
         // would generate a NEW password, so the keystore unlock fails the AEAD tag — fail-closed.
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
-        let (residency, _) = assemble(backend.clone(), MemCred::default());
+        let (residency, _) = assemble(backend.clone(), typed());
         residency.lock_all();
 
         assert!(
-            !reunlock_into(backend, MemCred::default(), account(), &residency),
+            !reunlock_into(
+                backend,
+                Types::password("a-different-password"),
+                account(),
+                &residency
+            ),
             "a re-unlock with the wrong (freshly-generated) password must fail closed"
         );
         assert!(!residency.is_any_unlocked());
@@ -683,7 +864,7 @@ mod tests {
 
         assert!(!reunlock_into(
             backend.clone(),
-            MemCred::default(),
+            typed(),
             account(),
             &residency
         ));

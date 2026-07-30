@@ -31,11 +31,12 @@
 //! for — **account management is reachable at all times**: creating, replacing, restoring and removing
 //! an account are offered whenever the host can hold one, never gated on the account being absent.
 //!
-//! **3. A row that IS legitimately disabled says why in its own label.** Two rows are disabled across the
-//! five account states — `Set up my DIG Account (not supported on this system yet)` on a host with no
-//! per-application credential store, and `Show my recovery phrase (unlock first)` while the account is
-//! locked. Both name their own reason, and both sit beside an ENABLED remedy (the management submenu; the
-//! `Unlock…` row directly above), so neither is a dead end. That count is asserted by
+//! **3. A row that IS legitimately disabled says why in its own label.** Three rows are disabled across
+//! the account states — `Set up my DIG Account (not supported on this system yet)` on a host with no
+//! per-application credential store, and the two `Show my recovery phrase (…)` rows naming what stands in
+//! the way (an unlock, or a password that has never been set). Each names its own reason, and each sits
+//! beside an ENABLED remedy (the management submenu; the `Unlock…` or `Set a password…` row directly
+//! above), so none is a dead end. That set is asserted by
 //! [`the_disabled_rows_are_exactly_the_two_that_name_their_reason`], because "rare" is the kind of claim
 //! that drifts silently — an earlier revision of this comment said "exactly one" while the model rendered
 //! two.
@@ -90,6 +91,17 @@ pub enum AccountState {
     /// swallowed that into a `tracing::warn!` and returned `None`, so the tray reported a locked account and
     /// the user silently lost signing with no in-app route out. This state is what makes that impossible.
     Unopenable,
+    /// An account exists, but it is still sealed under a password the MACHINE generated and kept in the
+    /// OS credential store — so opening it requires nothing its owner knows (dig_ecosystem#1817).
+    ///
+    /// # Why this is its own state
+    ///
+    /// It is not `Locked`: `Unlock…` here would ask for a password the user has never chosen and does not
+    /// have. It is not `Unopenable` either — the account opens perfectly well, which is precisely the
+    /// problem. The one honest offer is to SET a password, so the state that produces that offer has to
+    /// exist. The account keeps its identity, address and data through the change
+    /// ([`migration`](crate::account::migration)); only the lock on it changes.
+    NeedsPassword,
     /// An account is live.
     Unlocked {
         /// Whether a recovery phrase is stored for it. `false` = enrolled before recovery phrases
@@ -107,7 +119,7 @@ impl AccountState {
     fn exists(&self) -> bool {
         matches!(
             self,
-            Self::Locked | Self::Unopenable | Self::Unlocked { .. }
+            Self::Locked | Self::NeedsPassword | Self::Unopenable | Self::Unlocked { .. }
         )
     }
 
@@ -178,6 +190,9 @@ pub enum AtRest {
     Present,
     /// An account is enrolled and an attempt to open it FAILED.
     PresentButUnopenable,
+    /// An account is enrolled, and it is still sealed under the machine-generated password — it has no
+    /// user-known secret protecting it yet. See [`AccountState::NeedsPassword`].
+    PresentUnderMachinePassword,
 }
 
 /// What a live tray session knows about its account — the two facts the state derivation needs.
@@ -239,6 +254,7 @@ pub fn account_state(
             AtRest::None => AccountState::Absent,
             AtRest::Present => AccountState::Locked,
             AtRest::PresentButUnopenable => AccountState::Unopenable,
+            AtRest::PresentUnderMachinePassword => AccountState::NeedsPassword,
         },
     }
 }
@@ -284,6 +300,12 @@ pub enum TrayAction {
     RemoveAccount,
     /// Unlock the existing account.
     Unlock,
+    /// Give an account that is still sealed under the machine-generated password one the USER chooses,
+    /// re-sealing the SAME seed so the account, its identity and its data all survive.
+    ///
+    /// Offered ONLY in [`AccountState::NeedsPassword`], because in every other state there is either no
+    /// account to re-seal or a user password already in place.
+    SetAccountPassword,
     /// Re-seal the session now.
     LockNow,
     /// Re-display the account's recovery phrase, behind unlock + a native confirm.
@@ -503,7 +525,11 @@ pub fn status(view: &TrayView) -> TrayStatus {
     let account = view.account();
     let glyph = if !view.running {
         TrayGlyph::Starting
-    } else if matches!(account, AccountState::Unopenable) || !account.exists() {
+    } else if matches!(
+        account,
+        AccountState::Unopenable | AccountState::NeedsPassword
+    ) || !account.exists()
+    {
         TrayGlyph::NeedsAccount
     } else if !matches!(account, AccountState::Unlocked { .. }) {
         TrayGlyph::Locked
@@ -528,6 +554,7 @@ fn tooltip_text(view: &TrayView, glyph: TrayGlyph) -> String {
         TrayGlyph::NeedsAccount => match view.account() {
             AccountState::Unsupported => "DIG — accounts are not available on this system yet",
             AccountState::Unopenable => "DIG — your account cannot be opened",
+            AccountState::NeedsPassword => "DIG — your account has no password yet",
             _ => "DIG — no account set up yet",
         },
         TrayGlyph::Locked => "DIG — your account is locked",
@@ -693,6 +720,13 @@ fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
             true,
         )),
         AccountState::Locked => Some(MenuRow::action(TrayAction::Unlock, "Unlock…", true)),
+        // NOT `Unlock…`: this account opens with no password at all, so the honest offer is to give it
+        // one — not to ask for a secret the user has never chosen.
+        AccountState::NeedsPassword => Some(MenuRow::action(
+            TrayAction::SetAccountPassword,
+            "Set a password for my DIG Account…",
+            true,
+        )),
         // NOT an `Unlock…` row: unlocking is what already failed, so offering it again would be a button
         // guaranteed to fail. The one thing the app can do here is explain and point at the remedy.
         AccountState::Unopenable => Some(MenuRow::action(
@@ -741,6 +775,11 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
         AccountState::Locked => rows.push(MenuRow::action(
             TrayAction::ShowRecoveryPhrase,
             "Show my recovery phrase (unlock first)",
+            false,
+        )),
+        AccountState::NeedsPassword => rows.push(MenuRow::action(
+            TrayAction::ShowRecoveryPhrase,
+            "Show my recovery phrase (set a password first)",
             false,
         )),
         _ => rows.push(MenuRow::action(
@@ -796,6 +835,19 @@ fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow>
             let mut rows = vec![MenuRow::action(
                 TrayAction::ExplainUnopenable,
                 "This account cannot be opened — what to do…",
+                true,
+            )];
+            rows.extend(two_factor_row(false, second_factor));
+            rows
+        }
+        // Not `Unlock…`: this account opens with no password at all, so the honest offer is to give it
+        // one. It passes `unlocked: false` to the two-factor row for the same reason `Locked` does —
+        // enrolling a second factor seals a record under the account's DEK, which needs the account
+        // open, and the row directly above is what opens it.
+        AccountState::NeedsPassword => {
+            let mut rows = vec![MenuRow::action(
+                TrayAction::SetAccountPassword,
+                "Set a password for my DIG Account…",
                 true,
             )];
             rows.extend(two_factor_row(false, second_factor));
@@ -902,11 +954,6 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     rows
 }
 
-/// The DID explainer's label.
-///
-/// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
-/// DID is a real spend (§3.7 — mainnet is real money), and names it optional so an absent DID never reads
-/// as something they have failed to do. It must not promise to CREATE one: nothing can mint yet.
 /// The `Open URL…` row, carrying the global shortcut when there IS one.
 ///
 /// A shortcut nobody can discover is a shortcut nobody uses, and a tray menu is the one place every user
@@ -920,12 +967,20 @@ fn open_url_label(view: &TrayView) -> String {
     }
 }
 
-const DID_LABEL: &str = "About on-chain DIDs (optional, costs XCH)…";
+/// The DID explainer's label.
+///
+/// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
+/// DID is a real spend (§3.7 — mainnet is real money). It deliberately no longer says "optional": a DID
+/// is the bedrock of a DIG Account (dig_ecosystem#1820), and calling it optional was the copy that made a
+/// required step look like a nicety. It must not promise to CREATE one either: nothing can mint yet.
+const DID_LABEL: &str = "About on-chain DIDs (required, costs XCH)…";
 
-/// The DID line. Absent is the NORMAL state — minting one costs money and is never automatic — so it is
-/// phrased as a choice not yet made, not as an error.
+/// The DID line. Absent is the state of every account today, because minting is not implemented — so it
+/// names the remaining step AND why it cannot be taken, rather than reading as something the user has
+/// neglected (dig_ecosystem#1820).
 fn did_label(did: Option<&str>) -> String {
-    did.unwrap_or("not created yet (optional)").to_string()
+    did.unwrap_or("not created yet — on-chain minting is not available in this version")
+        .to_string()
 }
 
 /// A DIG ID abbreviated for display beside a full copy. The full value goes to the clipboard and into
@@ -979,6 +1034,9 @@ impl fmt::Display for AccountState {
             AccountState::Absent => "not set up yet",
             AccountState::Locked => "locked",
             AccountState::Unopenable => "cannot be opened on this computer",
+            AccountState::NeedsPassword => {
+                "needs a password — anyone using this computer can open it"
+            }
             AccountState::Unlocked { recoverable: true } => "unlocked",
             AccountState::Unlocked { recoverable: false } => "unlocked — NO recovery phrase",
         };
@@ -995,18 +1053,20 @@ mod tests {
     /// Iterating is what makes the rules below load-bearing: the trap this module was rewritten for
     /// (`can_create = account == Absent`) looked correct from an `Absent` fixture and was wrong in every
     /// other state, which is where real users live.
-    const EVERY_STATE: [AccountState; 6] = [
+    const EVERY_STATE: [AccountState; 7] = [
         AccountState::Unsupported,
         AccountState::Absent,
         AccountState::Locked,
+        AccountState::NeedsPassword,
         AccountState::Unopenable,
         AccountState::Unlocked { recoverable: true },
         AccountState::Unlocked { recoverable: false },
     ];
 
     /// The states in which an account EXISTS — the ones the old gate locked out of management.
-    const STATES_WITH_AN_ACCOUNT: [AccountState; 4] = [
+    const STATES_WITH_AN_ACCOUNT: [AccountState; 5] = [
         AccountState::Locked,
+        AccountState::NeedsPassword,
         // The wedged legacy-seed state is deliberately IN this list: an account that cannot be opened is
         // exactly the one a user most needs to be able to replace.
         AccountState::Unopenable,
@@ -1532,7 +1592,10 @@ mod tests {
             assert!(menu.is_enabled(TrayAction::AboutDid), "{account:?}");
             let label = menu.label_of(TrayAction::AboutDid).unwrap();
             assert!(label.contains("XCH"), "{account:?}: {label}");
-            assert!(label.contains("optional"), "{account:?}: {label}");
+            // "required", never "optional": a DID is the bedrock of the account (dig_ecosystem#1820),
+            // and the retired label described the one mandatory remaining step as a nicety.
+            assert!(label.contains("required"), "{account:?}: {label}");
+            assert!(!label.contains("optional"), "{account:?}: {label}");
         }
     }
 
@@ -1860,7 +1923,9 @@ mod tests {
     fn an_absent_did_is_never_dressed_up_as_a_minted_one() {
         let details = details_text(&view(AccountState::Unlocked { recoverable: true }));
         assert!(
-            details.contains("On-chain DID: not created yet (optional)"),
+            details.contains(
+                "On-chain DID: not created yet — on-chain minting is not available in this version"
+            ),
             "{details}"
         );
     }
@@ -2117,8 +2182,32 @@ mod tests {
                     "locked".to_string(),
                     "Show my recovery phrase (unlock first)".to_string()
                 ),
+                (
+                    "needs a password — anyone using this computer can open it".to_string(),
+                    "Show my recovery phrase (set a password first)".to_string()
+                ),
             ],
             "the disabled set changed; update the module docs and SPEC §3.1c to match"
+        );
+    }
+
+    /// An account still sealed under the machine password must NOT be reported as `Locked`.
+    ///
+    /// Collapsing it into `Locked` is the tempting shortcut and it is exactly wrong: it would offer
+    /// `Unlock…`, which asks for a password the user has never chosen and does not have — a control
+    /// guaranteed to fail, with nothing said about why. This is the same collapse `Unopenable` was added
+    /// to prevent, one state along.
+    #[test]
+    fn an_account_with_no_user_password_is_reported_as_needing_one_not_as_locked() {
+        assert_eq!(
+            account_state(true, AtRest::PresentUnderMachinePassword, None),
+            AccountState::NeedsPassword
+        );
+        // The control: an account with a user password and no live session IS locked, so the assertion
+        // above is reading the at-rest fact rather than reporting `NeedsPassword` for everything.
+        assert_eq!(
+            account_state(true, AtRest::Present, None),
+            AccountState::Locked
         );
     }
 
@@ -2131,6 +2220,14 @@ mod tests {
         let locked = build(&view(AccountState::Locked));
         assert!(!locked.is_enabled(TrayAction::ShowRecoveryPhrase));
         assert!(locked.is_enabled(TrayAction::Unlock));
+
+        // An account with no password: the reveal is greyed, and the row that resolves it — setting a
+        // password — is clickable. `Unlock…` deliberately is NOT offered, because there is no password
+        // to type yet.
+        let needs = build(&view(AccountState::NeedsPassword));
+        assert!(!needs.is_enabled(TrayAction::ShowRecoveryPhrase));
+        assert!(needs.is_enabled(TrayAction::SetAccountPassword));
+        assert!(!needs.is_enabled(TrayAction::Unlock));
 
         // An unsupported host: setup is greyed, and the details window that explains the host is clickable.
         let unsupported = build(&view(AccountState::Unsupported));
