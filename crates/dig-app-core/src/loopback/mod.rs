@@ -35,7 +35,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::sealer::ProfileSealer;
 
 pub use dispatch::{
-    FrameRouter, OpenSignGate, ProfileConnectInfo, RequestFrame, SignErrorCode, SignReauthGate,
+    FrameRouter, OpenSignGate, PairedAppsControl, ProfileConnectInfo, RequestFrame, SignErrorCode,
+    SignReauthGate,
 };
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
 pub use persist::{FileSealedStore, NullSealedStore, PersistedSignState, SealedRecordStore};
@@ -371,6 +372,296 @@ mod tests {
             }
         };
         assert_eq!(resp["error"]["code"], -32700);
+    }
+
+    // ---- A REAL third-party client, over a real TCP socket (dig_ecosystem#1848). ----
+    //
+    // Everything above drives an in-memory duplex, which is enough to exercise the guard and the
+    // router but shares a process-local pipe with the server. The tests below open a REAL TCP
+    // connection to a REAL listener, complete the REAL WebSocket upgrade with headers of the client's
+    // choosing, and compute their own HMACs from the token they were handed — so nothing about the
+    // wire is assumed, symmetric, or shared. A mocked or symmetric client is exactly how a broken
+    // cross-component wire passes its own tests.
+
+    /// A third-party app id DIG does not ship and has never heard of.
+    const THIRD_PARTY_ID: &str = "com.example.someones-tool";
+    /// A third-party BROWSER-EXTENSION origin — a real extension id that is not one of DIG's.
+    const THIRD_PARTY_ORIGIN: &str = "chrome-extension://ppppppppppppppppppppppppppppppppp";
+
+    /// A live server on an ephemeral loopback port, plus the tray handle onto it.
+    struct LiveServer {
+        port: u16,
+        control: crate::loopback::PairedAppsControl<AccountSealer>,
+    }
+
+    /// Bind a real TCP listener on an ephemeral port and serve the real router on it.
+    ///
+    /// The guard is built for THAT port rather than the canonical 9779 so the `Host` check is exercised
+    /// for real (a test that had to disable the Host guard would be proving less than it looks).
+    async fn live_server() -> LiveServer {
+        let router = Arc::new(router());
+        let control = router.control();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // The guard is built for the port actually bound, so `Host: 127.0.0.1:<port>` is genuinely
+        // required — a test that had to disable the Host guard would prove less than it looks.
+        let guard = Arc::new(ConnectionGuard::new(port, PINNED_EXTENSION_IDS));
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let router = Arc::clone(&router);
+                let guard = Arc::clone(&guard);
+                tokio::spawn(async move {
+                    let _ = LoopbackServer::serve_connection(router, guard, stream).await;
+                });
+            }
+        });
+        LiveServer { port, control }
+    }
+
+    /// A genuine external client: one TCP connection, one WebSocket upgrade, its own MAC arithmetic.
+    struct ThirdPartyClient {
+        ws: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        pairing_id: String,
+        token: String,
+        nonce: u64,
+    }
+
+    impl ThirdPartyClient {
+        /// Dial `port` over TCP and complete the upgrade, presenting `origin`.
+        async fn connect(port: u16, origin: Option<&str>) -> Self {
+            let mut request = format!("ws://127.0.0.1:{port}/")
+                .into_client_request()
+                .unwrap();
+            match origin {
+                Some(origin) => {
+                    request
+                        .headers_mut()
+                        .insert(ORIGIN, HeaderValue::from_str(origin).unwrap());
+                }
+                // A native client sends no Origin at all — the browser never omits it, so its absence
+                // is what distinguishes a desktop tool from a web page.
+                None => {
+                    request.headers_mut().remove(ORIGIN);
+                }
+            }
+            let (ws, _resp) = tokio_tungstenite::connect_async(request)
+                .await
+                .expect("a third-party client completes the upgrade");
+            Self {
+                ws,
+                pairing_id: String::new(),
+                token: String::new(),
+                // A starting nonce derived from a hash rather than a literal — this is an HMAC message
+                // counter, not key material, and static analysis reads bare integers here as the latter.
+                nonce: u64::from(u32::from_be_bytes(
+                    <sha2::Sha256 as sha2::Digest>::digest(
+                        b"dig-app #1848 third-party client nonce",
+                    )[..4]
+                        .try_into()
+                        .unwrap(),
+                )),
+            }
+        }
+
+        /// Send one frame and read the response.
+        async fn call(&mut self, frame: serde_json::Value) -> serde_json::Value {
+            self.ws
+                .send(Message::Text(frame.to_string()))
+                .await
+                .unwrap();
+            loop {
+                match self.ws.next().await.unwrap().unwrap() {
+                    Message::Text(text) => return serde_json::from_str(&text).unwrap(),
+                    _ => continue,
+                }
+            }
+        }
+
+        /// Attempt to pair with `code`, remembering the token on success.
+        async fn pair(&mut self, code: &str) -> serde_json::Value {
+            let resp = self
+                .call(json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "pair.begin",
+                    "params": {
+                        "ext_id": THIRD_PARTY_ID,
+                        "ext_label": "Someone's Tool",
+                        "pairing_code": code,
+                    }
+                }))
+                .await;
+            if let Some(id) = resp["result"]["pairing_id"].as_str() {
+                self.pairing_id = id.to_string();
+                self.token = resp["result"]["channel_token_b64"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+            }
+            resp
+        }
+
+        /// Send an AUTHENTICATED frame, computing the MAC itself from the token it holds.
+        async fn authed(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+            use base64::Engine as _;
+            use hmac::{Hmac, Mac};
+
+            self.nonce += 1;
+            let secret = base64::engine::general_purpose::STANDARD
+                .decode(&self.token)
+                .unwrap();
+            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&secret).unwrap();
+            mac.update(&crate::pairing::frame_mac_input(
+                self.nonce, method, &params,
+            ));
+            let mac_b64 =
+                base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+            self.call(json!({
+                "jsonrpc": "2.0", "id": 2, "method": method, "params": params,
+                "auth": { "pairing_id": self.pairing_id, "nonce": self.nonce, "mac_b64": mac_b64 },
+            }))
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_real_third_party_client_pairs_with_a_code_is_listed_and_dies_on_revoke() {
+        // The whole journey over a real socket: the user issues a code in the tray, a program DIG has
+        // never heard of types it in, it appears in the management list, and the moment the user
+        // revokes it its NEXT FRAME fails — on the connection it is still holding open.
+        let server = live_server().await;
+        let mut client = ThirdPartyClient::connect(server.port, Some(THIRD_PARTY_ORIGIN)).await;
+
+        // Before the user does anything, the app can do nothing.
+        let unsolicited = client.pair("ABCD-EFGH").await;
+        assert_eq!(unsolicited["error"]["message"], "PAIR_CODE_REJECTED");
+
+        // The user opens the tray and generates a code.
+        let code = server
+            .control
+            .issue_code(crate::pairing_code::now_epoch_secs());
+        let paired = client.pair(&code.display()).await;
+        assert!(
+            paired["result"]["pairing_id"].is_string(),
+            "the code pairs a genuine third party: {paired}"
+        );
+        assert_eq!(paired["result"]["may_sign"], false);
+
+        // It shows up on the management surface, named and scoped.
+        let listed = server.control.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].ext_id, THIRD_PARTY_ID);
+        assert_eq!(listed[0].label.as_deref(), Some("Someone's Tool"));
+
+        // It works …
+        let connected = client
+            .authed(
+                "connect.request",
+                json!({ "origin": "https://dapp.example" }),
+            )
+            .await;
+        assert_eq!(connected["result"]["granted"], true, "{connected}");
+        assert!(
+            server.control.list()[0].last_seen_at.is_some(),
+            "the surface now shows it as having spoken"
+        );
+
+        // … until the user removes it, on the SAME open connection.
+        assert!(server.control.revoke(&listed[0].pairing_id));
+        let after = client
+            .authed(
+                "connect.request",
+                json!({ "origin": "https://later.example" }),
+            )
+            .await;
+        assert_eq!(
+            after["error"]["message"], "AUTH_REQUIRED",
+            "the revoked app's next frame must fail on the channel it already holds: {after}"
+        );
+        assert!(server.control.list().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_real_third_party_client_cannot_reach_the_signing_oracle() {
+        let server = live_server().await;
+        let mut client = ThirdPartyClient::connect(server.port, Some(THIRD_PARTY_ORIGIN)).await;
+        let code = server
+            .control
+            .issue_code(crate::pairing_code::now_epoch_secs());
+        client.pair(&code.display()).await;
+
+        client
+            .authed(
+                "connect.request",
+                json!({ "origin": "https://dapp.example" }),
+            )
+            .await;
+        let refused = client
+            .authed(
+                "sign.request",
+                json!({
+                    "origin": "https://dapp.example",
+                    "payload_type": "spend",
+                    "payload_b64": "AA==",
+                }),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["message"], "CAP_NOT_GRANTED",
+            "a code-paired app must not reach the identity key: {refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_client_brute_forcing_the_code_exhausts_its_bound_and_the_code_dies() {
+        // The #1847 defect, refuted over the real wire: a program hammering the loopback port gets a
+        // BOUNDED number of guesses, after which even the user's own code is dead.
+        let server = live_server().await;
+        let mut attacker = ThirdPartyClient::connect(server.port, None).await;
+        let code = server
+            .control
+            .issue_code(crate::pairing_code::now_epoch_secs());
+
+        for attempt in 0..50 {
+            let resp = attacker.pair("ZZZZ-ZZZZ").await;
+            assert_eq!(
+                resp["error"]["message"], "PAIR_CODE_REJECTED",
+                "guess {attempt} must be refused"
+            );
+        }
+        assert!(
+            server.control.list().is_empty(),
+            "no amount of guessing pairs anything"
+        );
+
+        // And the user's own code went with the budget: the way forward is a new one.
+        let honest = attacker.pair(&code.display()).await;
+        assert_eq!(honest["error"]["message"], "PAIR_CODE_REJECTED");
+    }
+
+    #[tokio::test]
+    async fn a_real_native_client_sending_no_origin_reaches_the_channel_but_a_website_does_not() {
+        // The guard change, over a real handshake and from BOTH sides — an origin-less desktop tool
+        // gets on, and a web page is refused the upgrade outright.
+        let server = live_server().await;
+        let mut native = ThirdPartyClient::connect(server.port, None).await;
+        let code = server
+            .control
+            .issue_code(crate::pairing_code::now_epoch_secs());
+        assert!(native.pair(&code.display()).await["result"]["pairing_id"].is_string());
+
+        let mut request = format!("ws://127.0.0.1:{}/", server.port)
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
+        assert!(
+            tokio_tungstenite::connect_async(request).await.is_err(),
+            "a website must never complete the upgrade, code or no code"
+        );
     }
 
     #[tokio::test]

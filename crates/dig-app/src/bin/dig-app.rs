@@ -46,6 +46,8 @@ use dig_app_core::account::migration;
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
+use dig_app_core::account::residency::ResidencySealer;
+#[cfg(feature = "tray")]
 use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
 #[cfg(feature = "tray")]
@@ -53,8 +55,7 @@ use dig_app_core::confirm::{native_confirmer, NativeConfirmer, NoticePrompt};
 use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
-#[cfg(feature = "tray")]
-use dig_app_core::loopback::SignReauthGate;
+use dig_app_core::loopback::{PairedAppsControl, SignReauthGate};
 #[cfg(feature = "tray")]
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
@@ -88,6 +89,11 @@ struct TraySession {
     /// recovery phrase at all. Carried here (not re-read each repaint) because both are fixed for the
     /// life of an unlocked account and reading them per-tick would touch the disk 120 times a minute.
     account: AccountFacts,
+    /// The handle onto the live pairing surface (dig_ecosystem#1848): issue a code, list paired apps,
+    /// revoke one. Taken from the router BEFORE it is moved onto the serving thread, and holding the
+    /// SAME stores that thread authenticates against — which is what makes a revoke from this menu
+    /// take effect on the revoked app's very next frame rather than at the next restart.
+    paired_apps: PairedAppsControl<ResidencySealer>,
 }
 
 /// The user-visible facts about the account behind a live session.
@@ -325,6 +331,8 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     let sealer = residency.production_sealer(ProfileIx::ROOT);
     let router = sign_service::build_router(sealer, &profile_id, &profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate);
+    // Take the paired-app handle before the router is moved onto the serving thread.
+    let paired_apps = router.control();
 
     // Subscribe to OS screen-lock events, containing any callback panic before it can cross the
     // extern-"system" FFI boundary (WSEC-D adversarial hardening). The returned guard lives in the
@@ -352,6 +360,7 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
             profile_id,
             recoverable,
         },
+        paired_apps,
     })
 }
 
@@ -1234,6 +1243,8 @@ mod tray {
             TrayAction::FixMissingPhrase => {
                 explain_missing_phrase(confirmer);
             }
+            TrayAction::PairAnApp => pair_an_app(session.as_ref(), confirmer),
+            TrayAction::ManagePairedApps => manage_paired_apps(session.as_ref(), confirmer),
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
             // Both wallet arms re-snapshot LIVE for the same reason `show_status` does: a node that came
@@ -1324,6 +1335,52 @@ mod tray {
             ),
             EnrolOutcome::Abandoned | EnrolOutcome::Unavailable => {}
         }
+    }
+
+    /// Show a pairing code so another program on this computer can use this DIG Account
+    /// (dig_ecosystem#1848).
+    ///
+    /// The flow itself is [`paired_apps::offer_pairing_code`]; this handler only addresses the live
+    /// pairing surface and says what to do when there is none. A locked account has no live channel to
+    /// pair anything WITH, so it gets a sentence naming the remedy rather than a code that could not be
+    /// redeemed.
+    fn pair_an_app(session: Option<&TraySession>, confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::paired_apps::offer_pairing_code;
+
+        let Some(session) = session else {
+            notify(
+                confirmer,
+                "DIG - Pair an app",
+                "Your DIG Account is locked.",
+                "Unlock it from this menu first, then try again. Pairing stores a record sealed under                  your account, so DIG can only pair an app while the account is open.",
+            );
+            return;
+        };
+        offer_pairing_code(
+            confirmer,
+            &session.paired_apps,
+            dig_app_core::pairing_code::now_epoch_secs(),
+        );
+    }
+
+    /// See which programs are paired with this DIG Account, and remove any of their access.
+    fn manage_paired_apps(session: Option<&TraySession>, confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::paired_apps::manage_paired_apps as journey;
+
+        let Some(session) = session else {
+            notify(
+                confirmer,
+                "DIG - Paired apps",
+                "Your DIG Account is locked.",
+                "Unlock it from this menu first. While the account is locked nothing can use it                  through another program, so no app has access right now either way.",
+            );
+            return;
+        };
+        journey(
+            confirmer,
+            &session.paired_apps,
+            dig_app_core::pairing_code::now_epoch_secs(),
+        );
     }
 
     /// Turn the second factor off, behind the biometric authorization seam.

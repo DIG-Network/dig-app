@@ -68,6 +68,15 @@ pub trait SealedRecordStore: Send + Sync {
     /// Drop the persisted whitelist entry for `origin` (on `connect.revoke`). Idempotent.
     fn remove_whitelist(&self, origin: &str);
 
+    /// Drop the persisted pairing record for `pairing_id` (on a user revoke, dig_ecosystem#1848).
+    /// Idempotent.
+    ///
+    /// This is the DURABLE half of a revoke; the immediate half is the live unpair, which the
+    /// [`PairedAppsControl`](crate::loopback::PairedAppsControl) does first. Both are needed — without
+    /// this one the app is refused now and restored at the next boot, which is a revocation that
+    /// undoes itself.
+    fn remove_pairing(&self, pairing_id: &str);
+
     /// Load every persisted sealed record + the nonce ledger for restore on boot.
     fn load(&self) -> PersistedSignState;
 }
@@ -83,6 +92,7 @@ impl SealedRecordStore for NullSealedStore {
     fn persist_whitelist(&self, _origin: &str, _sealed: &[u8]) {}
     fn persist_nonce(&self, _pairing_id: &str, _nonce: u64) {}
     fn remove_whitelist(&self, _origin: &str) {}
+    fn remove_pairing(&self, _pairing_id: &str) {}
     fn load(&self) -> PersistedSignState {
         PersistedSignState::default()
     }
@@ -161,6 +171,35 @@ impl FileSealedStore {
             .unwrap_or_default()
     }
 
+    /// Delete `path`, treating "it was not there" as success — a revoke is idempotent, and a record
+    /// that never reached disk is one the user still wants gone.
+    fn remove(path: &Path, what: &str) {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %e, what, "failed to remove a revoked APP-SIGN record");
+            }
+        }
+    }
+
+    /// Drop `pairing_id` from the nonce ledger, rewriting what remains.
+    fn forget_nonce(&self, pairing_id: &str) {
+        let mut marks = self.read_nonce_ledger();
+        if marks.remove(pairing_id).is_none() {
+            return;
+        }
+        match serde_json::to_vec(&NonceLedger { marks }) {
+            Ok(bytes) => Self::write(&self.nonce_ledger_path(), "nonce-ledger", &bytes),
+            Err(e) => tracing::warn!(error = %e, "failed to rewrite the APP-SIGN nonce ledger"),
+        }
+    }
+
+    /// The file name for `pairing_id`'s sealed record. The id is an app-minted UUID, so this is a
+    /// straight join — but it goes through one named function so the whitelist's hashing and this
+    /// crate's assumption about pairing ids are both visible in one place.
+    fn pairing_file_name(pairing_id: &str) -> String {
+        format!("{pairing_id}.{SEAL_EXT}")
+    }
+
     /// The filesystem-safe file name for `origin`'s sealed whitelist entry — a SHA-256 of the origin,
     /// so an arbitrary origin string can never escape the whitelist directory or collide illegibly.
     fn origin_file_name(origin: &str) -> String {
@@ -170,7 +209,9 @@ impl FileSealedStore {
 
 impl SealedRecordStore for FileSealedStore {
     fn persist_pairing(&self, pairing_id: &str, sealed: &[u8]) {
-        let path = self.pairings_dir().join(format!("{pairing_id}.{SEAL_EXT}"));
+        let path = self
+            .pairings_dir()
+            .join(Self::pairing_file_name(pairing_id));
         Self::write(&path, "pairing", sealed);
     }
 
@@ -193,11 +234,20 @@ impl SealedRecordStore for FileSealedStore {
 
     fn remove_whitelist(&self, origin: &str) {
         let path = self.whitelist_dir().join(Self::origin_file_name(origin));
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(error = %e, "failed to remove a revoked whitelist record");
-            }
-        }
+        Self::remove(&path, "whitelist");
+    }
+
+    fn remove_pairing(&self, pairing_id: &str) {
+        // A pairing id is a UUID this app minted, never caller input, so it cannot carry a path
+        // separator. The file name is still built from it through `pairing_file_name`, which is the
+        // one place that assumption is stated and checked.
+        let path = self
+            .pairings_dir()
+            .join(Self::pairing_file_name(pairing_id));
+        Self::remove(&path, "pairing");
+        // The nonce high-water mark goes with it: leaving an orphan mark behind would seed a future
+        // pairing that happened to reuse the id, and it is state about an app the user just removed.
+        self.forget_nonce(pairing_id);
     }
 
     fn load(&self) -> PersistedSignState {

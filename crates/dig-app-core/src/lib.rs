@@ -16,6 +16,9 @@
 //!   handshake, the engine→app `sign` callback, detach, and re-attach.
 //! - [`pairing`] — the extension↔dig-app pairing store + per-frame pairing-token authentication
 //!   (HMAC + monotonic nonce) for the APP-SIGN loopback channel (SPEC §5.6.3).
+//! - [`pairing_code`] — the user-generated pairing CODE that replaces the pinned extension id for
+//!   apps DIG does not ship: single-use, short-lived, attempt-bounded (SPEC §5.6.3a).
+//! - [`paired_apps`] — the tray journey for pairing an app and for seeing and revoking what is paired.
 //! - [`confirm`] — the [`confirm::NativeConfirmer`] seam: the OS-native confirm + biometric that is
 //!   the sole authorization to pair, connect, or sign (SPEC §5.6.1).
 //! - [`loopback`] — the browser-reachable `ws://[127.0.0.1|::1]:9779` identity server the paired
@@ -47,6 +50,7 @@ pub mod account;
 pub mod agent;
 pub mod config;
 pub mod confirm;
+mod constant_time;
 pub mod control;
 pub mod decode;
 pub mod engine;
@@ -61,7 +65,9 @@ pub mod keystore;
 pub mod link;
 pub mod loopback;
 pub mod notify;
+pub mod paired_apps;
 pub mod pairing;
+pub mod pairing_code;
 pub mod sealer;
 pub mod session;
 pub mod session_lock;
