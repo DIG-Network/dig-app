@@ -295,6 +295,17 @@ pub enum TrayAction {
     /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
     /// of one `enabled: false`.
     AboutDid,
+    /// EXPLAIN what the wallet is, what it can do today, and what it cannot.
+    ///
+    /// There is deliberately NO `Send`, and no `Copy my receive address` either. Spending needs the money
+    /// path, which is parked (#1702); the receive address needs a field [`TrayView`] does not yet carry —
+    /// it holds the identity public key, which is NOT a Chia address, and inventing a row that copies the
+    /// wrong string would be worse than having none.
+    ///
+    /// Because no [`TrayAction`] can move funds or hand out an address, both facts are STRUCTURAL rather
+    /// than one `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid)
+    /// follows for minting (dig_ecosystem#1841).
+    AboutWallet,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.
@@ -602,6 +613,7 @@ pub fn build(view: &TrayView) -> MenuModel {
         "Manage Account",
         management_actions(&account),
     ));
+    rows.push(MenuRow::submenu("Wallet", wallet_actions()));
     rows.push(MenuRow::submenu("Security", security_actions(&account)));
     rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
@@ -697,6 +709,26 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
     rows.push(MenuRow::Separator);
     rows.push(MenuRow::action(TrayAction::AboutDid, DID_LABEL, true));
     rows
+}
+
+/// **Wallet** — what the account can do with money, which today is receive and understand.
+///
+/// # Why there is no `Send`
+///
+/// The money path is PARKED (#1702). A `Send…` row would therefore be permanently greyed, and a greyed row
+/// that cannot say when it will work is the exact defect #1800 removed from this menu. So spending is not
+/// offered *at all* — no [`TrayAction`] can spend, which makes "the tray cannot move funds" a structural
+/// fact rather than one `enabled: false` away from being wrong. [`AboutWallet`](TrayAction::AboutWallet)
+/// explains the situation in a window that has room for it.
+///
+/// The same reasoning already governs DIDs ([`AboutDid`](TrayAction::AboutDid)): the tray does not offer
+/// verbs the app cannot perform.
+fn wallet_actions() -> Vec<MenuRow> {
+    vec![MenuRow::action(
+        TrayAction::AboutWallet,
+        "About the DIG wallet…",
+        true,
+    )]
 }
 
 /// **Security** — locking, and the custody-state explainers.
@@ -1273,16 +1305,21 @@ mod tests {
 
     /// The top-level menu must stay SHORT — a native menu the length of the old one is a wall of text.
     ///
-    /// The bound is 8, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
-    /// that grew with state: Status · Open URL · View Account · Manage Account · Security · logs · quit is
-    /// seven, plus at most ONE contextual row when the account needs something (no account, locked, or
-    /// unopenable). Half the menu this replaced, which reached 12 with five rows greyed.
+    /// The bound is 9, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
+    /// that grew with state: Status · Open URL · View Account · Manage Account · Wallet · Security · logs ·
+    /// quit is eight, plus at most ONE contextual row when the account needs something (no account, locked,
+    /// or unopenable).
     ///
-    /// The number has moved twice, each time for a reason worth recording rather than a bumped constant: 7
-    /// → 8 when `Open` arrived (#1821), because opening content is what the product is FOR and burying it
-    /// under the custody menu would hide the one verb a content consumer wants. It stays 8 now because the
-    /// spine is shorter but gained the contextual row. The rule it enforces is unchanged — every *further*
-    /// verb goes in a submenu or the details window.
+    /// The number has moved three times, each for a recorded reason rather than as a bumped constant:
+    /// 7 → 8 when `Open` arrived (#1821), because opening content is what the product is FOR and burying it
+    /// under the custody menu would hide the one verb a content consumer wants; 8 → 9 when `Wallet` arrived
+    /// (#1841), because money is a top-level concern of this product (§6.0) and it is a SUBMENU, so it
+    /// costs one row and hides its own contents.
+    ///
+    /// The rule the number enforces is unchanged and is the thing to defend: every *further* verb goes in a
+    /// submenu or the details window, never onto the top level. Six named rows still fit on one screen
+    /// without scrolling, which is what "not a wall" actually means. If a seventh ever wants the spine, the
+    /// question to ask is which of the six it replaces.
     #[test]
     fn the_top_level_menu_stays_short_in_every_state() {
         for account in EVERY_STATE {
@@ -1293,20 +1330,20 @@ mod tests {
                 .filter(|row| matches!(row, MenuRow::Action { .. } | MenuRow::Submenu { .. }))
                 .count();
             assert!(
-                clickable <= 8,
+                clickable <= 9,
                 "{account:?}: {clickable} top-level rows is a wall, not a menu"
             );
         }
     }
 
-    /// **The five named options are always present, in order** (dig_ecosystem#1836).
+    /// **The named options are always present, in order** (dig_ecosystem#1836, plus Wallet from #1841).
     ///
     /// The user asked for a specific menu; this is what holds the loop to it. Asserted in EVERY state,
     /// because the defect it prevents is the old behaviour — a menu whose rows appeared and vanished with
     /// account state, so no two machines showed the same thing and nothing could be found twice in the
     /// same place.
     #[test]
-    fn the_five_named_options_are_present_and_ordered_in_every_state() {
+    fn the_named_options_are_present_and_ordered_in_every_state() {
         for account in EVERY_STATE {
             let menu = build(&view(account.clone()));
             let spine: Vec<&str> = menu
@@ -1324,6 +1361,7 @@ mod tests {
                 "Open URL…",
                 "View Account",
                 "Manage Account",
+                "Wallet",
                 "Security",
             ];
             let found: Vec<&str> = spine
@@ -1333,7 +1371,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 found, wanted,
-                "{account:?}: the five options must all be present, in order — got {spine:?}"
+                "{account:?}: every named option must be present, in order — got {spine:?}"
             );
 
             // The escapes are not part of the five, and are not negotiable against them: a tray app that
