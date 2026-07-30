@@ -61,15 +61,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage,
     BM_GETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CREATESTRUCTW, CW_USEDEFAULT,
     ES_AUTOHSCROLL, ES_PASSWORD, GWLP_USERDATA, HMENU, IDCANCEL, IDC_ARROW, IDOK, MSG, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_GROUP,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    SM_CYSCREEN, SW_SHOW, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_NCCREATE, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
+    WS_EX_TOPMOST, WS_GROUP, WS_OVERLAPPED, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use zeroize::Zeroizing;
 
 use super::{
-    ConfirmContent, ForegroundInput, ForegroundWindow, InputContent, InputOutcome, Presentation,
-    WindowIntent,
+    ConfirmContent, ForegroundInput, ForegroundWindow, InputContent, InputOutcome, InputStyle,
+    Presentation, WindowIntent,
 };
 
 /// The window class this module registers. Namespaced so it can never collide with another component's.
@@ -127,6 +127,22 @@ mod layout {
     pub const BUTTON_H: i32 = 34;
     /// Extra vertical space the caption and frame consume, so the CLIENT area fits the controls.
     pub const CHROME: i32 = 44;
+
+    /// Outer width of the launcher BAR (dig_ecosystem#1839).
+    ///
+    /// Wider than the dialog because a DIG link is long — a store id alone is 64 hex characters — and a
+    /// launcher whose field scrolls away from the start of what you pasted is one you cannot check.
+    pub const BAR_WIDTH: i32 = 900;
+    /// Height of the bar's field. Roughly half again the dialog's, which is what makes it read as a
+    /// launcher rather than a small dialog with its title bar missing.
+    pub const BAR_FIELD: i32 = 48;
+    /// The bar field's text height. Deliberately large: this is the only text on the window that matters.
+    pub const BAR_FONT_FIELD: i32 = 26;
+    /// How far down the screen the bar's TOP sits, as a fraction of the screen height.
+    ///
+    /// A launcher belongs above the middle — dead centre puts it over whatever the user is reading, and
+    /// every established launcher (Spotlight, PowerToys Run, Alfred) sits high for that reason.
+    pub const BAR_TOP_DIVISOR: i32 = 4;
 }
 
 /// The reference DPI every value in [`layout`] is expressed at.
@@ -152,6 +168,9 @@ struct Metrics {
     chrome: i32,
     font_body: i32,
     font_heading: i32,
+    bar_width: i32,
+    bar_field: i32,
+    font_bar_field: i32,
 }
 
 impl Metrics {
@@ -220,6 +239,9 @@ impl Metrics {
             chrome: s(layout::CHROME),
             font_body: s(layout::FONT_BODY),
             font_heading: s(layout::FONT_HEADING),
+            bar_width: s(layout::BAR_WIDTH),
+            bar_field: s(layout::BAR_FIELD),
+            font_bar_field: s(layout::BAR_FONT_FIELD),
         }
     }
 
@@ -295,6 +317,61 @@ struct WindowSpec<'a> {
     field: Option<FieldSpec<'a>>,
     /// What the buttons say and which one Enter activates.
     buttons: ButtonSpec<'a>,
+    /// How the window is framed and placed. Six windows, one class, two presentations.
+    chrome: Chrome,
+}
+
+/// The window's frame, placement and proportions — the ONLY axis on which the launcher bar differs from
+/// the five dialogs.
+///
+/// Everything else about a bar is a dialog: the same class, the same field, the same message loop, the
+/// same [`IsDialogMessageW`] keyboard handling, the same DPI scaling. Expressing the difference as a
+/// two-variant enum read by [`Layout::compute`] keeps it that way — there is no second code path to drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Chrome {
+    /// A titled, framed window centred on the display: the five consent/input dialogs.
+    Dialog,
+    /// A frameless bar floating high on the display, with an oversized field and no heading — the
+    /// launcher (dig_ecosystem#1839).
+    Bar,
+}
+
+impl Chrome {
+    /// The window styles this presentation is created with.
+    ///
+    /// A bar is `WS_POPUP` — no caption, no system menu, no resize border — which is what "frameless"
+    /// means in Win32 terms. `WS_BORDER` keeps a one-pixel edge so the bar reads as an object rather than
+    /// bleeding into whatever is behind it.
+    ///
+    /// Pure and separate from the `CreateWindowExW` call so the property is unit-testable: a bar that
+    /// silently regained a caption would otherwise be visible only in a screenshot.
+    fn window_style(self) -> WINDOW_STYLE {
+        match self {
+            Self::Dialog => WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+            Self::Bar => WS_POPUP | WS_BORDER,
+        }
+    }
+
+    /// The outer width of this presentation.
+    fn width(self, m: Metrics) -> i32 {
+        match self {
+            Self::Dialog => m.width,
+            Self::Bar => m.bar_width,
+        }
+    }
+
+    /// Whether losing focus dismisses the window.
+    ///
+    /// TRUE for the bar and only the bar. A launcher the user has clicked away from has been abandoned,
+    /// and an always-on-top frameless window with no close box that OUTLIVED that click would be one
+    /// they cannot get rid of without answering it — the never-trap-the-user rule (§6.1), which the bar
+    /// would otherwise break precisely because it has no frame to close.
+    ///
+    /// FALSE for the dialogs: a consent window that vanished when the user glanced at the transaction in
+    /// their browser would be a consent window nobody can read.
+    fn dismiss_on_blur(self) -> bool {
+        matches!(self, Self::Bar)
+    }
 }
 
 /// The typed field on a window that has one.
@@ -356,6 +433,8 @@ struct WindowState {
     submitted: Option<Zeroizing<String>>,
     /// Whether Submit (rather than Cancel or the frame's close box) ended the window.
     accepted: bool,
+    /// Whether losing the foreground dismisses this window — see [`Chrome::dismiss_on_blur`].
+    dismiss_on_blur: bool,
 }
 
 /// A [`ForegroundInput`] that draws the Win32 window with a typed field.
@@ -437,6 +516,10 @@ fn spec_for_input(content: &InputContent) -> WindowSpec<'_> {
             refuse: "Cancel",
             refusal_is_default: false,
         },
+        chrome: match content.style {
+            InputStyle::Dialog => Chrome::Dialog,
+            InputStyle::Bar => Chrome::Bar,
+        },
     }
 }
 
@@ -463,6 +546,9 @@ fn spec_for_confirm(content: &ConfirmContent) -> WindowSpec<'_> {
         body: &content.body,
         field: None,
         buttons,
+        // A consent window is never a launcher: it must keep its frame, its title and its place on the
+        // screen, and it must NOT evaporate when the user looks at something else.
+        chrome: Chrome::Dialog,
     }
 }
 
@@ -549,12 +635,16 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
         // control can never be placed outside the frame that was sized for it.
         let l = Layout::compute(spec, m);
         let height = l.total_height;
-        let (x, y) = centred(m.width, height);
+        let (x, y) = placed(spec.chrome, l.width, height);
+        // The field wears its own face, which the bar enlarges; on a dialog it is the body font's size, so
+        // this is the same face it always had.
+        let field_font = gui_font(l.field_font, FW_NORMAL.0 as i32);
 
         let mut state = Box::new(WindowState {
             edit: HWND::default(),
             submitted: None,
             accepted: false,
+            dismiss_on_blur: spec.chrome.dismiss_on_blur(),
         });
         let state_ptr: *mut WindowState = &mut *state;
 
@@ -562,10 +652,10 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
             window_ex_style(),
             CLASS_NAME,
             &HSTRING::from(spec.title),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WINDOW_STYLE(0),
+            spec.chrome.window_style(),
             x,
             y,
-            m.width,
+            l.width,
             height,
             HWND::default(),
             HMENU::default(),
@@ -587,23 +677,21 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
         };
 
         let inner = l.inner;
-        add_static(
-            &heading_ctx,
-            spec.heading,
-            l.heading_top,
-            inner,
-            m.heading_line,
-        );
+        if l.has_heading {
+            add_static(
+                &heading_ctx,
+                spec.heading,
+                l.heading_top,
+                inner,
+                m.heading_line,
+            );
+        }
         add_static(&ctx, spec.body, l.body_top, inner, l.body_height);
 
         if let Some(field) = &spec.field {
-            add_static(
-                &ctx,
-                field.label,
-                l.field_label_top.unwrap_or(l.body_top),
-                inner,
-                m.line,
-            );
+            if let Some(label_top) = l.field_label_top {
+                add_static(&ctx, field.label, label_top, inner, m.line);
+            }
 
             let edit = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
@@ -613,13 +701,13 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                 m.margin,
                 l.field_top.unwrap_or(l.buttons_top),
                 inner,
-                m.field_single,
+                l.field_height,
                 window,
                 HMENU::default(),
                 instance,
                 None,
             )?;
-            set_font(edit, font);
+            set_font(edit, field_font);
             (*state_ptr).edit = edit;
 
             // §3.1d's reveal-while-typing affordance: masked by default, un-maskable on purpose. Without it
@@ -647,7 +735,7 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                     &ctx,
                     label,
                     IDOK.0,
-                    affirm_button_left(w, m),
+                    affirm_button_left(w, m, inner),
                     top,
                     w,
                     BS_DEFPUSHBUTTON as u32,
@@ -665,7 +753,7 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
                     false => (BS_PUSHBUTTON, BS_DEFPUSHBUTTON),
                 };
                 let (affirm_w, refuse_w) = (button_width(affirm, m), button_width(refuse, m));
-                let affirm_left = affirm_button_left(affirm_w, m);
+                let affirm_left = affirm_button_left(affirm_w, m, inner);
                 add_button(
                     &ctx,
                     refuse,
@@ -698,6 +786,7 @@ fn show(spec: &WindowSpec<'_>) -> Result<Answer, windows::core::Error> {
         // The window is gone by now (WM_DESTROY ran), so the state is ours again.
         let _ = DeleteObject(font);
         let _ = DeleteObject(heading_font);
+        let _ = DeleteObject(field_font);
         let answer = match state.accepted {
             true => Answer::Affirmed(state.submitted.take()),
             false => Answer::Refused,
@@ -759,13 +848,72 @@ struct Layout {
     buttons_top: i32,
     /// The OUTER window height, caption and frame included.
     total_height: i32,
+    /// The OUTER window width.
+    width: i32,
     /// Width of the controls that span the window.
     inner: i32,
+    /// Height of the input field, which the bar enlarges.
+    field_height: i32,
+    /// Text height of the input field's font, likewise.
+    field_font: i32,
+    /// Whether the heading line is drawn at all. The bar has no heading — a launcher that explained
+    /// itself in a headline every time would be a dialog wearing a launcher's frame.
+    has_heading: bool,
 }
 
 impl Layout {
     /// Walk `spec`'s controls top to bottom at `m`'s scale.
     fn compute(spec: &WindowSpec<'_>, m: Metrics) -> Self {
+        match spec.chrome {
+            Chrome::Dialog => Self::dialog(spec, m),
+            Chrome::Bar => Self::bar(m),
+        }
+    }
+
+    /// The launcher bar: field first and large, one hint line under it, then the buttons.
+    ///
+    /// Inverted from the dialog on purpose. A dialog explains and then asks; a launcher asks
+    /// immediately, and anything it has to say sits UNDER the field where it does not stand between the
+    /// user and the thing they pressed a shortcut to reach.
+    ///
+    /// The buttons stay. They are what makes Enter and Esc work: [`IsDialogMessageW`] maps Enter to the
+    /// window's default push button, so a bar with no buttons would depend on the undefaulted fallback
+    /// path instead of the same tested one every other DIG window uses — and a visible `Open` button also
+    /// tells a first-time user what Enter is going to do.
+    fn bar(m: Metrics) -> Self {
+        let gap = m.margin / 2;
+        let width = Chrome::Bar.width(m);
+        let inner = width - m.margin * 2;
+
+        let field_top = m.margin;
+        let mut top = field_top + m.bar_field + gap;
+        let body_top = top;
+        let body_height = m.line;
+        top += body_height + gap;
+
+        let buttons_top = top;
+        Self {
+            // No heading is drawn, so its position is the field's — nothing reads it.
+            heading_top: field_top,
+            body_top,
+            body_height,
+            field_label_top: None,
+            field_top: Some(field_top),
+            // A URN is not a secret, so there is nothing to reveal.
+            reveal_top: None,
+            buttons_top,
+            // No caption and no frame to account for: `WS_POPUP` client area IS the window.
+            total_height: buttons_top + m.button_h + m.margin,
+            width,
+            inner,
+            field_height: m.bar_field,
+            field_font: m.font_bar_field,
+            has_heading: false,
+        }
+    }
+
+    /// The titled dialog: heading, body, optional field, buttons.
+    fn dialog(spec: &WindowSpec<'_>, m: Metrics) -> Self {
         let gap = m.margin / 2;
         let inner = m.width - m.margin * 4;
 
@@ -799,7 +947,11 @@ impl Layout {
             reveal_top,
             buttons_top,
             total_height,
+            width: Chrome::Dialog.width(m),
             inner,
+            field_height: m.field_single,
+            field_font: m.font_body,
+            has_heading: true,
         }
     }
 }
@@ -836,24 +988,36 @@ fn edit_style(field: &FieldSpec<'_>) -> WINDOW_STYLE {
     style
 }
 
-/// Where to place a `width`×`height` window so it sits centred on the primary display.
+/// Where to place a `width`×`height` window of this presentation on the primary display.
 ///
-/// Pure so the arithmetic is unit-tested; falls back to `CW_USEDEFAULT` when the metrics are unreadable
-/// (a session with no display), which lets Windows place it rather than putting it off-screen.
-fn centred(width: i32, height: i32) -> (i32, i32) {
+/// Pure arithmetic behind one metrics call, so the placement is unit-tested; falls back to
+/// `CW_USEDEFAULT` when the metrics are unreadable (a session with no display), which lets Windows place
+/// it rather than putting it off-screen.
+fn placed(chrome: Chrome, width: i32, height: i32) -> (i32, i32) {
     // SAFETY: `GetSystemMetrics` reads a global integer and cannot fail in a way that matters; a 0 result
     // means "unknown", handled below.
     let (screen_w, screen_h) =
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-    centred_in(width, height, screen_w, screen_h)
+    placed_in(chrome, width, height, screen_w, screen_h)
 }
 
 /// The placement arithmetic, separated from the metrics call so it is testable.
-fn centred_in(width: i32, height: i32, screen_w: i32, screen_h: i32) -> (i32, i32) {
+///
+/// A dialog is centred both ways. A bar is centred horizontally and sits HIGH — one
+/// [`layout::BAR_TOP_DIVISOR`] of the screen down — because a launcher dead-centre covers the thing the
+/// user was looking at when they pressed the shortcut, and every established launcher sits high for that
+/// reason.
+fn placed_in(chrome: Chrome, width: i32, height: i32, screen_w: i32, screen_h: i32) -> (i32, i32) {
     if screen_w <= width || screen_h <= height {
         return (CW_USEDEFAULT, CW_USEDEFAULT);
     }
-    ((screen_w - width) / 2, (screen_h - height) / 2)
+    let x = (screen_w - width) / 2;
+    let y = match chrome {
+        Chrome::Dialog => (screen_h - height) / 2,
+        // Clamped to the centre line so a very tall bar on a very short screen still fits on it.
+        Chrome::Bar => (screen_h / layout::BAR_TOP_DIVISOR).min((screen_h - height) / 2),
+    };
+    (x, y)
 }
 
 /// How wide a button must be to wear `label` without cramping it.
@@ -873,12 +1037,14 @@ fn button_width(label: &str, m: Metrics) -> i32 {
 
 /// The left edge of the AFFIRMATIVE button — the rightmost control on every window.
 ///
-/// It is flush with the right edge of the text block above it (`margin + inner`, where `inner` is
-/// `width - margin * 4`), so the buttons line up with the heading and body rather than overhanging them.
+/// It is flush with the right edge of the text block above it (`margin + inner`), so the buttons line up
+/// with the heading, body and field rather than overhanging them. `inner` comes from the [`Layout`] rather
+/// than being recomputed here, because the bar and the dialog span different widths and two expressions for
+/// one edge is an alignment that drifts the first time either is edited.
 /// A notice's single button and a decision's affirmative both sit here, which is what makes the two window
 /// kinds read as one design.
-fn affirm_button_left(affirm_width: i32, m: Metrics) -> i32 {
-    let text_block_right = m.margin + (m.width - m.margin * 4);
+fn affirm_button_left(affirm_width: i32, m: Metrics, inner: i32) -> i32 {
+    let text_block_right = m.margin + inner;
     text_block_right - affirm_width
 }
 
@@ -965,6 +1131,19 @@ unsafe extern "system" fn wnd_proc(
             } else {
                 DefWindowProcW(window, message, wparam, lparam)
             }
+        }
+        // A launcher the user has clicked away from has been abandoned. The bar has no close box, so
+        // without this it would be an always-on-top frameless window with no way out but answering it —
+        // the never-trap-the-user rule (§6.1). Gated on the window's own flag so a CONSENT dialog, which
+        // the user may legitimately look away from to read a transaction, is never dismissed for them.
+        WM_ACTIVATE if wparam.0 as u32 & 0xFFFF == WA_INACTIVE => {
+            let dismiss = state_of(window).is_some_and(|state| state.dismiss_on_blur);
+            if dismiss {
+                // `accepted` stays false, so nothing typed is acted on — this is a cancel, not a submit.
+                let _ = DestroyWindow(window);
+                return LRESULT(0);
+            }
+            DefWindowProcW(window, message, wparam, lparam)
         }
         WM_CLOSE => {
             // Closing by the frame is a cancel: `accepted` stays false, so no text is acted on.
@@ -1271,13 +1450,16 @@ mod tests {
     /// off-screen input window is an input window the user never answers.
     #[test]
     fn the_window_centres_itself_and_defers_when_it_would_not_fit() {
-        assert_eq!(centred_in(600, 400, 1920, 1080), (660, 340));
+        assert_eq!(placed_in(Chrome::Dialog, 600, 400, 1920, 1080), (660, 340));
 
         // A display smaller than the window (or unreadable metrics reported as 0) must not produce a
         // negative origin, which would put the title bar above the top of the screen.
-        assert_eq!(centred_in(600, 400, 0, 0), (CW_USEDEFAULT, CW_USEDEFAULT));
         assert_eq!(
-            centred_in(600, 400, 640, 360),
+            placed_in(Chrome::Dialog, 600, 400, 0, 0),
+            (CW_USEDEFAULT, CW_USEDEFAULT)
+        );
+        assert_eq!(
+            placed_in(Chrome::Dialog, 600, 400, 640, 360),
             (CW_USEDEFAULT, CW_USEDEFAULT),
             "a display shorter than the window must not be centred into a negative Y"
         );
@@ -1487,6 +1669,7 @@ mod tests {
             submit: "Restore",
             masked,
             revealable,
+            style: InputStyle::Dialog,
         }
     }
 
@@ -1564,13 +1747,14 @@ mod tests {
     fn the_buttons_align_with_the_text_block_at_every_scale() {
         for dpi in [96, 144, 192, 240] {
             let m = Metrics::for_dpi(dpi);
-            let text_block_right = m.margin + (m.width - m.margin * 4);
+            let inner = Layout::compute(&field_spec(false, false), m).inner;
+            let text_block_right = m.margin + inner;
 
             // Whatever the label, the affirmative's right edge meets the text block's.
             for label in ["OK", "Destroy", "Yes, I have them"] {
                 let w = button_width(label, m);
                 assert_eq!(
-                    affirm_button_left(w, m) + w,
+                    affirm_button_left(w, m, inner) + w,
                     text_block_right,
                     "'{label}' must right-align to the text block at {dpi} DPI"
                 );
@@ -1581,7 +1765,7 @@ mod tests {
                 button_width("Keep my account", m),
             );
             assert!(
-                affirm_button_left(affirm_w, m) - refuse_w - m.margin > m.margin,
+                affirm_button_left(affirm_w, m, inner) - refuse_w - m.margin > m.margin,
                 "two long-labelled buttons must fit beside each other at {dpi} DPI"
             );
         }
@@ -1777,6 +1961,172 @@ mod tests {
                 refuse: "Cancel",
                 refusal_is_default: false,
             },
+            chrome: Chrome::Dialog,
+        }
+    }
+
+    /// The launcher bar's spec — the same field window, presented as a bar (dig_ecosystem#1839).
+    ///
+    /// Deliberately IDENTICAL to [`field_spec`] except for `chrome`, so every comparison below varies one
+    /// thing. A bar fixture that also changed its copy or its buttons could not tell a presentation
+    /// difference from a content difference.
+    fn bar_spec() -> WindowSpec<'static> {
+        WindowSpec {
+            chrome: Chrome::Bar,
+            ..field_spec(false, false)
+        }
+    }
+
+    // ──────────────── The launcher bar (dig_ecosystem#1839) ────────────────
+
+    /// The bar is FRAMELESS and the dialogs are not. Both arms asserted: a `window_style` that returned
+    /// the popup style for everything would satisfy the bar half alone.
+    #[test]
+    fn the_bar_is_frameless_and_the_dialogs_keep_their_frame() {
+        let bar = Chrome::Bar.window_style().0;
+        assert_ne!(bar & WS_POPUP.0, 0, "the bar must be a popup");
+        // `WS_CAPTION` is `WS_BORDER | WS_DLGFRAME`, and the bar deliberately KEEPS `WS_BORDER` for its
+        // one-pixel edge — so the caption is only absent if the FULL mask is not set, not if the AND is
+        // non-zero. Asserting the mask is what makes this test see a caption rather than a border.
+        assert_ne!(
+            bar & WS_CAPTION.0,
+            WS_CAPTION.0,
+            "the bar must have no caption"
+        );
+        assert_eq!(bar & WS_SYSMENU.0, 0, "the bar must have no system menu");
+
+        let dialog = Chrome::Dialog.window_style().0;
+        assert_eq!(dialog & WS_POPUP.0, 0);
+        assert_eq!(dialog & WS_CAPTION.0, WS_CAPTION.0);
+        assert_ne!(dialog & WS_SYSMENU.0, 0);
+    }
+
+    /// The bar sits HIGH; a dialog sits centred. Compared on the SAME size and the SAME screen, so the
+    /// only thing that can move the window is the presentation — the nearest wrong implementation
+    /// (centring both) is what this distinguishes.
+    #[test]
+    fn the_bar_sits_high_and_the_dialog_sits_centred() {
+        let (w, h, screen_w, screen_h) = (900, 200, 1920, 1080);
+        let (bar_x, bar_y) = placed_in(Chrome::Bar, w, h, screen_w, screen_h);
+        let (dialog_x, dialog_y) = placed_in(Chrome::Dialog, w, h, screen_w, screen_h);
+
+        // Horizontally identical — a launcher is centred left-to-right like anything else.
+        assert_eq!(bar_x, dialog_x);
+        assert_eq!(bar_y, screen_h / layout::BAR_TOP_DIVISOR);
+        assert!(
+            bar_y < dialog_y,
+            "the bar must sit above the centre line: {bar_y} vs {dialog_y}"
+        );
+
+        // A bar taller than half a short screen must not be pushed BELOW the centre by the divisor.
+        let (_, squeezed_y) = placed_in(Chrome::Bar, 600, 500, 1024, 768);
+        assert!(squeezed_y <= (768 - 500) / 2);
+        assert!(squeezed_y >= 0);
+    }
+
+    /// **The never-trap-the-user rule (§6.1), and the one property that must NOT generalise.**
+    ///
+    /// The bar has no close box, so losing focus has to dismiss it or it is a window with no way out. A
+    /// CONSENT dialog must never inherit that: a user who glances at their browser to check the
+    /// transaction they are approving would come back to a window that answered itself.
+    #[test]
+    fn only_the_bar_dismisses_itself_on_losing_focus() {
+        assert!(Chrome::Bar.dismiss_on_blur());
+        assert!(!Chrome::Dialog.dismiss_on_blur());
+    }
+
+    /// The bar is a LAUNCHER: no heading, no field label, no reveal control, and a field that fills it.
+    ///
+    /// Asserted against the dialog computed from the same spec, so each claim is a difference rather than
+    /// a restatement of whatever the bar arm happens to return.
+    #[test]
+    fn the_bar_drops_the_dialogs_furniture_and_enlarges_its_field() {
+        for dpi in [96, 144, 192, 240] {
+            let m = Metrics::for_dpi(dpi);
+            let bar = Layout::compute(&bar_spec(), m);
+            let dialog = Layout::compute(&field_spec(false, true), m);
+
+            assert!(!bar.has_heading, "a launcher explains nothing at {dpi} DPI");
+            assert!(dialog.has_heading);
+            assert_eq!(bar.field_label_top, None);
+            assert_eq!(bar.reveal_top, None, "a DIG link is not a secret to reveal");
+
+            assert!(
+                bar.field_height > dialog.field_height,
+                "the bar's field must be larger at {dpi} DPI"
+            );
+            assert!(
+                bar.field_font > dialog.field_font,
+                "the bar's type must be larger at {dpi} DPI"
+            );
+            assert!(
+                bar.width > dialog.width && bar.inner > dialog.inner,
+                "a 64-hex store id plus a 64-hex root needs the wider field at {dpi} DPI"
+            );
+        }
+    }
+
+    /// **The defect this file was reorganised to prevent, extended to the bar.** Every control must sit
+    /// inside the window that was sized for it.
+    ///
+    /// The bar is where this could newly break: it is a DIFFERENT width from the dialog, so anything that
+    /// still measured against the dialog's `Metrics::width` — as the button alignment did before it took
+    /// the layout's `inner` — would place the buttons outside the bar entirely.
+    #[test]
+    fn every_control_fits_inside_the_window_it_was_sized_for() {
+        for dpi in [96, 144, 192, 240] {
+            let m = Metrics::for_dpi(dpi);
+            for (name, spec) in [("bar", bar_spec()), ("dialog", field_spec(false, true))] {
+                let l = Layout::compute(&spec, m);
+                let field_bottom = l.field_top.unwrap() + l.field_height;
+                assert!(
+                    field_bottom <= l.buttons_top,
+                    "{name}: the field overlaps the buttons at {dpi} DPI"
+                );
+                assert!(
+                    l.buttons_top + m.button_h + m.margin <= l.total_height,
+                    "{name}: the buttons fall outside the frame at {dpi} DPI"
+                );
+                // The affirmative's right edge, which is the rightmost pixel of any control.
+                let w = button_width("Open", m);
+                let right = affirm_button_left(w, m, l.inner) + w;
+                assert!(
+                    right <= l.width - m.margin,
+                    "{name}: the buttons overhang the window at {dpi} DPI ({right} of {})",
+                    l.width
+                );
+            }
+        }
+    }
+
+    /// The style the CALLER asked for is the chrome the window gets — and a consent window can never
+    /// become a bar.
+    ///
+    /// That second half is the load-bearing one. `Chrome::Bar` carries dismiss-on-blur, so a consent
+    /// window drawn as a bar would silently deny itself the moment the user looked away — and it is the
+    /// kind of thing a future refactor could plausibly "simplify" into one shared mapping.
+    #[test]
+    fn the_requested_style_reaches_the_window_and_consent_is_never_a_bar() {
+        let mut c = content(false, false);
+        c.style = InputStyle::Bar;
+        assert_eq!(spec_for_input(&c).chrome, Chrome::Bar);
+        c.style = InputStyle::Dialog;
+        assert_eq!(spec_for_input(&c).chrome, Chrome::Dialog);
+
+        for confirm in [
+            ConfirmContent::notice(&crate::confirm::NoticePrompt {
+                title: "DIG",
+                heading: "Done.",
+                body: "It worked.",
+                acknowledge: "OK",
+            }),
+            ConfirmContent::destroy(&crate::confirm::DestroyPrompt {
+                subject: "the DIG Account on this computer",
+                replacement: "A new one will be created.",
+                recoverable: true,
+            }),
+        ] {
+            assert_eq!(spec_for_confirm(&confirm).chrome, Chrome::Dialog);
         }
     }
 
@@ -1789,6 +2139,7 @@ mod tests {
             body,
             field: None,
             buttons,
+            chrome: Chrome::Dialog,
         }
     }
 }

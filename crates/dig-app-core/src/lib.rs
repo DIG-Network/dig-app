@@ -54,6 +54,7 @@ pub mod environment;
 pub mod events;
 pub mod form_factor;
 pub mod gateway;
+pub mod hotkey;
 pub mod identity;
 pub mod ipc;
 pub mod keystore;

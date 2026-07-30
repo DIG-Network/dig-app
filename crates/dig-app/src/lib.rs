@@ -12,6 +12,7 @@
 //!   only).
 //! * [`console`] — where a GUI-subsystem binary prints, so `dig-app --version` still answers the update
 //!   beacon's health probe (dig_ecosystem#1797).
+//! * [`hotkey`] — claiming the global shortcut that opens the URN bar (tray builds only).
 //! * [`logging`] — the shared dual-sink field log the shell installs for the user's whole session.
 //! * [`tray_guard`] — surviving a desktop stack that panics instead of failing (tray builds only).
 
@@ -24,6 +25,11 @@ pub mod autostart;
 #[cfg(feature = "tray")]
 pub mod brand;
 pub mod console;
+/// Claiming the global shortcut that opens the URN bar.
+///
+/// Tray-only: a headless build has no desktop to open a bar on, and nothing to press a chord from.
+#[cfg(feature = "tray")]
+pub mod hotkey;
 pub mod logging;
 /// Surviving a desktop stack that panics instead of failing.
 ///

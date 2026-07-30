@@ -11,6 +11,7 @@
 //! any profile is unlocked. When U4 lands, secret-bearing config moves under the sealed per-profile
 //! store; these boot settings stay readable pre-unlock.
 
+use crate::hotkey::HotkeyError;
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,15 @@ pub struct AgentConfig {
     /// Seconds between run-loop reconcile ticks.
     #[serde(default = "default_tick_secs")]
     pub tick_secs: u64,
+
+    /// The global shortcut that opens the URN bar, written as a chord (`"Alt+Space"`,
+    /// `"Ctrl+Shift+D"`). `None` means [`hotkey::DEFAULT_SHORTCUT`].
+    ///
+    /// User-configurable on purpose: the default displaces the Windows window menu
+    /// ([`hotkey`](crate::hotkey) explains why that trade is taken), and a user who wants that chord
+    /// back must be able to have it without editing source.
+    #[serde(default)]
+    pub open_bar_shortcut: Option<String>,
 }
 
 fn default_tick_secs() -> u64 {
@@ -52,11 +62,24 @@ impl Default for AgentConfig {
             node_url: None,
             active_profile: None,
             tick_secs: DEFAULT_TICK_SECS,
+            open_bar_shortcut: None,
         }
     }
 }
 
 impl AgentConfig {
+    /// The global shortcut to register for the URN bar.
+    ///
+    /// A **malformed** setting is an `Err` the caller reports rather than a silent fall-back to the
+    /// default: a user who wrote `Ctrl+Banana` and got Alt+Space would conclude their setting was
+    /// ignored, with nothing anywhere saying why. An ABSENT setting is not malformed — it is the
+    /// ordinary case, and yields [`crate::hotkey::DEFAULT_SHORTCUT`].
+    pub fn open_bar_shortcut(&self) -> std::result::Result<crate::hotkey::Hotkey, HotkeyError> {
+        match self.open_bar_shortcut.as_deref() {
+            None => Ok(crate::hotkey::Hotkey::default()),
+            Some(text) => crate::hotkey::Hotkey::parse(text),
+        }
+    }
     /// The config file path under a resolved brand data directory.
     pub fn path_in(brand_dir: &Path) -> PathBuf {
         brand_dir.join(CONFIG_FILE)
@@ -114,6 +137,7 @@ mod tests {
             node_url: Some("https://node.example".to_string()),
             active_profile: Some("did:chia:abc".to_string()),
             tick_secs: 42,
+            open_bar_shortcut: Some("Ctrl+Shift+D".to_string()),
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());
@@ -126,6 +150,42 @@ mod tests {
         let path = AgentConfig::path_in(dir.path());
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(AgentConfig::load(&path).is_err());
+    }
+
+    /// The ordinary case — no setting at all — yields the documented default chord.
+    #[test]
+    fn an_unset_shortcut_is_the_documented_default() {
+        assert_eq!(
+            AgentConfig::default().open_bar_shortcut().unwrap(),
+            crate::hotkey::Hotkey::default()
+        );
+    }
+
+    /// A configured chord WINS over the default — the whole point of the setting.
+    #[test]
+    fn a_configured_shortcut_replaces_the_default() {
+        let cfg = AgentConfig {
+            open_bar_shortcut: Some("Ctrl+Shift+D".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            cfg.open_bar_shortcut().unwrap(),
+            crate::hotkey::Hotkey::parse("Ctrl+Shift+D").unwrap()
+        );
+    }
+
+    /// A typo is an ERROR the shell can report, never a silent fall-back to the default — which would
+    /// look to the user exactly like their setting being ignored for no reason.
+    #[test]
+    fn a_malformed_shortcut_is_an_error_not_a_silent_default() {
+        let cfg = AgentConfig {
+            open_bar_shortcut: Some("Ctrl+Banana".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            cfg.open_bar_shortcut(),
+            Err(crate::hotkey::HotkeyError::UnknownKey("Banana".to_string()))
+        );
     }
 
     #[test]

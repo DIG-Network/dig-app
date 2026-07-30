@@ -88,6 +88,7 @@ fn view_for(state: AccountState) -> TrayView {
         account: Some(state),
         profile_id: Some("a".repeat(96)),
         did: None,
+        hotkey: None,
     }
 }
 

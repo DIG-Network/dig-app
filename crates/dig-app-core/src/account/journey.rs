@@ -19,8 +19,8 @@ use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
 use crate::confirm::{
-    ClaimPrompt, ConfirmDecision, DestroyPrompt, InputOutcome, InputPrompt, NativeConfirmer,
-    NoticePrompt, RevealPrompt,
+    ClaimPrompt, ConfirmDecision, DestroyPrompt, InputOutcome, InputPrompt, InputStyle,
+    NativeConfirmer, NoticePrompt, RevealPrompt,
 };
 use crate::sealer::ProfileSealer;
 
@@ -303,6 +303,7 @@ pub fn ask_for_phrase(confirmer: &dyn NativeConfirmer, purpose: &str) -> Option<
             // deliberate un-mask rather than defaulting to clear text.
             masked: true,
             revealable: true,
+            style: InputStyle::Dialog,
         }) {
             InputOutcome::Provided(text) => text,
             // Cancelled or undrawable: either way the user has not supplied a phrase, so stop. Retrying an

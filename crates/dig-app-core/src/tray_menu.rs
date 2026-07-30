@@ -141,6 +141,12 @@ pub struct TrayView {
     /// honest value is always `None` (see the
     /// `never_claims_an_on_chain_did_from_a_local_profile_reference` test).
     pub did: Option<String>,
+    /// What became of the global shortcut that opens the URN bar (dig_ecosystem#1839).
+    ///
+    /// `None` before the shell has attempted registration, which is why it is not simply a
+    /// [`HotkeyState`](crate::hotkey::HotkeyState): "not tried yet" and "tried and refused" are different
+    /// facts, and only the second is worth telling the user about.
+    pub hotkey: Option<crate::hotkey::HotkeyState>,
 }
 
 impl TrayView {
@@ -558,6 +564,12 @@ pub fn details_text(view: &TrayView) -> String {
             &view.node
         }
     ));
+    // The shortcut goes LAST and only once the shell has tried to claim it. This is the only place its
+    // failure — or the fact that it displaced the Windows window menu — is ever stated, so a user who
+    // presses the chord and gets nothing has somewhere to find out why (`crate::hotkey`).
+    if let Some(hotkey) = &view.hotkey {
+        out.push_str(&format!("\n\nKeyboard\n{}", hotkey.summary()));
+    }
     out
 }
 
@@ -604,7 +616,11 @@ pub fn build(view: &TrayView) -> MenuModel {
     rows.push(MenuRow::action(TrayAction::ShowStatus, "Status", true));
     // Opening content is what the product is FOR, and it works with no account at all — so it sits high and
     // stays enabled in every state (§6.0: consumption is never gated on custody).
-    rows.push(MenuRow::action(TrayAction::Open, "Open URL…", true));
+    rows.push(MenuRow::action(
+        TrayAction::Open,
+        open_url_label(view),
+        true,
+    ));
     rows.push(MenuRow::submenu(
         "View Account",
         view_account_actions(view, &account),
@@ -819,6 +835,19 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
 /// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
 /// DID is a real spend (§3.7 — mainnet is real money), and names it optional so an absent DID never reads
 /// as something they have failed to do. It must not promise to CREATE one: nothing can mint yet.
+/// The `Open URL…` row, carrying the global shortcut when there IS one.
+///
+/// A shortcut nobody can discover is a shortcut nobody uses, and a tray menu is the one place every user
+/// of this app already looks. The chord is appended ONLY when it is live — advertising a chord that failed
+/// to register would teach the user to press a key that does nothing (see
+/// [`HotkeyState::shortcut`](crate::hotkey::HotkeyState::shortcut)).
+fn open_url_label(view: &TrayView) -> String {
+    match view.hotkey.as_ref().and_then(|state| state.shortcut()) {
+        Some(hotkey) => format!("Open URL…\t{hotkey}"),
+        None => "Open URL…".to_string(),
+    }
+}
+
 const DID_LABEL: &str = "About on-chain DIDs (optional, costs XCH)…";
 
 /// The DID line. Absent is the NORMAL state — minting one costs money and is never automatic — so it is
@@ -921,7 +950,79 @@ mod tests {
             account: Some(account),
             profile_id: Some("a".repeat(96)),
             did: None,
+            hotkey: None,
         }
+    }
+
+    // ---- The global shortcut's two surfaces (dig_ecosystem#1839). ----
+
+    /// A live shortcut is DISCOVERABLE from the menu; a failed or unattempted one is not advertised.
+    ///
+    /// All three states asserted against the same view, because "shows the chord" and "shows the chord
+    /// only when it works" are different properties and only a fixture that varies the state can tell them
+    /// apart.
+    #[test]
+    fn the_open_row_advertises_the_shortcut_only_while_it_is_live() {
+        let base = view(AccountState::Absent);
+        let label_with = |hotkey| {
+            let view = TrayView {
+                hotkey,
+                ..base.clone()
+            };
+            build(&view).label_of(TrayAction::Open).unwrap().to_string()
+        };
+
+        let live = label_with(Some(crate::hotkey::HotkeyState::Registered(
+            crate::hotkey::Hotkey::default(),
+        )));
+        assert!(live.starts_with("Open URL…"), "{live}");
+        assert!(live.contains("Alt+Space"), "{live}");
+
+        // Not attempted, and attempted-but-refused, must both read exactly as the row always did — a
+        // menu that promised a chord the OS refused would be a lie the user acts on.
+        for absent in [
+            None,
+            Some(crate::hotkey::HotkeyState::Unavailable {
+                hotkey: crate::hotkey::Hotkey::default(),
+                reason: "another application already uses it".to_string(),
+            }),
+            Some(crate::hotkey::HotkeyState::Unsupported {
+                reason: "no global shortcuts on this desktop".to_string(),
+            }),
+        ] {
+            assert_eq!(label_with(absent), "Open URL…");
+        }
+    }
+
+    /// `Status` is where a shortcut that did NOT work gets explained — the only place it can be, since a
+    /// chord that does nothing produces no other signal at all.
+    #[test]
+    fn status_explains_a_shortcut_that_failed_and_stays_quiet_before_one_is_tried() {
+        let base = view(AccountState::Absent);
+        assert!(
+            !details_text(&base).contains("Keyboard"),
+            "nothing to report before the shell has tried"
+        );
+
+        let failed = TrayView {
+            hotkey: Some(crate::hotkey::HotkeyState::Unavailable {
+                hotkey: crate::hotkey::Hotkey::default(),
+                reason: "another application already uses it".to_string(),
+            }),
+            ..base.clone()
+        };
+        let text = details_text(&failed);
+        assert!(text.contains("Keyboard"));
+        assert!(
+            text.contains("another application already uses it"),
+            "{text}"
+        );
+        assert!(text.contains("Open URL…"), "{text}");
+
+        // The account and node lines must survive the addition — a new section appended over the top of
+        // an existing one is exactly the kind of thing a `contains` on the new text alone cannot see.
+        assert!(text.contains("Node"));
+        assert!(text.contains("DIG ID:"));
     }
 
     // ---- Rule 1: a menu item is an ACTION. ----

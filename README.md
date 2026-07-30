@@ -46,6 +46,26 @@ Replacing or removing an account destroys the key it is sealed to, so DIG asks y
 and offers to show you the current account's 24 words before anything is lost. Those verbs are always
 available: an account you cannot change is a trap, not a safeguard.
 
+## Opening a DIG link — press Alt+Space anywhere
+
+Reading DIG content needs no account, so it should cost one keystroke. Press **Alt+Space** from any
+application and a bar floats up in the middle of your screen: paste a `chia://` or `urn:dig:chia:` link,
+press Enter, and it opens in your browser served by your own DIG node. Escape closes it, and so does
+clicking somewhere else. The same thing is in the tray menu as **Open URL…**, which shows the shortcut
+beside it.
+
+On Windows, Alt+Space normally opens the current window's Move / Size / Close menu, and while DIG is
+running it opens the DIG bar instead. If you would rather keep the window menu, set your own chord in
+`agent.json` beside DIG's other settings:
+
+```json
+{ "open_bar_shortcut": "Ctrl+Shift+Space" }
+```
+
+Any combination of `Ctrl`, `Alt`, `Shift` and `Win` plus a letter, a digit, `Space` or `F1`–`F24` works; at
+least one modifier is required. If another application already owns your chord, DIG says so in **Status and
+details…** and the tray's **Open URL…** goes on working.
+
 An on-chain `did:chia:` DID is optional and costs XCH; DIG never mints one without you asking, and your
 account, phrase and address all work fully without it.
 

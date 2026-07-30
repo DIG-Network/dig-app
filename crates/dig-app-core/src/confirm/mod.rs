@@ -183,6 +183,37 @@ pub struct InputPrompt<'a> {
     /// 24 words typed entirely blind cannot be checked, so the field is masked AND deliberately un-maskable
     /// rather than defaulting to clear text. A short passphrase needs no such control.
     pub revealable: bool,
+    /// How the window is presented — a titled dialog, or the frameless launcher bar.
+    pub style: InputStyle,
+}
+
+/// How an input window is PRESENTED. Not what it asks — that is the rest of [`InputPrompt`].
+///
+/// # Why this is a variant rather than a second window
+///
+/// The Spotlight-style URN bar (dig_ecosystem#1839) and the titled restore dialog differ only in chrome,
+/// placement and type size. Everything that matters — the field, the keyboard handling, the DPI scaling,
+/// the fail-closed [`InputOutcome`] mapping — is identical, and the five native windows were just unified
+/// into ONE class precisely so those could not drift (dig_ecosystem#1832). A second window stack would
+/// undo that on day one, so the bar is a presentation of the same [`InputPrompt`].
+///
+/// **Only the Windows backend honours [`InputStyle::Bar`] today.** macOS draws every input on an `NSAlert`
+/// accessory field and Linux shells out to `zenity`; neither can be made frameless without a different
+/// window mechanism, so both fall back to their ordinary dialog. That is a presentation difference, not a
+/// behavioural one — the same link reaches the same validator either way — and it is stated here rather
+/// than discovered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InputStyle {
+    /// A titled, framed dialog with a heading and an explanatory body. The default, and what every
+    /// account journey uses: those windows are asking for something consequential and need the room to
+    /// say so.
+    #[default]
+    Dialog,
+    /// A frameless bar floating high on the screen, with an oversized field and one hint line — the
+    /// launcher interaction. Dismissed by Esc **or by losing focus**, because a launcher the user has
+    /// clicked away from has been abandoned, and one that stayed on top of everything afterwards would be
+    /// a window they cannot get rid of without answering it.
+    Bar,
 }
 
 /// What came back from an [`InputPrompt`].
@@ -634,6 +665,8 @@ pub(crate) struct InputContent {
     pub masked: bool,
     /// Whether a reveal-while-typing control is offered.
     pub revealable: bool,
+    /// How the window is presented.
+    pub style: InputStyle,
 }
 
 impl InputContent {
@@ -648,6 +681,7 @@ impl InputContent {
             submit: prompt.submit,
             masked: prompt.masked,
             revealable: prompt.revealable,
+            style: prompt.style,
         }
     }
 }

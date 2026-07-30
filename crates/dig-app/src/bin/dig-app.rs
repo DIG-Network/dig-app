@@ -615,8 +615,9 @@ mod tray {
         explain_missing_phrase, explain_unopenable, reveal_phrase,
     };
     use dig_app_core::agent::{Agent, SharedStatus};
-    use dig_app_core::confirm::{native_confirmer, NativeConfirmer};
+    use dig_app_core::confirm::{native_confirmer, InputStyle, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;
+    use dig_app_core::hotkey::HotkeyState;
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
@@ -731,6 +732,7 @@ mod tray {
         env: &AppEnvironment,
         session: Option<&TraySession>,
         boot_failed: bool,
+        hotkey: &HotkeyState,
     ) -> TrayView {
         use dig_app_core::engine::EngineState;
 
@@ -763,6 +765,7 @@ mod tray {
             // the user does not have as soon as anything started writing that field. See
             // [`TrayView::did`].
             did: None,
+            hotkey: Some(hotkey.clone()),
         }
     }
 
@@ -781,11 +784,28 @@ mod tray {
         let event_loop = EventLoopBuilder::new().build();
         let status = agent.status_handle();
 
+        // Claim the global shortcut BEFORE the menu is built, so the very first menu already carries it
+        // and the very first `Status` already explains a failure. The chord opens the SAME handler the
+        // `Open URL…` row does — the node check, `validate_open_link` and `link::serve_url`, in that order
+        // — differing only in how the window is presented. There is no second open path to keep in step,
+        // and in particular no second copy of the scheme allowlist (#745).
+        //
+        // The callback owns its own status handle and its own confirmer because it runs on the shortcut's
+        // thread, not this one; drawing the bar there is what keeps a user standing at the bar from
+        // freezing the tray.
+        let hotkey = {
+            let status = status.clone();
+            dig_app::hotkey::install(agent.config().open_bar_shortcut(), move || {
+                let confirmer = native_confirmer();
+                open_dig_link(&status, confirmer.as_ref(), InputStyle::Bar);
+            })
+        };
+
         // `boot_failed` is the observable half of a wedged account: an open was attempted and did not
         // produce a session. Sticky until an open SUCCEEDS, so the tray keeps telling the truth rather than
         // flickering back to "locked" on the next repaint tick.
         let mut boot_failed = session.is_none() && super::account_is_enrolled(&env);
-        let mut model = snapshot(&status, &env, session.as_ref(), boot_failed);
+        let mut model = snapshot(&status, &env, session.as_ref(), boot_failed, &hotkey);
         // Guarded for the same reason as the mount below: creating native menu objects touches the
         // platform's desktop stack, and a missing library there panics rather than failing.
         let mut menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
@@ -855,6 +875,7 @@ mod tray {
                     confirmer.as_ref(),
                     &shutdown,
                     &status,
+                    &hotkey,
                 ) {
                     *control_flow = ControlFlow::Exit;
                     return;
@@ -866,7 +887,7 @@ mod tray {
             if session.is_some() {
                 boot_failed = false;
             }
-            let latest = snapshot(&status, &env, session.as_ref(), boot_failed);
+            let latest = snapshot(&status, &env, session.as_ref(), boot_failed, &hotkey);
             if !view_eq(&latest, &model) {
                 // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
                 // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
@@ -921,6 +942,7 @@ mod tray {
         confirmer: &dyn NativeConfirmer,
         shutdown: &dig_app_core::shutdown::Shutdown,
         status: &SharedStatus,
+        hotkey: &HotkeyState,
     ) -> bool {
         match action {
             TrayAction::SetUpAccount => {
@@ -945,7 +967,7 @@ mod tray {
             TrayAction::RemoveAccount => {
                 replace_account(session, env, confirmer, Replacement::Nothing)
             }
-            TrayAction::ShowStatus => show_status(status, env, session.as_ref(), confirmer),
+            TrayAction::ShowStatus => show_status(status, env, session.as_ref(), confirmer, hotkey),
             TrayAction::Unlock => {
                 // The account exists but did not unlock at boot. Re-running the boot path is the whole
                 // unlock: on Windows/macOS it is zero-prompt from the OS credential store.
@@ -975,7 +997,9 @@ mod tray {
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
             TrayAction::AboutWallet => explain_wallet(confirmer),
-            TrayAction::Open => open_dig_link(status, confirmer),
+            // The tray row asks in the framed dialog; the Alt+Space chord asks in the bar. Same handler,
+            // same validation, same resolution — only the presentation differs.
+            TrayAction::Open => open_dig_link(status, confirmer, InputStyle::Dialog),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
                 shutdown.trigger();
@@ -1036,8 +1060,9 @@ mod tray {
         env: &AppEnvironment,
         session: Option<&TraySession>,
         confirmer: &dyn NativeConfirmer,
+        hotkey: &HotkeyState,
     ) {
-        let view = snapshot(status, env, session, false);
+        let view = snapshot(status, env, session, false, hotkey);
         notify(
             confirmer,
             "DIG — Status",
@@ -1183,7 +1208,7 @@ mod tray {
     /// 3. **`link::serve_url` builds an `http://` URL under the NODE's own origin** — the host and
     ///    scheme are ours, never the user's, so a pasted link cannot redirect the browser elsewhere.
     /// 4. The browser is spawned with the URL as ONE argument, never through a shell.
-    fn open_dig_link(status: &SharedStatus, confirmer: &dyn NativeConfirmer) {
+    fn open_dig_link(status: &SharedStatus, confirmer: &dyn NativeConfirmer, style: InputStyle) {
         use dig_app_core::engine::EngineState;
 
         // 1. Is there a node to resolve through?
@@ -1216,18 +1241,7 @@ mod tray {
         };
 
         // 2. Ask for the link. Not secret, so neither masked nor revealable.
-        let typed = match confirmer.request_input(&dig_app_core::confirm::InputPrompt {
-            title: "DIG — Open",
-            heading: "Which DIG link would you like to open?",
-            body: "Paste a DIG link. Both forms work:\n\n\
-                   chia://<store id>[:<generation root>]/<path>\n\
-                   urn:dig:chia:<store id>[:<generation root>]/<path>\n\n\
-                   It opens in your browser, served by your own DIG node.",
-            field_label: "DIG link:",
-            submit: "Open",
-            masked: false,
-            revealable: false,
-        }) {
+        let typed = match confirmer.request_input(&open_prompt(style)) {
             dig_app_core::confirm::InputOutcome::Provided(text) => text,
             dig_app_core::confirm::InputOutcome::Cancelled => return,
             dig_app_core::confirm::InputOutcome::Unavailable => {
@@ -1289,6 +1303,38 @@ mod tray {
                 "DIG could not launch your browser.",
                 &format!("The content is here:\n\n{url}"),
             );
+        }
+    }
+
+    /// What the window asks for, in each presentation.
+    ///
+    /// The DIALOG is reached deliberately, from a menu, by someone who may never have seen a DIG link —
+    /// so it spells both forms out. The BAR is reached by a chord, by someone who already has a link on
+    /// their clipboard, and a launcher that explained the URN grammar above its field every time would be
+    /// a dialog wearing a launcher's frame. Same field, same validator, different amount of talking.
+    fn open_prompt(style: InputStyle) -> dig_app_core::confirm::InputPrompt<'static> {
+        let (heading, body) = match style {
+            InputStyle::Dialog => (
+                "Which DIG link would you like to open?",
+                "Paste a DIG link. Both forms work:\n\n\
+                 chia://<store id>[:<generation root>]/<path>\n\
+                 urn:dig:chia:<store id>[:<generation root>]/<path>\n\n\
+                 It opens in your browser, served by your own DIG node.",
+            ),
+            InputStyle::Bar => (
+                "Open a DIG link",
+                "Paste a chia:// or urn:dig:chia: link and press Enter. Esc closes this.",
+            ),
+        };
+        dig_app_core::confirm::InputPrompt {
+            title: "DIG — Open",
+            heading,
+            body,
+            field_label: "DIG link:",
+            submit: "Open",
+            masked: false,
+            revealable: false,
+            style,
         }
     }
 
