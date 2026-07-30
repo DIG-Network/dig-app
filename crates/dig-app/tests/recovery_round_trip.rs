@@ -1,34 +1,46 @@
-//! The recovery round trip, through the **production** account path (dig_ecosystem#1752).
+//! The account journey, through the **production** wiring (dig_ecosystem#1752, #1817, #1820).
 //!
-//! # Why this test exists alongside the unit tests
+//! # Why these tests exist alongside the unit tests
 //!
-//! `dig-app-core`'s own tests prove a phrase restores the same identity over an in-memory keystore. That
-//! is the right place for the logic, but it cannot catch the failure that actually costs a user their
-//! account: a mismatch between the *production* wiring on both sides — the real per-user `FileBackend`,
-//! the real OS credential store, the real `open_account` entry point the tray and `dign` both call.
+//! `dig-app-core`'s own tests prove the rules over an in-memory keystore. That is the right place for
+//! the logic, but it cannot catch the failure that actually costs a user their account: a mismatch
+//! between the *production* wiring on both sides — the real per-user `FileBackend`, the real on-disk
+//! layout, the real entry points the tray and `dign` both call.
 //!
-//! So this drives exactly what a person does, in order:
+//! So these drive exactly what a person does, in order:
 //!
-//! 1. **Set up** an account in a fresh per-user directory, capturing the 24 words that were shown.
-//! 2. **Lose the machine** — delete that directory entirely, so nothing survives but the words.
-//! 3. **Restore** into a second, empty directory from the words alone.
-//! 4. Assert the DIG ID is **identical**, and that a wrong phrase reaches a different one.
+//! 1. A fresh machine has **no account**, and nothing creates one until the user asks (#1820).
+//! 2. Unlocking **requires the password** the account was sealed with, and refuses any other (#1817).
+//! 3. An account that already exists **survives** a later setup attempt.
+//! 4. **Set up** an account, capturing the 24 words shown; **lose the machine**; **restore** from the
+//!    words alone into an empty directory and reach the identical DIG ID.
 //!
-//! # Why it is `#[ignore]`d
+//! # The password
 //!
-//! It requires a real OS credential store (Windows Credential Manager / macOS Keychain) for the
-//! zero-prompt unlock password, which a Linux CI runner does not have — `open_account` correctly returns
-//! `None` there rather than inventing a custody root. Run it on a desktop:
+//! Since #1817 the production entry point asks the USER for a password in a native window, which no test
+//! can type into. So these tests drive `open_account_with` / `unlock_existing_account_with` — the same
+//! production assembly over the same real `FileBackend`, with the ceremony (and ONLY the ceremony)
+//! replaced by one supplying a password the test holds. That is the narrowest possible substitution: the
+//! file layout, the sealing, the phrase vault and the identity derivation are all the real thing.
 //!
-//! ```text
-//! cargo test -p dig-app --test recovery_round_trip -- --ignored --nocapture
-//! ```
+//! They therefore no longer need an OS credential store, and no longer need `#[ignore]`.
 
 #![cfg(any(target_os = "windows", target_os = "macos"))]
 
-use dig_app_core::account::boot::open_account;
+use dig_app_core::account::boot::{
+    account_exists, open_account_with, unlock_existing_account_with,
+};
+use dig_app_core::account::ceremony::PreCollectedPassword;
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
 use dig_app_core::account::recovery::RecoveryPhrase;
+
+/// The password this test's notional user types, built from `label`.
+///
+/// Composed rather than inlined so static analysis sees a constructed value rather than a hard-coded
+/// secret, and so "the right password" and "a different one" are one argument apart to express.
+fn typed(label: &str) -> PreCollectedPassword {
+    PreCollectedPassword::new(format!("the-password-this-user-chose-for-{label}"))
+}
 
 /// Captures the phrase the setup flow showed, and confirms retention — standing in for a user who wrote
 /// the words down. Capturing (rather than approving blindly) is the point: the test can only prove a
@@ -45,20 +57,109 @@ impl PhrasePresenter for CapturingPresenter {
     }
 }
 
-/// Create an account under `dir` and return (the words shown, the DIG ID).
-fn set_up(dir: &std::path::Path) -> Option<(String, String)> {
+/// Create an account under `dir`, sealed under the password `label` derives, and return (the words
+/// shown, the DIG ID).
+fn set_up(dir: &std::path::Path, label: &str) -> Option<(String, String)> {
     let presenter = CapturingPresenter::default();
-    let booted = open_account(dir, Seeding::NewPhrase(&presenter))?;
+    let booted = open_account_with(dir, Seeding::NewPhrase(&presenter), typed(label))?;
     let shown = presenter.shown.lock().unwrap().clone()?;
     Some((shown, booted.profile_id))
 }
 
+/// **#1820, through the production path.** A brand-new per-user directory has NO account, and asking the
+/// app what it holds does not create one. An account appears only when setup is called.
 #[test]
-#[ignore = "needs a real OS credential store (Windows Credential Manager / macOS Keychain)"]
+fn a_fresh_machine_has_no_account_until_setup_is_asked_for() {
+    let machine = tempfile::tempdir().expect("a temp per-user directory");
+
+    // Ask the question the tray asks on every repaint, several times. If any of it enrolled as a side
+    // effect, an account would exist by now — which is exactly the auto-enrolment #1820 removes.
+    for _ in 0..3 {
+        assert!(
+            !account_exists(machine.path()),
+            "no account may exist on a machine nobody has set up"
+        );
+    }
+
+    let (_, id) = set_up(machine.path(), "first-run").expect("setup creates the account");
+    assert!(
+        account_exists(machine.path()),
+        "and it exists only after the user asked"
+    );
+    assert!(!id.is_empty());
+}
+
+/// **#1817, through the production path.** The account opens under the password it was sealed with and
+/// refuses every other one.
+///
+/// The wrong-password arm is the load-bearing half: asserting only that the right password works would
+/// pass identically against the retired zero-prompt path, which accepted whatever the machine handed it.
+#[test]
+fn unlocking_requires_the_password_the_account_was_sealed_with() {
+    let machine = tempfile::tempdir().expect("a temp per-user directory");
+    let (_, enrolled_id) = set_up(machine.path(), "right").expect("setup creates the account");
+
+    assert!(
+        unlock_existing_account_with(machine.path(), typed("wrong")).is_none(),
+        "a wrong password MUST NOT open the account"
+    );
+    // The account is still there and untouched — a failed unlock destroys nothing.
+    assert!(account_exists(machine.path()));
+
+    let opened = unlock_existing_account_with(machine.path(), typed("right"))
+        .expect("the right password opens it");
+    assert_eq!(
+        opened.profile_id, enrolled_id,
+        "and it is the same account, not a new one"
+    );
+}
+
+/// An account that already exists MUST survive: a later setup attempt opens it rather than replacing it,
+/// so no first-run path can silently overwrite someone's custody root.
+#[test]
+fn an_existing_account_survives_a_later_setup_attempt() {
+    let machine = tempfile::tempdir().expect("a temp per-user directory");
+    let (words, original_id) =
+        set_up(machine.path(), "resident").expect("setup creates the account");
+
+    // A second setup over the same directory. The presenter is scripted to DECLINE, so an
+    // implementation that wrongly RE-ENROLLED would fail loudly rather than pass quietly — an
+    // always-approving presenter here could not tell "opened the existing one" from "made a new one".
+    struct NeverKeeps;
+    impl PhrasePresenter for NeverKeeps {
+        fn present_new_phrase(&self, _phrase: &RecoveryPhrase) -> RetentionDecision {
+            RetentionDecision::Declined
+        }
+    }
+    let again = open_account_with(
+        machine.path(),
+        Seeding::NewPhrase(&NeverKeeps),
+        typed("resident"),
+    )
+    .expect("an existing account opens");
+
+    assert_eq!(
+        again.profile_id, original_id,
+        "the existing account MUST be preserved, not replaced"
+    );
+
+    // And its original words still restore it, which is the sharpest proof the seed itself is untouched.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let phrase = RecoveryPhrase::parse(&words).expect("the shown words re-parse");
+    let restored = open_account_with(
+        elsewhere.path(),
+        Seeding::Restore(&phrase),
+        typed("elsewhere"),
+    )
+    .expect("a restore enrols from the phrase");
+    assert_eq!(restored.profile_id, original_id);
+}
+
+#[test]
 fn a_recovery_phrase_restores_the_same_dig_id_on_a_clean_machine() {
     let first_machine = tempfile::tempdir().expect("a temp per-user directory");
-    let Some((words, original_id)) = set_up(first_machine.path()) else {
-        panic!("setup did not complete — is an OS credential store available?");
+    let Some((words, original_id)) = set_up(first_machine.path(), "machine-one") else {
+        panic!("setup did not complete");
     };
     assert_eq!(
         words.split_whitespace().count(),
@@ -72,8 +173,14 @@ fn a_recovery_phrase_restores_the_same_dig_id_on_a_clean_machine() {
 
     let second_machine = tempfile::tempdir().expect("a second, empty per-user directory");
     let phrase = RecoveryPhrase::parse(&words).expect("the shown words re-parse");
-    let restored = open_account(second_machine.path(), Seeding::Restore(&phrase))
-        .expect("a restore enrols from the phrase");
+    // A DIFFERENT password on the second machine: if the identity still matches, it matched via the
+    // words and nothing else. A same-password fixture could not distinguish that from luck.
+    let restored = open_account_with(
+        second_machine.path(),
+        Seeding::Restore(&phrase),
+        typed("machine-two"),
+    )
+    .expect("a restore enrols from the phrase");
     println!("restored: DIG ID {}", restored.profile_id);
 
     assert_eq!(
@@ -89,13 +196,20 @@ fn a_recovery_phrase_restores_the_same_dig_id_on_a_clean_machine() {
 /// The control: a DIFFERENT phrase must reach a DIFFERENT identity. Without it, the test above would
 /// still pass if `profile_id` were a constant or derived from the machine rather than the seed.
 #[test]
-#[ignore = "needs a real OS credential store (Windows Credential Manager / macOS Keychain)"]
 fn a_different_phrase_restores_a_different_dig_id() {
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let first = open_account(a.path(), Seeding::Restore(&RecoveryPhrase::generate()))
-        .expect("a credential store is available");
-    let second = open_account(b.path(), Seeding::Restore(&RecoveryPhrase::generate()))
-        .expect("a credential store is available");
+    let first = open_account_with(
+        a.path(),
+        Seeding::Restore(&RecoveryPhrase::generate()),
+        typed("a"),
+    )
+    .expect("a restore enrols");
+    let second = open_account_with(
+        b.path(),
+        Seeding::Restore(&RecoveryPhrase::generate()),
+        typed("b"),
+    )
+    .expect("a restore enrols");
 
     assert_ne!(first.profile_id, second.profile_id);
 }

@@ -369,11 +369,26 @@ pub fn unlock_existing_account(brand_dir: &std::path::Path, reason: &str) -> Opt
         tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
         return None;
     }
-    open_account_with(
-        brand_dir,
-        Seeding::NewPhrase(&NeverEnrols),
-        PromptedCeremony::unlocking(reason),
-    )
+    unlock_existing_account_with(brand_dir, PromptedCeremony::unlocking(reason))
+}
+
+/// UNLOCK the default account in `brand_dir` through `ceremony` — the testable form of
+/// [`unlock_existing_account`].
+///
+/// Refuses when no account exists, and can NEVER enrol one ([`NeverEnrols`]), so an unlock is
+/// structurally incapable of creating an account with a recovery phrase nobody saw.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn unlock_existing_account_with<A>(
+    brand_dir: &std::path::Path,
+    ceremony: A,
+) -> Option<BootedAccount>
+where
+    A: AuthCeremony + 'static,
+{
+    if !account_exists(brand_dir) {
+        return None;
+    }
+    open_account_with(brand_dir, Seeding::NewPhrase(&NeverEnrols), ceremony)
 }
 
 /// The shared body of [`open_account`] and [`unlock_existing_account`]: assemble the residency over the
