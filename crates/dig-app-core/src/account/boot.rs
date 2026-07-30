@@ -42,6 +42,7 @@ use crate::account::lifecycle::{
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::residency::{AccountResidency, ResidencySealer};
+use crate::account::second_factor::vault::SecondFactorVault;
 use crate::keystore::CredentialStore;
 
 /// The single-account id the app boots by default. The account model supports many accounts (the
@@ -116,6 +117,24 @@ pub fn vault_for(
 ) -> Option<PhraseVault<ResidencySealer>> {
     let profile_id = root_profile_id(residency)?;
     Some(PhraseVault::new(
+        residency.production_sealer(ProfileIx::ROOT),
+        brand_dir,
+        &profile_id,
+    ))
+}
+
+/// The second-factor vault for the root profile of a live `residency`, or `None` when it is locked
+/// (dig_ecosystem#1840).
+///
+/// Deliberately the same shape as [`vault_for`], down to the live-view sealer: both vaults live in the
+/// same profile directory under the same DEK, so two different construction paths would be two places
+/// for the at-rest rules to drift apart.
+pub fn second_factor_vault_for(
+    brand_dir: &std::path::Path,
+    residency: &AccountResidency,
+) -> Option<SecondFactorVault<ResidencySealer>> {
+    let profile_id = root_profile_id(residency)?;
+    Some(SecondFactorVault::new(
         residency.production_sealer(ProfileIx::ROOT),
         brand_dir,
         &profile_id,
@@ -251,7 +270,7 @@ pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
             tracing::warn!(error = %e, "the stored account password could not be removed");
         }
     }
-    discard_phrase_vaults(brand_dir);
+    discard_sealed_vaults(brand_dir);
     DiscardOutcome::Discarded
 }
 
@@ -262,32 +281,42 @@ pub fn discard_account(_brand_dir: &std::path::Path) -> DiscardOutcome {
     DiscardOutcome::NothingToDiscard
 }
 
-/// Remove every sealed recovery-phrase copy under `brand_dir`.
+/// Remove every sealed per-profile vault under `brand_dir` — the recovery-phrase copy AND the
+/// second-factor enrolment.
 ///
 /// The vault lives in a per-profile directory keyed by a hash of the profile id, and by the time an account
 /// is being discarded it is locked — so the profile id is no longer readable and the exact directory cannot
 /// be computed. Sweeping for the vault FILE NAME instead is what makes this work at all, and it is safe
 /// because the name is specific to this one artifact.
 ///
-/// Best-effort by design: the vault holds a COPY of the seed that was just destroyed, so a leftover file is
-/// undecryptable ciphertext rather than exposure. It is still removed, because a file named
+/// Best-effort for the PHRASE copy: it holds a copy of the seed that was just destroyed, so a leftover
+/// file is undecryptable ciphertext rather than exposure. It is still removed, because a file named
 /// `recovery-phrase.seal` sitting in the data directory of an account that no longer exists is exactly the
 /// kind of residue that makes a user doubt a removal happened.
+///
+/// For the SECOND-FACTOR enrolment it is load-bearing rather than tidy (dig_ecosystem#1840). The tray
+/// reads "is a second factor enrolled?" from the file's EXISTENCE, which needs no unlock — so a leftover
+/// blob would make a brand-new account report a second factor it does not have, offer "Turn off two-factor
+/// codes…", and then fail every challenge, because the record was sealed under a seed that no longer
+/// exists. That is a trap with no way out, not residue.
 ///
 /// Gated to the same targets as [`discard_account`], its only caller: a host with no per-application
 /// credential store never enrols an account, so it never has one to discard either.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-fn discard_phrase_vaults(brand_dir: &std::path::Path) {
+fn discard_sealed_vaults(brand_dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(brand_dir.join("profiles")) else {
         return;
     };
     for profile in entries.flatten() {
-        let vault = profile
-            .path()
-            .join(crate::account::phrase_vault::VAULT_FILE);
-        if vault.exists() {
-            if let Err(e) = std::fs::remove_file(&vault) {
-                tracing::warn!(error = %e, "a sealed recovery-phrase copy could not be removed");
+        for name in [
+            crate::account::phrase_vault::VAULT_FILE,
+            crate::account::second_factor::vault::VAULT_FILE,
+        ] {
+            let vault = profile.path().join(name);
+            if vault.exists() {
+                if let Err(e) = std::fs::remove_file(&vault) {
+                    tracing::warn!(error = %e, file = name, "a sealed vault could not be removed");
+                }
             }
         }
     }
@@ -482,6 +511,42 @@ mod tests {
             second_phrase.is_none(),
             "a returning boot holds no phrase — it never saw the words"
         );
+    }
+
+    /// Discarding an account must sweep BOTH sealed vaults out of every profile directory
+    /// (dig_ecosystem#1840).
+    ///
+    /// The second-factor blob is the load-bearing one: the tray reads enrolment from the file's mere
+    /// EXISTENCE (no unlock needed), so a leftover would make the NEXT account report a second factor it
+    /// cannot possibly satisfy — every destructive verb blocked, with no way to turn off a factor that
+    /// was never set up.
+    ///
+    /// The fixture plants the phrase vault too, and asserts on both, because a sweep that removed only
+    /// one file would otherwise pass: with a single planted file the test cannot tell "sweeps this name"
+    /// from "sweeps every name".
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn discarding_an_account_sweeps_both_sealed_vaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profiles").join("some-profile-hash");
+        std::fs::create_dir_all(&profile).unwrap();
+        let planted: Vec<std::path::PathBuf> = [
+            crate::account::phrase_vault::VAULT_FILE,
+            crate::account::second_factor::vault::VAULT_FILE,
+        ]
+        .iter()
+        .map(|name| {
+            let path = profile.join(name);
+            std::fs::write(&path, b"sealed").unwrap();
+            path
+        })
+        .collect();
+
+        discard_sealed_vaults(dir.path());
+
+        for path in planted {
+            assert!(!path.exists(), "{} survived the discard", path.display());
+        }
     }
 
     /// A cancelled setup must leave the machine exactly as it was, so the user can try again.

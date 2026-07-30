@@ -141,6 +141,15 @@ pub struct TrayView {
     /// honest value is always `None` (see the
     /// `never_claims_an_on_chain_did_from_a_local_profile_reference` test).
     pub did: Option<String>,
+    /// Whether a second factor (an authenticator code) is enrolled for this account
+    /// (dig_ecosystem#1840).
+    ///
+    /// Decides which of the two Security rows is offered — "Set up…" or "Turn off…" — so the row always
+    /// names what clicking it will actually do. Read fresh on each repaint from
+    /// [`enrolment_present`](crate::account::second_factor::vault::enrolment_present), which needs no
+    /// unlock — so the menu flips the moment an enrolment completes AND still tells the truth about a
+    /// locked account.
+    pub second_factor: bool,
     /// What became of the global shortcut that opens the URN bar (dig_ecosystem#1839).
     ///
     /// `None` before the shell has attempted registration, which is why it is not simply a
@@ -292,6 +301,21 @@ pub enum TrayAction {
     /// dead end: it explained that the only remedy was a new account while the menu offered no way to
     /// create one. Now it names where that remedy is.
     FixMissingPhrase,
+    /// Set up an authenticator-app code as a SECOND factor (dig_ecosystem#1840).
+    ///
+    /// Offered only while the account is unlocked, which is its real precondition: the enrolment is
+    /// sealed under the account's own key, so a locked account cannot store one. The Security submenu in
+    /// the locked state offers `Unlock…` and nothing else, so the row's absence is not a dead end — the
+    /// remedy is the only row there.
+    ///
+    /// The handler ships with the row (see the `dig-app` shell's `dispatch`). A row whose handler does
+    /// nothing is exactly the dead end dig_ecosystem#1800 removed from this menu.
+    SetUpTwoFactor,
+    /// Turn the enrolled second factor OFF, behind the biometric authorization seam.
+    ///
+    /// Weakening a protection is a security act, not a toggle, so this is authorized rather than
+    /// switched — see [`journey::disable`](crate::account::second_factor::journey::disable).
+    TurnOffTwoFactor,
     /// Copy the profile's DIG ID to the clipboard.
     CopyDigId,
     /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
@@ -630,7 +654,10 @@ pub fn build(view: &TrayView) -> MenuModel {
         management_actions(&account),
     ));
     rows.push(MenuRow::submenu("Wallet", wallet_actions()));
-    rows.push(MenuRow::submenu("Security", security_actions(&account)));
+    rows.push(MenuRow::submenu(
+        "Security",
+        security_actions(&account, view.second_factor),
+    ));
     rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
@@ -753,23 +780,68 @@ fn wallet_actions() -> Vec<MenuRow> {
 /// safe right now*; Manage is *I want a different account*. Putting `Lock now` beside `Remove this account
 /// from this computer` would be a menu where the routine and the irreversible sit together, which is how a
 /// mis-click becomes a loss.
-fn security_actions(account: &AccountState) -> Vec<MenuRow> {
+fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
     match account {
         AccountState::Unlocked { .. } => {
-            vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)]
+            let mut rows = vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)];
+            rows.extend(two_factor_row(true, second_factor));
+            rows
         }
-        AccountState::Locked => vec![MenuRow::action(TrayAction::Unlock, "Unlock…", true)],
-        AccountState::Unopenable => vec![MenuRow::action(
-            TrayAction::ExplainUnopenable,
-            "This account cannot be opened — what to do…",
-            true,
-        )],
+        AccountState::Locked => {
+            let mut rows = vec![MenuRow::action(TrayAction::Unlock, "Unlock…", true)];
+            rows.extend(two_factor_row(false, second_factor));
+            rows
+        }
+        AccountState::Unopenable => {
+            let mut rows = vec![MenuRow::action(
+                TrayAction::ExplainUnopenable,
+                "This account cannot be opened — what to do…",
+                true,
+            )];
+            rows.extend(two_factor_row(false, second_factor));
+            rows
+        }
         // No account to lock or unlock. Saying so beats an empty submenu or a greyed verb with no reason.
         AccountState::Absent | AccountState::Unsupported => vec![MenuRow::action(
             TrayAction::ShowStatus,
             "No account on this computer yet — see Status",
             true,
         )],
+    }
+}
+
+/// The ONE two-factor row for the Security submenu, or `None` when there is nothing honest to offer.
+///
+/// The row is EITHER "set up" or "turn off" — never both, and never a greyed one of each. A row that
+/// names the thing it will do needs no explanation, and offering the verb the account is not in a state
+/// for is the greyed-row failure dig_ecosystem#1800 removed.
+///
+/// # Why "turn off" is offered even while the account is LOCKED
+///
+/// Setting a factor up seals a record under the account's key, so it genuinely needs an unlocked
+/// account. Turning one off only deletes that record, and it is authorized by the platform biometric
+/// rather than by the account — so it can run in any state.
+///
+/// That asymmetry is load-bearing rather than incidental. A second factor blocks the destructive verbs,
+/// and an account that CANNOT BE OPENED AT ALL ([`AccountState::Unopenable`]) can never answer a
+/// challenge. If "turn off" needed an unlock, such an account would be permanently unreplaceable and
+/// unremovable — the trap §6.1 forbids, created by the very feature meant to protect it. Offering the
+/// row here is the way out.
+fn two_factor_row(unlocked: bool, second_factor: bool) -> Option<MenuRow> {
+    match (second_factor, unlocked) {
+        (true, _) => Some(MenuRow::action(
+            TrayAction::TurnOffTwoFactor,
+            "Turn off two-factor codes…",
+            true,
+        )),
+        (false, true) => Some(MenuRow::action(
+            TrayAction::SetUpTwoFactor,
+            "Set up two-factor codes…",
+            true,
+        )),
+        // Nothing enrolled and no unlocked account to enrol under. The `Unlock…` row directly above is
+        // the remedy, so its absence is not a dead end.
+        (false, false) => None,
     }
 }
 
@@ -950,7 +1022,131 @@ mod tests {
             account: Some(account),
             profile_id: Some("a".repeat(96)),
             did: None,
+            second_factor: false,
             hotkey: None,
+        }
+    }
+
+    /// Every action row anywhere in `model`, submenus included, as `(action, label, enabled)`.
+    ///
+    /// A helper rather than a per-test walk because the rows under test live inside a submenu, and a
+    /// test that reached in by index would pass for a row that had drifted into the wrong menu.
+    fn every_action(model: &MenuModel) -> Vec<(TrayAction, String, bool)> {
+        fn walk(rows: &[MenuRow], out: &mut Vec<(TrayAction, String, bool)>) {
+            for row in rows {
+                match row {
+                    MenuRow::Action {
+                        action,
+                        label,
+                        enabled,
+                    } => out.push((*action, label.clone(), *enabled)),
+                    MenuRow::Submenu { rows, .. } => walk(rows, out),
+                    MenuRow::Separator => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&model.rows, &mut out);
+        out
+    }
+
+    /// The rows inside the submenu labelled `label`.
+    fn submenu(model: &MenuModel, label: &str) -> Vec<MenuRow> {
+        model
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                MenuRow::Submenu { label: l, rows } if l == label => Some(rows.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {label} submenu"))
+    }
+
+    // ---- The second factor (dig_ecosystem#1840). ----
+
+    /// The row is EITHER "set up" or "turn off" — the one that names what clicking it will do — and the
+    /// other is absent rather than greyed.
+    ///
+    /// Both states are exercised from the same unlocked fixture, varying ONLY `second_factor`: a test
+    /// that checked one state could not tell a state-dependent row from a hardcoded one.
+    #[test]
+    fn the_two_factor_row_names_the_verb_the_account_is_actually_in_a_state_for() {
+        for (enrolled, offered, absent) in [
+            (
+                false,
+                TrayAction::SetUpTwoFactor,
+                TrayAction::TurnOffTwoFactor,
+            ),
+            (
+                true,
+                TrayAction::TurnOffTwoFactor,
+                TrayAction::SetUpTwoFactor,
+            ),
+        ] {
+            let mut v = view(AccountState::Unlocked { recoverable: true });
+            v.second_factor = enrolled;
+            let rows = submenu(&build(&v), "Security");
+            let actions: Vec<TrayAction> = every_action(&MenuModel { rows })
+                .into_iter()
+                .map(|(action, _, _)| action)
+                .collect();
+
+            assert!(actions.contains(&offered), "with second_factor={enrolled}");
+            assert!(!actions.contains(&absent), "with second_factor={enrolled}");
+        }
+    }
+
+    /// Both two-factor rows are ENABLED wherever they appear. A greyed security verb with no stated
+    /// reason is the #1800 defect; the row's precondition is expressed by it appearing at all.
+    #[test]
+    fn no_two_factor_row_is_ever_offered_greyed_out() {
+        for enrolled in [false, true] {
+            for account in EVERY_STATE {
+                let mut v = view(account.clone());
+                v.second_factor = enrolled;
+                for (action, label, enabled) in every_action(&build(&v)) {
+                    if matches!(
+                        action,
+                        TrayAction::SetUpTwoFactor | TrayAction::TurnOffTwoFactor
+                    ) {
+                        assert!(enabled, "{label:?} is offered greyed in {account:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// SETTING UP is offered only where it can run — an unlocked account, since the enrolment is sealed
+    /// under the account's own key.
+    ///
+    /// The unlocked case is the control in the same loop: without it this would also pass for a menu
+    /// that never offered the row at all.
+    #[test]
+    fn setting_up_is_offered_only_where_it_can_actually_run() {
+        for account in EVERY_STATE {
+            let expected = matches!(account, AccountState::Unlocked { .. });
+            let offered = every_action(&build(&view(account.clone())))
+                .iter()
+                .any(|(a, _, _)| matches!(a, TrayAction::SetUpTwoFactor));
+            assert_eq!(offered, expected, "in {account:?}");
+        }
+    }
+
+    /// **The way out of the trap this feature could otherwise create.** An enrolled factor blocks the
+    /// destructive verbs, and an account that cannot be opened can never answer a challenge — so
+    /// `Turn off two-factor codes…` must be reachable in EVERY state an account exists in, including
+    /// `Locked` and `Unopenable`. If it were not, such an account could never be replaced or removed.
+    #[test]
+    fn turning_off_stays_reachable_even_when_the_account_will_not_open() {
+        for account in STATES_WITH_AN_ACCOUNT {
+            let mut v = view(account.clone());
+            v.second_factor = true;
+            assert!(
+                every_action(&build(&v))
+                    .iter()
+                    .any(|(a, _, enabled)| *a == TrayAction::TurnOffTwoFactor && *enabled),
+                "an enrolled factor must be removable in {account:?}"
+            );
         }
     }
 

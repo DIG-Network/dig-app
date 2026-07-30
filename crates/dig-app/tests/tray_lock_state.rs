@@ -88,6 +88,9 @@ fn view_for(state: AccountState) -> TrayView {
         account: Some(state),
         profile_id: Some("a".repeat(96)),
         did: None,
+        // This suite is about the LOCK state, so the second-factor axis is pinned off and covered by
+        // `tray_menu`'s own tests rather than crossed with every case here.
+        second_factor: false,
         hotkey: None,
     }
 }

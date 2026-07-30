@@ -62,6 +62,9 @@ async-trait.workspace = true
 bip39.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
+# HMAC-SHA1 for RFC 6238 TOTP (`account::second_factor`) — see the workspace manifest for why SHA-1 is
+# the right (and only interoperable) choice for a keyed one-time-password MAC.
+sha1.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
@@ -128,6 +131,11 @@ rand_chacha.workspace = true
 # app's BLS `SessionSigner` and prove a current dig-app opens a session with a current dig-node.
 dig-ipc-protocol.workspace = true
 base64.workspace = true
+# The never-log second-factor test computes a TOTP code INDEPENDENTLY of the crate under test, so the
+# fixture agrees with RFC 4226 rather than with the implementation it is checking (#1840).
+sha1.workspace = true
+hmac.workspace = true
+zeroize.workspace = true
 # Capturing subscriber for the never-log regression tests (#934, dig-logging SPEC §7): a `fmt` layer
 # writing into an in-memory buffer so a test can assert emitted records never contain secret values
 # (a passphrase, a raw identity key). Pinned to the same 0.3 line `dig-logging` builds on.
