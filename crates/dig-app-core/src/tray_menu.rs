@@ -552,26 +552,57 @@ pub fn details_text(view: &TrayView) -> String {
 
 /// Build the menu for `view`.
 ///
-/// The shape is fixed, so the menu never moves under the user's cursor between repaints: the details
-/// window, then the ONE primary account action, then the identity actions, then the management submenu,
-/// then the always-available escapes.
+/// # The shape
+///
+/// Five named rows, always the same five, in this order (dig_ecosystem#1836):
+///
+/// ```text
+/// Status
+/// Open URL…
+/// View Account    ▸
+/// Manage Account  ▸
+/// Security        ▸
+/// ──
+/// Open the log folder
+/// Quit DIG
+/// ```
+///
+/// A FIXED spine is the point. The previous menu grew and shrank with account state — the identity block
+/// appeared only when an account existed, and the primary row changed verb — so rows moved under the cursor
+/// between repaints and no two machines showed the same menu. Five stable rows mean muscle memory works.
+///
+/// Two things sit outside the five, deliberately:
+///
+/// - **The escapes.** `Open the log folder` and `Quit DIG` are always clickable, whatever else has gone
+///   wrong (`professional-ui`'s never-trap-the-user HARD RULE). A tray app with no way out is a defect, so
+///   these are not negotiable against menu length.
+/// - **One contextual row, ONLY when the account needs action** — see [`urgent_account_row`]. Without it a
+///   brand-new user would have to find "Set up my DIG Account" inside a submenu, which is exactly the
+///   first-run dead end #1800 removed and #1826 exists to prevent. In the ordinary unlocked state it is
+///   absent and the menu is exactly the five.
 pub fn build(view: &TrayView) -> MenuModel {
     let account = view.account();
-    let mut rows = vec![
-        MenuRow::action(TrayAction::ShowStatus, "Status and details…", true),
-        // Opening content sits ABOVE the account block and outside it: it is what the product is for,
-        // and it works with no account at all. Putting it below "Manage my DIG Account" would imply a
-        // dependency that does not exist.
-        MenuRow::action(TrayAction::Open, "Open…", true),
-        MenuRow::Separator,
-    ];
-    rows.extend(primary_account_actions(&account));
-    rows.extend(identity_actions(view, &account));
-    rows.push(MenuRow::Separator);
+    let mut rows = Vec::new();
+
+    // Whatever the account needs RIGHT NOW, above everything, and only when there is something to need.
+    if let Some(row) = urgent_account_row(&account) {
+        rows.push(row);
+        rows.push(MenuRow::Separator);
+    }
+
+    rows.push(MenuRow::action(TrayAction::ShowStatus, "Status", true));
+    // Opening content is what the product is FOR, and it works with no account at all — so it sits high and
+    // stays enabled in every state (§6.0: consumption is never gated on custody).
+    rows.push(MenuRow::action(TrayAction::Open, "Open URL…", true));
     rows.push(MenuRow::submenu(
-        "Manage my DIG Account",
+        "View Account",
+        view_account_actions(view, &account),
+    ));
+    rows.push(MenuRow::submenu(
+        "Manage Account",
         management_actions(&account),
     ));
+    rows.push(MenuRow::submenu("Security", security_actions(&account)));
     rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
@@ -584,65 +615,74 @@ pub fn build(view: &TrayView) -> MenuModel {
     MenuModel { rows }
 }
 
-/// The ONE thing the account most needs from the user right now, at the top of the menu.
+/// The ONE thing the account needs from the user right now, or `None` when it needs nothing.
 ///
-/// Exactly one row, chosen by state, rather than the four-row set-up/restore/unlock/lock block where
-/// three were always greyed. The rare verbs moved to [`management_actions`], which is what lets this
-/// stay a single, always-clickable row.
-fn primary_account_actions(account: &AccountState) -> Vec<MenuRow> {
+/// `None` is the ordinary case — an unlocked, working account has no outstanding demand, and inventing a row
+/// for it would be noise. The states that DO return a row are the ones where the app is otherwise unusable:
+/// no account yet, a locked account, and an account that cannot be opened at all.
+///
+/// This is the row that keeps a first run from being a scavenger hunt. `Set up my DIG Account…` living only
+/// inside **Manage Account** would put the single thing a new user must do behind a submenu they have no
+/// reason to open.
+fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
     match account {
-        // The one honestly-disabled row left in the menu, and it names its own reason (rule 3).
-        AccountState::Unsupported => vec![MenuRow::action(
+        // The one honestly-disabled row left on the top level, and it names its own reason (rule 3).
+        AccountState::Unsupported => Some(MenuRow::action(
             TrayAction::SetUpAccount,
             "Set up my DIG Account (not supported on this system yet)",
             false,
-        )],
-        AccountState::Absent => vec![
-            MenuRow::action(TrayAction::SetUpAccount, "Set up my DIG Account…", true),
-            MenuRow::action(
-                TrayAction::RestoreFromPhrase,
-                "Restore from a recovery phrase…",
-                true,
-            ),
-        ],
-        AccountState::Locked => vec![MenuRow::action(TrayAction::Unlock, "Unlock…", true)],
+        )),
+        AccountState::Absent => Some(MenuRow::action(
+            TrayAction::SetUpAccount,
+            "Set up my DIG Account…",
+            true,
+        )),
+        AccountState::Locked => Some(MenuRow::action(TrayAction::Unlock, "Unlock…", true)),
         // NOT an `Unlock…` row: unlocking is what already failed, so offering it again would be a button
         // guaranteed to fail. The one thing the app can do here is explain and point at the remedy.
-        AccountState::Unopenable => vec![MenuRow::action(
+        AccountState::Unopenable => Some(MenuRow::action(
             TrayAction::ExplainUnopenable,
             "This account cannot be opened — what to do…",
             true,
-        )],
-        AccountState::Unlocked { .. } => {
-            vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)]
-        }
+        )),
+        // Unlocked and working: nothing is owed. Locking lives under Security.
+        AccountState::Unlocked { .. } => None,
     }
 }
 
-/// The identity block: the recovery phrase and the DIG ID.
+/// **View Account** — the read-only views of the account. Nothing here changes anything.
 ///
-/// Omitted entirely when there is no account to have an identity — five greyed rows for an account that
-/// does not exist is the defect this rewrite removes, and a user with no account has nothing to do here.
+/// That is the submenu's whole contract, and it is why the destructive verbs are NOT here: a person opening
+/// "View" must not find "Remove this account from this computer" one mis-click away.
 ///
-/// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering
-/// a disabled "show my recovery phrase" to someone who has none tells them nothing about why.
-fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
+/// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering a
+/// disabled "show my recovery phrase" to someone who has none tells them nothing about why (#1800).
+fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     if !account.exists() {
-        return Vec::new();
+        // Nothing to view. The DID explainer still applies — it is about the CONCEPT, not this account —
+        // and leaving the submenu empty would be a row that opens onto nothing.
+        return vec![MenuRow::action(TrayAction::AboutDid, DID_LABEL, true)];
     }
-    let mut rows = vec![MenuRow::Separator];
+    let mut rows = Vec::new();
+    if view.profile_id.is_some() {
+        rows.push(MenuRow::action(
+            TrayAction::CopyDigId,
+            "Copy my DIG ID",
+            true,
+        ));
+    }
     match account {
         // An account that will not open cannot have its phrase read either — the vault is sealed under the
-        // same seed. The primary row above already explains the situation, so nothing is added here.
-        AccountState::Unopenable => rows.clear(),
+        // same seed. The urgent row already explains the situation, so nothing is added here.
+        AccountState::Unopenable => {}
         AccountState::Unlocked { recoverable: false } => rows.push(MenuRow::action(
             TrayAction::FixMissingPhrase,
             "This account has NO recovery phrase — what to do…",
             true,
         )),
         // Locked: the row stays, so the capability is visibly there, and its label names the ONE thing
-        // standing in the way — which the enabled `Unlock…` row directly above then does (rule 3). This is
-        // one of the two legitimately-disabled rows in the whole surface; see the module docs.
+        // standing in the way — which the enabled `Unlock…` row does. This is one of the two
+        // legitimately-disabled rows in the whole surface; see the module docs.
         AccountState::Locked => rows.push(MenuRow::action(
             TrayAction::ShowRecoveryPhrase,
             "Show my recovery phrase (unlock first)",
@@ -654,14 +694,35 @@ fn identity_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
             matches!(account, AccountState::Unlocked { recoverable: true }),
         )),
     }
-    if view.profile_id.is_some() {
-        rows.push(MenuRow::action(
-            TrayAction::CopyDigId,
-            "Copy my DIG ID",
-            true,
-        ));
-    }
+    rows.push(MenuRow::Separator);
+    rows.push(MenuRow::action(TrayAction::AboutDid, DID_LABEL, true));
     rows
+}
+
+/// **Security** — locking, and the custody-state explainers.
+///
+/// Separate from **Manage Account** because the two answer different questions. Security is *is my account
+/// safe right now*; Manage is *I want a different account*. Putting `Lock now` beside `Remove this account
+/// from this computer` would be a menu where the routine and the irreversible sit together, which is how a
+/// mis-click becomes a loss.
+fn security_actions(account: &AccountState) -> Vec<MenuRow> {
+    match account {
+        AccountState::Unlocked { .. } => {
+            vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)]
+        }
+        AccountState::Locked => vec![MenuRow::action(TrayAction::Unlock, "Unlock…", true)],
+        AccountState::Unopenable => vec![MenuRow::action(
+            TrayAction::ExplainUnopenable,
+            "This account cannot be opened — what to do…",
+            true,
+        )],
+        // No account to lock or unlock. Saying so beats an empty submenu or a greyed verb with no reason.
+        AccountState::Absent | AccountState::Unsupported => vec![MenuRow::action(
+            TrayAction::ShowStatus,
+            "No account on this computer yet — see Status",
+            true,
+        )],
+    }
 }
 
 /// The `Manage my DIG Account` submenu — **reachable in every state**, which is the whole point.
@@ -698,9 +759,21 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
             ),
         ]
     } else {
-        // With no account there is nothing to replace, so the create/restore verbs read plainly — and
-        // they are the SAME actions the top level offers, so the submenu does not repeat them.
-        Vec::new()
+        // With no account there is nothing to REPLACE, so the verbs read plainly as create and restore.
+        //
+        // `Set up` is repeated here even though `urgent_account_row` also offers it on the top level, and
+        // that repetition is deliberate: the top-level row is the first-run signpost, while this submenu is
+        // where a person goes when they have decided to *manage* their account and expect to find both ways
+        // of getting one. `Restore` has NO other home — it used to sit on the top level beside `Set up`, and
+        // dropping it here silently would strand every user with an existing recovery phrase.
+        vec![
+            MenuRow::action(TrayAction::SetUpAccount, "Set up a new DIG Account…", true),
+            MenuRow::action(
+                TrayAction::RestoreFromPhrase,
+                "Restore from a recovery phrase…",
+                true,
+            ),
+        ]
     };
     if !rows.is_empty() {
         rows.push(MenuRow::Separator);
@@ -1178,24 +1251,38 @@ mod tests {
                 "{action:?} must still be reachable in the submenu"
             );
         }
+        // **The control.** Without this, an EMPTY top level would satisfy every assertion above. `LockNow`
+        // used to serve as that control; it now lives under Security (dig_ecosystem#1836), so the spine
+        // itself does the job — and it is a stronger control, because it pins the two rows that must always
+        // be one click away rather than whichever verb happened to be primary.
+        for action in [TrayAction::ShowStatus, TrayAction::Open] {
+            assert!(
+                top_level.contains(&action),
+                "{action:?} is part of the fixed spine and must stay on the top level: {top_level:?}"
+            );
+        }
         assert!(
-            top_level.contains(&TrayAction::LockNow),
-            "the primary action stays on the top level: {top_level:?}"
+            !top_level.contains(&TrayAction::LockNow),
+            "locking belongs under Security, not beside the escapes: {top_level:?}"
+        );
+        assert!(
+            menu.is_enabled(TrayAction::LockNow),
+            "…but it must still be reachable there"
         );
     }
 
     /// The top-level menu must stay SHORT — a native menu the length of the old one is a wall of text.
     ///
-    /// The bound is 8: details · **open** · the primary account action · the phrase row · copy-id · the
-    /// management submenu · logs · quit. Still four fewer rows than the menu this replaced, which reached
-    /// 12 with five of them greyed.
+    /// The bound is 8, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
+    /// that grew with state: Status · Open URL · View Account · Manage Account · Security · logs · quit is
+    /// seven, plus at most ONE contextual row when the account needs something (no account, locked, or
+    /// unopenable). Half the menu this replaced, which reached 12 with five rows greyed.
     ///
-    /// It was 7 before `Open` (dig_ecosystem#1821). Raising it is a judgement, not an accommodation, so
-    /// the reason is recorded rather than left as a bumped constant: **opening content is what the
-    /// product is FOR**, it needs no account, and burying it in the account-management submenu would put
-    /// the one verb a content consumer wants behind the custody menu they may never use. The rule this
-    /// number enforces is unchanged — every *further* verb goes in the submenu or the details window —
-    /// and a primary capability arriving is exactly the case that should move the number, once.
+    /// The number has moved twice, each time for a reason worth recording rather than a bumped constant: 7
+    /// → 8 when `Open` arrived (#1821), because opening content is what the product is FOR and burying it
+    /// under the custody menu would hide the one verb a content consumer wants. It stays 8 now because the
+    /// spine is shorter but gained the contextual row. The rule it enforces is unchanged — every *further*
+    /// verb goes in a submenu or the details window.
     #[test]
     fn the_top_level_menu_stays_short_in_every_state() {
         for account in EVERY_STATE {
@@ -1210,6 +1297,99 @@ mod tests {
                 "{account:?}: {clickable} top-level rows is a wall, not a menu"
             );
         }
+    }
+
+    /// **The five named options are always present, in order** (dig_ecosystem#1836).
+    ///
+    /// The user asked for a specific menu; this is what holds the loop to it. Asserted in EVERY state,
+    /// because the defect it prevents is the old behaviour — a menu whose rows appeared and vanished with
+    /// account state, so no two machines showed the same thing and nothing could be found twice in the
+    /// same place.
+    #[test]
+    fn the_five_named_options_are_present_and_ordered_in_every_state() {
+        for account in EVERY_STATE {
+            let menu = build(&view(account.clone()));
+            let spine: Vec<&str> = menu
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    MenuRow::Action { label, .. } => Some(label.as_str()),
+                    MenuRow::Submenu { label, .. } => Some(label.as_str()),
+                    MenuRow::Separator => None,
+                })
+                .collect();
+
+            let wanted = [
+                "Status",
+                "Open URL…",
+                "View Account",
+                "Manage Account",
+                "Security",
+            ];
+            let found: Vec<&str> = spine
+                .iter()
+                .copied()
+                .filter(|l| wanted.contains(l))
+                .collect();
+            assert_eq!(
+                found, wanted,
+                "{account:?}: the five options must all be present, in order — got {spine:?}"
+            );
+
+            // The escapes are not part of the five, and are not negotiable against them: a tray app that
+            // cannot be quit traps the user (`professional-ui` HARD RULE).
+            assert!(menu.is_enabled(TrayAction::Quit), "{account:?}");
+            assert!(menu.is_enabled(TrayAction::OpenLogs), "{account:?}");
+        }
+    }
+
+    /// **Restore must not be lost.** It used to sit on the top level beside `Set up`; the five-option
+    /// restructure moved it into **Manage Account**, and a user with an existing recovery phrase who cannot
+    /// find it has no way onto this machine at all.
+    ///
+    /// Paired with the first-run property below, which pins the other half: `Set up` stays one click away.
+    #[test]
+    fn restoring_from_a_phrase_is_reachable_with_no_account() {
+        let menu = build(&view(AccountState::Absent));
+        assert!(
+            menu.is_enabled(TrayAction::RestoreFromPhrase),
+            "an existing phrase must have somewhere to go"
+        );
+    }
+
+    /// **First run stays one click.** Someone who has just installed must see what to do WITHOUT opening a
+    /// submenu — the dead end #1800 removed and #1826 is built to prevent.
+    #[test]
+    fn setting_up_an_account_is_on_the_top_level_when_there_is_none() {
+        let menu = build(&view(AccountState::Absent));
+        let top_level: Vec<TrayAction> = menu
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                MenuRow::Action { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            top_level.contains(&TrayAction::SetUpAccount),
+            "a brand-new user must not have to hunt for setup: {top_level:?}"
+        );
+
+        // The control: once an account EXISTS there is nothing urgent, so the top level carries no account
+        // verb at all and the menu is exactly the five plus the escapes.
+        let unlocked = build(&view(AccountState::Unlocked { recoverable: true }));
+        let unlocked_actions: Vec<TrayAction> = unlocked
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                MenuRow::Action { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !unlocked_actions.contains(&TrayAction::SetUpAccount),
+            "a working account has nothing urgent to offer: {unlocked_actions:?}"
+        );
     }
 
     // ---- The tray icon + tooltip: state's new home. ----
