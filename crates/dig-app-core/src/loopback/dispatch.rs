@@ -24,14 +24,14 @@
 //! then the injected confirmer is the fail-closed [`crate::confirm::HeadlessConfirmer`].
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
-use crate::pairing::{AuthFailure, PairingStore};
+use crate::pairing::{AuthFailure, NewPairing, PairedApp, PairingScope, PairingStore};
+use crate::pairing_code::{PairingCode, PairingCodeIssuer};
 use crate::sealer::ProfileSealer;
 use crate::session::{sign_callback_message, SessionSigner};
 use crate::sign_policy::{NativeConfirmSignPolicy, SignRejection, SignSubject, SignVerdict};
@@ -55,6 +55,14 @@ pub enum SignErrorCode {
     PairDenied,
     /// User did not answer the pairing confirm in time.
     PairTimeout,
+    /// An unpinned caller offered no pairing code, or one that was wrong, expired, already used, or
+    /// past its attempt budget (§5.6.3a).
+    ///
+    /// ONE code for every one of those cases, deliberately. Distinguishing "no code is outstanding"
+    /// from "that code was wrong" would tell a caller whether a human is mid-pairing right now, which
+    /// is precisely the signal a process racing to redeem someone else's code wants. The distinction
+    /// exists in [`CodeFailure`](crate::pairing_code::CodeFailure) for the log, not on the wire.
+    PairCodeRejected,
     /// The `origin` is not whitelisted for the active profile.
     ConnectRequired,
     /// User denied the connect modal.
@@ -73,6 +81,13 @@ pub enum SignErrorCode {
     SignNoConfirmer,
     /// The active profile could not be unlocked.
     Locked,
+    /// The frame authenticated, but this pairing's scope does not grant the method it asked for
+    /// (§5.6.3a) — a code-paired third party reaching for `sign.request`.
+    ///
+    /// Distinct from every `AUTH_*` code on purpose: the caller IS who it says it is and its token is
+    /// good, so telling it "authentication failed" would send a well-behaved app into a re-pair loop
+    /// that could never grant what it is asking for.
+    CapNotGranted,
 }
 
 impl SignErrorCode {
@@ -84,6 +99,7 @@ impl SignErrorCode {
             Self::AuthReplay => "AUTH_REPLAY",
             Self::PairDenied => "PAIR_DENIED",
             Self::PairTimeout => "PAIR_TIMEOUT",
+            Self::PairCodeRejected => "PAIR_CODE_REJECTED",
             Self::ConnectRequired => "CONNECT_REQUIRED",
             Self::ConnectDenied => "CONNECT_DENIED",
             Self::ConnectTimeout => "CONNECT_TIMEOUT",
@@ -93,6 +109,7 @@ impl SignErrorCode {
             Self::SignBadPayload => "SIGN_BAD_PAYLOAD",
             Self::SignNoConfirmer => "SIGN_NO_CONFIRMER",
             Self::Locked => "LOCKED",
+            Self::CapNotGranted => "CAP_NOT_GRANTED",
         }
     }
 
@@ -104,6 +121,7 @@ impl SignErrorCode {
             Self::AuthReplay => -33003,
             Self::PairDenied => -33010,
             Self::PairTimeout => -33011,
+            Self::PairCodeRejected => -33012,
             Self::ConnectRequired => -33020,
             Self::ConnectDenied => -33021,
             Self::ConnectTimeout => -33022,
@@ -113,6 +131,7 @@ impl SignErrorCode {
             Self::SignBadPayload => -33033,
             Self::SignNoConfirmer => -33034,
             Self::Locked => -33040,
+            Self::CapNotGranted => -33050,
         }
     }
 }
@@ -145,12 +164,17 @@ pub struct RequestFrame {
     pub auth: Option<FrameAuth>,
 }
 
-/// `pair.begin` parameters (`SPEC.md` §5.6.3).
+/// `pair.begin` parameters (`SPEC.md` §5.6.3 / §5.6.3a).
+///
+/// `pairing_code` is what an unpinned caller offers INSTEAD of a pin. It is absent for DIG's own
+/// extensions, whose `ext_id` is the pin, and required for everyone else.
 #[derive(Debug, Deserialize)]
 struct PairBeginParams {
     ext_id: String,
     #[serde(default)]
     ext_label: Option<String>,
+    #[serde(default)]
+    pairing_code: Option<String>,
 }
 
 /// `connect.request` parameters (`SPEC.md` §5.6.4).
@@ -234,7 +258,10 @@ impl SignReauthGate for OpenSignGate {
 /// Generic over the [`ProfileSealer`] so the pairing + whitelist stores seal under the active
 /// profile's DEK (NC-2). Shared behind an `Arc` by the async server; every method takes `&self`.
 pub struct FrameRouter<S: ProfileSealer> {
-    pairings: PairingStore<S>,
+    /// Shared with the tray's [`PairedAppsControl`] so a revoke from the menu and the authentication
+    /// of the next frame act on the SAME live map — which is what makes a revoke immediate rather
+    /// than a promise kept at the next restart.
+    pairings: Arc<PairingStore<S>>,
     whitelist: WhitelistStore<S>,
     /// Gates pairing + connect confirms (§5.6.1). Shared with `sign_policy`, which gates sign confirms.
     confirmer: Arc<dyn NativeConfirmer>,
@@ -246,8 +273,16 @@ pub struct FrameRouter<S: ProfileSealer> {
     signer: Box<dyn SessionSigner + Send + Sync>,
     /// The connect-handle returned on a granted connect.
     connect_info: ProfileConnectInfo,
-    /// The extension ids permitted to `pair.begin` — the same pinned set the `Origin` guard enforces.
+    /// The extension ids permitted to `pair.begin` WITHOUT a pairing code — the same pinned set the
+    /// `Origin` guard enforces. Callers outside it must redeem a code from [`codes`](Self::codes).
     allowed_ext_ids: Vec<String>,
+    /// The pairing codes the tray issues and this router redeems (§5.6.3a).
+    ///
+    /// The router holds it but has NO path to `issue` — only [`PairedAppsControl`], which the tray
+    /// takes via [`control`](Self::control), can mint one. That is the direction rule made
+    /// structural: no frame this router ever handles can cause a code to exist. A router whose
+    /// `control` handle nobody holds therefore has no code, ever, and admits no third party at all.
+    codes: Arc<PairingCodeIssuer>,
     /// The at-rest persistence sink: seals the sealed pairing/whitelist bytes + nonce high-water marks
     /// to disk so they survive a restart (#958/#956). Defaults to the no-op [`NullSealedStore`]; the
     /// tray boot injects a [`FileSealedStore`](crate::loopback::FileSealedStore) via
@@ -275,13 +310,14 @@ impl<S: ProfileSealer> FrameRouter<S> {
     ) -> Self {
         let sign_policy = NativeConfirmSignPolicy::new(Arc::clone(&confirmer));
         Self {
-            pairings,
+            pairings: Arc::new(pairings),
             whitelist,
             confirmer,
             sign_policy,
             signer,
             connect_info,
             allowed_ext_ids: allowed_ext_ids.into_iter().collect(),
+            codes: Arc::new(PairingCodeIssuer::new()),
             persist: Arc::new(NullSealedStore),
             reauth_gate: Arc::new(OpenSignGate),
         }
@@ -294,6 +330,16 @@ impl<S: ProfileSealer> FrameRouter<S> {
     pub fn with_reauth_gate(mut self, reauth_gate: Arc<dyn SignReauthGate>) -> Self {
         self.reauth_gate = reauth_gate;
         self
+    }
+
+    /// The handle the tray drives the paired-app surface through: issue a code, list what is paired,
+    /// revoke one. Take it BEFORE the router is moved onto the serving thread.
+    pub fn control(&self) -> PairedAppsControl<S> {
+        PairedAppsControl {
+            pairings: Arc::clone(&self.pairings),
+            codes: Arc::clone(&self.codes),
+            persist: Arc::clone(&self.persist),
+        }
     }
 
     /// Attach a durable [`SealedRecordStore`] so granted pairings, connected origins, and nonce
@@ -360,17 +406,44 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// The pairing handshake (§5.6.3): verify the extension id is pinned, raise the native pairing
-    /// confirm, and on approval mint + seal + persist the channel token.
+    /// The pairing handshake (§5.6.3 / §5.6.3a): establish that the caller may pair AT ALL, raise the
+    /// native pairing confirm, and on approval mint + seal + persist the channel token.
+    ///
+    /// # The two ways in, and why they are not one way
+    ///
+    /// A **pinned** DIG extension pairs on its `ext_id` alone — the same set the `Origin` guard
+    /// enforces, checked again here so a frame that somehow bypassed the transport guard still cannot
+    /// self-pair. **Anyone else** must redeem a pairing code the USER generated in the tray, and is
+    /// paired with the narrower [`PairingScope::ThirdParty`].
+    ///
+    /// The pin path is untouched by the code path: making `allowed_ext_ids` optional so one branch
+    /// could serve both would mean a caller claiming a pinned id no longer has to BE at that pinned
+    /// origin, which is a regression dressed as a simplification.
+    ///
+    /// # Why the code is checked BEFORE the window
+    ///
+    /// It is the whole of the no-unsolicited-prompt property: a caller with no valid code is refused
+    /// having drawn nothing, so a hostile local process cannot make a consent window appear, cannot
+    /// spam a person into approving one, and cannot even learn that a code is outstanding
+    /// (`PAIR_CODE_REJECTED` is one error for every failure). The cost is that a code is spent even if
+    /// the user then declines the window — which is the right way round: a pairing the user refused is
+    /// exactly the moment a code should stop working.
     fn handle_pair_begin(&self, id: &Value, params: &Value) -> Value {
         let Ok(params) = serde_json::from_value::<PairBeginParams>(params.clone()) else {
             return error(id, SignErrorCode::PairDenied);
         };
-        // The ext_id MUST be a pinned DIG extension — the same set the Origin guard enforces, checked
-        // again here so a frame that somehow bypassed the transport guard still cannot self-pair.
-        if !self.allowed_ext_ids.contains(&params.ext_id) {
-            return error(id, SignErrorCode::PairDenied);
-        }
+
+        let request = if self.allowed_ext_ids.contains(&params.ext_id) {
+            NewPairing::pinned(&params.ext_id, params.ext_label.as_deref())
+        } else {
+            let candidate = params.pairing_code.as_deref().unwrap_or("");
+            if let Err(failure) = self.codes.redeem(candidate, now_epoch_secs()) {
+                // The REASON is logged and never sent: on the wire every failure is one code.
+                tracing::info!(?failure, "refused an unpinned pair.begin");
+                return error(id, SignErrorCode::PairCodeRejected);
+            }
+            NewPairing::third_party(&params.ext_id, params.ext_label.as_deref())
+        };
 
         let decision = self.confirmer.confirm_pair(&PairPrompt {
             ext_id: &params.ext_id,
@@ -380,7 +453,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, code);
         }
 
-        match self.pairings.pair(&params.ext_id, now_epoch_secs()) {
+        match self.pairings.pair(&request, now_epoch_secs()) {
             Ok(outcome) => {
                 // Persist the sealed record so the pairing survives a restart (#958). Best-effort:
                 // a failed write is logged inside the store and never fails the pairing.
@@ -391,6 +464,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
                     json!({
                         "pairing_id": outcome.pairing_id,
                         "channel_token_b64": outcome.channel_token_b64,
+                        // Tell the caller what it was granted rather than letting it discover the
+                        // limit by having a sign refused: an app that knows it cannot sign can say so
+                        // in its own UI instead of offering a button that always fails.
+                        "may_sign": request.scope.may_sign(),
                     }),
                 )
             }
@@ -399,10 +476,19 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// Every non-pairing frame: authenticate it, then dispatch to the connect/sign handlers.
+    /// Every non-pairing frame: authenticate it, check the pairing's scope permits the method, then
+    /// dispatch.
+    ///
+    /// The order is load-bearing. Authentication runs FIRST, so an unauthenticated caller learns
+    /// nothing about what any pairing may do; the capability check runs SECOND, on the scope of the
+    /// pairing the frame actually authenticated as — never on anything the frame itself claimed.
     fn handle_authenticated(&self, frame: &RequestFrame) -> Value {
-        if let Err(code) = self.authenticate(frame) {
-            return error(&frame.id, code);
+        let scope = match self.authenticate(frame) {
+            Ok(scope) => scope,
+            Err(code) => return error(&frame.id, code),
+        };
+        if !permits(scope, &frame.method) {
+            return error(&frame.id, SignErrorCode::CapNotGranted);
         }
         match frame.method.as_str() {
             "connect.request" => self.handle_connect(&frame.id, &frame.params),
@@ -533,8 +619,9 @@ impl<S: ProfileSealer> FrameRouter<S> {
     }
 
     /// Verify a frame's `auth` object against the pairing store, mapping [`AuthFailure`] to the wire
-    /// codes. A frame with no `auth` object fails `AUTH_REQUIRED`.
-    fn authenticate(&self, frame: &RequestFrame) -> Result<(), SignErrorCode> {
+    /// codes and returning the authenticated pairing's [`PairingScope`]. A frame with no `auth` object
+    /// fails `AUTH_REQUIRED`.
+    fn authenticate(&self, frame: &RequestFrame) -> Result<PairingScope, SignErrorCode> {
         let auth = frame.auth.as_ref().ok_or(SignErrorCode::AuthRequired)?;
         self.pairings
             .verify_frame(
@@ -553,13 +640,98 @@ impl<S: ProfileSealer> FrameRouter<S> {
         // cannot replay into the next session (#956). Best-effort: a lost write only risks a one-frame
         // replay window across a crash, and every sign still re-gates on the native confirm.
         self.persist.persist_nonce(&auth.pairing_id, auth.nonce);
-        Ok(())
+        // Only an AUTHENTICATED frame moves "last seen", so the management window cannot be made to
+        // show a revoked or impersonated app as recently active.
+        let now = now_epoch_secs();
+        self.pairings.note_seen(&auth.pairing_id, now);
+        // The pairing verified a moment ago, so it is live; a race that unpaired it in between is a
+        // revoke, and refusing the frame is the correct outcome of one.
+        self.pairings
+            .scope_of(&auth.pairing_id)
+            .ok_or(SignErrorCode::AuthRequired)
     }
 
     /// The pairing store, for the async server to restore sealed pairings at startup and expose the
     /// unpair surface.
     pub fn pairings(&self) -> &PairingStore<S> {
         &self.pairings
+    }
+}
+
+/// Whether a pairing in `scope` may call `method` (§5.6.3a).
+///
+/// Stated as ONE function over the method name rather than a check inside each handler, so a method
+/// added later is a line here rather than a capability that silently defaults to allowed — the failure
+/// mode where a new endpoint quietly hands a third party something the scope was written to withhold.
+///
+/// Everything except signing is the control plane, which is exactly what a code-paired third party is
+/// for. `sign.request` is the one that reaches the identity key, and it is why
+/// [`PairingScope::ThirdParty`] exists.
+fn permits(scope: PairingScope, method: &str) -> bool {
+    match method {
+        "sign.request" => scope.may_sign(),
+        _ => true,
+    }
+}
+
+/// The tray's handle onto the live pairing surface (dig_ecosystem#1848): issue a code, list what is
+/// paired, revoke one.
+///
+/// Holds the SAME [`PairingStore`] the [`FrameRouter`] authenticates against, which is the whole
+/// mechanism behind an immediate revoke: [`revoke`](Self::revoke) removes the live entry, so the
+/// revoked app's very next frame fails `AUTH_REQUIRED` on the channel it is already holding open. A
+/// handle that only deleted the at-rest record would leave the session running until the next restart
+/// — a revoke that reads as done and is not.
+///
+/// Cheap to clone (three `Arc`s) and `Send + Sync`, so the tray thread holds one while the loopback
+/// server owns the router.
+pub struct PairedAppsControl<S: ProfileSealer> {
+    pairings: Arc<PairingStore<S>>,
+    codes: Arc<PairingCodeIssuer>,
+    persist: Arc<dyn SealedRecordStore>,
+}
+
+impl<S: ProfileSealer> Clone for PairedAppsControl<S> {
+    fn clone(&self) -> Self {
+        Self {
+            pairings: Arc::clone(&self.pairings),
+            codes: Arc::clone(&self.codes),
+            persist: Arc::clone(&self.persist),
+        }
+    }
+}
+
+impl<S: ProfileSealer> PairedAppsControl<S> {
+    /// Mint a pairing code for the user to carry to their app, replacing any outstanding one.
+    ///
+    /// Reachable ONLY from the tray — the router has no path to it — which is what makes "the user
+    /// generates the code" a structural property rather than a convention.
+    pub fn issue_code(&self, now: u64) -> PairingCode {
+        self.codes.issue(now)
+    }
+
+    /// Destroy any outstanding code — the user's way to take one back.
+    pub fn cancel_code(&self) {
+        self.codes.cancel();
+    }
+
+    /// Every app currently paired with this profile, oldest first.
+    pub fn list(&self) -> Vec<PairedApp> {
+        self.pairings.list()
+    }
+
+    /// Revoke `pairing_id`: drop the live pairing FIRST so the next frame from that app fails
+    /// immediately, then delete its at-rest record so the revocation survives a restart. Returns
+    /// whether an app was actually paired under that id.
+    ///
+    /// The order matters. Deleting the record first would leave a window — however short — in which
+    /// the app is still authenticated on a channel the user has been told is closed.
+    pub fn revoke(&self, pairing_id: &str) -> bool {
+        let was_paired = self.pairings.unpair(pairing_id);
+        if was_paired {
+            self.persist.remove_pairing(pairing_id);
+        }
+        was_paired
     }
 }
 
@@ -584,14 +756,10 @@ fn pair_decision_error(decision: ConfirmDecision) -> Option<SignErrorCode> {
     }
 }
 
-/// The current Unix time in whole seconds (the pairing record's `created_at`). A backwards clock
-/// before the epoch is impossible on a sane host; clamp to 0 rather than panic if it ever happens.
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+/// The current Unix time in whole seconds (the pairing record's `created_at`, and the instant a
+/// pairing code is redeemed against). Re-exported from [`crate::pairing_code`] so the router and the
+/// tray that issues the code read the same clock through the same definition.
+use crate::pairing_code::now_epoch_secs;
 
 /// Build a JSON-RPC 2.0 success response.
 fn ok(id: &Value, result: Value) -> Value {
@@ -626,6 +794,7 @@ mod tests {
     use crate::test_support::{test_residency, test_sealer};
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const DID: &str = "did:chia:router-test";
     const EXT: &str = "mlibddmbhlgogepnjdienclhnkfpkfah";
@@ -887,15 +1056,363 @@ mod tests {
         assert!(router.pairings().is_paired(&pairing_id));
     }
 
+    /// An app id DIG does not ship — the caller the whole pairing-code path exists for.
+    const THIRD_PARTY: &str = "com.example.someones-tool";
+
+    /// A confirmer that COUNTS how many windows it was asked to draw.
+    ///
+    /// The count is the assertion in the tests below: "no unsolicited prompt" is a claim about windows,
+    /// and an implementation that prompted first and refused afterwards would return an identical
+    /// error while letting a hostile process spam a person until one is clicked.
+    struct CountingConfirmer {
+        decision: ConfirmDecision,
+        prompts: Arc<AtomicUsize>,
+    }
+    impl NativeConfirmer for CountingConfirmer {
+        fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
+            self.prompts.fetch_add(1, Ordering::SeqCst);
+            self.decision
+        }
+        fn confirm_connect(&self, _: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+        fn confirm_sign(&self, _: &crate::confirm::SignPrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+    }
+
+    /// A router plus the TRAY-side handle onto it, because every test below acts as both ends: the
+    /// tray that issues a code, and the app that types one.
+    fn router_with_codes(
+        confirmer: impl NativeConfirmer + 'static,
+    ) -> (FrameRouter<AccountSealer>, PairedAppsControl<AccountSealer>) {
+        let router = router_with(confirmer);
+        let control = router.control();
+        (router, control)
+    }
+
+    /// A `pair.begin` frame from an app DIG does not ship, optionally carrying a code.
+    fn third_party_pair(code: Option<&str>) -> Value {
+        let mut params = json!({ "ext_id": THIRD_PARTY, "ext_label": "A Tool" });
+        if let Some(code) = code {
+            params["pairing_code"] = json!(code);
+        }
+        params
+    }
+
+    /// An authenticated frame, MAC'd exactly as a real client would.
+    fn authed_request(
+        method: &str,
+        params: Value,
+        pairing_id: &str,
+        token: &str,
+        nonce: u64,
+    ) -> RequestFrame {
+        let auth = signed_auth(token, pairing_id, nonce, method, &params);
+        request(method, params, Some(auth))
+    }
+
+    /// Pair a third party with `code` and return the response.
+    fn pair_third_party(router: &FrameRouter<AccountSealer>, code: &str) -> Value {
+        router.handle(&request("pair.begin", third_party_pair(Some(code)), None))
+    }
+
     #[test]
-    fn pair_begin_from_an_unpinned_extension_is_denied() {
-        let router = router_with(ScriptedConfirmer(ConfirmDecision::Approve));
+    fn an_unpinned_caller_with_no_code_is_refused_without_drawing_a_window() {
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let (router, _codes) = router_with_codes(CountingConfirmer {
+            decision: ConfirmDecision::Approve,
+            prompts: Arc::clone(&prompts),
+        });
+
+        let resp = router.handle(&request("pair.begin", third_party_pair(None), None));
+        assert_eq!(resp["error"]["message"], "PAIR_CODE_REJECTED");
+        assert_eq!(
+            prompts.load(Ordering::SeqCst),
+            0,
+            "no code, no window: a person must never be asked about a caller that has no code"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_caller_with_the_users_code_pairs_with_a_narrower_scope() {
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+        let code = codes.issue_code(now_epoch_secs());
+
+        let resp = pair_third_party(&router, &code.display());
+        let pairing_id = resp["result"]["pairing_id"]
+            .as_str()
+            .expect("a code-paired app is paired");
+        assert_eq!(
+            resp["result"]["may_sign"], false,
+            "the app is told up front that it cannot sign"
+        );
+        assert_eq!(
+            router.pairings().scope_of(pairing_id),
+            Some(PairingScope::ThirdParty)
+        );
+    }
+
+    #[test]
+    fn a_code_paired_app_may_connect_but_never_sign() {
+        // The capability boundary through the REAL frame path (MAC and all) rather than by asking the
+        // scope directly — the check has to be WIRED INTO dispatch, not merely to exist.
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+        let code = codes.issue_code(now_epoch_secs());
+        let paired = pair_third_party(&router, &code.display());
+        let pairing_id = paired["result"]["pairing_id"].as_str().unwrap().to_string();
+        let token = paired["result"]["channel_token_b64"].as_str().unwrap();
+
+        let connect = router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://dapp.example" }),
+            &pairing_id,
+            token,
+            n(1),
+        ));
+        assert_eq!(
+            connect["result"]["granted"], true,
+            "the control plane IS what a third party is paired for"
+        );
+
+        let sign = router.handle(&authed_request(
+            "sign.request",
+            json!({
+                "origin": "https://dapp.example",
+                "payload_type": "spend",
+                "payload_b64": spend_payload_b64(),
+            }),
+            &pairing_id,
+            token,
+            n(2),
+        ));
+        assert_eq!(
+            sign["error"]["message"], "CAP_NOT_GRANTED",
+            "a code-paired app must not reach the identity key"
+        );
+    }
+
+    #[test]
+    fn a_pinned_extension_still_signs_and_still_needs_no_code() {
+        // The other side of the same bound. A scope check that refused everyone would satisfy the test
+        // above while silently breaking DIG's own extension — and the pinned path must ALSO still work
+        // with NO code outstanding, since making the pin optional was the regression to avoid.
+        let (router, _codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+
         let resp = router.handle(&request(
             "pair.begin",
-            json!({ "ext_id": "unpinned-extension-id", "requested_at": 1 }),
+            json!({ "ext_id": EXT, "requested_at": 1 }),
             None,
         ));
-        assert_eq!(resp["error"]["message"], "PAIR_DENIED");
+        assert_eq!(resp["result"]["may_sign"], true);
+        let pairing_id = resp["result"]["pairing_id"].as_str().unwrap().to_string();
+        let token = resp["result"]["channel_token_b64"].as_str().unwrap();
+
+        router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://dapp.example" }),
+            &pairing_id,
+            token,
+            n(1),
+        ));
+        let sign = router.handle(&authed_request(
+            "sign.request",
+            json!({
+                "origin": "https://dapp.example",
+                "payload_type": "spend",
+                "payload_b64": spend_payload_b64(),
+            }),
+            &pairing_id,
+            token,
+            n(2),
+        ));
+        assert!(
+            sign["result"]["signature_b64"].is_string(),
+            "the pinned path is untouched: {sign}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_code_is_refused_and_the_guessing_stops_at_the_budget() {
+        // The brute-force bound, through the FRAME path: a caller hammering `pair.begin` gets exactly
+        // MAX_ATTEMPTS shots before the code is destroyed, and no window is ever drawn.
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let (router, codes) = router_with_codes(CountingConfirmer {
+            decision: ConfirmDecision::Approve,
+            prompts: Arc::clone(&prompts),
+        });
+        let code = codes.issue_code(now_epoch_secs());
+
+        for _ in 0..200 {
+            let resp = pair_third_party(&router, "ZZZZ-ZZZZ");
+            assert_eq!(resp["error"]["message"], "PAIR_CODE_REJECTED");
+        }
+        assert_eq!(prompts.load(Ordering::SeqCst), 0);
+
+        // The user's own code is dead too — the budget destroyed it, so the way forward is a NEW code
+        // rather than a retry, and the attacker's loop cannot be resumed against the same secret.
+        let resp = pair_third_party(&router, &code.display());
+        assert_eq!(resp["error"]["message"], "PAIR_CODE_REJECTED");
+    }
+
+    #[test]
+    fn a_code_pairs_one_app_and_not_a_second() {
+        // Single-use through the real handler: a second app arriving with the same code — the shape of
+        // a local process that watched the user type it — gets nothing.
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+        let code = codes.issue_code(now_epoch_secs());
+
+        assert!(pair_third_party(&router, &code.display())["result"]["pairing_id"].is_string());
+        assert_eq!(
+            pair_third_party(&router, &code.display())["error"]["message"],
+            "PAIR_CODE_REJECTED"
+        );
+    }
+
+    #[test]
+    fn a_declined_pairing_spends_the_code() {
+        // The user said no. The code must not survive for whatever asks next — the moment a person
+        // refuses a pairing is exactly the moment that code should stop working.
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Deny));
+        let code = codes.issue_code(now_epoch_secs());
+
+        let denied = pair_third_party(&router, &code.display());
+        assert_eq!(denied["error"]["message"], "PAIR_DENIED");
+        // The refused code is spent: presenting it again gets nothing.
+        assert_eq!(
+            pair_third_party(&router, &code.display())["error"]["message"],
+            "PAIR_CODE_REJECTED"
+        );
+    }
+
+    #[test]
+    fn with_no_code_ever_issued_no_third_party_is_admitted() {
+        // The fail-closed default. Nothing but the tray can mint a code, so a router whose tray handle
+        // nobody has used admits no third party — the door is shut rather than open with a default.
+        let router = approving_router();
+        assert_eq!(
+            pair_third_party(&router, "ABCD-EFGH")["error"]["message"],
+            "PAIR_CODE_REJECTED"
+        );
+    }
+
+    #[test]
+    fn revoking_kills_the_live_channel_on_the_very_next_frame() {
+        // THE promise of the management surface. The revoked app keeps its token and its open channel;
+        // what must change is that the token stops working IMMEDIATELY — so this asserts on a frame
+        // sent AFTER the revoke, not on the record being gone.
+        //
+        // Two apps, because a revoke that simply cleared everything would satisfy a one-app fixture
+        // while being a purge rather than a revocation.
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+        let control = router.control();
+
+        let code = codes.issue_code(now_epoch_secs());
+        let doomed = pair_third_party(&router, &code.display());
+        let kept = router.handle(&request(
+            "pair.begin",
+            json!({ "ext_id": EXT, "requested_at": 1 }),
+            None,
+        ));
+
+        let doomed_id = doomed["result"]["pairing_id"].as_str().unwrap().to_string();
+        let doomed_token = doomed["result"]["channel_token_b64"].as_str().unwrap();
+        let kept_id = kept["result"]["pairing_id"].as_str().unwrap().to_string();
+        let kept_token = kept["result"]["channel_token_b64"].as_str().unwrap();
+
+        // Both work BEFORE the revoke, so every assertion after it is about the revoke.
+        let before = router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://before.example" }),
+            &doomed_id,
+            doomed_token,
+            n(1),
+        ));
+        assert_eq!(before["result"]["granted"], true);
+
+        assert!(control.revoke(&doomed_id));
+
+        let after = router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://after.example" }),
+            &doomed_id,
+            doomed_token,
+            n(2),
+        ));
+        assert_eq!(
+            after["error"]["message"], "AUTH_REQUIRED",
+            "the revoked app's next frame must FAIL, on the channel it already holds"
+        );
+
+        let untouched = router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://other.example" }),
+            &kept_id,
+            kept_token,
+            n(3),
+        ));
+        assert_eq!(
+            untouched["result"]["granted"], true,
+            "revoking one app must not disturb another"
+        );
+        assert!(!control.revoke(&doomed_id), "revoking twice is idempotent");
+    }
+
+    #[test]
+    fn the_management_list_shows_what_is_paired_and_when_it_last_spoke() {
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+        let control = router.control();
+        assert!(
+            control.list().is_empty(),
+            "a fresh profile has no paired apps"
+        );
+
+        let code = codes.issue_code(now_epoch_secs());
+        let paired = pair_third_party(&router, &code.display());
+        let pairing_id = paired["result"]["pairing_id"].as_str().unwrap().to_string();
+
+        let listed = control.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].ext_id, THIRD_PARTY);
+        assert_eq!(listed[0].label.as_deref(), Some("A Tool"));
+        assert_eq!(listed[0].scope, PairingScope::ThirdParty);
+        assert_eq!(
+            listed[0].last_seen_at, None,
+            "paired, but the app has not spoken yet"
+        );
+
+        router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://dapp.example" }),
+            &pairing_id,
+            paired["result"]["channel_token_b64"].as_str().unwrap(),
+            n(1),
+        ));
+        assert!(
+            control.list()[0].last_seen_at.is_some(),
+            "an authenticated frame is what 'last seen' means"
+        );
+    }
+
+    #[test]
+    fn a_failed_frame_never_makes_an_app_look_active() {
+        // "Last seen" is what a user reads when deciding whether to revoke something. A timestamp that
+        // moved for a frame that failed its MAC would be a lie about the one thing the surface is for.
+        let (router, codes) = router_with_codes(ScriptedConfirmer(ConfirmDecision::Approve));
+        let control = router.control();
+        let code = codes.issue_code(now_epoch_secs());
+        let paired = pair_third_party(&router, &code.display());
+        let pairing_id = paired["result"]["pairing_id"].as_str().unwrap().to_string();
+
+        let forged = router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://dapp.example" }),
+            &pairing_id,
+            &BASE64.encode([0u8; 32]),
+            n(1),
+        ));
+        assert_eq!(forged["error"]["message"], "AUTH_BAD_MAC");
+        assert_eq!(control.list()[0].last_seen_at, None);
     }
 
     #[test]

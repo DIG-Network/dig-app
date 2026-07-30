@@ -1248,10 +1248,20 @@ content. (Recorded in the `canonical` skill + `SYSTEM.md` ports.)
 - **Host-header allowlist (anti-DNS-rebinding)** — the WS upgrade `Host` MUST be exactly one of
   `127.0.0.1:9779`, `[::1]:9779`, or `localhost:9779`; any other value ⇒ the upgrade is rejected
   (403, connection closed). This is the same guard the dig-node control server uses.
-- **`Origin` pin** — the WS upgrade `Origin` MUST equal `chrome-extension://<pinned-ext-id>` (the
-  pinned DIG extension id; `SYSTEM.md`/canonical hold the value). A missing or mismatched `Origin` ⇒
-  the upgrade is rejected. (Browsers set `Origin` on a WS handshake and a page cannot forge another
-  extension's id.)
+- **`Origin` admission (the anti-web-page boundary).** The WS upgrade `Origin` MUST be one of:
+  - `chrome-extension://<pinned-ext-id>` — a pinned DIG extension (`SYSTEM.md`/canonical hold the
+    values); this caller MAY pair without a code (§5.6.3);
+  - any browser-extension origin — a scheme of `chrome-extension://`, `moz-extension://`,
+    `safari-web-extension://` or `ms-browser-extension://` followed by a non-empty id. A page cannot
+    forge one, so a THIRD-PARTY extension reaches the channel and MUST then pair with a code (§5.6.3a);
+  - **absent** — a native local client. A browser ALWAYS attaches `Origin` to a WS handshake, so its
+    absence establishes the caller is not a page. This caller MUST also pair with a code.
+
+  Every other value ⇒ the upgrade is rejected (403, connection closed). In particular every `http`/
+  `https` origin that is not pinned, and the literal `null` (which browsers send for sandboxed and
+  `file://` documents), MUST be rejected: no website ever reaches this channel, with or without a
+  pairing code. Admission to the channel is NOT authorization to act — pairing and the per-frame MAC
+  are.
 - **Pairing-token MAC** — after pairing (§5.6.3) every request frame carries an `auth` object the
   server verifies before dispatch (§5.6.3). An unpaired or MAC-invalid frame ⇒ `AUTH_REQUIRED` /
   `AUTH_BAD_MAC` and no side effect.
@@ -1264,15 +1274,21 @@ extension MUST surface a deep-link to launch/install dig-app rather than failing
 Pairing establishes the one trusted mediator ONCE, like pairing a hardware device. It is a native
 confirm, never silent.
 
-1. **`pair.begin`** (extension → app) — params: `{ ext_id, ext_label?, requested_at }`. The app
-   verifies `ext_id` equals the pinned extension id (matching the `Origin` guard), then raises a
+1. **`pair.begin`** (extension → app) — params: `{ ext_id, ext_label?, requested_at, pairing_code? }`.
+   The app verifies `ext_id` equals a pinned extension id (matching the `Origin` guard) — a caller
+   whose `ext_id` is NOT pinned MUST instead redeem a `pairing_code` (§5.6.3a) — then raises a
    native modal: *"Pair this browser extension with your DIG identity?"* gated on the user's
    biometric/passphrase. On approve the app:
    - generates a **32-byte CSPRNG channel token** (the `channel_secret`),
    - persists a pairing record — `{ pairing_id (uuid), ext_id, channel_secret, created_at }` — sealed
      at rest with DIGOP1 under the active profile (§3.1, NC-2), and
-   - returns `{ pairing_id, channel_token_b64 }` (`channel_token_b64` = base64 of the 32-byte secret).
+   - returns `{ pairing_id, channel_token_b64, may_sign }` (`channel_token_b64` = base64 of the
+     32-byte secret; `may_sign` states the granted scope, §5.6.3a).
    On deny/timeout ⇒ `PAIR_DENIED` / `PAIR_TIMEOUT` and no record.
+
+   The sealed record additionally carries `label` (the caller's self-declared `ext_label`, UNTRUSTED and
+   display-only) and `scope` (§5.6.3a). Both are OPTIONAL in the sealed form: a record written before
+   they existed MUST still open, and MUST restore with `scope = dig-extension`.
 2. **Token storage.** The extension stores `{ pairing_id, channel_token_b64 }` in `chrome.storage.local`.
    The token grants **channel access only** — it is never sign authority (the terminal native confirm
    still binds every sign).
@@ -1331,6 +1347,63 @@ confirm, never silent.
 The pairing token is defense-in-depth on the channel, not the sign gate. Token theft (by a same-user
 attacker who can already read `chrome.storage.local` or the sealed record) still cannot produce a
 signature without the human at the native biometric prompt (§5.6.5).
+
+#### 5.6.3a Pairing an app DIG does not ship — the pairing CODE
+
+The pinned `ext_id` is the trust anchor of §5.6.3, and a third party has none. A **pairing code**
+replaces the pin for such callers. It is therefore the only thing between an arbitrary local process
+and the user's identity agent, and all of the following are normative.
+
+**Direction.** dig-app MUST generate the code and display it to the USER, who carries it to the app.
+An app MUST NOT be able to propose a code, and MUST NOT be able to cause a code to exist. Only a
+user-initiated tray action issues one.
+
+**Shape.** A code is 8 symbols of Crockford base32 (the digits and the uppercase letters excluding
+`I`, `L`, `O`, `U`), drawn uniformly from a CSPRNG with no modulo bias — a space of 32^8 = 2^40. It is
+displayed grouped as `XXXX-XXXX`. On redemption the candidate is normalized before comparison:
+uppercased, `I`/`L` folded to `1`, `O` folded to `0`, and every character outside the alphabet
+discarded. The comparison MUST be constant-time.
+
+**Bounds (all three MUST hold).**
+- **Single-use** — a redeemed code is destroyed.
+- **Time-bounded** — a code expires 120 seconds after issue. It remains redeemable AT that bound and
+  MUST NOT be redeemable one second past it. An expired code is destroyed by the attempt that finds it,
+  and expiry MUST NOT consume an attempt.
+- **Attempt-bounded** — 5 wrong guesses DESTROY the code. Refusing only the sixth attempt is NOT
+  conformant: after the budget is spent even the CORRECT code MUST fail, so the only way forward is a
+  new code. An attacker therefore gets at most 5 guesses at one 2^40 secret per code a human issues:
+  P(success) ≤ 5/2^40 ≈ 4.5 × 10^-12.
+
+**At most one code is outstanding.** Issuing replaces any previous code, which is immediately dead.
+
+**Order of checks.** The code MUST be redeemed BEFORE the native pairing confirm is raised, so a caller
+with no valid code is refused having drawn no window at all. A pairing the user then DECLINES still
+spends the code.
+
+**One error, no oracle.** Every code failure — absent, wrong, expired, already used, budget exhausted —
+MUST return the single code `PAIR_CODE_REJECTED`. Distinguishing them would tell a caller whether a
+human is mid-pairing.
+
+**Scope.** A pairing carries a `scope`:
+
+| `scope` | Granted by | May call |
+|---|---|---|
+| `dig-extension` | a pinned `ext_id` | every method, including `sign.request` |
+| `third-party` | a redeemed pairing code | every method EXCEPT `sign.request` |
+
+A frame is authenticated FIRST and its scope checked SECOND, against the scope of the pairing it
+actually authenticated as — never against anything the frame claimed. A `sign.request` from a
+`third-party` pairing ⇒ `CAP_NOT_GRANTED`. The scope MUST survive sealing and restart.
+
+**Management + revocation.** dig-app MUST offer the user a surface listing every paired app — its
+`ext_id`, its untrusted `label`, its scope, when it was paired, and when it last authenticated a frame
+— and MUST let the user revoke any of them. `last_seen` MUST advance ONLY on a frame that
+authenticated. Revocation MUST take effect on the revoked app's NEXT FRAME, on the connection it
+already holds (`AUTH_REQUIRED`); deleting only the at-rest record is NOT conformant. The at-rest record
+and its nonce high-water mark MUST be deleted too, so the revocation survives a restart.
+
+**The pinned path is unchanged.** A pinned `ext_id` still pairs with no code and still signs. Making
+the pin optional so one branch could serve both callers is a REGRESSION, not a simplification.
 
 #### 5.6.4 dapp connect / whitelist protocol
 
@@ -1456,6 +1529,7 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `AUTH_BAD_MAC` | pairing-token MAC verification failed |
 | `AUTH_REPLAY` | frame nonce not strictly greater than the last accepted |
 | `PAIR_DENIED` / `PAIR_TIMEOUT` | user denied / did not answer the pairing confirm |
+| `PAIR_CODE_REJECTED` | an unpinned caller offered no pairing code, or one that was wrong, expired, already used, or past its attempt budget (§5.6.3a) — ONE code for all of those, deliberately |
 | `CONNECT_REQUIRED` | the `origin` is not whitelisted for the active profile |
 | `CONNECT_DENIED` / `CONNECT_TIMEOUT` | user denied / did not answer the connect modal |
 | `SIGN_DENIED` / `SIGN_TIMEOUT` | user denied / did not answer the sign confirm |
@@ -1463,6 +1537,7 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
 | `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
 | `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
+| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing's scope does not grant that method (§5.6.3a) |
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
 browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both

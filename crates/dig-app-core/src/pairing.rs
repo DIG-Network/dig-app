@@ -120,15 +120,75 @@ pub fn canonical_json(value: &serde_json::Value) -> String {
     }
 }
 
+/// WHAT a paired caller is allowed to do — and the reason a third party is not simply given what
+/// DIG's own extension has (dig_ecosystem#1848).
+///
+/// # Why the two are not the same
+///
+/// A pinned DIG extension is code DIG writes, reviews and publishes; the pin is a statement about the
+/// code on the other end of the channel. A code-paired third party has passed a check on the USER —
+/// they held a code — which says nothing about what the program does once it is through. For the
+/// signing oracle in particular, that difference matters: with a pinned extension the per-sign native
+/// confirm is the LAST barrier, but with an arbitrary local process it would be the ONLY one, and
+/// confirm-fatigue is a real bypass rather than a theoretical one.
+///
+/// So a third party gets the control plane — connect, and the profile handle that comes with it — and
+/// signing authority stays a deliberate future grant rather than a default. Defaulting to "the same as
+/// ours" would have been the risky choice, and it is refused here rather than left unstated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PairingScope {
+    /// A pinned DIG extension: the full channel, including `sign.request`.
+    ///
+    /// The DEFAULT, and deliberately so: every pairing sealed before this distinction existed was
+    /// pinned by construction (there was no other way to pair), so a record written by an older build
+    /// and opened by this one is restored with exactly the authority it had.
+    #[default]
+    DigExtension,
+    /// A code-paired third party: the control plane (`connect.request` / `connect.revoke`), NOT signing.
+    ThirdParty,
+}
+
+impl PairingScope {
+    /// Whether a pairing in this scope may reach the identity key through `sign.request`.
+    pub fn may_sign(self) -> bool {
+        matches!(self, Self::DigExtension)
+    }
+
+    /// What this scope permits, in the words the management window shows the user.
+    ///
+    /// The user's question is "what can this program do to my account", and the honest answer is a
+    /// sentence, not the variant's name.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::DigExtension => "can ask you to approve signatures, and connect websites",
+            Self::ThirdParty => "can connect websites — cannot ask you to sign anything",
+        }
+    }
+}
+
 /// A pairing record — the at-rest form persisted DIGOP1-sealed per-profile (§5.6.3). The
 /// `channel_secret` is the only sensitive field; it is base64-encoded in the serialized form and the
 /// whole record is sealed before it ever touches disk, so the base64 is never at rest in the clear.
+///
+/// `label` and `scope` were added by dig_ecosystem#1848 and are `serde(default)` so a record sealed by
+/// an earlier build still opens: a pairing that predates the distinction was pinned, which is exactly
+/// what [`PairingScope::default`] restores.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingRecord {
     /// The opaque pairing identifier (a UUID) the extension echoes in every `auth` object.
     pub pairing_id: String,
     /// The paired extension id (pinned; matches the `Origin` guard).
     pub ext_id: String,
+    /// The name the app called itself when it paired, if it gave one.
+    ///
+    /// **Caller-supplied and therefore untrusted** — it is a display string, never an identity. The
+    /// management window shows it beside the `ext_id`, which is what the channel actually authenticates
+    /// against, so a program calling itself "DIG" cannot pass itself off as one.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// What this pairing may do.
+    #[serde(default)]
+    pub scope: PairingScope,
     /// The 32-byte channel secret, base64-encoded for the sealed serialization. Zeroized on drop (the
     /// record is transient — built, sealed, then dropped — but the base64 secret must not linger in
     /// freed heap), matching the identity-key at-rest handling.
@@ -171,10 +231,72 @@ pub struct PairingOutcome {
     pub sealed_record: Vec<u8>,
 }
 
+/// What to pair — gathered into one value so the pinned and code-paired paths cannot drift into
+/// different argument orders at their two call sites.
+#[derive(Debug, Clone, Copy)]
+pub struct NewPairing<'a> {
+    /// The caller's extension/app id. Authenticated by the `Origin` guard for a browser extension;
+    /// for a native third-party client it is a self-declared name, which is why such a caller must
+    /// also redeem a pairing code.
+    pub ext_id: &'a str,
+    /// The caller's self-declared display name, if any. Untrusted — see [`PairingRecord::label`].
+    pub label: Option<&'a str>,
+    /// What the pairing may do.
+    pub scope: PairingScope,
+}
+
+impl<'a> NewPairing<'a> {
+    /// A pairing for a PINNED DIG extension — the full channel.
+    pub fn pinned(ext_id: &'a str, label: Option<&'a str>) -> Self {
+        Self {
+            ext_id,
+            label,
+            scope: PairingScope::DigExtension,
+        }
+    }
+
+    /// A pairing for a code-paired third party — the control plane only.
+    pub fn third_party(ext_id: &'a str, label: Option<&'a str>) -> Self {
+        Self {
+            ext_id,
+            label,
+            scope: PairingScope::ThirdParty,
+        }
+    }
+}
+
+/// One paired app as the management surface shows it (dig_ecosystem#1848). Carries no secret — this is
+/// the view a window renders, so nothing in it may be sensitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairedApp {
+    /// The opaque pairing id — also how the user names one to revoke it.
+    pub pairing_id: String,
+    /// The app id the channel authenticates against.
+    pub ext_id: String,
+    /// The app's self-declared display name, if it gave one. Untrusted.
+    pub label: Option<String>,
+    /// What it is allowed to do.
+    pub scope: PairingScope,
+    /// Unix-epoch seconds when the user approved the pairing.
+    pub paired_at: u64,
+    /// Unix-epoch seconds of the last frame this pairing successfully authenticated, or `None` if it
+    /// has not been heard from since dig-app started.
+    ///
+    /// This is the honest answer to "is it connected right now": the channel is a request/response
+    /// socket that a well-behaved app leaves idle, so a live TCP connection would not mean the app is
+    /// doing anything and its absence would not mean it had gone. When it last SPOKE is checkable and
+    /// means what it says.
+    pub last_seen_at: Option<u64>,
+}
+
 /// One live (in-memory, unsealed) pairing the server authenticates frames against. The sealed record
 /// is the durable form; this is the hot-path copy holding the secret and the monotonic-nonce ledger.
 struct LivePairing {
     ext_id: String,
+    label: Option<String>,
+    scope: PairingScope,
+    paired_at: u64,
+    last_seen_at: Option<u64>,
     /// The channel secret, held in a [`Zeroizing`] buffer so it is scrubbed from memory when the
     /// pairing is dropped (unpair / app exit) — parity with the identity-key handling.
     channel_secret: Zeroizing<[u8; CHANNEL_SECRET_LEN]>,
@@ -211,14 +333,20 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// # Errors
     ///
     /// [`SealError`] if the profile is locked or sealing fails; no live entry is registered on error.
-    pub fn pair(&self, ext_id: &str, created_at: u64) -> Result<PairingOutcome, SealError> {
+    pub fn pair(
+        &self,
+        request: &NewPairing<'_>,
+        created_at: u64,
+    ) -> Result<PairingOutcome, SealError> {
         let mut channel_secret = Zeroizing::new([0u8; CHANNEL_SECRET_LEN]);
         OsRng.fill_bytes(&mut *channel_secret);
         let pairing_id = Uuid::new_v4().to_string();
 
         let record = PairingRecord {
             pairing_id: pairing_id.clone(),
-            ext_id: ext_id.to_string(),
+            ext_id: request.ext_id.to_string(),
+            label: request.label.map(str::to_string),
+            scope: request.scope,
             channel_secret_b64: BASE64.encode(*channel_secret),
             created_at,
         };
@@ -233,7 +361,11 @@ impl<S: ProfileSealer> PairingStore<S> {
         self.lock().insert(
             pairing_id.clone(),
             LivePairing {
-                ext_id: ext_id.to_string(),
+                ext_id: request.ext_id.to_string(),
+                label: request.label.map(str::to_string),
+                scope: request.scope,
+                paired_at: created_at,
+                last_seen_at: None,
                 channel_secret: Zeroizing::new(*channel_secret),
                 last_nonce: None,
             },
@@ -262,6 +394,12 @@ impl<S: ProfileSealer> PairingStore<S> {
             pairing_id.clone(),
             LivePairing {
                 ext_id: record.ext_id.clone(),
+                label: record.label.clone(),
+                scope: record.scope,
+                paired_at: record.created_at,
+                // Not "never seen" — "not seen SINCE THIS BOOT", which is what the field means and
+                // what the management window says.
+                last_seen_at: None,
                 channel_secret,
                 last_nonce: None,
             },
@@ -339,6 +477,52 @@ impl<S: ProfileSealer> PairingStore<S> {
         self.lock().get(pairing_id).map(|p| p.ext_id.clone())
     }
 
+    /// What `pairing_id` is allowed to do, or `None` if it is not paired.
+    ///
+    /// The dispatch layer consults this AFTER authenticating a frame, so a capability check can never
+    /// be reached by a caller that failed the MAC.
+    pub fn scope_of(&self, pairing_id: &str) -> Option<PairingScope> {
+        self.lock().get(pairing_id).map(|p| p.scope)
+    }
+
+    /// Record that `pairing_id` was heard from at `now` — the "last seen" the management window shows.
+    ///
+    /// Called only after a frame AUTHENTICATES, so an unpaired or badly-MAC'd frame can never move a
+    /// paired app's timestamp and make it look active. A no-op for an unknown pairing.
+    pub fn note_seen(&self, pairing_id: &str, now: u64) {
+        if let Some(pairing) = self.lock().get_mut(pairing_id) {
+            pairing.last_seen_at = Some(now);
+        }
+    }
+
+    /// Every live pairing, as the management surface shows them — oldest first, so the list a user
+    /// reads twice is in the same order both times.
+    ///
+    /// Carries no secret: the channel secret stays in [`LivePairing`] and never reaches a window.
+    pub fn list(&self) -> Vec<PairedApp> {
+        let mut apps: Vec<PairedApp> = self
+            .lock()
+            .iter()
+            .map(|(pairing_id, live)| PairedApp {
+                pairing_id: pairing_id.clone(),
+                ext_id: live.ext_id.clone(),
+                label: live.label.clone(),
+                scope: live.scope,
+                paired_at: live.paired_at,
+                last_seen_at: live.last_seen_at,
+            })
+            .collect();
+        // Ties broken by id so the order is TOTAL: a `HashMap` iterates arbitrarily, and two apps
+        // paired in the same second would otherwise swap places between two openings of the window —
+        // which matters here because the user revokes an app by its position in that list.
+        apps.sort_by(|a, b| {
+            a.paired_at
+                .cmp(&b.paired_at)
+                .then_with(|| a.pairing_id.cmp(&b.pairing_id))
+        });
+        apps
+    }
+
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than
     /// authenticate against half-updated pairing state.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, LivePairing>> {
@@ -414,7 +598,9 @@ mod tests {
     #[test]
     fn pair_mints_a_token_and_seals_the_record() {
         let store = store();
-        let out = store.pair(EXT, 1_700_000_000).unwrap();
+        let out = store
+            .pair(&NewPairing::pinned(EXT, None), 1_700_000_000)
+            .unwrap();
 
         assert!(store.is_paired(&out.pairing_id));
         assert_eq!(store.ext_id_of(&out.pairing_id).as_deref(), Some(EXT));
@@ -428,8 +614,8 @@ mod tests {
     #[test]
     fn two_pairings_mint_distinct_secrets_and_ids() {
         let store = store();
-        let a = store.pair(EXT, 1).unwrap();
-        let b = store.pair(EXT, 2).unwrap();
+        let a = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let b = store.pair(&NewPairing::pinned(EXT, None), 2).unwrap();
         assert_ne!(a.pairing_id, b.pairing_id);
         assert_ne!(a.channel_token_b64, b.channel_token_b64);
     }
@@ -437,7 +623,7 @@ mod tests {
     #[test]
     fn a_sealed_pairing_round_trips_through_restore() {
         let store = store();
-        let out = store.pair(EXT, 42).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 42).unwrap();
         store.unpair(&out.pairing_id);
         assert!(!store.is_paired(&out.pairing_id));
 
@@ -449,7 +635,7 @@ mod tests {
     #[test]
     fn a_valid_frame_authenticates() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({"origin": "https://dapp.example"});
         let mac = client_mac(&out.channel_token_b64, n(1), "connect.request", &params);
         assert!(store
@@ -470,7 +656,7 @@ mod tests {
     #[test]
     fn a_tampered_mac_is_rejected() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({"amount": 5});
         let good = client_mac(&out.channel_token_b64, n(1), "sign.request", &params);
         // Forge by signing DIFFERENT params — the MAC no longer matches the frame.
@@ -490,7 +676,7 @@ mod tests {
     #[test]
     fn a_mac_from_a_foreign_secret_is_rejected() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let foreign_secret = BASE64.encode([9u8; CHANNEL_SECRET_LEN]);
         let mac = client_mac(&foreign_secret, n(1), "m", &params);
@@ -503,7 +689,7 @@ mod tests {
     #[test]
     fn a_replayed_or_stale_nonce_is_rejected() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let mac5 = client_mac(&out.channel_token_b64, n(5), "m", &params);
         assert!(store
@@ -531,7 +717,7 @@ mod tests {
     #[test]
     fn a_bad_mac_does_not_advance_the_nonce_ledger() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         // A bad-MAC frame at a high nonce must NOT poison the ledger.
         let bad = client_mac(&BASE64.encode([0u8; 32]), n(100), "m", &params);
@@ -549,7 +735,7 @@ mod tests {
     #[test]
     fn unpairing_revokes_authentication() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         assert!(store.unpair(&out.pairing_id));
         assert!(!store.unpair(&out.pairing_id));
         let params = json!({});
@@ -570,7 +756,7 @@ mod tests {
         let store_of = || PairingStore::new(test_sealer(DID), DID);
 
         let first = store_of();
-        let out = first.pair(EXT, 1).unwrap();
+        let out = first.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let mac = client_mac(&out.channel_token_b64, n(5), "m", &params);
         assert!(first
@@ -598,7 +784,7 @@ mod tests {
     #[test]
     fn seeding_never_lowers_an_already_advanced_ledger() {
         let store = store();
-        let out = store.pair(EXT, 1).unwrap();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let mac6 = client_mac(&out.channel_token_b64, n(6), "m", &params);
         assert!(store
@@ -619,10 +805,166 @@ mod tests {
     }
 
     #[test]
+    fn a_record_sealed_before_scopes_existed_restores_as_a_pinned_extension() {
+        // dig_ecosystem#1848 added `label` and `scope` to the sealed record. Every pairing written by
+        // an earlier build was PINNED (there was no other way to pair), so an old record must restore
+        // with the full channel — not with a `ThirdParty` scope that silently strips an installed
+        // extension's ability to sign.
+        //
+        // The fixture is the OLD JSON shape, sealed by hand, rather than a round-trip of the new struct
+        // — a round-trip would exercise serde's own output and could never catch a missing
+        // `serde(default)`.
+        let sealer = test_sealer(DID);
+        let old_shape = serde_json::json!({
+            "pairing_id": "0f3e7f2c-old-record",
+            "ext_id": EXT,
+            "channel_secret_b64": BASE64.encode([7u8; CHANNEL_SECRET_LEN]),
+            "created_at": 1_700_000_000u64,
+        });
+        let sealed = sealer
+            .seal(DID, &serde_json::to_vec(&old_shape).unwrap())
+            .unwrap();
+
+        let store = PairingStore::new(test_sealer(DID), DID);
+        let pairing_id = store
+            .restore_sealed(&sealed)
+            .expect("an older record must still open");
+        assert_eq!(pairing_id, "0f3e7f2c-old-record");
+        assert_eq!(
+            store.scope_of(&pairing_id),
+            Some(PairingScope::DigExtension)
+        );
+        assert!(store.scope_of(&pairing_id).unwrap().may_sign());
+    }
+
+    #[test]
+    fn a_third_party_pairing_may_not_sign_while_a_pinned_one_may() {
+        // Both halves, because a scope check that returned `false` unconditionally would satisfy the
+        // third-party assertion alone and quietly break DIG's own extension.
+        let store = store();
+        let third = store
+            .pair(
+                &NewPairing::third_party("com.example.tool", Some("Tool")),
+                1,
+            )
+            .unwrap();
+        let pinned = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+
+        assert_eq!(
+            store.scope_of(&third.pairing_id),
+            Some(PairingScope::ThirdParty)
+        );
+        assert!(!store.scope_of(&third.pairing_id).unwrap().may_sign());
+        assert!(store.scope_of(&pinned.pairing_id).unwrap().may_sign());
+        assert_eq!(store.scope_of("no-such-pairing"), None);
+    }
+
+    #[test]
+    fn the_scope_survives_a_seal_and_restore() {
+        // A third party that could regain signing authority by restarting dig-app would make the
+        // whole distinction cosmetic.
+        let store = store();
+        let out = store
+            .pair(
+                &NewPairing::third_party("com.example.tool", Some("Tool")),
+                1,
+            )
+            .unwrap();
+        store.unpair(&out.pairing_id);
+
+        store.restore_sealed(&out.sealed_record).unwrap();
+        assert_eq!(
+            store.scope_of(&out.pairing_id),
+            Some(PairingScope::ThirdParty)
+        );
+        assert_eq!(
+            store.list()[0].label.as_deref(),
+            Some("Tool"),
+            "the display name survives too"
+        );
+    }
+
+    #[test]
+    fn the_list_is_oldest_first_and_carries_no_secret() {
+        let store = store();
+        let older = store
+            .pair(&NewPairing::third_party("com.example.b", Some("B")), 100)
+            .unwrap();
+        let newer = store
+            .pair(&NewPairing::pinned(EXT, Some("DIG for Chrome")), 200)
+            .unwrap();
+
+        let apps = store.list();
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].pairing_id, older.pairing_id, "oldest first");
+        assert_eq!(apps[1].pairing_id, newer.pairing_id);
+        assert_eq!(apps[0].label.as_deref(), Some("B"));
+        assert_eq!(apps[0].scope, PairingScope::ThirdParty);
+        assert_eq!(apps[0].paired_at, 100);
+        assert_eq!(apps[0].last_seen_at, None, "not heard from since boot");
+
+        // The view a WINDOW renders must not carry the channel secret in any form.
+        let rendered = format!("{apps:?}");
+        assert!(!rendered.contains(&older.channel_token_b64));
+        assert!(!rendered.contains(&newer.channel_token_b64));
+    }
+
+    #[test]
+    fn last_seen_moves_only_when_an_app_is_actually_heard_from() {
+        // "Last seen" is what the management window uses to answer "is this thing still around", so a
+        // timestamp that moved for an unpaired or badly-authenticated caller would be a lie about a
+        // program the user is deciding whether to revoke.
+        let store = store();
+        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        assert_eq!(store.list()[0].last_seen_at, None);
+
+        store.note_seen(&out.pairing_id, 1_700_000_500);
+        assert_eq!(store.list()[0].last_seen_at, Some(1_700_000_500));
+
+        // An unknown pairing is a no-op rather than an entry appearing from nowhere.
+        store.note_seen("no-such-pairing", 1_700_000_900);
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].last_seen_at, Some(1_700_000_500));
+    }
+
+    #[test]
+    fn revoking_removes_the_app_from_the_list_and_from_the_channel() {
+        // The two halves of a revoke that is not a false promise: it disappears from what the user is
+        // shown AND its token stops working. Only the second is the security property.
+        let store = store();
+        let kept = store
+            .pair(&NewPairing::pinned(EXT, Some("keep me")), 1)
+            .unwrap();
+        let doomed = store
+            .pair(&NewPairing::third_party("com.example.tool", None), 2)
+            .unwrap();
+        assert_eq!(store.list().len(), 2);
+
+        assert!(store.unpair(&doomed.pairing_id));
+
+        let apps = store.list();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].pairing_id, kept.pairing_id);
+
+        let params = json!({});
+        let mac = client_mac(&doomed.channel_token_b64, n(1), "m", &params);
+        assert_eq!(
+            store.verify_frame(&doomed.pairing_id, n(1), "m", &params, &mac),
+            Err(AuthFailure::NotPaired),
+            "the revoked app's own token must stop authenticating"
+        );
+        // …and the pairing that was NOT revoked is untouched, so revoke is targeted rather than a purge.
+        let kept_mac = client_mac(&kept.channel_token_b64, n(1), "m", &params);
+        assert!(store
+            .verify_frame(&kept.pairing_id, n(1), "m", &params, &kept_mac)
+            .is_ok());
+    }
+
+    #[test]
     fn a_foreign_profile_cannot_restore_a_sealed_pairing() {
         // The sealed record is bound to the sealing profile's DEK (NC-2 cross-profile isolation).
         let store_a = store();
-        let out = store_a.pair(EXT, 1).unwrap();
+        let out = store_a.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
 
         // A DISTINCT profile DEK (a different label) cannot open A's sealed pairing.
         let store_b = PairingStore::new(test_sealer("did:chia:other"), "did:chia:other");

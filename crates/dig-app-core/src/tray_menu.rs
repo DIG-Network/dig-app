@@ -346,6 +346,24 @@ pub enum TrayAction {
     /// Weakening a protection is a security act, not a toggle, so this is authorized rather than
     /// switched — see [`journey::disable`](crate::account::second_factor::journey::disable).
     TurnOffTwoFactor,
+    /// Show a pairing code so another program on this computer can use this DIG Account
+    /// (dig_ecosystem#1848).
+    ///
+    /// Lives under **Security**, not Manage Account, because Security's question is *is my account
+    /// safe right now* and "which other programs can act through it" is exactly that question. Manage
+    /// Account answers *I want a different account*, which this is not.
+    ///
+    /// Offered only while the account is UNLOCKED, which is its real precondition: pairing seals a
+    /// record under the account's own key, so a locked account cannot store one. In the locked state
+    /// the row is absent rather than greyed, and the `Unlock…` row directly above is the remedy — the
+    /// same shape [`SetUpTwoFactor`](Self::SetUpTwoFactor) uses, for the same reason (#1800).
+    PairAnApp,
+    /// See which programs are paired with this DIG Account, and remove any of their access.
+    ///
+    /// Enabled whenever the account is unlocked, INCLUDING when nothing is paired: the window then says
+    /// so and names the way to pair something. A row that vanished when the list was empty would leave
+    /// a user who wants to check unable to find out that the answer is "nothing".
+    ManagePairedApps,
     /// Copy the profile's DIG ID to the clipboard.
     CopyDigId,
     /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
@@ -866,6 +884,8 @@ fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow>
         AccountState::Unlocked { .. } => {
             let mut rows = vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)];
             rows.extend(two_factor_row(true, second_factor));
+            rows.push(MenuRow::Separator);
+            rows.extend(paired_app_rows());
             rows
         }
         AccountState::Locked => {
@@ -937,6 +957,18 @@ fn two_factor_row(unlocked: bool, second_factor: bool) -> Option<MenuRow> {
         // the remedy, so its absence is not a dead end.
         (false, false) => None,
     }
+}
+
+/// The two paired-app rows for the Security submenu (dig_ecosystem#1848).
+///
+/// Both are offered ONLY while the account is unlocked, so this returns them as a pair rather than
+/// leaving each caller to remember the condition. Neither is ever greyed: a locked account sees no row
+/// at all, and the `Unlock…` row above it is the way forward (#1800).
+fn paired_app_rows() -> Vec<MenuRow> {
+    vec![
+        MenuRow::action(TrayAction::PairAnApp, "Pair an app…", true),
+        MenuRow::action(TrayAction::ManagePairedApps, "Paired apps…", true),
+    ]
 }
 
 /// The `Manage my DIG Account` submenu — **reachable in every state**, which is the whole point.
@@ -1171,6 +1203,67 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no {label} submenu"))
+    }
+
+    // ---- Paired apps (dig_ecosystem#1848). ----
+
+    /// Both paired-app rows live under **Security**, and nowhere else.
+    ///
+    /// The placement is the decision worth pinning: "which other programs can act through my account"
+    /// is a question about whether the account is safe right now, not about wanting a different
+    /// account — and a row that drifted into Manage Account would sit one mis-click from
+    /// "Remove this account from this computer".
+    #[test]
+    fn the_paired_app_rows_live_under_security() {
+        let model = build(&view(AccountState::Unlocked { recoverable: true }));
+        let security: Vec<TrayAction> = every_action(&MenuModel {
+            rows: submenu(&model, "Security"),
+        })
+        .into_iter()
+        .map(|(action, _, _)| action)
+        .collect();
+        assert!(security.contains(&TrayAction::PairAnApp));
+        assert!(security.contains(&TrayAction::ManagePairedApps));
+
+        for elsewhere in ["Manage Account", "View Account", "Wallet"] {
+            let rows: Vec<TrayAction> = every_action(&MenuModel {
+                rows: submenu(&model, elsewhere),
+            })
+            .into_iter()
+            .map(|(action, _, _)| action)
+            .collect();
+            assert!(
+                !rows.contains(&TrayAction::PairAnApp)
+                    && !rows.contains(&TrayAction::ManagePairedApps),
+                "the paired-app rows must not appear under {elsewhere}"
+            );
+        }
+    }
+
+    /// The rows appear ONLY while the account is unlocked, and are never greyed anywhere.
+    ///
+    /// Both halves matter and neither implies the other: an implementation that always offered them
+    /// would pass a greyness check while putting a row in front of a locked user that could only fail,
+    /// and one that always hid them would pass the "never greyed" check by offering nothing at all.
+    #[test]
+    fn the_paired_app_rows_appear_only_when_the_account_is_unlocked_and_never_greyed() {
+        for account in EVERY_STATE {
+            let model = build(&view(account.clone()));
+            let unlocked = matches!(account, AccountState::Unlocked { .. });
+            for action in [TrayAction::PairAnApp, TrayAction::ManagePairedApps] {
+                assert_eq!(
+                    model.offers(action),
+                    unlocked,
+                    "{action:?} in {account:?}: pairing seals under the account key, so an unlocked                      account is its real precondition"
+                );
+                if model.offers(action) {
+                    assert!(
+                        model.is_enabled(action),
+                        "{action:?} must never be offered greyed"
+                    );
+                }
+            }
+        }
     }
 
     // ---- The second factor (dig_ecosystem#1840). ----

@@ -381,7 +381,10 @@ mod tests {
         let sealed = {
             let pairings = PairingStore::new(test_sealer(DID), DID);
             let outcome = pairings
-                .pair("mlibddmbhlgogepnjdienclhnkfpkfah", 1)
+                .pair(
+                    &crate::pairing::NewPairing::pinned("mlibddmbhlgogepnjdienclhnkfpkfah", None),
+                    1,
+                )
                 .unwrap();
             let store = FileSealedStore::new(dir.path());
             store.persist_pairing(&outcome.pairing_id, &outcome.sealed_record);

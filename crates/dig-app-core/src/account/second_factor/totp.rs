@@ -37,6 +37,11 @@
 //! three are [`Zeroizing`]. Nothing here logs, and [`Debug`] on [`TotpSecret`] is written by hand to
 //! redact.
 
+// The ONE constant-time comparison the app owns. A `==` on the code would leak, through timing, how
+// many leading digits a guess got right, turning a 10^6 search into six 10-way searches. It is shared
+// with the pairing code (dig_ecosystem#1848), which needs the identical guarantee — two copies is how
+// one of them regresses to `==`.
+use crate::constant_time::constant_time_eq;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha1::Sha1;
@@ -219,49 +224,6 @@ impl TotpSecret {
     }
 }
 
-/// Compare two byte strings without an early exit on the first differing byte.
-///
-/// A `==` on the code would leak, through timing, how many leading digits a guess got right, which
-/// turns a 10^6 search into six 10-way searches. This is the standard accumulate-the-difference
-/// comparison, not a new primitive; the RustCrypto `hmac` dependency's own `verify_slice` does the
-/// same thing for MAC tags, but it cannot be applied to a decimal string.
-///
-/// Lengths are compared first and in the clear: the length of a TOTP code is public (it is always
-/// six), so nothing is learned from it.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// Percent-encode `text` for use inside a URI path segment or query value (RFC 3986 §2.3).
-///
-/// Everything outside the unreserved set becomes `%XX`. Hand-written for the same reason
-/// [`base32_encode`] is: this is an ENCODING, not a primitive, and the alternative was a dependency in
-/// a binary holding master seeds in order to turn one space into `%20`.
-///
-/// It is deliberately CONSERVATIVE — it escapes everything it is not certain about, including
-/// characters some encoders leave alone. Over-escaping is always readable by the other side; under-
-/// escaping produces a URI that parses into a different string, which for a `secret=` parameter means
-/// an authenticator that imports silently and never agrees with this code again.
-fn percent_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char);
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
 /// The RFC 4648 base32 alphabet, unpadded — the encoding every authenticator's manual-entry field uses.
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -289,6 +251,29 @@ fn base32_encode(bytes: &[u8]) -> String {
     if bits > 0 {
         let index = ((buffer << (5 - bits)) & 0x1f) as usize;
         out.push(BASE32_ALPHABET[index] as char);
+    }
+    out
+}
+
+/// Percent-encode `text` for use inside a URI path segment or query value (RFC 3986 §2.3).
+///
+/// Everything outside the unreserved set becomes `%XX`. Hand-written for the same reason
+/// [`base32_encode`] is: this is an ENCODING, not a primitive, and the alternative was a dependency in
+/// a binary holding master seeds in order to turn one space into `%20`.
+///
+/// It is deliberately CONSERVATIVE — it escapes everything it is not certain about, including
+/// characters some encoders leave alone. Over-escaping is always readable by the other side; under-
+/// escaping produces a URI that parses into a different string, which for a `secret=` parameter means
+/// an authenticator that imports silently and never agrees with this code again.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
     }
     out
 }
