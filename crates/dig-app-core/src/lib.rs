@@ -26,6 +26,8 @@
 //! - [`gateway`] — the CLI/RPC front door: authenticate callers, proxy engine work.
 //! - [`identity`] — the two-identity model (transport peer-identity vs the user identity).
 //! - [`form_factor`] — headless agent core vs optional GUI tray shell.
+//! - [`single_instance`] — the per-user OS lock that makes a duplicate launch (installer, login
+//!   autostart, an impatient double-click) a no-op instead of a second agent.
 //!
 //! The agent lifecycle that binds these together (U3) lives in:
 //!
@@ -74,6 +76,7 @@ pub mod session_lock;
 pub mod shutdown;
 pub mod sign_policy;
 pub mod sign_service;
+pub mod single_instance;
 pub mod spend_summary;
 pub mod storage;
 pub mod tray_menu;

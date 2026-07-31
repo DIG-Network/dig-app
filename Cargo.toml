@@ -103,6 +103,10 @@ dig-constants = "0.8"
 # the OS CSPRNG draw for a fresh phrase. English only (the ecosystem's phrase language), so the other
 # wordlists are not compiled in.
 bip39 = { version = "2", default-features = false, features = ["std", "zeroize", "rand"] }
+# The one `flock` call behind the unix half of `single_instance` (dig_ecosystem#1831). std has no
+# file-locking API, and the alternative crates wrap the same syscall in more surface than one call
+# needs; `libc` is already in the tree transitively via every unix dependency here.
+libc = "0.2"
 hkdf = "0.12"
 # HMAC-SHA1, the MAC RFC 6238 TOTP is defined over (`account::second_factor::totp`). SHA-1 is used here
 # ONLY as the keyed MAC every shipping authenticator app implements — never as a collision-resistant

@@ -56,6 +56,7 @@ use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
 use dig_app_core::loopback::{PairedAppsControl, SignReauthGate};
+use dig_app_core::single_instance;
 #[cfg(feature = "tray")]
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
@@ -152,6 +153,16 @@ fn main() {
     let env = resolve_environment();
     tracing::info!(version, os = ?env.os, has_display = env.has_display, "dig-app starting");
 
+    // One dig-app per user (dig_ecosystem#1831). Three things start this agent — the installer when it
+    // finishes, the OS at login, and a user who cannot see a tray icon and double-clicks the binary —
+    // so duplicate launches are the NORMAL case, not an error case, and are absorbed here rather than
+    // guarded against at each launcher. Taken before the agent so nothing touches the profile
+    // directory a live instance owns.
+    let _instance = match hold_the_single_instance_lock(&env) {
+        Ok(lock) => lock,
+        Err(SecondInstance) => return,
+    };
+
     let agent = match Agent::from_env(&env, NodeConnector::default()) {
         Ok(agent) => agent,
         Err(e) => {
@@ -189,6 +200,56 @@ fn main() {
             tracing::info!("no desktop display — running as headless agent (no tray)");
             eprintln!("dig-app: no desktop display — running as headless agent (no tray)");
             agent.run();
+        }
+    }
+}
+
+/// Another dig-app already owns this user's brand directory, so this process must stand down.
+struct SecondInstance;
+
+/// Take the single-instance lock, or decide this launch is a duplicate that should quietly stand down.
+///
+/// # Why a duplicate exits 0, and loudly in the log but quietly on screen
+///
+/// The launchers that produce duplicates are automatic — the installer's completion launch and the OS
+/// login autostart both fire without anyone asking — so "you are already running" is the system working,
+/// not a fault, and an error exit would turn a healthy install into a red one. The log still records it
+/// at `info` with the lock path, because "why did my second launch do nothing?" needs an answer.
+///
+/// # Why an unresolvable lock does NOT stand down
+///
+/// A brand directory that cannot be resolved or locked is a host problem, not evidence of a second
+/// instance. Standing down there would fail CLOSED on the one question this guard exists to answer,
+/// leaving a user with no agent at all; starting is the safer error, and the reason is logged.
+fn hold_the_single_instance_lock(
+    env: &AppEnvironment,
+) -> Result<Option<single_instance::InstanceLock>, SecondInstance> {
+    let Ok(brand_dir) = env.brand_dir() else {
+        tracing::warn!(
+            "could not resolve the DIG data directory — starting without the single-instance lock"
+        );
+        return Ok(None);
+    };
+    match single_instance::acquire(&brand_dir) {
+        Ok(single_instance::Acquired::Yes(lock)) => {
+            tracing::debug!(lock = %lock.path().display(), "holding the single-instance lock");
+            Ok(Some(lock))
+        }
+        Ok(single_instance::Acquired::AlreadyRunning) => {
+            let lock = single_instance::lock_path(&brand_dir);
+            tracing::info!(
+                lock = %lock.display(),
+                "another dig-app is already running for this user — this launch is a no-op"
+            );
+            eprintln!("dig-app: already running — look for the DIG icon in your system tray.");
+            Err(SecondInstance)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not evaluate the single-instance lock — starting anyway"
+            );
+            Ok(None)
         }
     }
 }
