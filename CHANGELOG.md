@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.4.0] - 2026-07-31
+
+### Features
+- **app:** Refuse a second instance so a duplicate launch is a no-op (#54)
+
 ## [5.3.0] - 2026-07-30
 
 ### Features
