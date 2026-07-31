@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "5.3.0"
+version = "5.4.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "5.3.0"
+version = "5.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1447,6 +1447,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "keyring",
+ "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -1858,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "5.3.0"
+version = "5.4.0"
 dependencies = [
  "clap",
  "dig-app-core",
