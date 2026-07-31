@@ -978,9 +978,30 @@ form-factor decision is a single point (`dig_app_core::form_factor`).
 
 **Autostart artifacts:** the macOS LaunchAgent plist and the Linux systemd user unit are rendered
 and installed by `dig_app::autostart` (`crates/dig-app/src/autostart.rs`) — pure content generation
-+ path resolution, unit-tested without a real service manager; loading the unit
-(`launchctl`/`systemctl --user`) is the installer's/first-run helper's job. Windows per-user logon
-autostart is dig-installer's own packaging concern (U8) and is out of this crate's scope.
++ path resolution, unit-tested without a real service manager. Windows per-user logon autostart is
+dig-installer's own packaging concern (U8) and is out of this crate's scope.
+
+These renderers are a LIBRARY surface that nothing in this crate calls: in a real install the artifacts
+are written by dig-installer's byte-identical `src/autostart.rs`, and LOADED by its launch step
+(`launchctl bootstrap` / `systemctl --user enable --now`, dig-installer SPEC §1.11a). Writing the
+artifact starts nothing on its own — a written-but-unloaded systemd user unit is `inactive` and
+`disabled` — so a reimplementation MUST NOT treat "the artifact exists" as "dig-app starts at login".
+
+**Single instance per user (MUST):** at most ONE dig-app runs per user at a time. Three launchers start
+it without being asked — the installer when it completes, the OS at login, and a user double-clicking the
+binary because no tray icon is visible — so a duplicate launch is the normal case and MUST be absorbed,
+not treated as an error. On startup dig-app MUST take an exclusive OS lock on `<brand_dir>/dig-app.lock`
+(`dig_app_core::single_instance`) and, when another live process holds it, MUST exit 0 without mounting a
+tray, starting an agent, or touching the profile directory.
+
+The lock MUST be held by an open file DESCRIPTOR, so the kernel releases it however the process dies:
+`flock(LOCK_EX | LOCK_NB)` on unix, an open with share mode zero on Windows. The lock FILE persists
+between runs and its presence MUST NOT be read as "an instance is running" — a crashed instance must
+never lock a user out of their own agent. The lock is scoped to the brand directory, so two accounts on
+one machine are two legitimate instances (§ Multi-user below). The APP-SIGN port MUST NOT be used as the
+guard: the app boots with the account locked, so no listener exists during the window a login autostart
+fires in. A brand directory that cannot be resolved or locked MUST start anyway — that is a host problem,
+not evidence of a second instance, and failing closed would leave the user with no agent at all.
 
 **Multi-user (MUST):** one engine daemon serves the whole machine; **each logged-in user runs their
 own dig-app instance** with its own profiles/keys. The engine holds no per-user state, so it keeps a

@@ -56,7 +56,6 @@ use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
 use dig_app_core::loopback::{PairedAppsControl, SignReauthGate};
-use dig_app_core::single_instance;
 #[cfg(feature = "tray")]
 use dig_app_core::session_lock::{
     panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
@@ -64,6 +63,7 @@ use dig_app_core::session_lock::{
 };
 #[cfg(feature = "tray")]
 use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
+use dig_app_core::single_instance;
 #[cfg(feature = "tray")]
 use dig_app_core::storage::did_hash;
 #[cfg(feature = "tray")]
