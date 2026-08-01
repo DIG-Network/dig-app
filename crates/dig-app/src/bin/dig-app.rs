@@ -888,6 +888,7 @@ mod tray {
         set_up_account, start_sign_service, AppEnvironment, TraySession,
     };
     use dig_app::tray_guard::mount_or_degrade;
+    use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::Replacement;
     use dig_app_core::account::journey::{
@@ -899,6 +900,7 @@ mod tray {
     use dig_app_core::hotkey::HotkeyState;
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
     use std::time::{Duration, Instant};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
@@ -1144,30 +1146,30 @@ mod tray {
         std::thread::spawn(move || agent.run());
 
         let menu_events = MenuEvent::receiver();
-        // ONE confirmer for the whole shell: every account window (setup, reveal, the explainers) is
-        // drawn by the same OS-owned, biometric-backed surface the signing path uses.
-        let confirmer: Box<dyn NativeConfirmer> = native_confirmer();
-        let mut session = session;
 
-        // The event loop diverges; `tray` + `session` stay alive on this frame for the whole process
-        // (dropping `session` would drop the OS screen-lock subscription guard it holds).
-        event_loop.run(move |_event, _target, control_flow| {
-            *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
+        // The session is SHARED rather than owned by the loop, because the actions that mutate it no
+        // longer run here (see `ActionWorker`). The worker takes the lock for the whole of an action —
+        // which is what stops a destroy and a repaint from seeing different accounts — and the loop
+        // only ever TRIES for it, so a dialog left open on the worker can never stall the tray.
+        let session: SharedSession = Arc::new(Mutex::new(session));
 
-            // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
-            if let Some(session) = &session {
-                session.lock.poll_idle();
-            }
-
-            while let Ok(event) = menu_events.try_recv() {
-                // Any tray interaction is activity — postpone the idle auto-lock.
-                if let Some(session) = &session {
-                    session.lock.note_activity();
-                }
-                let Some(action) = menu.actions.get(&event.id).copied() else {
-                    continue;
-                };
-                if dispatch(
+        // Every menu action runs on this worker, never on the event loop. That is the fix for the whole
+        // class of freezes (dig_ecosystem#1926): the biometric deadlock was the worst of them, but every
+        // handler that opens a window, waits for the agent to stop, or waits on a child process would
+        // otherwise hold the tray for as long as it waited.
+        let actions = {
+            let session = Arc::clone(&session);
+            let env = env.clone();
+            let shutdown = shutdown.clone();
+            let status = Arc::clone(&status);
+            let hotkey = hotkey.clone();
+            // ONE confirmer for the whole shell: every account window (setup, reveal, the explainers) is
+            // drawn by the same OS-owned, biometric-backed surface the signing path uses. It lives on the
+            // worker because that is where every window is now raised.
+            let confirmer: Box<dyn NativeConfirmer> = native_confirmer();
+            ActionWorker::spawn(move |action: TrayAction| {
+                let mut session = lock_session(&session);
+                dispatch(
                     action,
                     &mut session,
                     &env,
@@ -1175,18 +1177,59 @@ mod tray {
                     &shutdown,
                     &status,
                     &hotkey,
-                ) {
-                    *control_flow = ControlFlow::Exit;
-                    return;
+                )
+            })
+        };
+
+        // The event loop diverges; `tray` + `session` stay alive on this frame for the whole process
+        // (dropping `session` would drop the OS screen-lock subscription guard it holds).
+        event_loop.run(move |_event, _target, control_flow| {
+            *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
+
+            // Quit runs on the worker like every other action, but only this loop can exit.
+            if actions.stop_requested() {
+                *control_flow = ControlFlow::Exit;
+                return;
+            }
+
+            while let Ok(event) = menu_events.try_recv() {
+                let Some(action) = menu.actions.get(&event.id).copied() else {
+                    continue;
+                };
+                // Any tray interaction is activity — postpone the idle auto-lock.
+                if let Some(held) = peek_session(&session) {
+                    if let Some(session) = held.as_ref() {
+                        session.lock.note_activity();
+                    }
                 }
+                if !actions.submit(action) {
+                    // Another action is already on screen. Dropping this one is deliberate: the answer
+                    // to an impatient second click is the dialog already open, not a second one.
+                    tracing::debug!(
+                        ?action,
+                        "a tray action was ignored while another is in flight"
+                    );
+                }
+            }
+
+            // Everything below reads the session, so it is skipped entirely while an action holds it:
+            // the tray keeps its last picture rather than blocking, and the idle auto-lock does not run
+            // while the user is standing at a dialog.
+            let Some(held) = peek_session(&session) else {
+                return;
+            };
+
+            // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
+            if let Some(session) = held.as_ref() {
+                session.lock.poll_idle();
             }
 
             // Repaint only when something actually changed: rebuilding a native menu every 500ms would
             // close the menu under the user's cursor while they are reading it.
-            if session.is_some() {
+            if held.is_some() {
                 boot_failed = false;
             }
-            let latest = snapshot(&status, &env, session.as_ref(), boot_failed, &hotkey);
+            let latest = snapshot(&status, &env, held.as_ref(), boot_failed, &hotkey);
             if !view_eq(&latest, &model) {
                 // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
                 // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
@@ -1240,6 +1283,37 @@ mod tray {
     /// Every arm ends in something the user can see — a window, a new menu state, or the app closing.
     /// A handler that silently did nothing would leave a person clicking a menu item that appears
     /// broken, which is the failure mode §6.1 exists to prevent.
+    /// The tray's live session, shared between the event loop and the action worker.
+    ///
+    /// A mutex rather than a channel because the loop needs to READ it on every tick while the worker
+    /// needs to REPLACE it (setting up, restoring and destroying an account all swap the session), and
+    /// a lock states that "a repaint never sees a half-applied account change" in one place.
+    type SharedSession = Arc<Mutex<Option<TraySession>>>;
+
+    /// Take the session for the length of one action, waiting if the loop is mid-tick.
+    ///
+    /// A poisoned lock is RECOVERED rather than propagated: the poison means some earlier action
+    /// panicked, and refusing every future action — leaving the user a tray that can no longer set up,
+    /// unlock or destroy anything — is a far worse answer than carrying on with the session as it was.
+    fn lock_session(session: &SharedSession) -> MutexGuard<'_, Option<TraySession>> {
+        session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Look at the session WITHOUT waiting, for a caller that must not block.
+    ///
+    /// [`None`] means an action holds it right now. This is what keeps the event loop free while a
+    /// dialog is open: the tray skips one repaint rather than joining the queue behind a human
+    /// (dig_ecosystem#1926).
+    fn peek_session(session: &SharedSession) -> Option<MutexGuard<'_, Option<TraySession>>> {
+        match session.try_lock() {
+            Ok(held) => Some(held),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
     fn dispatch(
         action: TrayAction,
         session: &mut Option<TraySession>,
