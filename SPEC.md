@@ -330,6 +330,17 @@ Binding rules:
     tray (§3.1d). A row labelled "(in a terminal)" is not an acceptable end state even though it is honest,
     and on a host where another component owns the `dign` name on the shared bin directory it hands the user
     the WRONG TOOL. No label may name a terminal, a console or a command to run.
+- **No menu action may run on the tray's event loop (MUST).** Menu handlers open windows, wait for the OS
+  authenticator, wait for the agent to stop, and wait on child processes; a handler running on the event
+  loop makes every one of those a frozen tray, and the biometric case a permanent deadlock. Actions
+  therefore run on a worker, and the loop hands one off without waiting. It follows that:
+  - **Exactly ONE action runs at a time**, and an action chosen while another is in flight is REFUSED, not
+    queued: two clicks at a tray must never open two destroy flows, and an impatient second click is
+    answered by the dialog already on screen.
+  - **The tray stays live while a dialog is open** — its icon, tooltip and menu keep working — and reading
+    the session for a repaint MUST NOT wait on the action holding it; a repaint is skipped instead.
+  - **Only the event loop may exit the app.** A quit handler reports its decision back to the loop.
+  - **A handler that panics costs one action, not the tray**, and MUST NOT be read as a request to quit.
 - **The TOOLTIP MUST be bounded, and bounding MUST NOT lose information (MUST).** The Windows notification
   area truncates its tooltip silently, so an unbounded one is cut at an arbitrary point with no sign anything
   is missing. The tooltip MUST therefore be bounded to a single-line budget and visibly marked when cut, and
@@ -1495,6 +1506,13 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   device-owner identity*; it is distinct from the vault passphrase (the key unlock stays in the keystore
   path). **Never blind-sign (defense-in-depth):** a sign prompt whose `decoded_tx` is absent is denied
   WITHOUT raising a window, independently of the §5.6.5 dispatch allowlist.
+- **The authenticator MUST NOT run on the caller's UI thread.** A backend whose OS authenticator blocks
+  the calling thread MUST run it on a separate thread and wait for the outcome, leaving the calling
+  thread free to service its event loop; on Windows the caller pumps its message queue between polls.
+  A UI thread blocked inside the authenticator is a deadlock, because the platform needs that thread to
+  raise its prompt. The wait MUST be bounded: an authenticator that has not answered within the deadline
+  yields `Unavailable`. No outcome delivered late, no failed thread, and no lost result may be treated as
+  a success — an approval requires a `Verified` delivered within the deadline, and nothing else.
 - **Plain-language summary (default view, MUST derive from the signed bytes).** The confirm body leads
   with a plain-language, XCH-denominated summary of the decoded spend — one line per created output
   (`Send <amount> XCH to <recipient>`, recipients shown in full) plus the network fee — with the precise

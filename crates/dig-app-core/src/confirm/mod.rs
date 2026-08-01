@@ -413,6 +413,13 @@ pub mod qr;
 
 pub use qr::QrArt;
 
+// The off-thread biometric seam (dig_ecosystem#1926). Only the Windows backend runs a verifier that
+// would deadlock a UI thread, so only Windows builds it — but the policy it must preserve (nothing
+// but a delivered `Verified` authorizes) is platform-independent, so its tests compile and run
+// everywhere `cargo test` does.
+#[cfg(any(test, target_os = "windows"))]
+mod offload;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

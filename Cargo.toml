@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "5.4.0"
+version = "5.5.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -250,6 +250,9 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     # `CreateFileW`'s `SECURITY_ATTRIBUTES` parameter lives here, so the file-system feature needs it.
     "Win32_Security",
+    # `RoInitialize` (dig_ecosystem#1926): the thread that raises the Windows Hello prompt is spawned by
+    # us and belongs to no apartment, so it joins the MTA before activating a WinRT class.
+    "Win32_System_WinRT",
 ] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [

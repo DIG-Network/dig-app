@@ -36,3 +36,9 @@ pub mod logging;
 /// Tray-only, for the same reason as [`brand`]: a headless build mounts no tray.
 #[cfg(feature = "tray")]
 pub mod tray_guard;
+/// Running tray menu actions off the event loop, so no handler can freeze the tray.
+///
+/// Not tray-gated: it is plain threading with no desktop dependency, and its guarantees (nothing runs
+/// on the caller's thread, one action at a time, a panic is not a quit) are worth checking in every
+/// build (dig_ecosystem#1926).
+pub mod tray_worker;
