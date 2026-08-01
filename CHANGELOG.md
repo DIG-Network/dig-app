@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.5.0] - 2026-08-01
+
+### Bug Fixes
+- **tray:** Run menu actions off the event loop so custody actions stop deadlocking (#55)
+
 ## [5.4.0] - 2026-07-31
 
 ### Features
