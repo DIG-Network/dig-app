@@ -1,28 +1,38 @@
-//! The OS credential store abstraction — the PRIMARY home for a profile's at-rest key material on
-//! the platforms whose credential store gates access PER-APPLICATION.
+//! The OS credential-store abstraction — a LEGACY, migration-only seam (Windows Credential Manager ·
+//! macOS Keychain), no longer a custody primary.
 //!
-//! Per the U4 directive, on **Windows (Credential Manager)** and **macOS (Keychain)** the sealed
-//! identity blob and its DIGOP1 unlock password live TOGETHER in one OS credential-store entry when
-//! one is available. The security of this path rests on the OS store's **per-application access
-//! ACL** (scoped to the logged-in user, released by the login session) — that ACL is what keeps
-//! another process from reading the entry. The DIGOP1 sealing is defense-in-depth UNDER that ACL,
-//! NOT a second independent secret: because the unlock password rides in the same entry as the
-//! ciphertext, an attacker who defeats the ACL and dumps the entry obtains BOTH and can open the
-//! blob. (Splitting the password away from the ciphertext is a separate follow-up hardening; see
-//! `SPEC.md` §7.) So the honest guarantee here is "the OS ACL gates access; DIGOP1 adds a layer
-//! against a raw at-rest artifact but not against a full-entry dump."
+//! # What actually protects custody today
 //!
-//! **Linux is deliberately excluded.** The kernel keyutils session keyring is readable by ANY
-//! same-UID process in the session (it has no per-application ACL) and is non-persistent across
-//! reboot/logout — so it is unsafe as a custody primary (same-UID key theft) and would lose the
-//! identity on logout. On Linux the vault therefore uses the passphrase-sealed file as its primary
-//! (home-directory-ACL'd, persistent, and — needing a user passphrase — not harvestable by a
-//! same-UID background process). Accordingly [`OsCredentialStore`] and the `keyring` dependency are
-//! compiled only on Windows/macOS.
+//! The shipped custody root is NOT this store. The account master seed is sealed (DIGOP1 / Argon2id)
+//! in a per-user [`FileBackend`](dig_session::FileBackend), and the password that opens it comes from
+//! the **user's head** — collected at unlock by the production
+//! [`PromptedCeremony`](crate::account::ceremony::PromptedCeremony) in the app's own native masked
+//! window (dig_ecosystem#1817, wired live in [`account::boot`](crate::account::boot)). The password is
+//! never persisted — not on disk, not in this credential store, not in a log — so the honest guarantee
+//! is strong: an attacker who dumps the sealed seed file obtains only Argon2id-hardened ciphertext, and
+//! one who dumps this credential store obtains no seed. The two are separated because neither the
+//! password nor the ciphertext lives beside the other.
 //!
-//! Everything here is expressed against the small [`CredentialStore`] trait so the key-management
-//! logic is testable without touching the real OS store, and so the file-fallback path can be
-//! exercised deterministically by presenting no backend (`None`) to the vault.
+//! # Why this seam still exists (migration only)
+//!
+//! Accounts created BEFORE #1817 were sealed under a password the machine generated and kept in this
+//! credential store — a zero-prompt model whose defect is precisely that any code running as the
+//! logged-in user could read the password, so no user-known secret protected custody. That model is
+//! RETIRED: no boot, unlock, or sign path sources a password from here any more. This seam survives
+//! solely so [`migration`](crate::account::migration) can open such an account with the old machine
+//! password ONCE and re-seal the SAME seed under a password the user chooses — never deleting a seed —
+//! and so [`discard_account`](crate::account::boot::discard_account) can clean up a leftover entry. The
+//! per-application access ACL (scoped to the logged-in user, released by the login session) is what
+//! gated the old machine password; it was never a substitute for a user-known secret, which is the gap
+//! #1817 closed.
+//!
+//! **Linux never used this store.** The kernel keyutils session keyring is readable by ANY same-UID
+//! process (no per-application ACL) and is non-persistent across reboot/logout, so it was never a safe
+//! custody primary. Accordingly [`OsCredentialStore`] and the `keyring` dependency are compiled only on
+//! Windows/macOS; Linux's account boot defers until its passphrase unlock UX lands (dig_ecosystem#962).
+//!
+//! Everything here is expressed against the small [`CredentialStore`] trait so the migration logic is
+//! testable without touching the real OS store, using an in-memory double.
 
 use super::KeystoreError;
 

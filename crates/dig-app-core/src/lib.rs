@@ -8,7 +8,8 @@
 //!
 //! - [`keystore`] — hold / unlock / **sign with** the DIG identity + wallet keys (dig-keystore
 //!   DIGOP1 at-rest sealing; the user key never enters the engine).
-//! - [`profiles`] — multi-DID profiles via `dig-identity`; create / select / edit the active one.
+//! - [`account`] — the master-HD custody harness: one master seed per account, N profiles derived at
+//!   HD indices, the enroll/unlock lifecycle, and the lockable [`account::residency::AccountResidency`].
 //! - [`wallet`] — the per-profile wallet host (spend building + signing stays local).
 //! - [`storage`] — per-user AppData layout, DIGOP1-sealed at rest (NC-2 / NC-3).
 //! - [`ipc`] — the per-user IPC endpoint address (named pipe / Unix socket) the session dials.
@@ -40,8 +41,9 @@
 //! The normative contract for all of the above is the repo `SPEC.md`. Custody is the master-HD
 //! [`account`] harness (enroll/unlock lifecycle, the lockable [`account::residency::AccountResidency`],
 //! per-profile identity signing + DEK derivation, and the authorize-before-sign money path) over the
-//! `dig-account` crate; [`keystore`] holds the DIGOP1 at-rest sealing + OS-credential-store primary /
-//! sealed-file fallback it builds on. [`session`] is the identity-authenticated engine session
+//! `dig-account` crate; the master seed is sealed (DIGOP1 / Argon2id) in a per-user file backend under
+//! a password the user types at unlock, and [`keystore`] is the legacy, migration-only OS-credential-store
+//! seam for moving pre-#1817 accounts off the retired machine-generated password. [`session`] is the identity-authenticated engine session
 //! (begin→attach handshake, the `sign` callback, detach, re-attach, multi-session); [`gateway`] is the
 //! CLI/RPC front door that routes each command LOCAL vs engine-PROXY over the
 //! [`gateway::EngineProxy`] / [`gateway::LocalIdentity`] / [`gateway::LinkOpener`] seams.
