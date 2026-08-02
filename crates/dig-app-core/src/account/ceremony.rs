@@ -7,14 +7,16 @@
 //!   app's own native masked window ([`password`](crate::account::password)). The password exists only
 //!   in the user's head, so unlocking is a real gate: code running in the user's OS session cannot type
 //!   it.
-//! - **[`CredentialCeremony`] — the RETIRED zero-prompt ceremony, kept for MIGRATION ONLY.** It keeps a
-//!   machine-generated password in the OS credential store and hands it over with no prompt, which is
-//!   precisely the defect #1817 exists to remove: any code running as the logged-in user could read it,
-//!   so there was no user-known secret protecting custody at all. It survives because accounts sealed
-//!   under such a password are on real machines, and the graceful way out is to unlock them with it ONCE
-//!   and re-seal under a password the user chooses ([`migration`](crate::account::migration)) — never to
-//!   delete a seed. It is NOT a fallback: no boot path reaches for it, because a fallback needing no
-//!   password would defeat the whole change.
+//! - **[`CredentialCeremony`] — the RETIRED zero-prompt ceremony, kept only to REPRODUCE the pre-#1817
+//!   password model in tests.** It keeps a machine-generated password in the OS credential store and
+//!   hands it over with no prompt, which is precisely the defect #1817 exists to remove: any code
+//!   running as the logged-in user could read it, so there was no user-known secret protecting custody
+//!   at all. Production has moved off it entirely — no boot path reaches for it, and
+//!   [`migration`](crate::account::migration) reads the retired machine password DIRECTLY
+//!   ([`PreCollectedPassword`]) rather than through this ceremony. It survives so migration's own tests
+//!   can seal a realistic account under the old zero-prompt model — the same generation real machines
+//!   once used — and prove the re-seal path opens and rescues it. It is NOT a fallback: a path needing
+//!   no password would defeat the whole change.
 //!
 //! Spend confirmation (#1548, slice C — money goes live) is gated on the per-OS native confirmer: the
 //! money path calls [`confirm_spend`](AuthCeremony::confirm_spend), which renders the independently
@@ -44,11 +46,14 @@ const GENERATED_PASSWORD_BYTES: usize = 32;
 /// The RETIRED zero-prompt [`AuthCeremony`]: it sources the account password from an OS
 /// [`CredentialStore`], generating + persisting one on first run.
 ///
-/// **Migration only.** A password the machine invents and the machine keeps is not a custody secret —
-/// anything running as the logged-in user can read it — so no boot, unlock, or sign path uses this any
-/// more. It exists solely so [`migration`](crate::account::migration) can open an account that was
-/// sealed under such a password ONCE, in order to re-seal it under one the user chooses. Reaching for
-/// it anywhere else would reinstate a no-password path and undo dig_ecosystem#1817.
+/// **A test-only reproduction of the pre-#1817 model.** A password the machine invents and the machine
+/// keeps is not a custody secret — anything running as the logged-in user can read it — so no boot,
+/// unlock, or sign path uses this any more, and production [`migration`](crate::account::migration)
+/// reads the retired machine password DIRECTLY ([`PreCollectedPassword`]) rather than through this
+/// ceremony. It survives so migration's tests can seal a realistic account under the old zero-prompt
+/// model — the same generation real machines once used — and then prove the re-seal path opens and
+/// rescues it. Reaching for it in production anywhere would reinstate a no-password path and undo
+/// dig_ecosystem#1817.
 ///
 /// Generic over the credential backend so it is unit-testable with an in-memory double and swaps the
 /// real [`OsCredentialStore`](crate::keystore::OsCredentialStore) in production.

@@ -15,6 +15,7 @@
 //! cache directory (plaintext, SYSTEM-write-restricted). Only identity / wallet / subscriptions /
 //! config / profile-metadata are sealed under this layout.
 
+use crate::sealer::{ProfileSealer, SealError};
 use crate::{Error, Os, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -145,6 +146,45 @@ pub fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A failure from [`seal_and_write`]: the plaintext could not be sealed (normally because the account
+/// is locked) or the durable write to disk failed. Each vault maps this onto its own `VaultError`, so
+/// the two callers keep their existing error surfaces unchanged.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SealWriteError {
+    /// The plaintext could not be sealed under the profile's DEK.
+    #[error(transparent)]
+    Seal(#[from] SealError),
+
+    /// The ciphertext could not be written to disk.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// THE at-rest write discipline for every sealed per-profile blob — the single source of truth so the
+/// recovery-phrase vault and the second-factor vault cannot drift in how they persist a secret.
+///
+/// Seals `plaintext` under the DEK of the profile named by `did`, then persists the ciphertext to
+/// `path` exactly as every security-critical file in this crate is persisted: create the parent
+/// directory if absent, write durably and atomically through a sibling `*.seal.tmp` temp file
+/// ([`write_durably`] — temp + fsync + rename), then restrict the final file to its owner
+/// ([`restrict_to_owner`], `0600` on Unix). On success the bytes on disk are the AEAD ciphertext and
+/// nothing else; a locked account fails closed at the seal step, before any file is touched.
+pub(crate) fn seal_and_write(
+    sealer: &impl ProfileSealer,
+    did: &str,
+    path: &Path,
+    plaintext: &[u8],
+) -> std::result::Result<(), SealWriteError> {
+    let sealed = sealer.seal(did, plaintext)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("seal.tmp");
+    write_durably(path, &temp, &sealed)?;
+    restrict_to_owner(path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +276,60 @@ mod tests {
                 mode, 0o600,
                 "the temp file's owner-only mode must carry through the rename"
             );
+        }
+    }
+
+    /// A keyed-prefix [`ProfileSealer`] double: reversible but DID-bound, so `seal_and_write` can be
+    /// round-tripped without pulling in the real DIGOP1 crypto. It stands in for the shape every
+    /// production sealer satisfies — the bytes on disk are the sealed form, never the plaintext.
+    struct KeyedSealer;
+
+    impl ProfileSealer for KeyedSealer {
+        fn seal(&self, did: &str, plaintext: &[u8]) -> std::result::Result<Vec<u8>, SealError> {
+            let mut out = format!("{did}|").into_bytes();
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
+
+        fn open(
+            &self,
+            did: &str,
+            ciphertext: &[u8],
+        ) -> std::result::Result<zeroize::Zeroizing<Vec<u8>>, SealError> {
+            let prefix = format!("{did}|").into_bytes();
+            ciphertext
+                .strip_prefix(&prefix[..])
+                .map(|rest| zeroize::Zeroizing::new(rest.to_vec()))
+                .ok_or(SealError::Open)
+        }
+    }
+
+    /// The shared at-rest write: `seal_and_write` seals the plaintext (so the raw words never reach
+    /// the file), lands the ciphertext atomically, and leaves the file owner-only (`0600` on Unix).
+    /// This is what lets both vaults route through one copy of the discipline.
+    #[test]
+    fn seal_and_write_seals_then_lands_an_owner_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("blob.seal");
+        let did = "did:chia:profile-a";
+        let plaintext = b"the secret bytes";
+
+        seal_and_write(&KeyedSealer, did, &path, plaintext).unwrap();
+
+        // The on-disk bytes are the sealed form, and open back to exactly the plaintext.
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            raw.starts_with(did.as_bytes()) && raw != plaintext,
+            "the file must hold sealed bytes, not the plaintext"
+        );
+        let opened = KeyedSealer.open(did, &raw).unwrap();
+        assert_eq!(&*opened, plaintext, "the sealed blob must round-trip");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the sealed file must end owner-only");
         }
     }
 }
