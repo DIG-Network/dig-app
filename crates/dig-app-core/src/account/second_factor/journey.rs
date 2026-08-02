@@ -472,7 +472,7 @@ fn verify_a_code(
 mod tests {
     use super::*;
     use crate::confirm::{ConnectPrompt, DestroyPrompt, PairPrompt, RevealPrompt, SignPrompt};
-    use crate::sealer::SealError;
+    use crate::test_support::FakeSealer;
     use std::path::Path;
     use std::sync::Mutex;
     use zeroize::Zeroizing;
@@ -489,32 +489,8 @@ mod tests {
         }
     }
 
-    /// The same keyed-prefix sealer the vault's own tests use.
-    #[derive(Default)]
-    struct FakeSealer;
-
-    impl ProfileSealer for FakeSealer {
-        fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
-            let mut out = format!("{profile_did}|").into_bytes();
-            out.extend_from_slice(plaintext);
-            Ok(out)
-        }
-
-        fn open(
-            &self,
-            profile_did: &str,
-            ciphertext: &[u8],
-        ) -> Result<Zeroizing<Vec<u8>>, SealError> {
-            let prefix = format!("{profile_did}|").into_bytes();
-            ciphertext
-                .strip_prefix(&prefix[..])
-                .map(|rest| Zeroizing::new(rest.to_vec()))
-                .ok_or(SealError::Open)
-        }
-    }
-
     fn vault(dir: &Path) -> SecondFactorVault<FakeSealer> {
-        SecondFactorVault::new(FakeSealer, dir, DID)
+        SecondFactorVault::new(FakeSealer::default(), dir, DID)
     }
 
     /// What one screen of a scripted run does.

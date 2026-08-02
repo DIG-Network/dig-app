@@ -119,13 +119,10 @@ pub fn reveal_phrase<S: ProfileSealer>(
         return RevealOutcome::Refused;
     }
 
-    let phrase = match vault.load() {
-        Ok(Some(phrase)) => phrase,
-        Ok(None) => return RevealOutcome::NoPhraseStored,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not open the recovery-phrase vault");
-            return RevealOutcome::Unavailable;
-        }
+    let phrase = match open_vault(vault, "could not open the recovery-phrase vault") {
+        PhraseLookup::Found(phrase) => phrase,
+        PhraseLookup::Missing => return RevealOutcome::NoPhraseStored,
+        PhraseLookup::Unavailable => return RevealOutcome::Unavailable,
     };
 
     let words = phrase.numbered_lines();
@@ -138,6 +135,36 @@ pub fn reveal_phrase<S: ProfileSealer>(
         ConfirmDecision::Approve | ConfirmDecision::Deny => RevealOutcome::Shown,
         // The window itself could not be drawn, so nothing reached the screen.
         ConfirmDecision::Timeout | ConfirmDecision::Unavailable => RevealOutcome::Unavailable,
+    }
+}
+
+/// The three ways opening the phrase vault can end, before a ceremony maps them onto its own outcome.
+///
+/// The reveal and backup egress paths are DISTINCT ceremonies — one warns first, the other does not —
+/// but they read the vault identically: a stored phrase, a legacy account with none, or an unopenable
+/// vault. Naming the three cases once, here, is what keeps the two paths from drifting on which one
+/// means "no phrase" versus "unavailable". It deliberately does NOT merge the ceremonies themselves.
+enum PhraseLookup {
+    /// A phrase was stored and decrypted.
+    Found(RecoveryPhrase),
+    /// The account is legacy — no phrase was ever stored.
+    Missing,
+    /// The vault could not be opened (locked or damaged); the reason has been logged.
+    Unavailable,
+}
+
+/// Open `vault`, logging an open failure under `context`, and report which of the three cases occurred.
+///
+/// Shared by [`reveal_phrase`] and [`back_up_phrase`] so the `load()` mapping lives in one place; each
+/// caller supplies its own log context and maps the result onto its own outcome enum.
+fn open_vault<S: ProfileSealer>(vault: &PhraseVault<S>, context: &str) -> PhraseLookup {
+    match vault.load() {
+        Ok(Some(phrase)) => PhraseLookup::Found(phrase),
+        Ok(None) => PhraseLookup::Missing,
+        Err(e) => {
+            tracing::warn!(error = %e, "{context}");
+            PhraseLookup::Unavailable
+        }
     }
 }
 
@@ -237,13 +264,10 @@ pub fn back_up_phrase<S: ProfileSealer>(
     }
 
     // 3. Decrypt, then deliver. Nothing above this line has touched the ciphertext.
-    let phrase = match vault.load() {
-        Ok(Some(phrase)) => phrase,
-        Ok(None) => return BackupOutcome::NoPhraseStored,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not open the recovery-phrase vault for backup");
-            return BackupOutcome::Unavailable;
-        }
+    let phrase = match open_vault(vault, "could not open the recovery-phrase vault for backup") {
+        PhraseLookup::Found(phrase) => phrase,
+        PhraseLookup::Missing => return BackupOutcome::NoPhraseStored,
+        PhraseLookup::Unavailable => return BackupOutcome::Unavailable,
     };
 
     // The words live only in this zeroizing buffer for the length of the delivery, then are wiped. The

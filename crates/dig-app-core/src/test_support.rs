@@ -12,15 +12,60 @@
 //!   its live-view [`SessionSigner`], which fails closed the instant the residency is locked
 //!   ([`lock_all`](crate::session_lock::SessionKeys::lock_all)).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dig_account::{AccountId, AccountSession, AccountStore, ProfileIx};
 use dig_keystore::{KdfParams, MemoryBackend};
 use dig_session::{Password, ENTROPY_LEN};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use crate::account::residency::AccountResidency;
 use crate::account::sealer::AccountSealer;
+use crate::sealer::{ProfileSealer, SealError};
+
+/// A keyed-prefix [`ProfileSealer`] double, shared by every vault-level test (the recovery-phrase
+/// vault, the second-factor vault, the second-factor journey).
+///
+/// It is deliberately reversible-but-keyed: prefixing the profile DID means opening under a DIFFERENT
+/// DID fails exactly where a real DEK mismatch would, so cross-profile isolation is exercised for real
+/// rather than assumed. It can also be driven into a LOCKED state, because "the account locked
+/// mid-operation" is a state the vaults must fail closed on and a sealer that could only ever succeed
+/// could never express it. A test that never calls [`lock`](FakeSealer::lock) sees a plain,
+/// always-open keyed sealer.
+#[derive(Default)]
+pub struct FakeSealer {
+    locked: Mutex<bool>,
+}
+
+impl FakeSealer {
+    /// Drive the sealer closed, so every subsequent seal/open fails as a locked account would.
+    pub fn lock(&self) {
+        *self.locked.lock().unwrap() = true;
+    }
+}
+
+impl ProfileSealer for FakeSealer {
+    fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+        if *self.locked.lock().unwrap() {
+            return Err(SealError::Seal("locked".into()));
+        }
+        let mut out = format!("{profile_did}|").into_bytes();
+        out.extend_from_slice(plaintext);
+        Ok(out)
+    }
+
+    fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
+        if *self.locked.lock().unwrap() {
+            return Err(SealError::Open);
+        }
+        let prefix = format!("{profile_did}|").into_bytes();
+        ciphertext
+            .strip_prefix(&prefix[..])
+            .map(|rest| Zeroizing::new(rest.to_vec()))
+            .ok_or(SealError::Open)
+    }
+}
 
 /// A cheap-KDF [`AccountSealer`] bound to a DEK deterministically derived from `label`. Same label →
 /// same DEK (a persisted blob re-opens across a simulated restart); different label → different DEK

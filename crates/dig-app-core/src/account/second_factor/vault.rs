@@ -170,6 +170,15 @@ impl From<SecretError> for VaultError {
     }
 }
 
+impl From<storage::SealWriteError> for VaultError {
+    fn from(error: storage::SealWriteError) -> Self {
+        match error {
+            storage::SealWriteError::Seal(e) => Self::Seal(e),
+            storage::SealWriteError::Io(e) => Self::Io(e),
+        }
+    }
+}
+
 /// The enrolment record, as it is sealed.
 #[derive(Debug, Serialize, Deserialize)]
 struct Record {
@@ -401,13 +410,7 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
         let mut plaintext = ENVELOPE_MAGIC.to_vec();
         // `to_vec` cannot fail for this record (no maps with non-string keys, no non-finite floats).
         plaintext.extend_from_slice(&serde_json::to_vec(record).map_err(|_| VaultError::Corrupt)?);
-        let sealed = self.sealer.seal(&self.profile_did, &plaintext)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = self.path.with_extension("seal.tmp");
-        storage::write_durably(&self.path, &temp, &sealed)?;
-        storage::restrict_to_owner(&self.path)?;
+        storage::seal_and_write(&self.sealer, &self.profile_did, &self.path, &plaintext)?;
         Ok(())
     }
 }
@@ -473,48 +476,7 @@ impl<S: ProfileSealer> Enrolment for SecondFactorVault<S> {
 mod tests {
     use super::*;
     use crate::account::second_factor::totp::STEP_SECONDS;
-    use std::sync::Mutex;
-    use zeroize::Zeroizing;
-
-    /// The same keyed-prefix fake the phrase vault uses: reversible but DID-bound, so cross-profile
-    /// isolation is exercised for real, and lockable, because "the account locked mid-challenge" is a
-    /// state a sealer that can only succeed could never express.
-    #[derive(Default)]
-    struct FakeSealer {
-        locked: Mutex<bool>,
-    }
-
-    impl FakeSealer {
-        fn lock(&self) {
-            *self.locked.lock().unwrap() = true;
-        }
-    }
-
-    impl ProfileSealer for FakeSealer {
-        fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
-            if *self.locked.lock().unwrap() {
-                return Err(SealError::Seal("locked".into()));
-            }
-            let mut out = format!("{profile_did}|").into_bytes();
-            out.extend_from_slice(plaintext);
-            Ok(out)
-        }
-
-        fn open(
-            &self,
-            profile_did: &str,
-            ciphertext: &[u8],
-        ) -> Result<Zeroizing<Vec<u8>>, SealError> {
-            if *self.locked.lock().unwrap() {
-                return Err(SealError::Open);
-            }
-            let prefix = format!("{profile_did}|").into_bytes();
-            ciphertext
-                .strip_prefix(&prefix[..])
-                .map(|rest| Zeroizing::new(rest.to_vec()))
-                .ok_or(SealError::Open)
-        }
-    }
+    use crate::test_support::FakeSealer;
 
     const DID_A: &str = "did:chia:profile-a";
     const DID_B: &str = "did:chia:profile-b";

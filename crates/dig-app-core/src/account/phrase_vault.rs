@@ -59,6 +59,15 @@ pub enum VaultError {
     Corrupt,
 }
 
+impl From<storage::SealWriteError> for VaultError {
+    fn from(error: storage::SealWriteError) -> Self {
+        match error {
+            storage::SealWriteError::Seal(e) => Self::Seal(e),
+            storage::SealWriteError::Io(e) => Self::Io(e),
+        }
+    }
+}
+
 /// The per-profile store of the account's own recovery phrase.
 ///
 /// Generic over any [`ProfileSealer`] so it is unit-testable against a fake sealer; production wires
@@ -110,13 +119,12 @@ impl<S: ProfileSealer> PhraseVault<S> {
     /// [`VaultError::Seal`] if the account is locked; [`VaultError::Io`] on a write failure.
     pub fn store(&self, phrase: &RecoveryPhrase) -> Result<(), VaultError> {
         let words = phrase.words().join(" ");
-        let sealed = self.sealer.seal(&self.profile_did, words.as_bytes())?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temp = self.path.with_extension("seal.tmp");
-        storage::write_durably(&self.path, &temp, &sealed)?;
-        storage::restrict_to_owner(&self.path)?;
+        storage::seal_and_write(
+            &self.sealer,
+            &self.profile_did,
+            &self.path,
+            words.as_bytes(),
+        )?;
         Ok(())
     }
 
@@ -142,51 +150,7 @@ impl<S: ProfileSealer> PhraseVault<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use zeroize::Zeroizing;
-
-    /// A sealer that AEAD-like-binds the ciphertext to the profile DID, so cross-profile isolation is
-    /// exercised for real rather than assumed. It is deliberately reversible-but-keyed: prefixing the
-    /// DID means opening under a different DID fails exactly where a real DEK mismatch would.
-    ///
-    /// It can also be put into a LOCKED state, because "the account locked mid-reveal" is a state the
-    /// vault must fail closed on and a sealer that can only succeed could never express it.
-    #[derive(Default)]
-    struct FakeSealer {
-        locked: Mutex<bool>,
-    }
-
-    impl FakeSealer {
-        fn lock(&self) {
-            *self.locked.lock().unwrap() = true;
-        }
-    }
-
-    impl ProfileSealer for FakeSealer {
-        fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
-            if *self.locked.lock().unwrap() {
-                return Err(SealError::Seal("locked".into()));
-            }
-            let mut out = format!("{profile_did}|").into_bytes();
-            out.extend_from_slice(plaintext);
-            Ok(out)
-        }
-
-        fn open(
-            &self,
-            profile_did: &str,
-            ciphertext: &[u8],
-        ) -> Result<Zeroizing<Vec<u8>>, SealError> {
-            if *self.locked.lock().unwrap() {
-                return Err(SealError::Open);
-            }
-            let prefix = format!("{profile_did}|").into_bytes();
-            ciphertext
-                .strip_prefix(&prefix[..])
-                .map(|rest| Zeroizing::new(rest.to_vec()))
-                .ok_or(SealError::Open)
-        }
-    }
+    use crate::test_support::FakeSealer;
 
     fn vault(dir: &Path, did: &str) -> PhraseVault<FakeSealer> {
         PhraseVault::new(FakeSealer::default(), dir, did)
