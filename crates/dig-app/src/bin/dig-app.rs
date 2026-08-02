@@ -485,16 +485,21 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
     // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
-    let outcome = first_run_wizard(confirmer, || {
-        let presenter = WindowedPresenter::new(confirmer);
-        let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
-        let address = booted.residency.receiving_address()?.ok()?;
-        use dig_app_core::session_lock::SessionKeys;
-        // The account was created unlocked. Relock it here so the tray's ONE unlock path — the user
-        // typing the password they just chose — is also the first proof that password works.
-        booted.residency.lock_all();
-        Some(address)
-    });
+    let outcome = first_run_wizard(
+        confirmer,
+        || {
+            let presenter = WindowedPresenter::new(confirmer);
+            let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
+            first_run_address(booted)
+        },
+        // The IMPORT route (dig_ecosystem#1564): re-derive the account the user's typed phrase describes,
+        // through the SAME boot path as a create so the session is assembled identically. The wizard has
+        // already collected + validated the phrase; this closure only enrols from it.
+        |phrase| {
+            let booted = open_account(&dir, Seeding::Restore(phrase))?;
+            first_run_address(booted)
+        },
+    );
 
     match outcome {
         // Re-open through the normal unlock path so the session, signer, sealer and screen-lock guard
@@ -513,6 +518,18 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
             None
         }
     }
+}
+
+/// The receiving address of a freshly-enrolled first-run account, relocked so the tray's ONE unlock
+/// path proves the just-chosen password. Shared by the create and import routes so they end identically.
+#[cfg(feature = "tray")]
+fn first_run_address(booted: dig_app_core::account::boot::BootedAccount) -> Option<String> {
+    use dig_app_core::session_lock::SessionKeys;
+    let address = booted.residency.receiving_address()?.ok()?;
+    // The account was created/restored unlocked. Relock it here so the user typing the password they
+    // just chose is also the first proof that password works.
+    booted.residency.lock_all();
+    Some(address)
 }
 
 /// Whether this host's account is still sealed under the machine-generated password.
@@ -892,7 +909,8 @@ mod tray {
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::Replacement;
     use dig_app_core::account::journey::{
-        explain_missing_phrase, explain_unopenable, reveal_phrase,
+        back_up_phrase, explain_missing_phrase, explain_unopenable, reveal_phrase, BackupDelivery,
+        BackupOutcome, BackupTarget, PhraseBackupSink,
     };
     use dig_app_core::agent::{Agent, SharedStatus};
     use dig_app_core::confirm::{native_confirmer, InputStyle, NativeConfirmer};
@@ -1370,6 +1388,12 @@ mod tray {
                 }
             }
             TrayAction::ShowRecoveryPhrase => show_phrase(session.as_ref(), env, confirmer),
+            TrayAction::CopyRecoveryPhrase => {
+                back_up_phrase_to(session.as_ref(), env, confirmer, BackupTarget::Clipboard)
+            }
+            TrayAction::SaveRecoveryPhrase => {
+                back_up_phrase_to(session.as_ref(), env, confirmer, BackupTarget::File)
+            }
             TrayAction::SetUpTwoFactor => set_up_two_factor(session.as_ref(), env, confirmer),
             TrayAction::TurnOffTwoFactor => turn_off_two_factor(session.as_ref(), env, confirmer),
             TrayAction::ExplainUnopenable => {
@@ -1600,6 +1624,93 @@ mod tray {
             ),
         }
     }
+
+    /// Back up the account's recovery phrase to `target`, behind the reveal gate + a stark warning.
+    ///
+    /// The whole ordered ceremony — warn, authorize, decrypt, deliver — lives in
+    /// [`journey::back_up_phrase`], where it is unit-tested against a recording sink. This handler only
+    /// addresses the vault (like [`show_phrase`]) and supplies the platform egress via [`TrayBackupSink`].
+    fn back_up_phrase_to(
+        session: Option<&TraySession>,
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
+        target: BackupTarget,
+    ) {
+        // Same locked-account guard as `show_phrase`: an idle auto-lock between opening the menu and
+        // clicking the row lands here rather than revealing anything.
+        let vault = super::brand_dir(env)
+            .zip(session)
+            .and_then(|(dir, session)| vault_for(&dir, &session.residency));
+        let Some(vault) = vault else {
+            notify(
+                confirmer,
+                "DIG — Recovery phrase",
+                "Your DIG Account is locked.",
+                "Unlock it from this menu first, then try again.",
+            );
+            return;
+        };
+        match back_up_phrase(confirmer, &vault, target, &TrayBackupSink) {
+            // The ceremony draws its own success/failure windows; a refusal or a legacy account needs no
+            // extra one here (a refusal already saw the window it declined).
+            BackupOutcome::BackedUp | BackupOutcome::Refused | BackupOutcome::Unavailable => {}
+            BackupOutcome::NoPhraseStored => {
+                explain_missing_phrase(confirmer);
+            }
+        }
+    }
+
+    /// The platform egress for a phrase backup: the OS clipboard, or a plain `.txt` file in the user's
+    /// home directory. It handles the words for exactly one delivery and never logs or retains them.
+    struct TrayBackupSink;
+
+    impl PhraseBackupSink for TrayBackupSink {
+        fn deliver(&self, target: BackupTarget, words: &str) -> BackupDelivery {
+            match target {
+                BackupTarget::Clipboard => {
+                    if write_clipboard(words) {
+                        BackupDelivery::Delivered {
+                            where_to: "your clipboard".to_string(),
+                        }
+                    } else {
+                        BackupDelivery::Failed
+                    }
+                }
+                BackupTarget::File => save_phrase_file(words),
+            }
+        }
+    }
+
+    /// Write `words` to `dig-recovery-phrase.txt` in the user's home directory, owner-only, and report
+    /// the path. Deliberately a fixed, easy-to-find location rather than a native file picker (which
+    /// dig-app has no toolkit for); the user was warned this file is plaintext and told to delete it.
+    fn save_phrase_file(words: &str) -> BackupDelivery {
+        let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        else {
+            return BackupDelivery::Failed;
+        };
+        let path = std::path::Path::new(&home).join("dig-recovery-phrase.txt");
+        // A trailing newline so the file is a well-formed text line, nothing more.
+        if std::fs::write(&path, format!("{words}\n")).is_err() {
+            return BackupDelivery::Failed;
+        }
+        restrict_file_to_owner(&path);
+        BackupDelivery::Delivered {
+            where_to: path.display().to_string(),
+        }
+    }
+
+    /// Best-effort restrict a just-written secret file to its owner (0600 on Unix; a no-op elsewhere,
+    /// where the per-user profile ACLs already apply). A failure to tighten is not fatal — the warning
+    /// already told the user the file is sensitive — but it is attempted every time.
+    #[cfg(unix)]
+    fn restrict_file_to_owner(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_file_to_owner(_path: &std::path::Path) {}
 
     /// Show EVERYTHING the tray knows, in full, in a window that can hold it.
     ///

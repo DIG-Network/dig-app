@@ -318,6 +318,12 @@ pub enum TrayAction {
     LockNow,
     /// Re-display the account's recovery phrase, behind unlock + a native confirm.
     ShowRecoveryPhrase,
+    /// Copy the account's recovery phrase to the clipboard, behind the SAME gate as a reveal plus a stark
+    /// unencrypted-storage warning (dig_ecosystem#1564). Offered ONLY on an unlocked, recoverable account.
+    CopyRecoveryPhrase,
+    /// Save the account's recovery phrase to a plain `.txt` file, behind the same gate + warning as
+    /// [`CopyRecoveryPhrase`](Self::CopyRecoveryPhrase). Offered ONLY on an unlocked, recoverable account.
+    SaveRecoveryPhrase,
     /// Offered ONLY to an account that cannot be opened: explain WHY signing is unavailable and point at
     /// the only remedy, which is replacing the account.
     ///
@@ -812,10 +818,31 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
             "Show my recovery phrase (set a password first)",
             false,
         )),
+        // Unlocked WITH a phrase: the full backup surface — view it, copy it, or save it to a file. The
+        // copy/save rows are gated identically to the reveal (unlock + a fresh confirm) and each carries
+        // its own stark unencrypted-storage warning at the moment it runs (dig_ecosystem#1564).
+        AccountState::Unlocked { recoverable: true } => {
+            rows.push(MenuRow::action(
+                TrayAction::ShowRecoveryPhrase,
+                "Show my recovery phrase…",
+                true,
+            ));
+            rows.push(MenuRow::action(
+                TrayAction::CopyRecoveryPhrase,
+                "Copy my recovery phrase…",
+                true,
+            ));
+            rows.push(MenuRow::action(
+                TrayAction::SaveRecoveryPhrase,
+                "Save my recovery phrase to a file…",
+                true,
+            ));
+        }
+        // Any other state cannot read the phrase, so only the (disabled) view row is shown.
         _ => rows.push(MenuRow::action(
             TrayAction::ShowRecoveryPhrase,
             "Show my recovery phrase…",
-            matches!(account, AccountState::Unlocked { recoverable: true }),
+            false,
         )),
     }
     rows.push(MenuRow::Separator);

@@ -193,8 +193,16 @@ can carry to a new machine.
 - **Re-reveal (MUST).** An enrolled account MUST be able to display its phrase again, gated on BOTH the
   account being unlocked AND a fresh OS re-authentication, and the gate MUST run BEFORE the phrase is
   decrypted. The phrase is stored for this purpose sealed under the ROOT profile's DEK.
-- **Restore (MUST).** An account MUST be restorable from its phrase alone on a host with no prior state.
-  Restoring MUST refuse when an account already exists, rather than overwriting a custody root.
+- **Restore (MUST).** An account MUST be restorable from its phrase alone on a host with no prior state,
+  reachable BOTH at first run (§3.2b) and from the tray. Restoring MUST refuse when an account already
+  exists, rather than overwriting a custody root.
+- **Backup (MUST).** An enrolled account MUST be able to back up its phrase — copy it to the clipboard,
+  and optionally save it to a plain `.txt` file (`account::journey::back_up_phrase`). A backup is gated
+  IDENTICALLY to a re-reveal (unlock AND a fresh OS re-authentication, the gate running BEFORE the phrase
+  is decrypted) AND is preceded by a stark, destination-specific warning that the words will sit in the
+  clear where any app or person with access can take the account; refusing the warning MUST decrypt
+  nothing. The words MUST flow only through the zeroizing path — wiped after the single delivery — and
+  MUST NOT be logged; the egress MUST NOT retain them.
 - **Handling (MUST).** The phrase MUST NOT be logged, serialized, transmitted, or written anywhere but
   its sealed vault. It is held in zeroizing memory, redacted in debug output, and reaches only an
   OS-owned foreground window.
@@ -254,7 +262,9 @@ The ICON MUST NOT be the only signal for a state: the tooltip MUST name the same
 who cannot distinguish the icons — or whose theme flattens them — still has the fact (§6.6).
 
 The menu MUST offer actions to: show the status details, set up an account, restore from a recovery phrase,
-unlock, lock now, reveal the recovery phrase, copy the DIG ID, copy the receive address, show the wallet,
+unlock, lock now, reveal the recovery phrase, back up the recovery phrase (copy it to the clipboard, and
+save it to a file — §3.1a Backup, offered only on an unlocked recoverable account), copy the DIG ID, copy
+the receive address, show the wallet,
 replace the account (with a new one, or with one from a recovery phrase), remove the account, explain an
 account that cannot be opened, explain the on-chain DID, open the log folder, and quit.
 
@@ -702,17 +712,26 @@ The first-run flow (`account::journey::first_run_wizard`), reached from the tray
 `Set up my DIG Account…` row, is ordered so nothing becomes load-bearing before the words are written
 down:
 
-1. **Orient** — a two-choice screen stating what will happen. Refusing creates nothing.
-2. **Create** — generate the 24-word BIP-39 phrase, show it, take the retention claim, ask the user to
-   CHOOSE a password, and seal the seed under it. Any refusal at any point leaves the host untouched
-   (§3.1a, §3.2a).
+1. **Orient** — a two-choice screen stating what will happen. Refusing creates nothing; this is the
+   flow's one cancel point.
+2. **Choose the route (MUST).** A first run MUST let the user CREATE a new account OR IMPORT an existing
+   one from its recovery phrase — a stranger who already holds a DIG phrase MUST be able to restore at
+   first run, not only via the tray's replace-account path. The choice is a real either/or claim.
+   - **Create** — generate the 24-word BIP-39 phrase, show it, take the retention claim, ask the user to
+     CHOOSE a password, and seal the seed under it.
+   - **Import** — collect the 24 words through the native input gate (§3.1d — masked, re-asking on a bad
+     phrase, refusing a Chia wallet phrase), then re-derive and seal that account. The TYPED phrase MUST
+     reach the enrol step unchanged (the same-identity guarantee, §3.1a).
+
+   Any refusal at any point leaves the host untouched (§3.1a, §3.2a).
 3. **Fund** — show the account's OWN derived receiving address. It is SHOWN, not awaited: the flow is a
    chain of OS-owned modal windows (§3.1d) and a modal cannot poll a chain, so an implementation MUST NOT
    present a "waiting for funds" screen it cannot actually be waiting on.
 4. **DID** — name the on-chain DID as the remaining REQUIRED step (§3.1b) and state plainly that minting
    is not available in this version. It MUST NOT present a control that appears to mint.
 
-Every step MUST be escapable without half-creating an account. Reading content is NOT gated on any of
+Both routes end on the SAME fund + DID screens (`show_account_ready`) so they cannot drift. Every step
+MUST be escapable without half-creating an account. Reading content is NOT gated on any of
 this: `Open URL…` stays enabled in every account state (§6.0 — consumption is never gated on custody).
 
 ### 3.3 Wallet

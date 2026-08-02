@@ -23,6 +23,7 @@ use crate::confirm::{
     NativeConfirmer, NoticePrompt, RevealPrompt,
 };
 use crate::sealer::ProfileSealer;
+use zeroize::Zeroizing;
 
 /// How the user's own phrase is described to them, in one place so setup and reveal agree.
 const PHRASE_NAME: &str = "your 24-word DIG recovery phrase";
@@ -137,6 +138,173 @@ pub fn reveal_phrase<S: ProfileSealer>(
         ConfirmDecision::Approve | ConfirmDecision::Deny => RevealOutcome::Shown,
         // The window itself could not be drawn, so nothing reached the screen.
         ConfirmDecision::Timeout | ConfirmDecision::Unavailable => RevealOutcome::Unavailable,
+    }
+}
+
+/// Where a backup of the recovery phrase is being sent (dig_ecosystem#1564).
+///
+/// Chosen as a type rather than a boolean so the STARK unencrypted-storage warning and the confirmation
+/// wording for each destination are decided in one place, and a caller cannot ask for "both" — each
+/// backup targets exactly one place the user then has to look after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupTarget {
+    /// The OS clipboard — plaintext, until the next copy replaces it.
+    Clipboard,
+    /// A plain `.txt` file on disk — plaintext, until the user deletes it.
+    File,
+}
+
+/// What a backup attempt did (dig_ecosystem#1564). Every variant states whether the words left the
+/// vault, because that is the only fact a caller — or a reader — needs from this flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupOutcome {
+    /// The words reached the destination. **This is the one variant where the phrase left the vault.**
+    BackedUp,
+    /// The user declined the stark warning or the reveal gate, or cancelled the destination (e.g. a save
+    /// dialog). **Nothing was decrypted or delivered on a refusal before the gate; nothing was delivered
+    /// on a cancel after it.**
+    Refused,
+    /// This account has no stored phrase (a legacy account) — there is nothing to back up.
+    NoPhraseStored,
+    /// The vault could not be opened, no window could be drawn, or the destination write failed.
+    Unavailable,
+}
+
+/// The untestable egress a backup ends in — putting plaintext on the clipboard or writing it to a file.
+///
+/// A seam, for the same reason the destructive verbs have [`AccountCustodian`]: the ORDER that guards the
+/// words (warn, then authorize, then decrypt, then deliver) is the security property, and it lives in the
+/// library where a test can drive it against a recording double. The platform specifics — which clipboard
+/// utility, which file path, which permissions — are behind this one method, implemented by the shell.
+pub trait PhraseBackupSink {
+    /// Deliver `words` (the space-joined 24-word phrase) to `target`. Called ONLY after the warning and
+    /// the reveal gate have both been approved and the phrase has been decrypted — never speculatively.
+    ///
+    /// The implementation MUST NOT log, copy, or otherwise retain `words` beyond the delivery itself.
+    fn deliver(&self, target: BackupTarget, words: &str) -> BackupDelivery;
+}
+
+/// What a [`PhraseBackupSink`] did with the words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupDelivery {
+    /// Delivered. `where_to` names the destination for the confirmation window (e.g. `"your clipboard"`
+    /// or the file's path), so the user knows exactly where the plaintext now sits.
+    Delivered {
+        /// A human phrase naming where the words went, shown back to the user.
+        where_to: String,
+    },
+    /// The user cancelled at the destination itself (a save dialog dismissed). Nothing was written.
+    Cancelled,
+    /// The destination write failed (no clipboard utility, an unwritable path).
+    Failed,
+}
+
+/// Back up the account's recovery phrase to the clipboard or a file, behind the SAME gate as a reveal
+/// and behind a stark, explicit unencrypted-storage warning (dig_ecosystem#1564).
+///
+/// # The order, which is the whole point
+///
+/// 1. **Warn first.** A copy-to-clipboard or save-to-file puts the entire account, in plaintext, somewhere
+///    another program or person can read it. So the user is told exactly that — naming the destination —
+///    and must approve it BEFORE anything is decrypted. A refusal here decrypts nothing.
+/// 2. **Authorize like a reveal.** The words are then gated on a fresh OS re-authentication
+///    ([`RevealPrompt`]/`confirm_reveal`), identically to [`reveal_phrase`], because backing up hands over
+///    the whole account exactly as showing it does. A refusal here decrypts nothing either.
+/// 3. **Only then decrypt and deliver.** The vault is opened after both approvals, and the words are
+///    handed to the [`PhraseBackupSink`] in a zeroizing buffer that is wiped the moment this returns.
+///
+/// Returns [`BackupOutcome::Refused`] for any non-approval and never delivers the words on one, so the
+/// fail-closed direction is the default rather than a branch a caller must remember.
+pub fn back_up_phrase<S: ProfileSealer>(
+    confirmer: &dyn NativeConfirmer,
+    vault: &PhraseVault<S>,
+    target: BackupTarget,
+    sink: &dyn PhraseBackupSink,
+) -> BackupOutcome {
+    // 1. The stark warning, BEFORE any decryption. Refusing it must leave the vault unopened, which is
+    // why it is placed ahead of both the gate and the load.
+    if confirmer.confirm_claim(&backup_warning(target)) != ConfirmDecision::Approve {
+        return BackupOutcome::Refused;
+    }
+
+    // 2. The reveal gate — the identical authorization `reveal_phrase` runs, and for the identical
+    // reason: this hands over the whole account. Still before the load, so a refusal never decrypts.
+    if confirmer.confirm_reveal(&RevealPrompt {
+        secret: PHRASE_NAME,
+    }) != ConfirmDecision::Approve
+    {
+        return BackupOutcome::Refused;
+    }
+
+    // 3. Decrypt, then deliver. Nothing above this line has touched the ciphertext.
+    let phrase = match vault.load() {
+        Ok(Some(phrase)) => phrase,
+        Ok(None) => return BackupOutcome::NoPhraseStored,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not open the recovery-phrase vault for backup");
+            return BackupOutcome::Unavailable;
+        }
+    };
+
+    // The words live only in this zeroizing buffer for the length of the delivery, then are wiped. The
+    // sink is contractually forbidden from retaining them (see [`PhraseBackupSink::deliver`]).
+    let words = Zeroizing::new(phrase.words().join(" "));
+    match sink.deliver(target, &words) {
+        BackupDelivery::Delivered { where_to } => {
+            notify(
+                confirmer,
+                "DIG — Recovery phrase backed up",
+                "Your 24 words have been backed up.",
+                &format!(
+                    "They are now in {where_to}, in plain text. Anyone who can read that can take your \
+                     DIG Account, so move them somewhere safe and remove this copy when you are done.",
+                ),
+            );
+            BackupOutcome::BackedUp
+        }
+        // A cancel at the destination is the user's choice, and the words never left — treat it exactly
+        // like refusing the warning.
+        BackupDelivery::Cancelled => BackupOutcome::Refused,
+        BackupDelivery::Failed => {
+            notify(
+                confirmer,
+                "DIG — Backup did not complete",
+                "Your recovery phrase could not be backed up.",
+                "Your account is fine and nothing was changed. You can still view your words from the \
+                 DIG menu and write them down. The log folder (in this menu) has the details.",
+            );
+            BackupOutcome::Unavailable
+        }
+    }
+}
+
+/// The stark, destination-specific warning shown before a backup decrypts anything.
+///
+/// A CLAIM, not a notice: refusing it genuinely stops the backup, so the negative choice is load-bearing
+/// and must be a real, labelled way out. The copy names the concrete unencrypted-storage risk of the
+/// chosen destination in the user's own terms — a clipboard the next copy overwrites but any app can read
+/// until then, or a file that persists until it is deleted.
+fn backup_warning(target: BackupTarget) -> ClaimPrompt<'static> {
+    match target {
+        BackupTarget::Clipboard => ClaimPrompt {
+            title: "DIG — Copy your recovery phrase",
+            heading: "This puts your 24 words on the clipboard in PLAIN TEXT.",
+            body: "Until you copy something else, any app or person with access to this computer's \
+                   clipboard can read them — and anyone who has your 24 words can take your DIG Account. \
+                   Only do this to move them somewhere safe, and copy something else afterwards to clear \
+                   them.",
+            affirm: "I understand — copy my phrase",
+            scannable: None,
+        },
+        BackupTarget::File => ClaimPrompt {
+            title: "DIG — Save your recovery phrase",
+            heading: "This saves your 24 words to a plain, UNENCRYPTED file.",
+            body: "Anyone who can read that file — including backup software, sync services and anyone \
+                   who uses this computer — can take your DIG Account. Save it only somewhere you \
+                   control, and delete it once your words are somewhere safe.",
+            affirm: "I understand — save my phrase",
+            scannable: None,
+        },
     }
 }
 
@@ -598,89 +766,143 @@ pub enum FirstRunOutcome {
     Failed,
 }
 
-/// Run the FIRST-RUN flow: orient the user, create the wallet, show them where to send funds, and tell
-/// them the truth about the DID step (dig_ecosystem#1826).
+/// Run the FIRST-RUN flow: orient the user, let them CREATE a new account or IMPORT an existing one from
+/// its recovery phrase, then show them where to send funds and tell them the truth about the DID step
+/// (dig_ecosystem#1826, dig_ecosystem#1564).
 ///
-/// `create` is the account-creating step — in production the shell's setup path, which shows the 24
-/// words, takes the retention claim, asks for a password and enrols. It returns the new account's
-/// receiving address, or `None` if it did not complete.
+/// `create` is the new-account step — in production the shell's setup path, which shows the 24 words,
+/// takes the retention claim, asks for a password and enrols. `import` is the restore step, handed the
+/// user's typed [`RecoveryPhrase`] to re-derive and seal that account. Each returns the account's
+/// receiving address, or `None` if it did not complete; both feed the SAME [`show_account_ready`]
+/// screens so the two routes cannot drift.
 ///
-/// # The four steps, and why the last two are what they are
+/// # The route choice, and why it takes two screens (dig_ecosystem#1564)
 ///
-/// The directive asks for *create seed → fund → detect funding → mint DID*. Two of those are things this
-/// app cannot yet do, and the flow says so rather than miming them:
+/// A stranger who already holds a DIG recovery phrase must be able to restore at first run, not only
+/// create afresh. But a native window offers two buttons, and the choice has three outcomes — create,
+/// import, or leave. So the orient screen carries the ONE escape (its refusal ends the flow and creates
+/// nothing), and the screen after it is the real either/or: "yes" imports, "no" creates. A user who
+/// closes the route window lands in the create path, which is itself fully escapable — it shows the
+/// words and asks for the retention claim before anything is enrolled — so no account is ever created
+/// without an explicit choice.
+///
+/// # The last two screens, and why they are what they are
 ///
 /// - **Funding is shown, not awaited.** The wizard is a chain of OS-owned modal windows — dig-app has no
 ///   window toolkit and adding one to a custody-holding binary is a security surface, not a crate pick —
 ///   and a modal cannot poll a chain or update itself. So the user is given their address and told to
-///   fund it when they are ready, which is honest and works today, instead of a "waiting for funds…"
-///   screen that could never actually be waiting.
+///   fund it when they are ready, instead of a "waiting for funds…" screen that could never be waiting.
 /// - **The DID step cannot mint, and says so.** `dig-account`'s minter is a Phase-2 stub and no
 ///   [`TrayAction`](crate::tray_menu::TrayAction) can mint — that is structural, not an oversight. #1820
-///   requires that a DID is presented as REQUIRED rather than optional, so the step names it as the
-///   remaining, required step and states plainly that it is not available in this version. What it must
-///   not do is either present a button that silently does nothing, or repeat the retired copy claiming
-///   the account "fully works without a DID".
-///
-/// Escapable at every step: each screen is a two-choice claim whose refusal ends the flow, and backing
-/// out before `create` leaves nothing behind at all.
+///   requires a DID be presented as REQUIRED rather than optional, so the step names it as the remaining,
+///   required step and states plainly that it is not available in this version, rather than presenting a
+///   button that silently does nothing or claiming the account "fully works without a DID".
 pub fn first_run_wizard(
     confirmer: &dyn NativeConfirmer,
     create: impl FnOnce() -> Option<String>,
+    import: impl FnOnce(&RecoveryPhrase) -> Option<String>,
 ) -> FirstRunOutcome {
-    // 1. Orient. A person who opened the menu out of curiosity can leave here having changed nothing.
+    // 1. Orient. A person who opened the menu out of curiosity can leave here having changed nothing —
+    // this is the flow's ONE cancel point, which is why it is a claim whose refusal ends everything.
     if confirmer.confirm_claim(&ClaimPrompt {
         title: "DIG — Set up your DIG Account",
         heading: "Let's set up your DIG Account.",
-        body: "Three things happen next:
-
-               1. You are shown 24 words — your recovery phrase. Write them down.
-               2. You choose a password. You will type it whenever DIG needs to unlock your account.
-               3. You are shown your address, so you can add funds when you want to publish.
-
-               Nothing is created until you have written the words down, and you can stop at any point.
-
+        body: "You can create a brand-new account, or — if you have used DIG before — import an \
+               existing one from its 24-word recovery phrase.\n\n\
+               Nothing is created until you choose, and you can stop at any point.\n\n\
                You do not need an account to read content on the DIG Network — that already works.",
-        affirm: "Create my account",
+        affirm: "Get started",
         scannable: None,
     }) != ConfirmDecision::Approve
     {
         return FirstRunOutcome::Declined;
     }
 
-    // 2. Create. Everything load-bearing happens in here: words shown, retention claimed, password
-    // chosen, seed sealed. It reports its own failures, so this function adds nothing on that path.
+    // 2. Choose the route. A real either/or — "yes" imports an existing phrase, "no" creates a new
+    // account — so it is a CLAIM, and a host that cannot ask it creates nothing rather than guessing.
+    match confirmer.confirm_claim(&ClaimPrompt {
+        title: "DIG — Set up your DIG Account",
+        heading: "Do you already have a DIG recovery phrase?",
+        body:
+            "If you have used DIG on another computer, import that account by typing its 24 words. \
+               Choose \"Create a new account\" to start fresh with a brand-new recovery phrase.\n\n\
+               A recovery phrase from a Chia wallet such as Sage is NOT a DIG recovery phrase.",
+        affirm: "Import my recovery phrase",
+        scannable: None,
+    }) {
+        ConfirmDecision::Approve => import_existing_account(confirmer, import),
+        ConfirmDecision::Deny => create_new_account(confirmer, create),
+        // No confirm surface at all: create nothing, exactly as the orient screen does on such a host.
+        ConfirmDecision::Timeout | ConfirmDecision::Unavailable => FirstRunOutcome::Declined,
+    }
+}
+
+/// Create a brand-new account through the load-bearing `create` step, then the shared ready screens.
+///
+/// Everything consequential happens inside `create` — words shown, retention claimed, password chosen,
+/// seed sealed — and it reports its own failures, so nothing is added on the failing path.
+fn create_new_account(
+    confirmer: &dyn NativeConfirmer,
+    create: impl FnOnce() -> Option<String>,
+) -> FirstRunOutcome {
     let Some(address) = create() else {
         return FirstRunOutcome::Failed;
     };
+    show_account_ready(confirmer, &address);
+    FirstRunOutcome::WalletCreated
+}
 
-    // 3. Fund. Shown, not awaited — see the note above.
+/// Import an existing account from a typed recovery phrase, then the shared ready screens.
+///
+/// The words are collected through the SAME native input gate the tray restore uses ([`ask_for_phrase`])
+/// — masked, re-asking on a bad phrase, refusing a Chia wallet phrase — so a stranger with a phrase gets
+/// the identical, tested entry. A user who cancels the phrase window has created nothing.
+fn import_existing_account(
+    confirmer: &dyn NativeConfirmer,
+    import: impl FnOnce(&RecoveryPhrase) -> Option<String>,
+) -> FirstRunOutcome {
+    let Some(phrase) = ask_for_phrase(
+        confirmer,
+        "Type the recovery phrase of the DIG Account you want on this computer.",
+    ) else {
+        return FirstRunOutcome::Declined;
+    };
+    let Some(address) = import(&phrase) else {
+        return FirstRunOutcome::Failed;
+    };
+    show_account_ready(confirmer, &address);
+    FirstRunOutcome::WalletCreated
+}
+
+/// The two screens every completed first run ends on, whichever route created the account: where to send
+/// funds, and the honest truth about the DID step. Shared so create and import can never drift.
+fn show_account_ready(confirmer: &dyn NativeConfirmer, address: &str) {
+    // Fund. Shown, not awaited — a modal cannot poll a chain (see the wizard docs).
     notify(
         confirmer,
         "DIG — Your DIG address",
         "Your account is ready, and this is its address.",
         &format!(
-            "{address}
-
-             Send XCH or $DIG here when you want to publish content or mint an on-chain DID. You do              not need any funds to read content, and DIG will never spend anything without showing you              exactly what it is spending first.
-
+            "{address}\n\n\
+             Send XCH or $DIG here when you want to publish content or mint an on-chain DID. You do not \
+             need any funds to read content, and DIG will never spend anything without showing you \
+             exactly what it is spending first.\n\n\
              You can see this address again at any time from the DIG menu.",
         ),
     );
 
-    // 4. The DID step — named as required, and honest that it cannot run yet.
+    // The DID step — named as required, and honest that it cannot run yet.
     notify(
         confirmer,
         "DIG — One step still to come",
         "Your wallet is set up. Your on-chain DID is not.",
-        "A DID is what publishes your identity on the Chia blockchain so others can find and verify          it, and it is the step that turns this wallet into a full DIG Account.
-
-         Minting one is not available in this version of DIG. Nothing is missing from your setup and          there is nothing for you to do — when minting arrives, the DIG menu will offer it here, and          you will see the exact cost before anything is spent.
-
+        "A DID is what publishes your identity on the Chia blockchain so others can find and verify it, \
+         and it is the step that turns this wallet into a full DIG Account.\n\n\
+         Minting one is not available in this version of DIG. Nothing is missing from your setup and \
+         there is nothing for you to do — when minting arrives, the DIG menu will offer it here, and you \
+         will see the exact cost before anything is spent.\n\n\
          Until then your account holds funds, signs, and reads content normally.",
     );
-
-    FirstRunOutcome::WalletCreated
 }
 
 /// Draw a plain informational window, so every message this module shows goes through the same OS-owned
@@ -715,17 +937,36 @@ mod tests {
     /// the surrounding copy could satisfy the assertion by accident.
     const ADDRESS: &str = "xch1firstrunwizardfixtureaddress0000000000000000000000000000000";
 
-    /// Approving the welcome runs the creating step and finishes the flow, and the user's ACTUAL
-    /// address reaches the screen.
+    /// A recovery phrase the never-called import closure would reject, so a test that accidentally
+    /// routed through import (rather than create) fails loudly rather than silently passing.
+    fn never_imports(_phrase: &RecoveryPhrase) -> Option<String> {
+        panic!("this flow must take the CREATE route, not import");
+    }
+
+    /// Approving the welcome and choosing "create a new account" (declining the phrase-import question)
+    /// runs the creating step and finishes the flow, and the user's ACTUAL address reaches the screen.
     #[test]
     fn a_first_run_creates_the_wallet_and_shows_its_address() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
+        // Orient=Approve, route=Deny (→ create), fund=Approve, DID=Approve.
+        let confirmer = ScriptedConfirmer::new(
+            vec![],
+            vec![
+                ConfirmDecision::Approve,
+                ConfirmDecision::Deny,
+                ConfirmDecision::Approve,
+                ConfirmDecision::Approve,
+            ],
+        );
         let created = Mutex::new(false);
 
-        let outcome = first_run_wizard(&confirmer, || {
-            *created.lock().unwrap() = true;
-            Some(ADDRESS.to_string())
-        });
+        let outcome = first_run_wizard(
+            &confirmer,
+            || {
+                *created.lock().unwrap() = true;
+                Some(ADDRESS.to_string())
+            },
+            never_imports,
+        );
 
         assert_eq!(outcome, FirstRunOutcome::WalletCreated);
         assert!(*created.lock().unwrap(), "the creating step must have run");
@@ -745,10 +986,14 @@ mod tests {
         let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Deny]);
         let created = Mutex::new(false);
 
-        let outcome = first_run_wizard(&confirmer, || {
-            *created.lock().unwrap() = true;
-            Some(ADDRESS.to_string())
-        });
+        let outcome = first_run_wizard(
+            &confirmer,
+            || {
+                *created.lock().unwrap() = true;
+                Some(ADDRESS.to_string())
+            },
+            never_imports,
+        );
 
         assert_eq!(outcome, FirstRunOutcome::Declined);
         assert!(
@@ -767,7 +1012,7 @@ mod tests {
     #[test]
     fn the_welcome_offers_a_real_way_out() {
         let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Deny]);
-        first_run_wizard(&confirmer, || Some(ADDRESS.to_string()));
+        first_run_wizard(&confirmer, || Some(ADDRESS.to_string()), never_imports);
         assert_eq!(confirmer.kinds(), vec!["claim"]);
     }
 
@@ -775,16 +1020,20 @@ mod tests {
     /// screens after it are all statements about an account that does not exist.
     #[test]
     fn a_failed_creation_shows_no_success_screens() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
+        // Orient=Approve, route=Deny (→ create); create returns None.
+        let confirmer = ScriptedConfirmer::new(
+            vec![],
+            vec![ConfirmDecision::Approve, ConfirmDecision::Deny],
+        );
 
         assert_eq!(
-            first_run_wizard(&confirmer, || None),
+            first_run_wizard(&confirmer, || None, never_imports),
             FirstRunOutcome::Failed
         );
         assert_eq!(
             confirmer.windows_drawn(),
-            1,
-            "only the welcome was drawn; the creating step reports its own failure"
+            2,
+            "only the welcome and the route choice were drawn; the creating step reports its own failure"
         );
     }
 
@@ -795,8 +1044,16 @@ mod tests {
     /// sentence in the product — not a behaviour — that made a mandatory step look optional.
     #[test]
     fn the_did_step_names_it_as_required_and_admits_it_cannot_mint() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        first_run_wizard(&confirmer, || Some(ADDRESS.to_string()));
+        let confirmer = ScriptedConfirmer::new(
+            vec![],
+            vec![
+                ConfirmDecision::Approve,
+                ConfirmDecision::Deny,
+                ConfirmDecision::Approve,
+                ConfirmDecision::Approve,
+            ],
+        );
+        first_run_wizard(&confirmer, || Some(ADDRESS.to_string()), never_imports);
         let drawn = confirmer.drawn().to_lowercase();
 
         assert!(
@@ -810,6 +1067,345 @@ mod tests {
         assert!(
             !drawn.contains("optional"),
             "a DID is the bedrock of the account and must not be described as optional: {drawn}"
+        );
+    }
+
+    // ---- The first-run IMPORT route (dig_ecosystem#1564) ------------------------------------------
+
+    /// Choosing "I have a recovery phrase" routes into the import step and NEVER the create step — the
+    /// #1564 gap was that a stranger holding a phrase had no way to restore at first run.
+    ///
+    /// The two recorded flags are the load-bearing part: an outcome of `WalletCreated` alone is
+    /// satisfied identically by an implementation that ran CREATE, so the test pins which step ran.
+    #[test]
+    fn first_run_offers_import_and_takes_the_import_route() {
+        // Orient=Approve, route=Approve (→ import), [phrase typed], fund=Approve, DID=Approve.
+        let phrase = RecoveryPhrase::generate();
+        let typed = phrase.words().join(" ");
+        let confirmer = ScriptedConfirmer::new(
+            vec![],
+            vec![
+                ConfirmDecision::Approve,
+                ConfirmDecision::Approve,
+                ConfirmDecision::Approve,
+                ConfirmDecision::Approve,
+            ],
+        );
+        *confirmer.typed.lock().unwrap() = vec![Some(typed)];
+
+        let created = Mutex::new(false);
+        let imported = Mutex::new(false);
+        let outcome = first_run_wizard(
+            &confirmer,
+            || {
+                *created.lock().unwrap() = true;
+                Some(ADDRESS.to_string())
+            },
+            |_phrase| {
+                *imported.lock().unwrap() = true;
+                Some(ADDRESS.to_string())
+            },
+        );
+
+        assert_eq!(outcome, FirstRunOutcome::WalletCreated);
+        assert!(*imported.lock().unwrap(), "the import step must have run");
+        assert!(
+            !*created.lock().unwrap(),
+            "the create step must NOT run on the import route"
+        );
+        assert!(confirmer.drawn().contains(ADDRESS));
+    }
+
+    /// The phrase the user TYPED must reach the import step UNCHANGED — the wizard's own responsibility.
+    ///
+    /// Asserted on the master seed, not the word strings, because that is the custody root a restore must
+    /// reproduce (the same-identity guarantee itself is proven in `lifecycle`); a wizard that re-generated
+    /// or truncated the phrase would hand `import` a different seed and fail here.
+    #[test]
+    fn importing_at_first_run_hands_the_typed_phrase_through_unchanged() {
+        let phrase = RecoveryPhrase::generate();
+        let expected_seed = phrase.master_seed();
+        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
+        *confirmer.typed.lock().unwrap() = vec![Some(phrase.words().join(" "))];
+
+        let seen_seed: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+        let outcome = first_run_wizard(
+            &confirmer,
+            || panic!("must not create"),
+            |imported| {
+                *seen_seed.lock().unwrap() = Some(*imported.master_seed());
+                Some(ADDRESS.to_string())
+            },
+        );
+
+        assert_eq!(outcome, FirstRunOutcome::WalletCreated);
+        assert_eq!(
+            seen_seed.lock().unwrap().expect("import ran"),
+            *expected_seed,
+            "the wizard must pass the typed phrase's exact master seed to the restore step"
+        );
+    }
+
+    /// Cancelling the phrase window on the import route creates NOTHING and reports `Declined`.
+    #[test]
+    fn cancelling_the_import_phrase_creates_nothing() {
+        let confirmer = ScriptedConfirmer::new(
+            vec![],
+            vec![ConfirmDecision::Approve, ConfirmDecision::Approve],
+        );
+        *confirmer.typed.lock().unwrap() = vec![None]; // the user cancels the phrase window
+
+        let imported = Mutex::new(false);
+        let outcome = first_run_wizard(
+            &confirmer,
+            || panic!("must not create"),
+            |_p| {
+                *imported.lock().unwrap() = true;
+                Some(ADDRESS.to_string())
+            },
+        );
+
+        assert_eq!(outcome, FirstRunOutcome::Declined);
+        assert!(
+            !*imported.lock().unwrap(),
+            "a cancelled phrase window must not enrol anything"
+        );
+    }
+
+    /// An import step that could not complete reports `Failed`, not `WalletCreated`.
+    #[test]
+    fn a_failed_import_reports_failure() {
+        let phrase = RecoveryPhrase::generate();
+        let confirmer = ScriptedConfirmer::new(
+            vec![],
+            vec![ConfirmDecision::Approve, ConfirmDecision::Approve],
+        );
+        *confirmer.typed.lock().unwrap() = vec![Some(phrase.words().join(" "))];
+
+        let outcome = first_run_wizard(&confirmer, || panic!("must not create"), |_p| None);
+        assert_eq!(outcome, FirstRunOutcome::Failed);
+    }
+
+    // ---- The backup ceremony (dig_ecosystem#1564) -------------------------------------------------
+
+    /// A [`PhraseBackupSink`] that records what it was handed and returns a scripted delivery.
+    struct RecordingSink {
+        delivery: BackupDelivery,
+        got: Mutex<Option<(BackupTarget, String)>>,
+    }
+
+    impl RecordingSink {
+        fn delivering(where_to: &str) -> Self {
+            Self {
+                delivery: BackupDelivery::Delivered {
+                    where_to: where_to.to_string(),
+                },
+                got: Mutex::new(None),
+            }
+        }
+
+        fn returning(delivery: BackupDelivery) -> Self {
+            Self {
+                delivery,
+                got: Mutex::new(None),
+            }
+        }
+
+        fn received(&self) -> Option<(BackupTarget, String)> {
+            self.got.lock().unwrap().clone()
+        }
+    }
+
+    impl PhraseBackupSink for RecordingSink {
+        fn deliver(&self, target: BackupTarget, words: &str) -> BackupDelivery {
+            *self.got.lock().unwrap() = Some((target, words.to_string()));
+            self.delivery.clone()
+        }
+    }
+
+    /// Approving the warning and the reveal gate delivers the EXACT 24 words to the sink, decrypting
+    /// once.
+    ///
+    /// The fixture asserts the delivered string equals the space-joined phrase — not a substring, not the
+    /// numbered block — so an implementation that handed the sink the numbered display form, a partial
+    /// phrase, or anything else would fail here.
+    #[test]
+    fn backup_copies_words_and_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path());
+        let phrase = RecoveryPhrase::generate();
+        vault.store(&phrase).unwrap();
+        // reveal gate = Approve; notices = [warning Approve, success-notice Approve].
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Approve],
+            vec![ConfirmDecision::Approve, ConfirmDecision::Approve],
+        );
+        let sink = RecordingSink::delivering("your clipboard");
+
+        let outcome = back_up_phrase(&confirmer, &vault, BackupTarget::Clipboard, &sink);
+
+        assert_eq!(outcome, BackupOutcome::BackedUp);
+        let (target, words) = sink
+            .received()
+            .expect("the sink must have been handed the words");
+        assert_eq!(target, BackupTarget::Clipboard);
+        assert_eq!(
+            words,
+            phrase.words().join(" "),
+            "the sink must receive the exact space-joined 24 words"
+        );
+        assert_eq!(
+            vault.sealer_for_test().opens(),
+            1,
+            "the phrase is decrypted exactly once, only after both approvals"
+        );
+        assert!(
+            confirmer.drawn().contains("PLAIN TEXT"),
+            "a stark unencrypted-storage warning must reach the screen before the copy"
+        );
+    }
+
+    /// Refusing the warning delivers NOTHING and never even reaches the reveal gate or the vault.
+    ///
+    /// The control makes it load-bearing: the reveal script is `Approve`, so if the code reached the gate
+    /// it would approve and then decrypt (opens == 1). `opens == 0` AND the absence of a `REVEAL-GATE`
+    /// window together prove the warning short-circuits BEFORE both — a placement no outcome-only
+    /// assertion could pin.
+    #[test]
+    fn refusing_the_backup_warning_never_reveals_or_delivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path());
+        vault.store(&RecoveryPhrase::generate()).unwrap();
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Approve], // would approve the gate, if it were ever reached
+            vec![ConfirmDecision::Deny],    // the warning is refused
+        );
+        let sink = RecordingSink::delivering("your clipboard");
+
+        assert_eq!(
+            back_up_phrase(&confirmer, &vault, BackupTarget::Clipboard, &sink),
+            BackupOutcome::Refused
+        );
+        assert!(
+            sink.received().is_none(),
+            "a refused warning must not deliver"
+        );
+        assert_eq!(
+            vault.sealer_for_test().opens(),
+            0,
+            "a refused warning must run before the phrase is decrypted"
+        );
+        assert!(
+            !confirmer.kinds().contains(&"REVEAL-GATE"),
+            "the reveal gate must not even be drawn when the warning is refused"
+        );
+    }
+
+    /// Refusing the reveal gate (after approving the warning) delivers NOTHING and never decrypts — the
+    /// same placement property `reveal_phrase` has, now for the backup path.
+    #[test]
+    fn refusing_the_reveal_gate_never_delivers_the_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path());
+        vault.store(&RecoveryPhrase::generate()).unwrap();
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Deny],    // the gate is refused
+            vec![ConfirmDecision::Approve], // the warning is approved
+        );
+        let sink = RecordingSink::delivering("your clipboard");
+
+        assert_eq!(
+            back_up_phrase(&confirmer, &vault, BackupTarget::Clipboard, &sink),
+            BackupOutcome::Refused
+        );
+        assert!(sink.received().is_none());
+        assert_eq!(
+            vault.sealer_for_test().opens(),
+            0,
+            "a refused gate must run BEFORE the phrase is decrypted, not after"
+        );
+        assert!(
+            confirmer.kinds().contains(&"REVEAL-GATE"),
+            "the gate must have been drawn (and refused) after the approved warning"
+        );
+    }
+
+    /// A legacy account with no stored phrase reports it distinctly, and hands the sink nothing.
+    #[test]
+    fn backing_up_a_phraseless_account_reports_no_phrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Approve],
+            vec![ConfirmDecision::Approve],
+        );
+        let sink = RecordingSink::delivering("your clipboard");
+
+        assert_eq!(
+            back_up_phrase(&confirmer, &vault(dir.path()), BackupTarget::File, &sink),
+            BackupOutcome::NoPhraseStored
+        );
+        assert!(sink.received().is_none());
+    }
+
+    /// Each destination's warning names its OWN unencrypted-storage risk — a single generic warning would
+    /// tell a file-saver about a clipboard and vice versa. Asserted on the private copy directly.
+    #[test]
+    fn the_backup_warnings_name_the_destination_and_plaintext() {
+        let clip = backup_warning(BackupTarget::Clipboard);
+        assert!(clip.heading.contains("PLAIN TEXT"));
+        assert!(
+            clip.body.to_lowercase().contains("clipboard"),
+            "the clipboard warning must name the clipboard: {}",
+            clip.body
+        );
+
+        let file = backup_warning(BackupTarget::File);
+        assert!(file.heading.contains("UNENCRYPTED"));
+        assert!(
+            file.body.to_lowercase().contains("file"),
+            "the file warning must name the file: {}",
+            file.body
+        );
+    }
+
+    /// A cancel at the destination (a dismissed save dialog) is a refusal, and the words — though
+    /// decrypted and offered — are never confirmed as backed up.
+    #[test]
+    fn a_cancelled_destination_is_a_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path());
+        vault.store(&RecoveryPhrase::generate()).unwrap();
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Approve],
+            vec![ConfirmDecision::Approve],
+        );
+        let sink = RecordingSink::returning(BackupDelivery::Cancelled);
+
+        assert_eq!(
+            back_up_phrase(&confirmer, &vault, BackupTarget::File, &sink),
+            BackupOutcome::Refused
+        );
+        assert!(
+            sink.received().is_some(),
+            "a cancel is reported by the sink, so it must have been called"
+        );
+    }
+
+    /// A failed destination write reports `Unavailable`, not success.
+    #[test]
+    fn a_failed_destination_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path());
+        vault.store(&RecoveryPhrase::generate()).unwrap();
+        let confirmer = ScriptedConfirmer::new(
+            vec![ConfirmDecision::Approve],
+            vec![ConfirmDecision::Approve, ConfirmDecision::Approve],
+        );
+        let sink = RecordingSink::returning(BackupDelivery::Failed);
+
+        assert_eq!(
+            back_up_phrase(&confirmer, &vault, BackupTarget::File, &sink),
+            BackupOutcome::Unavailable
         );
     }
 
