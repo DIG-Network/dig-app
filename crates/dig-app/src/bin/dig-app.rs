@@ -893,6 +893,37 @@ fn rate_limited_notice_body(retry_after_seconds: u64) -> String {
     )
 }
 
+/// SHA-256 of the exact bytes DIG wrote to the clipboard.
+///
+/// A scheduled auto-clear of a copied recovery phrase retains ONLY this digest — never the plaintext
+/// seed — for the whole timeout window (dig_ecosystem#1964). The seed is a 256-bit-entropy BIP39 phrase,
+/// so its digest is not brute-forceable and is safe to hold; keeping only the digest is what lets the
+/// plaintext be wiped from its zeroizing buffer immediately, rather than lingering for the delay.
+///
+/// Only the tray shell arms the auto-clear, so a headless build has no caller — gated to keep
+/// `--no-default-features` free of dead-code warnings.
+#[cfg(feature = "tray")]
+fn clipboard_fingerprint(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
+/// Whether a scheduled best-effort clipboard clear should fire.
+///
+/// Clears ONLY when the clipboard still holds the exact bytes we wrote — i.e. its digest matches the
+/// `stored` fingerprint — so anything the user copied in the meantime is never clobbered. An
+/// unreadable or empty clipboard (`current == None`) is left untouched: the guarantee is "never destroy
+/// data that is not ours", so uncertainty resolves to doing nothing.
+///
+/// Tray-only for the same reason as [`clipboard_fingerprint`]: the headless build never schedules a clear.
+#[cfg(feature = "tray")]
+fn should_clear(stored: &[u8; 32], current: Option<&[u8]>) -> bool {
+    match current {
+        Some(bytes) => &clipboard_fingerprint(bytes) == stored,
+        None => false,
+    }
+}
+
 /// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
 /// address the identical per-user directory ([`AppEnvironment::from_host`]).
 fn resolve_environment() -> AppEnvironment {
@@ -954,6 +985,94 @@ mod tray {
     const GRACEFUL_STOP: Duration = Duration::from_secs(1);
     /// How often the tray re-reads the agent status and, if anything changed, repaints its menu.
     const REFRESH: Duration = Duration::from_millis(500);
+
+    /// How long a copied recovery phrase may sit on the OS clipboard before DIG best-effort clears it
+    /// (dig_ecosystem#1964).
+    ///
+    /// 45s is a deliberate balance: long enough for a person to switch to their password manager and
+    /// paste, short enough to shrink the window in which any local process — or clipboard history/sync —
+    /// can read the plaintext seed. It is BEST-EFFORT and reduces, not eliminates, exposure: a clear
+    /// only fires if the clipboard still holds our bytes, and clipboard history/sync may already have a
+    /// copy the clear cannot reach.
+    const CLIPBOARD_CLEAR_DELAY: Duration = Duration::from_secs(45);
+
+    /// A pending best-effort clipboard clear scheduled after a recovery-phrase copy.
+    ///
+    /// It retains ONLY the SHA-256 of the bytes written, NEVER the plaintext seed — the whole point of
+    /// the hash is that the plaintext can be wiped from its zeroizing buffer immediately while we still
+    /// keep enough to recognise our own copy at fire time (dig_ecosystem#1964).
+    struct PendingClipboardClear {
+        /// The instant at which to attempt the clear.
+        at: Instant,
+        /// SHA-256 of the exact bytes we wrote — the only thing retained.
+        fingerprint: [u8; 32],
+    }
+
+    /// The single in-flight clipboard clear. Process-global because the copy is scheduled on the action
+    /// worker but fired on the event loop, and there is only ever one tray in a process. A fresh copy
+    /// replaces any earlier pending clear.
+    static PENDING_CLIPBOARD_CLEAR: Mutex<Option<PendingClipboardClear>> = Mutex::new(None);
+
+    /// Arm a best-effort clipboard clear [`CLIPBOARD_CLEAR_DELAY`] from now, keyed by the digest of the
+    /// bytes just written.
+    ///
+    /// `written` is borrowed only to hash it; the plaintext is NEVER stored (it stays in the caller's
+    /// zeroizing buffer and is wiped as before). Only the 32-byte fingerprint outlives this call.
+    fn schedule_clipboard_clear(written: &str) {
+        let pending = PendingClipboardClear {
+            at: Instant::now() + CLIPBOARD_CLEAR_DELAY,
+            fingerprint: super::clipboard_fingerprint(written.as_bytes()),
+        };
+        if let Ok(mut slot) = PENDING_CLIPBOARD_CLEAR.lock() {
+            *slot = Some(pending);
+        }
+    }
+
+    /// If a scheduled clipboard clear is due, attempt it exactly once.
+    ///
+    /// Reads the clipboard back and clears it (writes empty) ONLY if it still holds our bytes, via the
+    /// pure [`super::should_clear`] decision — so a copy the user made in the meantime survives. The
+    /// pending entry is taken whether or not the clear fires, so a due clear is attempted once and then
+    /// forgotten. Called on the event-loop tick, so its resolution is one [`REFRESH`], ample for a 45s
+    /// deadline. Everything here is best-effort: a failed read or write is a cosmetic loss, not a bug.
+    fn poll_clipboard_clear() {
+        let due = {
+            let Ok(mut slot) = PENDING_CLIPBOARD_CLEAR.lock() else {
+                return;
+            };
+            match slot.as_ref() {
+                Some(pending) if Instant::now() >= pending.at => slot.take(),
+                _ => None,
+            }
+        };
+        let Some(pending) = due else { return };
+        if super::should_clear(&pending.fingerprint, read_clipboard().as_deref()) {
+            let _ = write_clipboard("");
+        }
+    }
+
+    /// Read the OS clipboard back via the platform utility, best-effort.
+    ///
+    /// `None` on any failure — a clear scheduled against an unreadable clipboard simply does not fire,
+    /// because [`super::should_clear`] never guesses and clobbers on uncertainty. Returns raw bytes so
+    /// the round-trip is byte-exact against what [`write_clipboard`] wrote.
+    fn read_clipboard() -> Option<Vec<u8>> {
+        use std::process::Command;
+
+        let output = if cfg!(target_os = "windows") {
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
+                .output()
+        } else if cfg!(target_os = "macos") {
+            Command::new("pbpaste").output()
+        } else {
+            Command::new("xclip")
+                .args(["-selection", "clipboard", "-o"])
+                .output()
+        };
+        let output = output.ok()?;
+        output.status.success().then_some(output.stdout)
+    }
 
     /// A rendered native menu plus the map from each native item id back to the action it stands for.
     ///
@@ -1229,6 +1348,10 @@ mod tray {
         // (dropping `session` would drop the OS screen-lock subscription guard it holds).
         event_loop.run(move |_event, _target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
+
+            // A recovery phrase copied to the clipboard is best-effort auto-cleared once its timeout
+            // elapses (dig_ecosystem#1964); the tick is where that deadline is checked.
+            poll_clipboard_clear();
 
             // Quit runs on the worker like every other action, but only this loop can exit.
             if actions.stop_requested() {
@@ -1695,6 +1818,9 @@ mod tray {
             match target {
                 BackupTarget::Clipboard => {
                     if write_clipboard(words) {
+                        // Arm the best-effort auto-clear keyed by a hash of what we just wrote — never
+                        // the plaintext (dig_ecosystem#1964). `words` is only borrowed for hashing here.
+                        schedule_clipboard_clear(words);
                         BackupDelivery::Delivered {
                             where_to: "your clipboard".to_string(),
                         }
@@ -2175,6 +2301,82 @@ mod tray {
             assert_eq!(mode, 0o600, "pre-existing file must end 0600, was {mode:o}");
             assert_eq!(std::fs::read(&path).unwrap(), b"new secret\n");
         }
+    }
+}
+
+#[cfg(all(test, feature = "tray"))]
+mod clipboard_clear_tests {
+    use super::{clipboard_fingerprint, should_clear};
+
+    /// A tiny in-memory stand-in for the OS clipboard, so the clear DECISION is exercised headless
+    /// without any platform utility. `None` models an empty or unreadable clipboard.
+    struct FakeClipboard(Option<Vec<u8>>);
+
+    impl FakeClipboard {
+        fn holding(bytes: &[u8]) -> Self {
+            Self(Some(bytes.to_vec()))
+        }
+        fn unreadable() -> Self {
+            Self(None)
+        }
+        fn current(&self) -> Option<&[u8]> {
+            self.0.as_deref()
+        }
+    }
+
+    /// (a) The clear fires when the clipboard STILL holds the exact bytes we wrote.
+    #[test]
+    fn clears_when_the_clipboard_still_holds_our_copy() {
+        let written =
+            b"legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let stored = clipboard_fingerprint(written);
+        let clipboard = FakeClipboard::holding(written);
+        assert!(should_clear(&stored, clipboard.current()));
+    }
+
+    /// (b) The clear does NOT fire once the user has copied something else — the pending fingerprint no
+    /// longer matches, so their new copy is never clobbered.
+    #[test]
+    fn does_not_clear_when_the_user_copied_something_else() {
+        let stored = clipboard_fingerprint(b"the recovery phrase we wrote");
+        let clipboard = FakeClipboard::holding(b"a password the user copied afterwards");
+        assert!(!should_clear(&stored, clipboard.current()));
+    }
+
+    /// (c) An empty or unreadable clipboard is left untouched — uncertainty resolves to doing nothing.
+    #[test]
+    fn does_not_clear_when_the_clipboard_is_empty_or_unreadable() {
+        let stored = clipboard_fingerprint(b"the recovery phrase we wrote");
+        assert!(!should_clear(
+            &stored,
+            FakeClipboard::unreadable().current()
+        ));
+        assert!(!should_clear(
+            &stored,
+            FakeClipboard::holding(b"").current()
+        ));
+    }
+
+    /// (d) The fingerprint is the SHA-256 of the EXACT bytes written — verified against the published
+    /// vector for "abc", and shown to change under a one-byte difference (a trailing space).
+    #[test]
+    fn the_fingerprint_is_sha256_of_the_exact_bytes() {
+        let expected_abc =
+            hex_literal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(clipboard_fingerprint(b"abc"), expected_abc);
+        assert_ne!(
+            clipboard_fingerprint(b"abc"),
+            clipboard_fingerprint(b"abc ")
+        );
+    }
+
+    /// Decode a 64-char hex string into the 32-byte digest it denotes (test helper only).
+    fn hex_literal(hex: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out
     }
 }
 

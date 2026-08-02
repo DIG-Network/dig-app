@@ -202,7 +202,11 @@ can carry to a new machine.
   is decrypted) AND is preceded by a stark, destination-specific warning that the words will sit in the
   clear where any app or person with access can take the account; refusing the warning MUST decrypt
   nothing. The words MUST flow only through the zeroizing path — wiped after the single delivery — and
-  MUST NOT be logged; the egress MUST NOT retain them.
+  MUST NOT be logged; the egress MUST NOT retain them. After a clipboard copy the shell SHOULD schedule
+  a best-effort auto-clear (`CLIPBOARD_CLEAR_DELAY`, ~45s): it clears the clipboard only if it still
+  holds the copied bytes, matched by a retained SHA-256 fingerprint — NEVER the plaintext, which stays
+  wiped. This reduces, not eliminates, exposure (clipboard history/sync may retain a copy), and the
+  warning copy MUST disclose it honestly.
 - **Handling (MUST).** The phrase MUST NOT be logged, serialized, transmitted, or written anywhere but
   its sealed vault. It is held in zeroizing memory, redacted in debug output, and reaches only an
   OS-owned foreground window.

@@ -289,10 +289,15 @@ fn backup_warning(target: BackupTarget) -> ClaimPrompt<'static> {
         BackupTarget::Clipboard => ClaimPrompt {
             title: "DIG — Copy your recovery phrase",
             heading: "This puts your 24 words on the clipboard in PLAIN TEXT.",
+            // The "about 45 seconds" mirrors `CLIPBOARD_CLEAR_DELAY` in the dig-app shell, which owns
+            // the timer (dig_ecosystem#1964). The wording is deliberately hedged — "usually", "may still
+            // retain" — because the clear is best-effort: it only fires if the clipboard still holds our
+            // copy, and clipboard history/sync can keep a copy the clear cannot reach.
             body: "Until you copy something else, any app or person with access to this computer's \
                    clipboard can read them — and anyone who has your 24 words can take your DIG Account. \
-                   Only do this to move them somewhere safe, and copy something else afterwards to clear \
-                   them.",
+                   DIG will usually clear them from the clipboard automatically after about 45 seconds, \
+                   but clipboard history or sync services may still retain a copy. Only do this to move \
+                   them somewhere safe, and copy something else afterwards to clear them sooner.",
             affirm: "I understand — copy my phrase",
             scannable: None,
         },
