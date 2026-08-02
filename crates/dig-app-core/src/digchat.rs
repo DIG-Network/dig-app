@@ -5,7 +5,7 @@
 //! (`dig-chat/src/main/identity/envelope.ts` + `conformance.ts`, SPEC §4): the DIG App is the side
 //! that actually HOLDS the identity keys, so `identity.seal` / `identity.unseal` seal and open real
 //! messages here, while dig-chat's `conformance.ts` stays a test-only reference. The two MUST agree
-//! on every byte — the [`tests`] module pins that against a golden vector produced by the TypeScript
+//! on every byte — the `tests` module pins that against a golden vector produced by the TypeScript
 //! reference.
 //!
 //! # The composition, and why none of it is invented here

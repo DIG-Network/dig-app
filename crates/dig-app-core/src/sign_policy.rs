@@ -5,7 +5,7 @@
 //! point with no divergence (§5.6.6):
 //!
 //! - the §5.3 engine `sign` callback ([`crate::session::SessionClient`]), via the [`SignPolicy`] trait;
-//! - the §5.6.5 loopback `sign.request` handler ([`crate::loopback::dispatch`]), via [`Self::decide`].
+//! - the §5.6.5 loopback `sign.request` handler ([`crate::loopback::dispatch`]), via [`NativeConfirmSignPolicy::decide`].
 //!
 //! The policy never signs and never touches a key — it only rules. For every request it:
 //!

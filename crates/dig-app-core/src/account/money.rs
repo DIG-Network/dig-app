@@ -10,7 +10,7 @@
 //! 1. **summarize** — [`AccountResidency::summarize`] independently re-derives the recipients + fee
 //!    from the coin spends (never a caller's claim) and classifies the [`SpendTier`] under the
 //!    profile's [`CustodyPolicy`]. A locked residency summarizes nothing → refused.
-//! 2. **authorize** — the injected [`SpendAuthorizer`] rules on the [`SpendSummary`] (spend limits /
+//! 2. **authorize** — the injected [`SpendAuthorizer`] rules on the [`SpendSummary`](dig_account::SpendSummary) (spend limits /
 //!    allowlists / programmatic policy). An `Err` refuses the spend.
 //! 3. **confirm ceremony (where the tier requires it)** — for any tier that
 //!    [`requires_confirmation`] (everything except a within-allowance [`SpendTier::AutoSend`]), the

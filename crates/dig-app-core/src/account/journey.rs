@@ -548,7 +548,7 @@ pub fn ask_for_phrase(confirmer: &dyn NativeConfirmer, purpose: &str) -> Option<
 /// very window: the rendered text read *"cannot sign anything or&nbsp;&nbsp;… show you its recovery phrase"*
 /// with a ten-space gap, in the highest-stakes message in the app. `concat!` cannot be reflowed, so what is
 /// written is what renders — and the copy lives in the LIBRARY rather than the tray binary so
-/// [`the_unopenable_copy_renders_without_holes`] can actually read it.
+/// the `the_unopenable_copy_renders_without_holes` test can actually read it.
 pub fn explain_unopenable(confirmer: &dyn NativeConfirmer) -> ConfirmDecision {
     confirmer.show_notice(&NoticePrompt {
         title: "DIG — This account cannot be opened",

@@ -10,7 +10,7 @@
 //! (DIGOP1 / Argon2id) in a per-user file backend, opened by a password the USER types at unlock —
 //! never persisted anywhere (dig_ecosystem#1817). The credential store held a machine-generated
 //! password under the earlier zero-prompt model, which is retired precisely because any code running
-//! as the logged-in user could read it. [`OsCredentialStore`] (Windows Credential Manager · macOS
+//! as the logged-in user could read it. `OsCredentialStore` (Windows Credential Manager · macOS
 //! Keychain) is now reached only to MIGRATE a pre-#1817 account off that machine password
 //! ([`migration`](crate::account::migration)) and to clean up a leftover entry on discard; see the
 //! `credential` module docs for the full posture. Linux never used it and its account boot defers

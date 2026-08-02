@@ -43,7 +43,7 @@ pub struct AgentConfig {
     pub tick_secs: u64,
 
     /// The global shortcut that opens the URN bar, written as a chord (`"Alt+Space"`,
-    /// `"Ctrl+Shift+D"`). `None` means [`hotkey::DEFAULT_SHORTCUT`].
+    /// `"Ctrl+Shift+D"`). `None` means [`DEFAULT_SHORTCUT`](crate::hotkey::DEFAULT_SHORTCUT).
     ///
     /// User-configurable on purpose: the default displaces the Windows window menu
     /// ([`hotkey`](crate::hotkey) explains why that trade is taken), and a user who wants that chord

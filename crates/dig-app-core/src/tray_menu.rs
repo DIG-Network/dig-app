@@ -37,7 +37,7 @@
 //! in each of the two states that withhold key material, every one naming what stands in the way (an
 //! unlock, or a password that has never been set). Each sits beside an ENABLED remedy (the management
 //! submenu; the `Unlock…` or `Set a password…` row), so none is a dead end. That set is
-//! asserted by [`the_disabled_rows_are_exactly_the_ones_that_name_their_reason`], because "rare" is the
+//! asserted by the `the_disabled_rows_are_exactly_the_ones_that_name_their_reason` test, because "rare" is the
 //! kind of claim that drifts silently — an earlier revision of this comment said "exactly one" while the
 //! model rendered two.
 //!

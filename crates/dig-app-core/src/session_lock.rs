@@ -58,7 +58,7 @@ pub trait SessionKeys {
 }
 
 /// A monotonic time source, seamed so the idle logic is deterministic in tests. Production uses
-/// [`SystemClock`] (`Instant`-backed); tests advance a [`ManualClock`] by exact durations.
+/// [`SystemClock`] (`Instant`-backed); tests advance a `ManualClock` by exact durations.
 pub trait MonotonicClock {
     /// Monotonic time elapsed since this clock's fixed origin. Only differences are meaningful.
     fn elapsed(&self) -> Duration;
