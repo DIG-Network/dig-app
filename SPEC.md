@@ -582,6 +582,12 @@ The enrolment UI MUST state both halves of this in the user's own words.
   (RECOMMENDED exponential backoff from a few seconds, capped at ~15 minutes). It MUST be a rate limit,
   NOT a permanent lockout — a hard lockout is a denial-of-service against the account's own owner and
   forces a recovery-code fallback they may not have.
+  - **Surface the wait before prompting (SHOULD).** When a throttle is already in force, the challenge
+    SHOULD tell the user how long to wait BEFORE drawing the code-input window, rather than accepting a
+    full code and only then refusing it — the pre-check is a read-only inspection of the throttle timer
+    that reveals nothing about whether a code would be correct, records no failure, does not advance the
+    clock anchor, and fails closed on a locked or unreadable record. It does not replace the post-judge
+    rate-limit result, which remains the backstop for a throttle that arms during the flow.
   - **Clock-tamper resistance (MUST).** The next-allowed-attempt instant is persisted, and the
     implementation MUST persist the greatest instant it has observed and treat any wall clock reading
     EARLIER than that anchor as frozen at the anchor — a clock rolled backwards MUST NOT shorten a
