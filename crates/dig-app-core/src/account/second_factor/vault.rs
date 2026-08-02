@@ -15,7 +15,7 @@
 //!
 //! # What "verifying a code" means here
 //!
-//! [`SecondFactorVault::challenge`] is the ONE place a code is judged, and it enforces three rules the
+//! [`SecondFactorVault::challenge`] is the ONE place a code is judged, and it enforces four rules the
 //! arithmetic in [`totp`](super::totp) cannot:
 //!
 //! 1. **A TOTP step is accepted at most once.** RFC 6238 §5.2 — a code is valid for a whole 30-second
@@ -23,6 +23,10 @@
 //! 2. **A recovery code is spent when used.**
 //! 3. **Both outcomes are persisted before the caller is told "yes".** A crash between accepting and
 //!    recording would otherwise silently restore a spent code.
+//! 4. **Wrong attempts are bounded — persistently (dig_ecosystem#1847).** A consecutive-failure count
+//!    and an escalating next-allowed-attempt instant ride the sealed record, so closing and reopening
+//!    the window cannot hand an attacker a fresh unbounded run at a ~3-in-10^6 code. It is a rate limit,
+//!    not a lockout, and it fails closed against a rolled-back clock.
 
 use std::path::{Path, PathBuf};
 
@@ -43,6 +47,28 @@ pub(crate) const VAULT_FILE: &str = "second-factor.seal";
 
 /// The domain tag every second-factor blob starts with, inside the sealed plaintext.
 const ENVELOPE_MAGIC: &[u8] = b"DIG2FA1\n";
+
+/// How many consecutive failed challenges are absorbed with NO delay (dig_ecosystem#1847).
+///
+/// A person who fat-fingers the code, or whose phone clock has just ticked over, should not be made to
+/// wait — three mirrors the enrolment retry budget ([`journey::VERIFY_ATTEMPTS`](super::journey)) and is
+/// small enough that an actual attacker is throttled almost at once. The delay begins on the failure
+/// AFTER this budget is spent.
+const FREE_CHALLENGE_ATTEMPTS: u32 = 3;
+
+/// The first enforced delay, in seconds, imposed on the failure after the free budget is spent
+/// (dig_ecosystem#1847). It doubles with each further consecutive failure: 5s, 10s, 20s, 40s…
+const BACKOFF_BASE_SECONDS: u64 = 5;
+
+/// The ceiling on the escalating delay, in seconds — fifteen minutes (dig_ecosystem#1847).
+///
+/// This is a RATE LIMIT, never a hard lockout: a permanent lockout would be a denial-of-service against
+/// the account's own owner, forcing them onto a recovery code they may not have. The delay grows without
+/// bound only up to here. Even pinned at this cap the arithmetic is decisive: a 6-digit TOTP with a ±1
+/// step tolerance is ~3-in-10^6 live per attempt (see [`totp`](super::totp)), so at four attempts an
+/// hour an attacker needs on the order of tens of thousands of hours — years — to reach an even chance,
+/// while a legitimate owner who waits fifteen minutes is always let back in.
+const BACKOFF_MAX_SECONDS: u64 = 900;
 
 /// What the disable path needs of an enrolment: whether one exists, and how to remove it.
 ///
@@ -155,6 +181,28 @@ struct Record {
     ///
     /// `None` until the first code is verified, which is also the enrolment moment.
     last_accepted_step: Option<u64>,
+
+    /// How many challenges have failed IN A ROW (dig_ecosystem#1847).
+    ///
+    /// Persisted with the sealed record — not held in the challenge window — precisely because the
+    /// defect was that reopening the window reset it to zero. Reset on any accepted code.
+    /// `#[serde(default)]` so a record written before this field existed (an already-enrolled user)
+    /// reads back as zero prior failures rather than failing to parse.
+    #[serde(default)]
+    consecutive_failures: u32,
+
+    /// The earliest unix second at which the NEXT challenge may be judged, once the free budget is
+    /// spent (dig_ecosystem#1847). `None` means no delay is in force. Persisted, so the escalating
+    /// delay cannot be walked around by closing and reopening the window.
+    #[serde(default)]
+    throttle_until: Option<u64>,
+
+    /// The greatest instant this record has ever observed — the anti-rollback anchor
+    /// (dig_ecosystem#1847). A wall clock reading earlier than this has been moved backwards; the
+    /// challenge then treats time as frozen here, so a rollback can neither shorten a throttle nor
+    /// replay an old code at its original window.
+    #[serde(default)]
+    clock_high_water: Option<u64>,
 }
 
 /// What a challenge concluded.
@@ -176,6 +224,15 @@ pub enum ChallengeOutcome {
     AlreadyUsed,
     /// Neither a valid code nor a valid recovery code.
     Rejected,
+    /// Too many challenges have failed in a row, so the next attempt must WAIT (dig_ecosystem#1847).
+    ///
+    /// A rate limit, NOT a lockout: the required delay escalates with each failure but the account is
+    /// never permanently sealed out of its own recovery path. The code was not even judged — a
+    /// throttled attempt learns nothing about whether its guess was close.
+    RateLimited {
+        /// Whole seconds the caller must wait before another code will be looked at.
+        retry_after_seconds: u64,
+    },
 }
 
 /// The per-profile store of the account's second-factor enrolment.
@@ -214,6 +271,9 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
             secret: hex::encode(secret.as_bytes()),
             recovery_codes: codes.to_stored(),
             last_accepted_step: None,
+            consecutive_failures: 0,
+            throttle_until: None,
+            clock_high_water: None,
         })
     }
 
@@ -225,28 +285,64 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
     /// [`VaultError::Seal`] if the account is locked (so a locked account can never satisfy a
     /// challenge), [`VaultError::Corrupt`] if the record is unreadable, [`VaultError::Io`] on a write
     /// failure. A challenge that cannot be *recorded* is not reported as accepted.
+    /// The bound the challenge window used to lack (dig_ecosystem#1847): a persistent, escalating
+    /// rate limit. Every failure — a wrong TOTP code OR a wrong recovery code — advances a counter that
+    /// rides the sealed record, so closing and reopening the window can no longer hand an attacker a
+    /// fresh unbounded run. Once [`FREE_CHALLENGE_ATTEMPTS`] is spent, a required delay is imposed and
+    /// doubled per failure up to [`BACKOFF_MAX_SECONDS`]; any accepted code clears it.
     pub fn challenge(&self, typed: &str, now: u64) -> Result<ChallengeOutcome, VaultError> {
         let mut record = self.read()?;
+
+        // Anti-rollback anchor. If the wall clock reads earlier than the greatest instant this record
+        // has seen, it has been moved backwards — freeze time at the high-water mark rather than trust
+        // the smaller value, so a rollback can neither shorten the throttle below nor replay a code at
+        // its original (now-past) window. Residual assumption, documented in SPEC §3.1e: an attacker
+        // who can move the clock FORWARD at will already has the root-level control the threat model
+        // (see the module docs) explicitly does not claim to defend against; the escalating delay only
+        // ever RAISES the bar for the unlocked-machine attacker it is actually for.
+        let effective_now = record.clock_high_water.map_or(now, |seen| now.max(seen));
+        record.clock_high_water = Some(effective_now);
+
+        // The throttle is enforced BEFORE the code is judged: a rate-limited attempt must not even
+        // learn whether its guess was arithmetically close.
+        if let Some(until) = record.throttle_until {
+            if effective_now < until {
+                self.write(&record)?;
+                return Ok(ChallengeOutcome::RateLimited {
+                    retry_after_seconds: until - effective_now,
+                });
+            }
+        }
+
         let secret =
             TotpSecret::from_bytes(&hex::decode(&record.secret).map_err(|_| VaultError::Corrupt)?)?;
 
-        if let Some(step) = secret.matching_step(typed, now) {
-            // Rule 1: a step is spendable once. `>=` rather than `>` because the LAST accepted step is
-            // itself already spent.
+        if let Some(step) = secret.matching_step(typed, effective_now) {
+            // Rule 1: a step is spendable once. `<=` rather than `<` because the LAST accepted step is
+            // itself already spent. A replayed-but-correct code is neither a fresh guess nor a success:
+            // it does not advance the failure bound and does not clear it — only the clock anchor moved.
             if record.last_accepted_step.is_some_and(|last| step <= last) {
+                self.write(&record)?;
                 return Ok(ChallengeOutcome::AlreadyUsed);
             }
             record.last_accepted_step = Some(step);
+            clear_failure_bound(&mut record);
             self.write(&record)?;
             return Ok(ChallengeOutcome::Accepted);
         }
 
         if recovery_codes::spend(&mut record.recovery_codes, typed) {
             let remaining = recovery_codes::remaining(&record.recovery_codes);
+            clear_failure_bound(&mut record);
             self.write(&record)?;
             return Ok(ChallengeOutcome::AcceptedRecoveryCode { remaining });
         }
 
+        // A wrong code — TOTP or recovery-code-shaped alike — advances the bound and, past the free
+        // budget, arms the escalating delay. Counting the recovery path too is deliberate: ten codes
+        // with unbounded guesses would be a weaker secret than it looks.
+        record_failure(&mut record, effective_now);
+        self.write(&record)?;
         Ok(ChallengeOutcome::Rejected)
     }
 
@@ -283,6 +379,34 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
         storage::restrict_to_owner(&self.path)?;
         Ok(())
     }
+}
+
+/// Clear the failure bound after a code is accepted — the account is back in the owner's hands.
+fn clear_failure_bound(record: &mut Record) {
+    record.consecutive_failures = 0;
+    record.throttle_until = None;
+}
+
+/// Advance the failure bound by one and arm the escalating delay once the free budget is spent.
+fn record_failure(record: &mut Record, now: u64) {
+    record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+    record.throttle_until = backoff_delay(record.consecutive_failures).map(|delay| now + delay);
+}
+
+/// The required wait after `failures` consecutive wrong codes, or `None` while inside the free budget.
+///
+/// Zero for the first [`FREE_CHALLENGE_ATTEMPTS`] failures, then `BACKOFF_BASE_SECONDS * 2^(n-1)` for the
+/// n-th failure past the budget, capped at [`BACKOFF_MAX_SECONDS`]. `checked_shl` guards the shift so a
+/// long attack that overruns `u64` saturates at the cap rather than wrapping to a tiny delay.
+fn backoff_delay(failures: u32) -> Option<u64> {
+    let past_budget = failures
+        .checked_sub(FREE_CHALLENGE_ATTEMPTS)
+        .filter(|&n| n > 0)?;
+    let delay = BACKOFF_BASE_SECONDS
+        .checked_shl(past_budget - 1)
+        .unwrap_or(BACKOFF_MAX_SECONDS)
+        .min(BACKOFF_MAX_SECONDS);
+    Some(delay)
 }
 
 impl<S: ProfileSealer> Enrolment for SecondFactorVault<S> {
@@ -687,5 +811,269 @@ mod tests {
         assert!(vault.is_enrolled() && enrolment_present(dir.path()));
         vault.remove().unwrap();
         assert!(!vault.is_enrolled() && !enrolment_present(dir.path()));
+    }
+
+    // ──────────────── The persistent challenge bound (dig_ecosystem#1847) ────────────────
+
+    /// **THE regression for #1847.** The attempt bound must survive the challenge window CLOSING. Every
+    /// attempt here goes through a FRESH vault handle re-read from disk — the exact "close and reopen
+    /// the window" the unbounded version reset to zero. Past the free budget a brand-new handle is told
+    /// to WAIT rather than being handed a clean, unbounded run.
+    ///
+    /// Load-bearing check: revert the persistence (hold the counter in the handle rather than the
+    /// sealed record) and every fresh handle sees zero failures, so the final attempt is `Rejected`, not
+    /// `RateLimited`, and this fails.
+    #[test]
+    fn the_attempt_bound_survives_the_challenge_window_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+
+        // Spend the free budget, then one more — each through a brand-new handle (a reopened window).
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            assert_eq!(
+                vault(dir.path(), DID_A).challenge("000000", NOW).unwrap(),
+                ChallengeOutcome::Rejected
+            );
+        }
+
+        match vault(dir.path(), DID_A).challenge("000000", NOW).unwrap() {
+            ChallengeOutcome::RateLimited {
+                retry_after_seconds,
+            } => assert!(
+                retry_after_seconds > 0,
+                "a throttle with no wait is no throttle"
+            ),
+            other => panic!("reopening the window bypassed the bound: {other:?}"),
+        }
+    }
+
+    /// The escalating delay must be exactly that — escalating. The second armed delay is longer than the
+    /// first, so patience does not buy an attacker a stable cheap retry rate.
+    #[test]
+    fn the_required_delay_grows_with_each_further_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, _) = enrolled(dir.path());
+
+        // Drive just past the budget to arm the first delay, read it, wait it out, fail again, read the
+        // second. The second must be strictly longer.
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            vault.challenge("000000", NOW).unwrap();
+        }
+        let first = match vault.challenge("000000", NOW).unwrap() {
+            ChallengeOutcome::RateLimited {
+                retry_after_seconds,
+            } => retry_after_seconds,
+            other => panic!("expected a throttle, got {other:?}"),
+        };
+        // Past the first delay, one more wrong code arms a longer one.
+        let after_first = NOW + first;
+        assert_eq!(
+            vault.challenge("000000", after_first).unwrap(),
+            ChallengeOutcome::Rejected
+        );
+        let second = match vault.challenge("000000", after_first).unwrap() {
+            ChallengeOutcome::RateLimited {
+                retry_after_seconds,
+            } => retry_after_seconds,
+            other => panic!("expected a second throttle, got {other:?}"),
+        };
+        assert!(
+            second > first,
+            "the delay must escalate: {second} was not longer than {first}"
+        );
+    }
+
+    /// A legitimate owner who fat-fingers a code is NOT locked out: two wrong codes then the right one
+    /// gets in, with no recovery code spent. The free budget exists precisely so honest mistakes cost
+    /// nothing.
+    #[test]
+    fn two_wrong_codes_then_the_right_one_still_gets_the_owner_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = enrolled(dir.path());
+
+        assert_eq!(
+            vault.challenge("000000", NOW).unwrap(),
+            ChallengeOutcome::Rejected
+        );
+        assert_eq!(
+            vault.challenge("111111", NOW).unwrap(),
+            ChallengeOutcome::Rejected
+        );
+        assert_eq!(
+            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted,
+            "an honest mistake within the budget must not throttle the real code"
+        );
+        assert_eq!(
+            vault.remaining_recovery_codes().unwrap(),
+            recovery_codes::CODE_COUNT,
+            "no recovery code was spent"
+        );
+    }
+
+    /// An accepted code CLEARS the bound: after a success, the free budget is restored, so a later
+    /// honest mistake is not met with a residual delay left over from before.
+    #[test]
+    fn a_successful_code_clears_the_failure_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = enrolled(dir.path());
+
+        // Arm a throttle, wait it out, and succeed.
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            vault.challenge("000000", NOW).unwrap();
+        }
+        let wait = match vault.challenge("000000", NOW).unwrap() {
+            ChallengeOutcome::RateLimited {
+                retry_after_seconds,
+            } => retry_after_seconds,
+            other => panic!("expected a throttle, got {other:?}"),
+        };
+        let unblocked = NOW + wait;
+        assert_eq!(
+            vault
+                .challenge(&secret.code_at(unblocked), unblocked)
+                .unwrap(),
+            ChallengeOutcome::Accepted
+        );
+
+        // The slate is clean: the whole free budget of wrong codes is available again with no delay.
+        for _ in 0..FREE_CHALLENGE_ATTEMPTS {
+            assert_eq!(
+                vault.challenge("000000", unblocked).unwrap(),
+                ChallengeOutcome::Rejected,
+                "the free budget must be restored after a success"
+            );
+        }
+    }
+
+    /// Wrong RECOVERY-code attempts count toward the same bound, not just wrong TOTP codes — otherwise
+    /// the ten recovery codes would be a secret an attacker could guess without limit.
+    #[test]
+    fn wrong_recovery_code_attempts_count_toward_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+
+        // A recovery-code-SHAPED wrong guess (dashed, in the alphabet) never matches a stored digest, so
+        // it falls through to the failure path exactly as a wrong TOTP code does.
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            assert_eq!(
+                vault(dir.path(), DID_A)
+                    .challenge("ZZZZZ-ZZZZZ", NOW)
+                    .unwrap(),
+                ChallengeOutcome::Rejected
+            );
+        }
+        assert!(
+            matches!(
+                vault(dir.path(), DID_A)
+                    .challenge("ZZZZZ-ZZZZZ", NOW)
+                    .unwrap(),
+                ChallengeOutcome::RateLimited { .. }
+            ),
+            "recovery-code guesses must be throttled too"
+        );
+    }
+
+    /// **Backwards compatibility (#1847).** A record written BEFORE the attempt-bound fields existed
+    /// must still deserialize — an already-enrolled user's vault cannot be bricked by an update — and
+    /// must read as zero prior failures. The fixture is a hand-written legacy record carrying only the
+    /// three original fields.
+    #[test]
+    fn a_pre_bound_record_reads_as_zero_prior_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = vault(dir.path(), DID_A);
+        let secret = TotpSecret::generate();
+
+        let legacy = format!(
+            r#"{{"secret":"{}","recovery_codes":[],"last_accepted_step":null}}"#,
+            hex::encode(secret.as_bytes())
+        );
+        let mut plaintext = ENVELOPE_MAGIC.to_vec();
+        plaintext.extend_from_slice(legacy.as_bytes());
+        let sealed = vault.sealer.seal(DID_A, &plaintext).unwrap();
+        std::fs::create_dir_all(vault.path.parent().unwrap()).unwrap();
+        std::fs::write(&vault.path, sealed).unwrap();
+
+        assert_eq!(
+            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted,
+            "a legacy record must open and behave as a clean slate"
+        );
+    }
+
+    /// **Clock tamper (#1847).** Rolling the wall clock BACK must not grant a free attempt. An attacker
+    /// who captured a code from a past window rolls the clock back to it; the persisted high-water anchor
+    /// freezes time at the present, so the stale code is judged as of now and refused.
+    ///
+    /// Load-bearing check: drop the anchor (judge at the raw `now`) and the stale code matches its
+    /// original step and is `Accepted`, so this fails.
+    #[test]
+    fn a_clock_rolled_back_to_an_old_codes_window_grants_no_free_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = enrolled(dir.path());
+
+        // One present-day attempt anchors the record's clock at NOW.
+        assert_eq!(
+            vault.challenge("000000", NOW).unwrap(),
+            ChallengeOutcome::Rejected
+        );
+
+        // The attacker winds the clock ten steps into the past and replays a code from that window.
+        let past = NOW - 10 * STEP_SECONDS;
+        assert_eq!(
+            vault.challenge(&secret.code_at(past), past).unwrap(),
+            ChallengeOutcome::Rejected,
+            "a code from a rolled-back window must not be accepted"
+        );
+    }
+
+    /// A rollback must not shorten an ARMED throttle either: once a delay is in force, winding the clock
+    /// back leaves the wait in place rather than expiring it early.
+    #[test]
+    fn rolling_the_clock_back_does_not_shorten_an_armed_throttle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, _) = enrolled(dir.path());
+
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            vault.challenge("000000", NOW).unwrap();
+        }
+        assert!(matches!(
+            vault.challenge("000000", NOW).unwrap(),
+            ChallengeOutcome::RateLimited { .. }
+        ));
+
+        match vault.challenge("000000", NOW - 100_000).unwrap() {
+            ChallengeOutcome::RateLimited {
+                retry_after_seconds,
+            } => assert!(retry_after_seconds > 0, "a rollback must not zero the wait"),
+            other => panic!("a rollback bypassed the throttle: {other:?}"),
+        }
+    }
+
+    /// The backoff schedule itself: zero inside the budget, then a doubling sequence capped at the
+    /// ceiling. Pinned from BOTH sides of the cap so neither the escalation nor the ceiling can silently
+    /// change.
+    #[test]
+    fn the_backoff_schedule_is_zero_then_doubles_up_to_the_cap() {
+        assert_eq!(backoff_delay(0), None);
+        assert_eq!(
+            backoff_delay(FREE_CHALLENGE_ATTEMPTS),
+            None,
+            "budget edge is free"
+        );
+        assert_eq!(
+            backoff_delay(FREE_CHALLENGE_ATTEMPTS + 1),
+            Some(BACKOFF_BASE_SECONDS)
+        );
+        assert_eq!(
+            backoff_delay(FREE_CHALLENGE_ATTEMPTS + 2),
+            Some(BACKOFF_BASE_SECONDS * 2)
+        );
+        assert_eq!(
+            backoff_delay(FREE_CHALLENGE_ATTEMPTS + 3),
+            Some(BACKOFF_BASE_SECONDS * 4)
+        );
+        // Far past the budget the delay is pinned at the cap and never overflows to a tiny value.
+        assert_eq!(backoff_delay(1_000), Some(BACKOFF_MAX_SECONDS));
     }
 }

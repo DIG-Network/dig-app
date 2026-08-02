@@ -149,6 +149,14 @@ pub enum ChallengeVerdict {
     Cancelled,
     /// The code was wrong, or was one already used inside its own window.
     Failed,
+    /// Too many codes have failed in a row, so the user must WAIT before trying again
+    /// (dig_ecosystem#1847). A rate limit, not a lockout — kept distinct from [`Failed`](Self::Failed)
+    /// so the window can tell the user to wait rather than to type a fresh code that will be refused
+    /// unread.
+    RateLimited {
+        /// Whole seconds the user must wait before another code will be checked.
+        retry_after_seconds: u64,
+    },
     /// No second factor is enrolled, so there was nothing to ask. Deliberately NOT collapsed into
     /// [`Passed`](Self::Passed): a caller must decide what "no factor" means for its own action, and a
     /// silent pass is how a guard becomes vacuous.
@@ -299,6 +307,11 @@ pub fn challenge<S: ProfileSealer>(
         Ok(ChallengeOutcome::AlreadyUsed) | Ok(ChallengeOutcome::Rejected) => {
             ChallengeVerdict::Failed
         }
+        Ok(ChallengeOutcome::RateLimited {
+            retry_after_seconds,
+        }) => ChallengeVerdict::RateLimited {
+            retry_after_seconds,
+        },
         // A locked account cannot answer a challenge, and an unreadable record is not a pass.
         Err(e) => {
             tracing::warn!(error = %e, "a second-factor challenge could not be judged");
@@ -1124,6 +1137,31 @@ mod tests {
             ),
             ChallengeVerdict::Cancelled
         );
+    }
+
+    /// A vault throttled by too many failed attempts reports `RateLimited` through the journey, not a
+    /// plain `Failed` — the window must be able to tell the user to WAIT rather than to keep typing
+    /// codes that will be refused unread (dig_ecosystem#1847). The throttle is armed through fresh vault
+    /// handles, mirroring the window being closed and reopened between guesses.
+    #[test]
+    fn a_throttled_vault_reports_rate_limited_through_the_journey() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+        // Six consecutive wrong answers is comfortably past any sane free budget.
+        for _ in 0..6 {
+            let _ = vault(dir.path()).challenge("000000", NOW);
+        }
+
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type("000000".into())]);
+        assert!(matches!(
+            challenge(
+                &confirmer,
+                &vault(dir.path()),
+                "do the thing",
+                &FixedClock(NOW)
+            ),
+            ChallengeVerdict::RateLimited { .. }
+        ));
     }
 
     /// An account with no second factor reports `NotEnrolled` rather than a silent pass, so a caller

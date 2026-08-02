@@ -854,6 +854,23 @@ Use Unlock in this menu and try again. If you no longer have your              a
             );
             false
         }
+        // Too many wrong codes in a row: the bound (dig_ecosystem#1847) makes the user wait rather than
+        // letting an attacker at an unlocked machine keep guessing. Tell them how long, and that a
+        // recovery code is still the way through if they have genuinely lost their phone.
+        ChallengeVerdict::RateLimited {
+            retry_after_seconds,
+        } => {
+            let minutes = retry_after_seconds.div_ceil(60);
+            notify(
+                confirmer,
+                "DIG — Too many attempts",
+                "Too many codes were entered incorrectly, so nothing was changed.",
+                &format!(
+                    "Wait about {minutes} minute(s), then open your authenticator and try a fresh                  code. If you have lost your phone, one of your recovery codes will still let you                  through.",
+                ),
+            );
+            false
+        }
         // Fail closed: a factor is enrolled and could not be judged.
         ChallengeVerdict::NotEnrolled | ChallengeVerdict::Unavailable => {
             notify(
