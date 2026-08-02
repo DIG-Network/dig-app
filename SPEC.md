@@ -1420,12 +1420,16 @@ human is mid-pairing.
 
 | `scope` | Granted by | May call |
 |---|---|---|
-| `dig-extension` | a pinned `ext_id` | every method, including `sign.request` |
-| `third-party` | a redeemed pairing code | every method EXCEPT `sign.request` |
+| `dig-extension` | a pinned `ext_id` | the control plane + `sign.request` |
+| `third-party` | a redeemed pairing code | the control plane, NOT `sign.request` |
 
-A frame is authenticated FIRST and its scope checked SECOND, against the scope of the pairing it
-actually authenticated as — never against anything the frame claimed. A `sign.request` from a
-`third-party` pairing ⇒ `CAP_NOT_GRANTED`. The scope MUST survive sealing and restart.
+`scope` gates the MONEY method (`sign.request`) only. It is orthogonal to the `identity.*` capability
+set (§5.6.8), which gates the sealing methods independently — a pairing of EITHER scope may hold
+identity capabilities, and neither scope implies them. A frame is authenticated FIRST and its
+authority checked SECOND, against the pairing it actually authenticated as — never against anything
+the frame claimed. A `sign.request` from a `third-party` pairing, or an ungranted `identity.*` method
+from any pairing, ⇒ `CAP_NOT_GRANTED`. Both `scope` and the capability set MUST survive sealing and
+restart.
 
 **Management + revocation.** dig-app MUST offer the user a surface listing every paired app — its
 `ext_id`, its untrusted `label`, its scope, when it was paired, and when it last authenticated a frame
@@ -1558,6 +1562,93 @@ returns only the signature. Both callers — the §5.3 engine `sign` callback AN
 authorization point with no divergence: the production policy is the native-confirm policy; the
 `AllowAll`/`DenyAll` policies (`session.rs`) remain test doubles only.
 
+#### 5.6.8 The `identity.*` capability class (end-to-end message sealing)
+
+The `identity.*` methods are a SEPARATE capability axis from the money `sign.request` boundary
+(dig_ecosystem#1931/#1913). They let a paired app — dig-chat is the first — reach the profile's
+X25519 **sealing** keypair to send and open `DIGCHAT1` end-to-end-encrypted messages (NC-1), WITHOUT
+ever obtaining the spend/identity signing power. The separation is structural, not advisory:
+
+- **Two independent gates.** `sign.request` is gated ONLY by the pairing `PairingScope` (§5.6.3a) —
+  a pinned DIG extension. `identity.attest` / `identity.seal` / `identity.unseal` are gated ONLY by a
+  per-pairing **granted capability set**. A pairing MAY hold every identity capability and a
+  non-signing scope; an identity grant can NEVER open `sign.request`. A KNOWN identity method a
+  pairing was not granted ⇒ `CAP_NOT_GRANTED`; a method that does not exist ⇒ `-32601` (they are
+  distinct).
+- **Granting.** `pair.begin` MAY carry `requested_capabilities: string[]`; the app grants the
+  recognized `identity.*` names (unknown names dropped) and echoes the result as
+  `granted_capabilities` in the `pair.begin` result. The set is stored on the sealed pairing record
+  and is `serde(default)` — a record sealed before this class existed opens as the EMPTY set,
+  refusing every `identity.*` method (§5.1 back-compat). The set MUST survive sealing and restart.
+
+**`identity.attest`** (params `{}`) → `{ did, sealing_public_key_b64, attestation_b64 }`.
+`sealing_public_key_b64` is the 32-byte X25519 sealing public key (base64). The sealing keypair is
+DERIVED deterministically from the account master seed (dig-account
+`profile_sealing_key`/`profile_sealing_public_key`), so a restored profile reproduces the identical
+key and every message sealed to it stays openable forever (§5.1). `attestation_b64` is the BLS
+`0x0010` identity key's signature over
+
+```text
+DIGATTEST1_DST ‖ sealing_public_key      where DIGATTEST1_DST = 0x44 49 47 41 54 54 45 53 54 31 00  ("DIGATTEST1\0")
+```
+
+The `DIGATTEST1\0` domain-separation prefix is MANDATORY: the identity signer signs raw bytes and is
+shared with session-attach and `dign sign`, so the prefix is what stops an attestation signature
+being replayed as a session or spend message. `identity.attest` takes no per-call confirm and no
+connect gate — the capability grant at pair time IS the authorization, and it is the probe a client
+uses to reach a `connected` state.
+
+**`identity.seal`** (params `{ recipient_did, recipient_sealing_public_key_b64, plaintext_b64 }`) →
+`{ envelope_b64 }`. Seals the plaintext into a `DIGCHAT1` envelope (below) addressed to the
+recipient's sealing key. DIGCHAT1 suite 1 is a **sealed-box**: it gives confidentiality to the
+recipient but does NOT authenticate the sender. This profile's DID is carried as `sender_did` and
+bound into the AEAD AAD for transit-integrity — a relay cannot re-address the envelope — but the AAD
+binding does NOT authenticate the sender to any key: anyone holding the recipient's published sealing
+key can seal with any `sender_did`. It is therefore an UNVERIFIED claim. Sender authentication is
+tracked as DIGCHAT1 suite 2 (#1940). A fresh random ephemeral key + nonce are drawn per call. The
+plaintext MUST NOT be retained.
+
+**`identity.unseal`** (params `{ envelope_b64 }`) → `{ sender_did, plaintext_b64 }`. Opens an envelope
+addressed to this profile with the profile's sealing SECRET. `sender_did` is the sender DID carried in
+the envelope header — an UNVERIFIED claim under suite 1 (see the seal note). A locked
+profile ⇒ `LOCKED`; a well-formed envelope that does not authenticate (wrong recipient,
+tampered/re-addressed header, corrupted body) ⇒ `UNSEAL_FAILED`; malformed input ⇒
+`IDENTITY_BAD_REQUEST`.
+
+##### The `DIGCHAT1` envelope (byte contract, big-endian)
+
+This is byte-identical to dig-chat's normative reference (`src/main/identity/envelope.ts` +
+`conformance.ts`, dig-chat SPEC §4). A message one side seals the other MUST open.
+
+```text
+offset  size  field
+  0      8    magic       "DIGCHAT1"  (44 49 47 43 48 41 54 31)
+  8      1    version     0x01
+  9      1    suite       0x01 = X25519 / HKDF-SHA256 / XChaCha20-Poly1305
+ 10      2    sender_did_len       u16
+ 12      n    sender_did           UTF-8   (1..=512 bytes)
+  …      2    recipient_did_len    u16
+  …      m    recipient_did        UTF-8   (1..=512 bytes)
+  …     32    epk                  X25519 ephemeral public key
+  …     24    nonce                XChaCha20-Poly1305 nonce
+  …      4    ct_len               u32
+  …      k    ciphertext           AEAD output, 16-byte tag included
+```
+
+- **Suite 1.** Key agreement X25519 (ephemeral-static). Key derivation HKDF-SHA256 with
+  `salt = "DIGCHAT1"` (the 8 magic bytes), `info = "DIGCHAT1 suite1 message key"`, `L = 32`, and
+  `IKM = shared_secret ‖ epk ‖ recipient_sealing_public_key`. AEAD XChaCha20-Poly1305, 24-byte nonce
+  drawn at random.
+- **Associated data** = `magic ‖ version ‖ suite ‖ sender_did_len ‖ sender_did ‖ recipient_did_len ‖
+  recipient_did ‖ epk`. Binding the DIDs + epk means a relay that re-addresses or replays an envelope
+  under a different header produces a decryption failure, not a delivered message.
+- **Bounds.** A DID is 1..=512 bytes; the plaintext is at most **49,152 bytes (48 KiB)**, chosen so a
+  sealed envelope with two maximal DIDs fits inside the DIG peer layer's 64 KiB decoded-frame ceiling.
+  A decoder MUST check every length against the bytes remaining before reading, and MUST reject
+  trailing bytes, a non-UTF-8 DID, an unknown version, and an unknown suite.
+- The two DIDs and the epk travel in the clear (a relay must read them to route); **message content
+  is never visible to a relay**. No primitive is hand-rolled (NC-1).
+
 #### 5.6.7 Error-code taxonomy
 
 Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off these, not off prose):
@@ -1576,7 +1667,9 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
 | `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
 | `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
-| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing's scope does not grant that method (§5.6.3a) |
+| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
+| `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed: missing/oversized field, a `payload`/`envelope` that was not valid base64, or a sealing key of the wrong length (§5.6.8) |
+| `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
 browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both

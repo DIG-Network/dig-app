@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use dig_account::{AccountId, AccountSession, AccountStore};
     use dig_keystore::MemoryBackend;
-    use dig_session::{Password, SEED_LEN};
+    use dig_session::{Password, ENTROPY_LEN};
     use std::sync::Arc as StdArc;
 
     const DID: &str = "did:chia:residency-test";
@@ -246,13 +246,13 @@ mod tests {
     /// residencies hold genuinely different key material.
     fn residency() -> AccountResidency {
         use rand_core::RngCore;
-        let mut seed = [0u8; SEED_LEN];
+        let mut seed = [0u8; ENTROPY_LEN];
         rand_core::OsRng.fill_bytes(&mut seed);
         residency_from_seed(&seed)
     }
 
     /// Enrol a residency over an EXACT seed, so a test can pin what the account derives from.
-    fn residency_from_seed(seed: &[u8; SEED_LEN]) -> AccountResidency {
+    fn residency_from_seed(seed: &[u8; ENTROPY_LEN]) -> AccountResidency {
         let store = StdArc::new(AccountStore::new(StdArc::new(MemoryBackend::new())));
         let unlocked = AccountSession::enroll(
             store,
@@ -305,10 +305,12 @@ mod tests {
     /// The literal is belt-and-braces on top: independently reproduced with an out-of-tree bech32m
     /// implementation, and identical to dig-account's own frozen `GOLDEN_ADDRESS` for this seed. A
     /// derivation change that moved BOTH implementations together would still have to move the literal.
+    /// The independent derivation now BIP-39-expands the entropy before key derivation, matching
+    /// dig-account 0.3's seed expansion via the `bip39` crate.
     #[test]
     fn the_receiving_address_matches_an_independent_derivation_of_the_same_seed() {
-        const SEED: [u8; SEED_LEN] = [0x42; SEED_LEN];
-        const GOLDEN: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+        const SEED: [u8; ENTROPY_LEN] = [0x42; ENTROPY_LEN];
+        const GOLDEN: &str = "xch14vlj35vktk9uyhuau3fv2dj4gw6c9kfxex44gvmzqa4rmvluqe7qrapt26";
 
         let derived = residency_from_seed(&SEED)
             .receiving_address()
@@ -327,13 +329,16 @@ mod tests {
     }
 
     /// Derive the canonical Chia receive address for `seed` at the root profile WITHOUT dig-account:
-    /// `master_to_wallet_unhardened(master, 0).derive_synthetic()` → `StandardArgs::curry_tree_hash` →
-    /// bech32m under the `xch` HRP.
+    /// BIP-39-expand the entropy → `master_to_wallet_unhardened(master, 0).derive_synthetic()` →
+    /// `StandardArgs::curry_tree_hash` → bech32m under the `xch` HRP.
     fn independent_address(seed: &[u8]) -> String {
         use chia_bls::{master_to_wallet_unhardened, SecretKey};
         use chia_puzzle_types::{standard::StandardArgs, DeriveSynthetic};
 
-        let master = SecretKey::from_seed(seed);
+        let expanded = bip39::Mnemonic::from_entropy_in(bip39::Language::English, seed)
+            .expect("32 bytes is valid 24-word BIP-39 entropy")
+            .to_seed("");
+        let master = SecretKey::from_seed(&expanded);
         let synthetic = master_to_wallet_unhardened(&master, ProfileIx::ROOT.0).derive_synthetic();
         let puzzle_hash = StandardArgs::curry_tree_hash(synthetic.public_key());
         bech32m("xch", puzzle_hash.to_bytes().as_ref())

@@ -29,8 +29,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
+use crate::digchat::{self, SealInputs, EPK_LEN};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
-use crate::pairing::{AuthFailure, NewPairing, PairedApp, PairingScope, PairingStore};
+use crate::pairing::{
+    AuthFailure, Capability, CapabilitySet, NewPairing, PairedApp, PairingAuthority, PairingStore,
+};
 use crate::pairing_code::{PairingCode, PairingCodeIssuer};
 use crate::sealer::ProfileSealer;
 use crate::session::{sign_callback_message, SessionSigner};
@@ -38,6 +41,7 @@ use crate::sign_policy::{NativeConfirmSignPolicy, SignRejection, SignSubject, Si
 use crate::whitelist::WhitelistStore;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 /// The stable symbolic error codes the extension keys its UX off (`SPEC.md` §5.6.7). Each carries a
 /// numeric JSON-RPC `code` (an application-specific range, distinct from the JSON-RPC reserved
@@ -88,6 +92,12 @@ pub enum SignErrorCode {
     /// good, so telling it "authentication failed" would send a well-behaved app into a re-pair loop
     /// that could never grant what it is asking for.
     CapNotGranted,
+    /// An `identity.*` request was malformed: a missing/oversized field, a `payload`/`envelope` that
+    /// was not valid base64, or a sealing key of the wrong length (dig_ecosystem#1931).
+    IdentityBadRequest,
+    /// An `identity.unseal` envelope did not authenticate under this profile's sealing key — a wrong
+    /// recipient, a tampered/re-addressed header, or a corrupted body (indistinguishable, on purpose).
+    UnsealFailed,
 }
 
 impl SignErrorCode {
@@ -110,6 +120,8 @@ impl SignErrorCode {
             Self::SignNoConfirmer => "SIGN_NO_CONFIRMER",
             Self::Locked => "LOCKED",
             Self::CapNotGranted => "CAP_NOT_GRANTED",
+            Self::IdentityBadRequest => "IDENTITY_BAD_REQUEST",
+            Self::UnsealFailed => "UNSEAL_FAILED",
         }
     }
 
@@ -132,6 +144,8 @@ impl SignErrorCode {
             Self::SignNoConfirmer => -33034,
             Self::Locked => -33040,
             Self::CapNotGranted => -33050,
+            Self::IdentityBadRequest => -33060,
+            Self::UnsealFailed => -33061,
         }
     }
 }
@@ -175,6 +189,11 @@ struct PairBeginParams {
     ext_label: Option<String>,
     #[serde(default)]
     pairing_code: Option<String>,
+    /// The `identity.*` capabilities the caller asks for (dig_ecosystem#1931). Absent for callers
+    /// that only want the control plane; dig-chat sends `["identity.attest","identity.seal",
+    /// "identity.unseal"]`. Unknown names are dropped when the grant is computed.
+    #[serde(default)]
+    requested_capabilities: Vec<String>,
 }
 
 /// `connect.request` parameters (`SPEC.md` §5.6.4).
@@ -206,6 +225,22 @@ struct SignParams {
 #[derive(Debug, Deserialize)]
 struct OriginGate {
     origin: String,
+}
+
+/// `identity.seal` parameters (`SPEC.md` §5.6, dig_ecosystem#1931): seal `plaintext_b64` into a
+/// `DIGCHAT1` envelope addressed to `recipient_did` under its published X25519 sealing public key.
+#[derive(Debug, Deserialize)]
+struct IdentitySealParams {
+    recipient_did: String,
+    recipient_sealing_public_key_b64: String,
+    plaintext_b64: String,
+}
+
+/// `identity.unseal` parameters (`SPEC.md` §5.6, dig_ecosystem#1931): open a `DIGCHAT1` envelope
+/// addressed to this profile.
+#[derive(Debug, Deserialize)]
+struct IdentityUnsealParams {
+    envelope_b64: String,
 }
 
 /// The connect-handle the app returns to a dapp on a successful `connect.request` (§5.6.4): the active
@@ -252,6 +287,41 @@ impl SignReauthGate for OpenSignGate {
     }
 }
 
+/// The domain-separation tag the `identity.attest` attestation is signed OVER, before the sealing
+/// public key (`SPEC.md` §5.6, dig_ecosystem#1931).
+///
+/// **Why this exists (a security caveat).** The identity signer's `sign` (a
+/// [`SessionSigner`](crate::session::SessionSigner) over the profile's `0x0010` BLS key) signs raw
+/// bytes and is SHARED with session-attach challenges and `dign sign`. Without a distinct prefix, an
+/// attestation signature over a 32-byte sealing key could be lifted and replayed as some other
+/// signed message. Prefixing every attestation with `DIGATTEST1\0` domain-separates it from every
+/// other thing that key ever signs, so an attestation can never be mistaken for a session or spend
+/// message. The trailing NUL keeps the tag an unambiguous, self-delimiting prefix.
+pub const DIGATTEST1_DST: &[u8] = b"DIGATTEST1\0";
+
+/// Supplies the active profile's X25519 SEALING keypair to the `identity.*` handlers
+/// (dig_ecosystem#1931). The private half stays behind this seam — dig-app is the key holder, and the
+/// router never copies raw seed bytes — mirroring how the identity signer is injected.
+///
+/// Returns `None` when the profile is locked, so a locked `identity.seal`/`unseal`/`attest` refuses
+/// with `LOCKED` rather than operating on a dropped key (parity with the sign path).
+pub trait ProfileSealingKey: Send + Sync {
+    /// The active profile's X25519 sealing secret, or `None` when the profile is locked.
+    fn sealing_secret(&self) -> Option<StaticSecret>;
+}
+
+/// The default sealing-key seam: always locked (no key). A router built without an injected
+/// [`ProfileSealingKey`] therefore refuses every `identity.*` method with `LOCKED` — fail-closed,
+/// the safe default until the tray boot injects a live key. Keeps the pre-#1931 unit-test wiring
+/// (which never sealed) compiling unchanged.
+pub struct LockedSealingKey;
+
+impl ProfileSealingKey for LockedSealingKey {
+    fn sealing_secret(&self) -> Option<StaticSecret> {
+        None
+    }
+}
+
 /// The frame router: authenticates every frame against the [`PairingStore`] and dispatches it,
 /// raising the native confirm (§5.6.1) through the [`NativeConfirmer`] where a decision is required.
 ///
@@ -293,6 +363,11 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// [`with_reauth_gate`](Self::with_reauth_gate) so a locked session forces a re-unlock before it
     /// signs. Reads never consult it.
     reauth_gate: Arc<dyn SignReauthGate>,
+    /// The active profile's X25519 sealing keypair seam for the `identity.*` handlers
+    /// (dig_ecosystem#1931). Defaults to the fail-closed [`LockedSealingKey`]; the tray boot injects a
+    /// live key via [`with_sealing_key`](Self::with_sealing_key). Independent of `signer` (which is
+    /// the BLS identity/attestation signer) — this is the X25519 seal/unseal key.
+    sealing_key: Arc<dyn ProfileSealingKey>,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
@@ -320,7 +395,17 @@ impl<S: ProfileSealer> FrameRouter<S> {
             codes: Arc::new(PairingCodeIssuer::new()),
             persist: Arc::new(NullSealedStore),
             reauth_gate: Arc::new(OpenSignGate),
+            sealing_key: Arc::new(LockedSealingKey),
         }
+    }
+
+    /// Inject the active profile's X25519 sealing keypair seam for the `identity.*` handlers
+    /// (dig_ecosystem#1931). Without this the router uses the fail-closed [`LockedSealingKey`] (every
+    /// `identity.*` method refuses `LOCKED`); the tray boot supplies a seam backed by the unlocked
+    /// account's `profile_sealing_key`.
+    pub fn with_sealing_key(mut self, sealing_key: Arc<dyn ProfileSealingKey>) -> Self {
+        self.sealing_key = sealing_key;
+        self
     }
 
     /// Inject the session-lock re-auth gate consulted before every signature (WSEC-D, #967). Without
@@ -414,7 +499,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
     /// A **pinned** DIG extension pairs on its `ext_id` alone — the same set the `Origin` guard
     /// enforces, checked again here so a frame that somehow bypassed the transport guard still cannot
     /// self-pair. **Anyone else** must redeem a pairing code the USER generated in the tray, and is
-    /// paired with the narrower [`PairingScope::ThirdParty`].
+    /// paired with the narrower [`PairingScope::ThirdParty`](crate::pairing::PairingScope::ThirdParty).
     ///
     /// The pin path is untouched by the code path: making `allowed_ext_ids` optional so one branch
     /// could serve both would mean a caller claiming a pinned id no longer has to BE at that pinned
@@ -433,7 +518,12 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, SignErrorCode::PairDenied);
         };
 
-        let request = if self.allowed_ext_ids.contains(&params.ext_id) {
+        // The identity capabilities the caller asked for, narrowed to the ones we recognize
+        // (dig_ecosystem#1931). Independent of the money `scope` below — an identity-only chat app is
+        // paired with a non-signing scope AND its identity capabilities.
+        let granted = CapabilitySet::from_requested(&params.requested_capabilities);
+
+        let base = if self.allowed_ext_ids.contains(&params.ext_id) {
             NewPairing::pinned(&params.ext_id, params.ext_label.as_deref())
         } else {
             let candidate = params.pairing_code.as_deref().unwrap_or("");
@@ -444,6 +534,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             }
             NewPairing::third_party(&params.ext_id, params.ext_label.as_deref())
         };
+        let request = base.with_capabilities(granted.clone());
 
         let decision = self.confirmer.confirm_pair(&PairPrompt {
             ext_id: &params.ext_id,
@@ -468,6 +559,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
                         // limit by having a sign refused: an app that knows it cannot sign can say so
                         // in its own UI instead of offering a button that always fails.
                         "may_sign": request.scope.may_sign(),
+                        // Echo the granted identity capabilities (dig_ecosystem#1931, D5) so the caller
+                        // knows which of the ones it requested it actually holds — dig-chat gates its
+                        // `connected` state on this echo naming the identity class.
+                        "granted_capabilities": granted.wire_names(),
                     }),
                 )
             }
@@ -483,17 +578,20 @@ impl<S: ProfileSealer> FrameRouter<S> {
     /// nothing about what any pairing may do; the capability check runs SECOND, on the scope of the
     /// pairing the frame actually authenticated as — never on anything the frame itself claimed.
     fn handle_authenticated(&self, frame: &RequestFrame) -> Value {
-        let scope = match self.authenticate(frame) {
-            Ok(scope) => scope,
+        let authority = match self.authenticate(frame) {
+            Ok(authority) => authority,
             Err(code) => return error(&frame.id, code),
         };
-        if !permits(scope, &frame.method) {
+        if !permits(&authority, &frame.method) {
             return error(&frame.id, SignErrorCode::CapNotGranted);
         }
         match frame.method.as_str() {
             "connect.request" => self.handle_connect(&frame.id, &frame.params),
             "connect.revoke" => self.handle_connect_revoke(&frame.id, &frame.params),
             "sign.request" => self.handle_sign(&frame.id, &frame.params),
+            "identity.attest" => self.handle_identity_attest(&frame.id),
+            "identity.seal" => self.handle_identity_seal(&frame.id, &frame.params),
+            "identity.unseal" => self.handle_identity_unseal(&frame.id, &frame.params),
             _ => method_not_found(&frame.id),
         }
     }
@@ -608,6 +706,113 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
+    /// The `identity.attest` handler (`SPEC.md` §5.6, dig_ecosystem#1931): publish this profile's DID,
+    /// its X25519 sealing public key, and an attestation binding the two.
+    ///
+    /// The attestation is `ProfileSigner::sign(DIGATTEST1 ‖ sealing_pubkey)` — the BLS `0x0010`
+    /// identity key (the identity path, NOT the money `sign.request` gate). The [`DIGATTEST1_DST`]
+    /// prefix domain-separates it from every other message that key signs (see the constant). No
+    /// per-call confirm and no connect gate: the capability grant at pair time IS the authorization,
+    /// and attest is the probe dig-chat uses to reach `connected`.
+    fn handle_identity_attest(&self, id: &Value) -> Value {
+        let Some(secret) = self.sealing_key.sealing_secret() else {
+            return error(id, SignErrorCode::Locked);
+        };
+        let sealing_pubkey = PublicKey::from(&secret).to_bytes();
+
+        // The attestation message is the domain-separation tag followed by the sealing public key, so
+        // a signature over it can never be replayed as a session-attach or spend message.
+        let mut message = Vec::with_capacity(DIGATTEST1_DST.len() + EPK_LEN);
+        message.extend_from_slice(DIGATTEST1_DST);
+        message.extend_from_slice(&sealing_pubkey);
+
+        // A locked identity signer yields no signature → LOCKED, never a bogus all-zero attestation.
+        let Some(signature) = self.signer.try_sign(&message) else {
+            return error(id, SignErrorCode::Locked);
+        };
+
+        ok(
+            id,
+            json!({
+                "did": self.connect_info.profile_did,
+                "sealing_public_key_b64": BASE64.encode(sealing_pubkey),
+                "attestation_b64": BASE64.encode(signature.as_bytes()),
+            }),
+        )
+    }
+
+    /// The `identity.seal` handler (`SPEC.md` §5.6, dig_ecosystem#1931): seal a caller-supplied
+    /// plaintext into a `DIGCHAT1` envelope addressed to `recipient_did` under its published sealing
+    /// key, with this profile's DID as the (unauthenticated, sealed-box) sender claim in the AAD.
+    ///
+    /// Sealing draws a fresh random ephemeral key + nonce and never touches this profile's sealing
+    /// SECRET (encryption is to the recipient's public key), so it does not gate on `LOCKED`. The
+    /// plaintext is never retained — it lives only for the duration of the seal.
+    fn handle_identity_seal(&self, id: &Value, params: &Value) -> Value {
+        let Ok(params) = serde_json::from_value::<IdentitySealParams>(params.clone()) else {
+            return error(id, SignErrorCode::IdentityBadRequest);
+        };
+        let Ok(recipient_pk_bytes) =
+            BASE64.decode(params.recipient_sealing_public_key_b64.as_bytes())
+        else {
+            return error(id, SignErrorCode::IdentityBadRequest);
+        };
+        let Ok(recipient_sealing_public_key) =
+            <[u8; EPK_LEN]>::try_from(recipient_pk_bytes.as_slice())
+        else {
+            return error(id, SignErrorCode::IdentityBadRequest);
+        };
+        let Ok(plaintext) = BASE64.decode(params.plaintext_b64.as_bytes()) else {
+            return error(id, SignErrorCode::IdentityBadRequest);
+        };
+        // The plaintext buffer is dropped at the end of this scope — never stored on the router.
+        let plaintext = zeroize::Zeroizing::new(plaintext);
+
+        match digchat::seal(&SealInputs {
+            sender_did: &self.connect_info.profile_did,
+            recipient_did: &params.recipient_did,
+            recipient_sealing_public_key,
+            plaintext: &plaintext,
+        }) {
+            Ok(envelope) => ok(id, json!({ "envelope_b64": BASE64.encode(envelope) })),
+            Err(e) => error(id, digchat_error_code(&e)),
+        }
+    }
+
+    /// The `identity.unseal` handler (`SPEC.md` §5.6, dig_ecosystem#1931): open a `DIGCHAT1` envelope
+    /// addressed to this profile and return the recovered plaintext plus the sender DID. `sender_did`
+    /// is the header's UNVERIFIED sender claim; `open` succeeding proves recipient-integrity, not
+    /// sender identity (suite 1 sealed-box, #1940).
+    ///
+    /// Unsealing NEEDS this profile's sealing secret, so a locked profile refuses `LOCKED`. An
+    /// envelope that decodes but does not authenticate — a wrong recipient, a tampered/re-addressed
+    /// header, a corrupted body — is `UNSEAL_FAILED`; a malformed envelope is `IDENTITY_BAD_REQUEST`.
+    fn handle_identity_unseal(&self, id: &Value, params: &Value) -> Value {
+        let Some(secret) = self.sealing_key.sealing_secret() else {
+            return error(id, SignErrorCode::Locked);
+        };
+        let Ok(params) = serde_json::from_value::<IdentityUnsealParams>(params.clone()) else {
+            return error(id, SignErrorCode::IdentityBadRequest);
+        };
+        let Ok(envelope_bytes) = BASE64.decode(params.envelope_b64.as_bytes()) else {
+            return error(id, SignErrorCode::IdentityBadRequest);
+        };
+
+        match digchat::open(&envelope_bytes, &secret) {
+            // `sender_did` is the header's UNVERIFIED sender claim; `open` succeeding proves
+            // recipient-integrity, not sender identity (suite 1 sealed-box). The plaintext is
+            // base64'd out then dropped (Zeroizing).
+            Ok((envelope, plaintext)) => ok(
+                id,
+                json!({
+                    "sender_did": envelope.sender_did,
+                    "plaintext_b64": BASE64.encode(&*plaintext),
+                }),
+            ),
+            Err(e) => error(id, digchat_error_code(&e)),
+        }
+    }
+
     /// The `{ granted, profile_did, addresses[], pubkeys[] }` handle returned on a successful connect.
     fn connect_result(&self) -> Value {
         json!({
@@ -619,9 +824,9 @@ impl<S: ProfileSealer> FrameRouter<S> {
     }
 
     /// Verify a frame's `auth` object against the pairing store, mapping [`AuthFailure`] to the wire
-    /// codes and returning the authenticated pairing's [`PairingScope`]. A frame with no `auth` object
+    /// codes and returning the authenticated pairing's [`PairingScope`](crate::pairing::PairingScope). A frame with no `auth` object
     /// fails `AUTH_REQUIRED`.
-    fn authenticate(&self, frame: &RequestFrame) -> Result<PairingScope, SignErrorCode> {
+    fn authenticate(&self, frame: &RequestFrame) -> Result<PairingAuthority, SignErrorCode> {
         let auth = frame.auth.as_ref().ok_or(SignErrorCode::AuthRequired)?;
         self.pairings
             .verify_frame(
@@ -647,7 +852,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         // The pairing verified a moment ago, so it is live; a race that unpaired it in between is a
         // revoke, and refusing the frame is the correct outcome of one.
         self.pairings
-            .scope_of(&auth.pairing_id)
+            .authority_of(&auth.pairing_id)
             .ok_or(SignErrorCode::AuthRequired)
     }
 
@@ -658,18 +863,37 @@ impl<S: ProfileSealer> FrameRouter<S> {
     }
 }
 
-/// Whether a pairing in `scope` may call `method` (§5.6.3a).
+/// Whether an authenticated pairing may call `method` (§5.6.3a, dig_ecosystem#1931).
 ///
 /// Stated as ONE function over the method name rather than a check inside each handler, so a method
 /// added later is a line here rather than a capability that silently defaults to allowed — the failure
-/// mode where a new endpoint quietly hands a third party something the scope was written to withhold.
+/// mode where a new endpoint quietly hands a caller something it was never granted.
 ///
-/// Everything except signing is the control plane, which is exactly what a code-paired third party is
-/// for. `sign.request` is the one that reaches the identity key, and it is why
-/// [`PairingScope::ThirdParty`] exists.
-fn permits(scope: PairingScope, method: &str) -> bool {
+/// The two authorization axes are kept SEPARATE and independent:
+/// - **`sign.request`** — the MONEY boundary, gated ONLY by [`PairingScope::may_sign`](crate::pairing::PairingScope::may_sign). Untouched by
+///   #1931: an identity capability can never open it.
+/// - **`identity.*`** — gated ONLY by the granted [`CapabilitySet`]. A KNOWN identity method that is
+///   not granted returns `false` here → `CAP_NOT_GRANTED`; an UNKNOWN method returns `true` here and
+///   falls through to `method_not_found` → `-32601` (so a never-defined method is not conflated with
+///   a real-but-ungranted one).
+/// - **everything else** (`connect.*`) is the control plane, always permitted to an authenticated
+///   pairing.
+///
+/// Map a [`digchat::DigchatError`] to its wire error code. A NON-AUTHENTIC envelope (wrong key,
+/// tampered/re-addressed header, corrupted body) is `UNSEAL_FAILED`; every MALFORMED-input case is
+/// `IDENTITY_BAD_REQUEST`. The two are kept distinct so a caller can tell "you sent me garbage" from
+/// "this is a real envelope I cannot open".
+fn digchat_error_code(error: &digchat::DigchatError) -> SignErrorCode {
+    match error {
+        digchat::DigchatError::NotAuthentic => SignErrorCode::UnsealFailed,
+        _ => SignErrorCode::IdentityBadRequest,
+    }
+}
+
+fn permits(authority: &PairingAuthority, method: &str) -> bool {
     match method {
-        "sign.request" => scope.may_sign(),
+        "sign.request" => authority.scope.may_sign(),
+        m if Capability::is_identity_method(m) => authority.capabilities.permits_method(m),
         _ => true,
     }
 }
@@ -790,7 +1014,7 @@ mod tests {
     use crate::account::residency::AccountResidency;
     use crate::account::sealer::AccountSealer;
     use crate::confirm::HeadlessConfirmer;
-    use crate::pairing::{frame_mac_input, PairingStore};
+    use crate::pairing::{frame_mac_input, PairingScope, PairingStore};
     use crate::test_support::{test_residency, test_sealer};
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
@@ -1892,10 +2116,577 @@ mod tests {
             SignErrorCode::SignBadPayload,
             SignErrorCode::SignNoConfirmer,
             SignErrorCode::Locked,
+            SignErrorCode::CapNotGranted,
+            SignErrorCode::IdentityBadRequest,
+            SignErrorCode::UnsealFailed,
         ];
         let codes: HashSet<i64> = all.iter().map(|c| c.code()).collect();
         let symbols: HashSet<&str> = all.iter().map(|c| c.symbol()).collect();
         assert_eq!(codes.len(), all.len(), "numeric codes must be unique");
         assert_eq!(symbols.len(), all.len(), "symbols must be unique");
+    }
+
+    // ---- identity.* capability class (dig_ecosystem#1931) --------------------------------------
+
+    use crate::pairing::{Capability, CapabilitySet};
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    /// The three identity capabilities dig-chat requests, as wire names.
+    const IDENTITY_CAPS: [&str; 3] = ["identity.attest", "identity.seal", "identity.unseal"];
+
+    /// A fixed X25519 sealing keypair seam for the identity tests — a deterministic secret so a
+    /// failure is reproducible and the derived public key is known.
+    struct FixedSealingKey(StaticSecret);
+    impl ProfileSealingKey for FixedSealingKey {
+        fn sealing_secret(&self) -> Option<StaticSecret> {
+            Some(StaticSecret::from(self.0.to_bytes()))
+        }
+    }
+
+    /// A sealing secret DERIVED from a seed hash (never a literal, so static analysis does not read it
+    /// as hard-coded key material).
+    fn identity_sealing_secret() -> StaticSecret {
+        let seed: [u8; 32] = Sha256::digest(b"dig-app #1931 identity sealing key").into();
+        StaticSecret::from(seed)
+    }
+
+    /// Build an approving router with a KNOWN identity signer + a KNOWN sealing key, returning the
+    /// router, the signer's BLS public key (to verify an attestation) and the sealing secret (to open
+    /// what the router sealed / seal what it opens). The pairing/whitelist stores seal under a
+    /// separate profile DEK; only the identity seams are the ones under test.
+    fn identity_router() -> (
+        FrameRouter<AccountSealer>,
+        dig_ipc_protocol::domain::SigningPublicKey,
+        StaticSecret,
+    ) {
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer_pubkey = SessionSigner::signing_public_key(&signer);
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec!["xch1testaddress".to_string()],
+            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        };
+        let sealing = identity_sealing_secret();
+        let router = FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(signer),
+            connect_info,
+            [EXT.to_string()],
+        )
+        .with_sealing_key(Arc::new(FixedSealingKey(StaticSecret::from(
+            sealing.to_bytes(),
+        ))));
+        (router, signer_pubkey, sealing)
+    }
+
+    /// Pair the pinned `EXT` requesting `requested_capabilities`, returning `(pairing_id, token)` and
+    /// the `granted_capabilities` the response echoed. The pinned path needs no code.
+    fn pair_requesting(
+        router: &FrameRouter<AccountSealer>,
+        requested_capabilities: &[&str],
+    ) -> (String, String, Vec<String>) {
+        let resp = router.handle(&request(
+            "pair.begin",
+            json!({ "ext_id": EXT, "requested_capabilities": requested_capabilities }),
+            None,
+        ));
+        let result = &resp["result"];
+        let granted = result["granted_capabilities"]
+            .as_array()
+            .expect("granted_capabilities is echoed")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        (
+            result["pairing_id"].as_str().unwrap().to_string(),
+            result["channel_token_b64"].as_str().unwrap().to_string(),
+            granted,
+        )
+    }
+
+    #[test]
+    fn d3_an_identity_only_pairing_is_refused_sign_request_with_cap_not_granted() {
+        // THE load-bearing separation (#1931): a pairing that holds every identity capability but a
+        // NON-signing scope must be refused `sign.request` with CAP_NOT_GRANTED — not -32601 (that is
+        // an unknown method), and certainly not a signature. Two actors keep this honest: the SAME
+        // pairing is granted identity.attest (which succeeds) and denied sign.request, so the refusal
+        // is about the money boundary, not a channel that refuses everything.
+        let (router, _pk, _sealing) = identity_router();
+        // A code-paired third party has a NON-signing scope; grant it the identity class on top.
+        let control = router.control();
+        let code = control.issue_code(now_epoch_secs());
+        let resp = router.handle(&request(
+            "pair.begin",
+            json!({
+                "ext_id": THIRD_PARTY,
+                "ext_label": "Chat",
+                "pairing_code": code.display(),
+                "requested_capabilities": IDENTITY_CAPS,
+            }),
+            None,
+        ));
+        let pairing_id = resp["result"]["pairing_id"].as_str().unwrap().to_string();
+        let token = resp["result"]["channel_token_b64"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            resp["result"]["may_sign"], false,
+            "an identity-only pairing does not hold the money scope"
+        );
+
+        // identity.attest is GRANTED → it succeeds (the truthful control).
+        let attest = router.handle(&authed_request(
+            "identity.attest",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        assert!(
+            attest["result"]["did"].is_string(),
+            "the identity capability it WAS granted works"
+        );
+
+        // sign.request is NOT in its scope → CAP_NOT_GRANTED, and no signature is produced.
+        let sign = router.handle(&authed_request(
+            "sign.request",
+            json!({
+                "origin": "https://dapp.example",
+                "payload_type": "spend",
+                "payload_b64": spend_payload_b64(),
+            }),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            sign["error"]["message"], "CAP_NOT_GRANTED",
+            "an identity grant must NEVER open the money boundary"
+        );
+        assert!(sign["result"].is_null(), "and no signature is returned");
+
+        // A genuinely unknown method is still -32601, NOT CAP_NOT_GRANTED — the two are distinct.
+        let unknown = router.handle(&authed_request(
+            "identity.teleport",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(3),
+        ));
+        assert_eq!(unknown["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn d3_a_known_identity_method_that_was_not_granted_is_cap_not_granted() {
+        // The KNOWN-but-ungranted split: a pairing granted ONLY identity.attest must be refused
+        // identity.seal with CAP_NOT_GRANTED (a known method it lacks), while identity.teleport (never
+        // defined) is -32601. Distinguishing the two is exactly what `is_identity_method` buys.
+        let (router, _pk, _sealing) = identity_router();
+        let (pairing_id, token, granted) = pair_requesting(&router, &["identity.attest"]);
+        assert_eq!(
+            granted,
+            vec!["identity.attest"],
+            "only the one it asked for"
+        );
+
+        let seal = router.handle(&authed_request(
+            "identity.seal",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        assert_eq!(
+            seal["error"]["message"], "CAP_NOT_GRANTED",
+            "a known identity method it was not granted is CAP_NOT_GRANTED"
+        );
+        let unknown = router.handle(&authed_request(
+            "identity.nope",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            unknown["error"]["code"], -32601,
+            "an unknown method stays -32601"
+        );
+    }
+
+    #[test]
+    fn d4_an_old_sealed_pairing_refuses_identity_but_still_signs_per_scope() {
+        // §5.1 back-compat: a pairing record sealed BEFORE the capability field existed opens with an
+        // EMPTY capability set, so every identity.* is refused CAP_NOT_GRANTED — while sign.request
+        // still works per its (pinned) PairingScope, proving the empty-set default did not disturb the
+        // money gate. The fixture is the OLD JSON shape sealed by hand (a round-trip of the new struct
+        // could never catch a missing serde(default)).
+        use crate::pairing::CHANNEL_SECRET_LEN;
+        let sealer = test_sealer(DID);
+        let secret = [0x5u8; CHANNEL_SECRET_LEN];
+        let old_shape = json!({
+            "pairing_id": "old-record-1931",
+            "ext_id": EXT,
+            "scope": "DigExtension",
+            "channel_secret_b64": BASE64.encode(secret),
+            "created_at": 1_700_000_000u64,
+        });
+        let sealed = sealer
+            .seal(DID, &serde_json::to_vec(&old_shape).unwrap())
+            .unwrap();
+
+        let (router, _pk, _sealing) = identity_router();
+        let pairing_id = router.pairings().restore_sealed(&sealed).unwrap();
+        // Empty capabilities → identity refused; scope preserved → still signs.
+        let authority = router.pairings().authority_of(&pairing_id).unwrap();
+        assert!(
+            authority.capabilities.is_empty(),
+            "old record has no capabilities"
+        );
+        assert_eq!(authority.scope, PairingScope::DigExtension);
+
+        let token = BASE64.encode(secret);
+        let attest = router.handle(&authed_request(
+            "identity.attest",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        assert_eq!(
+            attest["error"]["message"], "CAP_NOT_GRANTED",
+            "an old record grants no identity capability"
+        );
+        // …but the money gate is unchanged: whitelist the origin, then sign succeeds.
+        let connect = router.handle(&authed_request(
+            "connect.request",
+            json!({ "origin": "https://dapp.example" }),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(connect["result"]["granted"], true);
+        let sign = router.handle(&authed_request(
+            "sign.request",
+            json!({
+                "origin": "https://dapp.example",
+                "payload_type": "spend",
+                "payload_b64": spend_payload_b64(),
+            }),
+            &pairing_id,
+            &token,
+            n(3),
+        ));
+        assert!(
+            sign["result"]["signature_b64"].is_string(),
+            "the pinned scope still signs — the empty capability default left the money gate intact"
+        );
+    }
+
+    #[test]
+    fn d5_pair_begin_echoes_only_the_recognized_requested_capabilities() {
+        // The grant echoes back the capabilities actually held, dropping an unknown one, so the caller
+        // learns exactly what it has rather than assuming its whole request was honoured.
+        let (router, _pk, _sealing) = identity_router();
+        let (_id, _token, granted) = pair_requesting(
+            &router,
+            &[
+                "identity.attest",
+                "identity.seal",
+                "identity.unseal",
+                "money.print",
+            ],
+        );
+        assert_eq!(
+            granted,
+            vec!["identity.attest", "identity.seal", "identity.unseal"],
+            "the recognized identity capabilities are granted; the bogus one is dropped"
+        );
+        assert!(
+            !granted.iter().any(|c| c == "money.print"),
+            "a non-identity capability is never granted through the identity path"
+        );
+    }
+
+    #[test]
+    fn d5_a_revoke_kills_a_live_identity_pairing() {
+        // Revocation semantics (#1848) hold for identity pairings too: after unpair, the very next
+        // identity frame fails AUTH_REQUIRED on the channel it is already holding open.
+        let (router, _pk, _sealing) = identity_router();
+        let (pairing_id, token, _granted) = pair_requesting(&router, &IDENTITY_CAPS);
+        assert!(router.handle(&authed_request(
+            "identity.attest",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(1),
+        ))["result"]["did"]
+            .is_string());
+
+        assert!(router.pairings().unpair(&pairing_id));
+        let after = router.handle(&authed_request(
+            "identity.attest",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(after["error"]["message"], "AUTH_REQUIRED");
+    }
+
+    #[test]
+    fn d6_identity_attest_returns_a_dst_prefixed_attestation_over_the_sealing_key() {
+        // The attestation binds the sealing key to the DID, signed with the BLS identity key, and it
+        // MUST carry the DIGATTEST1 domain-separation tag so it can never be replayed as a session or
+        // spend message. The load-bearing halves: the signature verifies over (DST ‖ pubkey) and does
+        // NOT verify over the bare pubkey (proving the tag is actually present, not merely documented).
+        use crate::session::verify_signature;
+        use dig_ipc_protocol::Signature;
+
+        let (router, signer_pubkey, sealing) = identity_router();
+        let (pairing_id, token, _granted) = pair_requesting(&router, &["identity.attest"]);
+
+        let resp = router.handle(&authed_request(
+            "identity.attest",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        assert_eq!(resp["result"]["did"], DID);
+
+        // The published sealing key is the seam's public half, 32 bytes.
+        let published_pk = BASE64
+            .decode(resp["result"]["sealing_public_key_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            published_pk,
+            PublicKey::from(&sealing).to_bytes().to_vec(),
+            "attest publishes the profile's real sealing public key"
+        );
+
+        let sig_bytes: [u8; 96] = BASE64
+            .decode(resp["result"]["attestation_b64"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let signature = Signature::new(sig_bytes);
+
+        let mut dst_message = DIGATTEST1_DST.to_vec();
+        dst_message.extend_from_slice(&published_pk);
+        assert!(
+            verify_signature(&signer_pubkey, &dst_message, &signature),
+            "the attestation verifies over DIGATTEST1 ‖ sealing_pubkey"
+        );
+        assert!(
+            !verify_signature(&signer_pubkey, &published_pk, &signature),
+            "and NOT over the bare sealing key — the DST prefix must be present (anti-replay)"
+        );
+    }
+
+    #[test]
+    fn d6_identity_attest_on_a_locked_profile_is_locked() {
+        // A locked sealing seam yields no key → LOCKED, never a bogus attestation over an absent key.
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec![],
+            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        };
+        // No `.with_sealing_key` → the fail-closed LockedSealingKey.
+        let router = FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(signer),
+            connect_info,
+            [EXT.to_string()],
+        );
+        let (pairing_id, token, _granted) = pair_requesting(&router, &["identity.attest"]);
+        let resp = router.handle(&authed_request(
+            "identity.attest",
+            json!({}),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        assert_eq!(resp["error"]["message"], "LOCKED");
+    }
+
+    #[test]
+    fn d7_seal_then_unseal_round_trips_the_plaintext_and_the_sender_claim() {
+        // The router seam end-to-end: seal a message to THIS profile's own sealing key, then unseal
+        // it, recovering the plaintext AND the sender DID claim (the profile's own DID). Under suite 1
+        // the sender DID is an unauthenticated claim; here it round-trips because we sealed it.
+        let (router, _pk, sealing) = identity_router();
+        let (pairing_id, token, _granted) = pair_requesting(&router, &IDENTITY_CAPS);
+        let recipient_pk_b64 = BASE64.encode(PublicKey::from(&sealing).to_bytes());
+        let plaintext = b"the quick brown fox jumps over the lazy dog";
+
+        let sealed = router.handle(&authed_request(
+            "identity.seal",
+            json!({
+                "recipient_did": DID,
+                "recipient_sealing_public_key_b64": recipient_pk_b64,
+                "plaintext_b64": BASE64.encode(plaintext),
+            }),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        let envelope_b64 = sealed["result"]["envelope_b64"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // What travels is ciphertext (NC-1): the plaintext appears nowhere in the envelope bytes.
+        let envelope_bytes = BASE64.decode(&envelope_b64).unwrap();
+        assert!(
+            envelope_bytes
+                .windows(plaintext.len())
+                .all(|w| w != plaintext),
+            "the sealed envelope must carry no byte of the plaintext (NC-1)"
+        );
+
+        let opened = router.handle(&authed_request(
+            "identity.unseal",
+            json!({ "envelope_b64": envelope_b64 }),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            BASE64
+                .decode(opened["result"]["plaintext_b64"].as_str().unwrap())
+                .unwrap(),
+            plaintext,
+            "unseal recovers the plaintext"
+        );
+        assert_eq!(
+            opened["result"]["sender_did"], DID,
+            "unseal returns the sender DID claim (unauthenticated under suite 1)"
+        );
+    }
+
+    #[test]
+    fn d7_unseal_opens_the_dig_chat_golden_envelope_addressed_to_this_key() {
+        // Cross-implementation parity at the SEAM: an envelope produced by dig-chat's normative
+        // reference (the golden vector pinned in `digchat`) unseals through the router path when the
+        // profile's sealing key is the vector's recipient key. Proves the router opens what dig-chat
+        // seals, not merely what it seals itself.
+        // The golden fixture recipient secret is all-0xb0 (see `digchat::tests`).
+        let bob_secret = StaticSecret::from([0xb0u8; 32]);
+        let pairings = PairingStore::new(test_sealer(DID), DID);
+        let whitelist = WhitelistStore::new(test_sealer(DID), DID);
+        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let connect_info = ProfileConnectInfo {
+            profile_did: DID.to_string(),
+            addresses: vec![],
+            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
+        };
+        let router = FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(signer),
+            connect_info,
+            [EXT.to_string()],
+        )
+        .with_sealing_key(Arc::new(FixedSealingKey(StaticSecret::from(
+            bob_secret.to_bytes(),
+        ))));
+        let (pairing_id, token, _granted) = pair_requesting(&router, &IDENTITY_CAPS);
+
+        // The golden DIGCHAT1 wire, sealed by dig-chat's TypeScript reference to the 0xb0 recipient.
+        const GOLDEN_WIRE_HEX: &str = "44494743484154310101000e6469643a636869613a616c696365000c6469643a636869613a626f625855784cb3c8c796d84ac93e8f4a53dab0bb31e80960042cfa87f03a4293b3081111111111111111111111111111111111111111111111110000003f6fca01f4081e31c4ec7b4c88d3fe30b68beaf12bfa0d19a30bfdb2965de1a52c86fe8f76b62845c13c65567abaac27034f8c507ebceec57e28ec3733b9d47a";
+        let wire: Vec<u8> = (0..GOLDEN_WIRE_HEX.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&GOLDEN_WIRE_HEX[i..i + 2], 16).unwrap())
+            .collect();
+
+        let opened = router.handle(&authed_request(
+            "identity.unseal",
+            json!({ "envelope_b64": BASE64.encode(&wire) }),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        assert_eq!(
+            opened["result"]["sender_did"], "did:chia:alice",
+            "the sender DID claim carried in dig-chat's own envelope (unauthenticated under suite 1)"
+        );
+        assert_eq!(
+            BASE64
+                .decode(opened["result"]["plaintext_b64"].as_str().unwrap())
+                .unwrap(),
+            b"meet me at the bridge at nine, bring the ledger",
+        );
+    }
+
+    #[test]
+    fn d7_unseal_of_a_tampered_or_misaddressed_envelope_fails_and_locked_refuses() {
+        let (router, _pk, sealing) = identity_router();
+        let (pairing_id, token, _granted) = pair_requesting(&router, &IDENTITY_CAPS);
+        let recipient_pk_b64 = BASE64.encode(PublicKey::from(&sealing).to_bytes());
+
+        let sealed = router.handle(&authed_request(
+            "identity.seal",
+            json!({
+                "recipient_did": DID,
+                "recipient_sealing_public_key_b64": recipient_pk_b64,
+                "plaintext_b64": BASE64.encode(b"secret"),
+            }),
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+        let mut wire = BASE64
+            .decode(sealed["result"]["envelope_b64"].as_str().unwrap())
+            .unwrap();
+        let last = wire.len() - 1;
+        wire[last] ^= 0x01; // flip a ciphertext byte
+
+        let tampered = router.handle(&authed_request(
+            "identity.unseal",
+            json!({ "envelope_b64": BASE64.encode(&wire) }),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            tampered["error"]["message"], "UNSEAL_FAILED",
+            "a tampered envelope that decodes but does not authenticate is UNSEAL_FAILED"
+        );
+
+        // Garbage that is not even a valid envelope is IDENTITY_BAD_REQUEST, a distinct error.
+        let garbage = router.handle(&authed_request(
+            "identity.unseal",
+            json!({ "envelope_b64": BASE64.encode(b"not an envelope") }),
+            &pairing_id,
+            &token,
+            n(3),
+        ));
+        assert_eq!(garbage["error"]["message"], "IDENTITY_BAD_REQUEST");
+    }
+
+    #[test]
+    fn capability_set_serialization_is_the_wire_strings() {
+        // The sealed record must carry the capabilities as their stable wire names, so a second
+        // implementation (or an old build) reads the same set. A round-trip pins that.
+        let set = CapabilitySet::from_requested(&IDENTITY_CAPS);
+        let json = serde_json::to_string(&set).unwrap();
+        assert_eq!(
+            json,
+            r#"["identity.attest","identity.seal","identity.unseal"]"#
+        );
+        let back: CapabilitySet = serde_json::from_str(&json).unwrap();
+        assert!(back.contains(Capability::IdentityAttest));
+        assert!(back.contains(Capability::IdentitySeal));
+        assert!(back.contains(Capability::IdentityUnseal));
     }
 }

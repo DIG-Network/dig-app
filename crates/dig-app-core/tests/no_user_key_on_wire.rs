@@ -41,12 +41,22 @@ use dig_account::{
 };
 use dig_ipc_protocol::signer::SessionSigner;
 use dig_keystore::{BackendKey, MemoryBackend};
-use dig_session::{Password, Session, SEED_LEN};
+use dig_session::{Password, Session, ENTROPY_LEN};
 
 /// A fixed master seed so the independently-derived secrets we search the wire for match exactly the
 /// account's live key material at [`ProfileIx::ROOT`] (the byte-contract in
 /// `wallet_key_byte_contract.rs`).
-const SEED: [u8; SEED_LEN] = [0x5c; SEED_LEN];
+const SEED: [u8; ENTROPY_LEN] = [0x5c; ENTROPY_LEN];
+
+/// The 64-byte HD seed dig-account/dig-session derive from — [`SEED`] treated as BIP-39 ENTROPY and
+/// expanded exactly as production does before any key derivation (the #1759 seed expansion). Every
+/// independent derivation below MUST start from this expanded seed so the secrets we search the wire
+/// for are the account's ACTUAL live key material, not the pre-cutover raw-entropy ones.
+fn expanded_seed() -> [u8; 64] {
+    bip39::Mnemonic::from_entropy_in(bip39::Language::English, &SEED)
+        .expect("32-byte entropy is valid 24-word BIP-39")
+        .to_seed("")
+}
 
 /// A [`WalletEngine`] that RECORDS every serialized request byte it would place on the IPC wire, so a
 /// test can inspect exactly what crosses the dig-app → dig-node boundary. It never sees a key — the
@@ -122,7 +132,7 @@ fn residency_at_seed() -> AccountResidency {
 
 /// A real standard-layer XCH send out of the wallet's own coin (recipient hinted, change home).
 fn real_send() -> Vec<CoinSpend> {
-    let key = WalletKey::from_seed(&SEED);
+    let key = WalletKey::from_seed(&expanded_seed());
     let wallet_ph = key.puzzle_hash();
     let mut ctx = SpendContext::new();
     let coin = Coin::new(Bytes32::new([1u8; 32]), wallet_ph, 1_000_000);
@@ -141,7 +151,7 @@ fn real_send() -> Vec<CoinSpend> {
 /// The 32-byte canonical wallet synthetic secret key at ROOT, derived independently so we can prove
 /// it never leaks onto the wire.
 fn wallet_synthetic_secret() -> [u8; 32] {
-    let master = SecretKey::from_seed(&SEED);
+    let master = SecretKey::from_seed(&expanded_seed());
     master_to_wallet_unhardened(&master, 0)
         .derive_synthetic()
         .to_bytes()
@@ -196,7 +206,7 @@ async fn no_user_key_crosses_the_ipc_wire_on_a_live_signed_spend() {
     // A representative read request also crosses the wire — include it in the inspection.
     engine
         .coins(CoinsRequest {
-            address: WalletKey::from_seed(&SEED).address().unwrap(),
+            address: WalletKey::from_seed(&expanded_seed()).address().unwrap(),
             asset: dig_app_core::wallet::state::Asset::Xch,
         })
         .unwrap();

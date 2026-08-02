@@ -1,3 +1,37 @@
+## #1931 — the identity.* capability class, and the money-derivation drift the dig-account 0.3 bump surfaced
+
+- **DIGCHAT1 is a cross-repo BYTE contract, so pin it against the OTHER implementation, not a round-trip.**
+  dig-app's `identity.seal` must emit bytes dig-chat's normative `conformance.ts` emits. A Rust
+  round-trip (seal→unseal) proves internal consistency and nothing about parity. The load-bearing test
+  runs the TypeScript reference under `@noble/*` on a fixed fixture (all-`0xb0` recipient secret,
+  all-`0x0e` ephemeral, all-`0x11` nonce), captures the exact envelope hex, and pins it as a golden
+  literal `seal_with` must reproduce. A wrong HKDF salt/info, an endian slip, a different AAD, or an
+  X25519 clamp mismatch all move that literal — which is the point. The X25519 basepoint mult and the
+  DH agree byte-for-byte between `x25519-dalek` v2 and `@noble/curves` because both are standard RFC 7748.
+- **Two authorization axes, kept structurally separate.** `sign.request` (money) stays gated ONLY by
+  `PairingScope::may_sign`; `identity.*` is gated ONLY by a per-pairing granted `CapabilitySet`. The
+  split lives in one `permits()` match, and the KNOWN-but-ungranted identity method (→ `CAP_NOT_GRANTED`)
+  is distinguished from an UNKNOWN method (→ `-32601`) by `Capability::is_identity_method`. The
+  load-bearing test grants ONLY `identity.attest`, then asserts `identity.seal` → `CAP_NOT_GRANTED` while
+  `identity.teleport` → `-32601`; breaking the capability line fails the former but not an outcome-only
+  "returns error" assertion, which is why the two error shapes are asserted separately.
+- **`profile_sign` is shared, so an attestation MUST be domain-separated.** The `0x0010` BLS identity key
+  signs session-attach challenges and `dign sign` too. `identity.attest` therefore signs
+  `DIGATTEST1\0 ‖ sealing_pubkey`, and the test proves the tag is PRESENT by asserting the signature
+  verifies over `(DST ‖ pubkey)` and does NOT verify over the bare pubkey — a placement proof, not an
+  outcome proof.
+- **A two-minor dependency bump propagates a BEHAVIOUR change through the whole foundation.** Adopting
+  dig-account 0.3.0 forced dig-session 0.4→0.5 (to unify `UnlockedMasterSeed`/`StaticSecret` to one type
+  — two majors of the same crate do NOT unify and the compiler says "multiple different versions of
+  crate dig_session"). dig-session 0.5 renamed `SEED_LEN`→`ENTROPY_LEN` (same value, 32) and, with
+  dig-account 0.3's #1759, switched the money key derivation to the STANDARD BIP-39-expanded 64-byte
+  master seed (Sage-compatible). Consequence: any TEST that derives a wallet key/address from the raw
+  32-byte entropy is now the STALE side — three money-path tests fail (a changed golden address; a spend
+  whose locally-derived change output no longer returns to the wallet → the exfiltration guard fires).
+  The production wiring is unaffected (dig-app injects dig-account's signer); only test REFERENCE
+  derivations + two frozen golden constants drifted. This is money-path work, kept out of the identity
+  unit deliberately.
+
 ## #1773 — presentation is a contract, and only a live window proves it
 
 - **A working code path can still be the wrong UI, and no unit test could have said so.** Every dig-app

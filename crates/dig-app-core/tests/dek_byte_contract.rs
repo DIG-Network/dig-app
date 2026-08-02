@@ -1,16 +1,22 @@
 //! Custody byte-contract: the per-profile DEK derived through dig-session's master-HD facade is
-//! byte-identical to dig-app's prior (pre-cutover) `keystore/secrets.rs` HKDF construction for the
-//! same identity scalar (#1024 Phase 2, §5.1 at-rest back-compat / NC-2).
+//! byte-identical to an independent reconstruction from the same identity scalar — the CURRENT
+//! post-cutover byte contract (#1024 Phase 2, §5.1 at-rest back-compat / NC-2).
 //!
 //! This is the load-bearing custody proof of the identity/DEK cutover. After the cutover, dig-app
 //! routes ALL at-rest DEK derivation through `UnlockedMasterSeed::profile_derive_symmetric_key` —
-//! never a local re-derive. If that facade's output ever drifted from the frozen construction, every
+//! never a local re-derive. If that facade's output ever drifted from this reconstruction, every
 //! already-sealed profile blob would become unreadable (a permanent lock-out). These tests fail
 //! CLOSED on any such drift.
 //!
 //! The reference construction here is deliberately reproduced from LITERAL bytes (not imported from
 //! production code), so a drift on EITHER side — dig-session's facade OR dig-app's frozen contract —
 //! is caught rather than masked by a shared helper.
+//!
+//! The master root is `SEED` treated as BIP-39 ENTROPY and expanded to the 64-byte HD seed exactly as
+//! dig-session 0.5 does before every derivation (see `expanded_master_seed`). This pin MOVED once,
+//! deliberately (#1759 seed-expansion), while NO sealed artifacts existed; any FUTURE change needs a
+//! migration, not a silent re-pin. This brings dig-app into agreement with dig-account 0.3's
+//! already-shipped `GOLDEN_DEK0` re-pin.
 
 use std::sync::Arc;
 
@@ -19,16 +25,25 @@ use dig_identity::{
     derive_identity_sk, derive_identity_sk_at, master_secret_key_from_seed, public_key_bytes,
 };
 use dig_keystore::{opaque, KdfParams};
-use dig_session::{BackendKey, FileBackend, Password, Session, SEED_LEN};
+use dig_session::{BackendKey, FileBackend, Password, Session, ENTROPY_LEN};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
 /// A fixed 32-byte master seed — the golden anchor. Every derived value below is deterministic in it.
-const SEED: [u8; SEED_LEN] = [
+const SEED: [u8; ENTROPY_LEN] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 const PASSWORD: &str = "correct horse battery staple";
+
+/// Post-cutover master root: SEED is BIP-39 ENTROPY, expanded to the 64-byte HD seed
+/// (PBKDF2-HMAC-SHA512, empty passphrase) exactly as dig-session 0.5 does before every derivation.
+fn expanded_master_seed() -> [u8; 64] {
+    use bip39::{Language, Mnemonic};
+    Mnemonic::from_entropy_in(Language::English, &SEED)
+        .expect("32-byte entropy is valid 24-word BIP-39")
+        .to_seed("")
+}
 
 /// A live master-seed handle enrolled to a throwaway file-backed keystore. The `FileBackend` +
 /// on-disk keystore is the real production storage path (no test-only backend feature needed).
@@ -71,13 +86,15 @@ fn the_frozen_dig_constants_match_the_literal_pre_cutover_bytes() {
 
 #[test]
 fn profile0_dek_through_dig_session_equals_the_pre_cutover_construction() {
-    // THE cross-round-trip byte-contract: the DEK dig-app now derives via the facade
-    // (`profile_derive_symmetric_key(0, PROFILE_DEK_LABEL)`) is byte-identical to the DEK dig-app
-    // derived pre-cutover for the same identity scalar. Profile 0 is the default/back-compat path.
+    // THE cross-round-trip byte-contract: the DEK dig-app derives via the facade
+    // (`profile_derive_symmetric_key(0, PROFILE_DEK_LABEL)`) is byte-identical to this independent
+    // reconstruction from the same identity scalar (the post-cutover, BIP-39-expanded root). Profile
+    // 0 is the default path.
     let dir = tempfile::tempdir().unwrap();
     let handle = enrolled_handle(dir.path());
 
-    let profile0_scalar = derive_identity_sk_at(&master_secret_key_from_seed(&SEED), 0).to_bytes();
+    let profile0_scalar =
+        derive_identity_sk_at(&master_secret_key_from_seed(&expanded_master_seed()), 0).to_bytes();
     let reference = dig_app_reference_dek(&profile0_scalar, PROFILE_DEK_LABEL);
 
     let via_facade = handle.profile_derive_symmetric_key(0, PROFILE_DEK_LABEL);
@@ -91,13 +108,14 @@ fn profile0_dek_through_dig_session_equals_the_pre_cutover_construction() {
 
 #[test]
 fn a_blob_sealed_under_the_facade_dek_opens_under_the_reference_dek_and_vice_versa() {
-    // The at-rest back-compat guarantee end-to-end: a blob sealed with the facade-derived DEK opens
-    // under the independently-reconstructed pre-cutover DEK, and vice versa — proving already-sealed
-    // data stays readable after the cutover (§5.1 / NC-2).
+    // The at-rest byte contract end-to-end: a blob sealed with the facade-derived DEK opens under the
+    // independently-reconstructed DEK (post-cutover, BIP-39-expanded root), and vice versa — proving
+    // sealed data stays readable so long as the facade holds the contract (§5.1 / NC-2).
     let dir = tempfile::tempdir().unwrap();
     let handle = enrolled_handle(dir.path());
 
-    let profile0_scalar = derive_identity_sk_at(&master_secret_key_from_seed(&SEED), 0).to_bytes();
+    let profile0_scalar =
+        derive_identity_sk_at(&master_secret_key_from_seed(&expanded_master_seed()), 0).to_bytes();
     let reference_dek = dig_app_reference_dek(&profile0_scalar, PROFILE_DEK_LABEL);
     let facade_dek = handle.profile_derive_symmetric_key(0, PROFILE_DEK_LABEL);
 
@@ -124,12 +142,15 @@ fn a_blob_sealed_under_the_facade_dek_opens_under_the_reference_dek_and_vice_ver
 
 #[test]
 fn profile0_public_key_equals_the_default_identity_key() {
-    // Additive property (#5.1): profile index 0 IS the pre-cutover default identity, so
-    // `profile_public_key(0)` byte-equals the canonical `derive_identity_sk` key the DID anchors.
+    // Additive property (#5.1): profile index 0 IS the default identity, so `profile_public_key(0)`
+    // byte-equals the canonical `derive_identity_sk` key the DID anchors (post-cutover,
+    // BIP-39-expanded root).
     let dir = tempfile::tempdir().unwrap();
     let handle = enrolled_handle(dir.path());
 
-    let expected = public_key_bytes(&derive_identity_sk(&master_secret_key_from_seed(&SEED)));
+    let expected = public_key_bytes(&derive_identity_sk(&master_secret_key_from_seed(
+        &expanded_master_seed(),
+    )));
     assert_eq!(handle.profile_public_key(0), expected);
     assert_eq!(handle.profile_public_key(0), handle.public_key());
 }
