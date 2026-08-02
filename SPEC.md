@@ -497,9 +497,12 @@ any lower request at **64 MiB**.
   a reason that names the bound. A new cap BELOW current usage forces the node to evict cached content, so
   the flow MUST warn and require an explicit confirmation (a claim — two choices, no biometric) before
   applying it — the user learns of the loss before, not after.
-- **Every state ends visibly (MUST, §6.4 four async states).** The cap is applied over a live node
-  connection, which can be absent or can fail. A node that is down, a user who declines the eviction, and a
-  node that refuses the change MUST each end in a notice — the control MUST NOT be a silent no-op.
+- **Every state the user did not choose ends visibly (MUST, §6.4 four async states).** The cap is applied
+  over a live node connection, which can be absent or can fail. A node that is down, and a node that refuses
+  the change, MUST each end in a notice — the control MUST NOT be a silent no-op for an outcome the user did
+  not choose. Declining the eviction confirmation is NOT such an outcome: the confirmation dialog has already
+  named the consequence and the user has chosen not to proceed, so the flow returns quietly, consistent with
+  every other cancel path in the app — a fresh notice there would be redundant, not informative.
 - **Honest copy (MUST, §6.0).** The cache is the operator's read-history cover, not merely a disk knob:
   raising the cap increases privacy cover and network contribution, lowering it reduces them, and below
   512 MiB the node's tier-0 relevancy caching is disabled. Sizes are binary (1 GiB = 1024³) and the copy

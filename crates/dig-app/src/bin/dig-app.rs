@@ -2270,9 +2270,11 @@ mod tray {
     /// The single flow shared by every entry (a preset row and the custom input): resolve the live
     /// node, decide whether the new cap evicts ([`dig_app_core::cache::plan_cap_change`]) and gate that
     /// on an explicit confirmation, then persist through the node's `control.cache.setCap` — never by
-    /// writing the node's config directly (the node holds that lock). Every outcome ends in a visible
-    /// notice: a node that is down, a user who declined the eviction, a node that refused, and a
-    /// success all say so, so the row is never a silent no-op (requirement 5).
+    /// writing the node's config directly (the node holds that lock). Every outcome the user did NOT
+    /// directly choose ends in a visible notice: a node that is down, a node that refused, and a success
+    /// all say so, so the row is never a silent no-op (requirement 5). Declining the eviction
+    /// confirmation returns quietly — the dialog already named the consequence and the user chose not to
+    /// proceed, consistent with every other cancel path in the app (SPEC §3.1c-ii).
     fn change_cache_cap(status: &SharedStatus, confirmer: &dyn NativeConfirmer, bytes: u64) {
         use dig_app_core::cache::{self, CapChange};
         use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
@@ -2322,8 +2324,10 @@ mod tray {
                 scannable: None,
             }) {
                 ConfirmDecision::Approve => {}
-                // Declined or closed: leave the cap untouched and say nothing changed — the user chose
-                // that, so it is not an error, but it must not be silent either.
+                // Declined or closed: leave the cap untouched and return quietly. The confirmation
+                // dialog already named the consequence and the user chose not to proceed, so a fresh
+                // notice would be redundant — this matches every other cancel path in the app (not an
+                // error, not a silent surprise). SPEC §3.1c-ii.
                 ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
                 ConfirmDecision::Unavailable => {
                     notify(
