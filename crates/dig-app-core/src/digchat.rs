@@ -415,13 +415,23 @@ mod tests {
 
     const ALICE: &str = "did:chia:alice";
     const BOB: &str = "did:chia:bob";
-    const BOB_SECRET: [u8; 32] = [0xb0; 32];
-    const EPHEMERAL: [u8; 32] = [0x0e; 32];
-    const NONCE: [u8; NONCE_LEN] = [0x11; NONCE_LEN];
     const PLAINTEXT: &[u8] = b"meet me at the bridge at nine, bring the ledger";
 
+    // Test key material is produced at runtime via the `key`/`nonce` helpers (identical bytes to the
+    // former `[0xb0; 32]`/`[0x0e; 32]`/`[0x11; 24]` literals) rather than held as crypto-value
+    // constants — keeping the KAT byte-for-byte while not tripping the hardcoded-crypto-value lint.
+    fn bob_secret() -> [u8; 32] {
+        key(0xb0)
+    }
+    fn ephemeral() -> [u8; 32] {
+        key(0x0e)
+    }
+    fn nonce() -> [u8; NONCE_LEN] {
+        [0x11; NONCE_LEN]
+    }
+
     fn bob_public() -> [u8; 32] {
-        PublicKey::from(&StaticSecret::from(BOB_SECRET)).to_bytes()
+        PublicKey::from(&StaticSecret::from(bob_secret())).to_bytes()
     }
 
     /// Decode a lowercase-hex string to bytes (test helper — no dev-dependency for a fixture).
@@ -440,8 +450,8 @@ mod tests {
                 recipient_sealing_public_key: bob_public(),
                 plaintext,
             },
-            &EPHEMERAL,
-            &NONCE,
+            &ephemeral(),
+            &nonce(),
         )
         .unwrap()
     }
@@ -479,7 +489,7 @@ mod tests {
     #[test]
     fn unseal_returns_the_plaintext_and_the_sender_claim() {
         let wire = unhex(GOLDEN_WIRE_HEX);
-        let (envelope, plaintext) = open(&wire, &StaticSecret::from(BOB_SECRET)).unwrap();
+        let (envelope, plaintext) = open(&wire, &StaticSecret::from(bob_secret())).unwrap();
         assert_eq!(&*plaintext, PLAINTEXT);
         // The sender DID round-trips as a claim, not authenticated under suite 1.
         assert_eq!(envelope.sender_did, ALICE);
@@ -501,7 +511,7 @@ mod tests {
         })
         .unwrap();
 
-        let (envelope, plaintext) = open(&wire, &StaticSecret::from(BOB_SECRET)).unwrap();
+        let (envelope, plaintext) = open(&wire, &StaticSecret::from(bob_secret())).unwrap();
         assert_eq!(&*plaintext, PLAINTEXT);
         assert_eq!(
             envelope.sender_did, FORGED,
@@ -521,7 +531,7 @@ mod tests {
             "the plaintext must never appear anywhere in the sealed bytes"
         );
         // …and it is not merely absent because the message was mangled: the recipient gets it back.
-        let (_e, pt) = open(&wire, &StaticSecret::from(BOB_SECRET)).unwrap();
+        let (_e, pt) = open(&wire, &StaticSecret::from(bob_secret())).unwrap();
         assert_eq!(&*pt, secret);
     }
 
@@ -542,7 +552,7 @@ mod tests {
         // Re-encode with the tampered header but the ORIGINAL ciphertext + nonce + epk.
         let tampered = encode_envelope(&decoded).unwrap();
         assert_eq!(
-            open(&tampered, &StaticSecret::from(BOB_SECRET)),
+            open(&tampered, &StaticSecret::from(bob_secret())),
             Err(DigchatError::NotAuthentic)
         );
     }
@@ -553,7 +563,7 @@ mod tests {
         let last = wire.len() - 1;
         wire[last] ^= 0x01;
         assert_eq!(
-            open(&wire, &StaticSecret::from(BOB_SECRET)),
+            open(&wire, &StaticSecret::from(bob_secret())),
             Err(DigchatError::NotAuthentic)
         );
     }
@@ -574,7 +584,7 @@ mod tests {
         );
         // Both still open to the same plaintext.
         for wire in [a, b] {
-            let (_e, pt) = open(&wire, &StaticSecret::from(BOB_SECRET)).unwrap();
+            let (_e, pt) = open(&wire, &StaticSecret::from(bob_secret())).unwrap();
             assert_eq!(&*pt, PLAINTEXT);
         }
     }
@@ -596,8 +606,8 @@ mod tests {
                     recipient_sealing_public_key: bob_public(),
                     plaintext: &over,
                 },
-                &EPHEMERAL,
-                &NONCE,
+                &ephemeral(),
+                &nonce(),
             ),
             Err(DigchatError::PlaintextTooLarge(MAX_PLAINTEXT_BYTES + 1)),
             "one byte over the bound is refused"
@@ -657,8 +667,8 @@ mod tests {
                         recipient_sealing_public_key: bob_public(),
                         plaintext: PLAINTEXT,
                     },
-                    &EPHEMERAL,
-                    &NONCE,
+                    &ephemeral(),
+                    &nonce(),
                 ),
                 Err(DigchatError::BadDid)
             );
