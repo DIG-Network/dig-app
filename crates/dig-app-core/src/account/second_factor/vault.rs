@@ -15,7 +15,7 @@
 //!
 //! # What "verifying a code" means here
 //!
-//! [`SecondFactorVault::challenge`] is the ONE place a code is judged, and it enforces three rules the
+//! [`SecondFactorVault::challenge`] is the ONE place a code is judged, and it enforces four rules the
 //! arithmetic in [`totp`](super::totp) cannot:
 //!
 //! 1. **A TOTP step is accepted at most once.** RFC 6238 §5.2 — a code is valid for a whole 30-second
@@ -23,6 +23,10 @@
 //! 2. **A recovery code is spent when used.**
 //! 3. **Both outcomes are persisted before the caller is told "yes".** A crash between accepting and
 //!    recording would otherwise silently restore a spent code.
+//! 4. **Wrong attempts are bounded — persistently (dig_ecosystem#1847).** A consecutive-failure count
+//!    and an escalating next-allowed-attempt instant ride the sealed record, so closing and reopening
+//!    the window cannot hand an attacker a fresh unbounded run at a ~3-in-10^6 code. It is a rate limit,
+//!    not a lockout, and it fails closed against a rolled-back clock.
 
 use std::path::{Path, PathBuf};
 

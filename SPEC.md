@@ -570,6 +570,25 @@ The enrolment UI MUST state both halves of this in the user's own words.
 - **Single use (MUST).** A step MUST be accepted at most once. An implementation records the most
   recently accepted step and refuses any step at or before it, so a code read off a screen cannot be
   replayed for the remainder of its window.
+- **Bounded challenge attempts (MUST).** The challenge that guards the destructive verbs MUST bound
+  wrong-code attempts with a PERSISTENT, escalating rate limit, so a 6-digit code (~3-in-10^6 live per
+  attempt) cannot be brute-forced by an attacker at an unlocked machine. The bound state — a
+  consecutive-failure count and a next-allowed-attempt instant — MUST ride the sealed enrolment record,
+  NOT the challenge window, so closing and reopening the window does not reset it, and it cannot be
+  cleared by deleting a file the attacker can write. A wrong RECOVERY code MUST advance the same bound as
+  a wrong TOTP code. The counter MUST increment on every failed challenge and reset on any accepted code.
+  A small number of consecutive failures (RECOMMENDED three) is absorbed with no delay so an owner's
+  mistyping is not punished; past that, each further failure imposes an escalating required delay
+  (RECOMMENDED exponential backoff from a few seconds, capped at ~15 minutes). It MUST be a rate limit,
+  NOT a permanent lockout — a hard lockout is a denial-of-service against the account's own owner and
+  forces a recovery-code fallback they may not have.
+  - **Clock-tamper resistance (MUST).** The next-allowed-attempt instant is persisted, and the
+    implementation MUST persist the greatest instant it has observed and treat any wall clock reading
+    EARLIER than that anchor as frozen at the anchor — a clock rolled backwards MUST NOT shorten a
+    throttle nor let a captured code be replayed at its original window. Residual assumption: an attacker
+    who can move the clock FORWARD at will already holds the root-level control this factor's threat model
+    (full local compromise) explicitly does not defend against; the bound only ever raises the bar for the
+    unlocked-machine attacker it is for.
 - **Enrolment order (MUST).** Enrolment MUST: explain what the factor does and does not protect,
   generate a secret, present it so it can be transferred to an authenticator, **require a correct code
   to be verified before anything is stored**, issue recovery codes, and obtain an explicit claim that
