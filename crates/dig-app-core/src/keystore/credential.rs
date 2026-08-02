@@ -28,7 +28,7 @@
 //!
 //! **Linux never used this store.** The kernel keyutils session keyring is readable by ANY same-UID
 //! process (no per-application ACL) and is non-persistent across reboot/logout, so it was never a safe
-//! custody primary. Accordingly [`OsCredentialStore`] and the `keyring` dependency are compiled only on
+//! custody primary. Accordingly `OsCredentialStore` and the `keyring` dependency are compiled only on
 //! Windows/macOS; Linux's account boot defers until its passphrase unlock UX lands (dig_ecosystem#962).
 //!
 //! Everything here is expressed against the small [`CredentialStore`] trait so the migration logic is
@@ -37,7 +37,7 @@
 use super::KeystoreError;
 
 /// A named-secret store keyed by `(service, account)` string pairs. The real implementation is
-/// [`OsCredentialStore`]; the vault's tests use an in-memory double.
+/// `OsCredentialStore` (a Windows/macOS-only type); the vault's tests use an in-memory double.
 ///
 /// Values are opaque byte strings (the vault stores base64 of DIGOP1 ciphertext / the unlock
 /// password), so this trait deliberately knows nothing about DIG key formats.

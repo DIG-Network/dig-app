@@ -55,6 +55,7 @@ use dig_app_core::confirm::{native_confirmer, NativeConfirmer, NoticePrompt};
 use dig_app_core::engine::NodeConnector;
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::form_factor::FormFactor;
+#[cfg(feature = "tray")]
 use dig_app_core::loopback::{PairedAppsControl, SignReauthGate};
 #[cfg(feature = "tray")]
 use dig_app_core::session_lock::{
@@ -885,6 +886,10 @@ Use Unlock in this menu and try again. If you no longer have your              a
 /// wait, and — because the throttle must never trap a genuinely lost-phone owner — that a recovery code
 /// still lets them through. `retry_after_seconds` is rounded UP to whole minutes so the notice never
 /// under-promises the wait.
+///
+/// Only the tray shell renders this notice, so a headless build has no caller — gated to keep
+/// `--no-default-features` free of dead-code warnings.
+#[cfg(feature = "tray")]
 fn rate_limited_notice_body(retry_after_seconds: u64) -> String {
     let minutes = retry_after_seconds.div_ceil(60);
     format!(
@@ -1046,7 +1051,10 @@ mod tray {
             }
         };
         let Some(pending) = due else { return };
-        if super::should_clear(&pending.fingerprint, read_clipboard().as_deref()) {
+        if super::should_clear(
+            &pending.fingerprint,
+            read_clipboard().as_deref().map(Vec::as_slice),
+        ) {
             let _ = write_clipboard("");
         }
     }
@@ -1056,7 +1064,12 @@ mod tray {
     /// `None` on any failure — a clear scheduled against an unreadable clipboard simply does not fire,
     /// because [`super::should_clear`] never guesses and clobbers on uncertainty. Returns raw bytes so
     /// the round-trip is byte-exact against what [`write_clipboard`] wrote.
-    fn read_clipboard() -> Option<Vec<u8>> {
+    ///
+    /// The bytes are returned in a [`zeroize::Zeroizing`] buffer because, at the moment the auto-clear
+    /// fires, the clipboard may still hold the copied recovery phrase — so this read transiently
+    /// materialises the plaintext seed on the heap. Wiping it on drop matches the `back_up_phrase` /
+    /// `save_phrase_file` discipline and keeps the plaintext out of freed-but-unzeroed memory.
+    fn read_clipboard() -> Option<zeroize::Zeroizing<Vec<u8>>> {
         use std::process::Command;
 
         let output = if cfg!(target_os = "windows") {
@@ -1071,7 +1084,10 @@ mod tray {
                 .output()
         };
         let output = output.ok()?;
-        output.status.success().then_some(output.stdout)
+        output
+            .status
+            .success()
+            .then(|| zeroize::Zeroizing::new(output.stdout))
     }
 
     /// A rendered native menu plus the map from each native item id back to the action it stands for.
@@ -2380,7 +2396,7 @@ mod clipboard_clear_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tray"))]
 mod rate_limited_notice_tests {
     use super::rate_limited_notice_body;
 

@@ -184,7 +184,7 @@ pub enum DisableOutcome {
 /// shown — one less place a DIG ID can end up on a phone's screen.
 ///
 /// Every screen before the final store is escapable and leaves NOTHING enrolled — the property the
-/// module docs open with, and the one [`enrolment_can_be_abandoned_at_every_screen`] pins.
+/// module docs open with, and the one the `enrolment_can_be_abandoned_at_every_screen` test pins.
 pub fn enrol<S: ProfileSealer>(
     confirmer: &dyn NativeConfirmer,
     vault: &SecondFactorVault<S>,

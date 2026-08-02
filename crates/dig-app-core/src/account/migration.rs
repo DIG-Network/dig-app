@@ -176,7 +176,7 @@ pub fn reseal_under<C: CredentialStore>(
 
 /// Re-seal THIS host's default account under `chosen` — the production wrapper.
 ///
-/// Wires the host's real [`OsCredentialStore`](crate::keystore::OsCredentialStore) and per-user
+/// Wires the host's real `OsCredentialStore` (a Windows/macOS-only type) and per-user
 /// [`FileBackend`](dig_session::FileBackend), so the tray shell states the intent and this module owns
 /// every piece of platform plumbing (and stays the single audited place custody is re-sealed).
 #[cfg(any(target_os = "windows", target_os = "macos"))]

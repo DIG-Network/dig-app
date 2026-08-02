@@ -56,7 +56,7 @@ const GENERATED_PASSWORD_BYTES: usize = 32;
 /// dig_ecosystem#1817.
 ///
 /// Generic over the credential backend so it is unit-testable with an in-memory double and swaps the
-/// real [`OsCredentialStore`](crate::keystore::OsCredentialStore) in production.
+/// real `OsCredentialStore` (a Windows/macOS-only type) in production.
 pub struct CredentialCeremony<C: CredentialStore> {
     store: C,
     /// The terminal human gate for a spend confirmation — the per-OS native biometric/passphrase

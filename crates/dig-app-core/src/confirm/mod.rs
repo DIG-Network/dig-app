@@ -255,7 +255,7 @@ pub enum InputStyle {
 /// derived `Debug` would put one into any log line, panic message or test failure that formatted it
 /// (`tests/never_log.rs` pins the rule).
 pub enum InputOutcome {
-    /// The user typed something and submitted it. Wrapped in [`Zeroizing`] so the buffer is wiped when
+    /// The user typed something and submitted it. Wrapped in [`Zeroizing`](zeroize::Zeroizing) so the buffer is wiped when
     /// the caller drops it.
     Provided(zeroize::Zeroizing<String>),
     /// The user cancelled or closed the window. Nothing was typed that the caller may act on.
