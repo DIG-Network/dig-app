@@ -1246,6 +1246,16 @@ mod tray {
                 .map(|dir| dig_app_core::account::second_factor::vault::enrolment_present(&dir))
                 .unwrap_or(false),
             hotkey: Some(hotkey.clone()),
+            // The node's own cache figures, straight from the status snapshot — so the tray shows the
+            // node's real cap + usage and the cache submenu is empty-handed (and says so) only when
+            // there is genuinely no node to read from (dig_ecosystem#2002).
+            cache: status
+                .read()
+                .ok()
+                .and_then(|s| s.engine.status().map(|st| dig_app_core::cache::CacheSnapshot {
+                    cap_bytes: st.cache.cap_bytes,
+                    used_bytes: st.cache.used_bytes,
+                })),
         }
     }
 
@@ -1459,6 +1469,10 @@ mod tray {
             // Without this the Security submenu would keep offering "Set up..." after an enrolment
             // completed, because nothing else in the view changed and the menu would not repaint.
             && a.second_factor == b.second_factor
+            // The Cache submenu shows live usage on its parent label and marks the current cap, so a
+            // changed cap or a moved usage figure must repaint — otherwise a just-applied new cap would
+            // not show as current until something else changed (dig_ecosystem#2002).
+            && a.cache == b.cache
     }
 
     /// Run one menu action. Returns `true` when the process should exit.
@@ -1582,6 +1596,11 @@ mod tray {
                 &snapshot(status, env, session.as_ref(), false, hotkey),
                 confirmer,
             ),
+            // A preset is a known-good value, so it skips input entirely and goes straight to the
+            // apply flow (which still runs the eviction check before touching the node).
+            TrayAction::SetCacheCap { bytes } => change_cache_cap(status, confirmer, bytes),
+            TrayAction::SetCustomCacheCap => set_custom_cache_cap(status, confirmer),
+            TrayAction::AboutCache => about_cache(confirmer),
             // The tray row asks in the framed dialog; the Alt+Space chord asks in the bar. Same handler,
             // same validation, same resolution — only the presentation differs.
             TrayAction::Open => open_dig_link(status, confirmer, InputStyle::Dialog),
@@ -2188,6 +2207,180 @@ mod tray {
                 "DIG could not launch your browser.",
                 &format!("The content is here:\n\n{url}"),
             );
+        }
+    }
+
+    /// Explain what the content cache is, what it costs and buys, and the unit convention — the honest
+    /// "About the cache…" notice (dig_ecosystem#2002, §6.0). Available in every state because it is
+    /// about the concept, not this node's live figures.
+    fn about_cache(confirmer: &dyn NativeConfirmer) {
+        notify(
+            confirmer,
+            "DIG — About the cache",
+            "Your node's content cache",
+            &dig_app_core::cache::privacy_notice_body(),
+        );
+    }
+
+    /// Ask for a custom cache size, validate it, and apply it (dig_ecosystem#2002).
+    ///
+    /// The typed path for a size no preset covers. A rejected value names exactly what was wrong (from
+    /// [`dig_app_core::cache::CapInputError`]) so the user can correct it, rather than failing silently.
+    fn set_custom_cache_cap(status: &SharedStatus, confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::cache;
+        // The guidance is dynamic (it names the floor + default), so it lives in a local the prompt
+        // borrows — an owned String tied to this scope, not a leaked 'static.
+        let body = cache::custom_input_body();
+        let prompt = dig_app_core::confirm::InputPrompt {
+            title: "DIG — Cache size",
+            heading: "How large should the content cache be?",
+            body: &body,
+            field_label: "Maximum size:",
+            submit: "Set limit",
+            masked: false,
+            revealable: false,
+            style: InputStyle::Dialog,
+        };
+        let typed = match confirmer.request_input(&prompt) {
+            dig_app_core::confirm::InputOutcome::Provided(text) => text,
+            dig_app_core::confirm::InputOutcome::Cancelled => return,
+            dig_app_core::confirm::InputOutcome::Unavailable => {
+                notify(
+                    confirmer,
+                    "DIG — Cache size",
+                    "DIG could not open an input window on this system.",
+                    "This host has no desktop dialog available, so there is nowhere to type a size.",
+                );
+                return;
+            }
+        };
+        match cache::parse_cap_input(&typed) {
+            Ok(bytes) => change_cache_cap(status, confirmer, bytes),
+            Err(e) => notify(
+                confirmer,
+                "DIG — Cache size",
+                "That size cannot be used.",
+                &e.message(),
+            ),
+        }
+    }
+
+    /// Apply a validated cap `bytes` to the node, warning first if it would evict cached content.
+    ///
+    /// The single flow shared by every entry (a preset row and the custom input): resolve the live
+    /// node, decide whether the new cap evicts ([`dig_app_core::cache::plan_cap_change`]) and gate that
+    /// on an explicit confirmation, then persist through the node's `control.cache.setCap` — never by
+    /// writing the node's config directly (the node holds that lock). Every outcome the user did NOT
+    /// directly choose ends in a visible notice: a node that is down, a node that refused, and a success
+    /// all say so, so the row is never a silent no-op (requirement 5). Declining the eviction
+    /// confirmation returns quietly — the dialog already named the consequence and the user chose not to
+    /// proceed, consistent with every other cancel path in the app (SPEC §3.1c-ii).
+    fn change_cache_cap(status: &SharedStatus, confirmer: &dyn NativeConfirmer, bytes: u64) {
+        use dig_app_core::cache::{self, CapChange};
+        use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
+        use dig_app_core::engine::EngineState;
+
+        // 1. Resolve the connected node + its current usage. No node ⇒ nothing to set; say so.
+        let (endpoint, used_bytes) = match status.read() {
+            Ok(s) => match &s.engine {
+                EngineState::Connected { endpoint, status } => {
+                    (endpoint.clone(), status.cache.used_bytes)
+                }
+                EngineState::Disconnected { reason } => {
+                    notify(
+                        confirmer,
+                        "DIG — Cache size",
+                        "DIG has no node to change the cache limit on.",
+                        &format!(
+                            "The cache limit is applied by your local node, and none is reachable \
+                             right now.\n\n{reason}"
+                        ),
+                    );
+                    return;
+                }
+            },
+            Err(_) => {
+                notify(
+                    confirmer,
+                    "DIG — Cache size",
+                    "DIG could not read the node status.",
+                    "Try again in a moment. If it keeps happening, the log folder has the detail.",
+                );
+                return;
+            }
+        };
+
+        // 2. Would this evict already-cached content? If so, the user must understand and agree BEFORE
+        //    it happens — a claim (two choices, no biometric), because refusing changes the outcome.
+        if let CapChange::ConfirmEviction { used_bytes, .. } =
+            cache::plan_cap_change(bytes, used_bytes)
+        {
+            let body = cache::eviction_warning_body(bytes, used_bytes);
+            match confirmer.confirm_claim(&ClaimPrompt {
+                title: "DIG — Lower the cache limit?",
+                heading: "This will delete some cached content",
+                body: &body,
+                affirm: "Lower it and free the space",
+                scannable: None,
+            }) {
+                ConfirmDecision::Approve => {}
+                // Declined or closed: leave the cap untouched and return quietly. The confirmation
+                // dialog already named the consequence and the user chose not to proceed, so a fresh
+                // notice would be redundant — this matches every other cancel path in the app (not an
+                // error, not a silent surprise). SPEC §3.1c-ii.
+                ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
+                ConfirmDecision::Unavailable => {
+                    notify(
+                        confirmer,
+                        "DIG — Cache size",
+                        "DIG could not ask you to confirm.",
+                        "Lowering the limit below what is in use would delete cached content, and \
+                         this host has no window to confirm that. The limit was left unchanged.",
+                    );
+                    return;
+                }
+            }
+        }
+
+        // 3. Persist through the node, and report exactly what the node applied.
+        apply_cache_cap(&endpoint, confirmer, bytes);
+    }
+
+    /// Send the cap to the node and report the applied value (or the reason it did not take).
+    ///
+    /// The node echoes the cap it now holds ([`SetCapResult`]); the notice shows THAT, not the request,
+    /// so the user sees the truth even if the node floored it. The change takes effect immediately —
+    /// the node reads the cap dynamically — so the copy never mentions a restart (requirement 3).
+    fn apply_cache_cap(endpoint: &str, confirmer: &dyn NativeConfirmer, bytes: u64) {
+        use dig_app_core::cache::format_cap;
+
+        let token = dig_app_core::control::load_control_token();
+        match dig_app_core::control::set_cache_cap(
+            endpoint,
+            bytes,
+            token.as_deref(),
+            dig_app_core::control::DEFAULT_PROBE_TIMEOUT,
+        ) {
+            Ok(applied) => notify(
+                confirmer,
+                "DIG — Cache size",
+                "Your cache limit is set.",
+                &format!(
+                    "The content cache limit is now {}. It takes effect right away — no restart \
+                     needed.",
+                    format_cap(applied)
+                ),
+            ),
+            Err(e) => notify(
+                confirmer,
+                "DIG — Cache size",
+                "DIG could not change the cache limit.",
+                &format!(
+                    "Your node did not apply the new limit.\n\n{}\n\nThe log folder (in this menu) \
+                     has the detail.",
+                    e
+                ),
+            ),
         }
     }
 

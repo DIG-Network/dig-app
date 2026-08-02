@@ -54,6 +54,12 @@ fn main() {
             hotkey: Some(dig_app_core::hotkey::HotkeyState::Registered(
                 dig_app_core::hotkey::Hotkey::default(),
             )),
+            // A connected node reporting a default 1 GiB cap with a little in use, so the gallery shows
+            // the populated Cache submenu.
+            cache: Some(dig_app_core::cache::CacheSnapshot {
+                cap_bytes: dig_app_core::cache::GIB,
+                used_bytes: 350 * dig_app_core::cache::MIB,
+            }),
         };
         let status = tray_menu::status(&view);
 
