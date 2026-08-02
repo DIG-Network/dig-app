@@ -1462,6 +1462,7 @@ dependencies = [
  "tracing",
  "tray-icon",
  "windows",
+ "zeroize",
 ]
 
 [[package]]
