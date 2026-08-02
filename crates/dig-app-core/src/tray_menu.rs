@@ -384,7 +384,7 @@ pub enum TrayAction {
     /// The address comes from [`TrayView::receive_address`], which the shell fills from the account's own
     /// MONEY key — never from [`profile_id`](TrayView::profile_id), which is the identity public key and
     /// would be a confidently wrong string to hand someone who means to pay you. Offered only where an
-    /// address can exist; see [`wallet_actions`].
+    /// address can exist; see `wallet_actions`.
     CopyReceiveAddress,
     /// Show the wallet: the receive address, the balance (or precisely why it is not known), and what the
     /// wallet cannot do yet.
@@ -686,7 +686,7 @@ pub fn details_text(view: &TrayView) -> String {
 /// - **The escapes.** `Open the log folder` and `Quit DIG` are always clickable, whatever else has gone
 ///   wrong (`professional-ui`'s never-trap-the-user HARD RULE). A tray app with no way out is a defect, so
 ///   these are not negotiable against menu length.
-/// - **One contextual row, ONLY when the account needs action** — see [`urgent_account_row`]. Without it a
+/// - **One contextual row, ONLY when the account needs action** — see `urgent_account_row`. Without it a
 ///   brand-new user would have to find "Set up my DIG Account" inside a submenu, which is exactly the
 ///   first-run dead end #1800 removed and #1826 exists to prevent. In the ordinary unlocked state it is
 ///   absent and the menu is exactly the five.

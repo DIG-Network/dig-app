@@ -31,8 +31,8 @@ use crate::sealer::ProfileSealer;
 
 /// How many apps one management page lists.
 ///
-/// Three, and the arithmetic is the reason: each app costs [`LINES_PER_APP`] lines and the page spends
-/// [`FIXED_PAGE_LINES`] on its header and its instruction, so a full page is 3 × 2 + 2 = 8 lines —
+/// Three, and the arithmetic is the reason: each app costs `LINES_PER_APP` lines and the page spends
+/// `FIXED_PAGE_LINES` on its header and its instruction, so a full page is 3 × 2 + 2 = 8 lines —
 /// comfortably inside the window class's 32-line ceiling and short enough to survive a heavily scaled
 /// display, where the derived budget is smaller than the ceiling. `paged_body` is tested against that
 /// number rather than trusted to stay under it.

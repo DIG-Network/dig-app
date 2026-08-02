@@ -802,7 +802,7 @@ pub enum FirstRunOutcome {
 /// `create` is the new-account step — in production the shell's setup path, which shows the 24 words,
 /// takes the retention claim, asks for a password and enrols. `import` is the restore step, handed the
 /// user's typed [`RecoveryPhrase`] to re-derive and seal that account. Each returns the account's
-/// receiving address, or `None` if it did not complete; both feed the SAME [`show_account_ready`]
+/// receiving address, or `None` if it did not complete; both feed the SAME `show_account_ready`
 /// screens so the two routes cannot drift.
 ///
 /// # The route choice, and why it takes two screens (dig_ecosystem#1564)

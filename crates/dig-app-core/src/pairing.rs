@@ -641,7 +641,7 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// Every live pairing, as the management surface shows them — oldest first, so the list a user
     /// reads twice is in the same order both times.
     ///
-    /// Carries no secret: the channel secret stays in [`LivePairing`] and never reaches a window.
+    /// Carries no secret: the channel secret stays in `LivePairing` and never reaches a window.
     pub fn list(&self) -> Vec<PairedApp> {
         let mut apps: Vec<PairedApp> = self
             .lock()

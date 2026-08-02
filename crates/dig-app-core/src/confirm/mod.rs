@@ -89,7 +89,7 @@ pub struct RevealPrompt<'a> {
 ///
 /// **A notice has ONE choice.** Nothing downstream of a notice branches on how it was dismissed, so a
 /// second button would be a decision the user is invited to make and that no code reads — see
-/// [`Presentation`]. A screen where the negative answer genuinely changes the outcome is a
+/// `Presentation`. A screen where the negative answer genuinely changes the outcome is a
 /// [`ClaimPrompt`], not a notice.
 #[derive(Debug, Clone, Copy)]
 pub struct NoticePrompt<'a> {

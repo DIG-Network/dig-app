@@ -23,7 +23,7 @@
 //! re-derived [`SpendSummary`] (recipients / fee / tier — never raw bytes) and requires the user to
 //! authorize it at the OS biometric/passphrase prompt (Windows Hello / macOS Touch ID / Linux polkit).
 //! A headless host has no confirmer, so a spend confirmation fails closed there (`Unavailable`). Both
-//! ceremonies share that path exactly ([`confirm_spend_natively`]), so the money gate cannot differ
+//! ceremonies share that path exactly (`confirm_spend_natively`), so the money gate cannot differ
 //! between them.
 
 use std::sync::Arc;
@@ -220,7 +220,7 @@ pub enum PasswordIntent {
 ///
 /// This is what makes `Unlock…` a real ceremony rather than a no-op. The password never touches disk,
 /// the credential store, or a log — it goes from the native window into
-/// [`AuthFactors`](dig_account::AuthFactors) and is zeroized with them.
+/// [`AuthFactors`] and is zeroized with them.
 pub struct PromptedCeremony {
     confirmer: Arc<dyn NativeConfirmer>,
     intent: PasswordIntent,

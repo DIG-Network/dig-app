@@ -74,7 +74,7 @@ impl std::fmt::Debug for PasswordOutcome {
 /// every later unlock. `purpose` names what the password is being set for, so the same window serves
 /// first-run setup and the re-seal a migration performs without either pretending to be the other.
 ///
-/// A too-short or mismatched entry is explained and re-asked, up to [`MAX_ESTABLISH_ATTEMPTS`]. A
+/// A too-short or mismatched entry is explained and re-asked, up to `MAX_ESTABLISH_ATTEMPTS`. A
 /// cancellation at ANY point stops immediately — a person backing out of the second field is backing
 /// out of setup, not asking to start over.
 pub fn establish_password(confirmer: &dyn NativeConfirmer, purpose: &str) -> PasswordOutcome {

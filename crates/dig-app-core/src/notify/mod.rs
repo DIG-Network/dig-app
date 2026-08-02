@@ -1,6 +1,6 @@
 //! Native funds-activity notifications (#970) — the "you got paid / your send confirmed" signal.
 //!
-//! A [`NotifyingSink`] taps the wallet [`EventSink`](crate::events::EventSink) stream for
+//! A [`NotifyingSink`] taps the wallet [`EventSink`] stream for
 //! [`WalletEvent::FundsReceived`]/[`WalletEvent::FundsSent`] and feeds them to [`run_notifier`],
 //! which DEBOUNCES a short coalescing window so a burst (3 coins in 2s) becomes ONE toast, then
 //! renders it through the per-OS [`NativeNotifier`]. It is a passive, dismissible awareness signal
@@ -38,7 +38,7 @@ pub struct Notification {
 
 /// The per-OS native toast seam. `Send + Sync` so the notifier task can own one across awaits.
 ///
-/// The production implementations are the per-OS backends ([`render`]); tests use a recording
+/// The production implementations are the per-OS backends (`render`); tests use a recording
 /// double, and a headless host falls back to the [`LoggingNotifier`].
 pub trait NativeNotifier: Send + Sync {
     /// Show `notification` as a native OS toast (best-effort; a failure is swallowed — a missed
