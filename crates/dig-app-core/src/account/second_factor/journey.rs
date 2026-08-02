@@ -277,6 +277,25 @@ pub fn challenge<S: ProfileSealer>(
         return ChallengeVerdict::NotEnrolled;
     }
 
+    // Tell a rate-limited user to wait BEFORE drawing the code window, not after they have typed a full
+    // code only to have it refused unread (dig_ecosystem#1970). This peek judges no code and mutates
+    // nothing (see `SecondFactorVault::current_throttle`); the post-judge `RateLimited` arm below stays
+    // as the backstop for a throttle that arms *during* the flow.
+    match vault.current_throttle(clock.now_unix()) {
+        Ok(Some(retry_after_seconds)) => {
+            return ChallengeVerdict::RateLimited {
+                retry_after_seconds,
+            };
+        }
+        Ok(None) => {}
+        // Fail closed exactly as the post-judge path does: a locked or unreadable vault is not a pass,
+        // and must not prompt as though nothing were wrong.
+        Err(e) => {
+            tracing::warn!(error = %e, "a second-factor throttle could not be read");
+            return ChallengeVerdict::Unavailable;
+        }
+    }
+
     let typed = match confirmer.request_input(&InputPrompt {
         title: "DIG — Two-factor code",
         heading: &format!("Enter your code to {purpose}."),
@@ -1161,6 +1180,91 @@ mod tests {
                 &FixedClock(NOW)
             ),
             ChallengeVerdict::RateLimited { .. }
+        ));
+    }
+
+    /// A throttled account is told to WAIT before the code-input window is ever drawn
+    /// (dig_ecosystem#1970) — the point of the pre-check is that a rate-limited user does not type a
+    /// full code first.
+    ///
+    /// # Why the verdict alone cannot see the fix
+    ///
+    /// A live-looking code IS queued, so WITHOUT the pre-check `request_input` would be called (drawing
+    /// the window and recording its body) and the post-judge path would STILL return `RateLimited` —
+    /// the verdict is identical either way. The load-bearing assertion is therefore that no window was
+    /// drawn: `transcript()` stays empty only because `request_input` was never reached. Revert the
+    /// pre-check and this test fails on the non-empty transcript, not the verdict.
+    #[test]
+    fn a_throttled_account_is_told_to_wait_before_the_code_window_is_drawn() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+        // Six consecutive wrong answers is comfortably past the free budget; fresh handles each time
+        // mirror the window being closed and reopened between guesses.
+        for _ in 0..6 {
+            let _ = vault(dir.path()).challenge("000000", NOW);
+        }
+
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type("000000".into())]);
+        let verdict = challenge(
+            &confirmer,
+            &vault(dir.path()),
+            "do the thing",
+            &FixedClock(NOW),
+        );
+
+        assert!(matches!(verdict, ChallengeVerdict::RateLimited { .. }));
+        assert!(
+            confirmer.transcript().is_empty(),
+            "a throttled account must not be shown the code-input window"
+        );
+    }
+
+    /// The control for the test above: a healthy (un-throttled) account IS prompted normally, so the
+    /// pre-check gates only on a real throttle and never suppresses the window wholesale.
+    #[test]
+    fn a_healthy_account_is_still_shown_the_code_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (secret, _) = enrolled(dir.path());
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type(secret.code_at(NOW).to_string())]);
+
+        assert_eq!(
+            challenge(
+                &confirmer,
+                &vault(dir.path()),
+                "do the thing",
+                &FixedClock(NOW)
+            ),
+            ChallengeVerdict::Passed
+        );
+        assert!(
+            !confirmer.transcript().is_empty(),
+            "an un-throttled account must be shown the code window"
+        );
+    }
+
+    /// The pre-check is a pure read: peeking at the throttle through the journey must not reset,
+    /// shorten, or otherwise consume it — a subsequent real attempt is still throttled.
+    #[test]
+    fn peeking_at_the_throttle_does_not_reset_it() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+        for _ in 0..6 {
+            let _ = vault(dir.path()).challenge("000000", NOW);
+        }
+
+        // Drive the journey pre-check (no window is drawn, so an empty script is never popped)...
+        let confirmer = ScriptedConfirmer::new(NOW, &[]);
+        let _ = challenge(
+            &confirmer,
+            &vault(dir.path()),
+            "do the thing",
+            &FixedClock(NOW),
+        );
+
+        // ...and the throttle is untouched: the vault still turns a real attempt away.
+        assert!(matches!(
+            vault(dir.path()).challenge("000000", NOW),
+            Ok(ChallengeOutcome::RateLimited { .. })
         ));
     }
 

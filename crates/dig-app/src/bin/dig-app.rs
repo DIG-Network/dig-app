@@ -860,14 +860,11 @@ Use Unlock in this menu and try again. If you no longer have your              a
         ChallengeVerdict::RateLimited {
             retry_after_seconds,
         } => {
-            let minutes = retry_after_seconds.div_ceil(60);
             notify(
                 confirmer,
                 "DIG — Too many attempts",
                 "Too many codes were entered incorrectly, so nothing was changed.",
-                &format!(
-                    "Wait about {minutes} minute(s), then open your authenticator and try a fresh                  code. If you have lost your phone, one of your recovery codes will still let you                  through.",
-                ),
+                &rate_limited_notice_body(retry_after_seconds),
             );
             false
         }
@@ -882,6 +879,18 @@ Use Unlock in this menu and try again. If you no longer have your              a
             false
         }
     }
+}
+
+/// The body shown when a challenge is refused for being rate-limited (dig_ecosystem#1847): how long to
+/// wait, and — because the throttle must never trap a genuinely lost-phone owner — that a recovery code
+/// still lets them through. `retry_after_seconds` is rounded UP to whole minutes so the notice never
+/// under-promises the wait.
+fn rate_limited_notice_body(retry_after_seconds: u64) -> String {
+    let minutes = retry_after_seconds.div_ceil(60);
+    format!(
+        "Wait about {minutes} minute(s), then open your authenticator and try a fresh code. If you \
+         have lost your phone, one of your recovery codes will still let you through.",
+    )
 }
 
 /// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
@@ -2166,5 +2175,43 @@ mod tray {
             assert_eq!(mode, 0o600, "pre-existing file must end 0600, was {mode:o}");
             assert_eq!(std::fs::read(&path).unwrap(), b"new secret\n");
         }
+    }
+}
+
+#[cfg(test)]
+mod rate_limited_notice_tests {
+    use super::rate_limited_notice_body;
+
+    /// The throttle notice must do two things and one non-thing: name the WAIT, keep the lost-phone
+    /// owner's recovery-code escape hatch in view, and never echo a code or secret. A message that
+    /// dropped the recovery-code line would silently trap someone who has genuinely lost their phone —
+    /// exactly the trap the second factor's recovery codes exist to prevent.
+    #[test]
+    fn the_notice_names_the_wait_and_the_recovery_code_fallback() {
+        // 130s rounds UP to 3 minutes, proving the wait is stated (and never under-promised).
+        let body = rate_limited_notice_body(130);
+        assert!(
+            body.contains("3 minute"),
+            "must name the rounded-up wait: {body}"
+        );
+        assert!(
+            body.to_lowercase().contains("recovery code"),
+            "must keep the recovery-code escape hatch: {body}"
+        );
+    }
+
+    /// A zero wait still rounds to a whole minute rather than "0 minute(s)", so the notice never tells a
+    /// throttled user they may retry immediately.
+    #[test]
+    fn a_sub_minute_wait_is_never_reported_as_zero() {
+        let body = rate_limited_notice_body(1);
+        assert!(
+            body.contains("1 minute"),
+            "a 1s wait must round up to a minute: {body}"
+        );
+        assert!(
+            !body.contains("0 minute"),
+            "never report a zero-minute wait: {body}"
+        );
     }
 }

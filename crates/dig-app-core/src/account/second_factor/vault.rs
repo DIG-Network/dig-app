@@ -300,7 +300,7 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
         // who can move the clock FORWARD at will already has the root-level control the threat model
         // (see the module docs) explicitly does not claim to defend against; the escalating delay only
         // ever RAISES the bar for the unlocked-machine attacker it is actually for.
-        let effective_now = record.clock_high_water.map_or(now, |seen| now.max(seen));
+        let effective_now = anchored_now(&record, now);
         record.clock_high_water = Some(effective_now);
 
         // The throttle is enforced BEFORE the code is judged: a rate-limited attempt must not even
@@ -346,6 +346,37 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
         Ok(ChallengeOutcome::Rejected)
     }
 
+    /// Peek at the challenge throttle WITHOUT judging a code or writing anything.
+    ///
+    /// Returns `Some(retry_after_seconds)` iff a challenge attempted at `now` (unix seconds) would be
+    /// turned away by the escalating rate limit that [`challenge`](Self::challenge) enforces, else
+    /// `None`.
+    ///
+    /// # Why this is — and must stay — a pure, non-mutating read
+    ///
+    /// It exists so a caller ([`journey::challenge`](super::journey::challenge)) can tell a throttled
+    /// user to WAIT *before* a code-input window is drawn, instead of after they have typed a whole
+    /// code only to have it refused unread. To be safe to call speculatively it reveals nothing and
+    /// changes nothing: it reads only the throttle timer — never a code, so it cannot leak whether a
+    /// guess is arithmetically close — records NO failure, and, critically, does NOT persist the
+    /// anti-rollback anchor. Advancing `clock_high_water` here would let a mere peek move the record
+    /// forward, so [`anchored_now`] is computed in memory and discarded; only a real
+    /// [`challenge`](Self::challenge) commits the anchor. A locked or unreadable vault fails closed via
+    /// [`read`](Self::read) — it can never answer "not throttled" for a vault it could not open.
+    ///
+    /// # Errors
+    ///
+    /// As [`challenge`](Self::challenge): [`VaultError::Seal`] if the account is locked,
+    /// [`VaultError::Corrupt`] if the record is unreadable.
+    pub fn current_throttle(&self, now: u64) -> Result<Option<u64>, VaultError> {
+        let record = self.read()?;
+        let effective_now = anchored_now(&record, now);
+        Ok(record
+            .throttle_until
+            .filter(|&until| effective_now < until)
+            .map(|until| until - effective_now))
+    }
+
     /// How many recovery codes remain unspent, for telling the user where they stand.
     ///
     /// # Errors
@@ -381,6 +412,15 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
     }
 }
 
+/// The instant the throttle math treats as "now": never earlier than the greatest instant this record
+/// has already seen, so a clock wound backwards can neither shorten an armed throttle nor replay a code
+/// at its original window. This is the READ half of the anti-rollback anchor (see
+/// [`challenge`](SecondFactorVault::challenge)); persisting the advance onto `clock_high_water` is a
+/// separate, write-side step that only a real challenge performs — a peek must not.
+fn anchored_now(record: &Record, now: u64) -> u64 {
+    record.clock_high_water.map_or(now, |seen| now.max(seen))
+}
+
 /// Clear the failure bound after a code is accepted — the account is back in the owner's hands.
 fn clear_failure_bound(record: &mut Record) {
     record.consecutive_failures = 0;
@@ -396,8 +436,11 @@ fn record_failure(record: &mut Record, now: u64) {
 /// The required wait after `failures` consecutive wrong codes, or `None` while inside the free budget.
 ///
 /// Zero for the first [`FREE_CHALLENGE_ATTEMPTS`] failures, then `BACKOFF_BASE_SECONDS * 2^(n-1)` for the
-/// n-th failure past the budget, capped at [`BACKOFF_MAX_SECONDS`]. `checked_shl` guards the shift so a
-/// long attack that overruns `u64` saturates at the cap rather than wrapping to a tiny delay.
+/// n-th failure past the budget, capped at [`BACKOFF_MAX_SECONDS`]. `checked_shl` only guards the shift
+/// AMOUNT (a shift of ≥64 bits is undefined) — it does NOT bound the value; the trailing
+/// `.min(BACKOFF_MAX_SECONDS)` is the real cap, holding the 0–63-bit range (where the shift itself can
+/// value-wrap once the product exceeds `u64`) down to [`BACKOFF_MAX_SECONDS`] rather than a tiny wrapped
+/// delay.
 fn backoff_delay(failures: u32) -> Option<u64> {
     let past_budget = failures
         .checked_sub(FREE_CHALLENGE_ATTEMPTS)
@@ -1075,5 +1118,77 @@ mod tests {
         );
         // Far past the budget the delay is pinned at the cap and never overflows to a tiny value.
         assert_eq!(backoff_delay(1_000), Some(BACKOFF_MAX_SECONDS));
+    }
+
+    /// The peek reports no throttle for a fresh enrolment and a positive wait once one is armed — and
+    /// the wait it reports matches what a real challenge would impose.
+    #[test]
+    fn current_throttle_reports_the_armed_wait_and_nothing_when_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let (v, _, _) = enrolled(dir.path());
+        assert_eq!(
+            v.current_throttle(NOW).unwrap(),
+            None,
+            "a fresh enrolment is not throttled"
+        );
+
+        // Arm the throttle past the free budget through fresh handles (window closed between guesses).
+        for _ in 0..6 {
+            let _ = vault(dir.path(), DID_A).challenge("000000", NOW);
+        }
+        let peeked = vault(dir.path(), DID_A)
+            .current_throttle(NOW)
+            .unwrap()
+            .expect("a wait is now armed");
+        assert!(peeked > 0, "an armed throttle reports a positive wait");
+    }
+
+    /// The peek is a PURE read: calling it must record no failure, arm no throttle, and advance no clock
+    /// anchor. A vault that is not throttled stays not throttled no matter how many times it is peeked,
+    /// and a real code still passes afterwards — proof the peek wrote nothing.
+    #[test]
+    fn current_throttle_neither_writes_nor_consumes_an_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = enrolled(dir.path());
+
+        for _ in 0..10 {
+            assert_eq!(vault.current_throttle(NOW).unwrap(), None);
+        }
+        // Had the peek recorded failures, the bound would have armed; the correct code still passes.
+        assert_eq!(
+            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted,
+            "peeking must not consume the free-attempt budget"
+        );
+    }
+
+    /// Peeking must NOT persist the anti-rollback anchor: a forward peek at a far-future instant must
+    /// not push `clock_high_water` ahead, which would leave a later honest challenge judging codes at a
+    /// clock the user never actually reached. The current code at the real time still passes after a
+    /// far-future peek.
+    #[test]
+    fn peeking_far_in_the_future_does_not_advance_the_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = enrolled(dir.path());
+
+        assert_eq!(vault.current_throttle(NOW + 10_000_000).unwrap(), None);
+        assert_eq!(
+            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted,
+            "a far-future peek must not have advanced the clock anchor"
+        );
+    }
+
+    /// A locked vault fails CLOSED: the peek must surface the error, never quietly answer "not
+    /// throttled" for a record it could not even open.
+    #[test]
+    fn current_throttle_fails_closed_on_a_locked_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, _) = enrolled(dir.path());
+        vault.sealer.lock();
+        assert!(
+            vault.current_throttle(NOW).is_err(),
+            "a locked vault must not report 'not throttled'"
+        );
     }
 }
