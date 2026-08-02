@@ -176,6 +176,13 @@ pub struct TrayView {
     /// [`HotkeyState`](crate::hotkey::HotkeyState): "not tried yet" and "tried and refused" are different
     /// facts, and only the second is worth telling the user about.
     pub hotkey: Option<crate::hotkey::HotkeyState>,
+    /// The node's content-cache cap + usage, or `None` when no node is connected to report it
+    /// (dig_ecosystem#2002).
+    ///
+    /// Filled from the node's `control.status` snapshot, so the tray shows the node's real numbers.
+    /// `None` is the honest value when the node is unreachable — the cache submenu then says the cap
+    /// cannot be changed until a node is connected rather than inventing a figure.
+    pub cache: Option<crate::cache::CacheSnapshot>,
 }
 
 impl TrayView {
@@ -394,6 +401,24 @@ pub enum TrayAction {
     /// `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid) follows
     /// for minting (dig_ecosystem#1841).
     AboutWallet,
+    /// Set the node's content-cache size cap to a specific preset (dig_ecosystem#2002).
+    ///
+    /// Carries the target cap in bytes so the shell forwards it straight to the node's
+    /// `control.cache.setCap` — no free-text parsing for a preset, which is a known-good value. The
+    /// shell still runs the eviction check ([`crate::cache::plan_cap_change`]) before applying, so a
+    /// preset below current usage warns before it deletes anything, exactly like a custom value.
+    SetCacheCap {
+        /// The cap to apply, in bytes — one of [`crate::cache::CACHE_PRESETS`].
+        bytes: u64,
+    },
+    /// Ask for a custom cache size in a native input window, validate it, then apply it
+    /// (dig_ecosystem#2002). The typed path for a size no preset covers.
+    SetCustomCacheCap,
+    /// Explain what the cache is, what it costs in disk and buys in privacy, and the unit convention
+    /// — the honest "About the cache…" notice (dig_ecosystem#2002, §6.0 honest copy). Carries no
+    /// action beyond informing, and is always available because it is about the CONCEPT, not this
+    /// node's live state.
+    AboutCache,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.
@@ -651,6 +676,17 @@ pub fn details_text(view: &TrayView) -> String {
             &view.node
         }
     ));
+    // The full cache figures live here, in the window that has room, rather than the menu (SPEC
+    // §3.1c). Only shown when a node reported them — an absent cache is already implied by the node
+    // line above saying it is not connected.
+    if let Some(cache) = &view.cache {
+        use crate::cache::format_cap;
+        out.push_str(&format!(
+            "\nCache: {} of {} used",
+            format_cap(cache.used_bytes),
+            format_cap(cache.cap_bytes)
+        ));
+    }
     // The shortcut goes LAST and only once the shell has tried to claim it. This is the only place its
     // failure — or the fact that it displaced the Windows window menu — is ever stated, so a user who
     // presses the chord and gets nothing has somewhere to find out why (`crate::hotkey`).
@@ -672,10 +708,15 @@ pub fn details_text(view: &TrayView) -> String {
 /// View Account    ▸
 /// Manage Account  ▸
 /// Security        ▸
+/// Cache           ▸
 /// ──
 /// Open the log folder
 /// Quit DIG
 /// ```
+///
+/// The **Cache** submenu (dig_ecosystem#2002) carries the node's content-cache size limit; its parent
+/// label shows the live usage against the cap, so it is a spine row that also reports state without a
+/// display-only disabled row (SPEC §3.1c). Like `Open URL…`, it is not gated on an account.
 ///
 /// A FIXED spine is the point. The previous menu grew and shrank with account state — the identity block
 /// appeared only when an account existed, and the primary row changed verb — so rows moved under the cursor
@@ -720,6 +761,14 @@ pub fn build(view: &TrayView) -> MenuModel {
     rows.push(MenuRow::submenu(
         "Security",
         security_actions(&account, view.second_factor),
+    ));
+    // The node's content-cache size limit (dig_ecosystem#2002). A submenu whose PARENT label carries
+    // the live usage-against-cap, so the figure the user needs is shown by an actionable row rather
+    // than a display-only disabled one (SPEC §3.1c: a menu item is an action). Reading is never gated
+    // on an account, so this sits outside the account block.
+    rows.push(MenuRow::submenu(
+        cache_label(view.cache.as_ref()),
+        cache_actions(view.cache.as_ref()),
     ));
     rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
@@ -1068,6 +1117,83 @@ fn open_url_label(view: &TrayView) -> String {
     }
 }
 
+/// The **Cache** submenu's parent label, carrying the live usage against the cap.
+///
+/// Putting the figure in the parent label is what lets the tray SHOW usage-against-cap without a
+/// display-only disabled row (SPEC §3.1c forbids one): a submenu parent is an action — it opens — so
+/// the number rides on something clickable. When no node is connected there are no live figures, so
+/// the label says exactly that rather than showing a stale or invented number.
+fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
+    use crate::cache::format_cap;
+    match cache {
+        Some(snapshot) => format!(
+            "Cache — {} of {} used",
+            format_cap(snapshot.used_bytes),
+            format_cap(snapshot.cap_bytes)
+        ),
+        None => "Cache — node not connected".to_string(),
+    }
+}
+
+/// The **Cache** submenu — the size-limit presets, a custom option, and the honest explainer.
+///
+/// # The four async states (§6.4)
+///
+/// The node's cache figures come from a live connection, so this surface has the same loading /
+/// error / empty / success shape every async view does. All of them collapse to two honest cases
+/// here: with a snapshot (`Some`), the presets and the custom option are offered and the current cap
+/// is marked; without one (`None` — no node reached yet, or a node that stopped), the change rows are
+/// omitted and a single enabled row explains that a connected node is needed. That row is NOT a
+/// disabled dead end — clicking it opens the same explainer, so the user always learns why (#1800).
+/// The explainer itself is offered in every state because it is about the concept, not the live node.
+fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
+    match cache {
+        Some(snapshot) => {
+            for &bytes in &crate::cache::CACHE_PRESETS {
+                rows.push(MenuRow::action(
+                    TrayAction::SetCacheCap { bytes },
+                    cache_preset_label(bytes, snapshot.cap_bytes),
+                    true,
+                ));
+            }
+            rows.push(MenuRow::action(
+                TrayAction::SetCustomCacheCap,
+                "Custom size…",
+                true,
+            ));
+        }
+        // No node to read from or change: never a silent no-op. One enabled row states the
+        // precondition and routes to the explainer, so the surface still does something visible.
+        None => rows.push(MenuRow::action(
+            TrayAction::AboutCache,
+            "Change the size limit (connect a node first)…",
+            true,
+        )),
+    }
+    rows.push(MenuRow::Separator);
+    rows.push(MenuRow::action(
+        TrayAction::AboutCache,
+        "About the cache and your privacy…",
+        true,
+    ));
+    rows
+}
+
+/// One preset row's label, marking the preset that is the node's CURRENT cap so the active choice is
+/// visible at a glance, and tagging the default so a person can find it deliberately.
+fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
+    use crate::cache::{format_cap, DEFAULT_CACHE_CAP_BYTES};
+    let mut label = format_cap(bytes);
+    if bytes == DEFAULT_CACHE_CAP_BYTES {
+        label.push_str(" (default)");
+    }
+    if bytes == current_cap {
+        label.push_str("  ✓ current");
+    }
+    label
+}
+
 /// The DID explainer's label.
 ///
 /// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
@@ -1194,6 +1320,12 @@ mod tests {
             did: None,
             second_factor: false,
             hotkey: None,
+            // A connected node reporting a default 1 GiB cap with 350 MiB in use — the ordinary
+            // success case. Tests that need the disconnected surface null this out explicitly.
+            cache: Some(crate::cache::CacheSnapshot {
+                cap_bytes: crate::cache::GIB,
+                used_bytes: 350 * crate::cache::MIB,
+            }),
         }
     }
 
@@ -1836,21 +1968,22 @@ mod tests {
 
     /// The top-level menu must stay SHORT — a native menu the length of the old one is a wall of text.
     ///
-    /// The bound is 9, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
-    /// that grew with state: Status · Open URL · View Account · Manage Account · Wallet · Security · logs ·
-    /// quit is eight, plus at most ONE contextual row when the account needs something (no account, locked,
-    /// or unopenable).
+    /// The bound is 10, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
+    /// that grew with state: Status · Open URL · View Account · Manage Account · Wallet · Security · Cache ·
+    /// logs · quit is nine, plus at most ONE contextual row when the account needs something (no account,
+    /// locked, or unopenable).
     ///
-    /// The number has moved three times, each for a recorded reason rather than as a bumped constant:
+    /// The number has moved four times, each for a recorded reason rather than as a bumped constant:
     /// 7 → 8 when `Open` arrived (#1821), because opening content is what the product is FOR and burying it
     /// under the custody menu would hide the one verb a content consumer wants; 8 → 9 when `Wallet` arrived
-    /// (#1841), because money is a top-level concern of this product (§6.0) and it is a SUBMENU, so it
-    /// costs one row and hides its own contents.
+    /// (#1841), because money is a top-level concern of this product (§6.0) and it is a SUBMENU, so it costs
+    /// one row and hides its own contents; 9 → 10 when `Cache` arrived (#2002), a SUBMENU carrying the
+    /// node's size-limit control with its usage on the parent label.
     ///
     /// The rule the number enforces is unchanged and is the thing to defend: every *further* verb goes in a
-    /// submenu or the details window, never onto the top level. Six named rows still fit on one screen
-    /// without scrolling, which is what "not a wall" actually means. If a seventh ever wants the spine, the
-    /// question to ask is which of the six it replaces.
+    /// submenu or the details window, never onto the top level. Seven named rows still fit on one screen
+    /// without scrolling, which is what "not a wall" actually means. If an eighth ever wants the spine, the
+    /// question to ask is which of the seven it replaces.
     #[test]
     fn the_top_level_menu_stays_short_in_every_state() {
         for account in EVERY_STATE {
@@ -1861,7 +1994,7 @@ mod tests {
                 .filter(|row| matches!(row, MenuRow::Action { .. } | MenuRow::Submenu { .. }))
                 .count();
             assert!(
-                clickable <= 9,
+                clickable <= 10,
                 "{account:?}: {clickable} top-level rows is a wall, not a menu"
             );
         }
@@ -2461,5 +2594,166 @@ mod tests {
         assert!(!unsupported.is_enabled(TrayAction::SetUpAccount));
         assert!(unsupported.is_enabled(TrayAction::ShowStatus));
         assert!(unsupported.is_enabled(TrayAction::Quit));
+    }
+
+    // ---- The cache size-limit surface (dig_ecosystem#2002). ----
+
+    /// A view whose only difference from the default fixture is its cache field — so a cache test
+    /// varies exactly one thing and keeps a truthful, connected control elsewhere.
+    fn view_with_cache(cache: Option<crate::cache::CacheSnapshot>) -> TrayView {
+        TrayView {
+            cache,
+            ..view(AccountState::Unlocked { recoverable: true })
+        }
+    }
+
+    /// The rows of the Cache submenu for a given snapshot.
+    fn cache_rows(cache: Option<crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
+        let model = build(&view_with_cache(cache));
+        model
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                MenuRow::Submenu { label, rows } if label.starts_with("Cache") => {
+                    Some(rows.clone())
+                }
+                _ => None,
+            })
+            .expect("a Cache submenu must always be present")
+    }
+
+    #[test]
+    fn the_cache_parent_label_shows_usage_against_the_cap() {
+        // The figure a person needs — how full the cache is — must be visible on the spine row itself,
+        // and it must name BOTH numbers, because a cap with no usage is not actionable (requirement 2).
+        let model = build(&view_with_cache(Some(crate::cache::CacheSnapshot {
+            cap_bytes: crate::cache::GIB,
+            used_bytes: 350 * crate::cache::MIB,
+        })));
+        let label = model
+            .rows
+            .iter()
+            .find_map(|row| match row {
+                MenuRow::Submenu { label, .. } if label.starts_with("Cache") => Some(label.clone()),
+                _ => None,
+            })
+            .expect("a Cache submenu");
+        assert!(label.contains("350 MiB"), "shows usage: {label}");
+        assert!(label.contains("1 GiB"), "shows the cap: {label}");
+    }
+
+    #[test]
+    fn every_preset_is_offered_and_the_current_cap_is_marked() {
+        // The node's cap is 2 GiB here, which is a preset — so that row, and ONLY that row, is marked
+        // current. A test that only checked "a row is marked" would pass if the WRONG row were marked,
+        // so this pins that the mark tracks the actual cap.
+        let rows = cache_rows(Some(crate::cache::CacheSnapshot {
+            cap_bytes: 2 * crate::cache::GIB,
+            used_bytes: crate::cache::GIB,
+        }));
+        let actions: Vec<(TrayAction, String, bool)> =
+            every_action(&MenuModel { rows }).into_iter().collect();
+
+        let mut marked = Vec::new();
+        for &bytes in &crate::cache::CACHE_PRESETS {
+            let row = actions
+                .iter()
+                .find(|(a, _, _)| *a == TrayAction::SetCacheCap { bytes })
+                .unwrap_or_else(|| panic!("preset {bytes} must be offered"));
+            assert!(row.2, "a preset must be clickable");
+            if row.1.contains("current") {
+                marked.push(bytes);
+            }
+        }
+        assert_eq!(
+            marked,
+            vec![2 * crate::cache::GIB],
+            "exactly the current cap (2 GiB) is marked"
+        );
+    }
+
+    #[test]
+    fn the_default_preset_is_labelled_as_the_default() {
+        let rows = cache_rows(Some(crate::cache::CacheSnapshot {
+            cap_bytes: 2 * crate::cache::GIB,
+            used_bytes: 0,
+        }));
+        let default_label = every_action(&MenuModel { rows })
+            .into_iter()
+            .find(|(a, _, _)| {
+                *a == TrayAction::SetCacheCap {
+                    bytes: crate::cache::DEFAULT_CACHE_CAP_BYTES,
+                }
+            })
+            .map(|(_, label, _)| label)
+            .expect("the default preset is offered");
+        assert!(
+            default_label.contains("default"),
+            "the default cap must be findable deliberately: {default_label}"
+        );
+    }
+
+    #[test]
+    fn a_connected_cache_offers_a_custom_option() {
+        let model = MenuModel {
+            rows: cache_rows(Some(crate::cache::CacheSnapshot {
+                cap_bytes: crate::cache::GIB,
+                used_bytes: 0,
+            })),
+        };
+        assert!(model.is_enabled(TrayAction::SetCustomCacheCap));
+    }
+
+    #[test]
+    fn a_disconnected_node_offers_no_change_rows_but_never_a_dead_end() {
+        // The error/empty async state (requirement 5): with no node there is nothing to set, so the
+        // preset and custom rows are ABSENT rather than shown-but-broken — yet the submenu still has an
+        // enabled row that explains why and an enabled explainer, so it is never a silent no-op.
+        let model = MenuModel {
+            rows: cache_rows(None),
+        };
+        assert!(!model.offers(TrayAction::SetCustomCacheCap));
+        for &bytes in &crate::cache::CACHE_PRESETS {
+            assert!(
+                !model.offers(TrayAction::SetCacheCap { bytes }),
+                "a preset must not be offered with no node to apply it"
+            );
+        }
+        // The explainer is reachable and enabled — the way forward.
+        assert!(model.is_enabled(TrayAction::AboutCache));
+        // And no row in the submenu is a disabled dead end.
+        let disconnected = MenuModel {
+            rows: cache_rows(None),
+        };
+        for (label, enabled) in disconnected.all_actions() {
+            assert!(
+                enabled,
+                "the disconnected cache row {label:?} must not be a greyed dead end"
+            );
+        }
+    }
+
+    #[test]
+    fn the_explainer_is_offered_in_both_the_connected_and_disconnected_states() {
+        assert!(MenuModel {
+            rows: cache_rows(None)
+        }
+        .is_enabled(TrayAction::AboutCache));
+        assert!(MenuModel {
+            rows: cache_rows(Some(crate::cache::CacheSnapshot {
+                cap_bytes: crate::cache::GIB,
+                used_bytes: 0
+            }))
+        }
+        .is_enabled(TrayAction::AboutCache));
+    }
+
+    #[test]
+    fn the_status_details_window_carries_the_full_cache_figures() {
+        let text = details_text(&view_with_cache(Some(crate::cache::CacheSnapshot {
+            cap_bytes: crate::cache::GIB,
+            used_bytes: 350 * crate::cache::MIB,
+        })));
+        assert!(text.contains("Cache: 350 MiB of 1 GiB used"), "got: {text}");
     }
 }

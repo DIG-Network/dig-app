@@ -474,6 +474,38 @@ to grant Accessibility permission) and Linux (where a Wayland compositor owns sh
 a global grab at all) report the unsupported state rather than claiming a chord that would silently do
 nothing.
 
+### 3.1c-ii The node cache-size surface (normative)
+
+The tray MUST expose the node's content-cache size cap as a control a person can view and change, built
+from the same pure model as the rest of the menu (`dig_app_core::tray_menu` + `dig_app_core::cache`) so
+these rules are testable without a desktop. The cap defaults to **1 GiB** (1024³ bytes); the node floors
+any lower request at **64 MiB**.
+
+- **Show usage AGAINST the cap, not the cap alone (MUST).** The control MUST surface both how much of the
+  cache is in use and the cap it is measured against (e.g. `Cache — 350 MiB of 1 GiB used`). A cap with no
+  consumption figure is not actionable. The figures come from the node's `control.status` snapshot; they
+  MUST NOT be invented when no node is connected. Because a menu item is an ACTION (§3.1c), the usage MUST
+  NOT be a display-only disabled row — it rides on an actionable row (the submenu parent) and the full
+  figures also appear in the `Status and details…` window.
+- **Persist ONLY through the node (MUST).** A new cap MUST be applied via the node's `control.cache.setCap`
+  control method. dig-app MUST NOT write the node's `config.json` directly — the node holds a cross-process
+  lock over it, and a second writer could corrupt a concurrent node write. The value shown as applied MUST
+  be the cap the node ECHOES, which may differ from the request (the node floors sub-64-MiB values).
+- **No restart (MUST).** The node reads the cap dynamically, so a change takes effect immediately; the copy
+  MUST NOT tell the user to restart.
+- **Validate, and confirm eviction BEFORE it happens (MUST).** A zero or absurd value MUST be rejected with
+  a reason that names the bound. A new cap BELOW current usage forces the node to evict cached content, so
+  the flow MUST warn and require an explicit confirmation (a claim — two choices, no biometric) before
+  applying it — the user learns of the loss before, not after.
+- **Every state ends visibly (MUST, §6.4 four async states).** The cap is applied over a live node
+  connection, which can be absent or can fail. A node that is down, a user who declines the eviction, and a
+  node that refuses the change MUST each end in a notice — the control MUST NOT be a silent no-op.
+- **Honest copy (MUST, §6.0).** The cache is the operator's read-history cover, not merely a disk knob:
+  raising the cap increases privacy cover and network contribution, lowering it reduces them, and below
+  512 MiB the node's tier-0 relevancy caching is disabled. Sizes are binary (1 GiB = 1024³) and the copy
+  MUST say so, so the displayed number matches the stored bytes. The copy MUST NOT present lowering the cap
+  as free of a privacy cost.
+
 ### 3.1d Native input, modals and prompts (normative)
 
 **Whenever dig-app needs input from the user it MUST use the platform's native input box, modal or

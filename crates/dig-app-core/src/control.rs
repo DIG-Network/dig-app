@@ -255,6 +255,47 @@ pub fn fetch_status(
     parse_response::<StatusParams>(response).map_err(|e| ControlCallError::Refused(e.message))
 }
 
+/// Send one typed control call to `endpoint` and return its typed result.
+///
+/// The write-side twin of [`fetch_status`]: the same one-shot blocking JSON-RPC exchange, but generic
+/// over any [`ControlCall`] in the contract crate — so `control.cache.setCap` (and any future control
+/// mutation the tray needs) goes through the SAME transport, token header and response parsing rather
+/// than a hand-rolled request. The cap is persisted by the NODE this reaches (which holds the config
+/// lock, §2002); dig-app never writes the node's config itself.
+pub fn call_control<C>(
+    endpoint: &str,
+    call: &C,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<C::Output, ControlCallError>
+where
+    C: dig_node_control_interface::traits::ControlCall,
+{
+    let request = build_request(RequestId::from(1), call);
+    let body = serde_json::to_vec(&request)
+        .map_err(|e| ControlCallError::BadResponse(format!("could not encode the request: {e}")))?;
+    let raw = post_json(endpoint, &body, token, timeout)?;
+    let response: JsonRpcResponse = serde_json::from_slice(&raw)
+        .map_err(|e| ControlCallError::BadResponse(format!("not a JSON-RPC response: {e}")))?;
+    parse_response::<C>(response).map_err(|e| ControlCallError::Refused(e.message))
+}
+
+/// Set the node's content-cache size cap, returning the cap the node now holds.
+///
+/// A thin, named wrapper over [`call_control`] for `control.cache.setCap`, so the tray shell applies a
+/// cap without depending on the contract crate directly. The node ECHOES the cap it applied (which may
+/// differ from the request — it floors sub-64-MiB values), and this returns that echoed value so the
+/// caller reports the truth rather than the request.
+pub fn set_cache_cap(
+    endpoint: &str,
+    cap_bytes: u64,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<u64, ControlCallError> {
+    use dig_node_control_interface::params::SetCapParams;
+    call_control(endpoint, &SetCapParams { cap_bytes }, token, timeout).map(|r| r.cap_bytes)
+}
+
 /// Walk `ladder` and return the first tier that answers, along with the endpoint that did.
 ///
 /// Every tier's failure is kept so the "no node found" surface can say what was actually tried,

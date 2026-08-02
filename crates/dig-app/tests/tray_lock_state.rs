@@ -75,6 +75,12 @@ fn view_for(state: AccountState) -> TrayView {
         // `tray_menu`'s own tests rather than crossed with every case here.
         second_factor: false,
         hotkey: None,
+        // This suite is about the account LOCK state, not the cache surface, so a connected node with
+        // the default cap is pinned here and the cache menu is exercised by `tray_menu`'s own tests.
+        cache: Some(dig_app_core::cache::CacheSnapshot {
+            cap_bytes: dig_app_core::cache::GIB,
+            used_bytes: 0,
+        }),
     }
 }
 

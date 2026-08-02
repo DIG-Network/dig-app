@@ -93,7 +93,8 @@ impl CapInputError {
         match self {
             Self::Empty => "Type a size, for example 2 GiB or 512 MiB.".to_string(),
             Self::MissingUnit => {
-                "Include a unit so the size is unambiguous — for example 2 GiB or 512 MiB.".to_string()
+                "Include a unit so the size is unambiguous — for example 2 GiB or 512 MiB."
+                    .to_string()
             }
             Self::Unparseable => {
                 "That is not a size. Type a number and a unit, for example 2 GiB or 512 MiB."
@@ -171,7 +172,10 @@ pub fn parse_cap_input(text: &str) -> Result<u64, CapInputError> {
         .find(|c: char| c.is_ascii_alphabetic())
         .ok_or(CapInputError::MissingUnit)?;
     let (number, unit) = trimmed.split_at(split);
-    let value: f64 = number.trim().parse().map_err(|_| CapInputError::Unparseable)?;
+    let value: f64 = number
+        .trim()
+        .parse()
+        .map_err(|_| CapInputError::Unparseable)?;
     if !value.is_finite() || value < 0.0 {
         return Err(CapInputError::Unparseable);
     }
@@ -328,8 +332,13 @@ mod tests {
     #[test]
     fn empty_and_garbage_are_named_distinctly() {
         assert_eq!(parse_cap_input("   "), Err(CapInputError::Empty));
-        assert_eq!(parse_cap_input("big"), Err(CapInputError::MissingUnit));
-        assert_eq!(parse_cap_input("1.2.3 GiB"), Err(CapInputError::Unparseable));
+        // Alphabetic with no leading number: the number part is empty, so it is unparseable rather
+        // than merely missing a unit (that case is a bare number — pinned above).
+        assert_eq!(parse_cap_input("big"), Err(CapInputError::Unparseable));
+        assert_eq!(
+            parse_cap_input("1.2.3 GiB"),
+            Err(CapInputError::Unparseable)
+        );
         assert_eq!(parse_cap_input("2 TB"), Err(CapInputError::Unparseable));
     }
 
@@ -369,10 +378,7 @@ mod tests {
         );
         // Exactly at usage: still nothing to evict — the boundary must be Apply, not a spurious
         // warning. Pinned because `<=` vs `<` is exactly where this kind of guard goes wrong.
-        assert_eq!(
-            plan_cap_change(GIB, GIB),
-            CapChange::Apply { bytes: GIB }
-        );
+        assert_eq!(plan_cap_change(GIB, GIB), CapChange::Apply { bytes: GIB });
     }
 
     #[test]
@@ -393,9 +399,15 @@ mod tests {
         let body = eviction_warning_body(512 * MIB, GIB);
         // 1 GiB used, capped at 512 MiB → ~512 MiB evicted, and the warning must say so and warn it
         // cannot be undone.
-        assert!(body.contains("512 MiB"), "must name the evicted amount: {body}");
+        assert!(
+            body.contains("512 MiB"),
+            "must name the evicted amount: {body}"
+        );
         assert!(body.contains("1 GiB"), "must name current usage: {body}");
-        assert!(body.contains("cannot be undone"), "must warn of the loss: {body}");
+        assert!(
+            body.contains("cannot be undone"),
+            "must warn of the loss: {body}"
+        );
     }
 
     // ---- The honest privacy copy (requirement 6). ----
@@ -404,9 +416,12 @@ mod tests {
     fn the_privacy_notice_states_disk_privacy_and_units_without_hiding_the_downside() {
         let body = privacy_notice_body();
         assert!(body.contains("135 MB"), "names the capsule size: {body}");
-        assert!(body.contains("privacy"), "names the privacy trade-off: {body}");
         assert!(
-            body.contains("Lowering it reduces"),
+            body.contains("privacy"),
+            "names the privacy trade-off: {body}"
+        );
+        assert!(
+            body.contains("lowering it reduces"),
             "is honest that lowering costs privacy: {body}"
         );
         assert!(
@@ -414,7 +429,8 @@ mod tests {
             "is explicit that sizes are binary (req 7): {body}"
         );
         assert!(
-            body.to_lowercase().contains("immediately") || body.contains("no \nrestart")
+            body.to_lowercase().contains("immediately")
+                || body.contains("no \nrestart")
                 || body.contains("no restart"),
             "must not tell the user to restart (req 3): {body}"
         );
@@ -424,7 +440,13 @@ mod tests {
     fn the_custom_input_body_names_the_format_the_floor_and_the_default() {
         let body = custom_input_body();
         assert!(body.contains("GiB"), "shows the unit form: {body}");
-        assert!(body.contains(&format_cap(MIN_CACHE_CAP_BYTES)), "names the floor: {body}");
-        assert!(body.contains(&format_cap(DEFAULT_CACHE_CAP_BYTES)), "names the default: {body}");
+        assert!(
+            body.contains(&format_cap(MIN_CACHE_CAP_BYTES)),
+            "names the floor: {body}"
+        );
+        assert!(
+            body.contains(&format_cap(DEFAULT_CACHE_CAP_BYTES)),
+            "names the default: {body}"
+        );
     }
 }
