@@ -267,7 +267,7 @@ pub struct ProfileConnectInfo {
 /// session-lock controller or the keystore directly.
 ///
 /// **Reads never consult this** — a lock gates the identity key, not content, so browsing/reads keep
-/// flowing untouched (§6.0). Only [`handle_sign`](FrameRouter::handle_sign) calls it.
+/// flowing untouched (§6.0). Only `handle_sign` calls it.
 pub trait SignReauthGate: Send + Sync {
     /// Authorize the next signature. Returns `true` when signing may proceed — either the session was
     /// never locked, or a re-unlock just succeeded — and `false` when the session is locked and could
@@ -291,7 +291,7 @@ impl SignReauthGate for OpenSignGate {
 /// public key (`SPEC.md` §5.6, dig_ecosystem#1931).
 ///
 /// **Why this exists (a security caveat).** The identity signer's `sign` (a
-/// [`SessionSigner`](crate::session::SessionSigner) over the profile's `0x0010` BLS key) signs raw
+/// [`SessionSigner`] over the profile's `0x0010` BLS key) signs raw
 /// bytes and is SHARED with session-attach challenges and `dign sign`. Without a distinct prefix, an
 /// attestation signature over a 32-byte sealing key could be lifted and replayed as some other
 /// signed message. Prefixing every attestation with `DIGATTEST1\0` domain-separates it from every

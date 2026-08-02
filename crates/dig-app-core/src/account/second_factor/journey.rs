@@ -86,7 +86,7 @@ pub enum EnrolOutcome {
     },
     /// The user backed out at one of the screens. NOTHING was enrolled.
     Abandoned,
-    /// The user could not produce a correct code within [`VERIFY_ATTEMPTS`]. Nothing was enrolled —
+    /// The user could not produce a correct code within `VERIFY_ATTEMPTS`. Nothing was enrolled —
     /// which is the whole point of verifying before writing.
     NotVerified,
     /// A second factor is already enrolled. Re-running setup would silently invalidate the codes the

@@ -6,7 +6,7 @@
 //!
 //! # The envelope, and what it is for
 //!
-//! The sealed plaintext is [`ENVELOPE_MAGIC`] followed by the record's JSON. The magic is not a
+//! The sealed plaintext is `ENVELOPE_MAGIC` followed by the record's JSON. The magic is not a
 //! checksum — the AEAD already authenticates the bytes — it is DOMAIN SEPARATION: both vaults in this
 //! directory are sealed under the same profile DEK, so without a domain tag a recovery-phrase blob
 //! renamed over this file would decrypt successfully and only then fail to parse. With it, the
@@ -297,8 +297,8 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
     /// The bound the challenge window used to lack (dig_ecosystem#1847): a persistent, escalating
     /// rate limit. Every failure — a wrong TOTP code OR a wrong recovery code — advances a counter that
     /// rides the sealed record, so closing and reopening the window can no longer hand an attacker a
-    /// fresh unbounded run. Once [`FREE_CHALLENGE_ATTEMPTS`] is spent, a required delay is imposed and
-    /// doubled per failure up to [`BACKOFF_MAX_SECONDS`]; any accepted code clears it.
+    /// fresh unbounded run. Once `FREE_CHALLENGE_ATTEMPTS` is spent, a required delay is imposed and
+    /// doubled per failure up to `BACKOFF_MAX_SECONDS`; any accepted code clears it.
     pub fn challenge(&self, typed: &str, now: u64) -> Result<ChallengeOutcome, VaultError> {
         let mut record = self.read()?;
 
@@ -369,9 +369,9 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
     /// changes nothing: it reads only the throttle timer — never a code, so it cannot leak whether a
     /// guess is arithmetically close — records NO failure, and, critically, does NOT persist the
     /// anti-rollback anchor. Advancing `clock_high_water` here would let a mere peek move the record
-    /// forward, so [`anchored_now`] is computed in memory and discarded; only a real
+    /// forward, so `anchored_now` is computed in memory and discarded; only a real
     /// [`challenge`](Self::challenge) commits the anchor. A locked or unreadable vault fails closed via
-    /// [`read`](Self::read) — it can never answer "not throttled" for a vault it could not open.
+    /// `read` — it can never answer "not throttled" for a vault it could not open.
     ///
     /// # Errors
     ///

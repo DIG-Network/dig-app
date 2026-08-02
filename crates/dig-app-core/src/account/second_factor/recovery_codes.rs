@@ -79,7 +79,7 @@ impl RecoveryCodeSet {
         )
     }
 
-    /// The codes as the user must see them: [`PER_LINE`] to a line, so the block can be written down
+    /// The codes as the user must see them: `PER_LINE` to a line, so the block can be written down
     /// or printed.
     ///
     /// Two per line rather than one is a LAYOUT constraint, not a style choice: the native window's

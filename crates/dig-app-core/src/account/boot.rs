@@ -16,8 +16,8 @@
 //! user's session could reach the master seed.
 //!
 //! [`assemble_residency`] is the testable core: over any keystore backend and any
-//! [`AuthCeremony`](crate::account::auth::AuthCeremony) it enrols-or-unlocks the account (through
-//! [`open_or_enroll`](crate::account::lifecycle::open_or_enroll)) and houses the result in an
+//! [`AuthCeremony`] it enrols-or-unlocks the account (through
+//! [`open_or_enroll`]) and houses the result in an
 //! [`AccountResidency`]. The cfg-gated wrappers wire the host's real
 //! [`PromptedCeremony`](crate::account::ceremony::PromptedCeremony) + a per-user
 //! [`FileBackend`](dig_session::FileBackend), and defer on Linux, which has no window stack for the

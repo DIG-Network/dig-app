@@ -58,7 +58,7 @@ pub struct QrArt {
 
 /// Written out rather than derived because [`Zeroizing`] has no [`PartialEq`], and because the
 /// comparison a caller wants is over the PATTERN — two `QrArt`s carrying the same modules are the same
-/// picture. Needed at all so [`super::ConfirmContent`], which a test compares whole, keeps its derive.
+/// picture. Needed at all so `super::ConfirmContent`, which a test compares whole, keeps its derive.
 impl PartialEq for QrArt {
     fn eq(&self, other: &Self) -> bool {
         self.size == other.size && *self.modules == *other.modules

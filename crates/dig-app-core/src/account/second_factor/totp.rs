@@ -28,7 +28,7 @@
 //! It does not decide whether a code is *acceptable* — only whether it is *arithmetically correct for
 //! some step near now*. Single-use enforcement (a code must not be replayed inside its own 30-second
 //! window) needs persistent state, so it lives with the enrolment record in
-//! [`super::vault`](super::vault). Keeping the two apart is what lets this file be exhaustively tested
+//! [`super::vault`]. Keeping the two apart is what lets this file be exhaustively tested
 //! against the RFC's own vectors with no I/O at all.
 //!
 //! # Secret handling
