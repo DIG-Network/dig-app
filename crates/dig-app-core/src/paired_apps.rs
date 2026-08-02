@@ -401,6 +401,7 @@ mod tests {
             ext_id: format!("com.example.{id}"),
             label: label.map(str::to_string),
             scope: PairingScope::ThirdParty,
+            capabilities: crate::pairing::CapabilitySet::empty(),
             paired_at,
             last_seen_at: last_seen,
         }

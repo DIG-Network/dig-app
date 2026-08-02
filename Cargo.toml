@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "5.5.0"
+version = "5.6.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -137,6 +137,17 @@ qrcodegen = "1.8"
 # profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
 # slot-key derivation.
 sha2 = "0.10"
+# The DIGCHAT1 identity-seal suite (dig_ecosystem#1931, the `identity.*` capability class). The
+# dig-chat wire contract (its SPEC §4) fixes the envelope as ephemeral-static X25519 → HKDF-SHA256 →
+# XChaCha20-Poly1305 — the NaCl sealed-box shape — so the seal is byte-identical to that published
+# format. Both are the RustCrypto/dalek reference implementations of standardised primitives (X25519
+# per RFC 7748, XChaCha20-Poly1305 per the IRTF draft); NONE of the crypto is hand-rolled, which is the
+# whole point (§5.4: never invent primitives). `static_secrets` is enabled because the sealing key is a
+# DETERMINISTIC static X25519 key derived from the profile's identity material (so a restored profile
+# reproduces it), not a per-call ephemeral. This is the ONE X25519 use in the app — the profile IDENTITY
+# key stays the single slot-`0x0010` BLS G1 key; this is a SEPARATE, purpose-derived sealing key.
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"

@@ -1576,11 +1576,96 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
 | `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
 | `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
-| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing's scope does not grant that method (§5.6.3a) |
+| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing's scope/capabilities do not grant that method (§5.6.3a, §5.6.8) |
+| `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed — bad base64, an over-long plaintext, a wrong-length key, or an undecodable envelope (§5.6.8) |
+| `IDENTITY_UNSEAL_FAILED` | an `identity.unseal` envelope did not authenticate under this profile's sealing key (§5.6.8) |
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
 browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both
 sides.
+
+#### 5.6.8 The `identity.*` capability class (dig_ecosystem#1931)
+
+`sign.request` is the power to MOVE MONEY; the `identity.*` methods are the power to prove identity and
+to read what was sealed to you. They are **different powers, granted separately** (#1913): a chat
+application (dig-chat) needs to encrypt and read messages but MUST NEVER be able to spend. The
+capability is named for what it DOES — `identity.*`, not `chat.*` — so a second application needing the
+same power requests the same capability rather than presenting itself as chat.
+
+**The capability set.** A pairing carries a capability set alongside its `scope` (§5.6.3a). It is
+populated from a `requested_capabilities` array on `pair.begin` and sealed with the pairing record,
+honoured across restart, and returned as `granted_capabilities` on the `pair.begin` result. The
+grantable capabilities are exactly `identity.attest`, `identity.seal`, `identity.unseal`. **`sign.request`
+is NEVER a capability** — a name in `requested_capabilities` that is not one of the three (most
+importantly `sign.request`) is dropped, so nothing a caller lists can widen its sign authority (INV-2).
+An absent/empty `granted_capabilities` MUST be read as the empty set (a DIG App predating this model
+grants nothing).
+
+**Gating.** A frame is authenticated FIRST and its capability checked SECOND, against the pairing it
+actually authenticated as. `sign.request` is gated by `scope`; `identity.attest`/`identity.seal`/
+`identity.unseal` are each gated by the capability set. A pairing holding ONLY the identity
+capabilities is therefore refused `sign.request` with `CAP_NOT_GRANTED`, and an `identity.*` method on a
+pairing that was not granted it ⇒ `CAP_NOT_GRANTED`.
+
+**Consent.** A `pair.begin` requesting identity capabilities draws a DISTINCT consent window naming the
+power — "use your DIG identity to encrypt and read messages" — a different sentence from the sign
+consent, so the user sees which one they approve.
+
+**Methods.**
+
+- **`identity.attest`** — params `{}`; result `{ did, sealing_public_key_b64, attestation_b64 }`. The
+  profile's DID, its 32-byte X25519 sealing public key (base64), and the identity key's signature over
+  a domain-separated message binding the sealing key (`"DIGCHAT1 sealing-key attestation v1" ‖ sealing_pub`).
+  It is the "connected" probe — success proves paired + reachable + unlocked at once.
+- **`identity.seal`** — params `{ recipient_did, recipient_sealing_public_key_b64, plaintext_b64 }`;
+  result `{ envelope_b64 }`. Seals the plaintext into a `DIGCHAT1` envelope (below) whose sender DID is
+  THIS profile's DID (never a caller's claim). The plaintext is not retained.
+- **`identity.unseal`** — params `{ envelope_b64 }`; result `{ sender_did, plaintext_b64 }`. Opens an
+  envelope addressed to this profile. **`sender_did` is the DID the AEAD AUTHENTICATED** (bound into the
+  associated data), NOT a value the header merely claims — a re-addressed or re-attributed envelope
+  fails to open.
+
+**Sealing key.** The sealing key is a deterministic **X25519 static** key derived from the profile's
+identity material (an HKDF-SHA256 subkey of the frozen per-profile DEK, `info = "DIGCHAT1 x25519 sealing key"`),
+so a restored profile reproduces it and previously-sealed messages stay readable. It is DISTINCT from
+the profile's slot-`0x0010` BLS identity key: that key signs (and attests THIS key); this one seals.
+Every operation reads it live from the unlocked account and fails closed (`LOCKED`) once locked.
+
+##### The `DIGCHAT1` envelope (byte-identical to the dig-chat wire contract, its SPEC §4)
+
+All integers big-endian.
+
+```text
+offset  size  field
+  0      8    magic       "DIGCHAT1"  (44 49 47 43 48 41 54 31)
+  8      1    version     0x01
+  9      1    suite       0x01
+ 10      2    sender_did_len       u16
+ 12      n    sender_did           UTF-8   (1..=512 bytes)
+  …      2    recipient_did_len    u16
+  …      m    recipient_did        UTF-8   (1..=512 bytes)
+  …     32    epk                  X25519 ephemeral public key
+  …     24    nonce                XChaCha20-Poly1305 nonce
+  …      4    ct_len               u32
+  …      k    ciphertext           AEAD output, 16-byte tag included
+```
+
+- **Suite 1** — key agreement ephemeral-static **X25519**; key derivation **HKDF-SHA256** with
+  `salt = "DIGCHAT1"` (the 8 magic bytes), `info = "DIGCHAT1 suite1 message key"`, `L = 32`, and
+  `IKM = shared_secret ‖ epk ‖ recipient_sealing_public_key`; AEAD **XChaCha20-Poly1305**, 24-byte
+  random nonce.
+- **Associated data** — `magic ‖ version ‖ suite ‖ sender_did_len ‖ sender_did ‖ recipient_did_len ‖
+  recipient_did ‖ epk`. Binding it means a relay that re-addresses, re-attributes, or replays an
+  envelope under a different header produces a decryption failure rather than a delivered message.
+- **Bounds** — each DID 1..=512 bytes; plaintext ≤ 49,152 bytes (48 KiB). A decoder MUST check every
+  length against the bytes remaining, and MUST reject trailing bytes, an unknown version/suite, and a
+  DID that is not valid UTF-8.
+- **What it hides** — the two DIDs and the ephemeral key travel in the clear (a relay must read them to
+  route); **message content is never visible to a relay** (NC-1). Every primitive is the standard
+  RustCrypto/dalek reference implementation — no hand-rolled crypto (§5.4).
+
+This format + the three methods above are a byte-identical cross-repo contract with dig-chat (its
+SPEC §3–§4); the reference sealer is dig-chat's `src/main/identity/conformance.ts`.
 
 ---
 
@@ -1589,6 +1674,10 @@ sides.
 dig-app is the component that satisfies these ecosystem MUST-DO items (see the `normative-contract`
 skill; some are CLAUDE.md §5 hard rules):
 
+- **NC-1 — every directed message end-to-end encrypted to the recipient.** The `identity.seal` method
+  (§5.6.8) seals each directed payload into a `DIGCHAT1` envelope readable ONLY by the recipient's
+  X25519 sealing key, layered on top of the channel's mTLS — an intermediary that terminates the pipe
+  sees ciphertext only. The KAT + the "no plaintext substring in the envelope" test prove it.
 - **NC-2 — at-rest encryption to the user key.** Every per-profile blob (§3.4) is DIGOP1-sealed under
   a per-profile DEK rooted at the unlocked user key. The `.dig` content cache is **exempt** (§3.4,
   ecosystem §5.1: public, on-chain-anchored, permanently readable).

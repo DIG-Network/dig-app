@@ -166,6 +166,95 @@ impl PairingScope {
     }
 }
 
+/// One capability a pairing may hold — a power that is granted SEPARATELY from the base scope's sign
+/// authority (dig_ecosystem#1931).
+///
+/// # Why these are not folded into [`PairingScope`]
+///
+/// `sign.request` is the power to MOVE MONEY; the `identity.*` methods are the power to prove identity
+/// and to read what was sealed to you. They are different powers and are granted separately (#1913): a
+/// chat application needs to encrypt and read messages but must NEVER be able to spend, so it holds the
+/// identity capabilities with a [`PairingScope::ThirdParty`] base that cannot sign. Naming the
+/// capability for what it DOES (`identity.*`, not `chat.*`) means a second application needing the same
+/// power requests the same capability rather than presenting itself as chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Capability {
+    /// `identity.attest` — sign an attestation over the profile's sealing key (the "connected" probe).
+    IdentityAttest,
+    /// `identity.seal` — seal a payload to a recipient DID's sealing key (a `DIGCHAT1` envelope).
+    IdentitySeal,
+    /// `identity.unseal` — open a `DIGCHAT1` envelope addressed to this profile.
+    IdentityUnseal,
+}
+
+impl Capability {
+    /// The stable wire method name this capability authorizes.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::IdentityAttest => "identity.attest",
+            Self::IdentitySeal => "identity.seal",
+            Self::IdentityUnseal => "identity.unseal",
+        }
+    }
+
+    /// Parse a wire method name into the capability that authorizes it, or `None` for a name that is
+    /// not a grantable capability (e.g. `sign.request`, which is NEVER a capability — it is gated by
+    /// [`PairingScope`] — so it can never be requested INTO the set).
+    pub fn from_wire(method: &str) -> Option<Self> {
+        match method {
+            "identity.attest" => Some(Self::IdentityAttest),
+            "identity.seal" => Some(Self::IdentitySeal),
+            "identity.unseal" => Some(Self::IdentityUnseal),
+            _ => None,
+        }
+    }
+}
+
+/// The set of extra capabilities a pairing has been granted, beyond its base [`PairingScope`]
+/// (dig_ecosystem#1931). Sealed with the pairing record and honoured across restart.
+///
+/// `serde(default)` on the containing record makes an empty set the reading of a record sealed before
+/// capabilities existed — a pre-#1931 pairing holds NO identity capability, which is exactly right: it
+/// predates the feature and must not silently acquire it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitySet(std::collections::BTreeSet<Capability>);
+
+impl CapabilitySet {
+    /// The empty set — a pairing with no extra capabilities.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build a set from requested wire method names, keeping ONLY names that are grantable
+    /// capabilities. A name that is not a capability — most importantly `sign.request` (INV-2) — is
+    /// silently dropped, so nothing a caller lists in `requested_capabilities` can ever widen it into
+    /// sign authority; sign stays gated by [`PairingScope`] alone.
+    pub fn from_requested<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(
+            names
+                .into_iter()
+                .filter_map(Capability::from_wire)
+                .collect(),
+        )
+    }
+
+    /// Whether this set grants `capability`.
+    pub fn contains(&self, capability: Capability) -> bool {
+        self.0.contains(&capability)
+    }
+
+    /// Whether the set is empty (no extra capability granted).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The granted capabilities as their wire method names, sorted for a stable `granted_capabilities`
+    /// response.
+    pub fn wire_names(&self) -> Vec<&'static str> {
+        self.0.iter().map(|c| c.wire()).collect()
+    }
+}
+
 /// A pairing record — the at-rest form persisted DIGOP1-sealed per-profile (§5.6.3). The
 /// `channel_secret` is the only sensitive field; it is base64-encoded in the serialized form and the
 /// whole record is sealed before it ever touches disk, so the base64 is never at rest in the clear.
@@ -189,6 +278,11 @@ pub struct PairingRecord {
     /// What this pairing may do.
     #[serde(default)]
     pub scope: PairingScope,
+    /// The extra capabilities granted beyond the scope (dig_ecosystem#1931). `serde(default)` so a
+    /// record sealed before capabilities existed opens as the empty set — a pre-#1931 pairing holds no
+    /// identity capability, which is exactly right.
+    #[serde(default)]
+    pub capabilities: CapabilitySet,
     /// The 32-byte channel secret, base64-encoded for the sealed serialization. Zeroized on drop (the
     /// record is transient — built, sealed, then dropped — but the base64 secret must not linger in
     /// freed heap), matching the identity-key at-rest handling.
@@ -233,7 +327,7 @@ pub struct PairingOutcome {
 
 /// What to pair — gathered into one value so the pinned and code-paired paths cannot drift into
 /// different argument orders at their two call sites.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NewPairing<'a> {
     /// The caller's extension/app id. Authenticated by the `Origin` guard for a browser extension;
     /// for a native third-party client it is a self-declared name, which is why such a caller must
@@ -241,27 +335,39 @@ pub struct NewPairing<'a> {
     pub ext_id: &'a str,
     /// The caller's self-declared display name, if any. Untrusted — see [`PairingRecord::label`].
     pub label: Option<&'a str>,
-    /// What the pairing may do.
+    /// What the pairing may do (its base sign authority).
     pub scope: PairingScope,
+    /// The extra capabilities the pairing is granted beyond its scope (dig_ecosystem#1931).
+    pub capabilities: CapabilitySet,
 }
 
 impl<'a> NewPairing<'a> {
-    /// A pairing for a PINNED DIG extension — the full channel.
+    /// A pairing for a PINNED DIG extension — the full channel, no extra capabilities by default.
     pub fn pinned(ext_id: &'a str, label: Option<&'a str>) -> Self {
         Self {
             ext_id,
             label,
             scope: PairingScope::DigExtension,
+            capabilities: CapabilitySet::empty(),
         }
     }
 
-    /// A pairing for a code-paired third party — the control plane only.
+    /// A pairing for a code-paired third party — the control plane only, no extra capabilities by
+    /// default.
     pub fn third_party(ext_id: &'a str, label: Option<&'a str>) -> Self {
         Self {
             ext_id,
             label,
             scope: PairingScope::ThirdParty,
+            capabilities: CapabilitySet::empty(),
         }
+    }
+
+    /// Grant `capabilities` to this pairing (the requested `identity.*` set). Chainable so the
+    /// dispatch layer builds a pinned/third-party base and then layers the granted set on.
+    pub fn with_capabilities(mut self, capabilities: CapabilitySet) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 }
 
@@ -275,8 +381,10 @@ pub struct PairedApp {
     pub ext_id: String,
     /// The app's self-declared display name, if it gave one. Untrusted.
     pub label: Option<String>,
-    /// What it is allowed to do.
+    /// What it is allowed to do (base sign authority).
     pub scope: PairingScope,
+    /// The extra capabilities it has been granted (dig_ecosystem#1931).
+    pub capabilities: CapabilitySet,
     /// Unix-epoch seconds when the user approved the pairing.
     pub paired_at: u64,
     /// Unix-epoch seconds of the last frame this pairing successfully authenticated, or `None` if it
@@ -295,6 +403,7 @@ struct LivePairing {
     ext_id: String,
     label: Option<String>,
     scope: PairingScope,
+    capabilities: CapabilitySet,
     paired_at: u64,
     last_seen_at: Option<u64>,
     /// The channel secret, held in a [`Zeroizing`] buffer so it is scrubbed from memory when the
@@ -347,6 +456,7 @@ impl<S: ProfileSealer> PairingStore<S> {
             ext_id: request.ext_id.to_string(),
             label: request.label.map(str::to_string),
             scope: request.scope,
+            capabilities: request.capabilities.clone(),
             channel_secret_b64: BASE64.encode(*channel_secret),
             created_at,
         };
@@ -364,6 +474,7 @@ impl<S: ProfileSealer> PairingStore<S> {
                 ext_id: request.ext_id.to_string(),
                 label: request.label.map(str::to_string),
                 scope: request.scope,
+                capabilities: request.capabilities.clone(),
                 paired_at: created_at,
                 last_seen_at: None,
                 channel_secret: Zeroizing::new(*channel_secret),
@@ -396,6 +507,7 @@ impl<S: ProfileSealer> PairingStore<S> {
                 ext_id: record.ext_id.clone(),
                 label: record.label.clone(),
                 scope: record.scope,
+                capabilities: record.capabilities.clone(),
                 paired_at: record.created_at,
                 // Not "never seen" — "not seen SINCE THIS BOOT", which is what the field means and
                 // what the management window says.
@@ -485,6 +597,13 @@ impl<S: ProfileSealer> PairingStore<S> {
         self.lock().get(pairing_id).map(|p| p.scope)
     }
 
+    /// The extra capabilities granted to `pairing_id` (dig_ecosystem#1931), or `None` if it is not
+    /// paired. Consulted by the dispatch layer AFTER authenticating a frame, so a capability check can
+    /// never be reached by a caller that failed the MAC — exactly like [`scope_of`](Self::scope_of).
+    pub fn capabilities_of(&self, pairing_id: &str) -> Option<CapabilitySet> {
+        self.lock().get(pairing_id).map(|p| p.capabilities.clone())
+    }
+
     /// Record that `pairing_id` was heard from at `now` — the "last seen" the management window shows.
     ///
     /// Called only after a frame AUTHENTICATES, so an unpaired or badly-MAC'd frame can never move a
@@ -508,6 +627,7 @@ impl<S: ProfileSealer> PairingStore<S> {
                 ext_id: live.ext_id.clone(),
                 label: live.label.clone(),
                 scope: live.scope,
+                capabilities: live.capabilities.clone(),
                 paired_at: live.paired_at,
                 last_seen_at: live.last_seen_at,
             })
@@ -958,6 +1078,75 @@ mod tests {
         assert!(store
             .verify_frame(&kept.pairing_id, n(1), "m", &params, &kept_mac)
             .is_ok());
+    }
+
+    #[test]
+    fn a_capability_set_drops_sign_request_and_keeps_identity_methods() {
+        // `sign.request` is NEVER a grantable capability (INV-2) — it is gated by PairingScope — so a
+        // caller cannot smuggle sign authority in through `requested_capabilities`.
+        let caps = CapabilitySet::from_requested([
+            "identity.attest",
+            "identity.seal",
+            "identity.unseal",
+            "sign.request",
+            "not.a.capability",
+        ]);
+        assert!(caps.contains(Capability::IdentityAttest));
+        assert!(caps.contains(Capability::IdentitySeal));
+        assert!(caps.contains(Capability::IdentityUnseal));
+        assert_eq!(
+            caps.wire_names(),
+            vec!["identity.attest", "identity.seal", "identity.unseal"],
+            "sign.request and unknown names are dropped"
+        );
+    }
+
+    #[test]
+    fn granted_capabilities_survive_a_seal_and_restore() {
+        // A chat app that lost its identity capabilities across a restart would break silently; one
+        // that GAINED them would be a privilege escalation. The set must round-trip exactly.
+        let store = store();
+        let caps = CapabilitySet::from_requested(["identity.attest", "identity.seal"]);
+        let out = store
+            .pair(
+                &NewPairing::third_party("net.dig.chat", Some("DIG Chat"))
+                    .with_capabilities(caps.clone()),
+                1,
+            )
+            .unwrap();
+        store.unpair(&out.pairing_id);
+
+        store.restore_sealed(&out.sealed_record).unwrap();
+        assert_eq!(store.capabilities_of(&out.pairing_id), Some(caps));
+        // Base scope is still ThirdParty — the identity grant does not confer sign authority.
+        assert_eq!(
+            store.scope_of(&out.pairing_id),
+            Some(PairingScope::ThirdParty)
+        );
+        assert!(!store.scope_of(&out.pairing_id).unwrap().may_sign());
+    }
+
+    #[test]
+    fn a_record_sealed_before_capabilities_existed_restores_with_the_empty_set() {
+        // #1931 added `capabilities`. A record written by an earlier build has none — it must NOT
+        // silently acquire the identity power it predates.
+        let sealer = test_sealer(DID);
+        let old_shape = serde_json::json!({
+            "pairing_id": "pre-1931-record",
+            "ext_id": EXT,
+            "scope": "ThirdParty",
+            "channel_secret_b64": BASE64.encode([7u8; CHANNEL_SECRET_LEN]),
+            "created_at": 1_700_000_000u64,
+        });
+        let sealed = sealer
+            .seal(DID, &serde_json::to_vec(&old_shape).unwrap())
+            .unwrap();
+        let store = PairingStore::new(test_sealer(DID), DID);
+        let pairing_id = store.restore_sealed(&sealed).unwrap();
+        assert_eq!(
+            store.capabilities_of(&pairing_id),
+            Some(CapabilitySet::empty())
+        );
     }
 
     #[test]

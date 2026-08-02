@@ -72,6 +72,12 @@ qrcodegen.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
+# The DIGCHAT1 identity-seal suite (#1931, the `identity.*` capability class): deterministic-static
+# X25519 key agreement + XChaCha20-Poly1305 AEAD for the `identity.seal`/`identity.unseal` sealed-box,
+# byte-identical to the dig-chat wire contract (its SPEC §4). Reference implementations of standard
+# primitives — never hand-rolled crypto (§5.4). See the workspace manifest for the full reasoning.
+x25519-dalek.workspace = true
+chacha20poly1305.workspace = true
 # Profiles (U5) — the canonical `did:chia:` profile FORMAT (consumed, never reinvented) + hex
 # encoding for the human-readable registry.
 dig-identity.workspace = true

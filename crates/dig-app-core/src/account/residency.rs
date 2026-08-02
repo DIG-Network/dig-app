@@ -30,6 +30,7 @@ use dig_wallet_backend::types::Network;
 use zeroize::Zeroizing;
 
 use crate::account::sealer::AccountSealer;
+use crate::digchat::{SealingKeyProvider, SealingKeypair};
 use crate::sealer::{ProfileSealer, SealError};
 use crate::session_lock::SessionKeys;
 
@@ -79,6 +80,19 @@ impl AccountResidency {
             residency: self.clone(),
             ix,
             kdf,
+        }
+    }
+
+    /// A live-view X25519 sealing-key provider for profile `ix` (dig_ecosystem#1931) — derives the
+    /// deterministic `DIGCHAT1` sealing keypair from the current account's per-profile DEK, or fails
+    /// closed once the residency is locked. The sealing key is a child of the profile's identity
+    /// material (the DEK is a frozen HKDF of the master seed), so it reproduces across restart/restore
+    /// while a lock immediately relocks the seal path — the same custody property the signer + sealer
+    /// have.
+    pub fn sealing_keys(&self, ix: ProfileIx) -> ResidencySealingKeys {
+        ResidencySealingKeys {
+            residency: self.clone(),
+            ix,
         }
     }
 
@@ -228,6 +242,22 @@ impl ProfileSealer for ResidencySealer {
 
     fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
         self.with_sealer(|s| s.open(profile_did, ciphertext))
+    }
+}
+
+/// A live-view [`SealingKeyProvider`] that derives the current account's `DIGCHAT1` sealing keypair
+/// from an [`AccountResidency`] on every call, so a lock immediately relocks the seal path.
+/// Fail-closed: a locked residency yields `None` (seals and unseals nothing).
+pub struct ResidencySealingKeys {
+    residency: AccountResidency,
+    ix: ProfileIx,
+}
+
+impl SealingKeyProvider for ResidencySealingKeys {
+    fn sealing_keypair(&self) -> Option<SealingKeypair> {
+        // Read the DEK live (fail-closed once locked), derive the sealing keypair, and drop the DEK.
+        let dek = Zeroizing::new(self.residency.guard().as_ref()?.dek(self.ix));
+        Some(SealingKeypair::from_profile_dek(&dek))
     }
 }
 
@@ -509,6 +539,46 @@ mod tests {
         assert!(
             residency.summarize(&[], &policy).is_none(),
             "a locked residency summarizes nothing (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn the_sealing_key_is_deterministic_per_account_and_fails_closed_once_locked() {
+        // Same account → same sealing key across a "restart" (two independent unlocks of the same
+        // seed); a lock relocks the seal path (fail-closed, no snapshot escape).
+        const SEED: [u8; SEED_LEN] = [0x24; SEED_LEN];
+        let before = residency_from_seed(&SEED)
+            .sealing_keys(ProfileIx::ROOT)
+            .sealing_keypair()
+            .expect("unlocked")
+            .public_key();
+        let after = residency_from_seed(&SEED)
+            .sealing_keys(ProfileIx::ROOT)
+            .sealing_keypair()
+            .expect("unlocked")
+            .public_key();
+        assert_eq!(
+            before, after,
+            "same account reproduces the same sealing key"
+        );
+
+        let other = residency()
+            .sealing_keys(ProfileIx::ROOT)
+            .sealing_keypair()
+            .expect("unlocked")
+            .public_key();
+        assert_ne!(
+            before, other,
+            "a different account has a different sealing key"
+        );
+
+        let residency = residency_from_seed(&SEED);
+        let keys = residency.sealing_keys(ProfileIx::ROOT);
+        assert!(keys.sealing_keypair().is_some());
+        residency.lock_all();
+        assert!(
+            keys.sealing_keypair().is_none(),
+            "a locked residency derives no sealing key"
         );
     }
 

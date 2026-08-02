@@ -43,6 +43,24 @@ pub struct PairPrompt<'a> {
     pub ext_label: Option<&'a str>,
 }
 
+/// The identity-capability consent prompt (dig_ecosystem#1931): *"Let `<app>` use your DIG identity to
+/// encrypt and read messages?"*
+///
+/// This is a DIFFERENT sentence from the sign confirm (*"Let this app spend"*), and the user must see
+/// which one they are approving (the dig-chat SPEC §7.4). It is the pairing consent for a caller that
+/// requested the `identity.*` capabilities — a code-paired chat app gets THIS window, naming the power
+/// it is actually asking for, rather than the generic pairing window.
+#[derive(Debug, Clone, Copy)]
+pub struct IdentityGrantPrompt<'a> {
+    /// The app id requesting the capability (self-declared for a code-paired third party).
+    pub ext_id: &'a str,
+    /// An optional human label the app supplied for display.
+    pub ext_label: Option<&'a str>,
+    /// What the capability lets the app do, in the user's words — e.g. *"use your DIG identity to
+    /// encrypt and read messages"*. Named so the window says the power, never the method list.
+    pub purpose: &'a str,
+}
+
 /// The connect-confirm prompt: *"`<origin>` wants to connect to your DIG identity"* (§5.6.4).
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectPrompt<'a> {
@@ -290,6 +308,17 @@ pub trait NativeConfirmer: Send + Sync {
 
     /// Confirm signing the decoded transaction with the in-memory identity key.
     fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision;
+
+    /// Confirm granting the `identity.*` capability class to an app (dig_ecosystem#1931).
+    ///
+    /// A distinct window from [`confirm_pair`](Self::confirm_pair) because it authorizes a distinct
+    /// power — using the identity to encrypt/read messages, which is NOT the power to spend — and the
+    /// user must see which one they approve (dig-chat SPEC §7.4). Defaults to
+    /// [`ConfirmDecision::Unavailable`] so a backend that has not implemented it refuses to grant
+    /// rather than granting unguarded — the same fail-closed default the rest of this trait has.
+    fn confirm_identity_grant(&self, _prompt: &IdentityGrantPrompt<'_>) -> ConfirmDecision {
+        ConfirmDecision::Unavailable
+    }
 
     /// Confirm revealing a secret (the recovery phrase) on screen.
     ///

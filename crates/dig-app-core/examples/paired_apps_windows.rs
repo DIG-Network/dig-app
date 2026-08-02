@@ -10,7 +10,7 @@
 
 use dig_app_core::confirm::native_confirmer;
 use dig_app_core::paired_apps::{manage_paired_apps, offer_pairing_code, PairedApps};
-use dig_app_core::pairing::{PairedApp, PairingScope};
+use dig_app_core::pairing::{CapabilitySet, PairedApp, PairingScope};
 use dig_app_core::pairing_code::{now_epoch_secs, PairingCode, PairingCodeIssuer};
 use std::sync::Mutex;
 
@@ -49,6 +49,7 @@ fn main() {
                 ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah".into(),
                 label: Some("DIG for Chrome".into()),
                 scope: PairingScope::DigExtension,
+                capabilities: CapabilitySet::empty(),
                 paired_at: now - 86_400 * 12,
                 last_seen_at: Some(now - 300),
             },
@@ -57,6 +58,7 @@ fn main() {
                 ext_id: "com.example.someones-tool".into(),
                 label: Some("Someone's Tool".into()),
                 scope: PairingScope::ThirdParty,
+                capabilities: CapabilitySet::empty(),
                 paired_at: now - 7_200,
                 last_seen_at: None,
             },
@@ -65,6 +67,7 @@ fn main() {
                 ext_id: "com.example.publisher".into(),
                 label: None,
                 scope: PairingScope::ThirdParty,
+                capabilities: CapabilitySet::empty(),
                 paired_at: now - 600,
                 last_seen_at: Some(now - 30),
             },
