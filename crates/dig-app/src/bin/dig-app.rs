@@ -485,16 +485,21 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
     // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
-    let outcome = first_run_wizard(confirmer, || {
-        let presenter = WindowedPresenter::new(confirmer);
-        let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
-        let address = booted.residency.receiving_address()?.ok()?;
-        use dig_app_core::session_lock::SessionKeys;
-        // The account was created unlocked. Relock it here so the tray's ONE unlock path — the user
-        // typing the password they just chose — is also the first proof that password works.
-        booted.residency.lock_all();
-        Some(address)
-    });
+    let outcome = first_run_wizard(
+        confirmer,
+        || {
+            let presenter = WindowedPresenter::new(confirmer);
+            let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
+            first_run_address(booted)
+        },
+        // The IMPORT route (dig_ecosystem#1564): re-derive the account the user's typed phrase describes,
+        // through the SAME boot path as a create so the session is assembled identically. The wizard has
+        // already collected + validated the phrase; this closure only enrols from it.
+        |phrase| {
+            let booted = open_account(&dir, Seeding::Restore(phrase))?;
+            first_run_address(booted)
+        },
+    );
 
     match outcome {
         // Re-open through the normal unlock path so the session, signer, sealer and screen-lock guard
@@ -513,6 +518,18 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
             None
         }
     }
+}
+
+/// The receiving address of a freshly-enrolled first-run account, relocked so the tray's ONE unlock
+/// path proves the just-chosen password. Shared by the create and import routes so they end identically.
+#[cfg(feature = "tray")]
+fn first_run_address(booted: dig_app_core::account::boot::BootedAccount) -> Option<String> {
+    use dig_app_core::session_lock::SessionKeys;
+    let address = booted.residency.receiving_address()?.ok()?;
+    // The account was created/restored unlocked. Relock it here so the user typing the password they
+    // just chose is also the first proof that password works.
+    booted.residency.lock_all();
+    Some(address)
 }
 
 /// Whether this host's account is still sealed under the machine-generated password.
@@ -892,7 +909,8 @@ mod tray {
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::Replacement;
     use dig_app_core::account::journey::{
-        explain_missing_phrase, explain_unopenable, reveal_phrase,
+        back_up_phrase, explain_missing_phrase, explain_unopenable, reveal_phrase, BackupDelivery,
+        BackupOutcome, BackupTarget, PhraseBackupSink,
     };
     use dig_app_core::agent::{Agent, SharedStatus};
     use dig_app_core::confirm::{native_confirmer, InputStyle, NativeConfirmer};
@@ -1370,6 +1388,12 @@ mod tray {
                 }
             }
             TrayAction::ShowRecoveryPhrase => show_phrase(session.as_ref(), env, confirmer),
+            TrayAction::CopyRecoveryPhrase => {
+                back_up_phrase_to(session.as_ref(), env, confirmer, BackupTarget::Clipboard)
+            }
+            TrayAction::SaveRecoveryPhrase => {
+                back_up_phrase_to(session.as_ref(), env, confirmer, BackupTarget::File)
+            }
             TrayAction::SetUpTwoFactor => set_up_two_factor(session.as_ref(), env, confirmer),
             TrayAction::TurnOffTwoFactor => turn_off_two_factor(session.as_ref(), env, confirmer),
             TrayAction::ExplainUnopenable => {
@@ -1599,6 +1623,116 @@ mod tray {
                 "Your account is fine and still works. The log folder (in this menu) has the details.",
             ),
         }
+    }
+
+    /// Back up the account's recovery phrase to `target`, behind the reveal gate + a stark warning.
+    ///
+    /// The whole ordered ceremony — warn, authorize, decrypt, deliver — lives in
+    /// [`journey::back_up_phrase`], where it is unit-tested against a recording sink. This handler only
+    /// addresses the vault (like [`show_phrase`]) and supplies the platform egress via [`TrayBackupSink`].
+    fn back_up_phrase_to(
+        session: Option<&TraySession>,
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
+        target: BackupTarget,
+    ) {
+        // Same locked-account guard as `show_phrase`: an idle auto-lock between opening the menu and
+        // clicking the row lands here rather than revealing anything.
+        let vault = super::brand_dir(env)
+            .zip(session)
+            .and_then(|(dir, session)| vault_for(&dir, &session.residency));
+        let Some(vault) = vault else {
+            notify(
+                confirmer,
+                "DIG — Recovery phrase",
+                "Your DIG Account is locked.",
+                "Unlock it from this menu first, then try again.",
+            );
+            return;
+        };
+        match back_up_phrase(confirmer, &vault, target, &TrayBackupSink) {
+            // The ceremony draws its own success/failure windows; a refusal or a legacy account needs no
+            // extra one here (a refusal already saw the window it declined).
+            BackupOutcome::BackedUp | BackupOutcome::Refused | BackupOutcome::Unavailable => {}
+            BackupOutcome::NoPhraseStored => {
+                explain_missing_phrase(confirmer);
+            }
+        }
+    }
+
+    /// The platform egress for a phrase backup: the OS clipboard, or a plain `.txt` file in the user's
+    /// home directory. It handles the words for exactly one delivery and never logs or retains them.
+    struct TrayBackupSink;
+
+    impl PhraseBackupSink for TrayBackupSink {
+        fn deliver(&self, target: BackupTarget, words: &str) -> BackupDelivery {
+            match target {
+                BackupTarget::Clipboard => {
+                    if write_clipboard(words) {
+                        BackupDelivery::Delivered {
+                            where_to: "your clipboard".to_string(),
+                        }
+                    } else {
+                        BackupDelivery::Failed
+                    }
+                }
+                BackupTarget::File => save_phrase_file(words),
+            }
+        }
+    }
+
+    /// Write `words` to `dig-recovery-phrase.txt` in the user's home directory, owner-only, and report
+    /// the path. Deliberately a fixed, easy-to-find location rather than a native file picker (which
+    /// dig-app has no toolkit for); the user was warned this file is plaintext and told to delete it.
+    fn save_phrase_file(words: &str) -> BackupDelivery {
+        let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        else {
+            return BackupDelivery::Failed;
+        };
+        let path = std::path::Path::new(&home).join("dig-recovery-phrase.txt");
+        // The line is held in a zeroizing buffer so the plaintext seed is wiped from heap after the
+        // write — `format!` would leave a plain `String` recoverable from freed heap / a core dump /
+        // swap (dig_ecosystem#1564 security gate). A trailing newline keeps it a well-formed text line.
+        let mut line = zeroize::Zeroizing::new(String::with_capacity(words.len() + 1));
+        line.push_str(words);
+        line.push('\n');
+        match write_owner_only(&path, line.as_bytes()) {
+            Ok(()) => BackupDelivery::Delivered {
+                where_to: path.display().to_string(),
+            },
+            Err(_) => BackupDelivery::Failed,
+        }
+    }
+
+    /// Write `bytes` to `path`, owner-only, so the seed is NEVER on disk at a looser mode.
+    ///
+    /// The naive `fs::write` + later `chmod 0600` creates the file at the umask default (typically
+    /// 0644) and only tightens it AFTERWARDS — a window in which a colocated unprivileged process can
+    /// read the plaintext seed out of a home dir that is traversable by other local users
+    /// (dig_ecosystem#1564 security gate). Here the mode is set AT CREATION, and a pre-existing file is
+    /// re-tightened while it is still empty (truncated, before any secret byte is written).
+    #[cfg(unix)]
+    fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        // `mode()` only applies when the file is CREATED; a pre-existing (perhaps 0644) file is now
+        // open + truncated to zero length, so tighten it to 0600 while it still holds no secret.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        file.write_all(bytes)
+    }
+
+    /// Windows has no chmod equivalent; the file inherits the per-user `%USERPROFILE%` ACLs (readable
+    /// by the user + Administrators/SYSTEM only) — the documented Windows posture. Still written from
+    /// the caller's zeroizing buffer.
+    #[cfg(not(unix))]
+    fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::write(path, bytes)
     }
 
     /// Show EVERYTHING the tray knows, in full, in a window that can hold it.
@@ -1981,6 +2115,39 @@ mod tray {
                 );
                 None
             }
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    mod backup_egress_tests {
+        use super::write_owner_only;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// The recovery-phrase file is created owner-only (0600), never at the umask default then
+        /// tightened afterwards — there must be no window where the plaintext seed is world-readable
+        /// (dig_ecosystem#1564 security gate).
+        #[test]
+        fn a_new_seed_file_is_created_owner_only() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("dig-recovery-phrase.txt");
+            write_owner_only(&path, b"abandon ability able\n").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "seed file must be 0600, was {mode:o}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"abandon ability able\n");
+        }
+
+        /// A pre-existing looser-perms file is tightened to 0600 while still empty (truncated), BEFORE
+        /// the secret is written — so the seed never lands on disk at the old mode.
+        #[test]
+        fn a_preexisting_loose_file_is_tightened_before_the_secret_lands() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("dig-recovery-phrase.txt");
+            std::fs::write(&path, b"stale content").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_owner_only(&path, b"new secret\n").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "pre-existing file must end 0600, was {mode:o}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"new secret\n");
         }
     }
 }

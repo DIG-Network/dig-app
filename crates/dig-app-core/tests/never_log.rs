@@ -198,6 +198,28 @@ impl NativeConfirmer for ApproveAll {
     fn show_notice(&self, _p: &NoticePrompt<'_>) -> ConfirmDecision {
         ConfirmDecision::Approve
     }
+    fn confirm_claim(&self, _p: &ClaimPrompt<'_>) -> ConfirmDecision {
+        // Approve the backup's stark warning too, so the backup ceremony actually runs on this fixture.
+        ConfirmDecision::Approve
+    }
+}
+
+/// A backup sink that captures the words it is handed, so the never-log assertion covers the ceremony
+/// that carries the phrase to the clipboard/a file (dig_ecosystem#1564). It records, never logs.
+#[derive(Default)]
+struct CapturingSink(Mutex<Vec<String>>);
+
+impl dig_app_core::account::journey::PhraseBackupSink for CapturingSink {
+    fn deliver(
+        &self,
+        _target: dig_app_core::account::journey::BackupTarget,
+        words: &str,
+    ) -> dig_app_core::account::journey::BackupDelivery {
+        self.0.lock().unwrap().push(words.to_string());
+        dig_app_core::account::journey::BackupDelivery::Delivered {
+            where_to: "the test sink".to_string(),
+        }
+    }
 }
 
 /// **The recovery phrase must never reach a log record** — it is the whole account in 24 words, so a
@@ -223,6 +245,20 @@ fn the_recovery_phrase_never_reaches_a_log_record() {
         let vault = dig_app_core::account::boot::vault_for(dir.path(), &booted.residency)
             .expect("the account is unlocked");
         let _ = reveal_phrase(&ApproveAll, &vault);
+        // And the BACKUP ceremony, which carries the words out to the clipboard / a file — the newest
+        // path that handles them in the clear (dig_ecosystem#1564). It must not log them on the way.
+        let sink = CapturingSink::default();
+        let _ = dig_app_core::account::journey::back_up_phrase(
+            &ApproveAll,
+            &vault,
+            dig_app_core::account::journey::BackupTarget::Clipboard,
+            &sink,
+        );
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "the backup ceremony must actually have delivered the words, or it proves nothing"
+        );
         // And the display-once presenter, which formats the words for a window.
         let _ = WindowedPresenter::new(&ApproveAll).present_new_phrase(&RecoveryPhrase::generate());
 

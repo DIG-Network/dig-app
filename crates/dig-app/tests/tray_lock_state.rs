@@ -138,6 +138,14 @@ fn the_menu_after_a_real_lock_is_truthful_and_offers_a_way_back_in() {
         "a locked account must not offer to reveal its recovery phrase"
     );
     assert!(
+        !menu.is_enabled(TrayAction::CopyRecoveryPhrase),
+        "a locked account must not offer to back up (copy) its recovery phrase"
+    );
+    assert!(
+        !menu.is_enabled(TrayAction::SaveRecoveryPhrase),
+        "a locked account must not offer to back up (save) its recovery phrase"
+    );
+    assert!(
         !menu.is_enabled(TrayAction::LockNow),
         "there is nothing left to lock"
     );
