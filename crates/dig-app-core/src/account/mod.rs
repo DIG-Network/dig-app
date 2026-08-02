@@ -14,16 +14,18 @@
 //! - [`registry`] — the **Accounts registry**: which accounts exist, which ONE is the default account,
 //!   and which is currently active. Generic over the loaded-account handle so it needs no `dig-account`
 //!   type (it is specialized to `dig_account::AccountSession` on adoption).
-//! - `auth` (LATER, on dig-account adoption) — the harness [`dig_account::AuthProvider`] impl: the
-//!   OS-native factor-collection + signing-modal ceremony dig-account calls BACK through. dig-account
-//!   verifies the collected `AuthFactors`; the harness never draws its UI from inside the crate.
-//! - `session`/`signer` wiring (LATER) — bind `UnlockedAccount::identity_signer(ix)` (a
-//!   `SessionSigner`) into the engine→app sign callback, and stream `WalletEvent`s to notifications.
+//! - [`auth`] — the harness [`dig_account::AuthProvider`] impl: the OS-native factor-collection +
+//!   signing-modal ceremony dig-account calls BACK through. dig-account verifies the collected
+//!   `AuthFactors`; the harness never draws its UI from inside the crate.
+//! - [`boot`]/[`residency`] wiring — bind `UnlockedAccount::identity_signer(ix)` (a `SessionSigner`)
+//!   into the engine→app sign callback, and stream `WalletEvent`s to notifications, holding the live
+//!   account in the lockable [`residency::AccountResidency`].
 //!
-//! # Strangler discipline (#1509)
+//! # This is the live custody path (#1530)
 //!
-//! Built ALONGSIDE the existing modules; no consumer is wired to it yet, so the crate stays green at
-//! every commit. The mechanical switchover is a later pass.
+//! The switchover has shipped: [`boot`] is the production custody boot path, the app enrols-or-unlocks
+//! the master seed through it, and the retired keystore no longer holds custody. The `dig-account`
+//! object model + crypto is fully adopted here, and consumers sign through [`residency::AccountResidency`].
 
 pub mod auth;
 pub mod boot;

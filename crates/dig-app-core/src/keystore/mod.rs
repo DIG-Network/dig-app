@@ -1,5 +1,4 @@
-//! The OS credential-store seam — the zero-prompt source of the master-HD account's unlock password
-//! (security-critical).
+//! The OS credential-store seam — a LEGACY, migration-only credential abstraction (security-critical).
 //!
 //! dig-app is the sole holder of the user's private keys (§2 of `SPEC.md`); the identity-agnostic
 //! engine never sees them. The at-rest crypto (DIGOP1 sealing, KDF, key generation, the master-HD
@@ -7,17 +6,15 @@
 //! [`AccountResidency`](crate::account::residency::AccountResidency). This module owns only the piece
 //! that is inherently app-side: the [`CredentialStore`] seam over the platform credential store.
 //!
-//! The credential store is a safe custody primary only where it gates access per-application, so its
-//! use is PLATFORM-DEPENDENT:
-//!
-//! - **Windows / macOS — the OS credential store is the custody primary** (Windows Credential Manager
-//!   · macOS Keychain). It holds the account's random unlock password; the login session releases it
-//!   with zero prompt, and the store gates access per-application. [`OsCredentialStore`] is the entry
-//!   point; the master seed itself is sealed (DIGOP1) in a per-user file backend under that password.
-//! - **Linux — deferred.** The kernel keyutils session keyring is readable by any same-UID process
-//!   (no per-app ACL) and non-persistent, so there is no zero-prompt custody primary; the account boot
-//!   defers there ([`boot_residency`](crate::account::boot::boot_residency)) until a passphrase UX
-//!   lands.
+//! **This store is no longer a custody primary.** The shipped custody root is a master seed sealed
+//! (DIGOP1 / Argon2id) in a per-user file backend, opened by a password the USER types at unlock —
+//! never persisted anywhere (dig_ecosystem#1817). The credential store held a machine-generated
+//! password under the earlier zero-prompt model, which is retired precisely because any code running
+//! as the logged-in user could read it. [`OsCredentialStore`] (Windows Credential Manager · macOS
+//! Keychain) is now reached only to MIGRATE a pre-#1817 account off that machine password
+//! ([`migration`](crate::account::migration)) and to clean up a leftover entry on discard; see the
+//! `credential` module docs for the full posture. Linux never used it and its account boot defers
+//! until a passphrase unlock UX lands (dig_ecosystem#962).
 
 mod credential;
 
