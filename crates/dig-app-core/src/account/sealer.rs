@@ -89,7 +89,7 @@ mod tests {
     use super::*;
     use dig_account::{profile_dek, ProfileIx};
     use dig_keystore::{BackendKey, MemoryBackend};
-    use dig_session::{Password as SessionPassword, Session, SEED_LEN};
+    use dig_session::{Password as SessionPassword, Session, ENTROPY_LEN};
     use std::sync::Arc as StdArc;
 
     const DID: &str = "did:chia:account-sealer-test";
@@ -142,7 +142,7 @@ mod tests {
     /// isolation flows straight from the master-seed DEK derivation.
     #[test]
     fn honours_the_dig_account_master_seed_dek_contract() {
-        const SEED: [u8; SEED_LEN] = [0x3C; SEED_LEN];
+        const SEED: [u8; ENTROPY_LEN] = [0x3C; ENTROPY_LEN];
         let seed = StdArc::new(
             Session::enroll_master_seed(
                 StdArc::new(MemoryBackend::new()),

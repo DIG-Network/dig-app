@@ -501,6 +501,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if 1.0.4",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+dependencies = [
+ "aead",
+ "chacha20",
+ "cipher",
+ "poly1305",
+ "zeroize",
+]
+
+[[package]]
 name = "chia"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -947,6 +971,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common",
  "inout",
+ "zeroize",
 ]
 
 [[package]]
@@ -1291,6 +1316,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
 
 [[package]]
+name = "curve25519-dalek"
+version = "4.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
+dependencies = [
+ "cfg-if 1.0.4",
+ "cpufeatures",
+ "curve25519-dalek-derive",
+ "fiat-crypto",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek-derive"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1374,9 +1425,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.1.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a644b1187c53c8a9ae804a842627a77116bcd5b2b3074513e8635d50fa90471"
+checksum = "53adee5b828d9446c8cd6cc707e34a177266b3dd19d83387950e1e35d528a45b"
 dependencies = [
  "async-trait",
  "chia-bls 0.26.0",
@@ -1384,7 +1435,7 @@ dependencies = [
  "chia-puzzle-types",
  "chia-wallet-sdk",
  "clvmr",
- "dig-constants 0.7.0",
+ "dig-constants 0.9.0",
  "dig-identity 0.5.0",
  "dig-ipc-protocol",
  "dig-keystore",
@@ -1393,12 +1444,13 @@ dependencies = [
  "dig-wallet-backend",
  "serde",
  "thiserror 2.0.18",
+ "x25519-dalek",
  "zeroize",
 ]
 
 [[package]]
 name = "dig-app"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1414,12 +1466,13 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "async-trait",
  "base64",
  "bip39",
  "block2 0.6.2",
+ "chacha20poly1305",
  "chia-bls 0.26.0",
  "chia-protocol",
  "chia-puzzle-types",
@@ -1432,7 +1485,7 @@ dependencies = [
  "clvm-traits",
  "clvmr",
  "dig-account",
- "dig-constants 0.8.0",
+ "dig-constants 0.9.0",
  "dig-events-protocol",
  "dig-identity 0.5.0",
  "dig-ipc-protocol",
@@ -1467,6 +1520,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -1545,9 +1599,9 @@ dependencies = [
 
 [[package]]
 name = "dig-constants"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6c8b18e4c82af7bd809037195f3c8af5c58fe6cbe4387ab4d2defbc9790c062"
+checksum = "194aefd3f9ee813b10b43322c0381dbab55ac6d8cb99bc6c3782e53d60405dd5"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -1725,10 +1779,11 @@ dependencies = [
 
 [[package]]
 name = "dig-session"
-version = "0.4.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40faf7bcc2cad224200ee5eff2f716dd01fa8e0940f8b1e1dadb9e031cee7fe4"
+checksum = "ecb21cf421c5f2b1d6e43b35592f71767c72526b4ccf5e7552352c0162ed4ded"
 dependencies = [
+ "bip39",
  "dig-constants 0.7.0",
  "dig-identity 0.5.0",
  "dig-keystore",
@@ -1859,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "5.5.0"
+version = "5.6.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -2099,6 +2154,12 @@ dependencies = [
  "rand_core",
  "subtle",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "field-offset"
@@ -3828,6 +3889,17 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide",
+]
+
+[[package]]
+name = "poly1305"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
+dependencies = [
+ "cpufeatures",
+ "opaque-debug",
+ "universal-hash",
 ]
 
 [[package]]
@@ -5730,6 +5802,18 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]

@@ -184,14 +184,15 @@ mod tests {
         SpendSummary, UnlockRequest, Vault, WalletKey,
     };
     use dig_keystore::MemoryBackend;
-    use dig_session::{Password, SEED_LEN};
+    use dig_session::{Password, ENTROPY_LEN};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// A fixed 32-byte master seed so the test's independently-built coin spend (via dig-account's
-    /// [`WalletKey`]) and the residency's dig-account money signer derive the SAME canonical wallet
-    /// key at [`ProfileIx::ROOT`].
-    const SEED: [u8; SEED_LEN] = [0x7c; SEED_LEN];
+    /// A fixed 32-byte entropy that gets BIP-39-expanded before key derivation so the test's
+    /// independently-built coin spend (via dig-account's [`WalletKey`]) and the residency's
+    /// dig-account money signer derive the SAME canonical wallet key at [`ProfileIx::ROOT`].
+    /// This matches dig-account 0.3's seed expansion via the `bip39` crate.
+    const SEED: [u8; ENTROPY_LEN] = [0x7c; ENTROPY_LEN];
 
     /// A residency over a fresh account enrolled at [`SEED`].
     fn residency_at_seed() -> AccountResidency {
@@ -211,7 +212,10 @@ mod tests {
     /// takes, so dig-account's money signer can actually verify + sign it. `native_out` mojos leave to
     /// a recipient; the remainder (minus `fee`) returns as change to the wallet.
     fn real_send(native_out: u64, fee: u64) -> Vec<CoinSpend> {
-        let key = WalletKey::from_seed(&SEED);
+        let expanded = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &SEED)
+            .expect("32 bytes is valid 24-word BIP-39 entropy")
+            .to_seed("");
+        let key = WalletKey::from_seed(&expanded);
         let wallet_ph = key.puzzle_hash();
         let mut ctx = SpendContext::new();
         let coin = Coin::new(Bytes32::new([1u8; 32]), wallet_ph, 1_000_000);

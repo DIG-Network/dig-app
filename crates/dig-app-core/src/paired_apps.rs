@@ -401,6 +401,7 @@ mod tests {
             ext_id: format!("com.example.{id}"),
             label: label.map(str::to_string),
             scope: PairingScope::ThirdParty,
+            capabilities: Default::default(),
             paired_at,
             last_seen_at: last_seen,
         }
@@ -713,6 +714,7 @@ mod tests {
     fn the_page_says_what_each_app_may_do_and_when_it_last_spoke() {
         let listed = vec![PairedApp {
             scope: PairingScope::ThirdParty,
+            capabilities: Default::default(),
             last_seen_at: Some(NOW - 7_200),
             ..app("tool", Some("A Tool"), NOW - 172_800 * 2, None)
         }];

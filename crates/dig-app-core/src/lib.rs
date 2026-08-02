@@ -55,6 +55,7 @@ pub mod confirm;
 mod constant_time;
 pub mod control;
 pub mod decode;
+pub mod digchat;
 pub mod engine;
 pub mod environment;
 pub mod events;

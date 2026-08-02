@@ -11,7 +11,7 @@
 //!
 //! # The entropy IS the master seed (a deliberate, load-bearing choice)
 //!
-//! [`dig_session::SEED_LEN`] is 32, and a 24-word BIP-39 phrase carries **exactly 32 bytes** of
+//! [`dig_session::ENTROPY_LEN`] is 32, and a 24-word BIP-39 phrase carries **exactly 32 bytes** of
 //! entropy. This module therefore maps a phrase to a master seed by taking its entropy verbatim, which
 //! makes phrase ⇄ seed a *lossless bijection*: [`RecoveryPhrase::master_seed`] and
 //! [`RecoveryPhrase::from_master_seed`] round-trip byte-identically, so a restore reaches the same
@@ -20,7 +20,7 @@
 //! The consequence, stated plainly because it is a real trade-off: this is **not** the standard Chia
 //! mnemonic derivation. A Chia wallet (Sage, chia-blockchain) maps a phrase to a key through the
 //! 64-byte PBKDF2 seed of BIP-39 §5, so the SAME phrase yields a DIFFERENT wallet address in Sage than
-//! it does here. Adopting the Chia path would require widening `SEED_LEN` to 64 in `dig-session` (a
+//! it does here. Adopting the Chia path would require widening `ENTROPY_LEN` to 64 in `dig-session` (a
 //! `10-primitives` crate), cascading through `dig-account` and `dig-wallet-backend`, and would break
 //! at-rest compatibility for every already-enrolled account — a cross-crate breaking change tracked
 //! separately, not something to fork custody over here.
@@ -38,11 +38,11 @@
 use std::fmt;
 
 use bip39::{Language, Mnemonic};
-use dig_session::SEED_LEN;
+use dig_session::ENTROPY_LEN;
 use zeroize::Zeroizing;
 
 /// The number of words in a DIG recovery phrase. 24 words is the 256-bit BIP-39 strength, and its
-/// 32-byte entropy is exactly [`SEED_LEN`] — see the module docs for why that identity matters.
+/// 32-byte entropy is exactly [`ENTROPY_LEN`] — see the module docs for why that identity matters.
 pub const PHRASE_WORDS: usize = 24;
 
 /// Why a recovery phrase could not be accepted.
@@ -130,7 +130,7 @@ impl RecoveryPhrase {
     /// # Panics
     ///
     /// Never: 32 bytes is a valid BIP-39 entropy length.
-    pub fn from_master_seed(seed: &[u8; SEED_LEN]) -> Self {
+    pub fn from_master_seed(seed: &[u8; ENTROPY_LEN]) -> Self {
         let mnemonic = Mnemonic::from_entropy_in(Language::English, seed)
             .expect("32 bytes is a valid BIP-39 entropy length");
         Self::from_mnemonic(&mnemonic)
@@ -142,14 +142,14 @@ impl RecoveryPhrase {
     /// # Panics
     ///
     /// Never: every `RecoveryPhrase` is [`PHRASE_WORDS`] words by construction, whose entropy is
-    /// exactly [`SEED_LEN`] bytes.
-    pub fn master_seed(&self) -> Zeroizing<[u8; SEED_LEN]> {
+    /// exactly [`ENTROPY_LEN`] bytes.
+    pub fn master_seed(&self) -> Zeroizing<[u8; ENTROPY_LEN]> {
         let mnemonic = Mnemonic::parse_in_normalized(Language::English, &self.words)
             .expect("a RecoveryPhrase is valid BIP-39 by construction");
         let (entropy, len) = mnemonic.to_entropy_array();
-        debug_assert_eq!(len, SEED_LEN, "24 words carry exactly SEED_LEN bytes");
-        let mut seed = Zeroizing::new([0u8; SEED_LEN]);
-        seed.copy_from_slice(&entropy[..SEED_LEN]);
+        debug_assert_eq!(len, ENTROPY_LEN, "24 words carry exactly ENTROPY_LEN bytes");
+        let mut seed = Zeroizing::new([0u8; ENTROPY_LEN]);
+        seed.copy_from_slice(&entropy[..ENTROPY_LEN]);
         seed
     }
 
@@ -326,7 +326,7 @@ mod tests {
     fn a_legacy_csprng_seed_renders_as_a_phrase_that_restores_it() {
         // A fixed, non-uniform pattern (not all-zero, not all-same) so a byte-order or padding bug in
         // the entropy mapping shows up as a mismatch rather than hiding behind a symmetric value.
-        let legacy: [u8; SEED_LEN] =
+        let legacy: [u8; ENTROPY_LEN] =
             std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
 
         let phrase = RecoveryPhrase::from_master_seed(&legacy);

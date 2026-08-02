@@ -41,12 +41,12 @@ use dig_account::{
 };
 use dig_ipc_protocol::signer::SessionSigner;
 use dig_keystore::{BackendKey, MemoryBackend};
-use dig_session::{Password, Session, SEED_LEN};
+use dig_session::{Password, Session, ENTROPY_LEN};
 
 /// A fixed master seed so the independently-derived secrets we search the wire for match exactly the
 /// account's live key material at [`ProfileIx::ROOT`] (the byte-contract in
 /// `wallet_key_byte_contract.rs`).
-const SEED: [u8; SEED_LEN] = [0x5c; SEED_LEN];
+const SEED: [u8; ENTROPY_LEN] = [0x5c; ENTROPY_LEN];
 
 /// A [`WalletEngine`] that RECORDS every serialized request byte it would place on the IPC wire, so a
 /// test can inspect exactly what crosses the dig-app → dig-node boundary. It never sees a key — the

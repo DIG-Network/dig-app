@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use dig_account::{AccountId, AccountSession, AccountStore, ProfileIx};
 use dig_keystore::{KdfParams, MemoryBackend};
-use dig_session::{Password, SEED_LEN};
+use dig_session::{Password, ENTROPY_LEN};
 use sha2::{Digest, Sha256};
 
 use crate::account::residency::AccountResidency;
@@ -34,7 +34,7 @@ pub fn test_sealer(label: &str) -> AccountSealer {
 /// backend); each call is an independent account with its own key material.
 pub fn test_residency() -> AccountResidency {
     use rand_core::RngCore;
-    let mut seed = [0u8; SEED_LEN];
+    let mut seed = [0u8; ENTROPY_LEN];
     rand_core::OsRng.fill_bytes(&mut seed);
     let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
     let unlocked = AccountSession::enroll(

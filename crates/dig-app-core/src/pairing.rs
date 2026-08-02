@@ -15,7 +15,7 @@
 //! still binds every sign (§5.6.3). This module owns the MAC construction, the monotonic-nonce
 //! ledger, and the sealed pairing store; it holds no signing key and makes no policy decision.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -166,6 +166,114 @@ impl PairingScope {
     }
 }
 
+/// One capability from the `identity.*` class (`SPEC.md` §5.6, dig_ecosystem#1931/#1913).
+///
+/// # Why this is a SEPARATE axis from [`PairingScope`]
+///
+/// [`PairingScope`] is the MONEY gate: it decides `sign.request`, the one method that reaches the
+/// spend/identity signing key, and only a pinned DIG extension holds it. The `identity.*` class is a
+/// DIFFERENT power — sealing and unsealing end-to-end-encrypted messages (dig-chat) — that a
+/// code-paired third party legitimately needs and that must NEVER imply the money power. So it is
+/// granted per-pairing as an explicit set, checked independently of the scope. A pairing can hold
+/// every identity capability and still be refused `sign.request`; that separation is the whole point
+/// of #1931 (dig-chat reaches `connected` without ever touching the money boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Capability {
+    /// `identity.attest` — publish the profile's DID + X25519 sealing public key + its attestation.
+    #[serde(rename = "identity.attest")]
+    IdentityAttest,
+    /// `identity.seal` — seal a plaintext into a `DIGCHAT1` envelope to a recipient.
+    #[serde(rename = "identity.seal")]
+    IdentitySeal,
+    /// `identity.unseal` — open a `DIGCHAT1` envelope addressed to this profile.
+    #[serde(rename = "identity.unseal")]
+    IdentityUnseal,
+}
+
+impl Capability {
+    /// The stable wire method name this capability gates.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::IdentityAttest => "identity.attest",
+            Self::IdentitySeal => "identity.seal",
+            Self::IdentityUnseal => "identity.unseal",
+        }
+    }
+
+    /// Parse a wire method name into its [`Capability`], or `None` if it names no known capability.
+    pub fn from_wire(method: &str) -> Option<Self> {
+        match method {
+            "identity.attest" => Some(Self::IdentityAttest),
+            "identity.seal" => Some(Self::IdentitySeal),
+            "identity.unseal" => Some(Self::IdentityUnseal),
+            _ => None,
+        }
+    }
+
+    /// Whether `method` names a capability in the identity class. Used by the dispatcher to split a
+    /// KNOWN-but-ungranted identity method (→ `CAP_NOT_GRANTED`) from an UNKNOWN one (→ `-32601`).
+    pub fn is_identity_method(method: &str) -> bool {
+        Self::from_wire(method).is_some()
+    }
+}
+
+/// The set of `identity.*` capabilities a pairing has been granted.
+///
+/// Stored on the sealed pairing record and `#[serde(default)]` there, so a record sealed before this
+/// class existed opens as the EMPTY set — which refuses every `identity.*` method, exactly the safe
+/// default (§5.1 back-compat). A `BTreeSet` so the serialized order is deterministic (the sealed
+/// bytes must be stable) and membership is a set, not a list with duplicates.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CapabilitySet(BTreeSet<Capability>);
+
+impl CapabilitySet {
+    /// The set of capabilities to grant for a set of REQUESTED wire names (as an app sends in
+    /// `pair.begin`): every name that maps to a known [`Capability`] is granted, unknown names are
+    /// dropped. This is the grant policy — the identity class carries no money power, so a paired app
+    /// that asks for its identity capabilities is granted the ones it names.
+    pub fn from_requested<S: AsRef<str>>(requested: &[S]) -> Self {
+        Self(
+            requested
+                .iter()
+                .filter_map(|name| Capability::from_wire(name.as_ref()))
+                .collect(),
+        )
+    }
+
+    /// Whether this set grants the capability that gates `method`. `false` for a non-identity method
+    /// (those are gated elsewhere) and for an identity method not in the set.
+    pub fn permits_method(&self, method: &str) -> bool {
+        Capability::from_wire(method).is_some_and(|cap| self.0.contains(&cap))
+    }
+
+    /// The granted wire names, sorted, for the `pair.begin` `granted_capabilities` echo (§5.6.3, D5).
+    pub fn wire_names(&self) -> Vec<&'static str> {
+        self.0.iter().map(|cap| cap.wire_name()).collect()
+    }
+
+    /// Whether the set is empty (grants no identity capability).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether the set contains `capability`.
+    pub fn contains(&self, capability: Capability) -> bool {
+        self.0.contains(&capability)
+    }
+}
+
+/// What an authenticated pairing may do: its money [`PairingScope`] AND its granted identity
+/// [`CapabilitySet`]. Returned by [`PairingStore::authority_of`] so the dispatcher checks BOTH axes
+/// against the pairing the frame actually authenticated as — never against anything the frame claimed.
+#[derive(Debug, Clone)]
+pub struct PairingAuthority {
+    /// The money gate (whether `sign.request` is permitted).
+    pub scope: PairingScope,
+    /// The granted `identity.*` capabilities.
+    pub capabilities: CapabilitySet,
+}
+
 /// A pairing record — the at-rest form persisted DIGOP1-sealed per-profile (§5.6.3). The
 /// `channel_secret` is the only sensitive field; it is base64-encoded in the serialized form and the
 /// whole record is sealed before it ever touches disk, so the base64 is never at rest in the clear.
@@ -189,6 +297,11 @@ pub struct PairingRecord {
     /// What this pairing may do.
     #[serde(default)]
     pub scope: PairingScope,
+    /// The granted `identity.*` capabilities (dig_ecosystem#1931). `serde(default)` so a record
+    /// sealed before the identity class existed opens as the EMPTY set — refusing every `identity.*`
+    /// method, the safe default (§5.1 back-compat).
+    #[serde(default)]
+    pub granted_capabilities: CapabilitySet,
     /// The 32-byte channel secret, base64-encoded for the sealed serialization. Zeroized on drop (the
     /// record is transient — built, sealed, then dropped — but the base64 secret must not linger in
     /// freed heap), matching the identity-key at-rest handling.
@@ -233,7 +346,7 @@ pub struct PairingOutcome {
 
 /// What to pair — gathered into one value so the pinned and code-paired paths cannot drift into
 /// different argument orders at their two call sites.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NewPairing<'a> {
     /// The caller's extension/app id. Authenticated by the `Origin` guard for a browser extension;
     /// for a native third-party client it is a self-declared name, which is why such a caller must
@@ -243,25 +356,39 @@ pub struct NewPairing<'a> {
     pub label: Option<&'a str>,
     /// What the pairing may do.
     pub scope: PairingScope,
+    /// The `identity.*` capabilities granted at pair time (dig_ecosystem#1931). Independent of
+    /// `scope` — an identity-only pairing carries capabilities with a non-signing scope.
+    pub capabilities: CapabilitySet,
 }
 
 impl<'a> NewPairing<'a> {
-    /// A pairing for a PINNED DIG extension — the full channel.
+    /// A pairing for a PINNED DIG extension — the full channel, no identity capabilities by default.
     pub fn pinned(ext_id: &'a str, label: Option<&'a str>) -> Self {
         Self {
             ext_id,
             label,
             scope: PairingScope::DigExtension,
+            capabilities: CapabilitySet::default(),
         }
     }
 
-    /// A pairing for a code-paired third party — the control plane only.
+    /// A pairing for a code-paired third party — the control plane only, no identity capabilities by
+    /// default.
     pub fn third_party(ext_id: &'a str, label: Option<&'a str>) -> Self {
         Self {
             ext_id,
             label,
             scope: PairingScope::ThirdParty,
+            capabilities: CapabilitySet::default(),
         }
+    }
+
+    /// Grant `capabilities` to this pairing (the `identity.*` class, dig_ecosystem#1931). Chainable
+    /// on either constructor, so a pinned extension OR a code-paired app can hold identity
+    /// capabilities without changing its money `scope`.
+    pub fn with_capabilities(mut self, capabilities: CapabilitySet) -> Self {
+        self.capabilities = capabilities;
+        self
     }
 }
 
@@ -277,6 +404,8 @@ pub struct PairedApp {
     pub label: Option<String>,
     /// What it is allowed to do.
     pub scope: PairingScope,
+    /// The `identity.*` capabilities it was granted (dig_ecosystem#1931).
+    pub capabilities: CapabilitySet,
     /// Unix-epoch seconds when the user approved the pairing.
     pub paired_at: u64,
     /// Unix-epoch seconds of the last frame this pairing successfully authenticated, or `None` if it
@@ -295,6 +424,7 @@ struct LivePairing {
     ext_id: String,
     label: Option<String>,
     scope: PairingScope,
+    capabilities: CapabilitySet,
     paired_at: u64,
     last_seen_at: Option<u64>,
     /// The channel secret, held in a [`Zeroizing`] buffer so it is scrubbed from memory when the
@@ -347,6 +477,7 @@ impl<S: ProfileSealer> PairingStore<S> {
             ext_id: request.ext_id.to_string(),
             label: request.label.map(str::to_string),
             scope: request.scope,
+            granted_capabilities: request.capabilities.clone(),
             channel_secret_b64: BASE64.encode(*channel_secret),
             created_at,
         };
@@ -364,6 +495,7 @@ impl<S: ProfileSealer> PairingStore<S> {
                 ext_id: request.ext_id.to_string(),
                 label: request.label.map(str::to_string),
                 scope: request.scope,
+                capabilities: request.capabilities.clone(),
                 paired_at: created_at,
                 last_seen_at: None,
                 channel_secret: Zeroizing::new(*channel_secret),
@@ -396,6 +528,7 @@ impl<S: ProfileSealer> PairingStore<S> {
                 ext_id: record.ext_id.clone(),
                 label: record.label.clone(),
                 scope: record.scope,
+                capabilities: record.granted_capabilities.clone(),
                 paired_at: record.created_at,
                 // Not "never seen" — "not seen SINCE THIS BOOT", which is what the field means and
                 // what the management window says.
@@ -485,6 +618,16 @@ impl<S: ProfileSealer> PairingStore<S> {
         self.lock().get(pairing_id).map(|p| p.scope)
     }
 
+    /// The full authority (money [`PairingScope`] + granted [`CapabilitySet`]) for `pairing_id`, or
+    /// `None` if it is not paired. The dispatch layer consults this AFTER authenticating a frame, so
+    /// neither the money gate nor the capability check can be reached by a caller that failed the MAC.
+    pub fn authority_of(&self, pairing_id: &str) -> Option<PairingAuthority> {
+        self.lock().get(pairing_id).map(|p| PairingAuthority {
+            scope: p.scope,
+            capabilities: p.capabilities.clone(),
+        })
+    }
+
     /// Record that `pairing_id` was heard from at `now` — the "last seen" the management window shows.
     ///
     /// Called only after a frame AUTHENTICATES, so an unpaired or badly-MAC'd frame can never move a
@@ -508,6 +651,7 @@ impl<S: ProfileSealer> PairingStore<S> {
                 ext_id: live.ext_id.clone(),
                 label: live.label.clone(),
                 scope: live.scope,
+                capabilities: live.capabilities.clone(),
                 paired_at: live.paired_at,
                 last_seen_at: live.last_seen_at,
             })

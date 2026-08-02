@@ -21,7 +21,7 @@ use dig_ipc_protocol::{
     OsEntropy, ProfileAttachment, SigningPublicKey,
 };
 use dig_keystore::MemoryBackend;
-use dig_session::{Password, SEED_LEN};
+use dig_session::{Password, ENTROPY_LEN};
 
 const DID: &str = "did:chia:testprofile1211";
 
@@ -29,7 +29,7 @@ const DID: &str = "did:chia:testprofile1211";
 /// call), exactly the signer the loopback router signs with in production.
 fn app_signer() -> ResidencySigner {
     use rand_core::RngCore;
-    let mut seed = [0u8; SEED_LEN];
+    let mut seed = [0u8; ENTROPY_LEN];
     rand_core::OsRng.fill_bytes(&mut seed);
     let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
     let unlocked = AccountSession::enroll(
