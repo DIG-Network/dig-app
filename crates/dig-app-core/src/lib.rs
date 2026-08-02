@@ -52,6 +52,7 @@
 
 pub mod account;
 pub mod agent;
+pub mod cache;
 pub mod config;
 pub mod confirm;
 mod constant_time;
