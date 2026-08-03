@@ -72,9 +72,24 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 /// See the module docs for why the DACL is applied both at creation and to the open handle, and
 /// [`stores_acls`] for the one volume where there is no DACL to apply.
 pub(super) fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_under_dacl(path, bytes, stores_acls)
+}
+
+/// [`write_owner_only`], with the volume-capability question injected.
+///
+/// The seam exists so a test can drive the `false` branch on an ordinary NTFS disk — there is no
+/// FAT volume on a CI runner to reach it with otherwise, and an untested fail-open branch in
+/// custody code is exactly the kind that rots quietly. Driving it `false` also isolates the
+/// creation descriptor: with `SetSecurityInfo` skipped, a new file is protected by `CreateFileW`'s
+/// descriptor ALONE, so a test in that mode fails if the descriptor is ever dropped.
+fn write_under_dacl(
+    path: &Path,
+    bytes: &[u8],
+    volume_stores_acls: impl Fn(&File) -> io::Result<bool>,
+) -> io::Result<()> {
     let dacl = OwnerOnlyDacl::for_current_user()?;
     let mut file = create_truncated(path, &dacl)?;
-    if stores_acls(&file)? {
+    if volume_stores_acls(&file)? {
         dacl.apply_to(&file)?;
     }
     file.write_all(bytes)
@@ -148,6 +163,16 @@ impl OwnerOnlyDacl {
         // No old ACL to merge with, so the result holds this single entry and nothing else.
         let mut acl: *mut ACL = std::ptr::null_mut();
         check(unsafe { SetEntriesInAclW(Some(&[entry]), None, &mut acl) })?;
+
+        // A NULL DACL does not mean "no access", it means "access to EVERYONE" — so a success that
+        // somehow handed back nothing would turn this whole type into the opposite of itself.
+        // Unreachable with a fixed one-entry list, and checked anyway, because the fail-closed
+        // property should hold structurally rather than rest on an undocumented guarantee.
+        if acl.is_null() {
+            return Err(io::Error::other(
+                "the access-control list could not be built",
+            ));
+        }
         Ok(Self { acl })
     }
 
@@ -481,5 +506,54 @@ pub(super) mod inspect {
     /// SYSTEM — the other principal an inherited profile ACL hands the file to.
     pub(in crate::secret_file) fn system() -> io::Result<Sid> {
         well_known(WinLocalSystemSid)
+    }
+
+    /// Run the real volume probe against an open file, so a test can check what it reports.
+    pub(in crate::secret_file) fn probe_volume_of(file: &std::fs::File) -> io::Result<bool> {
+        super::stores_acls(file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inspect::{everyone, probe_volume_of, FileSecurity};
+    use super::write_under_dacl;
+
+    /// On a volume that CANNOT hold an ACL the write still succeeds — refusing would fail the backup
+    /// on a FAT/exFAT USB stick, which is the destination the save picker exists to enable.
+    ///
+    /// It also isolates the creation descriptor. With `SetSecurityInfo` skipped, the only thing that
+    /// can protect a NEW file is `CreateFileW`'s own security descriptor, so this test goes red if
+    /// that descriptor is ever dropped — which no other test here notices.
+    #[test]
+    fn a_volume_without_acls_still_gets_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+
+        write_under_dacl(&path, b"redacted\n", |_| Ok(false)).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"redacted\n");
+        // This directory is NTFS, so the creation descriptor really did apply, and it must have been
+        // the owner-only one. On a true FAT volume there would be no ACL here to read at all.
+        let security = FileSecurity::of(&path).unwrap();
+        assert_eq!(
+            security.rights_of(&everyone().unwrap()).unwrap(),
+            0,
+            "the creation descriptor alone must already exclude Everyone"
+        );
+        assert!(security.dacl().unwrap().protected);
+    }
+
+    /// The probe tells the truth about the volume these tests run on — so the fail-open branch above
+    /// is genuinely NOT the path production takes here, and the permission tests mean what they say.
+    #[test]
+    fn an_ordinary_disk_reports_that_it_stores_acls() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = std::fs::File::create(dir.path().join("probe")).unwrap();
+
+        assert!(
+            probe_volume_of(&probe).unwrap(),
+            "the test volume must support ACLs, or the permission tests prove nothing"
+        );
     }
 }

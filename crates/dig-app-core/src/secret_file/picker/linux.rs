@@ -24,9 +24,13 @@ pub(super) fn ask(request: &SaveFileRequest<'_>) -> PickedPath {
 
     for helper in [Helper::Zenity, Helper::Kdialog] {
         match helper.ask(request.title, &suggested) {
-            // Not installed. Try the other one before giving up on the desktop entirely.
-            None => continue,
-            Some(answer) => return answer,
+            // A real answer from the user. Done.
+            Some(answer @ (PickedPath::Chosen(_) | PickedPath::Cancelled)) => return answer,
+            // This helper could not ask — it is not installed, it could not reach the display, or
+            // it rejected an option a newer version renamed. Try the other one before giving up:
+            // returning here would send the seed to the fixed fallback path, which is the outcome
+            // this whole feature exists to avoid, on a desktop that may well have the other helper.
+            Some(PickedPath::Unavailable) | None => continue,
         }
     }
     PickedPath::Unavailable
