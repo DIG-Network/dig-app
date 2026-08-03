@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "5.12.3"
+version = "5.14.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -213,6 +213,34 @@ chia-sdk-utils = "0.30"
 # AppIndicator/GTK menus rather than an unused extra; see `README.md`.
 tray-icon = { version = "0.19", default-features = false }
 tao = "0.30"
+# The branded prompt GUI (dig_ecosystem#2038) — the ONE renderer every DIG consent/notice/input
+# window is drawn with, on all three platforms, replacing the Win32 GDI dialog, the macOS `NSAlert`
+# and the Linux `zenity`/`kdialog` subprocess.
+#
+# `egui` was chosen over a webview (wry/Tauri, which dig-installer's GUI uses) on a MEASURED
+# comparison, not a preference — the numbers are in #2038. Two properties decided it:
+#
+#   1. **The injection class cannot occur.** Every value these windows display is
+#      attacker-influenced, and `egui::Painter::text` rasterises glyphs — there is no markup
+#      interpreter in the process to opt out of. A webview moves that from "impossible" to
+#      "defended by an escape call at every render site, forever", inside the window that authorises
+#      spending real mainnet funds; the prototype showed one missing call forges a complete
+#      "verified by DIG" consent panel, and that a script-oriented CSP does not stop it (the forgery
+#      is markup plus inline styles).
+#   2. **The runtime shape suits a tray daemon.** ~90 ms to first paint in ONE process and ~55 MB
+#      private, against ~410 ms across SEVEN processes and ~190 MB private for the webview.
+#
+# The cost taken knowingly is a second design system in Rust (hub.dig.net's tokens, ported in
+# `confirm::gui::theme`) — a cost the user accepted explicitly rather than one that slipped in.
+#
+# `eframe` supplies the window + GL surface; `default-features = false` drops the `wgpu`,
+# `persistence` and `accesskit` extras and keeps `glow` (OpenGL), which is present wherever a
+# desktop session is. `x11` + `wayland` mirror the dual-stack the Linux tray already needs.
+egui = "0.31"
+eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11"] }
+# Pinned to the line `eframe` 0.31 resolves so the EventLoopBuilder the `with_any_thread`
+# extension traits are applied to is the SAME type eframe builds the window from.
+winit = "0.30"
 # Decoder for the embedded DIG brand mark the tray paints (`dig-app::brand`). This is NOT a new
 # dependency for the tray stack: `tray-icon` and `muda` already depend on `png` on Linux and macOS to
 # load their own icons, so on those targets it is a graph we are already carrying, and it is a small

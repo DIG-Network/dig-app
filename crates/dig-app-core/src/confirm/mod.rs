@@ -188,7 +188,8 @@ pub struct SecurityPrompt<'a> {
 /// only menu items. That is a property of the tray API, not a reason to send a person to a terminal — and
 /// the tray shipped `"Restore from a recovery phrase (in a terminal)…"` for exactly that reason. The
 /// honest destination is a real OS window with a real input control, which is what every backend behind
-/// this seam draws (Win32 `EDIT`, `NSAlert` accessory field, `zenity --entry`).
+/// this seam draws (the branded window's own field on Windows and Linux, an `NSAlert` accessory field on
+/// macOS).
 ///
 /// **The subprocess-helper alternative was rejected on security grounds.** Shelling out to a small
 /// "ask for a phrase" binary would need a verify-the-helper-is-ours check, or a `PATH` impostor
@@ -230,11 +231,10 @@ pub struct InputPrompt<'a> {
 /// into ONE class precisely so those could not drift (dig_ecosystem#1832). A second window stack would
 /// undo that on day one, so the bar is a presentation of the same [`InputPrompt`].
 ///
-/// **Only the Windows backend honours [`InputStyle::Bar`] today.** macOS draws every input on an `NSAlert`
-/// accessory field and Linux shells out to `zenity`; neither can be made frameless without a different
-/// window mechanism, so both fall back to their ordinary dialog. That is a presentation difference, not a
-/// behavioural one — the same link reaches the same validator either way — and it is stated here rather
-/// than discovered.
+/// **No backend honours [`InputStyle::Bar`] today** (dig_ecosystem#2054). Windows and Linux both draw
+/// the branded window, which renders every input as a dialog; macOS draws an `NSAlert` accessory field,
+/// which cannot be made frameless at all. That is a presentation difference, not a behavioural one — the
+/// same link reaches the same validator either way — and it is stated here rather than discovered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InputStyle {
     /// A titled, framed dialog with a heading and an explanatory body. The default, and what every
@@ -246,6 +246,13 @@ pub enum InputStyle {
     /// launcher interaction. Dismissed by Esc **or by losing focus**, because a launcher the user has
     /// clicked away from has been abandoned, and one that stayed on top of everything afterwards would be
     /// a window they cannot get rid of without answering it.
+    ///
+    /// **NOT HONOURED TODAY — the branded window draws this as a [`Dialog`](InputStyle::Dialog)**
+    /// (dig_ecosystem#2054). The Win32 renderer that implemented the bar chrome was deleted with the
+    /// rest of the per-OS drawing code in dig_ecosystem#2038, and the branded window has not yet
+    /// regained the frameless width, the high placement or the dismiss-on-blur. The launcher still
+    /// WORKS — the field, the validator and the fail-closed mapping are the same — it is presented as
+    /// a centred dialog instead of a bar. Stated here rather than discovered.
     Bar,
 }
 
@@ -413,6 +420,13 @@ pub mod qr;
 
 pub use qr::QrArt;
 
+// The branded prompt GUI (dig_ecosystem#2038) — the ONE window implementation all three platforms
+// draw, replacing the Win32 GDI dialog, the macOS `NSAlert` and the Linux `zenity`/`kdialog`
+// subprocess. It is a `ForegroundWindow` + `ForegroundInput` pair and nothing more: the security
+// policy stays in `gated_consent` above, unchanged and shared.
+#[cfg(feature = "gui")]
+pub mod gui;
+
 // The off-thread biometric seam (dig_ecosystem#1926). Only the Windows backend runs a verifier that
 // would deadlock a UI thread, so only Windows builds it — but the policy it must preserve (nothing
 // but a delivered `Verified` authorizes) is platform-independent, so its tests compile and run
@@ -426,10 +440,6 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
-// Windows keeps every window in `windows_input`: one hand-built window class with a message loop, drawn with
-// or without a field. `windows` holds only the Windows Hello step and the backend's construction.
-#[cfg(target_os = "windows")]
-mod windows_input;
 
 /// Select the confirmer this host uses as the terminal identity gate (SIGN-3).
 ///
@@ -473,6 +483,14 @@ pub(crate) struct ConfirmContent {
     /// The detail body the window shows beneath the heading — the decoded transaction for a sign, the
     /// extension id for a pairing, already formatted for a human. Never raw signable bytes.
     pub body: String,
+    /// The one thing on the window the user must READ CAREFULLY before authorising — the decoded
+    /// transaction — or `None` when the prompt has no such field.
+    ///
+    /// Separate from [`body`](Self::body) because it is not explanation: it is the substance of what
+    /// is being authorised, and the window gives it its own recessed panel. Keeping it out of the
+    /// prose also keeps the amount and recipient in a STRUCTURED field rather than in a string a
+    /// caller pre-formatted.
+    pub detail: Option<String>,
     /// The label of the affirmative action (`"Pair"`, `"Connect"`, `"Sign"`, `"OK"`), reused as the reason
     /// string the biometric prompt shows.
     pub action: &'static str,
@@ -526,6 +544,7 @@ impl ConfirmContent {
                 "This browser extension will be allowed to relay connect and signing requests to \
                    your DIG identity. You approve every signature individually."
                     .to_string(),
+            detail: None,
             action: "Pair",
             qr: None,
             presentation: Self::authorize(),
@@ -545,6 +564,7 @@ impl ConfirmContent {
                    — will see it, and anyone who has it can take your DIG Account. Make sure you are \
                    alone before continuing."
                 .to_string(),
+            detail: None,
             action: "Reveal",
             qr: None,
             presentation: Self::authorize(),
@@ -559,6 +579,7 @@ impl ConfirmContent {
     /// error they must resolve (dig_ecosystem#1773).
     fn notice(prompt: &NoticePrompt<'_>) -> Self {
         Self {
+            detail: None,
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
@@ -571,6 +592,7 @@ impl ConfirmContent {
     /// The content for a claim prompt (dig_ecosystem#1773): a real either/or with no biometric.
     fn claim(prompt: &ClaimPrompt<'_>) -> Self {
         Self {
+            detail: None,
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
@@ -609,6 +631,7 @@ impl ConfirmContent {
                 true => loss.to_string(),
                 false => format!("{loss}\n\n{}", prompt.replacement),
             },
+            detail: None,
             action: "Destroy",
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
@@ -627,6 +650,7 @@ impl ConfirmContent {
     /// Enter keeps the protection.
     fn security(prompt: &SecurityPrompt<'_>) -> Self {
         Self {
+            detail: None,
             title: "DIG — Change your account security".to_string(),
             heading: format!("Do you want to {}?", prompt.change),
             body: prompt.consequence.to_string(),
@@ -666,6 +690,7 @@ impl ConfirmContent {
                  need your approval for every signature.",
                 prompt.origin
             ),
+            detail: None,
             action: "Connect",
             qr: None,
             presentation: Self::authorize(),
@@ -685,9 +710,16 @@ impl ConfirmContent {
             title: "DIG — Approve signing".to_string(),
             heading: format!("{} wants you to sign a transaction", prompt.origin),
             body: format!(
-                "Requested via your paired DIG extension.\n\nType: {}\n\n{decoded}",
+                "Requested via your paired DIG extension.\nType: {}",
                 prompt.payload_type
             ),
+            // The decoded transaction is a FIELD, not a paragraph appended to the explanation.
+            //
+            // It is the one thing on the window a person has to read carefully before spending real
+            // money, and it is the field most likely to carry attacker-supplied text — so it is kept
+            // separate all the way to the painter, which gives it its own recessed panel instead of
+            // letting it trail off the end of the boilerplate (dig_ecosystem#2038).
+            detail: Some(decoded.to_string()),
             action: "Sign",
             qr: None,
             presentation: Self::authorize(),
@@ -707,10 +739,15 @@ pub(crate) enum WindowIntent {
     Approve,
     /// The user dismissed / cancelled the window.
     Deny,
-    /// The window closed on its own deadline with no answer. Only some backends have a dialog timeout
-    /// (the Linux helper's `--timeout`); the modal Windows/macOS dialogs never self-close, so this is
-    /// constructed on those targets' `#[allow(dead_code)]`-permitted paths only.
-    #[allow(dead_code)]
+    /// The window closed on its own deadline with no answer.
+    ///
+    /// Every branded prompt has one: a window nobody answers dismisses itself rather than holding
+    /// the single prompt thread — and therefore every LATER consent window — for the life of the
+    /// process (dig_ecosystem#2038). Distinct from [`Self::Deny`], which is a person refusing, and
+    /// from [`Self::Unavailable`], which is a host that could not ask. `gated_consent` maps it to
+    /// [`ConfirmDecision::Timeout`]; it never authorizes anything.
+    ///
+    /// The macOS `NSAlert` backend is modal and does not self-close, so it never constructs this.
     Timeout,
     /// No foreground window could be shown (e.g. the desktop dialog helper is missing) — fail closed.
     /// Constructed only by backends that can detect that condition (Linux); permitted dead elsewhere.
@@ -1159,7 +1196,13 @@ mod tests {
         assert_eq!(content.action, "Sign");
         assert!(content.heading.contains("https://dapp.example"));
         assert!(content.body.contains("spend"));
-        assert!(content.body.contains(SPEND_TX));
+        // The decoded transaction is its OWN field, so the window can give it its own panel — it is
+        // deliberately NOT concatenated onto the end of the explanation (dig_ecosystem#2038).
+        assert_eq!(content.detail.as_deref(), Some(SPEND_TX));
+        assert!(
+            !content.body.contains(SPEND_TX),
+            "the decoded transaction must not ALSO be buried in the explanatory copy"
+        );
     }
 
     #[test]

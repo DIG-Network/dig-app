@@ -447,3 +447,100 @@ and the modules blur into each other — you then measure your screenshotter, no
 with an implementation that is not the encoder. Degrading the capture first — perspective warp, downscale,
 Gaussian blur, lossy JPEG — approximates the camera path, which is the one that matters: a QR that
 decodes from a pristine bitmap and not from a photograph is the exact failure worth catching.
+
+## A GDI screen capture is BLIND to a hardware GL surface (dig_ecosystem#2038)
+
+`Graphics.CopyFromScreen` / `BitBlt` of the screen DC returns whatever is UNDERNEATH a window whose
+client area is a composited GL surface. A perfectly-painted egui window photographs as the desktop
+behind it. `PrintWindow`, `PW_RENDERFULLCONTENT` and `CAPTUREBLT` do not help.
+
+This cost the #2038 port its entire verification phase — the window was read as "opens but never
+paints" for a long time. **Every direct health probe said the window was fine** the whole time:
+`IsWindowVisible` true, `IsIconic` false, DWM `CLOAKED` 0, not layered, correct physical rect,
+`WindowFromPoint` at its centre returning its own handle, `IsHungAppWindow` false, ~17 fps.
+
+The control that settles it in ten minutes: draw a TRIVIAL window — solid colour, one label — and
+photograph it the same way. It photographs identically blank, which indicts the capture, not the
+renderer.
+
+Two bisections along the way were also artefacts of the capture: `with_decorations(false)` and
+`with_transparent(true)` appear to change the outcome, but only because they change what NON-GL chrome
+the capture can see. And a DPI-UNAWARE probe reports a 2.5×-scaled 1550×1400 window as 620×560, which
+reads as "wrong size" stacked on top of "blank" — set `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`
+in any probe.
+
+**Read the framebuffer instead:** `egui::ViewportCommand::Screenshot` for the real on-screen window,
+and for CI a headless pass over the renderer's own output with no window at all. Same lesson as the QR
+entry above — screenshot the REAL pixels, or you are measuring your screenshotter.
+
+## Deleting a run of tests can silently disable the NEXT one (dig_ecosystem#2038)
+
+Removing several `#[test]` blocks from one module took the `#[test]` attribute belonging to the test
+that FOLLOWED each deleted block, three times over. The functions survived, still full of assertions,
+and simply stopped running. One of them pinned polkit's exit code to an outcome including both
+fail-closed arms — the Linux half of the authorization gate. It read like a live guard on the spend
+path and was inert.
+
+**Nothing in the normal toolchain flags this.** A `#[test]`-less private fn inside a `#[cfg(test)]`
+module is just an unused fn. It surfaces only as `dead_code`, and only on a host that compiles the
+file at all — this one was `cfg(target_os = "linux")`, so no Windows or macOS build ever saw it. It
+finally appeared as four lines inside an already-red CI job.
+
+**When deleting a run of tests, diff the `#[test]` COUNT before and after.** `grep -c '#\[test\]'` is
+the whole check. A passing suite proves nothing here: the suite got SMALLER and stayed green, which is
+exactly what a deletion is supposed to look like.
+
+## `winit` on Windows does not destroy a window in `Drop` — it posts a message (dig_ecosystem#2038)
+
+`winit::window::Window::drop` on Windows does NOT call `DestroyWindow`. A window may only be destroyed
+by the thread that created it, so Drop does `PostMessageW(hwnd, "Winit::DestroyMsg")` and leaves the
+real destruction to the window procedure (winit 0.30 `windows/window.rs:1113`, handled at
+`windows/event_loop.rs:2445`). **The destruction therefore needs the event loop to still be pumping.**
+
+eframe's `run_and_return` path drops the window AFTER `run_app_on_demand` has already returned. In a
+normal eframe app the process exits next and nobody notices. In a long-lived app that opens windows on
+a worker thread and then goes back to `rx.recv()`, nothing on that thread ever dispatches the posted
+message: **the window stays on screen, always on top, with a dead message pump — which is exactly what
+Windows renders as "not responding".** The app has already moved on; the frozen window is all the user
+can see.
+
+The tell is that only the LAST window sticks. Each new `run_native` pumps the queue and disposes of the
+PREVIOUS window's deferred destroy, so a sequence of prompts looks fine right up until the final one.
+The fix is one call: drain the thread's message queue after `run_native` returns.
+
+Diagnosing it: `Get-Process.Responding` is measured on `MainWindowHandle`, so it reports on whichever
+thread owns the frontmost window, not on the app. Windows' Wait Chain Traversal API
+(`OpenThreadWaitChainSession`/`GetThreadWaitChain`) returned a bare blocked node with no chain, which
+correctly RULED OUT a `SendMessage`/critical-section deadlock and pointed away from an hour of
+cross-thread theories. What actually settled it was `eprintln!` tracing through `draw`/`serve`: the
+trace showed `run_native returned` and the answer delivered while `EnumWindows` still listed the
+window as visible.
+
+## `ViewportCommand::Close` comes BACK as an input event, one frame later (dig_ecosystem#2038)
+
+`ctx.send_viewport_cmd(ViewportCommand::Close)` does not close anything by itself. egui-winit turns it
+into a `ViewportEvent::Close` (`egui-winit` `lib.rs:1352`) that arrives in the NEXT frame's raw input,
+which is what eframe reads to decide to exit (`epi_integration.rs:270`). So the window keeps running
+frames after you ask it to close, and **any handler that treats `close_requested()` as "the user
+dismissed me" fires on your own close command.**
+
+In the prompt window that meant a click on Sign recorded `Approve` and then had it overwritten with
+`Deny` one frame later, by the window's own teardown. Every affirmative in the app answered Deny, and
+786 tests at 93.85% coverage all passed, because the suite drove the pure `Screen` model and read
+glyphs back — never the frame that carries the close event.
+
+**Latch the first answer.** Whatever else a teardown frame does, it must not be able to change what the
+human said. And when testing a window, synthesise that close frame explicitly: it is a real frame the
+real loop runs, and it is where this class of bug lives.
+
+## A scrollbar is not automatically an affordance (dig_ecosystem#2038)
+
+Wrapping the clipped body in an `egui::ScrollArea` made the hidden two-thirds of a 24-word recovery
+phrase *reachable* and the regression test *pass* — and the reshot gallery still showed a window that
+stops at word 14 beside a 2 px grey hairline. A person transcribing a phrase onto paper writes down
+what they can see and clicks the affirmative. **Reachable is the test's bar; visible is the user's.**
+
+Two changes, not one: let the window GROW to what its content needs (bounded by `MAX_HEIGHT` and 90%
+of `ViewportInfo::monitor_size`, falling back to the creation height when no monitor is reported, which
+is also what keeps the headless overflow tests meaningful), and make the bar solid and wide for the
+displays where growing is not enough. Look at the picture after the test goes green.
