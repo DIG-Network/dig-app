@@ -5,7 +5,7 @@
 //! `dig-app` is a desktop shell with no verbs, so for three releases it ignored argv entirely. That
 //! turned out to break something invisible: the **update beacon health-gates every component by
 //! spawning `<binary> --version`** and reading stdout
-//! ([`dig_release_resolver::detect_installed_version`]). A binary that ignores `--version` does not
+//! (`dig_release_resolver::detect_installed_version`). A binary that ignores `--version` does not
 //! fail loudly — it *launches the whole app* and prints nothing to stdout, so the beacon reads an
 //! empty string, cannot parse a version, and concludes the install is broken **forever**.
 //!
@@ -40,7 +40,7 @@ pub enum Invocation {
     },
 }
 
-/// Parse the process arguments (**excluding** argv[0]).
+/// Parse the process arguments (**excluding** `argv[0]`).
 ///
 /// `--version`/`-V` and `--help`/`-h` win over anything else in the list, because a request for
 /// information about the binary should be answerable even when the rest of the line is nonsense.
