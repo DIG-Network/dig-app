@@ -447,3 +447,45 @@ and the modules blur into each other — you then measure your screenshotter, no
 with an implementation that is not the encoder. Degrading the capture first — perspective warp, downscale,
 Gaussian blur, lossy JPEG — approximates the camera path, which is the one that matters: a QR that
 decodes from a pristine bitmap and not from a photograph is the exact failure worth catching.
+
+## A GDI screen capture is BLIND to a hardware GL surface (dig_ecosystem#2038)
+
+`Graphics.CopyFromScreen` / `BitBlt` of the screen DC returns whatever is UNDERNEATH a window whose
+client area is a composited GL surface. A perfectly-painted egui window photographs as the desktop
+behind it. `PrintWindow`, `PW_RENDERFULLCONTENT` and `CAPTUREBLT` do not help.
+
+This cost the #2038 port its entire verification phase — the window was read as "opens but never
+paints" for a long time. **Every direct health probe said the window was fine** the whole time:
+`IsWindowVisible` true, `IsIconic` false, DWM `CLOAKED` 0, not layered, correct physical rect,
+`WindowFromPoint` at its centre returning its own handle, `IsHungAppWindow` false, ~17 fps.
+
+The control that settles it in ten minutes: draw a TRIVIAL window — solid colour, one label — and
+photograph it the same way. It photographs identically blank, which indicts the capture, not the
+renderer.
+
+Two bisections along the way were also artefacts of the capture: `with_decorations(false)` and
+`with_transparent(true)` appear to change the outcome, but only because they change what NON-GL chrome
+the capture can see. And a DPI-UNAWARE probe reports a 2.5×-scaled 1550×1400 window as 620×560, which
+reads as "wrong size" stacked on top of "blank" — set `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`
+in any probe.
+
+**Read the framebuffer instead:** `egui::ViewportCommand::Screenshot` for the real on-screen window,
+and for CI a headless pass over the renderer's own output with no window at all. Same lesson as the QR
+entry above — screenshot the REAL pixels, or you are measuring your screenshotter.
+
+## Deleting a run of tests can silently disable the NEXT one (dig_ecosystem#2038)
+
+Removing several `#[test]` blocks from one module took the `#[test]` attribute belonging to the test
+that FOLLOWED each deleted block, three times over. The functions survived, still full of assertions,
+and simply stopped running. One of them pinned polkit's exit code to an outcome including both
+fail-closed arms — the Linux half of the authorization gate. It read like a live guard on the spend
+path and was inert.
+
+**Nothing in the normal toolchain flags this.** A `#[test]`-less private fn inside a `#[cfg(test)]`
+module is just an unused fn. It surfaces only as `dead_code`, and only on a host that compiles the
+file at all — this one was `cfg(target_os = "linux")`, so no Windows or macOS build ever saw it. It
+finally appeared as four lines inside an already-red CI job.
+
+**When deleting a run of tests, diff the `#[test]` COUNT before and after.** `grep -c '#\[test\]'` is
+the whole check. A passing suite proves nothing here: the suite got SMALLER and stayed green, which is
+exactly what a deletion is supposed to look like.
