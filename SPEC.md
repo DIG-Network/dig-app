@@ -299,6 +299,13 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   given a password, and actively misleading for one that cannot be opened — where unlocking is precisely
   what failed. An implementation MUST therefore carry one reason per REMEDY rather than one per rough
   category, and MUST distinguish all six account states in both the menu label and the window prose.
+- **An unlocked account whose address derivation itself fails MUST NOT be told to unlock**
+  (dig_ecosystem#2059). This is a SEVENTH, orthogonal fault distinct from the six account states above: the
+  account is genuinely unlocked, so "unlock it" names a remedy the user has already performed. An
+  implementation MUST read the account's unlock state and its address derivation from a SINGLE observation
+  of the same underlying lock — never as two separate reads — because a lock landing BETWEEN two separate
+  reads (an idle relock, `Lock now`) makes an ordinary lock indistinguishable from this fault, and would
+  alarm a user who merely locked their account with wording meant for a genuine defect.
 - **An upstream error string MUST NOT be interpolated into a menu label.** It is unbounded and its
   contents are not this application's; the row states that the read failed and the window states what the
   source said.

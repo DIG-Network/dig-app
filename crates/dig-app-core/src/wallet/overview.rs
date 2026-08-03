@@ -181,8 +181,15 @@ impl WalletOverview {
             (None, Some(AccountState::Unopenable)) => {
                 AddressReading::Unavailable(AddressUnavailable::Unopenable)
             }
-            // Locked, or unlocked-but-address-not-yet-derived: the key material is sealed and unlocking
-            // is genuinely the route back.
+            // Unlocked at the moment of observation, yet the derivation itself failed: unlocking is NOT
+            // the way back, because unlocking is not what is missing (dig_ecosystem#2059). Checked
+            // before the plain `Locked` arm below so this — the narrower, rarer case — wins.
+            (None, Some(AccountState::Unlocked { .. })) if view.address_derivation_failed => {
+                AddressReading::Unavailable(AddressUnavailable::DerivationFailed)
+            }
+            // Locked, or unlocked-but-address-not-yet-derived for an ordinary reason (e.g. the shell
+            // simply hasn't read it this repaint): the key material is sealed and unlocking is genuinely
+            // the route back.
             (None, Some(AccountState::Locked | AccountState::Unlocked { .. })) => {
                 AddressReading::Unavailable(AddressUnavailable::Locked)
             }
@@ -891,6 +898,70 @@ mod tests {
             !body(AccountState::NeedsPassword).contains("Unlock it and it appears here"),
             "there is no password to type yet"
         );
+    }
+
+    /// **An unlocked account whose address derivation genuinely fails is told the truth, never
+    /// "unlock your account first"** (dig_ecosystem#2059).
+    ///
+    /// Before this fix, `Unlocked { .. }` + `receive_address: None` fell through to the SAME `Locked`
+    /// arm as an ordinary lock — naming a remedy ("unlock it") the user is not in a position to need,
+    /// because they are already unlocked. This is the load-bearing assertion: it fails against the old
+    /// collapse-to-`Locked` mapping and passes only once `address_derivation_failed` is threaded through
+    /// to a distinct `DerivationFailed` reading.
+    #[test]
+    fn an_unlocked_account_with_a_failed_derivation_is_told_the_truth_not_told_to_unlock() {
+        let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: None,
+            address_derivation_failed: true,
+            ..Default::default()
+        }));
+
+        assert!(
+            body.contains("could not be derived"),
+            "the honest fault text must appear: {body}"
+        );
+        assert!(
+            !body.contains("Unlock it and it appears here"),
+            "the account is ALREADY unlocked — this remedy cannot apply: {body}"
+        );
+    }
+
+    /// **The control: a plain locked account (never unlocked) still gets the ordinary "unlock it"
+    /// wording**, proving the arm above did not swallow the everyday case — only a residency observed
+    /// unlocked-yet-failing routes to `DerivationFailed`.
+    #[test]
+    fn a_plain_locked_account_still_says_unlock_it() {
+        let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Locked),
+            receive_address: None,
+            address_derivation_failed: false,
+            ..Default::default()
+        }));
+
+        assert!(body.contains("Unlock it and it appears here"), "{body}");
+        assert!(!body.contains("could not be derived"), "{body}");
+    }
+
+    /// **The race the atomic read closes:** an account observed unlocked this repaint but with NO
+    /// derivation-failure signal (the ordinary in-between state — e.g. a lock landed between the tray's
+    /// last read and this one) must NOT be alarmed into `DerivationFailed`. Only the atomic
+    /// `address_derivation_failed` flag — set from ONE observation, never from `Unlocked` alone — may
+    /// route there.
+    #[test]
+    fn unlocked_with_no_address_and_no_failure_signal_reads_as_an_ordinary_lock() {
+        let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: None,
+            address_derivation_failed: false,
+            ..Default::default()
+        }));
+
+        assert!(
+            body.contains("Unlock it and it appears here"),
+            "a merely-locked-mid-observation account must read as an ordinary lock, not a fault: {body}"
+        );
+        assert!(!body.contains("could not be derived"), "{body}");
     }
 
     /// The window never advertises a verb the app cannot perform — sending is parked (#1702), so it is
