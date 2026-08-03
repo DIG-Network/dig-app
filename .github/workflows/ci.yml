@@ -85,7 +85,12 @@ jobs:
       # nextest does not run doctests; run them explicitly so a doc example can never rot.
       - name: Run doctests
         run: cargo test --doc --workspace --all-features
-      - name: Check documentation builds
+      # Warning-clean rustdoc is GATED (dig_ecosystem#2012): RUSTDOCFLAGS=-D warnings fails the build
+      # on any rustdoc warning (broken/private intra-doc link, etc.), so the #2005/#1977 doc-clean
+      # baseline can never silently regress. Covers the whole workspace uniformly.
+      - name: Check documentation builds (warning-clean, gated)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --no-deps --workspace --all-features
 
   # The ubuntu jobs above compile only the Linux `#[cfg(target_os = "linux")]` code, so the Windows +

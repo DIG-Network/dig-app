@@ -14,7 +14,7 @@
 //!   (dig_ecosystem#1926).
 //!
 //! Fixing the biometric alone would have fixed the worst symptom of a defect the whole class shares.
-//! So the event loop no longer runs handlers at all: it hands each action to an [`ActionWorker`] and
+//! So the event loop no longer runs handlers at all: it hands each action to an `ActionWorker` and
 //! returns immediately, which makes "a handler blocked the tray" unexpressible rather than merely
 //! absent from today's handlers.
 //!
