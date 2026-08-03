@@ -129,7 +129,8 @@ mod unix_tests {
 mod windows_tests {
     use super::write_owner_only;
     use crate::secret_file::windows_acl::inspect::{
-        administrators, everyone, me, open_to_everyone, system, FileSecurity,
+        administrators, everyone, me, open_to_everyone, readable_without_owner_sid, system,
+        FileSecurity,
     };
     use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 
@@ -176,6 +177,65 @@ mod windows_tests {
             mine & FILE_GENERIC_READ.0,
             FILE_GENERIC_READ.0,
             "the owner must keep read access, or the backup is unreadable to the user who made it"
+        );
+    }
+
+    /// A principal that is not the owner cannot OPEN the file — the real syscall, not an ACL query.
+    ///
+    /// The tests above ask the OS to evaluate the ACL. This one performs the access check itself, on
+    /// a thread whose token has the owner's SID marked deny-only, so the single allow-ACE grants it
+    /// nothing. It is the check an owner-run test cannot make, and the class of check that catches a
+    /// permission bug a whole suite of owner-run scenarios will happily miss.
+    ///
+    /// **It refuses to pass vacuously, and it took two controls to get that right.**
+    ///
+    /// The first control proves the PROBE works: a file granted to Everyone must be readable through
+    /// the restricted token, since Everyone is still enabled in it. A probe that denied everything
+    /// would otherwise "prove" any file secure.
+    ///
+    /// The second control proves the probe DISCRIMINATES, and it is the one that matters. A plain
+    /// `fs::write` file — the exact before-state this ticket fixes — must be readable without the
+    /// owner's SID, or the probe cannot tell the fixed file from the broken one. It only can when the
+    /// session is elevated, because a non-elevated token has Administrators deny-only already and so
+    /// reaches an inherited-ACL file by no route either.
+    ///
+    /// Getting this wrong was demonstrated, not theorised: with only the Everyone control, this test
+    /// PASSED against a reverted `fs::write` implementation. Where the second control cannot be
+    /// established the test skips loudly instead of banking a pass it did not earn.
+    #[test]
+    fn a_principal_without_the_owner_sid_cannot_open_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // CONTROL 1 — the probe can read something. Everyone is enabled in the restricted token.
+        let shared = dir.path().join("shared.txt");
+        std::fs::write(&shared, b"not a secret").unwrap();
+        open_to_everyone(&shared).unwrap();
+        assert!(
+            readable_without_owner_sid(&shared).unwrap(),
+            "control failed: the probe cannot read even a world-readable file, so it would call \
+             any file protected"
+        );
+
+        // CONTROL 2 — the probe can read the BEFORE-state. Without this the comparison is empty.
+        let ordinary = dir.path().join("ordinary.txt");
+        std::fs::write(&ordinary, b"not a secret").unwrap();
+        if !readable_without_owner_sid(&ordinary).unwrap() {
+            eprintln!(
+                "SKIPPED a_principal_without_the_owner_sid_cannot_open_the_file: an inherited-ACL \
+                 file is already unreadable without the owner SID in this session, so the probe \
+                 cannot distinguish the fix from the defect. Requires an elevated session; CI runs \
+                 elevated and does exercise it."
+            );
+            return;
+        }
+
+        // SUBJECT — the same probe, against the recovery-phrase file.
+        let secret = dir.path().join("secret.txt");
+        write_owner_only(&secret, b"redacted\n").unwrap();
+
+        assert!(
+            !readable_without_owner_sid(&secret).unwrap(),
+            "a principal other than the owner opened the recovery-phrase file"
         );
     }
 

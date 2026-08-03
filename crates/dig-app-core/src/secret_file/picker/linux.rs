@@ -1,8 +1,22 @@
-//! The Linux save dialog, driven through the desktop's own helper.
+//! The Linux save dialog, driven through the desktop's own helper — `zenity` on GNOME/GTK, `kdialog`
+//! on KDE. Both exit `0` when the user picks a file and `1` when they dismiss it, and both print the
+//! chosen path on stdout.
 //!
-//! Same shape, and the same two helpers, as the confirm windows: `zenity` on GNOME/GTK and
-//! `kdialog` on KDE. Both exit `0` when the user picks a file and `1` when they dismiss the dialog,
-//! and both print the chosen path on stdout.
+//! # Why a helper here, when the prompts deliberately stopped using one
+//!
+//! dig_ecosystem#2038 moved every CONSENT window off `zenity`/`kdialog` and into an in-process egui
+//! window, and one of its stated reasons was deleting the "neither helper is installed, so there is
+//! no consent window at all" failure mode.
+//!
+//! This is not that failure mode, and it is not that kind of window. egui draws prompts; it does not
+//! provide a file browser, and writing one — with volume enumeration, permissions and network mounts —
+//! to choose a path is far more surface than the job deserves. More importantly, the consequence of
+//! neither helper being present is different in kind: a missing consent window meant no way to
+//! authorize, whereas a missing save dialog means [`PickedPath::Unavailable`], which falls back to the
+//! documented fixed path. The capability degrades; it never disappears, and it never fails open.
+//!
+//! So the dependency is deliberately SOFT — nothing here is required for dig-app to run, or for the
+//! backup to work.
 
 use std::path::PathBuf;
 use std::process::Command;

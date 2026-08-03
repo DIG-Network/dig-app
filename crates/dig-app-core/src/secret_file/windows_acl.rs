@@ -512,6 +512,91 @@ pub(super) mod inspect {
     pub(in crate::secret_file) fn probe_volume_of(file: &std::fs::File) -> io::Result<bool> {
         super::stores_acls(file)
     }
+
+    /// Try to OPEN `path` as a principal that is not the file's owner, and report whether it worked.
+    ///
+    /// # Why an effective-rights query was not enough
+    ///
+    /// [`FileSecurity::rights_of`] asks the OS to evaluate an ACL. This performs the actual syscall a
+    /// second user would — the kernel's own access check, against a thread token in which the owner's
+    /// SID is **deny-only**, so an allow-ACE naming that SID grants nothing. It is as close to
+    /// "another account tries to read the recovery phrase" as a single-account test process can get,
+    /// and it is the check that catches a permission bug an owner-run test cannot see.
+    ///
+    /// Impersonation is per-THREAD and is reverted by [`Impersonation`]'s `Drop`, including on panic.
+    pub(in crate::secret_file) fn readable_without_owner_sid(path: &Path) -> io::Result<bool> {
+        let _acting_as_someone_else = Impersonation::denying_our_own_sid()?;
+        match std::fs::File::open(path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A thread impersonating a restricted token, reverted when it drops.
+    struct Impersonation;
+
+    impl Impersonation {
+        /// Impersonate a copy of this process's token with our own SID marked deny-only.
+        fn denying_our_own_sid() -> io::Result<Self> {
+            use std::os::windows::io::{FromRawHandle, OwnedHandle};
+            use windows::Win32::Foundation::HANDLE;
+            use windows::Win32::Security::{
+                CreateRestrictedToken, ImpersonateLoggedOnUser, DISABLE_MAX_PRIVILEGE,
+                SID_AND_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY,
+            };
+            use windows::Win32::System::SystemServices::SE_GROUP_USE_FOR_DENY_ONLY;
+            use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+            let mut ours = HANDLE::default();
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_DUPLICATE | TOKEN_QUERY,
+                    &mut ours,
+                )
+            }
+            .map_err(super::to_io)?;
+            let ours_owned = unsafe { OwnedHandle::from_raw_handle(ours.0) };
+
+            // Marking a SID deny-only leaves it in the token for DENY entries but strips its power to
+            // GRANT — so the one allow-ACE naming this user stops applying, which is precisely the
+            // difference between "the owner" and "somebody else" for this file.
+            let me = super::current_user_sid()?;
+            let disable = [SID_AND_ATTRIBUTES {
+                Sid: me.as_psid(),
+                Attributes: SE_GROUP_USE_FOR_DENY_ONLY as u32,
+            }];
+
+            let mut restricted = HANDLE::default();
+            unsafe {
+                CreateRestrictedToken(
+                    ours,
+                    DISABLE_MAX_PRIVILEGE,
+                    Some(&disable),
+                    None,
+                    None,
+                    &mut restricted,
+                )
+            }
+            .map_err(super::to_io)?;
+            let restricted_owned = unsafe { OwnedHandle::from_raw_handle(restricted.0) };
+
+            unsafe { ImpersonateLoggedOnUser(restricted) }.map_err(super::to_io)?;
+            drop(ours_owned);
+            drop(restricted_owned);
+            Ok(Self)
+        }
+    }
+
+    impl Drop for Impersonation {
+        fn drop(&mut self) {
+            // If this ever failed the thread would keep the restricted token, so it is not ignored
+            // quietly — a test thread that silently stayed impersonated would corrupt later tests.
+            unsafe { windows::Win32::Security::RevertToSelf() }
+                .expect("the test thread must stop impersonating");
+        }
+    }
 }
 
 #[cfg(test)]
