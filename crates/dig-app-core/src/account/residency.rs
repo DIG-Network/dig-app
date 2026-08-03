@@ -41,6 +41,21 @@ pub struct AccountResidency {
     inner: Arc<Mutex<Option<UnlockedAccount>>>,
 }
 
+/// The outcome of [`AccountResidency::observe_receiving_address`] — the residency's unlock state and
+/// its receive-address derivation, read TOGETHER under one lock acquisition (dig_ecosystem#2059). See
+/// that method's docs for why the two facts must come from a single observation rather than two calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddressObservation {
+    /// The residency held no unlocked account at the moment of observation — an ordinary lock, whether
+    /// this account was never unlocked or has since been relocked.
+    Locked,
+    /// The residency was unlocked, and the address derived successfully.
+    Derived(String),
+    /// The residency was unlocked at the moment of observation, and address derivation itself failed —
+    /// a genuine defect: unlocking is NOT the way back, because unlocking is not what is missing.
+    DerivationFailed,
+}
+
 impl AccountResidency {
     /// House a freshly-unlocked `account`.
     pub fn new(account: UnlockedAccount) -> Self {
@@ -130,6 +145,31 @@ impl AccountResidency {
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().address())
+    }
+
+    /// [`is_any_unlocked`](Self::is_any_unlocked) and [`receiving_address`](Self::receiving_address)
+    /// TOGETHER, under a single lock acquisition (dig_ecosystem#2059).
+    ///
+    /// Calling those two methods separately reads the residency TWICE, so a lock landing between the
+    /// calls — an idle timeout, `Lock now`, an OS screen lock — can make "was unlocked" and "no address"
+    /// true of two DIFFERENT moments: an ordinary lock race, not a defect. A caller that then reasons
+    /// "unlocked yet no address ⇒ derivation is broken" would alarm a user who merely locked their
+    /// account. This method closes that gap by taking the lock exactly once, so
+    /// [`AddressObservation::DerivationFailed`] can only ever mean a genuine defect.
+    pub fn observe_receiving_address(&self) -> AddressObservation {
+        match self.guard().as_ref() {
+            None => AddressObservation::Locked,
+            Some(acct) => match acct.wallet_ops().address() {
+                Ok(address) => AddressObservation::Derived(address),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "the account's receive address could not be derived while unlocked"
+                    );
+                    AddressObservation::DerivationFailed
+                }
+            },
+        }
     }
 
     /// The 48-byte identity signing public key of profile `ix`, as hex — for the connect-handle
@@ -290,6 +330,39 @@ mod tests {
         assert!(
             mine_residency.receiving_address().is_none(),
             "a locked residency must not derive an address from key material it no longer holds"
+        );
+    }
+
+    /// [`AccountResidency::observe_receiving_address`] reports the same two everyday outcomes the
+    /// separate calls already prove — unlocked-and-derived, and locked — through the ONE atomic call
+    /// (dig_ecosystem#2059). `DerivationFailed` is exercised at the `wallet::overview` mapping layer
+    /// instead of here: dig-account's real address derivation has no seam that fails for a validly
+    /// enrolled account, so forcing that outcome from a genuine residency would mean faking a defect
+    /// that cannot occur — the honest test of "does the fault route correctly" lives where the app can
+    /// inject the observation directly (`TrayView::address_derivation_failed`).
+    #[test]
+    fn the_atomic_observation_agrees_with_the_two_separate_reads() {
+        let residency = residency();
+
+        let observed = residency.observe_receiving_address();
+        let AddressObservation::Derived(address) = observed else {
+            panic!("a freshly unlocked residency must derive: {observed:?}");
+        };
+        assert_eq!(
+            address,
+            residency
+                .receiving_address()
+                .expect("still unlocked")
+                .expect("an address encodes"),
+            "the atomic read must agree with the separate call"
+        );
+        assert!(address.starts_with("xch1"), "{address}");
+
+        residency.lock_all();
+        assert_eq!(
+            AddressObservation::Locked,
+            residency.observe_receiving_address(),
+            "a locked residency has no address to observe"
         );
     }
 

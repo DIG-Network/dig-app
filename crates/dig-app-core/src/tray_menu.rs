@@ -154,6 +154,19 @@ pub struct TrayView {
     /// only the identity key was on hand. A `Copy my receive address` wired to that would hand out a
     /// string that receives nothing.
     pub receive_address: Option<String>,
+    /// Whether the SAME observation that produced [`receive_address`](Self::receive_address) found the
+    /// residency unlocked yet unable to derive an address — a genuine defect, not the ordinary "not
+    /// unlocked" case (dig_ecosystem#2059).
+    ///
+    /// Only meaningful when `receive_address` is `None`: it is what tells
+    /// `wallet::overview::WalletOverview::of_tray` apart the two reasons a `None` can mean — an account
+    /// that is simply not unlocked (say "unlock it"), versus one that WAS unlocked at the moment of
+    /// observation and still failed to derive (saying "unlock it" would name a remedy the user already
+    /// performed). The shell fills both fields from a single call to
+    /// `AccountResidency::observe_receiving_address` so the two facts describe the SAME instant —
+    /// reading unlock-state and the address as two separate calls lets an idle relock or `Lock now` land
+    /// between them and misreport an ordinary lock as this fault.
+    pub address_derivation_failed: bool,
     /// The profile's **minted on-chain** `did:chia:` DID, or `None` when it has none.
     ///
     /// This must be set from evidence that a DID was actually minted on chain — never from a local
@@ -1348,6 +1361,7 @@ mod tests {
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
             account: Some(account),
             receive_address,
+            address_derivation_failed: false,
             profile_id: Some("a".repeat(96)),
             did: None,
             second_factor: false,

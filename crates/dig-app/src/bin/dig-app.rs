@@ -1194,9 +1194,24 @@ mod tray {
         boot_failed: bool,
         hotkey: &HotkeyState,
     ) -> TrayView {
+        use dig_app_core::account::residency::AddressObservation;
         use dig_app_core::engine::EngineState;
 
         let account = account_state(env, session, boot_failed);
+        // ONE observation of the residency, not two separate calls — so "unlocked" and "no address"
+        // always describe the SAME instant (dig_ecosystem#2059). Reading `receiving_address()` on its
+        // own let an idle relock or `Lock now` land between the account-state read above and this one,
+        // making an ordinary lock indistinguishable from a genuine derivation defect.
+        let (receive_address, address_derivation_failed) = match session
+            .map(|s| s.residency.observe_receiving_address())
+        {
+            Some(AddressObservation::Derived(address)) => (Some(address), false),
+            Some(AddressObservation::DerivationFailed) => {
+                tracing::warn!("the account's receive address could not be derived while unlocked");
+                (None, true)
+            }
+            Some(AddressObservation::Locked) | None => (None, false),
+        };
         let (running, node, node_connected) = match status.read() {
             Ok(status) => (
                 status.running,
@@ -1222,18 +1237,12 @@ mod tray {
             // Derived LIVE from the residency on each repaint rather than cached at unlock, so a lock
             // takes the address away with the keys it comes from. Unlike `profile_id` (cached because
             // reading it touches the disk), this is a pure in-memory derivation, so the twice-a-second
-            // cost is arithmetic, not I/O. A derivation that FAILS reports no address rather than a
-            // wrong one — the menu then says "unlock first", which is the only wrong-but-harmless case
-            // here, and the wallet window states the real reason.
-            receive_address: session
-                .and_then(|s| s.residency.receiving_address())
-                .and_then(|derived| match derived {
-                    Ok(address) => Some(address),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "the account's receive address could not be derived");
-                        None
-                    }
-                }),
+            // cost is arithmetic, not I/O. A derivation failure is carried separately in
+            // `address_derivation_failed` (dig_ecosystem#2059) rather than swallowed here — see that
+            // field's docs for why the wallet window must be told which of the two `None` reasons this
+            // is.
+            receive_address,
+            address_derivation_failed,
             // No on-chain DID can exist yet: minting is unimplemented, so there is nothing that could
             // have produced one. This was previously filled from `config.active_profile` — a LOCAL
             // string, not chain evidence — which would have made the tray report an on-chain identity
@@ -1249,13 +1258,14 @@ mod tray {
             // The node's own cache figures, straight from the status snapshot — so the tray shows the
             // node's real cap + usage and the cache submenu is empty-handed (and says so) only when
             // there is genuinely no node to read from (dig_ecosystem#2002).
-            cache: status
-                .read()
-                .ok()
-                .and_then(|s| s.engine.status().map(|st| dig_app_core::cache::CacheSnapshot {
-                    cap_bytes: st.cache.cap_bytes,
-                    used_bytes: st.cache.used_bytes,
-                })),
+            cache: status.read().ok().and_then(|s| {
+                s.engine
+                    .status()
+                    .map(|st| dig_app_core::cache::CacheSnapshot {
+                        cap_bytes: st.cache.cap_bytes,
+                        used_bytes: st.cache.used_bytes,
+                    })
+            }),
         }
     }
 
