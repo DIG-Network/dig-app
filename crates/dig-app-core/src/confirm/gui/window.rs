@@ -629,7 +629,7 @@ impl PromptApp {
     }
 }
 
-/// The branded [`ForegroundWindow`] — every confirm, notice and claim window in the app.
+/// The branded `ForegroundWindow` — every confirm, notice and claim window in the app.
 #[derive(Debug, Clone)]
 pub struct BrandedWindow {
     /// Where the theme preference lives.
@@ -693,7 +693,7 @@ impl ForegroundWindow for BrandedWindow {
     }
 }
 
-/// The branded [`ForegroundInput`] — the recovery-phrase, passphrase and launcher fields.
+/// The branded `ForegroundInput` — the recovery-phrase, passphrase and launcher fields.
 #[derive(Debug, Clone)]
 pub struct BrandedInput {
     /// Where the theme preference lives.
@@ -859,8 +859,8 @@ mod tests {
                     .iter()
                     .find(|(text, _)| text == wanted)
                     .unwrap_or_else(|| panic!("{theme:?}: the chrome never drew {wanted:?}"));
-                let ratio =
-                    super::super::theme::Rgba::hex(color.r(), color.g(), color.b()).contrast(t.surface);
+                let ratio = super::super::theme::Rgba::hex(color.r(), color.g(), color.b())
+                    .contrast(t.surface);
                 assert!(
                     ratio >= 4.5,
                     "{theme:?}: {wanted:?} is drawn at {ratio:.2}:1 on --surface, below AA 4.5"

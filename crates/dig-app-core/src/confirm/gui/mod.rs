@@ -7,16 +7,13 @@
 //! three visual languages, none of them branded — and on Linux, a dialog that simply did not appear
 //! if neither helper happened to be installed.
 //!
-//! This module is a [`ForegroundWindow`](super::ForegroundWindow) +
-//! [`ForegroundInput`](super::ForegroundInput) pair drawn with `egui`, so all three platforms get the
-//! same window, in hub.dig.net's visual language, from the same code.
+//! This module is a `ForegroundWindow` + `ForegroundInput` pair drawn with `egui`, so all three
+//! platforms get the same window, in hub.dig.net's visual language, from the same code.
 //!
-//! **It changes only how the window is DRAWN.** The security policy — [`gated_consent`], the
+//! **It changes only how the window is DRAWN.** The security policy — `gated_consent`, the
 //! never-blind-sign short circuit, the fail-closed defaults on every unimplemented prompt — is
 //! untouched, still lives in the parent module, and is still what decides every outcome. This module
 //! answers exactly one question: what did the human click.
-//!
-//! [`gated_consent`]: super::gated_consent
 //!
 //! # Why a Rust renderer rather than a webview (the #2038 decision)
 //!
@@ -42,9 +39,8 @@
 //! server shape — [`available`] answers `false`, the per-OS confirmer falls back to
 //! [`HeadlessConfirmer`](super::HeadlessConfirmer), and every prompt returns
 //! [`ConfirmDecision::Unavailable`](super::ConfirmDecision::Unavailable). If the window fails to open
-//! or the loop dies mid-prompt, [`BrandedWindow::show`] returns
-//! [`WindowIntent::Unavailable`](super::WindowIntent::Unavailable). No path anywhere in this module
-//! produces an approval that the user did not click.
+//! or the loop dies mid-prompt, `BrandedWindow::show` returns `WindowIntent::Unavailable`. No path
+//! anywhere in this module produces an approval that the user did not click.
 
 mod paint;
 mod render;

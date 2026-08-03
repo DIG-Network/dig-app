@@ -287,7 +287,7 @@ impl ThemeChoice {
     /// The stored theme, or [`Theme::Light`] when nothing has been stored.
     ///
     /// Never fails. An unreadable, absent or nonsense file all mean "the user has expressed no
-    /// preference", which is the default — see [`Theme::parse`] for why this must not be an error.
+    /// preference", which is the default — see `Theme::parse` for why this must not be an error.
     pub fn read(&self) -> Theme {
         std::fs::read_to_string(&self.path)
             .map(|raw| Theme::parse(&raw))
