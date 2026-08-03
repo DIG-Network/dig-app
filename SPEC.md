@@ -225,7 +225,12 @@ can carry to a new machine.
   every service, backup agent and indexer holding those tokens — full access to the account's custody
   root. Mode bits have no meaning on Windows, so a `set_permissions` call there satisfies nothing. A
   failure to restrict the file MUST be reported as a failed backup; an implementation MUST NOT write the
-  words and then report success because only the permission step failed. (`secret_file::write_owner_only`.)
+  words and then report success because only the permission step failed. The single exception is a volume
+  with NO access control at all — an exFAT/FAT32 removable disk, which is a destination this feature
+  exists to enable — where there is no restriction to apply and none to downgrade; the write proceeds, and
+  the confirmation window's standing disclosure that the file is plaintext and readable by anyone who can
+  reach it is what makes that honest. An implementation MUST detect that case from the volume's own
+  capabilities and MUST NOT infer it from a failed permission call. (`secret_file::write_owner_only`.)
 - **Handling (MUST).** The phrase MUST NOT be logged, serialized, transmitted, or written anywhere but
   its sealed vault. It is held in zeroizing memory, redacted in debug output, and reaches only an
   OS-owned foreground window.

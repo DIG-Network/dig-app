@@ -60,20 +60,56 @@ use windows::Win32::Security::{
     PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
 };
+use windows::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, CREATE_ALWAYS, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, WRITE_DAC,
 };
-use windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
+use windows::Win32::System::SystemServices::{FILE_PERSISTENT_ACLS, SECURITY_DESCRIPTOR_REVISION};
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 /// Create-or-truncate `path` under an owner-only DACL and write `bytes` into it.
 ///
-/// See the module docs for why the DACL is applied both at creation and to the open handle.
+/// See the module docs for why the DACL is applied both at creation and to the open handle, and
+/// [`stores_acls`] for the one volume where there is no DACL to apply.
 pub(super) fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dacl = OwnerOnlyDacl::for_current_user()?;
     let mut file = create_truncated(path, &dacl)?;
-    dacl.apply_to(&file)?;
+    if stores_acls(&file)? {
+        dacl.apply_to(&file)?;
+    }
     file.write_all(bytes)
+}
+
+/// Whether the volume `file` lives on can persist access-control lists at all.
+///
+/// # Why this question has to be asked
+///
+/// The reason a user is offered a destination at all (dig_ecosystem#1966) is so they can put their
+/// recovery phrase on a removable or encrypted volume of their own — and removable volumes are
+/// routinely exFAT or FAT32, which have **no access control whatsoever**. There is no owner-only
+/// DACL to write there, so insisting on one would fail the backup on precisely the destination the
+/// picker exists to enable.
+///
+/// Skipping it there is not a downgrade, because there was never anything to downgrade FROM: a FAT
+/// volume grants everyone everything by design, and the user reached this point through a stark
+/// warning that the file is plaintext and anyone who can read it can take the account — which the
+/// confirmation window repeats, naming the path. What the user is NOT told, and what this must
+/// therefore never do, is skip the DACL on a volume that could have held one: on any filesystem
+/// with access control the restriction stays mandatory and a failure to apply it is a failed backup.
+fn stores_acls(file: &File) -> io::Result<bool> {
+    let mut flags = 0u32;
+    unsafe {
+        GetVolumeInformationByHandleW(
+            HANDLE(file.as_raw_handle()),
+            None,
+            None,
+            None,
+            Some(&mut flags),
+            None,
+        )
+    }
+    .map_err(to_io)?;
+    Ok(flags & FILE_PERSISTENT_ACLS != 0)
 }
 
 /// A DACL granting full access to exactly one trustee and to nobody else.
