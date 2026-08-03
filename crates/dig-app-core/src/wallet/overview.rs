@@ -645,20 +645,39 @@ mod tests {
         );
     }
 
-    /// A menu row cannot scroll, so the label is BOUNDED — and the bound has to hold for the one
-    /// reading whose text comes from outside this crate.
+    /// A menu row cannot wrap or scroll, so EVERY label this function can emit is bounded — not just
+    /// the ones someone remembered to measure.
     ///
-    /// The fixture is a hostile upstream error: a renderer that interpolated it would produce a label
-    /// hundreds of characters wide (and, on a native menu, one carrying whatever the upstream sent).
+    /// The bound is 80 characters: comfortably inside what a native menu renders on the narrowest
+    /// platform, and loose enough that a clause can be reworded without a spurious failure. The
+    /// interesting fixture is the hostile upstream error — a renderer that interpolated a
+    /// `ReadFailed` detail would emit a label thousands of characters wide, carrying whatever the
+    /// source sent, straight into an OS menu.
     #[test]
-    fn the_menu_label_stays_short_even_when_the_upstream_error_does_not() {
-        let label = menu_balance_label(&BalanceReading::Unknown(BalanceUnknown::ReadFailed(
-            "x".repeat(4000),
+    fn every_menu_label_stays_short_including_a_hostile_upstream_error() {
+        let mut labels: Vec<String> = every_unknown()
+            .into_iter()
+            .map(|why| menu_balance_label(&BalanceReading::Unknown(why)))
+            .collect();
+        labels.push(menu_balance_label(&BalanceReading::Unknown(
+            BalanceUnknown::ReadFailed("x".repeat(4000)),
         )));
-        assert!(label.len() <= 64, "{} chars: {label}", label.len());
+        // The widest KNOWN reading a u64 pair can produce, so the bound covers the figures too.
+        labels.push(menu_balance_label(&BalanceReading::Known(Balances {
+            xch_mojos: u64::MAX,
+            dig_units: u64::MAX,
+        })));
+
+        for label in &labels {
+            assert!(
+                label.chars().count() <= 80,
+                "{} chars is wider than a menu row: {label}",
+                label.chars().count()
+            );
+        }
         assert!(
-            !label.contains("xxxx"),
-            "the upstream detail belongs in the window, not the menu: {label}"
+            !labels.iter().any(|label| label.contains("xxxx")),
+            "the upstream detail belongs in the window, not the menu: {labels:?}"
         );
     }
 
