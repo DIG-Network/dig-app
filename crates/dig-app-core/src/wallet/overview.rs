@@ -827,6 +827,53 @@ mod tests {
         assert_ne!(locked, brand_new);
     }
 
+    /// **Every account state reaches a DIFFERENT window, and none is told to unlock unless unlocking
+    /// is the way back** (dig_ecosystem#1841).
+    ///
+    /// Before this, three states fell through to `Locked` and every one of them read "Unlock it and it
+    /// appears here": a host that cannot hold an account at all, an account that has no password to
+    /// type, and an account whose unlock is exactly what failed. The distinctness assertion is what
+    /// makes a future re-collapse fail — a shared arm would produce two identical bodies.
+    #[test]
+    fn each_account_state_reaches_its_own_window_naming_a_remedy_it_can_perform() {
+        use crate::tray_menu::AccountState;
+
+        let body = |account: AccountState| {
+            window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+                account: Some(account),
+                receive_address: None,
+                ..Default::default()
+            }))
+        };
+        let cases = [
+            (AccountState::Unsupported, "cannot hold a DIG Account"),
+            (AccountState::Absent, "do not have a DIG Account"),
+            (AccountState::NeedsPassword, "no password yet"),
+            (AccountState::Locked, "account is locked"),
+            (AccountState::Unopenable, "will not open"),
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for (account, expected) in cases {
+            let text = body(account.clone());
+            assert!(text.contains(expected), "{account:?}: {text}");
+            assert!(
+                seen.insert(text),
+                "{account:?}: states must not share a window"
+            );
+        }
+
+        // The one that would be wrong to say, said only where it is true.
+        assert!(
+            !body(AccountState::Unopenable).contains("Unlock it and it appears here"),
+            "unlocking is what already failed for this account"
+        );
+        assert!(
+            !body(AccountState::NeedsPassword).contains("Unlock it and it appears here"),
+            "there is no password to type yet"
+        );
+    }
+
     /// The window never advertises a verb the app cannot perform — sending is parked (#1702), so it is
     /// named as absent rather than implied.
     #[test]
