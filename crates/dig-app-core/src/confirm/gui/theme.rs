@@ -260,6 +260,19 @@ pub struct ThemeChoice {
 const FILE_NAME: &str = "theme";
 
 impl ThemeChoice {
+    /// The preference for THIS host, resolved the same way the rest of dig-app's per-user state is.
+    ///
+    /// Falls back to a path under the OS temp directory when the brand directory cannot be resolved
+    /// (an unusual environment, a locked-down service account). The consequence is that the theme
+    /// stops persisting, which is a cosmetic loss; refusing to open a consent window because a
+    /// colour preference had nowhere to live would not be.
+    pub fn for_host() -> Self {
+        let dir = crate::environment::AppEnvironment::from_host()
+            .brand_dir()
+            .unwrap_or_else(|_| std::env::temp_dir().join("dig-app"));
+        Self::in_brand_dir(&dir)
+    }
+
     /// The preference stored beside the rest of dig-app's per-user state.
     pub fn in_brand_dir(brand_dir: &Path) -> Self {
         Self {

@@ -368,19 +368,19 @@ pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
     if !has_display(|key| std::env::var(key).ok()) {
         return None;
     }
-    let tool = detect_dialog_tool(binary_on_path)?;
+    // The branded GUI (dig_ecosystem#2038) draws every window IN THIS PROCESS; polkit still
+    // authorises. The `zenity`/`kdialog` subprocess this replaces is gone, and with it the
+    // "no dialog helper installed, so no consent window at all" failure mode — and the whole
+    // markup-neutralisation burden, since nothing in the drawing path interprets markup any more.
+    if !super::gui::available() {
+        return None;
+    }
     Some(Box::new(BackedConfirmer::new(
-        DialogWindow {
-            runner: SystemCommandRunner,
-            tool,
-        },
+        super::gui::BrandedWindow::default(),
         PolkitVerifier {
             runner: SystemCommandRunner,
         },
-        EntryWindow {
-            runner: SystemCommandRunner,
-            tool,
-        },
+        super::gui::BrandedInput::default(),
     )))
 }
 

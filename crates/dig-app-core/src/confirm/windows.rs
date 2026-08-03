@@ -136,10 +136,13 @@ fn outcome_from_consent(result: UserConsentVerificationResult) -> VerifyOutcome 
 /// window are one implementation parameterised by whether it has a field, so the DPI scaling, the type
 /// hierarchy and the keyboard behaviour cannot drift apart between them (dig_ecosystem#1832).
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
+    // The branded GUI (dig_ecosystem#2038) draws every window; Windows Hello still authorises.
+    // The hand-built Win32 GDI dialog it replaces is gone — there is exactly one way a DIG prompt
+    // is drawn, on every platform that can draw one.
     Some(Box::new(BackedConfirmer::new(
-        super::windows_input::DialogWindow,
+        super::gui::BrandedWindow::default(),
         HelloVerifier,
-        super::windows_input::InputWindow,
+        super::gui::BrandedInput::default(),
     )))
 }
 

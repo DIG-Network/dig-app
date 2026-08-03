@@ -335,6 +335,16 @@ impl eframe::App for PromptApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep painting for as long as the window is open.
+        //
+        // egui is lazy by default and only redraws when it sees an event. A window created on a
+        // background thread can miss its first paint entirely and sit on screen BLANK — observed on
+        // Windows while building this (#2038). A blank consent dialog is not a cosmetic bug: it is a
+        // focus-stealing, always-on-top window with no visible way out, in front of a user who has
+        // no idea what it is asking. The cost of never being blank is one redraw per frame for the
+        // few seconds a modal is up, which is the right trade for this window.
+        ctx.request_repaint();
+
         let t = self.theme.tokens();
         self.keys(ctx);
 
@@ -545,6 +555,15 @@ pub struct BrandedWindow {
     refusal: &'static str,
 }
 
+impl Default for BrandedWindow {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::for_host(),
+            refusal: "Cancel",
+        }
+    }
+}
+
 impl BrandedWindow {
     /// A window storing its theme preference beside the rest of dig-app's per-user state.
     pub fn new(brand_dir: &std::path::Path) -> Self {
@@ -593,6 +612,14 @@ impl ForegroundWindow for BrandedWindow {
 pub struct BrandedInput {
     /// Where the theme preference lives.
     theme: ThemeChoice,
+}
+
+impl Default for BrandedInput {
+    fn default() -> Self {
+        Self {
+            theme: ThemeChoice::for_host(),
+        }
+    }
 }
 
 impl BrandedInput {
