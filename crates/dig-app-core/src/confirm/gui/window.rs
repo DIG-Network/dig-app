@@ -129,15 +129,14 @@ fn serve(rx: &Receiver<Job>) {
     }
 }
 
-/// Run one window to completion. `None` means it could not be drawn at all.
-fn draw(job: Job) -> Option<Outcome> {
-    let wants_text = job.wants_text;
-    let theme_store = job.theme.clone();
-    let title = job.screen.title.clone();
-
-    let options = eframe::NativeOptions {
+/// How every prompt window is created.
+///
+/// One function so the screenshot harness photographs the SAME window a user is shown — a gallery
+/// built from a second, slightly-different set of options is a gallery of something else.
+fn native_options(title: &str) -> eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(&title)
+            .with_title(title)
             .with_inner_size([WIDTH, HEIGHT])
             .with_min_inner_size([WIDTH, 320.0])
             .with_resizable(false)
@@ -166,7 +165,16 @@ fn draw(job: Job) -> Option<Outcome> {
             let _ = builder;
         })),
         ..Default::default()
-    };
+    }
+}
+
+/// Run one window to completion. `None` means it could not be drawn at all.
+fn draw(job: Job) -> Option<Outcome> {
+    let wants_text = job.wants_text;
+    let theme_store = job.theme.clone();
+    let title = job.screen.title.clone();
+
+    let options = native_options(&title);
 
     // The app writes its answer here before the loop exits, so it survives `run_native` returning.
     let slot = std::sync::Arc::new(Mutex::new(None::<Outcome>));
@@ -244,6 +252,8 @@ struct PromptApp {
     typed: Zeroizing<String>,
     /// Whether a masked field is currently revealed.
     revealed: bool,
+    /// Whether the text field has already been given its opening keyboard focus.
+    field_focused: bool,
     /// Where the answer is written before the loop exits.
     sink: std::sync::Arc<Mutex<Option<Outcome>>>,
 }
@@ -268,6 +278,7 @@ impl PromptApp {
             focus,
             typed: Zeroizing::new(String::new()),
             revealed: false,
+            field_focused: false,
             sink,
         }
     }
@@ -492,10 +503,12 @@ impl PromptApp {
                 .background_color(rgba(t.surface_2))
                 .font(regular(size::BASE));
             let response = ui.add(edit);
-            // A field the user has to click before typing is a field they will type past.
-            if response.has_focus() || self.screen.buttons.is_empty() {
-                // already focused
-            } else if !response.lost_focus() {
+            // A field the user has to click before typing is a field they will type past — so it
+            // takes focus when the window opens. ONCE, though: re-requesting it every frame made the
+            // field claw focus straight back after Tab, so the action row was unreachable from the
+            // keyboard (#2038).
+            if !self.field_focused {
+                self.field_focused = true;
                 response.request_focus();
             }
             if field.revealable {
@@ -1052,6 +1065,397 @@ mod tests {
             std::sync::Arc::new(Mutex::new(None)),
         );
         assert_eq!(app.theme, Theme::Light);
+    }
+
+    /// Photograph EVERY prompt view, in BOTH themes, from the renderer's own framebuffer.
+    ///
+    /// ```text
+    /// cargo test -p dig-app-core --lib -- --ignored --nocapture prompt_gallery
+    /// ```
+    ///
+    /// # Why the pixels come from `glReadPixels` and not from a screenshot tool
+    ///
+    /// A GDI screen capture cannot see a hardware GL surface: it returns the desktop behind the
+    /// window, and for a decorated window it returns the DWM title bar over a white client area.
+    /// Photographing this window with one produces a picture of something else — which is exactly
+    /// what stalled the first attempt at this port (#2038). `ViewportCommand::Screenshot` reads back
+    /// the framebuffer of the real, on-screen window after the real frame is drawn, so what lands in
+    /// the PNG is what the window contains.
+    ///
+    /// Ignored by default: it opens real windows, so it needs a display and a human deciding to run
+    /// it. `DIG_PROMPT_SHOTS` sets the output directory (default `target/prompt-shots`).
+    #[test]
+    #[ignore = "opens real windows; run deliberately to produce the professional-ui gallery"]
+    fn prompt_gallery() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("DIG_PROMPT_SHOTS").unwrap_or_else(|_| "target/prompt-shots".into()),
+        );
+        std::fs::create_dir_all(&dir).expect("the gallery directory");
+
+        let mut written = Vec::new();
+        for (name, screen, wants_text) in gallery() {
+            for theme in [Theme::Light, Theme::Dark] {
+                let label = match theme {
+                    Theme::Light => "light",
+                    Theme::Dark => "dark",
+                };
+                let path = dir.join(format!("{name}-{label}.png"));
+                match photograph(screen.clone(), wants_text, theme, &path) {
+                    Some((w, h)) => {
+                        println!("wrote {} ({w}x{h})", path.display());
+                        written.push(path);
+                    }
+                    None => panic!("could not photograph {name} in the {label} theme"),
+                }
+            }
+        }
+        assert!(!written.is_empty(), "the gallery produced no screenshots");
+    }
+
+    /// Every view the branded window draws, named for its file.
+    fn gallery() -> Vec<(&'static str, Screen, bool)> {
+        use crate::confirm::{ClaimPrompt, ConnectPrompt, DestroyPrompt, PairPrompt, RevealPrompt};
+
+        let confirm = |content: ConfirmContent| Screen::confirm(&content, "Cancel");
+        vec![
+            ("sign", confirm(
+                ConfirmContent::sign(&SignPrompt {
+                    origin: "https://dapp.example",
+                    payload_type: "spend",
+                    decoded_tx: Some(
+                        "Send 0.001 XCH to \
+                         xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln\n\
+                         Fee 0.000005 XCH",
+                    ),
+                })
+                .expect("a decoded transaction yields content"),
+            ), false),
+            ("connect", confirm(ConfirmContent::connect(&ConnectPrompt {
+                origin: "https://dapp.example",
+                dapp_name: Some("Example Marketplace"),
+            })), false),
+            ("pair", confirm(ConfirmContent::pair(&PairPrompt {
+                ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah",
+                ext_label: Some("DIG Network"),
+            })), false),
+            ("reveal", confirm(ConfirmContent::reveal(&RevealPrompt {
+                secret: "your recovery phrase",
+            })), false),
+            ("notice", confirm(ConfirmContent::notice(&NoticePrompt {
+                title: "DIG — DIG ID copied",
+                heading: "Your DIG ID is on the clipboard.",
+                body: "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4",
+                acknowledge: "OK",
+            })), false),
+            ("claim", confirm(ConfirmContent::claim(&ClaimPrompt {
+                title: "DIG — Keep your recovery phrase",
+                heading: "Have you written your recovery phrase down?",
+                body: "DIG cannot recover it for you. Without it, this account cannot be restored \
+                       on another computer.",
+                affirm: "Yes, I have them",
+                scannable: None,
+            })), false),
+            ("destroy", confirm(ConfirmContent::destroy(&DestroyPrompt {
+                subject: "the DIG Account on this computer",
+                replacement: "",
+                recoverable: false,
+            })), false),
+            ("passphrase", Screen::input(&InputContent {
+                title: "DIG — Unlock your account".into(),
+                heading: "Enter your DIG passphrase".into(),
+                body: "Your keys stay on this computer. DIG never sees your passphrase.".into(),
+                field_label: "Passphrase".into(),
+                submit: "Unlock",
+                masked: true,
+                revealable: false,
+                style: crate::confirm::InputStyle::Dialog,
+            }), true),
+            ("recovery-phrase", Screen::input(&InputContent {
+                title: "DIG — Restore from your recovery phrase".into(),
+                heading: "Type your 24-word recovery phrase".into(),
+                body: "Separate each word with a space.".into(),
+                field_label: "Recovery phrase".into(),
+                submit: "Restore",
+                masked: true,
+                revealable: true,
+                style: crate::confirm::InputStyle::Dialog,
+            }), true),
+        ]
+    }
+
+    /// Open one real window, let it settle, read its framebuffer back, write a PNG, close it.
+    fn photograph(
+        screen: Screen,
+        wants_text: bool,
+        theme: Theme,
+        path: &std::path::Path,
+    ) -> Option<(usize, usize)> {
+        /// How many frames to draw before the shot. The first frames build the font atlas and let
+        /// the compositor show the window; photographing frame 1 catches an unfinished one.
+        const SETTLE_FRAMES: u32 = 12;
+
+        let dir = tempfile::tempdir().ok()?;
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        store.write(theme).ok()?;
+        let title = screen.title.clone();
+        let (reply, _rx) = sync_channel(1);
+        let app = PromptApp::new(
+            Job {
+                screen,
+                wants_text,
+                theme: store.clone(),
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+
+        let size = std::sync::Arc::new(Mutex::new(None));
+        let recorded = size.clone();
+        let target = path.to_path_buf();
+        eframe::run_native(
+            &title,
+            native_options(&title),
+            Box::new(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                Ok(Box::new(Photographer {
+                    app,
+                    frames: 0,
+                    settle: SETTLE_FRAMES,
+                    path: target,
+                    size: recorded,
+                }))
+            }),
+        )
+        .ok()?;
+        let answer = *size.lock().ok()?;
+        answer
+    }
+
+    /// Draws the real prompt, then photographs it.
+    struct Photographer {
+        app: PromptApp,
+        frames: u32,
+        settle: u32,
+        path: std::path::PathBuf,
+        size: std::sync::Arc<Mutex<Option<(usize, usize)>>>,
+    }
+
+    impl eframe::App for Photographer {
+        fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+            self.app.clear_color(visuals)
+        }
+
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            self.app.frame(ctx);
+            self.frames += 1;
+            if self.frames == self.settle {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = shot {
+                let (w, h) = (image.width(), image.height());
+                let bytes: Vec<u8> = image
+                    .pixels
+                    .iter()
+                    .flat_map(|p| [p.r(), p.g(), p.b(), 0xFF])
+                    .collect();
+                let file = std::fs::File::create(&self.path).expect("the screenshot file");
+                let mut encoder =
+                    png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .and_then(|mut w| w.write_image_data(&bytes))
+                    .expect("the screenshot encodes");
+                if let Ok(mut slot) = self.size.lock() {
+                    *slot = Some((w, h));
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// **Enter in a text field SUBMITS what was typed — it must never cancel.**
+    ///
+    /// Regression for the defect the screenshot gallery exposed (#2038): with nothing pre-focused,
+    /// the window fell back to control 0, control 0 is the refusal, and so typing a passphrase and
+    /// pressing Enter threw it away and denied the unlock. Driven through the real frame, so it
+    /// asserts on what the key handler does rather than on the button list.
+    #[test]
+    fn enter_in_a_text_field_submits_rather_than_cancelling() {
+        let field = InputContent {
+            title: "DIG — Unlock your account".into(),
+            heading: "Enter your DIG passphrase".into(),
+            body: "b".into(),
+            field_label: "Passphrase".into(),
+            submit: "Unlock",
+            masked: true,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let outcome = press(Screen::input(&field), true, Key::Enter, "hunter2");
+        match outcome {
+            Some(Outcome::Input(InputOutcome::Provided(typed))) => assert_eq!(&*typed, "hunter2"),
+            other => panic!("Enter must submit the typed text; got {:?}", Describe(&other)),
+        }
+    }
+
+    /// …and Escape still refuses, so the fix above did not remove the way out.
+    #[test]
+    fn escape_in_a_text_field_still_cancels() {
+        let field = InputContent {
+            title: "t".into(),
+            heading: "h".into(),
+            body: "b".into(),
+            field_label: "l".into(),
+            submit: "Unlock",
+            masked: true,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let outcome = press(Screen::input(&field), true, Key::Escape, "hunter2");
+        assert!(
+            matches!(outcome, Some(Outcome::Input(InputOutcome::Cancelled))),
+            "Escape must cancel, got {:?}",
+            Describe(&outcome)
+        );
+    }
+
+    /// **Tab reaches the action row.** The field takes focus when the window opens, but only once —
+    /// re-requesting it every frame clawed focus straight back, so a keyboard-only user could never
+    /// leave the field and the buttons were unreachable (#2038, `professional-ui`: never trap the
+    /// user).
+    #[test]
+    fn tab_out_of_a_text_field_is_not_undone_on_the_next_frame() {
+        let field = InputContent {
+            title: "t".into(),
+            heading: "h".into(),
+            body: "b".into(),
+            field_label: "Passphrase".into(),
+            submit: "Unlock",
+            masked: true,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        let (reply, _rx) = sync_channel(1);
+        let mut app = PromptApp::new(
+            Job {
+                screen: Screen::input(&field),
+                wants_text: true,
+                theme: store.clone(),
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let quiet = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(WIDTH, HEIGHT),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(quiet.clone(), |ctx| app.frame(ctx));
+        let _ = ctx.run(quiet.clone(), |ctx| app.frame(ctx));
+        assert!(
+            ctx.memory(|m| m.focused()).is_some(),
+            "the field must take focus when the window opens, or the user types into nothing"
+        );
+        // Stand in for the user tabbing away.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+        // Two more frames: the old code re-requested focus on every one of them.
+        let _ = ctx.run(quiet.clone(), |ctx| app.frame(ctx));
+        let _ = ctx.run(quiet, |ctx| app.frame(ctx));
+        assert!(
+            ctx.memory(|m| m.focused()).is_none(),
+            "the field took focus back after the user left it — the action row is unreachable"
+        );
+    }
+
+    /// A destroy window is unchanged by that fix: Enter still REFUSES (dig_ecosystem#1799).
+    #[test]
+    fn enter_on_a_destroy_still_refuses() {
+        let content = ConfirmContent::destroy(&crate::confirm::DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: false,
+        });
+        let outcome = press(Screen::confirm(&content, "Cancel"), false, Key::Enter, "");
+        assert!(
+            matches!(outcome, Some(Outcome::Confirm(WindowIntent::Deny))),
+            "a bare Enter on a destroy must keep the account, got {:?}",
+            Describe(&outcome)
+        );
+    }
+
+    /// Drive one real frame with `key` pressed and return whatever the window recorded.
+    fn press(screen: Screen, wants_text: bool, key: Key, typed: &str) -> Option<Outcome> {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        let (reply, _rx) = sync_channel(1);
+        let sink = std::sync::Arc::new(Mutex::new(None));
+        let mut app = PromptApp::new(
+            Job {
+                screen,
+                wants_text,
+                theme: store.clone(),
+                reply,
+            },
+            store,
+            sink.clone(),
+        );
+        app.typed = Zeroizing::new(typed.to_owned());
+
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let rect = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+        let quiet = egui::RawInput {
+            screen_rect: Some(rect),
+            ..Default::default()
+        };
+        // One frame to build the atlas and lay the window out, then the frame carrying the key.
+        let _ = ctx.run(quiet.clone(), |ctx| app.frame(ctx));
+        let pressed = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..quiet
+        };
+        let _ = ctx.run(pressed, |ctx| app.frame(ctx));
+        let answer = sink.lock().expect("the answer slot").take();
+        answer
+    }
+
+    /// Renders an [`Outcome`] in a panic message. `Outcome` is deliberately not `Debug` in
+    /// production — an input outcome carries a passphrase.
+    struct Describe<'a>(&'a Option<Outcome>);
+
+    impl std::fmt::Debug for Describe<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {
+                None => write!(f, "no answer"),
+                Some(Outcome::Confirm(intent)) => write!(f, "{intent:?}"),
+                Some(Outcome::Input(InputOutcome::Provided(_))) => write!(f, "Provided(<redacted>)"),
+                Some(Outcome::Input(other)) => write!(f, "{other:?}"),
+            }
+        }
     }
 
     /// The typed buffer is `Zeroizing`, so a recovery phrase is wiped when the window drops rather

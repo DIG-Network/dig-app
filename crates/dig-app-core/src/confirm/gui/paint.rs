@@ -171,7 +171,17 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
 
     match fill {
         Some((base, hover)) => {
-            glow(ui, rect, corner, t.glow);
+            // The glow follows the control's OWN colour. An accent glow behind a destructive button
+            // reads as the focus ring — which is drawn in the accent — so a destroy window appeared
+            // to have both controls focused at once, and the one that looked brightest was the one
+            // that destroys the account (#2038, found in the screenshot gallery). The pre-focused
+            // refusal (dig_ecosystem#1799) is only a safeguard if the user can SEE which control
+            // Enter will press.
+            let halo = match weight {
+                Weight::Danger => Rgba { a: t.glow.a, ..t.danger },
+                _ => t.glow,
+            };
+            glow(ui, rect, corner, halo);
             let from = if hovered { hover } else { base };
             // The affirmative carries hub's accent GRADIENT; the destructive is a flat `--danger`,
             // so the two are told apart by more than hue at a glance.

@@ -233,10 +233,17 @@ impl Screen {
                     focused: false,
                 },
                 Button {
+                    // Pre-focused, so Enter SUBMITS what was typed.
+                    //
+                    // With nothing pre-focused the window fell back to its first control, and the
+                    // first control is the refusal: typing a passphrase and pressing Enter — the
+                    // single most likely thing a person does in a text field — cancelled the unlock
+                    // (#2038, found in the screenshot gallery). Unlike a destroy, submitting a field
+                    // is not destructive; the safe default here IS the affirmative.
                     label: content.submit.to_owned(),
                     weight: Weight::Primary,
                     answer: Answer::Approve,
-                    focused: false,
+                    focused: true,
                 },
             ],
             field: Some(Field {
