@@ -1250,6 +1250,14 @@ mod tests {
         ]
     }
 
+    /// How many frames to draw before the shot. The first frames build the font atlas and let the
+    /// compositor show the window; photographing frame 1 catches an unfinished one.
+    const SETTLE_FRAMES: u32 = 12;
+
+    /// The scale the gallery is rendered at, regardless of the host's display. 2× is retina without
+    /// being a two-megabyte file per view.
+    const GALLERY_SCALE: f32 = 2.0;
+
     /// Open one real window, let it settle, read its framebuffer back, write a PNG, close it.
     fn photograph(
         screen: Screen,
@@ -1257,10 +1265,6 @@ mod tests {
         theme: Theme,
         path: &std::path::Path,
     ) -> Option<(usize, usize)> {
-        /// How many frames to draw before the shot. The first frames build the font atlas and let
-        /// the compositor show the window; photographing frame 1 catches an unfinished one.
-        const SETTLE_FRAMES: u32 = 12;
-
         let dir = tempfile::tempdir().ok()?;
         let store = ThemeChoice::in_brand_dir(dir.path());
         store.write(theme).ok()?;
@@ -1314,6 +1318,11 @@ mod tests {
         }
 
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            // Pin the scale so the gallery is the same picture on every machine. At the host's own
+            // DPI these files would be 620×560 on one laptop and 1550×1400 on another, and a
+            // screenshot set whose dimensions depend on who ran it cannot be diffed between two
+            // versions of the window.
+            ctx.set_pixels_per_point(GALLERY_SCALE);
             self.app.frame(ctx);
             self.frames += 1;
             if self.frames == self.settle {
@@ -1327,15 +1336,19 @@ mod tests {
             });
             if let Some(image) = shot {
                 let (w, h) = (image.width(), image.height());
+                // RGB, not RGBA: the window is opaque, so an alpha channel is a quarter of the file
+                // spent storing 0xFF. `Best` on top, because these frames are large flat fields of
+                // brand colour that deflate very well and the gallery is committed.
                 let bytes: Vec<u8> = image
                     .pixels
                     .iter()
-                    .flat_map(|p| [p.r(), p.g(), p.b(), 0xFF])
+                    .flat_map(|p| [p.r(), p.g(), p.b()])
                     .collect();
                 let file = std::fs::File::create(&self.path).expect("the screenshot file");
                 let mut encoder =
                     png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_compression(png::Compression::Best);
                 encoder.set_depth(png::BitDepth::Eight);
                 encoder
                     .write_header()
