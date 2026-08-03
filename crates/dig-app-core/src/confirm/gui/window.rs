@@ -404,7 +404,10 @@ impl PromptApp {
             egui::Align2::LEFT_CENTER,
             &self.screen.title,
             semibold(size::XS),
-            rgba(t.faint),
+            // `--muted`, not `--faint`: this is the line that says WHICH window is asking, on a
+            // window that is asking to spend money. `--faint` is 3.34:1 on white — a decoration
+            // tier, below the 4.5:1 text bar (#2038).
+            rgba(t.muted),
         );
         paint::rule(ui, full, bar.bottom(), t);
 
@@ -751,6 +754,74 @@ mod tests {
             walk(&clipped.shape, &mut out);
         }
         out
+    }
+
+    /// Every string the painter drew, paired with the colour it was drawn IN.
+    ///
+    /// A token can clear AA in the palette and still reach the screen in the wrong tier, so the
+    /// colour is read back off the galley rather than assumed from the token table.
+    fn drawn_text_colored(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Color32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Color32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    // `Painter::galley` passes PLACEHOLDER to mean "use the galley's own colours";
+                    // any other override is the colour that actually lands on the screen.
+                    let color = match text.override_text_color {
+                        Some(c) if c != egui::Color32::PLACEHOLDER => c,
+                        _ => text
+                            .galley
+                            .job
+                            .sections
+                            .first()
+                            .map_or(egui::Color32::PLACEHOLDER, |s| s.format.color),
+                    };
+                    out.push((text.galley.text().to_owned(), color));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// **The window chrome is TEXT, so it takes AA's 4.5:1 bar** — the window title and the theme
+    /// toggle both sit on `--surface` and both have to be readable by someone who is not the person
+    /// who picked the colour.
+    ///
+    /// Both were drawn in `--faint`, which is ~3.2:1 on white. The token test above did not catch it
+    /// because it asserts `--text` and `--muted` and never the tertiary tier, and `--faint` is a
+    /// legitimate token — for decoration, not for a control's label (#2038, found in the gallery).
+    ///
+    /// Asserted against the frame rather than the palette: the bug was a token used in the wrong
+    /// place, which a palette-only test cannot see.
+    #[test]
+    fn the_window_chrome_text_clears_aa_in_both_themes() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let t = theme.tokens();
+            let toggle_label = match theme {
+                Theme::Light => "Dark theme",
+                Theme::Dark => "Light theme",
+            };
+            let (_ctx, output) = painted(sign_screen(), false, theme);
+            let drawn = drawn_text_colored(&output.shapes);
+
+            for wanted in [sign_screen().title.as_str(), toggle_label] {
+                let (_, color) = drawn
+                    .iter()
+                    .find(|(text, _)| text == wanted)
+                    .unwrap_or_else(|| panic!("{theme:?}: the chrome never drew {wanted:?}"));
+                let ratio =
+                    super::super::theme::Rgba::hex(color.r(), color.g(), color.b()).contrast(t.surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{theme:?}: {wanted:?} is drawn at {ratio:.2}:1 on --surface, below AA 4.5"
+                );
+            }
+        }
     }
 
     /// The triangles the frame tessellates to, and the area their bounding boxes cover.

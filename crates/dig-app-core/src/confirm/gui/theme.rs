@@ -138,7 +138,11 @@ pub struct Rgba {
 
 impl Rgba {
     /// An opaque colour, the form hub's hex tokens take.
-    const fn hex(r: u8, g: u8, b: u8) -> Self {
+    ///
+    /// Visible to the rest of `gui` so a test can rebuild a colour it read back off a painted
+    /// galley and run it through [`contrast`](Self::contrast) — this module stays egui-free, so the
+    /// conversion happens on the caller's side.
+    pub(super) const fn hex(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
     }
 

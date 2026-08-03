@@ -269,7 +269,9 @@ fn space_x() -> f32 {
 pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
     let galley = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), regular(size::SM), rgba(t.faint));
+        // `--muted`, not `--faint`: this is an interactive control's LABEL, so it takes AA's 4.5:1
+        // text bar. `--faint` is 3.34:1 on white (#2038).
+        .layout_no_wrap(label.to_owned(), regular(size::SM), rgba(t.muted));
     let (rect, response) =
         ui.allocate_exact_size(galley.size() + Vec2::new(18.0, 10.0), Sense::click());
     if response.hovered() {
