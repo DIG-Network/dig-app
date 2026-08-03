@@ -19,9 +19,10 @@
 //!
 //! # Markup safety
 //!
-//! The summary is PLAIN text (recipients, decimal amounts, newlines) — it adds no markup. The per-OS
-//! confirmers neutralize any markup-significant characters in the displayed text
-//! (`confirm::linux::escape_kdialog_plain`, zenity `--no-markup`), so this module never needs to escape.
+//! The summary is PLAIN text (recipients, decimal amounts, newlines) — it adds no markup, and nothing
+//! downstream interprets any. The branded window rasterises glyphs (`Painter::text`), so `<b>` draws as
+//! `<`, `b`, `>`; there is no markup-neutralising step to forget, because there is no markup parser to
+//! neutralise it for (dig_ecosystem#2038). This module never needs to escape.
 
 use crate::decode::{DecodedOutput, DecodedTx};
 

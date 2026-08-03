@@ -188,7 +188,8 @@ pub struct SecurityPrompt<'a> {
 /// only menu items. That is a property of the tray API, not a reason to send a person to a terminal — and
 /// the tray shipped `"Restore from a recovery phrase (in a terminal)…"` for exactly that reason. The
 /// honest destination is a real OS window with a real input control, which is what every backend behind
-/// this seam draws (Win32 `EDIT`, `NSAlert` accessory field, `zenity --entry`).
+/// this seam draws (the branded window's own field on Windows and Linux, an `NSAlert` accessory field on
+/// macOS).
 ///
 /// **The subprocess-helper alternative was rejected on security grounds.** Shelling out to a small
 /// "ask for a phrase" binary would need a verify-the-helper-is-ours check, or a `PATH` impostor
@@ -230,11 +231,10 @@ pub struct InputPrompt<'a> {
 /// into ONE class precisely so those could not drift (dig_ecosystem#1832). A second window stack would
 /// undo that on day one, so the bar is a presentation of the same [`InputPrompt`].
 ///
-/// **Only the Windows backend honours [`InputStyle::Bar`] today.** macOS draws every input on an `NSAlert`
-/// accessory field and Linux shells out to `zenity`; neither can be made frameless without a different
-/// window mechanism, so both fall back to their ordinary dialog. That is a presentation difference, not a
-/// behavioural one — the same link reaches the same validator either way — and it is stated here rather
-/// than discovered.
+/// **No backend honours [`InputStyle::Bar`] today** (dig_ecosystem#2054). Windows and Linux both draw
+/// the branded window, which renders every input as a dialog; macOS draws an `NSAlert` accessory field,
+/// which cannot be made frameless at all. That is a presentation difference, not a behavioural one — the
+/// same link reaches the same validator either way — and it is stated here rather than discovered.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InputStyle {
     /// A titled, framed dialog with a heading and an explanatory body. The default, and what every
@@ -246,6 +246,13 @@ pub enum InputStyle {
     /// launcher interaction. Dismissed by Esc **or by losing focus**, because a launcher the user has
     /// clicked away from has been abandoned, and one that stayed on top of everything afterwards would be
     /// a window they cannot get rid of without answering it.
+    ///
+    /// **NOT HONOURED TODAY — the branded window draws this as a [`Dialog`](InputStyle::Dialog)**
+    /// (dig_ecosystem#2054). The Win32 renderer that implemented the bar chrome was deleted with the
+    /// rest of the per-OS drawing code in dig_ecosystem#2038, and the branded window has not yet
+    /// regained the frameless width, the high placement or the dismiss-on-blur. The launcher still
+    /// WORKS — the field, the validator and the fail-closed mapping are the same — it is presented as
+    /// a centred dialog instead of a bar. Stated here rather than discovered.
     Bar,
 }
 
