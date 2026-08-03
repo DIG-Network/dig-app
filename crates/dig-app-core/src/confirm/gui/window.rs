@@ -43,11 +43,11 @@ use crate::confirm::{
 /// The window's logical width. Wide enough for a full `xch1…` address to wrap at most once, which is
 /// what the user has to read to know where their money is going.
 const WIDTH: f32 = 620.0;
-/// The window's logical height BEFORE it shrinks to its content — the tallest a prompt is allowed to
-/// be, and the size it is created at.
+/// The window's logical height before it is sized to its content — the size it is CREATED at, and
+/// the ceiling on a host that will not say how big its display is.
 ///
-/// The window only ever shrinks from here ([`PromptApp::fit_to_content`]), never grows, so a screen
-/// whose content genuinely needs the full height keeps exactly the layout it has today.
+/// [`PromptApp::fit_to_content`] moves it from here in both directions: down to [`MIN_HEIGHT`] for a
+/// two-line notice, up to [`PromptApp::tallest_here`] for a screen that genuinely needs the room.
 const HEIGHT: f32 = 560.0;
 /// The shortest a prompt may shrink to. Below this a consent window starts reading as a toast.
 const MIN_HEIGHT: f32 = 320.0;
@@ -101,6 +101,12 @@ const INPUT_DEADLINE: Duration = Duration::from_secs(300);
 /// question whose answer no longer matters. This is the BACKSTOP for the case the window itself is
 /// wedged — the prompt thread died, the GL context hung, the frame loop stopped — where the caller
 /// must still be released rather than blocked for the life of the process.
+///
+/// The caller's clock starts when it QUEUES the job, not when the window opens, so a prompt sitting
+/// behind one the user is ignoring can have its caller give up before it is drawn. That resolves to
+/// a refusal, which is the safe direction, and the window it eventually opens still dismisses itself
+/// on its own deadline. Making the backstop cover an arbitrary queue would mean blocking the caller
+/// for minutes, which is the thing being fixed.
 const ANSWER_GRACE: Duration = Duration::from_secs(15);
 
 /// The id the body's scrolling viewport is stored under.
@@ -619,10 +625,9 @@ impl PromptApp {
     ///
     /// # Why the body SCROLLS
     ///
-    /// The window is capped at [`HEIGHT`] and [`fit_to_content`](Self::fit_to_content) only ever
-    /// shrinks, so the body area is at most 404 px. A screen whose content is taller than that used
-    /// to be **silently cut off**: `Ui::new_child` inherits its parent's clip rect, so the overflow
-    /// was clipped with no scrollbar and no cut-off marker.
+    /// The window was capped at [`HEIGHT`] and only ever shrank, leaving 404 px of body. A screen
+    /// whose content was taller than that was **silently cut off**: `Ui::new_child` inherits its
+    /// parent's clip rect, so the overflow was clipped with no scrollbar and no cut-off marker.
     ///
     /// That was not cosmetic. First-run enrolment draws a 24-word recovery phrase — 24 lines at
     /// `size::BASE * 1.55`, 558 px, plus a heading and a three-line warning — so roughly **words
@@ -633,7 +638,10 @@ impl PromptApp {
     ///
     /// A [`egui::ScrollArea`] fixes the CLASS rather than the two instances: no content this window
     /// is ever handed can be hidden without a way to reach it, whatever the display, whatever the
-    /// screen. Short prompts are unaffected — the window still shrinks to them and no bar appears.
+    /// screen. It is the floor, not the answer — the window GROWS first
+    /// ([`fit_to_content`](Self::fit_to_content)), because a person copying a phrase onto paper
+    /// should not have to scroll the thing they are transcribing. Short prompts are unaffected: the
+    /// window still shrinks to them and no bar appears.
     fn body(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
         let inner = Rect::from_min_max(
             full.left_top() + Vec2::new(space::S6, 44.0 + space::S6),
@@ -1189,7 +1197,8 @@ mod tests {
         );
         assert!(
             tall <= HEIGHT,
-            "the sign prompt asked for {tall} px, over the {HEIGHT} px cap — this may only shrink"
+            "the sign prompt asked for {tall} px, over the {HEIGHT} px ceiling a host that reports \
+             no monitor gets"
         );
     }
 
@@ -2356,12 +2365,16 @@ mod tests {
     /// **No display can hide body text without a scrollbar.**
     ///
     /// The guard this replaces was deleted with the Win32 renderer, and the defect came straight
-    /// back. The window is capped at [`HEIGHT`] and [`PromptApp::fit_to_content`] only shrinks, so
-    /// the body area is 404 px; the phrase body is 24 lines at 23.25 px plus a heading and a warning
-    /// — about 767 px. `Ui::new_child` inherits its parent's clip rect, so the overflow was cut off
-    /// **with no scrollbar and no marker**: words 15–24 and the whole warning never reached the
-    /// screen, the user wrote down 14 of 24, and the account became unrecoverable
-    /// (dig_ecosystem#49, #2038, and #2063 on the sign window).
+    /// back. The window was capped at [`HEIGHT`] and could only shrink, leaving 404 px of body; the
+    /// phrase body is 24 lines at 23.25 px plus a heading and a warning — about 767 px.
+    /// `Ui::new_child` inherits its parent's clip rect, so the overflow was cut off **with no
+    /// scrollbar and no marker**: words 15–24 and the whole warning never reached the screen, the
+    /// user wrote down 14 of 24, and the account became unrecoverable (dig_ecosystem#49, #2038, and
+    /// #2063 on the sign window).
+    ///
+    /// The window grows now, so on an ordinary display the phrase fits with nothing to scroll. This
+    /// asserts the FLOOR — the display where it cannot fit however tall the window is allowed to be,
+    /// which is the one that has to be safe.
     ///
     /// The property asserted is REACHABILITY, at every display this window can be drawn on: the
     /// start of the body is visible at rest, and the END of it is visible after the user scrolls.

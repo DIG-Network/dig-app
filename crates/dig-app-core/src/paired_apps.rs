@@ -32,9 +32,9 @@ use crate::sealer::ProfileSealer;
 ///
 /// Three, and the arithmetic is the reason: each app costs `LINES_PER_APP` lines and the page spends
 /// `FIXED_PAGE_LINES` on its header and its instruction, so a full page is 3 × 2 + 2 = 8 lines —
-/// comfortably inside the window's [`WINDOW_BODY_LINE_CEILING`] and short enough to survive a heavily
-/// scaled display, where the derived budget is smaller than the ceiling. `paged_body` is tested
-/// against that number rather than trusted to stay under it.
+/// comfortably inside the window's `WINDOW_BODY_LINE_CEILING` (private, below) and short enough to
+/// survive a heavily scaled display, where the derived budget is smaller than the ceiling.
+/// `paged_body` is tested against that number rather than trusted to stay under it.
 pub const APPS_PER_PAGE: usize = 3;
 
 /// Lines one listed app occupies: its name and what it is, then when it was paired and last heard from.
