@@ -634,6 +634,18 @@ The enrolment UI MUST state both halves of this in the user's own words.
     who can move the clock FORWARD at will already holds the root-level control this factor's threat model
     (full local compromise) explicitly does not defend against; the bound only ever raises the bar for the
     unlocked-machine attacker it is for.
+    - **Forward direction — a monotonic/trusted-time basis was evaluated and is deliberately NOT adopted.**
+      No operating-system monotonic clock survives a reboot (Linux `CLOCK_MONOTONIC`/`CLOCK_BOOTTIME`,
+      Windows `GetTickCount64`/`QueryUnbiasedInterruptTime`, macOS `mach_continuous_time` all reset at
+      boot), yet the bound MUST persist across reboot — so no monotonic reference bridges the shutdown gap
+      that the wall clock, which the forward attacker controls, otherwise fills. Crediting only a bounded
+      elapsed per observation would instead punish the HONEST owner who waits out a long backoff and then
+      makes a single attempt (the full wall-delta clamps to the ceiling and tells them to keep waiting) —
+      the very denial-of-service against the owner the rate limit is designed to avoid. A network
+      trusted-time source is blockable and spoofable by the same privileged attacker and adds an offline
+      failure mode. The operative bounds therefore remain the PERSISTENT escalating failure counter and
+      the platform authorization seam (§3.1d); the wall-clock deadline with the backward-only anchor is
+      retained by design, not by omission.
 - **Enrolment order (MUST).** Enrolment MUST: explain what the factor does and does not protect,
   generate a secret, present it so it can be transferred to an authenticator, **require a correct code
   to be verified before anything is stored**, issue recovery codes, and obtain an explicit claim that
