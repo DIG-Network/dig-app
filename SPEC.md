@@ -585,23 +585,29 @@ Binding rules, which matter more for an input control than for a notice:
   screen MUST state that a DIG recovery phrase is not a Chia wallet phrase and vice versa, because DIG
   will accept a Sage phrase and silently build a different, empty account from it (§3.1a).
 
-**Current state:** implemented on all three platforms. Windows draws a registered-class window with an
-`EDIT` control plus the reveal checkbox — the same window class it draws every consent prompt with, with the
-field omitted; macOS uses an `NSAlert` with a text-field accessory view; Linux drives `zenity --entry` /
-`kdialog`. A subprocess input helper is
-explicitly REJECTED: it would need a verify-the-helper-is-ours check, or a `PATH` impostor harvests recovery
-phrases, so every backend draws its window IN-PROCESS.
+**Current state:** Windows and Linux draw the **branded prompt window** — one renderer, in-process,
+shared by every consent and input prompt, in hub.dig.net's visual language, with the field, the masking
+and the reveal-while-typing control (dig_ecosystem#2038). macOS still uses an `NSAlert` with a text-field
+accessory view, deferred with its reason in dig_ecosystem#2047.
 
-The destroy window's pre-selected refusal is honoured on Windows (the refusing button holds the focus and
-carries `BS_DEFPUSHBUTTON`) and macOS (the Return key equivalent moves to Cancel). The Linux dialog helpers offer no equivalent, which is currently unreachable
-rather than a gap — Linux has no per-application credential store, so it is always the unsupported-host state
-and no destroy window can be drawn there. A Linux credential store MUST NOT land without addressing it.
+A subprocess input helper is explicitly REJECTED: it would need a verify-the-helper-is-ours check, or a
+`PATH` impostor harvests recovery phrases, so every backend draws its window IN-PROCESS. Since #2038 that
+is no longer a rule a backend could break by accident — the Linux `zenity`/`kdialog` path, the only one
+that ever shelled out, is deleted, and with it the "neither helper is installed, so there is no consent
+window" failure mode.
 
-Platform limits, recorded rather than papered over: Win32 ignores `ES_PASSWORD` on a multiline `EDIT`, so a
-maskable field is single-line and scrolls horizontally; and the reveal-while-typing control exists only on
-Windows — neither Linux dialog helper offers one, and an `NSAlert` accessory would need a custom view
-hierarchy for it — so on macOS and Linux the phrase field is masked with no un-mask control, which is the
-direction §3.1d requires a backend to fail in.
+The rendered text is PLAIN by construction. The branded window rasterises glyphs, so a hostile
+attacker-supplied value cannot be interpreted as markup and cannot forge UI inside a real consent window;
+there is no escaping step to omit at a new call site, because there is no markup parser to escape for.
+
+The destroy window's pre-selected refusal is honoured on Windows and Linux (the refusing control holds the
+opening focus and the focus ring) and on macOS (the Return key equivalent moves to Cancel).
+
+Platform limits, recorded rather than papered over: on macOS an `NSAlert` accessory would need a custom
+view hierarchy for a reveal-while-typing control, so the phrase field there is masked with no un-mask
+control — the direction §3.1d requires a backend to fail in. The frameless launcher presentation
+(`InputStyle::Bar`) is honoured by NO backend today; every input is drawn as a dialog, tracked in
+dig_ecosystem#2054.
 
 ### 3.1e The second factor — authenticator codes (normative)
 
@@ -1645,8 +1651,9 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   mojo-level decode kept below under a `Details:` section. The summary is rendered ENTIRELY from the
   `DecodedTx` the policy produced from the exact bytes that will be signed (there is no second decode
   source), and it lists EVERY output the decode enumerated (never a lossy subset), so the human sees the
-  full effect they authorize. It is plain text and adds no markup (the per-OS confirmers neutralize
-  markup-significant characters). A net-effect preview (what leaves vs returns from local coin state) is
+  full effect they authorize. It is plain text and adds no markup, and nothing downstream interprets any
+  — the prompt window rasterises glyphs, so there is no markup parser to neutralize characters for
+  (dig_ecosystem#2038). A net-effect preview (what leaves vs returns from local coin state) is
   a future addition gated on the engine's coin-state.
 - **Non-XCH assets MUST fail closed — never a fabricated amount (MUST).** A `payload_type = "spend"`
   bundle may spend a CAT (e.g. $DIG — 3 decimals, `1 $DIG = 1000 CAT-mojos`) or an unrecognized puzzle;
