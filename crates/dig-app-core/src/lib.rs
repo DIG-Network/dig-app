@@ -75,6 +75,7 @@ pub mod paired_apps;
 pub mod pairing;
 pub mod pairing_code;
 pub mod sealer;
+pub mod secret_file;
 pub mod session;
 pub mod session_lock;
 pub mod shutdown;
