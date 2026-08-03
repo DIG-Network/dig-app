@@ -261,19 +261,30 @@ fn space_x() -> f32 {
     52.0
 }
 
-/// The theme toggle in the window chrome: a small, always-reachable text control.
+/// The padding a text control puts around its label to make an honest hit area.
+const CONTROL_PAD: Vec2 = Vec2::new(18.0, 10.0);
+
+/// Where a text control's label sits inside that padding.
+enum ControlAlign {
+    /// Centred in the hit area — for a control positioned by its own slot, like the chrome toggle.
+    Centred,
+    /// Flush with the hit area's left edge — for a control sitting in a column of left-aligned text,
+    /// where centring would indent it out of line with everything above it.
+    Column,
+}
+
+/// A small text control: a label, a generous hit area, and a wash on hover.
 ///
 /// A text control rather than an icon because it must be legible to a screen reader and
 /// unambiguous without colour, and because an unlabelled sun/moon glyph is one more thing a user has
 /// to decode on a window that is asking them to authorise a spend.
-pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
+fn text_control(ui: &mut Ui, label: &str, t: &Tokens, align: ControlAlign) -> Response {
     let galley = ui
         .painter()
         // `--muted`, not `--faint`: this is an interactive control's LABEL, so it takes AA's 4.5:1
         // text bar. `--faint` is 3.34:1 on white (#2038).
         .layout_no_wrap(label.to_owned(), regular(size::SM), rgba(t.muted));
-    let (rect, response) =
-        ui.allocate_exact_size(galley.size() + Vec2::new(18.0, 10.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(galley.size() + CONTROL_PAD, Sense::click());
     if response.hovered() {
         ui.painter().rect_filled(
             rect,
@@ -282,12 +293,28 @@ pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    ui.painter().galley(
-        rect.center() - galley.size() / 2.0,
-        galley,
-        Color32::PLACEHOLDER,
-    );
+    let pos = match align {
+        ControlAlign::Centred => rect.center() - galley.size() / 2.0,
+        ControlAlign::Column => {
+            egui::Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0)
+        }
+    };
+    ui.painter().galley(pos, galley, Color32::PLACEHOLDER);
     response
+}
+
+/// The theme toggle in the window chrome: a small, always-reachable text control.
+pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
+    text_control(ui, label, t, ControlAlign::Centred)
+}
+
+/// A text control sitting INSIDE the body's text column — the reveal-while-typing switch.
+///
+/// Left-aligned rather than centred so its label starts on the same x as the field label and the
+/// field above it. Centring indents it by half the hit-area padding, which reads as a stray
+/// half-indent in an otherwise flush column (#2038, caught in the gallery).
+pub fn inline_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
+    text_control(ui, label, t, ControlAlign::Column)
 }
 
 /// A hairline rule across `rect`'s width at `y` — hub's `--border`.

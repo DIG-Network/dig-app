@@ -547,7 +547,7 @@ impl PromptApp {
                     true => "Hide what I type",
                     false => "Show what I type",
                 };
-                if paint::theme_toggle(&mut ui, label, t).clicked() {
+                if paint::inline_toggle(&mut ui, label, t).clicked() {
                     self.revealed = !self.revealed;
                 }
             }
@@ -921,6 +921,60 @@ mod tests {
         assert!(
             tall <= HEIGHT,
             "the sign prompt asked for {tall} px, over the {HEIGHT} px cap — this may only shrink"
+        );
+    }
+
+    /// Where each drawn string's left edge landed.
+    fn drawn_text_left(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, f32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, f32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push((text.galley.text().to_owned(), text.pos.x));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// **The reveal control lines up with the column it sits in.** It is drawn with the same padded
+    /// hit area as the chrome toggle, and that control CENTRES its label — which indented "Show what
+    /// I type" by half the padding, leaving it visibly out of line with the field label directly
+    /// above it (#2038, caught in the gallery, invisible to every other test).
+    #[test]
+    fn the_reveal_control_starts_on_the_same_column_as_the_field_label() {
+        let content = InputContent {
+            title: "DIG — Restore from your recovery phrase".into(),
+            heading: "Type your 24-word recovery phrase".into(),
+            body: "Separate each word with a space.".into(),
+            field_label: "Recovery phrase".into(),
+            submit: "Restore",
+            masked: true,
+            revealable: true,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let (_ctx, output) = painted(Screen::input(&content), true, Theme::Light);
+        let drawn = drawn_text_left(&output.shapes);
+
+        let left_of = |wanted: &str| {
+            drawn
+                .iter()
+                .find(|(text, _)| text == wanted)
+                .unwrap_or_else(|| panic!("the frame never drew {wanted:?}"))
+                .1
+        };
+        let label = left_of("Recovery phrase");
+        let reveal = left_of("Show what I type");
+        assert!(
+            (reveal - label).abs() < 1.0,
+            "the reveal control starts at x={reveal} and the field label at x={label} — \
+             a {:.0} px indent out of the column",
+            reveal - label
         );
     }
 
