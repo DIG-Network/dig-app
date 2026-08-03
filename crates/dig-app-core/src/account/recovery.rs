@@ -252,28 +252,55 @@ mod tests {
         assert_eq!(err, RecoveryError::WrongLength { found: 3 });
     }
 
-    /// A 24-word phrase with a valid word list but a BROKEN CHECKSUM must fail. The fixture is a real
-    /// generated phrase with its LAST word swapped for a different valid word — the nearest wrong
+    /// A real, valid 24-word phrase whose LAST word has been swapped for a different wordlist word, so
+    /// every word is still in the wordlist but the BIP-39 checksum no longer holds — the nearest wrong
     /// input to a correct phrase, and the one a length check or a wordlist check alone would accept.
+    ///
+    /// This fixture is a `const` on purpose. A 24-word phrase's last word carries 3 entropy bits and all
+    /// 8 checksum bits, so with the first 23 words fixed exactly 8 of the 2048 wordlist entries yield a
+    /// valid checksum — 8/2048 = 1/256. Generating a fresh phrase and swapping one word therefore lands
+    /// on a *checksum-valid* phrase 1 run in 256, and the assertion below then panics on `.unwrap_err()`
+    /// (dig_ecosystem#2062). A fixed phrase, verified checksum-invalid once at authoring time by
+    /// [`the_bad_checksum_fixture_is_wordlist_valid_but_checksum_broken`], never does.
+    ///
+    /// Base: the canonical zero-entropy vector `abandon ×23 + art` — a real, valid BIP-39 phrase.
+    /// Swapping the last word `art → abandon` keeps every word in the wordlist but breaks the checksum,
+    /// because the 8-bit checksum of 32 zero bytes is not zero (`SHA-256(0x00×32)` begins `0x66`).
+    const BAD_CHECKSUM_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+        abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon \
+        abandon abandon abandon abandon";
+
     #[test]
     fn a_valid_length_phrase_with_a_bad_checksum_is_rejected() {
-        let phrase = RecoveryPhrase::generate();
-        let mut words: Vec<String> = phrase.words().iter().map(|w| w.to_string()).collect();
-        // Every checksum-preserving alternative for the last word is astronomically unlikely to be the
-        // one we pick, and "abandon"/"zoo" are both real wordlist entries, so this stays a wordlist-
-        // valid phrase whose checksum is wrong.
-        let last = words.len() - 1;
-        words[last] = if words[last] == "zoo" {
-            "abandon"
-        } else {
-            "zoo"
-        }
-        .to_string();
-
         assert_eq!(
-            RecoveryPhrase::parse(&words.join(" ")).unwrap_err(),
+            RecoveryPhrase::parse(BAD_CHECKSUM_PHRASE).unwrap_err(),
             RecoveryError::Invalid,
             "a checksum failure must be rejected, not silently accepted as a different seed"
+        );
+    }
+
+    /// The authoring-time proof that [`BAD_CHECKSUM_PHRASE`] is exactly the fixture the flaky-test fix
+    /// needs: 24 wordlist-valid words that fail ONLY the checksum, distinct from a wrong-length or an
+    /// unknown-word rejection. Anchors the `const` so a future edit to it cannot silently make the
+    /// bad-checksum test pass for the wrong reason.
+    #[test]
+    fn the_bad_checksum_fixture_is_wordlist_valid_but_checksum_broken() {
+        // 24 words: it is not rejected for length.
+        assert_eq!(BAD_CHECKSUM_PHRASE.split_whitespace().count(), PHRASE_WORDS);
+        // The base it is derived from — the same 23 words + the *correct* last word `art` — IS valid,
+        // proving the only defect the fixture introduces is the checksum.
+        let base = BAD_CHECKSUM_PHRASE
+            .rsplit_once(' ')
+            .map(|(head, _last)| format!("{head} art"))
+            .expect("fixture has more than one word");
+        assert!(
+            RecoveryPhrase::parse(&base).is_ok(),
+            "the base phrase (…+ art) must be a real valid BIP-39 phrase"
+        );
+        // The fixture itself fails, and specifically as a checksum/wordlist Invalid — never WrongLength.
+        assert_eq!(
+            RecoveryPhrase::parse(BAD_CHECKSUM_PHRASE).unwrap_err(),
+            RecoveryError::Invalid
         );
     }
 

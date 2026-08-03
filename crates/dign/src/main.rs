@@ -7,7 +7,7 @@
 //! locally with the user identity or proxied to the engine.
 //!
 //! The per-user IPC session client is owned by the dig-app IPC layer (APP-1 / U6). Until it lands,
-//! [`send_to_app`] reports a clean `NOT_CONNECTED` error, so `dign` already offers its full parsed
+//! `send_to_app` reports a clean `NOT_CONNECTED` error, so `dign` already offers its full parsed
 //! command surface + `--help`/`--json` discovery and drops onto the real session with a one-line
 //! swap.
 
