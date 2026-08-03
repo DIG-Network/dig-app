@@ -2774,6 +2774,35 @@ mod tests {
         }
     }
 
+    /// **Before the first boot has reported, the two halves of the row must still agree.**
+    ///
+    /// `build` resolves a missing `account` through `TrayView::account()`, which defaults to
+    /// `Absent`; `WalletOverview::of_tray` matches `view.account` directly. Two derivations of the
+    /// same fact, in the one state (`None`) that `EVERY_STATE` cannot reach — so a divergence would
+    /// show only on a real machine during startup, as a submenu whose row contradicted its own
+    /// address gating.
+    #[test]
+    fn an_unreported_account_reads_the_same_in_the_wallet_submenu_as_an_absent_one() {
+        let unreported = MenuModel {
+            rows: submenu(&build(&TrayView::default()), "Wallet"),
+        };
+        let labels: Vec<String> = every_action(&unreported)
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect();
+
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("no account on this computer yet")),
+            "startup must not invent a different reason: {labels:?}"
+        );
+        assert!(
+            !unreported.offers(TrayAction::CopyReceiveAddress),
+            "there is no address to copy before an account is reported: {labels:?}"
+        );
+    }
+
     /// The submenu's order is address → balance → explainer: what a person came for first, the figure
     /// second, and the prose last.
     #[test]
