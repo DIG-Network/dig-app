@@ -32,9 +32,9 @@ use crate::sealer::ProfileSealer;
 ///
 /// Three, and the arithmetic is the reason: each app costs `LINES_PER_APP` lines and the page spends
 /// `FIXED_PAGE_LINES` on its header and its instruction, so a full page is 3 × 2 + 2 = 8 lines —
-/// comfortably inside the window class's 32-line ceiling and short enough to survive a heavily scaled
-/// display, where the derived budget is smaller than the ceiling. `paged_body` is tested against that
-/// number rather than trusted to stay under it.
+/// comfortably inside the window's [`WINDOW_BODY_LINE_CEILING`] and short enough to survive a heavily
+/// scaled display, where the derived budget is smaller than the ceiling. `paged_body` is tested
+/// against that number rather than trusted to stay under it.
 pub const APPS_PER_PAGE: usize = 3;
 
 /// Lines one listed app occupies: its name and what it is, then when it was paired and last heard from.
@@ -47,14 +47,19 @@ const FIXED_PAGE_LINES: usize = 2;
 /// rendered body, and by the compile-time assertion below against the window's ceiling.
 pub const MAX_PAGE_LINES: usize = APPS_PER_PAGE * LINES_PER_APP + FIXED_PAGE_LINES;
 
-/// The most body lines the prompt window can show before its fixed body area overruns. A number this
-/// module can be checked against at compile time, rather than a fact rediscovered by a user whose page
-/// was silently cut off.
-const WINDOW_BODY_LINE_CEILING: usize = 32;
+/// The most body lines the prompt window shows WITHOUT the reader having to scroll.
+///
+/// Derived, not guessed: the window is 560 px, of which 68 px is chrome and padding and 88 px is the
+/// action row, leaving 404 px of body; a body line is `size::BASE * 1.55` = 23.25 px. So
+/// `404 / 23.25` = 17 lines. The number that stood here — 32 — described no window that has ever
+/// existed (32 lines is 744 px against 404 px of room), so the assertion below silently guarded
+/// nothing (dig_ecosystem#2038).
+const WINDOW_BODY_LINE_CEILING: usize = 17;
 
-// A page that outgrew the window would be CLIPPED IN SILENCE — the defect that hid sixteen recovery
-// words (dig_ecosystem#49). Raising APPS_PER_PAGE past what the window can draw therefore fails the
-// BUILD rather than shipping a list with entries the user never sees.
+// A page that outgrew the window used to be CLIPPED IN SILENCE — the defect that hid sixteen recovery
+// words (dig_ecosystem#49). The body now scrolls, so an overrun is reachable rather than lost; a page
+// the user has to scroll to finish reading is still the wrong page, so raising APPS_PER_PAGE past what
+// the window shows at a glance fails the BUILD rather than shipping a list that needs scrolling.
 const _: () = assert!(MAX_PAGE_LINES <= WINDOW_BODY_LINE_CEILING);
 
 /// The tray's view of the live pairing surface.

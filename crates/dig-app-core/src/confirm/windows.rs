@@ -93,11 +93,18 @@ fn request_consent(message: String) -> VerifyOutcome {
     outcome
 }
 
-/// Dispatch the messages already waiting for this thread, so the tray keeps painting while Hello is up.
+/// Dispatch the messages already waiting for this thread, and return once the queue is empty.
+///
+/// Two callers, one mechanism — this is the crate's ONLY message pump:
+///
+/// * the Hello wait above passes it as the "I am still alive" hook, so the tray keeps painting while
+///   the authenticator is up (dig_ecosystem#1926);
+/// * the prompt window calls it after its event loop exits, to dispatch the destroy message `winit`
+///   posted rather than performed (see `gui::window::flush_deferred_window_destruction`).
 ///
 /// A `WM_QUIT` is put back rather than consumed: it belongs to the event loop that owns this thread,
 /// and swallowing it here would leave the app unable to exit.
-fn pump_pending() {
+pub(super) fn pump_pending() {
     let mut message = MSG::default();
     for _ in 0..PUMP_BUDGET {
         // SAFETY: a plain message-queue read on the calling thread's own queue.

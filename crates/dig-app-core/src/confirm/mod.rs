@@ -739,10 +739,15 @@ pub(crate) enum WindowIntent {
     Approve,
     /// The user dismissed / cancelled the window.
     Deny,
-    /// The window closed on its own deadline with no answer. Only some backends have a dialog timeout
-    /// (the Linux helper's `--timeout`); the modal Windows/macOS dialogs never self-close, so this is
-    /// constructed on those targets' `#[allow(dead_code)]`-permitted paths only.
-    #[allow(dead_code)]
+    /// The window closed on its own deadline with no answer.
+    ///
+    /// Every branded prompt has one: a window nobody answers dismisses itself rather than holding
+    /// the single prompt thread — and therefore every LATER consent window — for the life of the
+    /// process (dig_ecosystem#2038). Distinct from [`Self::Deny`], which is a person refusing, and
+    /// from [`Self::Unavailable`], which is a host that could not ask. `gated_consent` maps it to
+    /// [`ConfirmDecision::Timeout`]; it never authorizes anything.
+    ///
+    /// The macOS `NSAlert` backend is modal and does not self-close, so it never constructs this.
     Timeout,
     /// No foreground window could be shown (e.g. the desktop dialog helper is missing) — fail closed.
     /// Constructed only by backends that can detect that condition (Linux); permitted dead elsewhere.

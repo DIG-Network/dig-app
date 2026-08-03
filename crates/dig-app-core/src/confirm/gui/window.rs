@@ -26,8 +26,9 @@
 //! [`WindowIntent::Approve`] is a click or an Enter on a control whose `answer` is
 //! [`Answer::Approve`].
 
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use egui::{Key, Rect, Vec2};
 use zeroize::Zeroizing;
@@ -58,6 +59,43 @@ const ACTION_ROW: f32 = 72.0;
 /// itself rounds down to a whole number of pixels per module inside this ([`QrArt::module_pixels`]).
 const QR_SIDE: f32 = 200.0;
 
+/// How long a CONFIRM window waits for an answer before dismissing ITSELF as a refusal.
+///
+/// # Why a prompt must have a deadline at all
+///
+/// Every prompt in the process is drawn on ONE thread, strictly one after another — which is a
+/// security property (§ the module docs) and, without a deadline, a denial-of-service: a hostile
+/// dapp raises a sign prompt the user never answers, and every LATER prompt — the tray unlock, a
+/// destroy confirm, a second sign — queues behind it forever, none of them ever drawn, with no error
+/// reaching any caller (dig_ecosystem#2038). One ignored window must cost the user one refused
+/// action, never the whole consent surface.
+///
+/// Two minutes is what the deleted `zenity` backend passed as `--timeout=120s`, so this restores the
+/// behaviour that shipped rather than inventing a new one.
+const CONFIRM_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The same deadline for a window the user has to TYPE into.
+///
+/// Longer than [`CONFIRM_DEADLINE`] on purpose: a confirm window is read and answered, but restoring
+/// an account means copying 24 words off a piece of paper, and a field that cancels itself halfway
+/// through that is a trap. The security property is satisfied by any finite bound — the prompt thread
+/// is freed either way — so the bound is set where it cannot interrupt an honest user.
+const INPUT_DEADLINE: Duration = Duration::from_secs(300);
+
+/// How much longer than the window's OWN deadline a blocked caller waits before giving up.
+///
+/// The window is the primary deadline: it self-dismisses, so it never lingers on screen asking a
+/// question whose answer no longer matters. This is the BACKSTOP for the case the window itself is
+/// wedged — the prompt thread died, the GL context hung, the frame loop stopped — where the caller
+/// must still be released rather than blocked for the life of the process.
+const ANSWER_GRACE: Duration = Duration::from_secs(15);
+
+/// The id the body's scrolling viewport is stored under.
+///
+/// Named rather than derived so a test can read the scroll state back out of `egui`'s memory and
+/// assert on the SAME viewport the user scrolls.
+const BODY_SCROLL_ID: &str = "dig-prompt-body";
+
 /// The brand's typeface, self-hosted exactly as hub.dig.net self-hosts it.
 const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/space-grotesk-400.ttf");
 /// The 600 weight — a distinct cut, never a synthetic bold.
@@ -79,6 +117,10 @@ struct Job {
     wants_text: bool,
     /// Where the theme preference is stored, so the toggle persists.
     theme: ThemeChoice,
+    /// How long this window waits for a human before dismissing itself ([`CONFIRM_DEADLINE`] /
+    /// [`INPUT_DEADLINE`]). Carried on the job rather than read from a constant inside the window so
+    /// a test can drive the expiry in milliseconds instead of minutes.
+    deadline: Duration,
     /// The caller's reply channel. A bounded channel of one: the caller is already blocked on it.
     reply: SyncSender<Outcome>,
 }
@@ -202,6 +244,9 @@ fn draw(job: Job) -> Option<Outcome> {
         }),
     );
 
+    // The window is not gone yet — see why this call exists.
+    flush_deferred_window_destruction();
+
     if run.is_err() {
         return None;
     }
@@ -212,6 +257,57 @@ fn draw(job: Job) -> Option<Outcome> {
         true => Outcome::Input(InputOutcome::Cancelled),
         false => Outcome::Confirm(WindowIntent::Deny),
     }))
+}
+
+/// Actually destroy the window the event loop only ASKED to destroy.
+///
+/// # The bug this exists for
+///
+/// On Windows a window may only be destroyed by the thread that created it, so
+/// `winit::window::Window::drop` does not call `DestroyWindow` — it **posts a private message** and
+/// leaves the real destruction to the window procedure (winit 0.30 `windows/window.rs:1113`, handled
+/// at `windows/event_loop.rs:2445`). eframe drops the window only after `run_app_on_demand` has
+/// already returned, and [`serve`] then goes straight back to waiting for the next job. Nothing on
+/// this thread ever dispatches that message.
+///
+/// So the consent window STAYED ON SCREEN after the user answered it — always on top, undecorated,
+/// with a message pump that had stopped — which is precisely what Windows shows as *"not
+/// responding"*. It is the defect reported as *"whenever a UI pops up, when I press cancel or ok or
+/// any button the program stops responding"* (dig_ecosystem#2038). The answer had in fact been
+/// recorded and delivered; the frozen window on top of everything was all the user could see.
+///
+/// Draining the queue here is exactly what the NEXT `run_native` on this thread would have done —
+/// which is why the *previous* prompt's window always vanished and only the LAST one stayed. Doing
+/// it eagerly is what makes a window disappear when the person answers it.
+#[cfg(target_os = "windows")]
+fn flush_deferred_window_destruction() {
+    crate::confirm::windows::pump_pending();
+}
+
+/// Elsewhere the window is destroyed inside `Drop`, so there is nothing to flush.
+#[cfg(not(target_os = "windows"))]
+fn flush_deferred_window_destruction() {}
+
+/// Drop the undo history `egui` keeps of whatever was typed into `field`.
+///
+/// # Why `.password(true)` is not enough
+///
+/// `TextEdit` masks what is DRAWN; it does not change what is RETAINED. Every frame it feeds
+/// `text.as_str().to_owned()` into an undoer twice (egui 0.31.1 `text_edit/builder.rs:905` and
+/// `:1116`), and that undoer keeps up to `max_undos` snapshots in `ctx.memory` for the whole life of
+/// the [`egui::Context`]. So the passphrase — and a 24-word recovery phrase typed to restore an
+/// account — accumulated in plain `String`s that are freed without being wiped.
+/// [`PromptApp::typed`] being [`Zeroizing`] covers our own buffer and nothing egui copied out of it.
+///
+/// A one-line consent field has no undo affordance, so the history is pure exposure and is cleared
+/// on every frame. This BOUNDS the exposure to a single frame rather than the window's lifetime; it
+/// is a reduction, not an erasure, because dropping a `String` does not scrub the allocation and
+/// egui exposes no way to reach inside the undoer and do so.
+fn forget_the_undo_history(ctx: &egui::Context, field: egui::Id) {
+    if let Some(mut state) = egui::TextEdit::load_state(ctx, field) {
+        state.clear_undoer();
+        egui::TextEdit::store_state(ctx, field, state);
+    }
 }
 
 /// Register the brand's typeface so every prompt is set in it.
@@ -268,6 +364,17 @@ struct PromptApp {
     revealed: bool,
     /// Whether the text field has already been given its opening keyboard focus.
     field_focused: bool,
+    /// Whether an answer has already been recorded.
+    ///
+    /// The window keeps drawing for the frames it takes the windowing system to take the close
+    /// command, and those frames must not be able to change what the human said — see
+    /// [`PromptApp::record`].
+    answered: bool,
+    /// When this window opened, and how long it waits — the self-dismissal deadline
+    /// ([`CONFIRM_DEADLINE`] / [`INPUT_DEADLINE`]).
+    opened: Instant,
+    /// How long to wait before [`PromptApp::expire`] answers for the absent human.
+    deadline: Duration,
     /// Where the answer is written before the loop exits.
     sink: std::sync::Arc<Mutex<Option<Outcome>>>,
 }
@@ -293,8 +400,38 @@ impl PromptApp {
             typed: Zeroizing::new(String::new()),
             revealed: false,
             field_focused: false,
+            answered: false,
+            opened: Instant::now(),
+            deadline: job.deadline,
             sink,
         }
+    }
+
+    /// Record `outcome` — if nothing has been recorded yet — and ask the window to close.
+    ///
+    /// # Why the FIRST answer is the only one
+    ///
+    /// `ViewportCommand::Close` does not close anything by itself: eframe turns it into a
+    /// `ViewportEvent::Close` that arrives in the NEXT frame's input, and the window keeps drawing
+    /// until that frame runs. [`PromptApp::keys`] reads that same event as a dismissal — so a person
+    /// who clicked **Sign** had their approval recorded and then, one frame later, silently
+    /// overwritten with a refusal by the window's own teardown (dig_ecosystem#2038). Every
+    /// affirmative in the app answered `Deny`.
+    ///
+    /// Latching here rather than special-casing the close event fixes the class: whatever else a
+    /// teardown frame does, it cannot change what the human said. Closing stays idempotent, because
+    /// a close command that is dropped on the floor is a window that never goes away.
+    ///
+    /// The latch cannot manufacture consent. An unanswered window records nothing, and [`draw`] maps
+    /// nothing to a denial.
+    fn record(&mut self, ctx: &egui::Context, outcome: Outcome) {
+        if !self.answered {
+            self.answered = true;
+            if let Ok(mut slot) = self.sink.lock() {
+                *slot = Some(outcome);
+            }
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     /// Record `answer` and close.
@@ -305,10 +442,22 @@ impl PromptApp {
             (true, Answer::Approve) => Outcome::Input(InputOutcome::Provided(self.typed.clone())),
             (true, Answer::Deny) => Outcome::Input(InputOutcome::Cancelled),
         };
-        if let Ok(mut slot) = self.sink.lock() {
-            *slot = Some(outcome);
-        }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.record(ctx, outcome);
+    }
+
+    /// Nobody answered in time: dismiss the window and report that, not an approval.
+    ///
+    /// A confirm reports [`WindowIntent::Timeout`], which `gated_consent` maps to
+    /// [`ConfirmDecision::Timeout`](crate::confirm::ConfirmDecision::Timeout) — an honest "the human
+    /// never answered", distinct from a refusal and from a host that could not draw. An input window
+    /// reports [`InputOutcome::Cancelled`]: nothing was typed that a caller may act on. Neither is an
+    /// approval, and no expression here could construct one.
+    fn expire(&mut self, ctx: &egui::Context) {
+        let outcome = match self.wants_text {
+            true => Outcome::Input(InputOutcome::Cancelled),
+            false => Outcome::Confirm(WindowIntent::Timeout),
+        };
+        self.record(ctx, outcome);
     }
 
     /// Keyboard handling: Escape denies, Tab moves, Enter activates the focused control.
@@ -382,6 +531,11 @@ impl PromptApp {
 
         let t = self.theme.tokens();
         self.keys(ctx);
+        // Answer for the human who never came back, so one ignored window cannot hold the single
+        // prompt thread — and therefore every later consent window — for the life of the process.
+        if !self.answered && self.opened.elapsed() >= self.deadline {
+            self.expire(ctx);
+        }
 
         let (full, content_bottom) = egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(rgba(t.bg)))
@@ -443,12 +597,30 @@ impl PromptApp {
         }
     }
 
-    /// The heading, the body, and — on an input prompt — the field.
+    /// The heading, the body, and — on an input prompt — the field, in a scrolling viewport.
     ///
     /// Returns the y the content actually ended at, which is what
     /// [`fit_to_content`](Self::fit_to_content) sizes the window from. It is measured rather than
     /// predicted because the blocks wrap: the same screen is a different height at a different
     /// address length.
+    ///
+    /// # Why the body SCROLLS
+    ///
+    /// The window is capped at [`HEIGHT`] and [`fit_to_content`](Self::fit_to_content) only ever
+    /// shrinks, so the body area is at most 404 px. A screen whose content is taller than that used
+    /// to be **silently cut off**: `Ui::new_child` inherits its parent's clip rect, so the overflow
+    /// was clipped with no scrollbar and no cut-off marker.
+    ///
+    /// That was not cosmetic. First-run enrolment draws a 24-word recovery phrase — 24 lines at
+    /// `size::BASE * 1.55`, 558 px, plus a heading and a three-line warning — so roughly **words
+    /// 15–24 and the entire warning never reached the screen**. The user wrote down 14 of 24 words,
+    /// clicked "I have written these down", and their account became unrecoverable
+    /// (dig_ecosystem#2038; the same clipping hid the tail of a many-output spend on the sign window,
+    /// dig_ecosystem#2063, and hid sixteen words once before, dig_ecosystem#49).
+    ///
+    /// A [`egui::ScrollArea`] fixes the CLASS rather than the two instances: no content this window
+    /// is ever handed can be hidden without a way to reach it, whatever the display, whatever the
+    /// screen. Short prompts are unaffected — the window still shrinks to them and no bar appears.
     fn body(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
         let inner = Rect::from_min_max(
             full.left_top() + Vec2::new(space::S6, 44.0 + space::S6),
@@ -459,7 +631,22 @@ impl PromptApp {
                 .max_rect(inner)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
-        let width = inner.width();
+        let scrolled = egui::ScrollArea::vertical()
+            .id_salt(BODY_SCROLL_ID)
+            // The viewport is the body area whether or not the content fills it, so the action row
+            // stays put instead of sliding up under a short prompt.
+            .auto_shrink([false, false])
+            .show(&mut ui, |ui| self.contents(ui, t));
+        // Size the window from the CONTENT, not the viewport: a short prompt still shrinks to fit,
+        // and a tall one asks for the full window and scrolls the remainder.
+        inner.top() + scrolled.content_size.y
+    }
+
+    /// Draw the blocks and the field into whatever viewport the caller framed.
+    fn contents(&mut self, ui: &mut egui::Ui, t: &Tokens) {
+        // Read back rather than captured from the frame: when the scrollbar appears it takes real
+        // width, and text that wraps to the pre-bar width would slide under it.
+        let width = ui.available_width();
 
         for block in self.screen.blocks.clone() {
             match &block {
@@ -496,8 +683,8 @@ impl PromptApp {
                     let height = galley.size().y + space::S4 * 2.0;
                     let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, height));
                     match warning {
-                        true => paint::warning_panel(&ui, rect, t),
-                        false => paint::panel(&ui, rect, t),
+                        true => paint::warning_panel(ui, rect, t),
+                        false => paint::panel(ui, rect, t),
                     }
                     ui.painter().galley(
                         rect.min + Vec2::new(space::S5, space::S4),
@@ -512,7 +699,7 @@ impl PromptApp {
                     // always present as text above it, for anyone using a screen reader or whose
                     // authenticator lives on this machine (dig_ecosystem#1849).
                     let side = QR_SIDE.min(width);
-                    let drawn = paint::qr(&ui, ui.cursor().min, side, art);
+                    let drawn = paint::qr(ui, ui.cursor().min, side, art);
                     ui.advance_cursor_after_rect(drawn);
                     ui.add_space(space::S4);
                 }
@@ -533,6 +720,7 @@ impl PromptApp {
                 .background_color(rgba(t.surface_2))
                 .font(regular(size::BASE));
             let response = ui.add(edit);
+            forget_the_undo_history(ui.ctx(), response.id);
             // A field the user has to click before typing is a field they will type past — so it
             // takes focus when the window opens. ONCE, though: re-requesting it every frame made the
             // field claw focus straight back after Tab, so the action row was unreachable from the
@@ -547,13 +735,11 @@ impl PromptApp {
                     true => "Hide what I type",
                     false => "Show what I type",
                 };
-                if paint::inline_toggle(&mut ui, label, t).clicked() {
+                if paint::inline_toggle(ui, label, t).clicked() {
                     self.revealed = !self.revealed;
                 }
             }
         }
-
-        ui.min_rect().bottom()
     }
 
     /// Shrink the window to the height its content actually needs.
@@ -662,17 +848,41 @@ impl BrandedWindow {
 ///
 /// Every failure — no prompt thread, a poisoned lock, a dead thread — returns `None`, which callers
 /// map to their own fail-closed outcome.
+///
+/// # Why the wait is bounded
+///
+/// This used to be a bare `recv()`. A caller that blocks forever is not merely a stuck caller here:
+/// every prompt in the process is served by ONE thread, so an unanswered window queued the tray
+/// unlock, the destroy confirm and every later sign behind it, none of them ever drawn, with no
+/// error reaching anyone (dig_ecosystem#2038). The window answers for itself at
+/// [`CONFIRM_DEADLINE`]/[`INPUT_DEADLINE`]; this is the backstop for the case where the window
+/// cannot, and every way out of it is a refusal.
 fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> {
     let host = host()?;
     let (reply, answers) = sync_channel(1);
+    let deadline = match wants_text {
+        true => INPUT_DEADLINE,
+        false => CONFIRM_DEADLINE,
+    };
     let job = Job {
         screen,
         wants_text,
         theme,
+        deadline,
         reply,
     };
     host.tx.lock().ok()?.send(job).ok()?;
-    answers.recv().ok()
+    match answers.recv_timeout(deadline + ANSWER_GRACE) {
+        Ok(outcome) => Some(outcome),
+        // The window did not even manage to dismiss itself. Report the same non-answer it would
+        // have; there is no branch here that could produce an approval.
+        Err(RecvTimeoutError::Timeout) => Some(match wants_text {
+            true => Outcome::Input(InputOutcome::Cancelled),
+            false => Outcome::Confirm(WindowIntent::Timeout),
+        }),
+        // The prompt thread died holding the job.
+        Err(RecvTimeoutError::Disconnected) => None,
+    }
 }
 
 impl ForegroundWindow for BrandedWindow {
@@ -733,6 +943,10 @@ mod tests {
     use super::*;
     use crate::confirm::{NoticePrompt, SignPrompt};
 
+    /// The deadline a test that is not ABOUT the deadline uses: longer than any test run, so the
+    /// self-dismissal can never fire behind an assertion's back.
+    const PATIENT: Duration = Duration::from_secs(3600);
+
     fn theme_store() -> (tempfile::TempDir, ThemeChoice) {
         let dir = tempfile::tempdir().unwrap();
         let store = ThemeChoice::in_brand_dir(dir.path());
@@ -766,6 +980,7 @@ mod tests {
                 screen,
                 wants_text,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -997,14 +1212,17 @@ mod tests {
         (triangles, covered / (WIDTH * HEIGHT))
     }
 
-    fn sign_screen() -> Screen {
-        let content = ConfirmContent::sign(&SignPrompt {
+    fn sign_content() -> ConfirmContent {
+        ConfirmContent::sign(&SignPrompt {
             origin: "https://dapp.example",
             payload_type: "spend",
             decoded_tx: Some("Send 0.001 XCH to xch1safe\u{2026}addr"),
         })
-        .expect("a decoded transaction yields content");
-        Screen::confirm(&content, "Cancel")
+        .expect("a decoded transaction yields content")
+    }
+
+    fn sign_screen() -> Screen {
+        Screen::confirm(&sign_content(), "Cancel")
     }
 
     /// **The window is drawn edge to edge.** A consent window that opens, steals focus, sits on top
@@ -1253,6 +1471,7 @@ mod tests {
                 screen: screen.clone(),
                 wants_text: false,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1285,6 +1504,7 @@ mod tests {
                 screen,
                 wants_text: false,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1312,6 +1532,7 @@ mod tests {
                 ),
                 wants_text: false,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1339,6 +1560,7 @@ mod tests {
                 ),
                 wants_text: false,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1427,6 +1649,11 @@ mod tests {
                 body: "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4",
                 acknowledge: "OK",
             })), false),
+            // The 24-word enrolment screen. It was the ONE confirm view the gallery did not
+            // photograph, which is exactly why the look-at-the-pictures pass missed that ten of its
+            // words and its whole warning were being clipped away (dig_ecosystem#2038). A gallery
+            // that omits the view whose overflow matters is a gallery of the easy cases.
+            ("recovery-phrase-shown", phrase_screen(), false),
             ("claim", confirm(ConfirmContent::claim(&ClaimPrompt {
                 title: "DIG — Keep your recovery phrase",
                 heading: "Have you written your recovery phrase down?",
@@ -1500,6 +1727,7 @@ mod tests {
                 screen,
                 wants_text,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1660,6 +1888,7 @@ mod tests {
                 screen: Screen::input(&field),
                 wants_text: true,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1720,6 +1949,7 @@ mod tests {
                 screen,
                 wants_text,
                 theme: store.clone(),
+                deadline: PATIENT,
                 reply,
             },
             store,
@@ -1766,6 +1996,639 @@ mod tests {
                 Some(Outcome::Input(other)) => write!(f, "{other:?}"),
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Driving the window the way eframe drives it
+    //
+    // Everything above reads a PAINTED frame back. The three defects below live one layer lower —
+    // in what the window does when a pointer actually presses a control, when eframe reports that
+    // the close command was taken, and when nobody answers at all. None of them can be seen from a
+    // frame's glyphs, which is why 786 tests at 93.85% coverage shipped a window that answered
+    // `Deny` to every affirmative click (dig_ecosystem#2038).
+    // ---------------------------------------------------------------------------------------------
+
+    /// One prompt, driven frame by frame with real input.
+    struct Driver {
+        app: PromptApp,
+        ctx: egui::Context,
+        size: Vec2,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        /// Keeps the theme file alive for the driver's lifetime.
+        _dir: tempfile::TempDir,
+    }
+
+    impl Driver {
+        fn new(screen: Screen, wants_text: bool, deadline: Duration, size: Vec2) -> Self {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let store = ThemeChoice::in_brand_dir(dir.path());
+            let (reply, _rx) = sync_channel(1);
+            let sink = std::sync::Arc::new(Mutex::new(None));
+            let app = PromptApp::new(
+                Job {
+                    screen,
+                    wants_text,
+                    theme: store.clone(),
+                    deadline,
+                    reply,
+                },
+                store,
+                sink.clone(),
+            );
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            Self {
+                app,
+                ctx,
+                size,
+                sink,
+                _dir: dir,
+            }
+        }
+
+        /// A prompt at the shipped window size, with a deadline no test reaches by accident.
+        fn shown(screen: Screen, wants_text: bool) -> Self {
+            Self::new(screen, wants_text, PATIENT, Vec2::new(WIDTH, HEIGHT))
+        }
+
+        fn input(&self) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, self.size)),
+                ..Default::default()
+            }
+        }
+
+        /// Run one frame carrying `events`.
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            let input = egui::RawInput {
+                events,
+                ..self.input()
+            };
+            let app = &mut self.app;
+            self.ctx.run(input, |ctx| app.frame(ctx))
+        }
+
+        /// Two quiet frames: the first builds the font atlas, the second lays out against it.
+        fn settle(&mut self) -> egui::FullOutput {
+            self.frame(Vec::new());
+            self.frame(Vec::new())
+        }
+
+        /// The frame eframe runs once the windowing system has taken `ViewportCommand::Close`.
+        ///
+        /// This is not a synthetic convenience: `Close` does not close anything by itself, it comes
+        /// back as a `ViewportEvent::Close` in the next frame's input (eframe 0.31.1
+        /// `epi_integration.rs:270`, `egui-winit` `lib.rs:1352`). Reproducing it is the whole point
+        /// — that frame is where a recorded approval used to be overwritten with a refusal.
+        fn close_frame(&mut self) -> egui::FullOutput {
+            let mut input = self.input();
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .expect("the root viewport")
+                .events
+                .push(egui::ViewportEvent::Close);
+            let app = &mut self.app;
+            self.ctx.run(input, |ctx| app.frame(ctx))
+        }
+
+        /// Press and release the primary pointer over `at`, as a person clicking would.
+        fn click(&mut self, at: egui::Pos2) {
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        /// Turn the wheel over `at`, far enough to reach the end of anything this window shows.
+        fn scroll_to_the_bottom(&mut self, at: egui::Pos2) {
+            for _ in 0..4 {
+                self.frame(vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: Vec2::new(0.0, -2000.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+        }
+
+        fn answer(&self) -> Option<Outcome> {
+            self.sink.lock().expect("the answer slot").take()
+        }
+    }
+
+    /// Every string the frame drew, with the rectangle it occupies and the clip it was drawn under.
+    ///
+    /// The clip is the half that matters here: a galley whose rectangle escapes its clip rect is
+    /// text the user cannot see, and it is drawn exactly as confidently as text they can.
+    fn drawn_with_clip(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Rect, Rect)> {
+        fn walk(shape: &egui::Shape, clip: Rect, out: &mut Vec<(String, Rect, Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    Rect::from_min_size(text.pos, text.galley.size()),
+                    clip,
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, clip, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, clipped.clip_rect, &mut out);
+        }
+        out
+    }
+
+    /// Where the control labelled `label` was drawn, in window coordinates.
+    ///
+    /// Read off the frame rather than recomputed from the layout constants: a test that predicts
+    /// where a button *should* be would keep clicking the same spot after the button moved.
+    fn centre_of(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
+        let drawn = drawn_with_clip(&output.shapes);
+        let (_, rect, _) = drawn
+            .iter()
+            .find(|(text, _, _)| text == label)
+            .unwrap_or_else(|| panic!("the frame never drew a control labelled {label:?}"));
+        rect.center()
+    }
+
+    /// The one galley containing `needle`, with its rectangle and its clip.
+    fn body_galley(output: &egui::FullOutput, needle: &str) -> (String, Rect, Rect) {
+        drawn_with_clip(&output.shapes)
+            .into_iter()
+            .find(|(text, _, _)| text.contains(needle))
+            .unwrap_or_else(|| panic!("the frame never drew a body containing {needle:?}"))
+    }
+
+    /// **Clicking the affirmative approves.** Not "records an approval" — *ends up* an approval,
+    /// after the frame that actually closes the window has run.
+    ///
+    /// This is the defect the user hit and no test could see (dig_ecosystem#2038): the click DID
+    /// record `Approve`, and then `ViewportCommand::Close` came back one frame later as a
+    /// `ViewportEvent::Close`, [`PromptApp::keys`] read it as a dismissal, and the window overwrote
+    /// the person's approval with a refusal on its way out. Every Sign, every Unlock, every "I have
+    /// written these down" in the app answered `Deny`.
+    ///
+    /// Driven with a real pointer press and release over the control's real rectangle, because the
+    /// bug lives between the click and the answer — a test that calls `finish` directly walks
+    /// straight past it.
+    #[test]
+    fn clicking_the_affirmative_survives_the_frame_that_closes_the_window() {
+        let mut driver = Driver::shown(sign_screen(), false);
+        let laid_out = driver.settle();
+        let at = centre_of(&laid_out, "Sign");
+
+        driver.click(at);
+        driver.close_frame();
+
+        match driver.answer() {
+            Some(Outcome::Confirm(WindowIntent::Approve)) => {}
+            other => panic!(
+                "a click on Sign answered {:?} — the affirmative does not survive the close",
+                Describe(&other)
+            ),
+        }
+    }
+
+    /// …and the same for the typed window: the passphrase must not be thrown away on the way out.
+    #[test]
+    fn submitting_a_typed_field_survives_the_frame_that_closes_the_window() {
+        let field = InputContent {
+            title: "DIG — Unlock your account".into(),
+            heading: "Enter your DIG passphrase".into(),
+            body: "b".into(),
+            field_label: "Passphrase".into(),
+            submit: "Unlock",
+            masked: true,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let mut driver = Driver::shown(Screen::input(&field), true);
+        let laid_out = driver.settle();
+        let at = centre_of(&laid_out, "Unlock");
+        driver.app.typed = Zeroizing::new("hunter2".to_owned());
+
+        driver.click(at);
+        driver.close_frame();
+
+        match driver.answer() {
+            Some(Outcome::Input(InputOutcome::Provided(typed))) => assert_eq!(&*typed, "hunter2"),
+            other => panic!(
+                "submitting answered {:?} — the typed text does not survive the close",
+                Describe(&other)
+            ),
+        }
+    }
+
+    /// **The control for the latch: a window closed with NOTHING clicked is still a refusal.**
+    ///
+    /// Without this, "keep the first answer" could be satisfied by keeping no answer at all, and the
+    /// window-manager close button would stop denying.
+    #[test]
+    fn a_window_closed_without_a_click_is_still_a_denial() {
+        let mut driver = Driver::shown(sign_screen(), false);
+        driver.settle();
+
+        driver.close_frame();
+
+        assert!(
+            matches!(driver.answer(), Some(Outcome::Confirm(WindowIntent::Deny))),
+            "dismissing the window without answering it must deny"
+        );
+    }
+
+    /// …and the refusal control still refuses, so the latch did not make every button approve.
+    #[test]
+    fn clicking_the_refusal_denies() {
+        let mut driver = Driver::shown(sign_screen(), false);
+        let laid_out = driver.settle();
+        let at = centre_of(&laid_out, "Cancel");
+
+        driver.click(at);
+        driver.close_frame();
+
+        assert!(
+            matches!(driver.answer(), Some(Outcome::Confirm(WindowIntent::Deny))),
+            "a click on Cancel must deny"
+        );
+    }
+
+    /// The 24-word enrolment screen, composed the way `account::journey::present_new_phrase`
+    /// composes it: the numbered words, then the sentence that says losing them loses the account.
+    ///
+    /// This is the screen that hid sixteen of its own words.
+    fn phrase_screen() -> Screen {
+        use crate::confirm::ClaimPrompt;
+        // Twenty-four BIP-39 words, laid out by `RecoveryPhrase::numbered_lines`' exact format.
+        let words = [
+            "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract",
+            "absurd", "abuse", "access", "accident", "account", "accuse", "achieve", "acid",
+            "acoustic", "acquire", "across", "act", "action", "actor", "actress", "adapt",
+        ];
+        let mut body = String::new();
+        for (i, word) in words.iter().enumerate() {
+            body.push_str(&format!("{:>2}. {word}\n", i + 1));
+        }
+        body.push_str(
+            "These words ARE your DIG Account. Anyone who has them can take it, and nobody — \
+             including DIG — can recover your account without them.",
+        );
+        Screen::confirm(
+            &ConfirmContent::claim(&ClaimPrompt {
+                title: "DIG — Your recovery phrase",
+                heading: "Write these 24 words down, in order, and keep them somewhere safe.",
+                body: &body,
+                affirm: "I have written these down",
+                scannable: None,
+            }),
+            "Not yet",
+        )
+    }
+
+    /// **No display can hide body text without a scrollbar.**
+    ///
+    /// The guard this replaces was deleted with the Win32 renderer, and the defect came straight
+    /// back. The window is capped at [`HEIGHT`] and [`PromptApp::fit_to_content`] only shrinks, so
+    /// the body area is 404 px; the phrase body is 24 lines at 23.25 px plus a heading and a warning
+    /// — about 767 px. `Ui::new_child` inherits its parent's clip rect, so the overflow was cut off
+    /// **with no scrollbar and no marker**: words 15–24 and the whole warning never reached the
+    /// screen, the user wrote down 14 of 24, and the account became unrecoverable
+    /// (dig_ecosystem#49, #2038, and #2063 on the sign window).
+    ///
+    /// The property asserted is REACHABILITY, at every display this window can be drawn on: the
+    /// start of the body is visible at rest, and the END of it is visible after the user scrolls.
+    /// Both halves are read off the painted frame — the galley's own rectangle against the clip it
+    /// was drawn under — so a scroll container that exists but does not actually move the content
+    /// fails here.
+    #[test]
+    fn no_display_can_hide_body_text_without_a_scrollbar() {
+        for (height, points_per_pixel) in [
+            (HEIGHT, 1.0),
+            (HEIGHT, 1.5),
+            (HEIGHT, 2.0),
+            (480.0, 1.0),
+            (MIN_HEIGHT, 1.0),
+            (MIN_HEIGHT, 2.0),
+        ] {
+            let mut driver = Driver::new(phrase_screen(), false, PATIENT, Vec2::new(WIDTH, height));
+            driver.ctx.set_pixels_per_point(points_per_pixel);
+            let at_rest = driver.settle();
+            let (_, first, clip) = body_galley(&at_rest, " 1. abandon");
+            let config = format!("{height} px at {points_per_pixel}×");
+            assert!(
+                first.top() >= clip.top() - 0.5,
+                "{config}: the body starts above its own clip — the FIRST words are cut off",
+            );
+
+            driver.scroll_to_the_bottom(clip.center());
+            let scrolled = driver.frame(Vec::new());
+            let (text, last, clip) = body_galley(&scrolled, "24. adapt");
+            assert!(
+                text.contains("recover your account without them"),
+                "{config}: the warning is not in the body that was drawn",
+            );
+            assert!(
+                last.bottom() <= clip.bottom() + 0.5,
+                "{config}: after scrolling to the end, the body still runs {:.0} px past its clip \
+                 — the last words and the warning are unreachable",
+                last.bottom() - clip.bottom(),
+            );
+        }
+    }
+
+    /// The premise the test above rests on: this body genuinely does NOT fit.
+    ///
+    /// Asserted at the smallest window the app can draw, where 26 lines can never fit however the
+    /// layout is retuned. Without it, "you can scroll to the end" would pass on a body that was
+    /// never long enough to scroll, and prove nothing.
+    #[test]
+    fn the_recovery_phrase_really_is_taller_than_the_window() {
+        let mut driver = Driver::new(
+            phrase_screen(),
+            false,
+            PATIENT,
+            Vec2::new(WIDTH, MIN_HEIGHT),
+        );
+        let at_rest = driver.settle();
+        let (_, body, clip) = body_galley(&at_rest, " 1. abandon");
+        assert!(
+            body.bottom() > clip.bottom(),
+            "the 24-word body fits in a {MIN_HEIGHT} px window, so the scrolling test proves nothing"
+        );
+    }
+
+    /// …and the other control: a body that DOES fit is shown whole, with nothing to scroll.
+    ///
+    /// This is what stops the fix from "passing" by pushing every prompt into a scroll container the
+    /// user has to operate before they can read a two-line notice.
+    #[test]
+    fn a_short_body_is_shown_whole_and_needs_no_scrolling() {
+        let mut driver = Driver::shown(notice_screen(), false);
+        let at_rest = driver.settle();
+        for (text, rect, clip) in drawn_with_clip(&at_rest.shapes) {
+            assert!(
+                clip.contains_rect(rect.shrink(0.5)),
+                "a two-line notice drew {text:?} outside its clip — {rect:?} against {clip:?}"
+            );
+        }
+    }
+
+    /// **A prompt nobody answers dismisses ITSELF, and what it reports is not an approval.**
+    ///
+    /// Every prompt in the process is drawn on one thread, one at a time. Before this, `ask` blocked
+    /// on a bare `recv()` with no deadline anywhere in `confirm/gui/`, so a hostile dapp could raise
+    /// one sign prompt the user ignored and every LATER prompt — the tray unlock, a destroy confirm,
+    /// a second sign — queued behind it forever, none of them ever drawn, with no error reaching any
+    /// caller (dig_ecosystem#2038). One ignored window must cost one refused action.
+    #[test]
+    fn a_prompt_nobody_answers_times_out_rather_than_waiting_forever() {
+        let mut driver = Driver::new(
+            sign_screen(),
+            false,
+            Duration::from_millis(1),
+            Vec2::new(WIDTH, HEIGHT),
+        );
+        driver.frame(Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+        driver.frame(Vec::new());
+
+        assert!(
+            matches!(
+                driver.answer(),
+                Some(Outcome::Confirm(WindowIntent::Timeout))
+            ),
+            "an unanswered confirm must report a timeout"
+        );
+    }
+
+    /// …and the typed window reports that nothing was typed, never an empty answer a caller acts on.
+    #[test]
+    fn an_unanswered_input_window_times_out_as_a_cancellation() {
+        let field = InputContent {
+            title: "t".into(),
+            heading: "h".into(),
+            body: "b".into(),
+            field_label: "Passphrase".into(),
+            submit: "Unlock",
+            masked: true,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let mut driver = Driver::new(
+            Screen::input(&field),
+            true,
+            Duration::from_millis(1),
+            Vec2::new(WIDTH, HEIGHT),
+        );
+        driver.app.typed = Zeroizing::new("half-typed".to_owned());
+        driver.frame(Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+        driver.frame(Vec::new());
+
+        assert!(
+            matches!(
+                driver.answer(),
+                Some(Outcome::Input(InputOutcome::Cancelled))
+            ),
+            "an unanswered input window must cancel, never hand over what was half-typed"
+        );
+    }
+
+    /// The control: a window WITHIN its deadline answers nothing at all, so the test above is not
+    /// just observing a window that expires the moment it opens.
+    #[test]
+    fn a_prompt_inside_its_deadline_is_not_dismissed() {
+        let mut driver = Driver::shown(sign_screen(), false);
+        driver.settle();
+        std::thread::sleep(Duration::from_millis(5));
+        driver.frame(Vec::new());
+
+        assert!(
+            driver.answer().is_none(),
+            "a prompt that is still within its deadline answered on the user's behalf"
+        );
+    }
+
+    /// A timeout must not be able to become an approval on its way through the consent gate.
+    #[test]
+    fn a_timed_out_window_never_authorizes() {
+        use crate::confirm::{BiometricVerifier, ConfirmDecision, VerifyOutcome};
+
+        struct TimingOutWindow;
+        impl ForegroundWindow for TimingOutWindow {
+            fn show(&self, _content: &ConfirmContent) -> WindowIntent {
+                WindowIntent::Timeout
+            }
+        }
+        struct AlwaysVerified;
+        impl BiometricVerifier for AlwaysVerified {
+            fn verify(&self, _reason: &str) -> VerifyOutcome {
+                VerifyOutcome::Verified
+            }
+        }
+
+        assert_eq!(
+            crate::confirm::gated_consent(&sign_content(), &TimingOutWindow, &AlwaysVerified),
+            ConfirmDecision::Timeout
+        );
+    }
+
+    /// **What the user typed is not left behind in egui's undo history.**
+    ///
+    /// `.password(true)` masks what is DRAWN. It does not stop `TextEdit` feeding
+    /// `text.as_str().to_owned()` into an undoer twice per frame (egui 0.31.1
+    /// `text_edit/builder.rs:905`, `:1116`) and keeping those snapshots in `ctx.memory` for the life
+    /// of the Context — so a passphrase, or a 24-word recovery phrase typed to restore an account,
+    /// accumulated in plain `String`s outside our zeroizing buffer.
+    ///
+    /// Asserted against egui's own state rather than our field, because
+    /// `the_typed_buffer_is_zeroizing` asserts a type property on a local and cannot see this.
+    #[test]
+    fn what_was_typed_is_not_kept_in_eguis_undo_history() {
+        let field = InputContent {
+            title: "t".into(),
+            heading: "h".into(),
+            body: "b".into(),
+            field_label: "Passphrase".into(),
+            submit: "Unlock",
+            masked: true,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let mut driver = Driver::shown(Screen::input(&field), true);
+        driver.settle();
+        // A person typing, one frame per keystroke — which is what fills the history.
+        for keystroke in ["c", "o", "r", "r", "e", "c", "t"] {
+            driver.frame(vec![egui::Event::Text(keystroke.to_owned())]);
+        }
+        assert_eq!(
+            &*driver.app.typed, "correct",
+            "the field never took the text"
+        );
+
+        let id = driver
+            .ctx
+            .memory(|m| m.focused())
+            .expect("the field holds focus");
+        let state = egui::TextEdit::load_state(&driver.ctx, id).expect("the field has state");
+        // A state no keystroke could have produced, so an empty history is the only way this is
+        // false — a single retained snapshot that happens to equal the current one cannot hide here.
+        let sentinel = (
+            egui::text::CCursorRange::default(),
+            "\u{0}never-typed".to_owned(),
+        );
+        assert!(
+            !state.undoer().has_undo(&sentinel),
+            "egui is still holding earlier copies of what was typed into a masked field"
+        );
+    }
+
+    /// **The window is really gone when the prompt is answered.**
+    ///
+    /// On Windows `winit::window::Window::drop` does not destroy the window: it posts a private
+    /// message and lets the window procedure do it (winit 0.30 `windows/window.rs:1113`). eframe
+    /// drops the window only after `run_app_on_demand` has returned, and [`serve`] then goes
+    /// straight back to waiting — so nothing dispatched that message and the consent window STAYED
+    /// ON SCREEN, always on top, with a dead message pump. That is the *"press any button and the
+    /// program stops responding"* the user reported (dig_ecosystem#2038); the answer had already
+    /// been delivered, and the frozen window was all they could see.
+    ///
+    /// Driven with no input at all: the window is given a one-second deadline and dismisses itself,
+    /// so this needs a display but not a person.
+    ///
+    /// Ignored because it opens a real window — CI has no display, and a headless run cannot reach
+    /// the code path at all, since the whole defect is in what the real winit event loop leaves
+    /// behind. Run it deliberately on a desktop.
+    #[test]
+    #[ignore = "opens a real window; run deliberately on a desktop to check the window is destroyed"]
+    #[cfg(target_os = "windows")]
+    fn an_answered_prompt_leaves_no_window_behind() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsWindowVisible,
+        };
+
+        /// The class every `winit` window is registered under — the prompt's own window.
+        ///
+        /// Named so the count can EXCLUDE `"Winit Thread Event Target"`, the 32 px helper window the
+        /// cached event loop keeps between prompts. That one is meant to outlive a prompt; the
+        /// consent window is not.
+        const WINIT_WINDOW_CLASS: &str = "Window Class";
+
+        /// Count this process's visible prompt windows.
+        unsafe extern "system" fn prompts(window: HWND, total: LPARAM) -> BOOL {
+            // SAFETY: `total` is the `&AtomicUsize` handed to `EnumWindows` below, which outlives
+            // the enumeration.
+            let seen = unsafe { &*(total.0 as *const AtomicUsize) };
+            let mut owner = 0u32;
+            let mut class = [0u16; 64];
+            // SAFETY: plain queries on a handle the enumeration just produced.
+            let (visible, len) = unsafe {
+                GetWindowThreadProcessId(window, Some(&mut owner));
+                (
+                    IsWindowVisible(window).as_bool(),
+                    GetClassNameW(window, &mut class),
+                )
+            };
+            let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+            if owner == std::process::id() && visible && class == WINIT_WINDOW_CLASS {
+                seen.fetch_add(1, Ordering::Relaxed);
+            }
+            true.into()
+        }
+
+        fn prompt_windows_still_open() -> usize {
+            let seen = AtomicUsize::new(0);
+            // SAFETY: the callback only reads `seen`, which outlives the call.
+            unsafe {
+                let _ = EnumWindows(Some(prompts), LPARAM(std::ptr::from_ref(&seen) as isize));
+            }
+            seen.load(Ordering::Relaxed)
+        }
+
+        assert_eq!(
+            prompt_windows_still_open(),
+            0,
+            "another test left a prompt window open; run this one on its own"
+        );
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        let (reply, _rx) = sync_channel(1);
+        let outcome = draw(Job {
+            screen: sign_screen(),
+            wants_text: false,
+            theme: store.clone(),
+            // Answered by the deadline rather than by a person, so this needs a display but no human.
+            deadline: Duration::from_secs(1),
+            reply,
+        });
+
+        assert!(
+            matches!(outcome, Some(Outcome::Confirm(WindowIntent::Timeout))),
+            "the window should have dismissed itself on its deadline"
+        );
+        let left_behind = prompt_windows_still_open();
+        assert_eq!(
+            left_behind, 0,
+            "the prompt returned but left {left_behind} visible window(s) behind, with nothing left \
+             to pump their messages — that is the frozen consent window the user cannot dismiss"
+        );
     }
 
     /// The typed buffer is `Zeroizing`, so a recovery phrase is wiped when the window drops rather
