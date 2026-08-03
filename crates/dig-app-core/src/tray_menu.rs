@@ -700,13 +700,14 @@ pub fn details_text(view: &TrayView) -> String {
 ///
 /// # The shape
 ///
-/// Five named rows, always the same five, in this order (dig_ecosystem#1836):
+/// Named rows, always the same ones, in this order (dig_ecosystem#1836, extended by #1841 and #2002):
 ///
 /// ```text
 /// Status
 /// Open URL…
 /// View Account    ▸
 /// Manage Account  ▸
+/// Wallet          ▸
 /// Security        ▸
 /// Cache           ▸
 /// ──
@@ -714,15 +715,20 @@ pub fn details_text(view: &TrayView) -> String {
 /// Quit DIG
 /// ```
 ///
+/// The **Wallet** submenu (dig_ecosystem#1841) carries the receive address, the balance reading, and the
+/// explainer — and nothing that moves money, since the money path is parked (#1702). Its parent label is
+/// deliberately the bare word: unlike the cache figure below, a balance is the user's own money, and a
+/// tray spine is read by anyone standing behind them.
+///
 /// The **Cache** submenu (dig_ecosystem#2002) carries the node's content-cache size limit; its parent
 /// label shows the live usage against the cap, so it is a spine row that also reports state without a
 /// display-only disabled row (SPEC §3.1c). Like `Open URL…`, it is not gated on an account.
 ///
 /// A FIXED spine is the point. The previous menu grew and shrank with account state — the identity block
 /// appeared only when an account existed, and the primary row changed verb — so rows moved under the cursor
-/// between repaints and no two machines showed the same menu. Five stable rows mean muscle memory works.
+/// between repaints and no two machines showed the same menu. A stable spine means muscle memory works.
 ///
-/// Two things sit outside the five, deliberately:
+/// Two things sit outside the spine, deliberately:
 ///
 /// - **The escapes.** `Open the log folder` and `Quit DIG` are always clickable, whatever else has gone
 ///   wrong (`professional-ui`'s never-trap-the-user HARD RULE). A tray app with no way out is a defect, so
@@ -730,7 +736,7 @@ pub fn details_text(view: &TrayView) -> String {
 /// - **One contextual row, ONLY when the account needs action** — see `urgent_account_row`. Without it a
 ///   brand-new user would have to find "Set up my DIG Account" inside a submenu, which is exactly the
 ///   first-run dead end #1800 removed and #1826 exists to prevent. In the ordinary unlocked state it is
-///   absent and the menu is exactly the five.
+///   absent and the menu is exactly the spine.
 pub fn build(view: &TrayView) -> MenuModel {
     let account = view.account();
     let mut rows = Vec::new();
