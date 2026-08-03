@@ -826,9 +826,9 @@ fn second_factor_cleared(
             confirmer,
             "DIG — Two-factor code needed",
             "Unlock your DIG Account first.",
-            "This account has two-factor codes turned on, so DIG needs a code from your              authenticator before it can do this — and it can only check one while the account is              unlocked.
+            "This account has two-factor codes turned on, so DIG needs a code from your authenticator before it can do this — and it can only check one while the account is unlocked.
 
-Use Unlock in this menu and try again. If you no longer have your              authenticator or your recovery codes, turn two-factor off from the Security menu first.",
+Use Unlock in this menu and try again. If you no longer have your authenticator or your recovery codes, turn two-factor off from the Security menu first.",
         );
         return false;
     };
@@ -851,7 +851,7 @@ Use Unlock in this menu and try again. If you no longer have your              a
                 confirmer,
                 "DIG — Two-factor code needed",
                 "That code was not right, so nothing was changed.",
-                "Codes change every 30 seconds — open your authenticator, wait for a fresh one, and                  try again. A recovery code works too, and each of those works once.",
+                "Codes change every 30 seconds — open your authenticator, wait for a fresh one, and try again. A recovery code works too, and each of those works once.",
             );
             false
         }
@@ -1695,7 +1695,7 @@ mod tray {
                 confirmer,
                 "DIG - Pair an app",
                 "Your DIG Account is locked.",
-                "Unlock it from this menu first, then try again. Pairing stores a record sealed under                  your account, so DIG can only pair an app while the account is open.",
+                "Unlock it from this menu first, then try again. Pairing stores a record sealed under your account, so DIG can only pair an app while the account is open.",
             );
             return;
         };
@@ -1715,7 +1715,7 @@ mod tray {
                 confirmer,
                 "DIG - Paired apps",
                 "Your DIG Account is locked.",
-                "Unlock it from this menu first. While the account is locked nothing can use it                  through another program, so no app has access right now either way.",
+                "Unlock it from this menu first. While the account is locked nothing can use it through another program, so no app has access right now either way.",
             );
             return;
         };
