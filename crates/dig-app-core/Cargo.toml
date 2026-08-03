@@ -157,6 +157,7 @@ block2.workspace = true
 dispatch2.workspace = true
 
 [dev-dependencies]
+png.workspace = true
 tempfile.workspace = true
 rand_chacha.workspace = true
 # The IPC contract's ENGINE half (the same one dig-node runs) + base64 — used by the #1211 headline

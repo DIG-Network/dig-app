@@ -335,14 +335,26 @@ impl eframe::App for PromptApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+}
+
+impl PromptApp {
+    /// Lay out and paint ONE frame.
+    ///
+    /// Split out of [`eframe::App::update`] because `eframe::Frame` cannot be constructed outside
+    /// `eframe`, and this is the half worth testing: a caller with only an [`egui::Context`] — a
+    /// headless test, the screenshot harness — can drive the real paint path and read back what it
+    /// produced. Nothing here touches the window; the frame argument was never used.
+    fn frame(&mut self, ctx: &egui::Context) {
         // Keep painting for as long as the window is open.
         //
         // egui is lazy by default and only redraws when it sees an event. A window created on a
-        // background thread can miss its first paint entirely and sit on screen BLANK — observed on
-        // Windows while building this (#2038). A blank consent dialog is not a cosmetic bug: it is a
-        // focus-stealing, always-on-top window with no visible way out, in front of a user who has
-        // no idea what it is asking. The cost of never being blank is one redraw per frame for the
-        // few seconds a modal is up, which is the right trade for this window.
+        // background thread can miss its first paint entirely and sit on screen BLANK. A blank
+        // consent dialog is not a cosmetic bug: it is a focus-stealing, always-on-top window with no
+        // visible way out, in front of a user who has no idea what it is asking. The cost of never
+        // being blank is one redraw per frame for the few seconds a modal is up, which is the right
+        // trade for this window.
         ctx.request_repaint();
 
         let t = self.theme.tokens();
@@ -651,6 +663,216 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ThemeChoice::in_brand_dir(dir.path());
         (dir, store)
+    }
+
+    /// Paint one real frame with NO window, and hand back everything the renderer produced.
+    ///
+    /// # Why this exists
+    ///
+    /// "The window opens" and "the window has something in it" are different claims, and only the
+    /// second one matters to a person being asked to authorise a spend. An on-screen screenshot
+    /// cannot settle it either: a GDI screen capture is BLIND to a hardware GL surface, so a
+    /// perfectly-painted egui window photographs as the desktop behind it (#2038 — it cost the first
+    /// attempt at this port its whole verification step). Reading the renderer's own output back is
+    /// the check that actually answers the question, and it runs on a CI host with no display.
+    ///
+    /// Two frames are run because the first builds the font atlas; the second is the one that lays
+    /// out real glyphs.
+    fn painted(screen: Screen, wants_text: bool, theme: Theme) -> (egui::Context, egui::FullOutput) {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        store.write(theme).expect("the theme persists");
+        let (reply, _rx) = sync_channel(1);
+        let mut app = PromptApp::new(
+            Job {
+                screen,
+                wants_text,
+                theme: store.clone(),
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(WIDTH, HEIGHT),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |ctx| app.frame(ctx));
+        let output = ctx.run(input, |ctx| app.frame(ctx));
+        (ctx, output)
+    }
+
+    /// Every string the painter was actually asked to draw, in draw order.
+    fn drawn_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The triangles the frame tessellates to, and the area their bounding boxes cover.
+    fn coverage(ctx: &egui::Context, output: egui::FullOutput) -> (usize, f32) {
+        let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let mut triangles = 0;
+        let mut union: Option<Rect> = None;
+        for primitive in &primitives {
+            if let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive {
+                triangles += mesh.indices.len() / 3;
+                let bounds = mesh.calc_bounds();
+                union = Some(match union {
+                    Some(existing) => existing.union(bounds),
+                    None => bounds,
+                });
+            }
+        }
+        let covered = union.map_or(0.0, |r| r.width() * r.height());
+        (triangles, covered / (WIDTH * HEIGHT))
+    }
+
+    fn sign_screen() -> Screen {
+        let content = ConfirmContent::sign(&SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some("Send 0.001 XCH to xch1safe\u{2026}addr"),
+        })
+        .expect("a decoded transaction yields content");
+        Screen::confirm(&content, "Cancel")
+    }
+
+    /// **The window is drawn edge to edge.** A consent window that opens, steals focus, sits on top
+    /// of everything and paints only part of itself leaves the desktop showing through the rest.
+    #[test]
+    fn a_sign_prompt_paints_the_whole_window() {
+        let (ctx, output) = painted(sign_screen(), false, Theme::Light);
+        let (_, covered) = coverage(&ctx, output);
+        assert!(
+            covered > 0.95,
+            "the painted geometry covers only {:.0}% of the window",
+            covered * 100.0
+        );
+    }
+
+    /// …and the control for that metric: a frame that paints NOTHING must score ~0. Without it,
+    /// "covers 95%" could be reporting on a measurement that always says yes.
+    #[test]
+    fn a_frame_that_paints_nothing_covers_nothing() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(WIDTH, HEIGHT),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |_| {});
+        let output = ctx.run(input, |_| {});
+        let (_, covered) = coverage(&ctx, output);
+        assert!(
+            covered < 0.01,
+            "an empty frame scored {:.0}% coverage, so the assertion above proves nothing",
+            covered * 100.0
+        );
+    }
+
+    /// **The BODY is drawn, not just the chrome and the buttons.** Measured against the identical
+    /// screen with its blocks removed, so the surrounding furniture cannot satisfy the floor — which
+    /// is how a "the window is not blank" test rots into a rubber stamp.
+    #[test]
+    fn the_body_blocks_add_real_geometry_over_the_same_screen_without_them() {
+        let mut bodyless = sign_screen();
+        bodyless.blocks.clear();
+        let (bare_ctx, bare_output) = painted(bodyless, false, Theme::Light);
+        let (furniture_only, _) = coverage(&bare_ctx, bare_output);
+        let (ctx, output) = painted(sign_screen(), false, Theme::Light);
+        let (full, _) = coverage(&ctx, output);
+        assert!(
+            full > furniture_only + 200,
+            "the same screen tessellated to {full} triangles with its blocks and {furniture_only} \
+             without them — the heading, body and decoded transaction are not reaching the screen"
+        );
+    }
+
+    /// **Every string the screen carries reaches the painter.** Composing the right `Screen` is not
+    /// the same as drawing it: this asserts on the galleys the paint layer actually handed to egui.
+    #[test]
+    fn every_string_the_screen_carries_is_handed_to_the_painter() {
+        let screen = sign_screen();
+        let expected = screen
+            .visible_text()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let (_ctx, output) = painted(screen, false, Theme::Light);
+        let drawn = drawn_text(&output.shapes).join("\u{1}");
+        for text in expected {
+            assert!(
+                drawn.contains(&text),
+                "{text:?} was composed into the screen but never painted"
+            );
+        }
+    }
+
+    /// A hostile decoded transaction survives all the way to the PAINTER as literal characters.
+    ///
+    /// `render.rs` proves the text pipeline does not interpret markup; this proves the window
+    /// actually draws that same text, rather than composing it and then painting something else.
+    #[test]
+    fn a_hostile_decoded_transaction_is_painted_verbatim() {
+        const HOSTILE: &str = "Send 1 XCH</div><b>\u{2713} Verified</b><script>alert(1)</script>";
+        let content = ConfirmContent::sign(&SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some(HOSTILE),
+        })
+        .expect("a decoded transaction yields content");
+        let (_ctx, output) = painted(Screen::confirm(&content, "Cancel"), false, Theme::Light);
+        let drawn = drawn_text(&output.shapes).join("\u{1}");
+        assert!(
+            drawn.contains(HOSTILE),
+            "the painted text is not the decoded transaction that was signed; got {drawn:?}"
+        );
+    }
+
+    /// The two themes paint DIFFERENT pixels. A theme that is persisted but never reaches the
+    /// painter is the same defect as no theme at all.
+    #[test]
+    fn the_light_and_dark_themes_paint_different_frames() {
+        fn fills(theme: Theme) -> Vec<egui::Color32> {
+            let (_ctx, output) = painted(sign_screen(), false, theme);
+            fn walk(shape: &egui::Shape, out: &mut Vec<egui::Color32>) {
+                match shape {
+                    egui::Shape::Rect(rect) => out.push(rect.fill),
+                    egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            for clipped in &output.shapes {
+                walk(&clipped.shape, &mut out);
+            }
+            out
+        }
+        let light = fills(Theme::Light);
+        let dark = fills(Theme::Dark);
+        assert!(!light.is_empty(), "the light frame filled no rectangles");
+        assert_ne!(
+            light, dark,
+            "both themes painted identical fills — the theme never reached the painter"
+        );
     }
 
     /// **Headless fails closed.** A host with no prompt thread must DENY, not hang and not approve.

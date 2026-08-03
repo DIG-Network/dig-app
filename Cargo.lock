@@ -1774,6 +1774,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-local-authentication",
+ "png 0.17.16",
  "qrcodegen",
  "rand_chacha",
  "rand_core",
