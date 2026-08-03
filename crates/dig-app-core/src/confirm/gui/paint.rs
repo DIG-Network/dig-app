@@ -106,7 +106,7 @@ pub fn card(ui: &Ui, rect: Rect, t: &Tokens) {
     ui.painter().rect_stroke(
         rect,
         CornerRadius::same(radius::LG),
-        Stroke::new(1.0, rgba(t.border)),
+        Stroke::new(1.0_f32, rgba(t.border)),
         StrokeKind::Inside,
     );
 }
@@ -118,7 +118,7 @@ pub fn panel(ui: &Ui, rect: Rect, t: &Tokens) {
     ui.painter().rect_stroke(
         rect,
         CornerRadius::same(radius::BASE),
-        Stroke::new(1.0, rgba(t.border)),
+        Stroke::new(1.0_f32, rgba(t.border)),
         StrokeKind::Inside,
     );
 }
@@ -131,7 +131,7 @@ pub fn warning_panel(ui: &Ui, rect: Rect, t: &Tokens) {
     ui.painter().rect_stroke(
         rect,
         CornerRadius::same(radius::BASE),
-        Stroke::new(1.0, rgba(t.amber_border.over(bg))),
+        Stroke::new(1.0_f32, rgba(t.amber_border.over(bg))),
         StrokeKind::Inside,
     );
 }
@@ -230,7 +230,7 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
             ui.painter().rect_stroke(
                 rect,
                 CornerRadius::same(corner),
-                Stroke::new(1.0, rgba(edge)),
+                Stroke::new(1.0_f32, rgba(edge)),
                 StrokeKind::Inside,
             );
         }
@@ -240,7 +240,7 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
         ui.painter().rect_stroke(
             rect.expand(3.0),
             CornerRadius::same(corner.saturating_add(3)),
-            Stroke::new(2.0, rgba(t.dig_purple)),
+            Stroke::new(2.0_f32, rgba(t.dig_purple)),
             StrokeKind::Outside,
         );
     }
@@ -293,7 +293,7 @@ pub fn rule(ui: &Ui, rect: Rect, y: f32, t: &Tokens) {
     ui.painter().hline(
         rect.left()..=rect.right(),
         y,
-        Stroke::new(1.0, rgba(t.border)),
+        Stroke::new(1.0_f32, rgba(t.border)),
     );
 }
 
