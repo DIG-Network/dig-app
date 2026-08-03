@@ -41,7 +41,7 @@ use std::time::Duration;
 use dig_node_control_interface::envelope::{JsonRpcResponse, RequestId};
 use dig_node_control_interface::params::StatusParams;
 use dig_node_control_interface::results::StatusResult;
-use dig_node_control_interface::traits::{build_request, parse_response};
+use dig_node_control_interface::traits::{build_request, parse_response, ControlCall};
 
 /// The header dig-node gates every `control.*` method on. Byte-identical to `dig-node-service`'s
 /// `control::CONTROL_TOKEN_HEADER`; a mismatch means every call is refused.
@@ -269,7 +269,7 @@ pub fn call_control<C>(
     timeout: Duration,
 ) -> Result<C::Output, ControlCallError>
 where
-    C: dig_node_control_interface::traits::ControlCall,
+    C: ControlCall,
 {
     let request = build_request(RequestId::from(1), call);
     let body = serde_json::to_vec(&request)

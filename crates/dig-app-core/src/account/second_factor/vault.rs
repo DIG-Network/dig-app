@@ -308,7 +308,10 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
         // its original (now-past) window. Residual assumption, documented in SPEC §3.1e: an attacker
         // who can move the clock FORWARD at will already has the root-level control the threat model
         // (see the module docs) explicitly does not claim to defend against; the escalating delay only
-        // ever RAISES the bar for the unlocked-machine attacker it is actually for.
+        // ever RAISES the bar for the unlocked-machine attacker it is actually for. A monotonic/trusted-time
+        // basis for the FORWARD direction was evaluated (dig_ecosystem#1969) and rejected as impractical —
+        // no OS monotonic clock survives a reboot, which this persisted bound must; SPEC §3.1e records the
+        // full decision. The persistent failure counter + the platform authorization seam are the real bounds.
         let effective_now = anchored_now(&record, now);
         record.clock_high_water = Some(effective_now);
 
