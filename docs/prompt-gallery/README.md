@@ -14,7 +14,13 @@ persisted opt-in.
 | Destroy the account | [destroy-light.png](destroy-light.png) | [destroy-dark.png](destroy-dark.png) |
 | Two-factor enrolment (QR) | [two-factor-qr-light.png](two-factor-qr-light.png) | [two-factor-qr-dark.png](two-factor-qr-dark.png) |
 | Passphrase | [passphrase-light.png](passphrase-light.png) | [passphrase-dark.png](passphrase-dark.png) |
-| Recovery phrase | [recovery-phrase-light.png](recovery-phrase-light.png) | [recovery-phrase-dark.png](recovery-phrase-dark.png) |
+| Recovery phrase (typed on restore) | [recovery-phrase-light.png](recovery-phrase-light.png) | [recovery-phrase-dark.png](recovery-phrase-dark.png) |
+| Recovery phrase (shown on enrolment) | [recovery-phrase-shown-light.png](recovery-phrase-shown-light.png) | [recovery-phrase-shown-dark.png](recovery-phrase-shown-dark.png) |
+
+The last row is the tallest window the app draws, and it was the one view this gallery did not
+photograph. That omission is why nobody saw that ten of its words and its whole warning were being
+clipped away (dig_ecosystem#2038). A gallery that skips the view whose overflow matters is a gallery
+of the easy cases — every view the window can draw belongs here.
 
 ## Regenerating
 

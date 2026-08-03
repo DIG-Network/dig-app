@@ -584,6 +584,29 @@ Binding rules, which matter more for an input control than for a notice:
 - **The words a user types are DIG's, not a Chia wallet's (MUST).** Both the restore prompt and the setup
   screen MUST state that a DIG recovery phrase is not a Chia wallet phrase and vice versa, because DIG
   will accept a Sage phrase and silently build a different, empty account from it (§3.1a).
+- **Everything a window is given MUST be reachable on every display (MUST).** A prompt MUST NOT hide any
+  part of its content: where the content is taller than the window, the body MUST scroll, and no display
+  size or scale factor may leave text drawn outside the clip with no way to reach it. Silent truncation is
+  a custody defect, not a layout one — a 24-word recovery phrase clipped at word 14 produces an account
+  nobody can restore, and a decoded transaction clipped at its last output authorises a spend the user
+  never saw.
+- **Every prompt MUST have a deadline, and reaching it MUST refuse (MUST).** A window nobody answers MUST
+  dismiss itself and report a timeout — never an approval, and never nothing. Prompts are serialised onto
+  one renderer, so an unbounded window is not one stuck caller: it holds every LATER consent window,
+  including the unlock and the destroy confirm, for the life of the process. A caller blocked on a window
+  MUST also bound its own wait, so a wedged renderer cannot wedge the caller either.
+- **The FIRST answer a window records is the one it reports (MUST).** Closing a window is asynchronous —
+  the frames between "the user clicked" and "the window is gone" MUST NOT be able to change what was
+  answered. A window that recorded nothing MUST still resolve to a refusal.
+- **A window MUST be destroyed when it is answered (MUST).** A prompt that returns its answer while its
+  window is still on screen leaves an always-on-top surface whose event loop has stopped — indistinguishable
+  to the user from a crashed application, and impossible to dismiss. Where the windowing system defers
+  destruction to the event loop, the backend MUST run that destruction to completion before it reports.
+- **Nothing typed into a masked field may outlive it (MUST).** A masked control masks what is DRAWN; a
+  backend MUST also ensure the toolkit is not retaining its own copies (undo history, autofill, a
+  clipboard shadow) beyond the frame. Where the toolkit exposes no way to wipe such a copy, the backend
+  MUST at least bound its lifetime to the frame and MUST say so — this reduces exposure rather than
+  eliminating it.
 
 **Current state:** Windows and Linux draw the **branded prompt window** — one renderer, in-process,
 shared by every consent and input prompt, in hub.dig.net's visual language, with the field, the masking

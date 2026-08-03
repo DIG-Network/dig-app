@@ -489,3 +489,58 @@ finally appeared as four lines inside an already-red CI job.
 **When deleting a run of tests, diff the `#[test]` COUNT before and after.** `grep -c '#\[test\]'` is
 the whole check. A passing suite proves nothing here: the suite got SMALLER and stayed green, which is
 exactly what a deletion is supposed to look like.
+
+## `winit` on Windows does not destroy a window in `Drop` — it posts a message (dig_ecosystem#2038)
+
+`winit::window::Window::drop` on Windows does NOT call `DestroyWindow`. A window may only be destroyed
+by the thread that created it, so Drop does `PostMessageW(hwnd, "Winit::DestroyMsg")` and leaves the
+real destruction to the window procedure (winit 0.30 `windows/window.rs:1113`, handled at
+`windows/event_loop.rs:2445`). **The destruction therefore needs the event loop to still be pumping.**
+
+eframe's `run_and_return` path drops the window AFTER `run_app_on_demand` has already returned. In a
+normal eframe app the process exits next and nobody notices. In a long-lived app that opens windows on
+a worker thread and then goes back to `rx.recv()`, nothing on that thread ever dispatches the posted
+message: **the window stays on screen, always on top, with a dead message pump — which is exactly what
+Windows renders as "not responding".** The app has already moved on; the frozen window is all the user
+can see.
+
+The tell is that only the LAST window sticks. Each new `run_native` pumps the queue and disposes of the
+PREVIOUS window's deferred destroy, so a sequence of prompts looks fine right up until the final one.
+The fix is one call: drain the thread's message queue after `run_native` returns.
+
+Diagnosing it: `Get-Process.Responding` is measured on `MainWindowHandle`, so it reports on whichever
+thread owns the frontmost window, not on the app. Windows' Wait Chain Traversal API
+(`OpenThreadWaitChainSession`/`GetThreadWaitChain`) returned a bare blocked node with no chain, which
+correctly RULED OUT a `SendMessage`/critical-section deadlock and pointed away from an hour of
+cross-thread theories. What actually settled it was `eprintln!` tracing through `draw`/`serve`: the
+trace showed `run_native returned` and the answer delivered while `EnumWindows` still listed the
+window as visible.
+
+## `ViewportCommand::Close` comes BACK as an input event, one frame later (dig_ecosystem#2038)
+
+`ctx.send_viewport_cmd(ViewportCommand::Close)` does not close anything by itself. egui-winit turns it
+into a `ViewportEvent::Close` (`egui-winit` `lib.rs:1352`) that arrives in the NEXT frame's raw input,
+which is what eframe reads to decide to exit (`epi_integration.rs:270`). So the window keeps running
+frames after you ask it to close, and **any handler that treats `close_requested()` as "the user
+dismissed me" fires on your own close command.**
+
+In the prompt window that meant a click on Sign recorded `Approve` and then had it overwritten with
+`Deny` one frame later, by the window's own teardown. Every affirmative in the app answered Deny, and
+786 tests at 93.85% coverage all passed, because the suite drove the pure `Screen` model and read
+glyphs back — never the frame that carries the close event.
+
+**Latch the first answer.** Whatever else a teardown frame does, it must not be able to change what the
+human said. And when testing a window, synthesise that close frame explicitly: it is a real frame the
+real loop runs, and it is where this class of bug lives.
+
+## A scrollbar is not automatically an affordance (dig_ecosystem#2038)
+
+Wrapping the clipped body in an `egui::ScrollArea` made the hidden two-thirds of a 24-word recovery
+phrase *reachable* and the regression test *pass* — and the reshot gallery still showed a window that
+stops at word 14 beside a 2 px grey hairline. A person transcribing a phrase onto paper writes down
+what they can see and clicks the affirmative. **Reachable is the test's bar; visible is the user's.**
+
+Two changes, not one: let the window GROW to what its content needs (bounded by `MAX_HEIGHT` and 90%
+of `ViewportInfo::monitor_size`, falling back to the creation height when no monitor is reported, which
+is also what keeps the headless overflow tests meaningful), and make the bar solid and wide for the
+displays where growing is not enough. Look at the picture after the test goes green.

@@ -184,4 +184,94 @@ mod tests {
     fn confirmer_is_constructed() {
         assert!(confirmer().is_some());
     }
+
+    /// **The pump DELIVERS a posted message to its window procedure.**
+    ///
+    /// Delivery is the whole point, and it is not the same as draining the queue: the prompt window
+    /// calls this after its event loop has exited so that the `DestroyWindow` `winit` merely POSTED
+    /// actually runs (`gui::window::flush_deferred_window_destruction`). A pump that removed
+    /// messages without dispatching them would empty the queue and still leave the consent window on
+    /// screen with a dead message pump — the *"press any button and the program stops responding"*
+    /// defect (dig_ecosystem#2038). So the assertion is on what the window procedure RECEIVED.
+    ///
+    /// A message-only window is used so this needs no display and runs on a CI runner.
+    #[test]
+    fn the_pump_delivers_a_posted_message_to_its_window() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, RegisterClassW,
+            HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+        };
+
+        /// A private message no other code in the process sends.
+        const PROBE: u32 = WM_APP + 7;
+        static DELIVERED: AtomicBool = AtomicBool::new(false);
+
+        unsafe extern "system" fn record(
+            window: HWND,
+            message: u32,
+            w: WPARAM,
+            l: LPARAM,
+        ) -> LRESULT {
+            if message == PROBE {
+                DELIVERED.store(true, Ordering::SeqCst);
+                return LRESULT(0);
+            }
+            // SAFETY: the default handling for every message this probe does not claim.
+            unsafe { DefWindowProcW(window, message, w, l) }
+        }
+
+        let class = windows::core::w!("DigPumpProbe");
+        // SAFETY: registering a class and creating a message-only window on this thread, then
+        // destroying it below. Every pointer is either null or a `'static` wide literal.
+        let window = unsafe {
+            let module = GetModuleHandleW(PCWSTR::null()).expect("this module's handle");
+            let _ = RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(record),
+                hInstance: module.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                PCWSTR::null(),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                module,
+                None,
+            )
+            .expect("a message-only window")
+        };
+
+        // SAFETY: posting to a window this thread owns.
+        unsafe {
+            PostMessageW(window, PROBE, WPARAM(0), LPARAM(0)).expect("the probe is queued");
+        }
+        assert!(
+            !DELIVERED.load(Ordering::SeqCst),
+            "a POSTED message must not reach the window until something pumps"
+        );
+
+        pump_pending();
+
+        let delivered = DELIVERED.load(Ordering::SeqCst);
+        // SAFETY: destroying a window this thread created.
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+        assert!(
+            delivered,
+            "the pump returned without delivering the posted message — a deferred window \
+             destruction would never run, and the consent window would stay on screen frozen"
+        );
+    }
 }

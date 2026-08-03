@@ -51,6 +51,19 @@ const WIDTH: f32 = 620.0;
 const HEIGHT: f32 = 560.0;
 /// The shortest a prompt may shrink to. Below this a consent window starts reading as a toast.
 const MIN_HEIGHT: f32 = 320.0;
+/// The tallest a prompt may GROW to when its content genuinely needs the room.
+///
+/// The window used to be capped at [`HEIGHT`] and could only shrink, so the 24-word recovery phrase
+/// — about 715 px of content — was cut off at word 14 (dig_ecosystem#2038). Scrolling makes the rest
+/// REACHABLE; growing makes it VISIBLE, and for a screen the user is copying out by hand onto paper
+/// that is the difference between an affordance and a trap. So the window grows first and scrolls
+/// only when it has run out of screen.
+const MAX_HEIGHT: f32 = 900.0;
+/// The most of the monitor's height a prompt may take.
+///
+/// A consent window taller than the display is worse than one that scrolls: its buttons go off the
+/// bottom edge and the user cannot answer it at all.
+const SCREEN_SHARE: f32 = 0.9;
 /// The height reserved for the action row — the separator, the buttons and the padding under them.
 const ACTION_ROW: f32 = 72.0;
 /// How much room a scannable QR is given, in logical pixels.
@@ -631,12 +644,33 @@ impl PromptApp {
                 .max_rect(inner)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
+        // egui's default bar is a 2 px hairline that fades out when nobody is touching it. On a
+        // window that is hiding part of a recovery phrase, the control that reveals the rest has to
+        // be visible at a glance or it is not an affordance at all (`professional-ui`).
+        //
+        // egui takes the bar's colours from the SHARED widget palette, which the field inside the
+        // body reads too, so the content's own visuals are put back before it is drawn — the
+        // scrollbar's brand colours belong to the scrollbar.
+        let content_widgets = ui.visuals().widgets.clone();
+        let style = ui.style_mut();
+        style.spacing.scroll = egui::style::ScrollStyle {
+            bar_width: 8.0,
+            handle_min_length: 24.0,
+            ..egui::style::ScrollStyle::solid()
+        };
+        style.visuals.widgets.inactive.bg_fill = rgba(t.border_strong);
+        style.visuals.widgets.hovered.bg_fill = rgba(t.dig_purple);
+        style.visuals.widgets.active.bg_fill = rgba(t.dig_purple);
+        style.visuals.extreme_bg_color = rgba(t.surface_2);
         let scrolled = egui::ScrollArea::vertical()
             .id_salt(BODY_SCROLL_ID)
             // The viewport is the body area whether or not the content fills it, so the action row
             // stays put instead of sliding up under a short prompt.
             .auto_shrink([false, false])
-            .show(&mut ui, |ui| self.contents(ui, t));
+            .show(&mut ui, |ui| {
+                ui.style_mut().visuals.widgets = content_widgets;
+                self.contents(ui, t);
+            });
         // Size the window from the CONTENT, not the viewport: a short prompt still shrinks to fit,
         // and a tall one asks for the full window and scrolls the remainder.
         inner.top() + scrolled.content_size.y
@@ -742,7 +776,7 @@ impl PromptApp {
         }
     }
 
-    /// Shrink the window to the height its content actually needs.
+    /// Size the window to the height its content actually needs.
     ///
     /// # Why the window is not simply a fixed size
     ///
@@ -751,11 +785,14 @@ impl PromptApp {
     /// user is meant to read together — and the gallery made it obvious in a way the tests could not
     /// (#2038). A consent window that looks broken is a consent window people click through.
     ///
-    /// # Why it only ever shrinks
+    /// # Why it grows as well as shrinks
     ///
-    /// Clamped to [`HEIGHT`] at the top, so a screen whose content genuinely fills the window keeps
-    /// exactly the layout it has today and NO screen can be made to clip by this. The floor is
-    /// [`MIN_HEIGHT`].
+    /// It only shrank, and 24 recovery words do not fit in 560 px, so the enrolment screen showed 14
+    /// of them and hid the rest (dig_ecosystem#2038). The body scrolls now, so nothing is ever
+    /// unreachable — but a person copying a phrase onto paper should not have to scroll a window
+    /// they are transcribing, and a hairline scrollbar is not the thing that stops them writing down
+    /// 14 words and clicking "I have written these down". So the window takes the room it needs, up
+    /// to [`tallest_here`](Self::tallest_here), and scrolls only past that.
     ///
     /// Recomputed every frame rather than latched on the first: the first frame builds the font
     /// atlas and lays out against it, so its measurement is not yet the real one. Sending only on a
@@ -763,9 +800,26 @@ impl PromptApp {
     /// into the measurement, because the blocks wrap on WIDTH, which never changes.
     fn fit_to_content(&self, ctx: &egui::Context, full: Rect, content_bottom: f32) {
         let needed = (content_bottom - full.top()) + space::S6 + ACTION_ROW;
-        let wanted = needed.clamp(MIN_HEIGHT, HEIGHT);
+        let wanted = needed.clamp(MIN_HEIGHT, Self::tallest_here(ctx));
         if (wanted - full.height()).abs() > 1.0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(WIDTH, wanted)));
+        }
+    }
+
+    /// The tallest this window may be on the display it is actually on.
+    ///
+    /// Bounded twice — by [`MAX_HEIGHT`] and by [`SCREEN_SHARE`] of the monitor — because a consent
+    /// window whose buttons are off the bottom of the screen cannot be answered at all.
+    ///
+    /// A host that does not report its monitor (a headless frame, a compositor that keeps it to
+    /// itself) falls back to [`HEIGHT`], the size the window was created at and the size every
+    /// display can show. That is the conservative answer, and it is the one the tests run under.
+    fn tallest_here(ctx: &egui::Context) -> f32 {
+        match ctx.input(|i| i.viewport().monitor_size) {
+            Some(monitor) if monitor.y.is_finite() && monitor.y > 0.0 => {
+                MAX_HEIGHT.min(monitor.y * SCREEN_SHARE).max(MIN_HEIGHT)
+            }
+            _ => HEIGHT,
         }
     }
 
