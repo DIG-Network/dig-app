@@ -2454,6 +2454,100 @@ mod tests {
         }
     }
 
+    /// A sign screen whose decoded transaction has `outputs` `Send … XCH to xch1…` lines — the
+    /// ordinary shape of a batch payment, and the input that ran off the bottom of the window.
+    ///
+    /// The outputs are ONE `Block::Detail` panel (the decode is a single multi-line string, per
+    /// `Screen::confirm`), so this exercises the panel layout path — `galley.size().y + padding`,
+    /// distinct from the recovery phrase's `Block::Body` path — which is why it is worth a test of
+    /// its own even though the scroll container is shared.
+    fn many_output_sign_screen(outputs: usize) -> Screen {
+        let mut tx = String::new();
+        for i in 1..=outputs {
+            tx.push_str(&format!(
+                "Send 0.001 XCH to xch1recipient{i:02}\u{2026}addr\n"
+            ));
+        }
+        let content = ConfirmContent::sign(&SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some(tx.trim_end()),
+        })
+        .expect("a decoded transaction yields content");
+        Screen::confirm(&content, "Cancel")
+    }
+
+    /// **A many-output spend keeps every output above the action row and reachable (dig_ecosystem#2063).**
+    ///
+    /// The sign window's whole job is to show the full effect of what will be signed — `SPEC.md` §3.2
+    /// requires every output the decode enumerated, "never a lossy subset, so the human sees the full
+    /// effect they authorize". Before the body scrolled, a decoded transaction with enough outputs
+    /// drew straight past the bottom of the window: at 12 outputs (an ordinary batch payment) the
+    /// lowest line sat 239 px below the window, invisible and unindicated, and the user authorised a
+    /// spend with part of what they were authorising off-screen.
+    ///
+    /// The recovery-phrase test above proves the CLASS is fixed, but it drives a `Block::Body`; the
+    /// sign screen is a `Block::Detail` panel whose height is measured differently, so a regression
+    /// that broke only the panel path would pass there and fail on a real spend. This pins the sign
+    /// instance directly, three ways: the body genuinely overflows, its viewport sits entirely ABOVE
+    /// the action row (so no output can be painted over Sign), and the LAST output is reachable after
+    /// scrolling. The action-row top is read off the painted frame, not recomputed, so the assertion
+    /// moves with the layout.
+    #[test]
+    fn a_many_output_spend_stays_above_the_action_row_and_stays_reachable() {
+        let mut driver = Driver::new(
+            many_output_sign_screen(30),
+            false,
+            PATIENT,
+            Vec2::new(WIDTH, HEIGHT),
+        );
+        let at_rest = driver.settle();
+
+        let (_, galley, clip) = body_galley(&at_rest, "xch1recipient01");
+        // The premise the reachability halves rest on: 30 outputs genuinely do not fit the viewport.
+        // Without it, "you can scroll to the last output" would pass on a body short enough to need
+        // no scrolling and prove nothing (the sign analogue of the recovery-phrase premise test).
+        assert!(
+            galley.bottom() > clip.bottom(),
+            "30 outputs fit the viewport, so the scrolling assertions below prove nothing",
+        );
+        // The window did not open already scrolled past the first outputs.
+        assert!(
+            galley.top() >= clip.top() - 0.5,
+            "the decoded transaction starts above its clip — the first outputs are cut off",
+        );
+
+        // The #2063 assertion: the transaction viewport sits ENTIRELY above the action row, so no
+        // output can be painted into or below the band the Cancel/Sign controls occupy. The action
+        // row top is the Cancel control's own rectangle, read off the frame.
+        let drawn = drawn_with_clip(&at_rest.shapes);
+        let (_, cancel, _) = drawn
+            .iter()
+            .find(|(t, _, _)| t == "Cancel")
+            .expect("the action row draws a Cancel control");
+        assert!(
+            clip.bottom() <= cancel.top() + 0.5,
+            "the transaction viewport overlaps the action row by {:.0} px — an output can draw over Sign",
+            clip.bottom() - cancel.top(),
+        );
+        // …and the affirmative is itself on-screen, not shoved off the bottom by the long body.
+        drawn
+            .iter()
+            .find(|(t, _, _)| t == "Sign")
+            .expect("the action row draws a Sign control");
+
+        // Reachability: the LAST output is inside the viewport after scrolling — the tail is not
+        // clipped away with no way to reach it.
+        driver.scroll_to_the_bottom(clip.center());
+        let scrolled = driver.frame(Vec::new());
+        let (_, last, clip) = body_galley(&scrolled, "xch1recipient30");
+        assert!(
+            last.bottom() <= clip.bottom() + 0.5,
+            "after scrolling to the end, the last output still runs {:.0} px past its clip — unreachable",
+            last.bottom() - clip.bottom(),
+        );
+    }
+
     /// **A prompt nobody answers dismisses ITSELF, and what it reports is not an approval.**
     ///
     /// Every prompt in the process is drawn on one thread, one at a time. Before this, `ask` blocked
