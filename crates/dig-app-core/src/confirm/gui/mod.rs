@@ -49,8 +49,10 @@
 mod paint;
 mod render;
 pub mod theme;
+mod window;
 
 pub use theme::{Theme, ThemeChoice, Tokens};
+pub use window::{BrandedInput, BrandedWindow};
 
 /// Whether this host can draw a prompt window at all.
 ///

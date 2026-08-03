@@ -238,6 +238,9 @@ tao = "0.30"
 # desktop session is. `x11` + `wayland` mirror the dual-stack the Linux tray already needs.
 egui = "0.31"
 eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11"] }
+# Pinned to the line `eframe` 0.31 resolves so the EventLoopBuilder the `with_any_thread`
+# extension traits are applied to is the SAME type eframe builds the window from.
+winit = "0.30"
 # Decoder for the embedded DIG brand mark the tray paints (`dig-app::brand`). This is NOT a new
 # dependency for the tray stack: `tray-icon` and `muda` already depend on `png` on Linux and macOS to
 # load their own icons, so on those targets it is a graph we are already carrying, and it is a small
