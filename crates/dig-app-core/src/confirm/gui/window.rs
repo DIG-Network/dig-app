@@ -42,8 +42,16 @@ use crate::confirm::{
 /// The window's logical width. Wide enough for a full `xch1…` address to wrap at most once, which is
 /// what the user has to read to know where their money is going.
 const WIDTH: f32 = 620.0;
-/// The window's logical height.
+/// The window's logical height BEFORE it shrinks to its content — the tallest a prompt is allowed to
+/// be, and the size it is created at.
+///
+/// The window only ever shrinks from here ([`PromptApp::fit_to_content`]), never grows, so a screen
+/// whose content genuinely needs the full height keeps exactly the layout it has today.
 const HEIGHT: f32 = 560.0;
+/// The shortest a prompt may shrink to. Below this a consent window starts reading as a toast.
+const MIN_HEIGHT: f32 = 320.0;
+/// The height reserved for the action row — the separator, the buttons and the padding under them.
+const ACTION_ROW: f32 = 72.0;
 /// How much room a scannable QR is given, in logical pixels.
 ///
 /// Big enough that a phone camera resolves the modules at arm's length on a 1× display; the art
@@ -143,7 +151,7 @@ fn native_options(title: &str) -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
             .with_inner_size([WIDTH, HEIGHT])
-            .with_min_inner_size([WIDTH, 320.0])
+            .with_min_inner_size([WIDTH, MIN_HEIGHT])
             .with_resizable(false)
             // A consent window must be SEEN. It steals focus and sits above the requesting app,
             // exactly as the Win32 and NSAlert windows did.
@@ -375,15 +383,18 @@ impl PromptApp {
         let t = self.theme.tokens();
         self.keys(ctx);
 
-        egui::CentralPanel::default()
+        let (full, content_bottom) = egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(rgba(t.bg)))
             .show(ctx, |ui| {
                 let full = ui.available_rect_before_wrap();
                 paint::card(ui, full, &t);
                 self.chrome(ui, full, &t);
-                self.body(ui, full, &t);
+                let content_bottom = self.body(ui, full, &t);
                 self.actions(ui, full, &t);
-            });
+                (full, content_bottom)
+            })
+            .inner;
+        self.fit_to_content(ctx, full, content_bottom);
     }
 }
 
@@ -433,7 +444,12 @@ impl PromptApp {
     }
 
     /// The heading, the body, and — on an input prompt — the field.
-    fn body(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) {
+    ///
+    /// Returns the y the content actually ended at, which is what
+    /// [`fit_to_content`](Self::fit_to_content) sizes the window from. It is measured rather than
+    /// predicted because the blocks wrap: the same screen is a different height at a different
+    /// address length.
+    fn body(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
         let inner = Rect::from_min_max(
             full.left_top() + Vec2::new(space::S6, 44.0 + space::S6),
             full.right_bottom() - Vec2::new(space::S6, 88.0),
@@ -536,12 +552,41 @@ impl PromptApp {
                 }
             }
         }
+
+        ui.min_rect().bottom()
+    }
+
+    /// Shrink the window to the height its content actually needs.
+    ///
+    /// # Why the window is not simply a fixed size
+    ///
+    /// It was, and every prompt got 560 px whatever it held. On the sign prompt that put roughly
+    /// 300 px of empty card between the decoded transaction and the Sign button — the two things the
+    /// user is meant to read together — and the gallery made it obvious in a way the tests could not
+    /// (#2038). A consent window that looks broken is a consent window people click through.
+    ///
+    /// # Why it only ever shrinks
+    ///
+    /// Clamped to [`HEIGHT`] at the top, so a screen whose content genuinely fills the window keeps
+    /// exactly the layout it has today and NO screen can be made to clip by this. The floor is
+    /// [`MIN_HEIGHT`].
+    ///
+    /// Recomputed every frame rather than latched on the first: the first frame builds the font
+    /// atlas and lays out against it, so its measurement is not yet the real one. Sending only on a
+    /// real difference makes it settle in two frames and stay there — the height cannot feed back
+    /// into the measurement, because the blocks wrap on WIDTH, which never changes.
+    fn fit_to_content(&self, ctx: &egui::Context, full: Rect, content_bottom: f32) {
+        let needed = (content_bottom - full.top()) + space::S6 + ACTION_ROW;
+        let wanted = needed.clamp(MIN_HEIGHT, HEIGHT);
+        if (wanted - full.height()).abs() > 1.0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(WIDTH, wanted)));
+        }
     }
 
     /// The action row, right-aligned, refusal first.
     fn actions(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) {
         let row = Rect::from_min_max(
-            egui::Pos2::new(full.left(), full.bottom() - 72.0),
+            egui::Pos2::new(full.left(), full.bottom() - ACTION_ROW),
             full.right_bottom() - Vec2::new(space::S6, space::S5),
         );
         paint::rule(ui, full, row.top(), t);
@@ -822,6 +867,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The inner size the frame asked the windowing system for, if it asked for one.
+    fn requested_height(output: &egui::FullOutput) -> Option<f32> {
+        output.viewport_output.values().find_map(|viewport| {
+            viewport.commands.iter().rev().find_map(|cmd| match cmd {
+                egui::ViewportCommand::InnerSize(size) => Some(size.y),
+                _ => None,
+            })
+        })
+    }
+
+    fn notice_screen() -> Screen {
+        let content = ConfirmContent::notice(&NoticePrompt {
+            title: "DIG — Logs",
+            heading: "DIG could not open the folder for you.",
+            body: "Open it yourself at C:\\Users\\you\\AppData\\DIG.",
+            acknowledge: "OK",
+        });
+        Screen::confirm(&content, "Cancel")
+    }
+
+    /// **The window is as tall as what it holds.** Every prompt used to be 560 px whatever it
+    /// contained, so the sign prompt opened with roughly 300 px of empty card between the decoded
+    /// transaction and the Sign button — the two things a person is meant to read together (#2038,
+    /// visible the moment the gallery existed).
+    ///
+    /// Asserted as a RELATIONSHIP as well as a bound: a short prompt must ask for less than a long
+    /// one. A single absolute number would pass just as well if the height stopped tracking the
+    /// content at all and got stuck on some smaller constant.
+    #[test]
+    fn a_prompt_asks_to_be_only_as_tall_as_its_content() {
+        let (_ctx, short) = painted(notice_screen(), false, Theme::Light);
+        let (_ctx, tall) = painted(sign_screen(), false, Theme::Light);
+
+        let short = requested_height(&short).expect("the notice asked for a height");
+        let tall = requested_height(&tall).expect("the sign prompt asked for a height");
+
+        assert!(
+            short < tall,
+            "a two-line notice asked for {short} px and a sign prompt with a decoded transaction \
+             asked for {tall} — the height is not tracking the content"
+        );
+        assert!(
+            short < HEIGHT,
+            "the notice still asked for the full {HEIGHT} px window"
+        );
+        assert!(
+            short >= MIN_HEIGHT,
+            "the notice asked for {short} px, under the {MIN_HEIGHT} px floor"
+        );
+        assert!(
+            tall <= HEIGHT,
+            "the sign prompt asked for {tall} px, over the {HEIGHT} px cap — this may only shrink"
+        );
     }
 
     /// The triangles the frame tessellates to, and the area their bounding boxes cover.
