@@ -22,10 +22,16 @@ use dig_app_core::tray_menu::{self, AccountState, MenuRow, TrayView};
 fn main() {
     // Both halves of the second-factor axis, because the Security submenu's row depends on it: a gallery
     // that rendered only one would stop showing half the menu the moment two-factor shipped.
+    // ALL SIX user-visible account states (SPEC §3.1c), not the five that happen to be common. The two
+    // added late — an account with no password yet, and one that will not open — are precisely the ones
+    // whose rows name a DIFFERENT remedy from `Locked`, so a gallery without them cannot show the
+    // difference a reviewer is here to check (dig_ecosystem#1841).
     let states = [
         AccountState::Unsupported,
         AccountState::Absent,
+        AccountState::NeedsPassword,
         AccountState::Locked,
+        AccountState::Unopenable,
         AccountState::Unlocked { recoverable: true },
         AccountState::Unlocked { recoverable: false },
     ];

@@ -379,6 +379,35 @@ Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app
   DPI-aware `CopyFromScreen` over the same window rect showed the whole thing. Make the capturing process
   DPI-aware (`SetProcessDpiAwarenessContext(-4)`) or its screen coordinates are scaled and it photographs
   the wrong rectangle.
+
+## The tray Wallet submenu, and "one variant per REMEDY" (dig_ecosystem#1841)
+
+- **A reason enum must be keyed on the REMEDY, not on the situation.** `AddressUnavailable` had three
+  variants for six account states, so `Unsupported`, `NeedsPassword` and `Unopenable` all fell through to
+  `Locked` and every one of them read *"Unlock it and it appears here"* — advice a host with no credential
+  store cannot follow, that names a password the user has never chosen, and that for an unopenable account
+  points at the very operation that already failed. The collapse survived because each state's text was
+  *plausible*; what exposed it was writing the state→clause table as a test and finding two rows that had
+  to differ. When a "why not" enum has fewer variants than the states feeding it, the shortfall is
+  where the wrong advice lives.
+- **The no-numeral rule needs re-proving at every layer that renders.** `balance_line` (the window) had
+  it; the new menu row needed it again, because rendering is where an `Unknown` becomes a `0`. The menu
+  label deliberately does NOT reuse the window's sentences or interpolate a `ReadFailed` detail: that
+  string is unbounded, comes from outside the crate, and can itself contain digits — three ways for a
+  menu row to lie or blow out. The test that has teeth feeds a `ReadFailed("HTTP 503 after 30s")` and
+  asserts the label contains no ASCII digit at all.
+- **Native menus cannot be built in-process on this stack, so `examples/tray_gallery.rs` IS the
+  screenshot.** It rendered only five of the six account states — missing exactly `NeedsPassword` and
+  `Unopenable`, the two whose remedy differs from `Locked`, which is why the wrong wording above went
+  unseen for so long. A gallery that omits a state is not evidence about that state; keep it exhaustive
+  over the enum rather than over the states someone happened to think of.
+- **The repo's gated `cargo doc` can fail locally while CI is green.** CI uses
+  `dtolnay/rust-toolchain@stable` (unpinned) with `RUSTDOCFLAGS=-D warnings`; rustc 1.96.1 fires
+  `redundant_explicit_links` on two `account/boot.rs` links that are on `main`, so
+  `cargo doc --no-deps --workspace --all-features` fails on a newer local toolchain and passes on CI's
+  older one. A local rustdoc failure in files your branch never touched is this, not your change —
+  check `git show origin/main:<file>` before chasing it. Tracked as dig_ecosystem#2056.
+
 ## A `STATIC` clips a run it cannot wrap, and text can arrive with holes in it (dig_ecosystem#1849)
 
 Two distinct silent-text failures, both invisible to `contains(...)` assertions and both found only in a
