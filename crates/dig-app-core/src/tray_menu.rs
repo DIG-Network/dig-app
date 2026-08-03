@@ -700,13 +700,14 @@ pub fn details_text(view: &TrayView) -> String {
 ///
 /// # The shape
 ///
-/// Five named rows, always the same five, in this order (dig_ecosystem#1836):
+/// Named rows, always the same ones, in this order (dig_ecosystem#1836, extended by #1841 and #2002):
 ///
 /// ```text
 /// Status
 /// Open URL…
 /// View Account    ▸
 /// Manage Account  ▸
+/// Wallet          ▸
 /// Security        ▸
 /// Cache           ▸
 /// ──
@@ -714,15 +715,20 @@ pub fn details_text(view: &TrayView) -> String {
 /// Quit DIG
 /// ```
 ///
+/// The **Wallet** submenu (dig_ecosystem#1841) carries the receive address, the balance reading, and the
+/// explainer — and nothing that moves money, since the money path is parked (#1702). Its parent label is
+/// deliberately the bare word: unlike the cache figure below, a balance is the user's own money, and a
+/// tray spine is read by anyone standing behind them.
+///
 /// The **Cache** submenu (dig_ecosystem#2002) carries the node's content-cache size limit; its parent
 /// label shows the live usage against the cap, so it is a spine row that also reports state without a
 /// display-only disabled row (SPEC §3.1c). Like `Open URL…`, it is not gated on an account.
 ///
 /// A FIXED spine is the point. The previous menu grew and shrank with account state — the identity block
 /// appeared only when an account existed, and the primary row changed verb — so rows moved under the cursor
-/// between repaints and no two machines showed the same menu. Five stable rows mean muscle memory works.
+/// between repaints and no two machines showed the same menu. A stable spine means muscle memory works.
 ///
-/// Two things sit outside the five, deliberately:
+/// Two things sit outside the spine, deliberately:
 ///
 /// - **The escapes.** `Open the log folder` and `Quit DIG` are always clickable, whatever else has gone
 ///   wrong (`professional-ui`'s never-trap-the-user HARD RULE). A tray app with no way out is a defect, so
@@ -730,7 +736,7 @@ pub fn details_text(view: &TrayView) -> String {
 /// - **One contextual row, ONLY when the account needs action** — see `urgent_account_row`. Without it a
 ///   brand-new user would have to find "Set up my DIG Account" inside a submenu, which is exactly the
 ///   first-run dead end #1800 removed and #1826 exists to prevent. In the ordinary unlocked state it is
-///   absent and the menu is exactly the five.
+///   absent and the menu is exactly the spine.
 pub fn build(view: &TrayView) -> MenuModel {
     let account = view.account();
     let mut rows = Vec::new();
@@ -923,6 +929,25 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
 ///
 /// The same reasoning already governs DIDs ([`AboutDid`](TrayAction::AboutDid)): the tray does not offer
 /// verbs the app cannot perform.
+///
+/// # The balance row
+///
+/// "What do I hold?" is half of what a wallet is for, so the answer belongs on the menu rather than one
+/// click into a window. It is ALWAYS present and ALWAYS enabled: today nothing can read a balance — the
+/// node's control catalog serves no wallet method — so in practice the row reads
+/// `Balance not known — no DIG node is running…`, and that sentence is the honest content the ticket
+/// asked for, not a placeholder. Its label carries the short reason and clicking it opens the window
+/// with the full one, which is how the **Cache** submenu's disconnected row behaves for the same
+/// reason: an enabled row that states the situation, never a greyed one the user must guess at (#1800).
+///
+/// It shares [`AboutWallet`](TrayAction::AboutWallet) with the explainer below it — as the Cache
+/// submenu's two rows share [`AboutCache`](TrayAction::AboutCache) — because the window they open is
+/// genuinely the same one, and inventing a second action that did the identical thing would put the
+/// duplication in the shell instead of admitting it here.
+///
+/// The row is what makes the no-account case say something. With no account the address row is
+/// (rightly) absent, and a submenu holding only `My wallet…` makes a person click to be told there is
+/// nothing — so the balance row names that state on the menu itself.
 fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     if account.exists() && !matches!(account, AccountState::Unopenable) {
@@ -943,8 +968,15 @@ fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
                 false,
             ),
         });
-        rows.push(MenuRow::Separator);
     }
+    rows.push(MenuRow::action(
+        TrayAction::AboutWallet,
+        crate::wallet::overview::menu_balance_label(
+            &crate::wallet::overview::WalletOverview::of_tray(view).balance,
+        ),
+        true,
+    ));
+    rows.push(MenuRow::Separator);
     rows.push(MenuRow::action(TrayAction::AboutWallet, "My wallet…", true));
     rows
 }
@@ -2569,6 +2601,221 @@ mod tests {
                 "{account:?}: the wallet must still be able to explain itself"
             );
         }
+    }
+
+    /// The labels of the Wallet submenu's action rows, in render order.
+    fn wallet_labels(account: AccountState) -> Vec<String> {
+        every_action(&MenuModel {
+            rows: submenu(&build(&view(account)), "Wallet"),
+        })
+        .into_iter()
+        .map(|(_, label, _)| label)
+        .collect()
+    }
+
+    /// **The balance is on the submenu, in EVERY account state** (dig_ecosystem#1841's third row).
+    ///
+    /// The ticket asked for three things the app can honestly deliver today — the address, the balance
+    /// or the reason it is unknown, and the explainer. The first and third shipped; this pins the
+    /// second, and pins it in every state rather than only the unlocked one, because the states that
+    /// CANNOT show a figure are exactly the ones where a person needs to be told why.
+    #[test]
+    fn the_wallet_submenu_reports_the_balance_in_every_state() {
+        for account in EVERY_STATE {
+            let labels = wallet_labels(account.clone());
+            let balance: Vec<&String> = labels
+                .iter()
+                .filter(|label| label.starts_with("Balance"))
+                .collect();
+            assert_eq!(
+                balance.len(),
+                1,
+                "{account:?}: exactly one balance row, got {labels:?}"
+            );
+        }
+    }
+
+    /// **The balance row is never greyed.** A greyed money row that could not say when it would work is
+    /// the dead end #1800 removed; the row is always clickable and its LABEL carries the reason, with the
+    /// window behind it carrying the full one.
+    #[test]
+    fn the_balance_row_is_always_clickable_and_never_a_greyed_dead_end() {
+        for account in EVERY_STATE {
+            let rows = every_action(&MenuModel {
+                rows: submenu(&build(&view(account.clone())), "Wallet"),
+            });
+            for (action, label, enabled) in rows {
+                if !label.starts_with("Balance") {
+                    continue;
+                }
+                assert!(
+                    enabled,
+                    "{account:?}: a greyed balance row is a dead end: {label}"
+                );
+                assert_eq!(
+                    action,
+                    TrayAction::AboutWallet,
+                    "{account:?}: the balance row must open the window that holds the full reason"
+                );
+            }
+        }
+    }
+
+    /// **No unknown balance is ever rendered as a figure on the menu.**
+    ///
+    /// The fixture is the production case and the trap at once: no state the tray can build today has a
+    /// chain source that answers, so every state's row must be words. An implementation that defaulted
+    /// an unreadable balance to `0` would put a numeral here and fail.
+    #[test]
+    fn an_unreadable_balance_shows_words_on_the_menu_and_never_a_figure() {
+        for account in EVERY_STATE {
+            let label = wallet_labels(account.clone())
+                .into_iter()
+                .find(|label| label.starts_with("Balance"))
+                .expect("a balance row in every state");
+            assert!(
+                !label.chars().any(|c| c.is_ascii_digit()),
+                "{account:?}: nothing can read a balance today, so a figure here is a lie: {label}"
+            );
+        }
+    }
+
+    /// **With no account, the Wallet submenu SAYS there is nothing to show** rather than opening onto a
+    /// bare explainer.
+    ///
+    /// `My wallet…` alone is not an answer to "what is in my wallet" — it is a row that makes the user
+    /// click to find out there is nothing. The balance row states it on the menu.
+    ///
+    /// The two account-less states get DIFFERENT words, and that is the point rather than a detail: a
+    /// host with no credential store cannot follow "set one up", so telling it the same thing as a
+    /// brand-new machine would name a remedy that does not exist there.
+    #[test]
+    fn with_no_account_the_wallet_submenu_says_so_instead_of_opening_onto_a_bare_explainer() {
+        for (account, expected) in [
+            (AccountState::Absent, "no account on this computer yet"),
+            (
+                AccountState::Unsupported,
+                "this computer cannot hold an account",
+            ),
+        ] {
+            let labels = wallet_labels(account.clone());
+            assert!(
+                labels.iter().any(|label| label.contains(expected)),
+                "{account:?}: the submenu must say there is nothing to show: {labels:?}"
+            );
+            assert!(
+                labels.len() > 1,
+                "{account:?}: a lone explainer row is the dead end this replaces: {labels:?}"
+            );
+        }
+    }
+
+    /// **No state is told to unlock when unlocking is not the way back.**
+    ///
+    /// This is the rule the balance row exists under (#1800) and the one an implementation drifts on
+    /// first, because "the keys are out of reach" *feels* like one state and is three. Asserted as a
+    /// full state → clause table so a future collapse is a red test rather than a wrong remedy shipped
+    /// to the one user who cannot act on it.
+    #[test]
+    fn the_balance_row_names_a_remedy_each_state_can_actually_perform() {
+        let expected = [
+            (
+                AccountState::Unsupported,
+                "this computer cannot hold an account",
+            ),
+            (AccountState::Absent, "no account on this computer yet"),
+            (AccountState::Locked, "unlock your account first"),
+            (
+                AccountState::NeedsPassword,
+                "set a password for your account first",
+            ),
+            (AccountState::Unopenable, "your account cannot be opened"),
+            // The unlocked states DO have an address, so their row fails for the only remaining
+            // reason: nothing can read a balance for it yet.
+            (
+                AccountState::Unlocked { recoverable: true },
+                "this node cannot read balances yet",
+            ),
+            (
+                AccountState::Unlocked { recoverable: false },
+                "this node cannot read balances yet",
+            ),
+        ];
+        for (account, clause) in expected {
+            let label = wallet_labels(account.clone())
+                .into_iter()
+                .find(|label| label.starts_with("Balance"))
+                .expect("a balance row in every state");
+            assert!(
+                label.contains(clause),
+                "{account:?}: expected {clause:?}, got {label:?}"
+            );
+        }
+    }
+
+    /// The balance row does not DISPLACE the explainer — both rows are present, and the explainer keeps
+    /// its own label.
+    ///
+    /// Worth pinning because the two share an action ([`TrayAction::AboutWallet`], as the Cache submenu's
+    /// two rows share [`TrayAction::AboutCache`]): every action-keyed assertion in this file would still
+    /// pass if the explainer row silently vanished, since the balance row answers to the same key.
+    #[test]
+    fn the_balance_row_is_added_beside_the_explainer_and_not_instead_of_it() {
+        for account in EVERY_STATE {
+            let labels = wallet_labels(account.clone());
+            assert!(
+                labels.iter().any(|label| label == "My wallet…"),
+                "{account:?}: the explainer must survive: {labels:?}"
+            );
+            assert!(
+                labels.iter().any(|label| label.starts_with("Balance")),
+                "{account:?}: {labels:?}"
+            );
+        }
+    }
+
+    /// **Before the first boot has reported, the two halves of the row must still agree.**
+    ///
+    /// `build` resolves a missing `account` through `TrayView::account()`, which defaults to
+    /// `Absent`; `WalletOverview::of_tray` matches `view.account` directly. Two derivations of the
+    /// same fact, in the one state (`None`) that `EVERY_STATE` cannot reach — so a divergence would
+    /// show only on a real machine during startup, as a submenu whose row contradicted its own
+    /// address gating.
+    #[test]
+    fn an_unreported_account_reads_the_same_in_the_wallet_submenu_as_an_absent_one() {
+        let unreported = MenuModel {
+            rows: submenu(&build(&TrayView::default()), "Wallet"),
+        };
+        let labels: Vec<String> = every_action(&unreported)
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect();
+
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("no account on this computer yet")),
+            "startup must not invent a different reason: {labels:?}"
+        );
+        assert!(
+            !unreported.offers(TrayAction::CopyReceiveAddress),
+            "there is no address to copy before an account is reported: {labels:?}"
+        );
+    }
+
+    /// The submenu's order is address → balance → explainer: what a person came for first, the figure
+    /// second, and the prose last.
+    #[test]
+    fn the_wallet_submenu_leads_with_the_address_then_the_balance() {
+        let labels = wallet_labels(AccountState::Unlocked { recoverable: true });
+        let position = |needle: &str| {
+            labels
+                .iter()
+                .position(|label| label.starts_with(needle))
+                .unwrap_or_else(|| panic!("no {needle} row in {labels:?}"))
+        };
+        assert!(position("Copy my receive address") < position("Balance"));
+        assert!(position("Balance") < position("My wallet"));
     }
 
     /// Neither disabled row is a DEAD END: each state that has one also offers an enabled row that resolves

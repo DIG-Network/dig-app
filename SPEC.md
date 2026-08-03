@@ -272,9 +272,9 @@ the receive address, show the wallet,
 replace the account (with a new one, or with one from a recovery phrase), remove the account, explain an
 account that cannot be opened, explain the on-chain DID, open the log folder, and quit.
 
-**The Wallet surface (MUST).** The Wallet submenu offers the receive address and a wallet window, and
-nothing that moves money — no tray action spends, so the absence of `Send` is structural rather than an
-`enabled: false` (§3.3, the money path). Binding rules:
+**The Wallet surface (MUST).** The Wallet submenu offers the receive address, the balance reading, and a
+wallet window, and nothing that moves money — no tray action spends, so the absence of `Send` is
+structural rather than an `enabled: false` (§3.3, the money path). Binding rules:
 
 - The copied address MUST be the account's derived `xch1…` money address (§3.3's wallet key), never the
   profile's identity public key. Funds sent to a well-formed address for the wrong key are unrecoverable,
@@ -287,7 +287,21 @@ nothing that moves money — no tray action spends, so the absence of `Send` is 
   balance READ from a chain source (where `0` means nothing is held) from one that is UNKNOWN, and every
   unknown MUST name which thing is missing — no address, no node, a node that does not serve wallet reads,
   a source still syncing, or a read that failed. Showing a zero for an unreadable balance is how a person
-  concludes their funds are gone, and is forbidden.
+  concludes their funds are gone, and is forbidden. This holds on the MENU ROW as well as in the window: a
+  glanced-at numeral is where the mistaken conclusion is cheapest to reach.
+- **The balance MUST be on the submenu itself, in every account state, and MUST be enabled.** "What do I
+  hold?" is half of what a wallet is for, so the answer MUST NOT require opening a window first; the row
+  carries the reading (or the short reason) as its LABEL and opens the window holding the full reason. It
+  is the row that makes the no-account case say there is nothing to show rather than presenting a lone
+  explainer. A greyed balance row is forbidden for the reason all greyed rows are (§3.1c).
+- **A row MUST NOT name a remedy the user's state cannot perform.** "Unlock first" is correct for a locked
+  account, meaningless on a host that cannot hold an account, wrong for an account that has never been
+  given a password, and actively misleading for one that cannot be opened — where unlocking is precisely
+  what failed. An implementation MUST therefore carry one reason per REMEDY rather than one per rough
+  category, and MUST distinguish all six account states in both the menu label and the window prose.
+- **An upstream error string MUST NOT be interpolated into a menu label.** It is unbounded and its
+  contents are not this application's; the row states that the read failed and the window states what the
+  source said.
 
 The account has SIX user-visible states, and an implementation MUST distinguish all of them: this host cannot
 hold an account · no account yet · locked · **cannot be opened** · unlocked · unlocked with no recovery

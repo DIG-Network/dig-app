@@ -34,14 +34,30 @@ pub enum AddressReading {
     Unavailable(AddressUnavailable),
 }
 
-/// Why no receive address is available. Each variant is a different thing for the user to do.
+/// Why no receive address is available.
+///
+/// **One variant per REMEDY, never per rough category.** The account has six user-visible states and
+/// they do not share a way forward: unlocking is right for a locked account, useless to someone who has
+/// never set a password, and actively wrong for an account that cannot be opened *because unlocking is
+/// what already failed*. Collapsing them — as this enum's first three variants did — produces a surface
+/// that names a remedy the user cannot perform, which is the dead end dig_ecosystem#1800 removed from
+/// the tray menu (dig_ecosystem#1841).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressUnavailable {
     /// There is no account on this computer yet, so there is no key to derive an address from.
     NoAccount,
+    /// This host has no per-application credential store, so it cannot hold an account at all. NOT
+    /// [`NoAccount`](Self::NoAccount): "set one up" is advice that cannot be followed here.
+    HostUnsupported,
+    /// The account exists but is still sealed under the machine-generated password. NOT
+    /// [`Locked`](Self::Locked): there is no password to type yet, so the way forward is to CHOOSE one.
+    NoPasswordYet,
     /// The account is locked. An address is public, but deriving one needs the key material a lock
     /// deliberately drops — so the address is *withheld*, never guessed.
     Locked,
+    /// The account will not open at all. NOT [`Locked`](Self::Locked): unlocking is the thing that
+    /// already failed, so offering it again names a remedy guaranteed not to work.
+    Unopenable,
     /// The account is unlocked but the address could not be encoded — a genuine defect, surfaced
     /// rather than swallowed, because the alternative is showing something wrong.
     DerivationFailed,
@@ -146,15 +162,30 @@ impl WalletOverview {
     pub fn of_tray(view: &crate::tray_menu::TrayView) -> Self {
         use crate::tray_menu::AccountState;
 
+        // One arm per account state, because each has a different way forward and the surface states it
+        // verbatim. The three that used to fall through to `Locked` were each told to unlock: a host that
+        // cannot hold an account, an account with no password to type, and an account whose unlock is
+        // exactly what failed.
         let address = match (&view.receive_address, view.account.as_ref()) {
             (Some(address), _) => AddressReading::Known(address.clone()),
             // No account, or none reported yet: there is no key to derive from and nothing to wait for.
             (None, None | Some(AccountState::Absent)) => {
                 AddressReading::Unavailable(AddressUnavailable::NoAccount)
             }
-            // Locked, unopenable, or an unsupported host — in all three the key material is out of
-            // reach, and unlocking is the route back for the one a person can act on.
-            (None, Some(_)) => AddressReading::Unavailable(AddressUnavailable::Locked),
+            (None, Some(AccountState::Unsupported)) => {
+                AddressReading::Unavailable(AddressUnavailable::HostUnsupported)
+            }
+            (None, Some(AccountState::NeedsPassword)) => {
+                AddressReading::Unavailable(AddressUnavailable::NoPasswordYet)
+            }
+            (None, Some(AccountState::Unopenable)) => {
+                AddressReading::Unavailable(AddressUnavailable::Unopenable)
+            }
+            // Locked, or unlocked-but-address-not-yet-derived: the key material is sealed and unlocking
+            // is genuinely the route back.
+            (None, Some(AccountState::Locked | AccountState::Unlocked { .. })) => {
+                AddressReading::Unavailable(AddressUnavailable::Locked)
+            }
         };
 
         // dig-node's published control catalog carries no wallet method, so even a reachable node
@@ -226,9 +257,26 @@ pub fn address_line(address: &AddressReading) -> String {
              Set one up from the tray menu and your address appears here."
                 .to_string()
         }
+        AddressReading::Unavailable(AddressUnavailable::HostUnsupported) => {
+            "This computer cannot hold a DIG Account, so there is no address to receive at. Status \
+             explains what this system is missing."
+                .to_string()
+        }
+        AddressReading::Unavailable(AddressUnavailable::NoPasswordYet) => {
+            "Your address is not shown because your account has no password yet. Choose one from the \
+             tray menu and your address appears here — DIG will not derive an address from keys that \
+             nothing is protecting."
+                .to_string()
+        }
         AddressReading::Unavailable(AddressUnavailable::Locked) => {
             "Your address is not shown because your account is locked. Unlock it and it appears here — \
              an address is public, but DIG will not guess one while the keys it comes from are sealed."
+                .to_string()
+        }
+        AddressReading::Unavailable(AddressUnavailable::Unopenable) => {
+            "Your address cannot be shown because this account will not open, so the key it is derived \
+             from is out of reach. Unlocking is not the way back — the tray menu's \
+             \"This account cannot be opened\" row explains what to do."
                 .to_string()
         }
         AddressReading::Unavailable(AddressUnavailable::DerivationFailed) => {
@@ -254,6 +302,62 @@ pub fn balance_line(balance: &BalanceReading) -> String {
     }
 }
 
+/// The same reading as [`balance_line`], rendered for a MENU ROW (dig_ecosystem#1841).
+///
+/// A row in a native menu cannot wrap or scroll, so this is the short form: one line, both assets, and
+/// for an unknown a clause naming the missing thing — with the full explanation one click away in the
+/// window [`window_body`] renders.
+///
+/// # Two things it deliberately does not do
+///
+/// It never renders a numeral for an [`BalanceReading::Unknown`], for the reason this whole module
+/// exists: a `0` glanced at in a menu is how a person concludes their money is gone.
+///
+/// And it never interpolates the upstream error of a [`BalanceUnknown::ReadFailed`]. That string comes
+/// from outside this crate and has neither a length bound nor a guarantee about its contents, so on a
+/// menu row it could be arbitrarily wide — and could itself carry digits, defeating the rule above. The
+/// row says the read failed; the window says what the source said.
+pub fn menu_balance_label(balance: &BalanceReading) -> String {
+    match balance {
+        BalanceReading::Known(held) => format!(
+            "Balance: {} $DIG · {} XCH",
+            format_amount(held.dig_units),
+            format_amount(held.xch_mojos)
+        ),
+        BalanceReading::Unknown(why) => format!("Balance not known — {}…", menu_reason(why)),
+    }
+}
+
+/// The menu-length clause completing "Balance not known — …", naming the missing thing or the remedy.
+///
+/// Deliberately separate wording from [`unknown_reason`] rather than a truncation of it: the window's
+/// sentences explain, and a row this size can only point. Each is digit-free, which is what keeps the
+/// no-numeral rule above mechanical rather than a matter of care.
+fn menu_reason(why: &BalanceUnknown) -> &'static str {
+    match why {
+        BalanceUnknown::NoAddress(AddressUnavailable::NoAccount) => {
+            "no account on this computer yet"
+        }
+        BalanceUnknown::NoAddress(AddressUnavailable::HostUnsupported) => {
+            "this computer cannot hold an account"
+        }
+        BalanceUnknown::NoAddress(AddressUnavailable::NoPasswordYet) => {
+            "set a password for your account first"
+        }
+        BalanceUnknown::NoAddress(AddressUnavailable::Locked) => "unlock your account first",
+        BalanceUnknown::NoAddress(AddressUnavailable::Unopenable) => {
+            "your account cannot be opened"
+        }
+        BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => {
+            "your address could not be derived"
+        }
+        BalanceUnknown::NoNode => "no DIG node is running",
+        BalanceUnknown::NodeCannotRead => "this node cannot read balances yet",
+        BalanceUnknown::NotSynced => "your node is still syncing",
+        BalanceUnknown::ReadFailed(_) => "the read failed",
+    }
+}
+
 /// The clause that completes "not known — …". Each one names the missing thing and, where there is
 /// one, the way to fix it.
 fn unknown_reason(why: &BalanceUnknown) -> String {
@@ -261,9 +365,22 @@ fn unknown_reason(why: &BalanceUnknown) -> String {
         BalanceUnknown::NoAddress(AddressUnavailable::NoAccount) => {
             "there is no account on this computer to hold one.".to_string()
         }
+        BalanceUnknown::NoAddress(AddressUnavailable::HostUnsupported) => {
+            "this computer cannot hold a DIG Account, so there is no address to read a balance for."
+                .to_string()
+        }
+        BalanceUnknown::NoAddress(AddressUnavailable::NoPasswordYet) => {
+            "your account has no password yet, so DIG cannot tell which address to read. Choose a \
+             password to see your balance."
+                .to_string()
+        }
         BalanceUnknown::NoAddress(AddressUnavailable::Locked) => {
             "your account is locked, so DIG cannot tell which address to read. Unlock it to see your \
              balance."
+                .to_string()
+        }
+        BalanceUnknown::NoAddress(AddressUnavailable::Unopenable) => {
+            "this account will not open, so the address its balance would be read for is out of reach."
                 .to_string()
         }
         BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => {
@@ -436,6 +553,134 @@ mod tests {
         }
     }
 
+    /// Every `BalanceUnknown` there is, so the menu-label tests below cover the whole enum rather than
+    /// the two states production happens to produce today.
+    fn every_unknown() -> Vec<BalanceUnknown> {
+        vec![
+            BalanceUnknown::NoAddress(AddressUnavailable::NoAccount),
+            BalanceUnknown::NoAddress(AddressUnavailable::HostUnsupported),
+            BalanceUnknown::NoAddress(AddressUnavailable::NoPasswordYet),
+            BalanceUnknown::NoAddress(AddressUnavailable::Locked),
+            BalanceUnknown::NoAddress(AddressUnavailable::Unopenable),
+            BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed),
+            BalanceUnknown::NoNode,
+            BalanceUnknown::NodeCannotRead,
+            BalanceUnknown::NotSynced,
+            // A detail full of digits — the case that would smuggle a numeral into a menu label if the
+            // renderer passed the upstream string through.
+            BalanceUnknown::ReadFailed("HTTP 503 after 30s".to_string()),
+        ]
+    }
+
+    /// **The headline property, at the MENU layer.** A menu row is where a glanced-at numeral does the
+    /// most damage, so the no-numeral-for-an-unknown rule has to hold here too — not only in the
+    /// window, where [`balance_line`] proves it.
+    ///
+    /// Asserted over EVERY unknown, including a `ReadFailed` whose upstream detail is full of digits:
+    /// an implementation that reused `balance_line`, or that interpolated the detail, fails on that one.
+    #[test]
+    fn an_unknown_balance_never_renders_a_numeral_on_a_menu_row() {
+        for why in every_unknown() {
+            let label = menu_balance_label(&BalanceReading::Unknown(why.clone()));
+            assert!(
+                !label.chars().any(|c| c.is_ascii_digit()),
+                "{why:?}: an unknown balance must never show a figure: {label}"
+            );
+            assert!(
+                label.contains("not known"),
+                "{why:?}: the row must say the balance is not known: {label}"
+            );
+        }
+    }
+
+    /// Each unknown names its OWN missing thing on the menu row, and no two read alike — the same
+    /// property [`balance_line`] holds, at menu length.
+    ///
+    /// Without the distinctness assertion a renderer could collapse all seven to
+    /// "Balance not known…" and still pass the no-numeral test above.
+    #[test]
+    fn each_unknown_names_its_own_reason_on_the_menu_row() {
+        let expected = [
+            "no account on this computer yet",
+            "this computer cannot hold an account",
+            "set a password for your account first",
+            "unlock your account first",
+            "your account cannot be opened",
+            "your address could not be derived",
+            "no DIG node is running",
+            "this node cannot read balances yet",
+            "your node is still syncing",
+            "the read failed",
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (why, clause) in every_unknown().into_iter().zip(expected) {
+            let label = menu_balance_label(&BalanceReading::Unknown(why.clone()));
+            assert!(label.contains(clause), "{why:?}: {label}");
+            assert!(seen.insert(label.clone()), "reasons must differ: {label}");
+        }
+    }
+
+    /// A KNOWN balance shows both assets, in whole coins, on one row — including a genuine zero, which
+    /// is the one case where a numeral is the truth.
+    #[test]
+    fn a_known_balance_shows_both_assets_on_the_menu_row() {
+        let held = menu_balance_label(&BalanceReading::Known(Balances {
+            xch_mojos: 1_250_000_000_000,
+            dig_units: 2_500_000_000_000,
+        }));
+        assert!(held.contains("2.5 $DIG"), "{held}");
+        assert!(held.contains("1.25 XCH"), "{held}");
+
+        let empty = menu_balance_label(&BalanceReading::Known(Balances {
+            xch_mojos: 0,
+            dig_units: 0,
+        }));
+        assert!(
+            empty.contains("0 $DIG") && empty.contains("0 XCH"),
+            "{empty}"
+        );
+        assert!(
+            !empty.contains("not known"),
+            "a source that answered zero KNOWS the balance: {empty}"
+        );
+    }
+
+    /// A menu row cannot wrap or scroll, so EVERY label this function can emit is bounded — not just
+    /// the ones someone remembered to measure.
+    ///
+    /// The bound is 80 characters: comfortably inside what a native menu renders on the narrowest
+    /// platform, and loose enough that a clause can be reworded without a spurious failure. The
+    /// interesting fixture is the hostile upstream error — a renderer that interpolated a
+    /// `ReadFailed` detail would emit a label thousands of characters wide, carrying whatever the
+    /// source sent, straight into an OS menu.
+    #[test]
+    fn every_menu_label_stays_short_including_a_hostile_upstream_error() {
+        let mut labels: Vec<String> = every_unknown()
+            .into_iter()
+            .map(|why| menu_balance_label(&BalanceReading::Unknown(why)))
+            .collect();
+        labels.push(menu_balance_label(&BalanceReading::Unknown(
+            BalanceUnknown::ReadFailed("x".repeat(4000)),
+        )));
+        // The widest KNOWN reading a u64 pair can produce, so the bound covers the figures too.
+        labels.push(menu_balance_label(&BalanceReading::Known(Balances {
+            xch_mojos: u64::MAX,
+            dig_units: u64::MAX,
+        })));
+
+        for label in &labels {
+            assert!(
+                label.chars().count() <= 80,
+                "{} chars is wider than a menu row: {label}",
+                label.chars().count()
+            );
+        }
+        assert!(
+            !labels.iter().any(|label| label.contains("xxxx")),
+            "the upstream detail belongs in the window, not the menu: {labels:?}"
+        );
+    }
+
     /// With no address, the ADDRESS's reason wins over the source's — telling someone with no account
     /// to start their node answers a question they did not ask.
     #[test]
@@ -599,6 +844,53 @@ mod tests {
             "{brand_new}"
         );
         assert_ne!(locked, brand_new);
+    }
+
+    /// **Every account state reaches a DIFFERENT window, and none is told to unlock unless unlocking
+    /// is the way back** (dig_ecosystem#1841).
+    ///
+    /// Before this, three states fell through to `Locked` and every one of them read "Unlock it and it
+    /// appears here": a host that cannot hold an account at all, an account that has no password to
+    /// type, and an account whose unlock is exactly what failed. The distinctness assertion is what
+    /// makes a future re-collapse fail — a shared arm would produce two identical bodies.
+    #[test]
+    fn each_account_state_reaches_its_own_window_naming_a_remedy_it_can_perform() {
+        use crate::tray_menu::AccountState;
+
+        let body = |account: AccountState| {
+            window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+                account: Some(account),
+                receive_address: None,
+                ..Default::default()
+            }))
+        };
+        let cases = [
+            (AccountState::Unsupported, "cannot hold a DIG Account"),
+            (AccountState::Absent, "do not have a DIG Account"),
+            (AccountState::NeedsPassword, "no password yet"),
+            (AccountState::Locked, "account is locked"),
+            (AccountState::Unopenable, "will not open"),
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for (account, expected) in cases {
+            let text = body(account.clone());
+            assert!(text.contains(expected), "{account:?}: {text}");
+            assert!(
+                seen.insert(text),
+                "{account:?}: states must not share a window"
+            );
+        }
+
+        // The one that would be wrong to say, said only where it is true.
+        assert!(
+            !body(AccountState::Unopenable).contains("Unlock it and it appears here"),
+            "unlocking is what already failed for this account"
+        );
+        assert!(
+            !body(AccountState::NeedsPassword).contains("Unlock it and it appears here"),
+            "there is no password to type yet"
+        );
     }
 
     /// The window never advertises a verb the app cannot perform — sending is parked (#1702), so it is
