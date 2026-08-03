@@ -195,15 +195,9 @@ mod tests {
         }
     }
 
-    fn content() -> ConfirmContent {
-        ConfirmContent::sign(&SignPrompt {
-            origin: "https://dapp.example",
-            payload_type: "spend",
-            decoded_tx: Some("Send 100 $DIG"),
-        })
-        .unwrap()
-    }
-
+    /// polkit's exit code is the whole authorization answer, so every code must land on a distinct
+    /// outcome and anything that is not an explicit YES must fail closed.
+    #[test]
     fn pkcheck_exit_codes_map_to_the_right_outcome() {
         assert_eq!(outcome_from_pkcheck_exit(Some(0)), VerifyOutcome::Verified);
         assert_eq!(outcome_from_pkcheck_exit(Some(1)), VerifyOutcome::Declined);
@@ -265,6 +259,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn pkcheck_uses_the_reuse_hardened_process_subject() {
         // The bare pid alone is deprecated (PID-reuse race); the subject pins at least pid,start_time.
         let subject = process_subject();
@@ -292,6 +287,7 @@ mod tests {
         assert_eq!(parse_effective_uid_from_status("no uid line"), None);
     }
 
+    #[test]
     fn has_display_follows_the_graphical_session_env() {
         let with = |k: &str, v: &str| {
             let (key, value) = (k.to_string(), v.to_string());
