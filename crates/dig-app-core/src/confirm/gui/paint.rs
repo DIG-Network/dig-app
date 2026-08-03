@@ -8,7 +8,9 @@
 //! Everything here takes [`Tokens`], never a literal colour — see [`super::theme`] for why that rule
 //! is what keeps a second copy of a design system diffable against its source.
 
-use egui::{Color32, CornerRadius, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
+use egui::{
+    Color32, CornerRadius, Mesh, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2,
+};
 
 use super::render::{radius, regular, rgba, semibold, size, Weight};
 use super::theme::{Rgba, Tokens};
@@ -28,7 +30,10 @@ const CORNER_SEGMENTS: usize = 8;
 
 /// The outline of a rounded rectangle, as points, clockwise from the bottom-right corner.
 fn rounded_outline(rect: Rect, radius: f32) -> Vec<Pos2> {
-    let r = radius.min(rect.width() / 2.0).min(rect.height() / 2.0).max(0.0);
+    let r = radius
+        .min(rect.width() / 2.0)
+        .min(rect.height() / 2.0)
+        .max(0.0);
     let quarter = std::f32::consts::FRAC_PI_2;
     let corners = [
         (rect.right_bottom() + Vec2::new(-r, -r), 0.0_f32),
@@ -131,15 +136,37 @@ pub fn warning_panel(ui: &Ui, rect: Rect, t: &Tokens) {
     );
 }
 
+/// A scannable QR code, drawn on a WHITE field whatever the theme.
+///
+/// The field is white and the modules are black in both themes, deliberately: a camera reads
+/// contrast, and a dark-theme QR in `--surface` on `--text` is a QR a phone will refuse. The white
+/// card is the quiet zone the format requires, so it is part of the code, not decoration.
+///
+/// Returns the square it drew, so the caller can advance past it.
+pub fn qr(ui: &Ui, top_left: Pos2, available: f32, art: &crate::confirm::QrArt) -> Rect {
+    let module = art.module_pixels(available as i32).max(1);
+    let side = art.drawn_pixels(module);
+    let field = Rect::from_min_size(top_left, Vec2::splat(side as f32));
+    ui.painter()
+        .rect_filled(field, CornerRadius::same(radius::SM), Color32::WHITE);
+    for (column, row) in art.dark_modules() {
+        let origin = top_left
+            + Vec2::new(
+                (column as i32 * module) as f32,
+                (row as i32 * module) as f32,
+            );
+        ui.painter().rect_filled(
+            Rect::from_min_size(origin, Vec2::splat(module as f32)),
+            CornerRadius::ZERO,
+            Color32::BLACK,
+        );
+    }
+    field
+}
+
 /// The DIG mark: hub's accent gradient in a small rounded square.
 pub fn brand_mark(ui: &Ui, rect: Rect, t: &Tokens) {
-    gradient_fill(
-        ui,
-        rect,
-        6.0,
-        rgba(t.dig_purple),
-        rgba(t.dig_magenta),
-    );
+    gradient_fill(ui, rect, 6.0, rgba(t.dig_purple), rgba(t.dig_magenta));
 }
 
 /// A pill button in hub's language, returning its click [`Response`].
@@ -178,7 +205,10 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
             // refusal (dig_ecosystem#1799) is only a safeguard if the user can SEE which control
             // Enter will press.
             let halo = match weight {
-                Weight::Danger => Rgba { a: t.glow.a, ..t.danger },
+                Weight::Danger => Rgba {
+                    a: t.glow.a,
+                    ..t.danger
+                },
                 _ => t.glow,
             };
             glow(ui, rect, corner, halo);
@@ -186,13 +216,9 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
             // The affirmative carries hub's accent GRADIENT; the destructive is a flat `--danger`,
             // so the two are told apart by more than hue at a glance.
             match weight {
-                Weight::Primary => gradient_fill(
-                    ui,
-                    rect,
-                    f32::from(corner),
-                    rgba(from),
-                    rgba(t.dig_magenta),
-                ),
+                Weight::Primary => {
+                    gradient_fill(ui, rect, f32::from(corner), rgba(from), rgba(t.dig_magenta))
+                }
                 _ => {
                     ui.painter()
                         .rect_filled(rect, CornerRadius::same(corner), rgba(from));
@@ -219,8 +245,11 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
         );
     }
 
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, Color32::PLACEHOLDER);
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        Color32::PLACEHOLDER,
+    );
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -251,15 +280,21 @@ pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    ui.painter()
-        .galley(rect.center() - galley.size() / 2.0, galley, Color32::PLACEHOLDER);
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        Color32::PLACEHOLDER,
+    );
     response
 }
 
 /// A hairline rule across `rect`'s width at `y` — hub's `--border`.
 pub fn rule(ui: &Ui, rect: Rect, y: f32, t: &Tokens) {
-    ui.painter()
-        .hline(rect.left()..=rect.right(), y, Stroke::new(1.0, rgba(t.border)));
+    ui.painter().hline(
+        rect.left()..=rect.right(),
+        y,
+        Stroke::new(1.0, rgba(t.border)),
+    );
 }
 
 #[cfg(test)]
@@ -274,10 +309,7 @@ mod tests {
         let pts = rounded_outline(rect, 12.0);
         assert_eq!(pts.len(), 4 * (CORNER_SEGMENTS + 1));
         for p in pts {
-            assert!(
-                rect.expand(0.01).contains(p),
-                "{p:?} escaped {rect:?}"
-            );
+            assert!(rect.expand(0.01).contains(p), "{p:?} escaped {rect:?}");
         }
     }
 

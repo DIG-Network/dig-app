@@ -143,7 +143,7 @@ impl Rgba {
     }
 
     /// A translucent colour, the form hub's `rgba(…)` tokens take.
-    const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+    const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
 
@@ -204,9 +204,9 @@ impl Tokens {
         amber_bg: Rgba::hex(0xfb, 0xf3, 0xe0),
         amber_border: Rgba::hex(0xeb, 0xd9, 0xa8),
         // `--glow-color: rgba(122, 61, 255, .22)`.
-        glow: Rgba::rgba(0x7a, 0x3d, 0xff, 56),
+        glow: Rgba::new(0x7a, 0x3d, 0xff, 56),
         // `--shadow-pop: 0 8px 28px rgba(20, 18, 43, .16)`.
-        shadow: Rgba::rgba(0x14, 0x12, 0x2b, 41),
+        shadow: Rgba::new(0x14, 0x12, 0x2b, 41),
         invert_marks: true,
     };
 
@@ -216,7 +216,7 @@ impl Tokens {
         dig_purple_hover: Rgba::hex(0x94, 0x66, 0xff),
         dig_magenta: Rgba::hex(0xff, 0x00, 0xde),
         // `--dig-wash: rgba(122, 61, 255, .16)`.
-        dig_wash: Rgba::rgba(0x7a, 0x3d, 0xff, 41),
+        dig_wash: Rgba::new(0x7a, 0x3d, 0xff, 41),
         bg: Rgba::hex(0x0b, 0x0a, 0x12),
         surface: Rgba::hex(0x16, 0x13, 0x1f),
         surface_2: Rgba::hex(0x1e, 0x1a, 0x2b),
@@ -230,13 +230,13 @@ impl Tokens {
         ok: Rgba::hex(0x2e, 0xc2, 0x7e),
         amber: Rgba::hex(0xe0, 0xa6, 0x40),
         // `--amber-bg: rgba(224, 166, 64, .12)`.
-        amber_bg: Rgba::rgba(0xe0, 0xa6, 0x40, 31),
+        amber_bg: Rgba::new(0xe0, 0xa6, 0x40, 31),
         // `--amber-border: rgba(224, 166, 64, .4)`.
-        amber_border: Rgba::rgba(0xe0, 0xa6, 0x40, 102),
+        amber_border: Rgba::new(0xe0, 0xa6, 0x40, 102),
         // `--glow-color: rgba(122, 61, 255, .45)`.
-        glow: Rgba::rgba(0x7a, 0x3d, 0xff, 115),
+        glow: Rgba::new(0x7a, 0x3d, 0xff, 115),
         // `--shadow-pop: 0 8px 28px rgba(0, 0, 0, .6)`.
-        shadow: Rgba::rgba(0, 0, 0, 153),
+        shadow: Rgba::new(0, 0, 0, 153),
         invert_marks: false,
     };
 }
@@ -365,8 +365,8 @@ mod tests {
     fn the_two_themes_disagree_about_inverting_bundled_marks() {
         // hub's `--chia-invert` flips 1→0 between the themes; a bundled white mark needs the same
         // treatment as the colours, and a single shared value would silently drop that.
-        assert!(Tokens::LIGHT.invert_marks);
-        assert!(!Tokens::DARK.invert_marks);
+        const _: () = assert!(Tokens::LIGHT.invert_marks);
+        const _: () = assert!(!Tokens::DARK.invert_marks);
     }
 
     // ---- WCAG 2.2 AA, in BOTH themes (§6.6). ----
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn compositing_a_translucent_token_yields_an_opaque_colour() {
-        let half = Rgba::rgba(0, 0, 0, 128);
+        let half = Rgba::new(0, 0, 0, 128);
         let over_white = half.over(Rgba::hex(0xff, 0xff, 0xff));
         assert_eq!(over_white.a, 255);
         assert!(

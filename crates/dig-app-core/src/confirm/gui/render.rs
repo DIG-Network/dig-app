@@ -56,8 +56,6 @@ pub mod space {
     pub const S5: f32 = 20.0;
     /// `--space-6`.
     pub const S6: f32 = 24.0;
-    /// `--space-7`.
-    pub const S7: f32 = 32.0;
 }
 
 /// hub's `--radius-*` scale.
@@ -93,7 +91,11 @@ pub enum Block {
     Warning(String),
     /// A QR code, drawn beneath the body. Always accompanied by the same secret as text (see
     /// [`ClaimPrompt::scannable`](crate::confirm::ClaimPrompt::scannable)).
-    Qr,
+    ///
+    /// Carries the art rather than a flag so the paint layer has everything it needs from the block
+    /// alone — a variant that only SAYS "a QR goes here" is how the branded window ended up reserving
+    /// space for a square it never drew.
+    Qr(crate::confirm::QrArt),
 }
 
 /// A button's visual weight, which follows what the button DOES.
@@ -175,8 +177,11 @@ impl Screen {
                 true => Block::Warning(content.body.clone()),
                 false => Block::Body(content.body.clone()),
             });
-            if content.qr.is_some() {
-                blocks.push(Block::Qr);
+            if let Some(detail) = content.detail.clone() {
+                blocks.push(Block::Detail(detail));
+            }
+            if let Some(art) = content.qr.clone() {
+                blocks.push(Block::Qr(art));
             }
             blocks
         };
@@ -258,12 +263,13 @@ impl Screen {
     ///
     /// Exists for the tests: it is the list a hostile value must appear in VERBATIM, and the list an
     /// assistive technology walks. Not used by the paint layer, which walks the typed structure.
+    #[cfg(test)]
     pub fn visible_text(&self) -> Vec<&str> {
         let blocks = self.blocks.iter().filter_map(|b| match b {
             Block::Heading(t) | Block::Body(t) | Block::Detail(t) | Block::Warning(t) => {
                 Some(t.as_str())
             }
-            Block::Qr => None,
+            Block::Qr(_) => None,
         });
         std::iter::once(self.title.as_str())
             .chain(blocks)
@@ -279,7 +285,7 @@ pub fn block_color(block: &Block, t: &Tokens) -> Rgba {
         Block::Heading(_) => t.text,
         Block::Body(_) | Block::Detail(_) => t.muted,
         Block::Warning(_) => t.amber,
-        Block::Qr => t.text,
+        Block::Qr(_) => t.text,
     }
 }
 
@@ -303,7 +309,13 @@ pub fn regular(size: f32) -> FontId {
 /// The one place body-shaped text becomes a drawable. It takes a `&str` and produces a layout job
 /// whose single section is that string — there is no parse step, no span splitting, and no way for a
 /// substring to acquire different formatting from its neighbours.
-pub fn paragraph(text: &str, font: FontId, color: Color32, width: f32, line: f32) -> egui::text::LayoutJob {
+pub fn paragraph(
+    text: &str,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    line: f32,
+) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = width;
     job.halign = Align::LEFT;
@@ -553,10 +565,7 @@ mod tests {
         });
         let screen = Screen::confirm(&content, "Cancel");
         assert!(
-            screen
-                .blocks
-                .iter()
-                .any(|b| matches!(b, Block::Warning(_))),
+            screen.blocks.iter().any(|b| matches!(b, Block::Warning(_))),
             "a destroy states its loss as a warning: {:?}",
             screen.blocks
         );
@@ -655,6 +664,9 @@ mod tests {
     fn the_headless_text_pipeline_emits_glyphs_at_all() {
         let (text, glyphs) = laid_out("abc");
         assert_eq!(text, "abc");
-        assert_eq!(glyphs, 3, "no glyphs were shaped; the markup tests are vacuous");
+        assert_eq!(
+            glyphs, 3,
+            "no glyphs were shaped; the markup tests are vacuous"
+        );
     }
 }

@@ -433,10 +433,6 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
-// Windows keeps every window in `windows_input`: one hand-built window class with a message loop, drawn with
-// or without a field. `windows` holds only the Windows Hello step and the backend's construction.
-#[cfg(target_os = "windows")]
-mod windows_input;
 
 /// Select the confirmer this host uses as the terminal identity gate (SIGN-3).
 ///
@@ -480,6 +476,14 @@ pub(crate) struct ConfirmContent {
     /// The detail body the window shows beneath the heading — the decoded transaction for a sign, the
     /// extension id for a pairing, already formatted for a human. Never raw signable bytes.
     pub body: String,
+    /// The one thing on the window the user must READ CAREFULLY before authorising — the decoded
+    /// transaction — or `None` when the prompt has no such field.
+    ///
+    /// Separate from [`body`](Self::body) because it is not explanation: it is the substance of what
+    /// is being authorised, and the window gives it its own recessed panel. Keeping it out of the
+    /// prose also keeps the amount and recipient in a STRUCTURED field rather than in a string a
+    /// caller pre-formatted.
+    pub detail: Option<String>,
     /// The label of the affirmative action (`"Pair"`, `"Connect"`, `"Sign"`, `"OK"`), reused as the reason
     /// string the biometric prompt shows.
     pub action: &'static str,
@@ -533,6 +537,7 @@ impl ConfirmContent {
                 "This browser extension will be allowed to relay connect and signing requests to \
                    your DIG identity. You approve every signature individually."
                     .to_string(),
+            detail: None,
             action: "Pair",
             qr: None,
             presentation: Self::authorize(),
@@ -552,6 +557,7 @@ impl ConfirmContent {
                    — will see it, and anyone who has it can take your DIG Account. Make sure you are \
                    alone before continuing."
                 .to_string(),
+            detail: None,
             action: "Reveal",
             qr: None,
             presentation: Self::authorize(),
@@ -566,6 +572,7 @@ impl ConfirmContent {
     /// error they must resolve (dig_ecosystem#1773).
     fn notice(prompt: &NoticePrompt<'_>) -> Self {
         Self {
+            detail: None,
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
@@ -578,6 +585,7 @@ impl ConfirmContent {
     /// The content for a claim prompt (dig_ecosystem#1773): a real either/or with no biometric.
     fn claim(prompt: &ClaimPrompt<'_>) -> Self {
         Self {
+            detail: None,
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
@@ -616,6 +624,7 @@ impl ConfirmContent {
                 true => loss.to_string(),
                 false => format!("{loss}\n\n{}", prompt.replacement),
             },
+            detail: None,
             action: "Destroy",
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
@@ -634,6 +643,7 @@ impl ConfirmContent {
     /// Enter keeps the protection.
     fn security(prompt: &SecurityPrompt<'_>) -> Self {
         Self {
+            detail: None,
             title: "DIG — Change your account security".to_string(),
             heading: format!("Do you want to {}?", prompt.change),
             body: prompt.consequence.to_string(),
@@ -673,6 +683,7 @@ impl ConfirmContent {
                  need your approval for every signature.",
                 prompt.origin
             ),
+            detail: None,
             action: "Connect",
             qr: None,
             presentation: Self::authorize(),
@@ -692,9 +703,16 @@ impl ConfirmContent {
             title: "DIG — Approve signing".to_string(),
             heading: format!("{} wants you to sign a transaction", prompt.origin),
             body: format!(
-                "Requested via your paired DIG extension.\n\nType: {}\n\n{decoded}",
+                "Requested via your paired DIG extension.\nType: {}",
                 prompt.payload_type
             ),
+            // The decoded transaction is a FIELD, not a paragraph appended to the explanation.
+            //
+            // It is the one thing on the window a person has to read carefully before spending real
+            // money, and it is the field most likely to carry attacker-supplied text — so it is kept
+            // separate all the way to the painter, which gives it its own recessed panel instead of
+            // letting it trail off the end of the boilerplate (dig_ecosystem#2038).
+            detail: Some(decoded.to_string()),
             action: "Sign",
             qr: None,
             presentation: Self::authorize(),
@@ -1166,7 +1184,13 @@ mod tests {
         assert_eq!(content.action, "Sign");
         assert!(content.heading.contains("https://dapp.example"));
         assert!(content.body.contains("spend"));
-        assert!(content.body.contains(SPEND_TX));
+        // The decoded transaction is its OWN field, so the window can give it its own panel — it is
+        // deliberately NOT concatenated onto the end of the explanation (dig_ecosystem#2038).
+        assert_eq!(content.detail.as_deref(), Some(SPEND_TX));
+        assert!(
+            !content.body.contains(SPEND_TX),
+            "the decoded transaction must not ALSO be buried in the explanatory copy"
+        );
     }
 
     #[test]

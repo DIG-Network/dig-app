@@ -1,19 +1,18 @@
-//! The Windows native confirmer (SIGN-3): a topmost Win32 consent window + Windows Hello.
+//! The Windows native confirmer (SIGN-3): the branded prompt window + Windows Hello.
 //!
-//! The confirm window is drawn by [`windows_input`](super::windows_input) — the same hand-built,
-//! DPI-scaled window that takes typed input, minus the field. The biometric step is the WinRT
+//! The window is drawn by [`super::gui`], the same one Linux draws. The biometric step is the WinRT
 //! [`UserConsentVerifier`], which raises the secure Windows Hello prompt (fingerprint / face / PIN — the
 //! PIN/password being the built-in fallback, §5.6.1). The FFI call reduces to a result code, and the
 //! code→outcome mapping is a pure function unit-tested here.
 //!
-//! # Why this is no longer a `MessageBoxW`
+//! # How the window got here
 //!
-//! It was, until dig_ecosystem#1832. A message box cannot relabel its buttons, so every two-choice window
-//! had to spell its choice out in a sentence beneath the body: the retention claim explained in a paragraph
-//! what a button reading "Yes, I have them" says by itself, and the destroy window's way out was a button
-//! labelled "Cancel" — which names the dialog, not the outcome a hesitating person is looking for. The
-//! labels were in the content all along; macOS and Linux put them on their buttons and only Windows threw
-//! them away. It also could not be styled, scaled, or given the DIG mark.
+//! It was a `MessageBoxW` until dig_ecosystem#1832: a message box cannot relabel its buttons, so every
+//! two-choice window had to spell its choice out in a sentence beneath the body, and the destroy
+//! window's way out was a button labelled "Cancel" — which names the dialog, not the outcome a
+//! hesitating person is looking for. That was replaced by a hand-built, DPI-scaled Win32 GDI window,
+//! and that in turn by the branded GUI (dig_ecosystem#2038), which draws the same window on every
+//! platform that can draw one. There is exactly one prompt renderer left in the app.
 //!
 //! An interactive user on Windows always has a window station, so [`confirmer`] returns the backend
 //! unconditionally; a session-0 service host degrades naturally (the confirm window cannot be created and
@@ -132,9 +131,9 @@ fn outcome_from_consent(result: UserConsentVerificationResult) -> VerifyOutcome 
 
 /// The Windows confirmer (always available for an interactive user; see the module docs).
 ///
-/// Both windows come from [`windows_input`](super::windows_input): the consent window and the typed-input
-/// window are one implementation parameterised by whether it has a field, so the DPI scaling, the type
-/// hierarchy and the keyboard behaviour cannot drift apart between them (dig_ecosystem#1832).
+/// Both windows come from [`super::gui`]: the consent window and the typed-input window are one
+/// implementation parameterised by whether it has a field, so the type hierarchy and the keyboard
+/// behaviour cannot drift apart between them (dig_ecosystem#1832).
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
     // The branded GUI (dig_ecosystem#2038) draws every window; Windows Hello still authorises.
     // The hand-built Win32 GDI dialog it replaces is gone — there is exactly one way a DIG prompt

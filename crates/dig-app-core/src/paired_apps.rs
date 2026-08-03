@@ -14,9 +14,8 @@
 //!
 //! # Why the list is paged rather than long
 //!
-//! The native window class shows a body of derived height and its ceiling is 32 lines
-//! (`windows_input`'s `BODY_LINES_FALLBACK`), which a list of N apps would exceed for a large enough N —
-//! and a body that overran used to be CLIPPED IN SILENCE. That defect hid sixteen of twenty-four
+//! The prompt window draws its body into a fixed area with no scrollbar, so a list of N apps would
+//! overrun it for a large enough N — and a body that overran used to be CLIPPED IN SILENCE. That defect hid sixteen of twenty-four
 //! recovery words (dig_ecosystem#49), so nothing here is allowed to depend on the list being short:
 //! [`APPS_PER_PAGE`] apps are shown at a time, the page says how many there are in total, and moving
 //! between pages is a typed choice. The page's line count is pinned by a test, not by hope.
@@ -45,12 +44,12 @@ const LINES_PER_APP: usize = 2;
 const FIXED_PAGE_LINES: usize = 2;
 
 /// The largest body any page of this window emits, in lines. Pinned by a test against the real
-/// rendered body, and by the compile-time assertion below against the window class's ceiling.
+/// rendered body, and by the compile-time assertion below against the window's ceiling.
 pub const MAX_PAGE_LINES: usize = APPS_PER_PAGE * LINES_PER_APP + FIXED_PAGE_LINES;
 
-/// The window class's body ceiling (`windows_input`'s `BODY_LINES_FALLBACK`). Restated here as a
-/// number this module can be checked against, because that constant is Windows-only and this module is
-/// not.
+/// The most body lines the prompt window can show before its fixed body area overruns. A number this
+/// module can be checked against at compile time, rather than a fact rediscovered by a user whose page
+/// was silently cut off.
 const WINDOW_BODY_LINE_CEILING: usize = 32;
 
 // A page that outgrew the window would be CLIPPED IN SILENCE — the defect that hid sixteen recovery

@@ -44,6 +44,11 @@ use crate::confirm::{
 const WIDTH: f32 = 620.0;
 /// The window's logical height.
 const HEIGHT: f32 = 560.0;
+/// How much room a scannable QR is given, in logical pixels.
+///
+/// Big enough that a phone camera resolves the modules at arm's length on a 1× display; the art
+/// itself rounds down to a whole number of pixels per module inside this ([`QrArt::module_pixels`]).
+const QR_SIDE: f32 = 200.0;
 
 /// The brand's typeface, self-hosted exactly as hub.dig.net self-hosts it.
 const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/space-grotesk-400.ttf");
@@ -226,9 +231,10 @@ fn install_fonts(ctx: &egui::Context) {
         .unwrap_or_default();
     let mut semibold = vec![super::render::SEMIBOLD.to_owned()];
     semibold.extend(fallback);
-    fonts
-        .families
-        .insert(egui::FontFamily::Name(super::render::SEMIBOLD.into()), semibold);
+    fonts.families.insert(
+        egui::FontFamily::Name(super::render::SEMIBOLD.into()),
+        semibold,
+    );
     ctx.set_fonts(fonts);
 }
 
@@ -288,9 +294,7 @@ impl PromptApp {
         let outcome = match (self.wants_text, answer) {
             (false, Answer::Approve) => Outcome::Confirm(WindowIntent::Approve),
             (false, Answer::Deny) => Outcome::Confirm(WindowIntent::Deny),
-            (true, Answer::Approve) => {
-                Outcome::Input(InputOutcome::Provided(self.typed.clone()))
-            }
+            (true, Answer::Approve) => Outcome::Input(InputOutcome::Provided(self.typed.clone())),
             (true, Answer::Deny) => Outcome::Input(InputOutcome::Cancelled),
         };
         if let Ok(mut slot) = self.sink.lock() {
@@ -389,7 +393,10 @@ impl PromptApp {
         let bar = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), 44.0));
         paint::brand_mark(
             ui,
-            Rect::from_min_size(bar.left_top() + Vec2::new(space::S4, 12.0), Vec2::splat(20.0)),
+            Rect::from_min_size(
+                bar.left_top() + Vec2::new(space::S4, 12.0),
+                Vec2::splat(20.0),
+            ),
             t,
         );
         ui.painter().text(
@@ -428,9 +435,11 @@ impl PromptApp {
             full.left_top() + Vec2::new(space::S6, 44.0 + space::S6),
             full.right_bottom() - Vec2::new(space::S6, 88.0),
         );
-        let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(
-            egui::Layout::top_down(egui::Align::Min),
-        ));
+        let mut ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
         let width = inner.width();
 
         for block in self.screen.blocks.clone() {
@@ -466,8 +475,7 @@ impl PromptApp {
                     );
                     let galley = ui.fonts(|f| f.layout_job(job));
                     let height = galley.size().y + space::S4 * 2.0;
-                    let rect =
-                        Rect::from_min_size(ui.cursor().min, Vec2::new(width, height));
+                    let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(width, height));
                     match warning {
                         true => paint::warning_panel(&ui, rect, t),
                         false => paint::panel(&ui, rect, t),
@@ -480,11 +488,14 @@ impl PromptApp {
                     ui.advance_cursor_after_rect(rect);
                     ui.add_space(space::S4);
                 }
-                Block::Qr => {
+                Block::Qr(art) => {
                     // The QR is an ADDITION to the body, never a replacement: the same secret is
                     // always present as text above it, for anyone using a screen reader or whose
-                    // authenticator lives on this machine.
-                    ui.add_space(space::S2);
+                    // authenticator lives on this machine (dig_ecosystem#1849).
+                    let side = QR_SIDE.min(width);
+                    let drawn = paint::qr(&ui, ui.cursor().min, side, art);
+                    ui.advance_cursor_after_rect(drawn);
+                    ui.add_space(space::S4);
                 }
             }
         }
@@ -627,8 +638,10 @@ impl ForegroundWindow for BrandedWindow {
     }
 
     fn draws_qr(&self) -> bool {
-        // The QR itself is drawn by the claim window; the typed secret is always in the body too.
-        false
+        // The branded window draws the scannable square itself (`Block::Qr`), on a white field so a
+        // camera can read it in either theme. The typed secret stays in the body regardless — the QR
+        // is an addition, never the only path to it (dig_ecosystem#1849).
+        true
     }
 }
 
@@ -691,7 +704,11 @@ mod tests {
     ///
     /// Two frames are run because the first builds the font atlas; the second is the one that lays
     /// out real glyphs.
-    fn painted(screen: Screen, wants_text: bool, theme: Theme) -> (egui::Context, egui::FullOutput) {
+    fn painted(
+        screen: Screen,
+        wants_text: bool,
+        theme: Theme,
+    ) -> (egui::Context, egui::FullOutput) {
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
         store.write(theme).expect("the theme persists");
@@ -857,6 +874,44 @@ mod tests {
         assert!(
             drawn.contains(HOSTILE),
             "the painted text is not the decoded transaction that was signed; got {drawn:?}"
+        );
+    }
+
+    /// The same guarantee on the OTHER two prompts that carry attacker-supplied strings: a dapp's
+    /// self-declared name on a connect, and a notice body built from a path or an id.
+    ///
+    /// Those two fixtures come from the `zenity`/`kdialog` escaping tests deleted with that backend
+    /// (dig_ecosystem#2038). Their mechanism is gone — nothing in the drawing path interprets markup
+    /// any more — but the PROPERTY they defended is the point, and it is asserted here against the
+    /// painter rather than against a subprocess's argument list.
+    #[test]
+    fn a_hostile_dapp_name_and_a_hostile_notice_body_are_painted_verbatim() {
+        use crate::confirm::ConnectPrompt;
+
+        const HOSTILE_NAME: &str = "<a href=x><b>Trusted Bank</b></a> & co";
+        let connect = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://evil.example",
+            dapp_name: Some(HOSTILE_NAME),
+        });
+        let (_ctx, output) = painted(Screen::confirm(&connect, "Cancel"), false, Theme::Light);
+        let drawn = drawn_text(&output.shapes).join("\u{1}");
+        assert!(
+            drawn.contains(HOSTILE_NAME),
+            "the dapp name was altered on its way to the screen; got {drawn:?}"
+        );
+
+        const HOSTILE_BODY: &str = "<b>C:\\evil</b> & co";
+        let notice = ConfirmContent::notice(&NoticePrompt {
+            title: "DIG — Logs",
+            heading: "DIG could not open the folder for you.",
+            body: HOSTILE_BODY,
+            acknowledge: "OK",
+        });
+        let (_ctx, output) = painted(Screen::confirm(&notice, "Cancel"), false, Theme::Light);
+        let drawn = drawn_text(&output.shapes).join("\u{1}");
+        assert!(
+            drawn.contains(HOSTILE_BODY),
+            "the notice body was altered on its way to the screen; got {drawn:?}"
         );
     }
 
@@ -1160,6 +1215,18 @@ mod tests {
                 replacement: "",
                 recoverable: false,
             })), false),
+            ("two-factor-qr", confirm(ConfirmContent::claim(&ClaimPrompt {
+                title: "DIG — Set up two-factor codes",
+                heading: "Scan this with your authenticator",
+                body: "Or type the key by hand: JBSW Y3DP EHPK 3PXP",
+                affirm: "I have added it",
+                scannable: Some(
+                    &crate::confirm::QrArt::encode(
+                        "otpauth://totp/DIG:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=DIG",
+                    )
+                    .expect("the demo provisioning URI encodes"),
+                ),
+            })), false),
             ("passphrase", Screen::input(&InputContent {
                 title: "DIG — Unlock your account".into(),
                 heading: "Enter your DIG passphrase".into(),
@@ -1303,7 +1370,10 @@ mod tests {
         let outcome = press(Screen::input(&field), true, Key::Enter, "hunter2");
         match outcome {
             Some(Outcome::Input(InputOutcome::Provided(typed))) => assert_eq!(&*typed, "hunter2"),
-            other => panic!("Enter must submit the typed text; got {:?}", Describe(&other)),
+            other => panic!(
+                "Enter must submit the typed text; got {:?}",
+                Describe(&other)
+            ),
         }
     }
 
@@ -1452,7 +1522,9 @@ mod tests {
             match self.0 {
                 None => write!(f, "no answer"),
                 Some(Outcome::Confirm(intent)) => write!(f, "{intent:?}"),
-                Some(Outcome::Input(InputOutcome::Provided(_))) => write!(f, "Provided(<redacted>)"),
+                Some(Outcome::Input(InputOutcome::Provided(_))) => {
+                    write!(f, "Provided(<redacted>)")
+                }
                 Some(Outcome::Input(other)) => write!(f, "{other:?}"),
             }
         }
