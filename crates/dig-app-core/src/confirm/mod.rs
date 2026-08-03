@@ -413,6 +413,13 @@ pub mod qr;
 
 pub use qr::QrArt;
 
+// The branded prompt GUI (dig_ecosystem#2038) — the ONE window implementation all three platforms
+// draw, replacing the Win32 GDI dialog, the macOS `NSAlert` and the Linux `zenity`/`kdialog`
+// subprocess. It is a `ForegroundWindow` + `ForegroundInput` pair and nothing more: the security
+// policy stays in `gated_consent` above, unchanged and shared.
+#[cfg(feature = "gui")]
+pub mod gui;
+
 // The off-thread biometric seam (dig_ecosystem#1926). Only the Windows backend runs a verifier that
 // would deadlock a UI thread, so only Windows builds it — but the policy it must preserve (nothing
 // but a delivered `Verified` authorizes) is platform-independent, so its tests compile and run

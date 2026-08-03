@@ -1,0 +1,653 @@
+//! What a prompt window SHOWS, as data — the layout model, separated from the drawing.
+//!
+//! # Why this layer exists
+//!
+//! [`ConfirmContent`] says what a prompt means; `paint` says how pixels get onto a screen. Between
+//! them sits one question that is security-critical and that neither of those layers is a good place
+//! to answer: *which strings reach the user, and in what role*.
+//!
+//! Keeping it here, as plain data, buys two things. A test can assert what a window WOULD show
+//! without opening one — which matters because a consent window cannot be constructed inside
+//! `cargo test` on this stack. And the set of roles a string may take is closed
+//! ([`Block`]), so a caller cannot invent a new one that renders differently from the rest.
+//!
+//! # The text rule
+//!
+//! Every string in a [`Screen`] is drawn with [`egui::Painter::text`], which rasterises glyphs. It is
+//! not parsed, not interpreted, and not templated into anything that is. A value containing
+//! `<script>` produces the glyphs `<`, `s`, `c`, … — see this module's tests, which run the real
+//! egui layout engine headlessly and read the glyphs back out.
+
+use egui::{Align, Color32, FontFamily, FontId, RichText, TextFormat};
+
+use super::theme::{Rgba, Tokens};
+use crate::confirm::{ConfirmContent, InputContent, Presentation};
+
+/// The font family the brand's 600-weight face is registered under.
+///
+/// A named family rather than `FontFamily::Proportional` with a synthetic bold: hub's type is Space
+/// Grotesk, whose 600 is a distinct cut, and faking it by smearing the 400 is exactly the kind of
+/// detail that makes a port look like an imitation.
+pub const SEMIBOLD: &str = "dig-semibold";
+
+/// Type sizes, mirroring hub's `--text-*` scale.
+pub mod size {
+    /// hub's `--text-xs` — the window-chrome title.
+    pub const XS: f32 = 12.0;
+    /// hub's `--text-sm` — the field label and the theme toggle.
+    pub const SM: f32 = 13.0;
+    /// hub's `--text-base` — body copy and the decoded transaction.
+    pub const BASE: f32 = 15.0;
+    /// Button labels. Between `--text-sm` and `--text-base`, as hub's `.btn` is.
+    pub const BUTTON: f32 = 14.5;
+    /// hub's `--text-xl` — the origin-bound heading.
+    pub const HEADING: f32 = 22.0;
+}
+
+/// hub's `--space-*` scale, in logical pixels.
+pub mod space {
+    /// `--space-2`.
+    pub const S2: f32 = 8.0;
+    /// `--space-3`.
+    pub const S3: f32 = 12.0;
+    /// `--space-4`.
+    pub const S4: f32 = 16.0;
+    /// `--space-5`.
+    pub const S5: f32 = 20.0;
+    /// `--space-6`.
+    pub const S6: f32 = 24.0;
+    /// `--space-7`.
+    pub const S7: f32 = 32.0;
+}
+
+/// hub's `--radius-*` scale.
+pub mod radius {
+    /// `--radius-sm` — chips and inputs.
+    pub const SM: u8 = 8;
+    /// `--radius` — cards.
+    pub const BASE: u8 = 10;
+    /// `--radius-lg` — the window card.
+    pub const LG: u8 = 16;
+    /// A pill. Not one of hub's tokens: hub writes `999px`, which is "half the height", and egui
+    /// takes an absolute corner radius — so it is derived from the control height at the call site
+    /// and this is only the cap.
+    pub const PILL: u8 = 24;
+}
+
+/// One thing a prompt window shows, in the role it shows it as.
+///
+/// A closed set on purpose: adding a way to display a string means adding a variant here, in front of
+/// the tests below, rather than reaching for a different draw call somewhere in the paint layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    /// The origin-bound question, largest type. One per screen.
+    Heading(String),
+    /// Explanatory copy in the secondary colour.
+    Body(String),
+    /// The decoded transaction / detail, inside a recessed panel.
+    ///
+    /// Distinct from [`Block::Body`] because it is the part a user is meant to READ CAREFULLY before
+    /// authorising, and because it is the field most likely to carry attacker-supplied text.
+    Detail(String),
+    /// A warning panel — the amber treatment. Used where the copy states an irreversible loss.
+    Warning(String),
+    /// A QR code, drawn beneath the body. Always accompanied by the same secret as text (see
+    /// [`ClaimPrompt::scannable`](crate::confirm::ClaimPrompt::scannable)).
+    Qr,
+}
+
+/// A button's visual weight, which follows what the button DOES.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Weight {
+    /// The accented affirmative — hub's `--dig-purple` fill.
+    Primary,
+    /// The destructive affirmative — hub's `--danger` fill. A destroy must not look like a save.
+    Danger,
+    /// The refusal — a bordered ghost.
+    Ghost,
+}
+
+/// A labelled control in the action row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Button {
+    /// The label, shown VERBATIM. A first-person claim label reaches the user unchanged; it is never
+    /// slotted into a sentence (dig_ecosystem#1752).
+    pub label: String,
+    /// How it is drawn.
+    pub weight: Weight,
+    /// The answer clicking it produces.
+    pub answer: Answer,
+    /// Whether this control is focused when the window opens.
+    ///
+    /// Carries [`Presentation::Decide::refusal_is_default`]: a destroy or a security-weakening window
+    /// pre-focuses its REFUSAL, so a bare Enter keeps the account (dig_ecosystem#1799).
+    pub focused: bool,
+}
+
+/// What a control answers with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// The user took the affirmative action.
+    Approve,
+    /// The user refused, or dismissed the window.
+    Deny,
+}
+
+/// Everything one prompt window shows and offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Screen {
+    /// The window-chrome title.
+    pub title: String,
+    /// The body, in order.
+    pub blocks: Vec<Block>,
+    /// The action row, in visual order (refusal first, affirmative last — the platform-conventional
+    /// order on Windows and Linux, and the one the old backends already used).
+    pub buttons: Vec<Button>,
+    /// A text field, when this is an input prompt rather than a confirm.
+    pub field: Option<Field>,
+}
+
+/// A text-entry control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    /// The label beside it.
+    pub label: String,
+    /// Whether typed characters start hidden. Secret material is masked by default (`SPEC.md` §3.1d).
+    pub masked: bool,
+    /// Whether a reveal-while-typing control is offered — §3.1d's own escape from the masking rule,
+    /// for the phrase that cannot be checked if typed entirely blind.
+    pub revealable: bool,
+}
+
+impl Screen {
+    /// The screen for a confirm prompt.
+    ///
+    /// Reads its structure ENTIRELY off [`ConfirmContent`] — which is composed and unit-tested in the
+    /// parent module — so this layer cannot reword a heading, drop an origin, or turn a notice into a
+    /// question. It decides presentation, never content.
+    pub fn confirm(content: &ConfirmContent, refusal_label: &str) -> Self {
+        let destructive = content.action.eq_ignore_ascii_case("destroy");
+        let blocks = {
+            let mut blocks = vec![Block::Heading(content.heading.clone())];
+            // A destroy states an irreversible loss, so its body takes the warning treatment rather
+            // than reading like ordinary explanatory copy.
+            blocks.push(match destructive {
+                true => Block::Warning(content.body.clone()),
+                false => Block::Body(content.body.clone()),
+            });
+            if content.qr.is_some() {
+                blocks.push(Block::Qr);
+            }
+            blocks
+        };
+
+        let buttons = match content.presentation {
+            // A notice has ONE dismiss. Nothing downstream branches on how it was dismissed, so a
+            // second button would invite a decision no code reads (dig_ecosystem#1773).
+            Presentation::Acknowledge => vec![Button {
+                label: content.action.to_owned(),
+                weight: Weight::Primary,
+                answer: Answer::Approve,
+                focused: true,
+            }],
+            Presentation::Decide { refusal_is_default } => vec![
+                Button {
+                    label: refusal_label.to_owned(),
+                    weight: Weight::Ghost,
+                    answer: Answer::Deny,
+                    focused: refusal_is_default,
+                },
+                Button {
+                    label: content.action.to_owned(),
+                    weight: match destructive {
+                        true => Weight::Danger,
+                        false => Weight::Primary,
+                    },
+                    answer: Answer::Approve,
+                    focused: !refusal_is_default,
+                },
+            ],
+        };
+
+        Self {
+            title: content.title.clone(),
+            blocks,
+            buttons,
+            field: None,
+        }
+    }
+
+    /// The screen for an input prompt.
+    pub fn input(content: &InputContent) -> Self {
+        Self {
+            title: content.title.clone(),
+            blocks: vec![
+                Block::Heading(content.heading.clone()),
+                Block::Body(content.body.clone()),
+            ],
+            buttons: vec![
+                Button {
+                    label: "Cancel".to_owned(),
+                    weight: Weight::Ghost,
+                    answer: Answer::Deny,
+                    focused: false,
+                },
+                Button {
+                    label: content.submit.to_owned(),
+                    weight: Weight::Primary,
+                    answer: Answer::Approve,
+                    focused: false,
+                },
+            ],
+            field: Some(Field {
+                label: content.field_label.clone(),
+                masked: content.masked,
+                revealable: content.revealable,
+            }),
+        }
+    }
+
+    /// Every string this screen puts in front of the user, in draw order.
+    ///
+    /// Exists for the tests: it is the list a hostile value must appear in VERBATIM, and the list an
+    /// assistive technology walks. Not used by the paint layer, which walks the typed structure.
+    pub fn visible_text(&self) -> Vec<&str> {
+        let blocks = self.blocks.iter().filter_map(|b| match b {
+            Block::Heading(t) | Block::Body(t) | Block::Detail(t) | Block::Warning(t) => {
+                Some(t.as_str())
+            }
+            Block::Qr => None,
+        });
+        std::iter::once(self.title.as_str())
+            .chain(blocks)
+            .chain(self.field.iter().map(|f| f.label.as_str()))
+            .chain(self.buttons.iter().map(|b| b.label.as_str()))
+            .collect()
+    }
+}
+
+/// The colour a [`Block`] draws its text in.
+pub fn block_color(block: &Block, t: &Tokens) -> Rgba {
+    match block {
+        Block::Heading(_) => t.text,
+        Block::Body(_) | Block::Detail(_) => t.muted,
+        Block::Warning(_) => t.amber,
+        Block::Qr => t.text,
+    }
+}
+
+/// Convert a token to egui's colour type.
+pub fn rgba(c: Rgba) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+}
+
+/// The brand's 600-weight face at `size`.
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
+}
+
+/// The brand's 400-weight face at `size`.
+pub fn regular(size: f32) -> FontId {
+    FontId::proportional(size)
+}
+
+/// A wrapping paragraph of PLAIN text, laid out at `width`.
+///
+/// The one place body-shaped text becomes a drawable. It takes a `&str` and produces a layout job
+/// whose single section is that string — there is no parse step, no span splitting, and no way for a
+/// substring to acquire different formatting from its neighbours.
+pub fn paragraph(text: &str, font: FontId, color: Color32, width: f32, line: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = width;
+    job.halign = Align::LEFT;
+    job.append(
+        text,
+        0.0,
+        TextFormat {
+            font_id: font,
+            color,
+            line_height: Some(line),
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// A short, non-wrapping run of text.
+pub fn label(text: &str, font: FontId, color: Color32) -> RichText {
+    RichText::new(text).font(font).color(color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::confirm::{ConnectPrompt, DestroyPrompt, NoticePrompt, SignPrompt};
+
+    /// A decoded transaction carrying markup AND a script tag — what a hostile dapp supplies.
+    const HOSTILE: &str = "Send 0.001 XCH to xch1safe\u{2026}addr</div><div class=\"ok\">\
+         <b>\u{2713} Verified by DIG</b><script>alert(1)</script>\
+         <span style=\"color:#2ec27e\">safe to approve</span>&amp;<b>done</b>";
+
+    fn sign_content(decoded: &'static str) -> ConfirmContent {
+        ConfirmContent::sign(&SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some(decoded),
+        })
+        .expect("a decoded transaction yields content")
+    }
+
+    /// Run the REAL egui text pipeline, with no window, and report what it actually laid out.
+    ///
+    /// This is the point of these tests: they do not inspect our own structs and conclude we did the
+    /// right thing — they drive the same `Fonts::layout_job` the window draws through and read the
+    /// resulting galley back. A renderer that interpreted markup would swallow tags and show up here
+    /// as missing text AND a lower glyph count.
+    ///
+    /// Returns the laid-out text and the number of GLYPHS the shaper emitted, because the text alone
+    /// could be echoed by a galley that rendered nothing.
+    fn laid_out(text: &str) -> (String, usize) {
+        let ctx = egui::Context::default();
+        // egui builds its font atlas on the first frame, so a bare `Context` has no fonts and
+        // `Context::fonts` panics. One empty frame is the documented way to bring them up headlessly.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let job = paragraph(
+            text,
+            regular(size::BASE),
+            Color32::BLACK,
+            10_000.0,
+            size::BASE * 1.5,
+        );
+        let galley = ctx.fonts(|f| f.layout_job(job));
+        let glyphs = galley.rows.iter().map(|r| r.glyphs.len()).sum();
+        (galley.text().to_owned(), glyphs)
+    }
+
+    /// **The plain-text consent guarantee.** A hostile decoded transaction must reach the screen as
+    /// LITERAL CHARACTERS — every angle bracket, every ampersand, every tag name — after passing
+    /// through the real layout engine.
+    ///
+    /// This is the test the ticket requires to fail if the renderer ever starts interpreting markup.
+    /// It asserts on the glyphs the text pipeline actually produced, not on a string we kept a copy
+    /// of, so swapping in a markup-aware renderer breaks it.
+    #[test]
+    fn a_hostile_value_is_laid_out_as_literal_characters() {
+        let (drawn, glyphs) = laid_out(HOSTILE);
+        assert_eq!(
+            drawn, HOSTILE,
+            "the layout engine altered the text; markup must be drawn, not interpreted"
+        );
+        // Spelled out, so a failure names the specific thing that went missing.
+        for fragment in [
+            "<b>",
+            "</b>",
+            "<script>alert(1)</script>",
+            "<div class=\"ok\">",
+            "&amp;",
+        ] {
+            assert!(
+                drawn.contains(fragment),
+                "{fragment:?} did not survive layout; got {drawn:?}"
+            );
+        }
+        // The text surviving is not enough on its own — a galley can carry text it never shaped.
+        // Every non-newline character must have produced a glyph, so the angle brackets are not
+        // merely present in the string but actually DRAWN.
+        let expected = HOSTILE.chars().filter(|c| *c != '\n').count();
+        assert_eq!(
+            glyphs, expected,
+            "the shaper emitted {glyphs} glyphs for {expected} characters — markup was consumed"
+        );
+    }
+
+    /// …and the control that makes the test above meaningful: an HTML-ESCAPED value would ALSO
+    /// survive a markup-interpreting renderer, so the assertion is specifically that NO escaping
+    /// happened either. `&amp;` must stay `&amp;`, not become `&`.
+    ///
+    /// Without this, a future "let's just escape it to be safe" change would pass the test above
+    /// while quietly showing the user a different string than the one that was signed.
+    #[test]
+    fn a_hostile_value_is_not_escaped_on_its_way_to_the_screen_either() {
+        let (drawn, _) = laid_out("a &amp; b &lt;c&gt;");
+        assert_eq!(
+            drawn, "a &amp; b &lt;c&gt;",
+            "the text must be neither interpreted NOR escaped — it is shown exactly as decoded"
+        );
+    }
+
+    /// The same guarantee at the level the window is composed at: every string a screen puts on
+    /// display is byte-identical to what the prompt supplied.
+    #[test]
+    fn every_string_a_screen_shows_is_verbatim() {
+        let content = sign_content(HOSTILE);
+        let screen = Screen::confirm(&content, "Cancel");
+        let shown = screen.visible_text().join("\n");
+        assert!(
+            shown.contains(HOSTILE),
+            "the hostile decoded transaction must reach the screen unchanged"
+        );
+    }
+
+    /// The heading binds the origin, and it is the origin the prompt supplied — a window that
+    /// dropped it would ask the user to authorise an unattributed request.
+    #[test]
+    fn the_heading_carries_the_vouched_origin() {
+        let content = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: Some("Cool Dapp"),
+        });
+        let screen = Screen::confirm(&content, "Cancel");
+        let Some(Block::Heading(heading)) = screen.blocks.first() else {
+            panic!("a confirm screen leads with its heading");
+        };
+        assert!(heading.contains("Cool Dapp"), "{heading}");
+        assert!(heading.contains("dapp.example"), "{heading}");
+    }
+
+    // ---- Presentation: the two kinds of window stay distinguishable. ----
+
+    /// A notice offers exactly one control, so the user is not asked to decide something no code
+    /// reads (dig_ecosystem#1773).
+    #[test]
+    fn a_notice_offers_exactly_one_control() {
+        let content = ConfirmContent::notice(&NoticePrompt {
+            title: "DIG \u{2014} DIG ID copied",
+            heading: "Your DIG ID is on the clipboard.",
+            body: "abc123",
+            acknowledge: "OK",
+        });
+        let screen = Screen::confirm(&content, "Cancel");
+        assert_eq!(screen.buttons.len(), 1);
+        assert_eq!(screen.buttons[0].answer, Answer::Approve);
+        assert_eq!(screen.buttons[0].label, "OK");
+    }
+
+    /// …and the control: an authorisation offers two, one of which refuses.
+    #[test]
+    fn an_authorization_offers_a_real_refusal() {
+        let screen = Screen::confirm(&sign_content("Send 1 XCH"), "Cancel");
+        assert_eq!(screen.buttons.len(), 2);
+        assert_eq!(screen.buttons[0].answer, Answer::Deny);
+        assert_eq!(screen.buttons[1].answer, Answer::Approve);
+    }
+
+    /// **Regression (dig_ecosystem#1799).** A destroy pre-focuses its REFUSAL, so a bare Enter keeps
+    /// the account. The affirmative being focused here would destroy a master seed on a keypress.
+    #[test]
+    fn a_destroy_pre_focuses_the_refusal_so_enter_keeps_the_account() {
+        let content = ConfirmContent::destroy(&DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: false,
+        });
+        let screen = Screen::confirm(&content, "Cancel");
+        let focused = screen
+            .buttons
+            .iter()
+            .find(|b| b.focused)
+            .expect("some control takes focus, or the window opens unfocusable");
+        assert_eq!(
+            focused.answer,
+            Answer::Deny,
+            "the safe answer must be pre-selected on a destroy"
+        );
+    }
+
+    /// …and the control: an ordinary authorisation pre-focuses its AFFIRMATIVE, because the user
+    /// just asked for it and refusing costs only a retry. Without this, a window that focused the
+    /// refusal everywhere would pass the destroy test above.
+    #[test]
+    fn an_ordinary_authorization_pre_focuses_its_affirmative() {
+        let screen = Screen::confirm(&sign_content("Send 1 XCH"), "Cancel");
+        let focused = screen.buttons.iter().find(|b| b.focused).expect("focused");
+        assert_eq!(focused.answer, Answer::Approve);
+    }
+
+    /// A destroy's affirmative is drawn DESTRUCTIVELY. The pre-focused refusal protects a keypress;
+    /// the colour protects a glance — neither alone is the whole guard.
+    #[test]
+    fn a_destroy_draws_its_affirmative_as_destructive() {
+        let content = ConfirmContent::destroy(&DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: true,
+        });
+        let screen = Screen::confirm(&content, "Cancel");
+        let affirm = screen
+            .buttons
+            .iter()
+            .find(|b| b.answer == Answer::Approve)
+            .unwrap();
+        assert_eq!(affirm.weight, Weight::Danger);
+        assert_eq!(affirm.label, "Destroy");
+    }
+
+    /// …and the control: a sign's affirmative is the ordinary accent, so the destructive treatment
+    /// still means something.
+    #[test]
+    fn a_sign_draws_its_affirmative_as_the_ordinary_accent() {
+        let screen = Screen::confirm(&sign_content("Send 1 XCH"), "Cancel");
+        let affirm = screen
+            .buttons
+            .iter()
+            .find(|b| b.answer == Answer::Approve)
+            .unwrap();
+        assert_eq!(affirm.weight, Weight::Primary);
+    }
+
+    /// A destroy's body takes the WARNING treatment: it states an irreversible loss and must not
+    /// read like ordinary explanatory copy.
+    #[test]
+    fn a_destroy_body_is_a_warning_not_ordinary_copy() {
+        let content = ConfirmContent::destroy(&DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: false,
+        });
+        let screen = Screen::confirm(&content, "Cancel");
+        assert!(
+            screen
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Warning(_))),
+            "a destroy states its loss as a warning: {:?}",
+            screen.blocks
+        );
+    }
+
+    /// A claim's first-person label reaches the button VERBATIM (dig_ecosystem#1752) — it is never
+    /// slotted into an authorisation sentence.
+    #[test]
+    fn a_claim_label_reaches_the_button_unchanged() {
+        let content = ConfirmContent::claim(&crate::confirm::ClaimPrompt {
+            title: "DIG \u{2014} Your recovery phrase",
+            heading: "Write these 24 words down.",
+            body: " 1. abandon",
+            affirm: "I have written these down",
+            scannable: None,
+        });
+        let screen = Screen::confirm(&content, "Not yet");
+        assert_eq!(screen.buttons[1].label, "I have written these down");
+        assert_eq!(screen.buttons[0].label, "Not yet");
+    }
+
+    // ---- Input screens. ----
+
+    /// Secret material is masked by default and the mask survives into the screen (`SPEC.md` §3.1d).
+    #[test]
+    fn an_input_screen_carries_its_masking_and_reveal_affordance() {
+        let content = InputContent {
+            title: "DIG \u{2014} Restore".into(),
+            heading: "Type your 24 words".into(),
+            body: "Order matters.".into(),
+            field_label: "Your 24 words:".into(),
+            submit: "Restore",
+            masked: true,
+            revealable: true,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let screen = Screen::input(&content);
+        let field = screen.field.expect("an input screen has a field");
+        assert!(field.masked);
+        assert!(field.revealable);
+        assert_eq!(field.label, "Your 24 words:");
+        assert_eq!(screen.buttons[1].label, "Restore");
+    }
+
+    /// An input screen always offers a way OUT that is not "submit" — never trap the user
+    /// (`professional-ui`, HARD).
+    #[test]
+    fn an_input_screen_always_offers_a_refusal() {
+        let content = InputContent {
+            title: "t".into(),
+            heading: "h".into(),
+            body: "b".into(),
+            field_label: "l".into(),
+            submit: "Go",
+            masked: false,
+            revealable: false,
+            style: crate::confirm::InputStyle::Dialog,
+        };
+        let screen = Screen::input(&content);
+        assert!(screen.buttons.iter().any(|b| b.answer == Answer::Deny));
+    }
+
+    /// EVERY screen offers a refusal or a dismissal — there is no shape of prompt that leaves the
+    /// user with no way out.
+    #[test]
+    fn every_screen_offers_at_least_one_control() {
+        let screens = [
+            Screen::confirm(&sign_content("Send 1 XCH"), "Cancel"),
+            Screen::confirm(
+                &ConfirmContent::notice(&NoticePrompt {
+                    title: "t",
+                    heading: "h",
+                    body: "b",
+                    acknowledge: "OK",
+                }),
+                "Cancel",
+            ),
+        ];
+        for screen in screens {
+            assert!(!screen.buttons.is_empty(), "{:?}", screen.title);
+        }
+    }
+
+    #[test]
+    fn a_block_takes_its_colour_from_the_active_theme() {
+        let warning = Block::Warning("gone for good".into());
+        assert_eq!(block_color(&warning, &Tokens::LIGHT), Tokens::LIGHT.amber);
+        assert_eq!(block_color(&warning, &Tokens::DARK), Tokens::DARK.amber);
+        // …and the two themes genuinely differ, so the lookup is doing something.
+        assert_ne!(Tokens::LIGHT.amber, Tokens::DARK.amber);
+    }
+
+    /// Guards the harness itself: if the headless text pipeline ever stops emitting glyphs, the
+    /// tests above would pass while proving nothing, so the CONTROL fails first.
+    #[test]
+    fn the_headless_text_pipeline_emits_glyphs_at_all() {
+        let (text, glyphs) = laid_out("abc");
+        assert_eq!(text, "abc");
+        assert_eq!(glyphs, 3, "no glyphs were shaped; the markup tests are vacuous");
+    }
+}
