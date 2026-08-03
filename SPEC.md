@@ -947,6 +947,19 @@ DIG link — only `chia://` / `urn:dig:chia:` are accepted, the security boundar
 + numeric exit code); the `--json` envelopes match the engine CLI's shape so the DIG command line is
 one consistent surface.
 
+**Two transports, one control contract (normative, [dig_ecosystem#2019]).** The node's `control.*`
+surface is reached by TWO transports that MUST stay byte-identical on the wire: the `dign` gateway's
+`EngineProxy` (this section) and the tray shell's direct loopback client (`dig_app_core::control`,
+§5.1.0). Both name the SAME method set and param shapes defined once in the shared
+`dig-node-control-interface` catalog (`ControlMethod` + the typed params). The tray shell is bound to
+that catalog at compile time (it builds requests from the typed `ControlCall`s); the gateway maps each
+command to a `control.*` method + params BY HAND, so it is the transport that can drift. A conformance
+test therefore asserts every gateway method resolves in the catalog and its params byte-match the
+typed serialization — the two encoders can never silently diverge (e.g. a rename of
+`SetCapParams::cap_bytes` fails the test until both transports follow). The two node-only peer verbs
+`control.peers.setBan` / `control.peers.setPoolConfig` are served by dig-node's own method list and are
+not yet promoted into the shared catalog; the test pins that exact exception.
+
 **`dign sign` — domain-separated + confirm-gated (MUST, custody).** The local `sign` command holds the
 custody key, so it enforces the two invariants every 0x0010 signing path enforces:
 

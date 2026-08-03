@@ -293,4 +293,212 @@ mod tests {
             assert_eq!(call.params, params, "params for {command:?}");
         }
     }
+
+    /// Every engine-routed command, with a representative argument for the arg-bearing ones. Both
+    /// #2019 transport-conformance tests below walk this one list, so a newly added engine command is
+    /// covered by both the catalog check and (where it has a typed twin) the params check without a
+    /// second fixture to keep in step.
+    fn all_engine_routed_commands() -> Vec<Command> {
+        vec![
+            Command::Info,
+            Command::Config(ConfigAction::Get),
+            Command::Config(ConfigAction::SetUpstream {
+                url: "https://up.example".into(),
+            }),
+            Command::Cache(CacheAction::Get),
+            Command::Cache(CacheAction::SetCap {
+                bytes: 2 * 1024 * 1024 * 1024,
+            }),
+            Command::Cache(CacheAction::Clear),
+            Command::Stores(StoresAction::List),
+            Command::Stores(StoresAction::Pin { store: "s".into() }),
+            Command::Stores(StoresAction::Unpin { store: "s".into() }),
+            Command::Stores(StoresAction::Status { store: "s".into() }),
+            Command::Sync(SyncAction::Status),
+            Command::Sync(SyncAction::Trigger { store: "s".into() }),
+            Command::Subscriptions(SubscriptionsAction::List),
+            Command::Subscriptions(SubscriptionsAction::Add {
+                store_id: "s".into(),
+            }),
+            Command::Subscriptions(SubscriptionsAction::Remove {
+                store_id: "s".into(),
+            }),
+            Command::Peers(PeersAction::List),
+            Command::Peers(PeersAction::Connect { peer: "p".into() }),
+            Command::Peers(PeersAction::Disconnect { peer: "p".into() }),
+            Command::Peers(PeersAction::Ban {
+                peer: "p".into(),
+                state: "ban".into(),
+            }),
+            Command::Peers(PeersAction::PoolConfig { max_connections: 8 }),
+            Command::Pair(PairAction::List),
+            Command::Pair(PairAction::Approve {
+                pairing_id: "pid".into(),
+            }),
+            Command::Pair(PairAction::Revoke {
+                token_id: "tid".into(),
+            }),
+        ]
+    }
+
+    /// #2019 — transport conformance, leg 1. Every method the `dign` GATEWAY transport emits must be a
+    /// method in the SHARED `dig-node-control-interface` catalog ([`ControlMethod`]) — the same catalog
+    /// the TRAY-SHELL transport (`control.rs`, via typed [`ControlCall`]s) is bound to at compile time.
+    /// This is the drift the literal `every_engine_command_maps_*` test above cannot see: that test
+    /// pins the gateway to hand-written strings, so a rename IN THE CONTRACT CRATE leaves it green while
+    /// the two transports silently diverge. Anchoring to the catalog closes that gap.
+    ///
+    /// The two exceptions are pinned EXACTLY: `control.peers.setBan` / `control.peers.setPoolConfig`
+    /// are served by dig-node's own `CONTROL_METHODS` list but not yet promoted into the shared
+    /// `ControlMethod` enum (a tracked node-side gap). Pinning the set means a NEW gateway method absent
+    /// from the catalog fails here until it is catalogued or consciously added to `KNOWN_GATEWAY_ONLY`.
+    #[test]
+    fn every_gateway_method_is_in_the_shared_catalog_or_a_known_gap() {
+        use dig_node_control_interface::method::ControlMethod;
+
+        const KNOWN_GATEWAY_ONLY: &[&str] =
+            &["control.peers.setBan", "control.peers.setPoolConfig"];
+
+        let mut gateway_only = Vec::new();
+        for command in all_engine_routed_commands() {
+            let call = engine_call(&command)
+                .unwrap_or_else(|| panic!("{command:?} is engine-routed and must map to a call"));
+            match ControlMethod::from_name(call.method) {
+                Some(method) => assert_eq!(
+                    method.name(),
+                    call.method,
+                    "gateway method {:?} must round-trip through the shared catalog",
+                    call.method
+                ),
+                None => gateway_only.push(call.method),
+            }
+        }
+        gateway_only.sort_unstable();
+        let mut known = KNOWN_GATEWAY_ONLY.to_vec();
+        known.sort_unstable();
+        assert_eq!(
+            gateway_only, known,
+            "a gateway method is absent from the shared control catalog — catalogue it in \
+             dig-node-control-interface, or (if it is a deliberate node-only method) add it to \
+             KNOWN_GATEWAY_ONLY"
+        );
+    }
+
+    /// #2019 — transport conformance, leg 2. For every shared method that carries a typed params struct
+    /// in the contract crate, the GATEWAY transport's hand-encoded params must be BYTE-IDENTICAL to the
+    /// crate's typed serialization, and its method string identical to the type's bound
+    /// [`ControlMethod`]. So a field rename on e.g. `SetCapParams::cap_bytes` — which the tray-shell
+    /// transport follows automatically, being typed — fails here until the gateway literal follows too.
+    /// That is precisely the drift #2002's cache-cap control could suffer between the two transports.
+    ///
+    /// The expected values are built FROM the contract crate (never a second copy of the literals), so
+    /// the crate is the single anchor both transports are checked against.
+    #[test]
+    fn gateway_params_byte_match_the_typed_contract_params() {
+        use dig_node_control_interface::params;
+        use dig_node_control_interface::traits::ControlCall;
+
+        let cap = 2u64 * 1024 * 1024 * 1024;
+        let cases: Vec<(Command, Value, &'static str)> = vec![
+            (
+                Command::Cache(CacheAction::SetCap { bytes: cap }),
+                serde_json::to_value(params::SetCapParams { cap_bytes: cap }).unwrap(),
+                <params::SetCapParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Config(ConfigAction::SetUpstream {
+                    url: "https://up.example".into(),
+                }),
+                serde_json::to_value(params::SetUpstreamParams {
+                    upstream: "https://up.example".into(),
+                })
+                .unwrap(),
+                <params::SetUpstreamParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Subscriptions(SubscriptionsAction::Add {
+                    store_id: "sid".into(),
+                }),
+                serde_json::to_value(params::SubscribeParams {
+                    store_id: "sid".into(),
+                })
+                .unwrap(),
+                <params::SubscribeParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Subscriptions(SubscriptionsAction::Remove {
+                    store_id: "sid".into(),
+                }),
+                serde_json::to_value(params::UnsubscribeParams {
+                    store_id: "sid".into(),
+                })
+                .unwrap(),
+                <params::UnsubscribeParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Peers(PeersAction::Connect { peer: "p".into() }),
+                serde_json::to_value(params::PeersConnectParams { peer: "p".into() }).unwrap(),
+                <params::PeersConnectParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Peers(PeersAction::Disconnect { peer: "p".into() }),
+                serde_json::to_value(params::PeersDisconnectParams { peer: "p".into() }).unwrap(),
+                <params::PeersDisconnectParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Stores(StoresAction::Pin { store: "s".into() }),
+                serde_json::to_value(params::PinParams { store: "s".into() }).unwrap(),
+                <params::PinParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Stores(StoresAction::Unpin { store: "s".into() }),
+                serde_json::to_value(params::UnpinParams { store: "s".into() }).unwrap(),
+                <params::UnpinParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Stores(StoresAction::Status { store: "s".into() }),
+                serde_json::to_value(params::HostedStoreStatusParams { store: "s".into() })
+                    .unwrap(),
+                <params::HostedStoreStatusParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Sync(SyncAction::Trigger { store: "s".into() }),
+                serde_json::to_value(params::SyncTriggerParams { store: "s".into() }).unwrap(),
+                <params::SyncTriggerParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Pair(PairAction::Approve {
+                    pairing_id: "pid".into(),
+                }),
+                serde_json::to_value(params::ApproveParams {
+                    pairing_id: "pid".into(),
+                })
+                .unwrap(),
+                <params::ApproveParams as ControlCall>::METHOD.name(),
+            ),
+            (
+                Command::Pair(PairAction::Revoke {
+                    token_id: "tid".into(),
+                }),
+                serde_json::to_value(params::RevokeParams {
+                    token_id: "tid".into(),
+                })
+                .unwrap(),
+                <params::RevokeParams as ControlCall>::METHOD.name(),
+            ),
+        ];
+
+        for (command, expected_params, method_name) in cases {
+            let call = engine_call(&command)
+                .unwrap_or_else(|| panic!("{command:?} must map to a control call"));
+            assert_eq!(
+                call.method, method_name,
+                "gateway method for {command:?} must equal the typed twin's ControlMethod name"
+            );
+            assert_eq!(
+                call.params, expected_params,
+                "gateway params for {command:?} must byte-match the typed contract serialization"
+            );
+        }
+    }
 }
