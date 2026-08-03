@@ -19,8 +19,8 @@ use std::path::Path;
 /// * **Unix** — mode `0600`, passed to `open(2)` so it is the mode the file is created with.
 /// * **Windows** — an explicit, PROTECTED DACL holding a single access-allowed ACE for the calling
 ///   user's own SID. Windows does not honour mode bits at all, so this is not a translation of
-///   `0600` but the genuine equivalent; see [`super::windows_acl`] for why the profile directory's
-///   inherited ACLs are not good enough (dig_ecosystem#1965).
+///   `0600` but the genuine equivalent; the `windows_acl` module documents why the profile
+///   directory's inherited ACLs are not good enough (dig_ecosystem#1965).
 ///
 /// Any other target fails to COMPILE rather than silently writing a secret at the platform
 /// default — a file this function returns `Ok(())` for must really be owner-only.
@@ -123,35 +123,35 @@ mod unix_tests {
 /// an actual second user's open call would go through.
 ///
 /// The first test also asserts a CONTROL: an ordinary `fs::write` in the same directory must hand
-/// Administrators real rights. Without that, a directory that happened to be narrow already would
-/// make every assertion below pass while proving nothing.
+/// some non-owner principal real rights. Without that, a directory that happened to be narrow
+/// already would make every assertion below pass while proving nothing.
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::write_owner_only;
     use crate::secret_file::windows_acl::inspect::{
-        administrators, everyone, me, open_to_everyone, FileSecurity,
+        administrators, everyone, me, open_to_everyone, system, FileSecurity,
     };
     use windows::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 
-    /// The secret is readable by its owner and by nobody else — not Everyone, not Administrators.
+    /// The secret is readable by its owner and by nobody else — not Everyone, not Administrators,
+    /// not SYSTEM.
     #[test]
     fn no_principal_but_the_owner_is_granted_access() {
         let dir = tempfile::tempdir().unwrap();
         let administrators = administrators().unwrap();
+        let system = system().unwrap();
 
-        // CONTROL. An ordinary file in this very directory inherits rights for Administrators. If
-        // it does not, the environment is not the one this test reasons about, and the assertions
-        // below would be vacuous — so fail here, loudly, rather than report a false pass.
+        // CONTROL. An ordinary file in this very directory inherits rights for principals that are
+        // not its owner. If it does not, the environment is not the one this test reasons about and
+        // the assertions below would be vacuous — so fail here, loudly, rather than pass falsely.
         let ordinary = dir.path().join("ordinary.txt");
         std::fs::write(&ordinary, b"not a secret").unwrap();
-        let inherited = FileSecurity::of(&ordinary)
-            .unwrap()
-            .rights_of(&administrators)
-            .unwrap();
-        assert_ne!(
-            inherited, 0,
-            "control failed: a plain write here already grants Administrators nothing, so this \
-             test cannot tell an owner-only ACL from an inherited one"
+        let inherited = FileSecurity::of(&ordinary).unwrap();
+        assert!(
+            inherited.rights_of(&administrators).unwrap() != 0
+                || inherited.rights_of(&system).unwrap() != 0,
+            "control failed: a plain write here already grants no non-owner principal anything, so \
+             this test cannot tell an owner-only ACL from an inherited one"
         );
 
         // SUBJECT.
@@ -159,16 +159,18 @@ mod windows_tests {
         write_owner_only(&secret, b"redacted\n").unwrap();
         let security = FileSecurity::of(&secret).unwrap();
 
-        assert_eq!(
-            security.rights_of(&administrators).unwrap(),
-            0,
-            "Administrators must be granted nothing on a recovery-phrase file"
-        );
-        assert_eq!(
-            security.rights_of(&everyone().unwrap()).unwrap(),
-            0,
-            "Everyone must be granted nothing on a recovery-phrase file"
-        );
+        for (who, name) in [
+            (&administrators, "Administrators"),
+            (&system, "SYSTEM"),
+            (&everyone().unwrap(), "Everyone"),
+        ] {
+            assert_eq!(
+                security.rights_of(who).unwrap(),
+                0,
+                "{name} must be granted nothing on a recovery-phrase file"
+            );
+        }
+
         let mine = security.rights_of(&me().unwrap()).unwrap();
         assert_eq!(
             mine & FILE_GENERIC_READ.0,

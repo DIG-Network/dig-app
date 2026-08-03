@@ -227,7 +227,15 @@ fn current_user_sid() -> io::Result<Sid> {
     // EXPECTED to fail with ERROR_INSUFFICIENT_BUFFER, which is why its result is discarded rather
     // than checked — `needed` staying zero is what the second call would fail on.
     let mut needed = 0u32;
-    let _ = unsafe { GetTokenInformation(HANDLE(token.as_raw_handle()), TokenUser, None, 0, &mut needed) };
+    let _ = unsafe {
+        GetTokenInformation(
+            HANDLE(token.as_raw_handle()),
+            TokenUser,
+            None,
+            0,
+            &mut needed,
+        )
+    };
 
     // u64 elements rather than u8: TOKEN_USER holds a pointer, so the buffer must be aligned for one.
     let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
@@ -309,9 +317,9 @@ pub(super) mod inspect {
     };
     use windows::Win32::Security::{
         AclSizeInformation, CreateWellKnownSid, GetAclInformation, GetSecurityDescriptorControl,
-        ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SECURITY_MAX_SID_SIZE, SE_DACL_PROTECTED, WELL_KNOWN_SID_TYPE,
-        WinBuiltinAdministratorsSid, WinWorldSid,
+        WinBuiltinAdministratorsSid, WinLocalSystemSid, WinWorldSid, ACL, ACL_SIZE_INFORMATION,
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_MAX_SID_SIZE,
+        SE_DACL_PROTECTED, WELL_KNOWN_SID_TYPE,
     };
 
     /// What a file's DACL says about itself, independently of who wrote it.
@@ -357,10 +365,8 @@ pub(super) mod inspect {
         pub(in crate::secret_file) fn dacl(&self) -> io::Result<Dacl> {
             let mut control = 0u16;
             let mut revision = 0u32;
-            unsafe {
-                GetSecurityDescriptorControl(self.descriptor, &mut control, &mut revision)
-            }
-            .map_err(to_io)?;
+            unsafe { GetSecurityDescriptorControl(self.descriptor, &mut control, &mut revision) }
+                .map_err(to_io)?;
 
             let mut size = ACL_SIZE_INFORMATION::default();
             unsafe {
@@ -434,5 +440,10 @@ pub(super) mod inspect {
     /// The local Administrators group: present in the inherited profile ACL, absent from ours.
     pub(in crate::secret_file) fn administrators() -> io::Result<Sid> {
         well_known(WinBuiltinAdministratorsSid)
+    }
+
+    /// SYSTEM — the other principal an inherited profile ACL hands the file to.
+    pub(in crate::secret_file) fn system() -> io::Result<Sid> {
+        well_known(WinLocalSystemSid)
     }
 }
