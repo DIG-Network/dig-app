@@ -41,20 +41,6 @@ pub fn log_dir() -> std::path::PathBuf {
 /// The env var whose value `dig_logging` treats as the log ROOT, overriding its own resolution.
 const ENV_LOG_DIR: &str = "DIG_LOG_DIR";
 
-/// The per-user log root — the directory `dig_logging` itself falls back to for an unprivileged run.
-///
-/// Derived by asking `dig_logging` to resolve with a probe that refuses the machine root, rather than
-/// re-deriving `%LOCALAPPDATA%\DigNetwork\logs` and its two POSIX equivalents here. A second copy of a
-/// per-OS path is a future drift bug, and this way dig-app's recovery lands in exactly the directory the
-/// shared crate would have chosen on its own.
-fn user_log_root<G>(get: G) -> Option<std::path::PathBuf>
-where
-    G: Fn(&str) -> Option<String>,
-{
-    let service_dir = dig_logging::resolve_log_dir(service().name, get, |_| false);
-    service_dir.parent().map(std::path::Path::to_path_buf)
-}
-
 /// Where to retry after `dig_logging::init` fails, or `None` when a retry would be wrong.
 ///
 /// Two cases decline the retry:
@@ -71,16 +57,28 @@ fn recovery_root<G>(get: G) -> Option<std::path::PathBuf>
 where
     G: Fn(&str) -> Option<String> + Copy,
 {
-    let overridden = get(ENV_LOG_DIR).is_some_and(|value| !value.trim().is_empty());
-    if overridden {
+    decide_recovery(
+        get(ENV_LOG_DIR).is_some_and(|value| !value.trim().is_empty()),
+        &dig_logging::resolve_log_dir(service().name, get, |_| true),
+        &dig_logging::resolve_log_dir(service().name, get, |_| false),
+    )
+}
+
+/// The decision behind [`recovery_root`], over the two directories `dig_logging` would resolve.
+///
+/// Pure and platform-free on purpose. The collapse case is only REACHABLE on Windows — `dev_root` falls
+/// back to `%ProgramData%` when `LOCALAPPDATA` is unset, whereas the POSIX roots can never coincide — so an
+/// environment-driven test of it is silently vacuous on Linux and macOS. Deciding over the two paths lets
+/// the rule be falsified on every host instead of only the one where the environment can express it.
+fn decide_recovery(
+    overridden: bool,
+    machine_dir: &std::path::Path,
+    user_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if overridden || user_dir == machine_dir {
         return None;
     }
-    let machine_dir = dig_logging::resolve_log_dir(service().name, get, |_| true);
-    let user_dir = dig_logging::resolve_log_dir(service().name, get, |_| false);
-    if user_dir == machine_dir {
-        return None;
-    }
-    user_log_root(get)
+    user_dir.parent().map(std::path::Path::to_path_buf)
 }
 
 /// Install the logging stack, retrying once against the per-user root, and return the guard plus any
@@ -290,7 +288,7 @@ mod tests {
         let chosen = chosen.borrow().clone().expect("a fallback root was chosen");
         assert_eq!(
             Some(chosen.as_path()),
-            user_log_root(env(&desktop)).as_deref(),
+            recovery_root(env(&desktop)).as_deref(),
             "the retry must land in the per-user root dig_logging itself falls back to"
         );
         assert!(
@@ -442,10 +440,56 @@ mod tests {
     /// A stripped environment (a service account, a scrubbed scheduled task) collapses dig_logging's
     /// per-user Windows root onto `%ProgramData%` — the very root that was unwritable. Retrying there
     /// would report a relocation that never happened, so the retry must be declined outright.
+    ///
+    /// Asserted over the two RESOLVED directories rather than through the environment, because the
+    /// collapse is only expressible on Windows: `dev_root` falls back to `%ProgramData%` with
+    /// `LOCALAPPDATA` unset, while `/var/log/dig` and `~/.local/state/dig/logs` can never coincide. An
+    /// env-driven version of this test passes vacuously on Linux and macOS — and did, until CI ran it.
     #[test]
-    fn a_degenerate_environment_declines_the_retry_rather_than_faking_one() {
+    fn a_collapsed_pair_of_roots_declines_the_retry_rather_than_faking_one() {
+        let same = std::path::Path::new("/somewhere/logs/dig-app");
+
+        assert_eq!(
+            decide_recovery(false, same, same),
+            None,
+            "retrying the directory that just failed would be a false recovery"
+        );
+    }
+
+    #[test]
+    fn distinct_roots_recover_into_the_per_user_one() {
+        let machine = std::path::Path::new("/machine/logs/dig-app");
+        let user = std::path::Path::new("/user/logs/dig-app");
+
+        assert_eq!(
+            decide_recovery(false, machine, user),
+            Some(std::path::PathBuf::from("/user/logs")),
+            "the retry must target the per-user ROOT, which dig_logging re-joins the service onto"
+        );
+    }
+
+    #[test]
+    fn an_override_declines_even_when_the_roots_differ() {
+        assert_eq!(
+            decide_recovery(
+                true,
+                std::path::Path::new("/machine/logs/dig-app"),
+                std::path::Path::new("/user/logs/dig-app"),
+            ),
+            None
+        );
+    }
+
+    /// The `install`-level counterpart, on whichever branch this host can actually express: the retry is
+    /// declined, no logger results, and — the part that matters — nothing claims a relocation happened.
+    #[test]
+    fn a_declined_retry_never_claims_it_relocated() {
         let (attempts, installer) = flaky(1);
-        let (guard, diagnostics) = install(env(&[]), |_| {}, || installer(&attempts));
+        let (guard, diagnostics) = install(
+            env(&[(ENV_LOG_DIR, "/operator/choice")]),
+            |_| {},
+            || installer(&attempts),
+        );
 
         assert_eq!(guard, None, "no logger is honest; a fake relocation is not");
         assert_eq!(
