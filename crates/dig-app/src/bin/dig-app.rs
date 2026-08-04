@@ -993,6 +993,7 @@ mod tray {
         restore_account, set_up_account, start_sign_service_reporting, AppEnvironment, TraySession,
         UnlockFailure,
     };
+    use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
@@ -1394,6 +1395,18 @@ mod tray {
 
         let menu_events = MenuEvent::receiver();
 
+        // Watch this loop from OUTSIDE it (dig-app#86). Every diagnostic the tray has — including
+        // #83's unmapped-id and click-while-busy WARNs — lives inside the closure below, so a loop
+        // that has STOPPED RUNNING cannot report that it has stopped running. That silence is why
+        // four recurrences of this defect class were each found by a user rather than by the log.
+        //
+        // The observer thread is cheap and its failure costs diagnostics only, so a machine that
+        // cannot spawn it still gets a tray.
+        let pump = pump_vigil::Heartbeat::now();
+        if let Err(e) = pump_vigil::watch(pump.clone()) {
+            tracing::warn!(error = %e, "the tray loop's liveness watcher could not be started");
+        }
+
         // The session is SHARED rather than owned by the loop, because the actions that mutate it no
         // longer run here (see `ActionWorker`). The worker takes the lock for the whole of an action —
         // which is what stops a destroy and a repaint from seeing different accounts — and the loop
@@ -1436,9 +1449,19 @@ mod tray {
         event_loop.run(move |_event, _target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
 
+            // Held for the whole closure, so EVERY way out of it — including the early returns below
+            // — restores `BetweenTicks`. That resting value is not decoration: a stall reported as
+            // `BetweenTicks` means the loop is blocked in the platform's own dispatch, which is where
+            // `tray-icon`'s `TrackPopupMenu` runs, and no diagnostic inside this closure can see it.
+            // A closure that never returns keeps its phase, which is exactly the reading wanted.
+            let _tick = pump.enter(Phase::Tick);
+
             // A recovery phrase copied to the clipboard is best-effort auto-cleared once its timeout
             // elapses (dig_ecosystem#1964); the tick is where that deadline is checked.
-            poll_clipboard_clear();
+            {
+                let _phase = pump.enter(Phase::ClipboardClear);
+                poll_clipboard_clear();
+            }
 
             // Quit runs on the worker like every other action, but only this loop can exit.
             if actions.stop_requested() {
@@ -1446,6 +1469,8 @@ mod tray {
                 return;
             }
 
+            {
+            let _phase = pump.enter(Phase::DrainClicks);
             while let Ok(event) = menu_events.try_recv() {
                 let Some(action) = menu.actions.get(&event.id).copied() else {
                     // Unreachable for any verb this shell offers, now that ids are derived from the
@@ -1481,27 +1506,32 @@ mod tray {
                     );
                 }
             }
+            }
 
             // Everything below reads the session, so it is skipped entirely while an action holds it:
             // the tray keeps its last picture rather than blocking, and the idle auto-lock does not run
             // while the user is standing at a dialog.
-            let Some(mut held) = peek_session(&session) else {
-                return;
+            let latest = {
+                let _phase = pump.enter(Phase::ReadState);
+                let Some(mut held) = peek_session(&session) else {
+                    return;
+                };
+
+                // A live session is proof the account DOES open, so any earlier attempt verdict is stale.
+                if held.session.is_some() {
+                    held.attempt = OpenAttempt::NotAttempted;
+                }
+
+                // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
+                if let Some(session) = held.session.as_ref() {
+                    session.lock.poll_idle();
+                }
+
+                snapshot(&status, &env, held.session.as_ref(), held.attempt, &hotkey)
             };
-
-            // A live session is proof the account DOES open, so any earlier attempt verdict is stale.
-            if held.session.is_some() {
-                held.attempt = OpenAttempt::NotAttempted;
-            }
-
-            // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
-            if let Some(session) = held.session.as_ref() {
-                session.lock.poll_idle();
-            }
 
             // Repaint only when something actually changed: rebuilding a native menu every 500ms would
             // close the menu under the user's cursor while they are reading it.
-            let latest = snapshot(&status, &env, held.session.as_ref(), held.attempt, &hotkey);
             if !view_eq(&latest, &model) {
                 // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
                 // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
@@ -1509,9 +1539,13 @@ mod tray {
                 // only the already-mounted tray, not the desktop's menu stack.
                 let fresh = tray_menu::status(&latest);
                 if fresh != presence {
+                    // `Shell_NotifyIcon` under the covers: an unbounded `SendMessage` to the shell,
+                    // and one of the calls this tick makes that has no timeout of its own.
+                    let _phase = pump.enter(Phase::Presence);
                     show_presence(&tray, &fresh);
                     presence = fresh;
                 }
+                let _phase = pump.enter(Phase::Repaint);
                 if let Some(rendered) = repaint(&tray, &tray_menu::build(&latest)) {
                     menu = rendered;
                     model = latest;

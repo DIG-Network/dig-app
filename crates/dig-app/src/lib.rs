@@ -14,6 +14,8 @@
 //!   beacon's health probe (dig_ecosystem#1797).
 //! * [`hotkey`] — claiming the global shortcut that opens the URN bar (tray builds only).
 //! * [`logging`] — the shared dual-sink field log the shell installs for the user's whole session.
+//! * [`pump_vigil`] — watching the tray's own event loop from outside it, so a loop that stops
+//!   running can say so.
 //! * [`tray_guard`] — surviving a desktop stack that panics instead of failing (tray builds only).
 
 pub mod argv;
@@ -31,6 +33,12 @@ pub mod console;
 #[cfg(feature = "tray")]
 pub mod hotkey;
 pub mod logging;
+/// Watching the tray's own event loop from OUTSIDE it.
+///
+/// Not tray-gated, for the same reason as [`tray_worker`]: it is two atomics and a clock, with no
+/// desktop dependency, and the property worth pinning — that a loop which stops running is named
+/// rather than silent — is checkable in every build (dig-app#86).
+pub mod pump_vigil;
 /// Surviving a desktop stack that panics instead of failing.
 ///
 /// Tray-only, for the same reason as [`brand`]: a headless build mounts no tray.
