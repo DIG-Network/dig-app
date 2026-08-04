@@ -60,45 +60,67 @@ impl<'a> WindowedPresenter<'a> {
 impl PhrasePresenter for WindowedPresenter<'_> {
     fn present_new_phrase(&self, phrase: &RecoveryPhrase) -> RetentionDecision {
         let words = phrase.numbered_lines();
+        let body = format!(
+            "{}\nThese words ARE your DIG Account. Anyone who has them can take it, and \
+             nobody — including DIG — can recover your account without them.",
+            *words
+        );
         // Both enrolment screens are CLAIMS, not notices: backing out of either abandons setup, so the
         // declining choice is load-bearing and must be offered as a real, labelled way out
         // (dig_ecosystem#1773 — this is the one place a two-button window is correct in this flow).
-        let shown = self.confirmer.confirm_claim(&ClaimPrompt {
-            title: "DIG — Your recovery phrase",
-            heading: "Write these 24 words down, in order, and keep them somewhere safe.",
-            body: &format!(
-                "{}\nThese words ARE your DIG Account. Anyone who has them can take it, and \
-                 nobody — including DIG — can recover your account without them.",
-                *words
-            ),
-            affirm: "I have written these down",
-            decline: None,
-            // An assertion about the world, and affirming it costs the account: a reflexive Enter
-            // would record that a seed is safely written down for somebody holding nothing.
-            refusal_is_default: true,
-            scannable: None,
-            identifier: None,
-        });
+        // Each claim is built by a named function so its `refusal_is_default` can be asserted directly
+        // rather than being an inline literal a test cannot reach (dig_ecosystem#2098).
+        let shown = self
+            .confirmer
+            .confirm_claim(&phrase_written_down_claim(&body));
         if shown != ConfirmDecision::Approve {
             return decision_for(shown);
         }
 
-        // The second screen is not a formality: it is the moment the user is asked to make a claim about
-        // the world (the words are somewhere other than this screen) rather than to dismiss a dialog.
-        let confirmed = self.confirmer.confirm_claim(&ClaimPrompt {
-            title: "DIG — Confirm you saved it",
-            heading: "Do you have your 24 words written down somewhere safe?",
-            body: "If you continue without them and later lose this computer, your DIG Account, its \
-                   address and everything sealed under it are gone for good. You can view the words \
-                   again later from the DIG tray menu.",
-            affirm: "Yes, I have them",
-            decline: None,
-            // As above — this screen exists precisely to make the user stop and check.
-            refusal_is_default: true,
-            scannable: None,
-        identifier: None,
-        });
+        let confirmed = self
+            .confirmer
+            .confirm_claim(&phrase_saved_confirmation_claim());
         decision_for(confirmed)
+    }
+}
+
+/// The first enrolment screen: the 24 words themselves, with the claim "I have written these down".
+///
+/// Named rather than written inline so its `refusal_is_default` is reachable from a test — flipping it
+/// must fail a named assertion, not leave the suite green (dig_ecosystem#2098). The `body` carries the
+/// numbered words, so it is passed in rather than built here.
+fn phrase_written_down_claim(body: &str) -> ClaimPrompt<'_> {
+    ClaimPrompt {
+        title: "DIG — Your recovery phrase",
+        heading: "Write these 24 words down, in order, and keep them somewhere safe.",
+        body,
+        affirm: "I have written these down",
+        decline: None,
+        // An assertion about the world, and affirming it costs the account: a reflexive Enter
+        // would record that a seed is safely written down for somebody holding nothing.
+        refusal_is_default: true,
+        scannable: None,
+        identifier: None,
+    }
+}
+
+/// The second enrolment screen: confirm the words are saved SOMEWHERE OTHER than this screen.
+///
+/// Named for the same reason as [`phrase_written_down_claim`] — the `refusal_is_default` guard is what
+/// makes a reflexive Enter stop and check rather than affirm (dig_ecosystem#2098).
+fn phrase_saved_confirmation_claim() -> ClaimPrompt<'static> {
+    ClaimPrompt {
+        title: "DIG — Confirm you saved it",
+        heading: "Do you have your 24 words written down somewhere safe?",
+        body: "If you continue without them and later lose this computer, your DIG Account, its \
+               address and everything sealed under it are gone for good. You can view the words \
+               again later from the DIG tray menu.",
+        affirm: "Yes, I have them",
+        decline: None,
+        // This screen exists precisely to make the user stop and check, so a bare Enter refuses.
+        refusal_is_default: true,
+        scannable: None,
+        identifier: None,
     }
 }
 
@@ -471,7 +493,24 @@ fn offer_a_last_look<S: ProfileSealer>(
     confirmer: &dyn NativeConfirmer,
     vault: Option<&PhraseVault<S>>,
 ) {
-    let wants_to_see = confirmer.confirm_claim(&ClaimPrompt {
+    let wants_to_see = confirmer.confirm_claim(&last_look_claim());
+    if wants_to_see != ConfirmDecision::Approve {
+        return;
+    }
+    if let Some(vault) = vault {
+        // Through the ordinary gate: this is a reveal like any other, so it re-authenticates and warns
+        // about the surroundings on its own. A separate, laxer path here would be a way around that gate.
+        reveal_phrase(confirmer, vault);
+    }
+}
+
+/// The pre-destroy last look: offer to show the recovery phrase before the account is destroyed.
+///
+/// Named for the same reason as the enrolment claims (dig_ecosystem#2098): affirming puts the phrase on
+/// screen, so a reflexive Enter must NOT — the `refusal_is_default` guard is reachable from a test here,
+/// where an inline literal would not be.
+fn last_look_claim() -> ClaimPrompt<'static> {
+    ClaimPrompt {
         title: "DIG — Before you destroy this account",
         heading: "Do you want to see this account's recovery phrase first?",
         body: "Once the account is destroyed, these 24 words are the ONLY way to get it back — and \
@@ -482,15 +521,7 @@ fn offer_a_last_look<S: ProfileSealer>(
         // Affirming puts the recovery phrase on screen; declining just carries on.
         refusal_is_default: true,
         scannable: None,
-    identifier: None,
-    });
-    if wants_to_see != ConfirmDecision::Approve {
-        return;
-    }
-    if let Some(vault) = vault {
-        // Through the ordinary gate: this is a reveal like any other, so it re-authenticates and warns
-        // about the surroundings on its own. A separate, laxer path here would be a way around that gate.
-        reveal_phrase(confirmer, vault);
+        identifier: None,
     }
 }
 
@@ -1550,6 +1581,19 @@ mod tests {
                 "the file backup warning",
                 backup_warning(BackupTarget::File),
             ),
+            // The three most custody-critical claims, previously built inline and so unreachable from
+            // this guard — flipping any of them left the suite green (dig_ecosystem#2098). The body of
+            // the first is a runtime string; its content does not affect the guard, so a stand-in is
+            // fine here.
+            (
+                "the recovery-phrase display claim",
+                phrase_written_down_claim("<the 24 words>"),
+            ),
+            (
+                "the saved-it confirmation claim",
+                phrase_saved_confirmation_claim(),
+            ),
+            ("the pre-destroy last-look claim", last_look_claim()),
         ] {
             let (refusal_is_default, _) = safe_side(&prompt);
             assert!(
