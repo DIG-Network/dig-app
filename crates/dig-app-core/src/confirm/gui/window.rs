@@ -145,6 +145,24 @@ struct Job {
     /// [`INPUT_DEADLINE`]). Carried on the job rather than read from a constant inside the window so
     /// a test can drive the expiry in milliseconds instead of minutes.
     deadline: Duration,
+    /// The instant past which this job's caller has certainly stopped waiting — the same
+    /// `deadline + ANSWER_GRACE` [`ask`] gives up at, resolved to an absolute time when the job is
+    /// QUEUED rather than when it is drawn.
+    ///
+    /// # Why a job can go stale before it is ever drawn
+    ///
+    /// Jobs are served one at a time, so a window that wedges parks every prompt behind it. Their
+    /// callers time out and are refused, but the jobs stay in the queue — and once the thread is
+    /// freed the loop would open each of them in turn: a real sign window, a real unlock, a real
+    /// destroy confirm, each showing a genuine origin and payload for an operation that was refused
+    /// minutes ago, and each holding the single renderer for another full deadline
+    /// (dig_ecosystem#2074).
+    ///
+    /// That is fail-safe on consent — the reply channel is gone, so no answer can reach anybody —
+    /// but a consent window nobody asked for is its own defect, and a stream of them teaches exactly
+    /// the click-through reflex [`ConfirmContent::claim`](crate::confirm::ConfirmContent) pre-selects
+    /// a refusal to prevent. So [`serve_with`] refuses a stale job WITHOUT DRAWING IT.
+    over_by: Instant,
     /// The caller's reply channel. A bounded channel of one: the caller is already blocked on it.
     reply: SyncSender<Outcome>,
 }
@@ -167,6 +185,19 @@ fn host() -> Option<&'static PromptThread> {
 }
 
 /// Spawn the prompt thread, or report that this host cannot draw.
+///
+/// # Why the thread is never replaced
+///
+/// It would be natural to notice a dead prompt thread and spawn a fresh one. That cannot work.
+/// `winit` guards event-loop creation with a PROCESS-GLOBAL one-shot — `EVENT_LOOP_CREATED`, an
+/// `AtomicBool` swapped to `true` on the first `build()` and reset nowhere off the web
+/// (winit 0.30.13 `src/event_loop.rs:69` and `:118`) — and `eframe` caches the loop it built in
+/// THREAD-LOCAL storage (`eframe` 0.31.1 `src/native/run.rs:51`). A replacement thread therefore
+/// starts with an empty cache, asks winit for a loop, and is told `RecreationAttempt` forever. A
+/// respawn would look like a recovery and would in fact be a silent, permanent `Unavailable`.
+///
+/// So this thread is made UNKILLABLE instead ([`serve`] catches every panic), and the one thing a
+/// caller can do about a thread that died anyway is say so loudly ([`ask`]).
 fn start() -> Option<PromptThread> {
     // macOS forbids a window server connection off the main thread, and dig-app's main thread is
     // already owned by the tray's own event loop. Until the prompt viewport is hosted INSIDE that
@@ -179,6 +210,10 @@ fn start() -> Option<PromptThread> {
         return None;
     }
 
+    // Leaked rather than reference-counted: the prompt thread and the watchdog both hold it for the
+    // life of the process, so there is no last owner for an `Arc` to free.
+    let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+
     let (tx, rx) = mpsc::channel::<Job>();
     std::thread::Builder::new()
         .name("dig-prompt-window".to_owned())
@@ -186,26 +221,246 @@ fn start() -> Option<PromptThread> {
         // on Linux but the driver stack is deeper on Windows, so the thread is given room explicitly
         // rather than depending on the platform default.
         .stack_size(4 * 1024 * 1024)
-        .spawn(move || serve(&rx))
+        .spawn(move || serve(&rx, drawing))
         .ok()?;
+
+    // The watchdog is a second thread on purpose: it has to be able to act while the prompt thread
+    // is inside a window that has stopped calling back (see `Vigil`).
+    let _ = std::thread::Builder::new()
+        .name("dig-prompt-watchdog".to_owned())
+        .spawn(move || watch(drawing, WATCHDOG_TICK));
 
     Some(PromptThread { tx: Mutex::new(tx) })
 }
 
+/// The window on screen right now, and the moment it has outstayed its welcome.
+///
+/// # Why the window's own deadline is not enough
+///
+/// [`PromptApp::frame`] expires the window by comparing `opened.elapsed()` against its deadline —
+/// which can only happen on a frame that actually RUNS. Every prompt in the process is drawn on one
+/// thread, one at a time, so a window whose frame loop goes quiet does not merely fail to expire
+/// itself: it holds the only prompt thread there is, and no later consent window — an unlock, a
+/// destroy confirm, a sign — can ever be drawn again (dig_ecosystem#2074). An in-frame deadline
+/// cannot bound a stalled frame loop, because it IS the frame loop.
+///
+/// So the deadline is enforced from OUTSIDE as well, with two requests the window already makes of
+/// itself — neither can invent an answer, and the outcome is still whatever [`PromptApp::expire`]
+/// records, never an approval.
+///
+/// # Which of the two actually saves the thread, and why the ORDER is load-bearing
+///
+/// `request_repaint` first, `ViewportCommand::Close` second — and NOT because a repaint is tidier.
+/// In the worst failure mode the two are not interchangeable and only the first one works:
+///
+/// * When the frame loop is merely idle, either would do. `Close` comes back as a
+///   `ViewportEvent::Close` in the next frame's input and eframe exits.
+/// * When winit has LATCHED a panic (`EventLoopRunner::catch_unwind`, winit 0.30.13
+///   `windows/event_loop/runner.rs:170`) the application handler is never invoked again, so
+///   `Close` is queued into an [`egui::Context`] nobody will ever read. What recovers the thread is
+///   a side effect of the wake: `request_repaint` posts through the `EventLoopProxy`, THAT message
+///   is still dispatched, and the `take_panic_error()` / `resume_unwind` at winit
+///   `event_loop.rs:423` then fires — so the stored panic finally escapes `run_native` into
+///   [`serve_with`]'s guard.
+///
+/// So `request_repaint` is the mechanism and `send_viewport_cmd` is the fallback, not the other way
+/// round. A refactor that drops the repaint because "Close implies a repaint" would silently remove
+/// the only thing that works in the latched case.
+struct Vigil {
+    /// The live window's context, used only to wake it and ask it to close.
+    ///
+    /// `None` until the window is CONSTRUCTED. A `run_native` that hangs before it reaches the
+    /// creator — GL context init, adapter enumeration, a driver that never returns — has no context
+    /// to nudge, and the watchdog cannot free that thread. Registering the vigil before the call
+    /// anyway is what lets it at least SAY SO, instead of the renderer disappearing with no record.
+    wake: Option<egui::Context>,
+    /// When the window has exceeded its own deadline by [`ANSWER_GRACE`] and must be forced shut.
+    over_by: Instant,
+    /// When to complain about this window again, once it has been forced and did not go.
+    ///
+    /// A latch was the first shape and it was wrong in the case that matters: a window that ignores
+    /// the nudge is a PERMANENT consent lockout, and latching reported it exactly once and then went
+    /// quiet forever — reintroducing, for the worst case specifically, the silence this module
+    /// exists to remove. Backing off keeps the log honest about the difference between "forced, and
+    /// it worked" and "forced, and the renderer is still gone".
+    complain_again_at: Option<Instant>,
+}
+
+/// How often the watchdog looks at the window on screen.
+///
+/// Coarse on purpose. It is enforcing a two-to-five MINUTE deadline that the window has already
+/// failed to enforce itself, so a second of slack costs nothing and a tighter tick would burn a
+/// wakeup a frame for the entire life of the process.
+const WATCHDOG_TICK: Duration = Duration::from_secs(1);
+
+/// How long to wait before saying again that a forced window is STILL there.
+///
+/// Long enough not to fill the log, short enough that a permanent lockout is unmistakable in it.
+const COMPLAIN_AGAIN_AFTER: Duration = Duration::from_secs(30);
+
+/// Force any window that has outstayed [`Vigil::over_by`] to wake up and close.
+///
+/// Runs until the process ends. Takes the tick as an argument so a test can drive it in
+/// milliseconds rather than waiting out a real prompt deadline.
+fn watch(drawing: &'static Mutex<Option<Vigil>>, tick: Duration) {
+    loop {
+        std::thread::sleep(tick);
+        // A poisoned slot means an earlier prompt panicked. `serve_with` catches that and carries
+        // on, so the watchdog must too — a poisoning is not a reason to stop enforcing deadlines
+        // for the rest of the session.
+        let mut slot = poisonless(drawing);
+        let Some(vigil) = slot.as_mut() else { continue };
+        let now = Instant::now();
+        if now < vigil.over_by {
+            continue;
+        }
+        match vigil.complain_again_at {
+            None => {
+                tracing::error!(
+                    "a DIG prompt window outlived its own deadline without answering; forcing it \
+                     closed so later prompts can be shown"
+                );
+            }
+            Some(due) if now >= due => {
+                // Still here a full backoff after being forced. This is the permanent lockout, and
+                // it must keep saying so rather than going quiet after one line.
+                tracing::error!(
+                    "a DIG prompt window is STILL open after being forced closed; no further DIG \
+                     prompt can be shown until DIG is restarted"
+                );
+            }
+            Some(_) => continue,
+        }
+        vigil.complain_again_at = Some(now + COMPLAIN_AGAIN_AFTER);
+        let Some(wake) = vigil.wake.as_ref() else {
+            // No context means `run_native` never reached the creator (GL init, adapter
+            // enumeration, a driver hang). There is nothing to nudge; the log line above is the
+            // whole of what the watchdog can do about it.
+            continue;
+        };
+        // Wake the loop FIRST — see `Vigil`, this ordering is the mechanism, not a nicety.
+        wake.request_repaint();
+        wake.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
 /// Draw prompts, one at a time, until the sender is dropped.
-fn serve(rx: &Receiver<Job>) {
+///
+/// # Why one job can never take the thread with it
+///
+/// This loop is the whole consent surface. If it exits — or if it never comes back from one window
+/// — the process keeps a [`PromptThread`] whose receiver is gone, and every later prompt returns
+/// `Unavailable` for the life of the process: the user can no longer approve, deny, unlock or
+/// destroy anything, with nothing written anywhere to say why (dig_ecosystem#2074). A prompt thread
+/// cannot be replaced either ([`start`]), so surviving is the only available answer.
+///
+/// Hence the panic guard. It is the same shape `session_lock` uses around its own callback: catch
+/// the unwind, put the platform back in a usable state, answer the caller the fail-closed way, say
+/// so in the log, and take the next job.
+fn serve(rx: &Receiver<Job>, drawing: &'static Mutex<Option<Vigil>>) {
+    serve_with(rx, drawing, |job| draw_watched(job, Some(drawing)));
+}
+
+/// [`serve`]'s loop over an arbitrary way of drawing a window.
+///
+/// Split out for ONE reason: the behaviour worth pinning here is what the loop does when a window
+/// misbehaves — panics, or refuses to open — and a test cannot make a real GL window do either on
+/// demand. With the drawing injected, the survival rules are exercised on a CI host with no display
+/// and no window, against the same loop production runs.
+fn serve_with(
+    rx: &Receiver<Job>,
+    drawing: &Mutex<Option<Vigil>>,
+    draw: impl Fn(Job) -> Option<Outcome>,
+) {
     while let Ok(job) = rx.recv() {
         let reply = job.reply.clone();
         let wants_text = job.wants_text;
-        let outcome = draw(job).unwrap_or_else(|| match wants_text {
-            // The window could not be opened. A caller must never read that as an empty answer.
-            true => Outcome::Input(InputOutcome::Unavailable),
-            false => Outcome::Confirm(WindowIntent::Unavailable),
-        });
+        let title = job.screen.title.clone();
+
+        // A job whose caller stopped waiting is REFUSED WITHOUT BEING DRAWN. Drawing it would open a
+        // real consent window — a real origin, a real payload — for an operation nobody is waiting
+        // on, and would hold the single renderer for another full deadline while doing it. See
+        // `Job::over_by`.
+        if Instant::now() >= job.over_by {
+            tracing::warn!(
+                prompt = %title,
+                "a DIG prompt reached the renderer after its caller had given up; refused without \
+                 opening a window"
+            );
+            let _ = reply.send(unavailable(wants_text));
+            continue;
+        }
+
+        tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt");
+
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw(job)));
+
+        // Whatever happened in there, this window is over: stop the watchdog nudging a context
+        // that no longer has a window, before anything else can go wrong.
+        clear_vigil(drawing);
+
+        let outcome = match drawn {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => {
+                tracing::warn!(prompt = %title, "a DIG prompt window could not be opened");
+                unavailable(wants_text)
+            }
+            Err(_) => {
+                // A panic inside `run_native` leaves the window undestroyed on Windows, because the
+                // flush at the end of `draw` was skipped on the way out.
+                flush_deferred_window_destruction();
+                tracing::error!(
+                    prompt = %title,
+                    "a DIG prompt window panicked; it was refused and the prompt thread kept alive"
+                );
+                unavailable(wants_text)
+            }
+        };
         // A caller that has gone away (its task was cancelled) is not an error worth killing the
         // thread over — the next prompt still needs it.
         let _ = reply.send(outcome);
     }
+    // Only reachable once every `PromptThread` sender has been dropped, which outside a test means
+    // the process is going away.
+    tracing::debug!("the DIG prompt thread has no senders left and is stopping");
+}
+
+/// The fail-closed answer for a window that produced none. Never an approval, never empty text.
+fn unavailable(wants_text: bool) -> Outcome {
+    match wants_text {
+        true => Outcome::Input(InputOutcome::Unavailable),
+        false => Outcome::Confirm(WindowIntent::Unavailable),
+    }
+}
+
+/// Put the window now being drawn under the watchdog's eye.
+fn set_vigil(drawing: &Mutex<Option<Vigil>>, wake: Option<egui::Context>, over_by: Instant) {
+    let mut slot = poisonless(drawing);
+    // Upgrading the same window from "no context yet" to "here is the context" must not restart its
+    // backoff, or a wedged window would re-announce itself as a fresh problem.
+    let complain_again_at = slot
+        .as_ref()
+        .filter(|current| current.over_by == over_by)
+        .and_then(|current| current.complain_again_at);
+    *slot = Some(Vigil {
+        wake,
+        over_by,
+        complain_again_at,
+    });
+}
+
+/// Take the window off the watchdog's list, because it is gone.
+fn clear_vigil(drawing: &Mutex<Option<Vigil>>) {
+    *poisonless(drawing) = None;
+}
+
+/// Lock `slot`, recovering rather than propagating a poisoning.
+///
+/// A poisoned slot means an earlier prompt panicked. Refusing to draw every later prompt over that
+/// — which is what propagating would do — is exactly the lockout this module exists to prevent, so
+/// this cannot fail: the guard is taken out of the `PoisonError` and handed back.
+fn poisonless<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// How every prompt window is created.
@@ -255,10 +510,17 @@ fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
 }
 
 /// Run one window to completion. `None` means it could not be drawn at all.
-fn draw(job: Job) -> Option<Outcome> {
+///
+/// `watched` is where the window registers itself for the out-of-band deadline (see [`Vigil`]); a
+/// caller that passes `None` — the screenshot harness, a test about one window — simply runs
+/// without a watchdog.
+fn draw_watched(job: Job, watched: Option<&Mutex<Option<Vigil>>>) -> Option<Outcome> {
     let wants_text = job.wants_text;
     let theme_store = job.theme.clone();
     let title = job.screen.title.clone();
+    // Read off the job rather than recomputed, so the watchdog, the caller's own wait and the
+    // staleness check in `serve_with` all enforce the SAME instant.
+    let over_by = job.over_by;
 
     let options = native_options(&title, job.screen.chrome);
 
@@ -266,11 +528,21 @@ fn draw(job: Job) -> Option<Outcome> {
     let slot = std::sync::Arc::new(Mutex::new(None::<Outcome>));
     let sink = slot.clone();
 
+    // Registered BEFORE the call, with no context yet. `run_native` can hang before it ever reaches
+    // the creator below — GL context init, adapter enumeration, a driver that does not return — and
+    // a vigil that only started existing inside the creator would never see that at all.
+    if let Some(watched) = watched {
+        set_vigil(watched, None, over_by);
+    }
+
     let run = eframe::run_native(
         &title,
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
+            if let Some(watched) = watched {
+                set_vigil(watched, Some(cc.egui_ctx.clone()), over_by);
+            }
             Ok(Box::new(PromptApp::new(job, theme_store, sink)))
         }),
     );
@@ -312,7 +584,9 @@ fn draw(job: Job) -> Option<Outcome> {
 /// it eagerly is what makes a window disappear when the person answers it.
 #[cfg(target_os = "windows")]
 fn flush_deferred_window_destruction() {
-    crate::confirm::windows::pump_pending();
+    // Drained, not budgeted: the destroy message is somewhere in the queue and a bound that ran out
+    // first would leave the window on screen forever (dig_ecosystem#2074).
+    crate::confirm::windows::drain_pending();
 }
 
 /// Elsewhere the window is destroyed inside `Drop`, so there is nothing to flush.
@@ -415,6 +689,12 @@ struct PromptApp {
     /// first frame that reports a real `monitor_size`, then latches so the bar is positioned once and
     /// does not fight the compositor every frame.
     placed: bool,
+    /// Whether the window has already been told to take the keyboard.
+    ///
+    /// Asked for ONCE, on the first frame, and never again — see [`PromptApp::claim_the_keyboard`].
+    /// Repeating it every frame would fight the user for the foreground for the whole life of the
+    /// window, which is a different and worse defect than the one it fixes.
+    keyboard_claimed: bool,
     /// Whether an answer has already been recorded.
     ///
     /// The window keeps drawing for the frames it takes the windowing system to take the close
@@ -450,6 +730,7 @@ impl PromptApp {
             focus,
             typed: Zeroizing::new(String::new()),
             revealed: false,
+            keyboard_claimed: false,
             field_focused: false,
             has_been_focused: false,
             placed: false,
@@ -458,6 +739,43 @@ impl PromptApp {
             deadline: job.deadline,
             sink,
         }
+    }
+
+    /// Ask, once, for the keyboard this window's own body text promises the user.
+    ///
+    /// # The defect
+    ///
+    /// `with_active(true)` asks the windowing system to activate the window, and on Windows that is
+    /// a REQUEST, not an instruction: the foreground lock refuses it for a process that is not
+    /// already foreground and has not just received input. A tray agent raising a prompt is exactly
+    /// that process, and the first prompt after a cold start was measured opening with the
+    /// foreground window belonging to somebody else (dig_ecosystem#2079).
+    ///
+    /// A prompt in that state has NO way out. It is undecorated, so there is no close button; it is
+    /// always-on-top, so it cannot be put behind anything; Escape does nothing because the keystroke
+    /// goes to whichever window does hold the keyboard — while the body of the input window reads
+    /// *"press Enter. Esc closes this."* Clicking it first activates it and everything then works,
+    /// but nothing on screen says so. That is `professional-ui`'s never-trap-the-user rule broken on
+    /// the one surface where being trapped means being unable to refuse.
+    ///
+    /// # Why here rather than in the window options
+    ///
+    /// [`egui::ViewportCommand::Focus`] is applied by `egui-winit` on a window that EXISTS, which is
+    /// a strictly better moment to ask than window creation: by the first frame the process has a
+    /// visible top-level window, which is one of the conditions the foreground lock tests.
+    ///
+    /// It is still a request. Windows can refuse it — a full-screen exclusive app, an active
+    /// foreground lock timeout — and this makes no attempt to defeat the lock with the
+    /// `AttachThreadInput` trick, which steals focus from whatever the user is typing into and is
+    /// the reason that lock exists. What this guarantees is that DIG ASKS; it does not guarantee
+    /// Windows agrees. The window remains answerable by mouse either way, and its own deadline still
+    /// refuses on its behalf if it is never answered at all.
+    fn claim_the_keyboard(&mut self, ctx: &egui::Context) {
+        if self.keyboard_claimed {
+            return;
+        }
+        self.keyboard_claimed = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Record `outcome` — if nothing has been recorded yet — and ask the window to close.
@@ -581,6 +899,7 @@ impl PromptApp {
         // being blank is one redraw per frame for the few seconds a modal is up, which is the right
         // trade for this window.
         ctx.request_repaint();
+        self.claim_the_keyboard(ctx);
 
         let t = self.theme.tokens();
         self.keys(ctx);
@@ -1054,24 +1373,56 @@ fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> 
         true => INPUT_DEADLINE,
         false => CONFIRM_DEADLINE,
     };
+    let title = screen.title.clone();
     let job = Job {
         screen,
         wants_text,
         theme,
         deadline,
+        // Stamped when the job is QUEUED, because that is when this caller's clock starts: the wait
+        // below gives up at exactly this instant, and the renderer must not draw a window for a
+        // caller that is already gone (`Job::over_by`).
+        over_by: Instant::now() + deadline + ANSWER_GRACE,
         reply,
     };
-    host.tx.lock().ok()?.send(job).ok()?;
+
+    // Every arm below is a NON-answer, and each one is logged. A prompt surface that has stopped
+    // working used to do so in complete silence — the user found it, not the log
+    // (dig_ecosystem#2074) — and silence is what made a five-minute wedge indistinguishable from a
+    // permanent one.
+    let queued = poisonless(&host.tx).send(job);
+    if queued.is_err() {
+        tracing::error!(
+            prompt = %title,
+            "the DIG prompt thread is gone; no consent window can be shown for the rest of this \
+             session and every prompt will be refused. Restart DIG."
+        );
+        return None;
+    }
+
     match answers.recv_timeout(deadline + ANSWER_GRACE) {
         Ok(outcome) => Some(outcome),
         // The window did not even manage to dismiss itself. Report the same non-answer it would
         // have; there is no branch here that could produce an approval.
-        Err(RecvTimeoutError::Timeout) => Some(match wants_text {
-            true => Outcome::Input(InputOutcome::Cancelled),
-            false => Outcome::Confirm(WindowIntent::Timeout),
-        }),
+        Err(RecvTimeoutError::Timeout) => {
+            tracing::warn!(
+                prompt = %title,
+                ?deadline,
+                "a DIG prompt was never answered and its window did not dismiss itself; refusing"
+            );
+            Some(match wants_text {
+                true => Outcome::Input(InputOutcome::Cancelled),
+                false => Outcome::Confirm(WindowIntent::Timeout),
+            })
+        }
         // The prompt thread died holding the job.
-        Err(RecvTimeoutError::Disconnected) => None,
+        Err(RecvTimeoutError::Disconnected) => {
+            tracing::error!(
+                prompt = %title,
+                "the DIG prompt thread died while drawing this window; the prompt is refused"
+            );
+            None
+        }
     }
 }
 
@@ -1171,6 +1522,7 @@ mod tests {
                 wants_text,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -1665,6 +2017,7 @@ mod tests {
                 wants_text: false,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -1699,6 +2052,7 @@ mod tests {
                 wants_text: false,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -1728,6 +2082,7 @@ mod tests {
                 wants_text: false,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -1757,6 +2112,7 @@ mod tests {
                 wants_text: false,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -1857,6 +2213,8 @@ mod tests {
                 body: "DIG cannot recover it for you. Without it, this account cannot be restored \
                        on another computer.",
                 affirm: "Yes, I have them",
+                decline: None,
+                refusal_is_default: true,
                 scannable: None,
             identifier: None,
             })), false),
@@ -1870,6 +2228,8 @@ mod tests {
                 heading: "Scan this with your authenticator",
                 body: "Or add it by hand. Then type this key:",
                 affirm: "I have added it",
+                decline: None,
+                refusal_is_default: true,
                 scannable: Some(
                     &crate::confirm::QrArt::encode(
                         "otpauth://totp/DIG:you@example.com?secret=JBSWY3DPEHPK3PXP&issuer=DIG",
@@ -1940,6 +2300,7 @@ mod tests {
                 wants_text,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -2210,6 +2571,7 @@ mod tests {
                 wants_text: true,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -2271,6 +2633,7 @@ mod tests {
                 wants_text,
                 theme: store.clone(),
                 deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                 reply,
             },
             store,
@@ -2351,6 +2714,7 @@ mod tests {
                     wants_text,
                     theme: store.clone(),
                     deadline,
+                    over_by: Instant::now() + deadline + ANSWER_GRACE,
                     reply,
                 },
                 store,
@@ -2573,6 +2937,8 @@ mod tests {
                 heading: "Scan this with your authenticator",
                 body: "Or add it by hand. Then type this key:",
                 affirm: "I have added it",
+                decline: None,
+                refusal_is_default: true,
                 scannable: None,
                 identifier: Some("JBSW Y3DP EHPK 3PXP"),
             }),
@@ -2855,11 +3221,119 @@ mod tests {
                 heading: "Write these 24 words down, in order, and keep them somewhere safe.",
                 body: &body,
                 affirm: "I have written these down",
+                decline: None,
+                refusal_is_default: true,
                 scannable: None,
                 identifier: None,
             }),
             "Not yet",
         )
+    }
+
+    /// The height a screen asks the windowing system for, on a display of `monitor` logical pixels.
+    ///
+    /// `None` for `monitor` is the host that will not say how big its display is. Everything else in
+    /// the suite runs that way, which is why the GROWTH half of the sizing had no coverage at all:
+    /// nothing supplied [`egui::ViewportInfo::monitor_size`], so `tallest_here` always took its
+    /// fallback branch and a regression to a bare `HEIGHT` cap passed every test while clipping the
+    /// recovery phrase (dig_ecosystem#2074).
+    fn asked_height_on(screen: Screen, monitor: Option<f32>) -> f32 {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        let (reply, _rx) = sync_channel(1);
+        let mut app = PromptApp::new(
+            Job {
+                screen,
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let mut viewports = egui::ViewportIdMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                monitor_size: monitor.map(|height| Vec2::new(1920.0, height)),
+                ..Default::default()
+            },
+        );
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(WIDTH, HEIGHT),
+            )),
+            viewports,
+            ..Default::default()
+        };
+        // Two frames: the first builds the font atlas, the second lays out real glyphs and is the
+        // one whose measured content drives the size request.
+        let _ = ctx.run(input.clone(), |ctx| app.frame(ctx));
+        let output = ctx.run(input, |ctx| app.frame(ctx));
+        requested_height(&output).unwrap_or(HEIGHT)
+    }
+
+    /// **On a display with room, the phrase window GROWS past the size it was created at.**
+    ///
+    /// Growing is the half of the sizing fix that makes the 24 words VISIBLE; scrolling only makes
+    /// them reachable, and for a person copying a phrase onto paper that is the difference between
+    /// an affordance and a trap (dig_ecosystem#2038). It had no test: with no
+    /// [`egui::ViewportInfo::monitor_size`] anywhere in the suite, `tallest_here` always returned
+    /// [`HEIGHT`], so reverting the cap to a bare `HEIGHT` stayed green (dig_ecosystem#2074).
+    ///
+    /// Asserted against a tall display, where the phrase genuinely fits, and compared to the
+    /// created size rather than to a magic number.
+    #[test]
+    fn a_tall_display_lets_the_phrase_window_grow_past_its_created_height() {
+        let grown = asked_height_on(phrase_screen(), Some(1440.0));
+        assert!(
+            grown > HEIGHT,
+            "on a 1440 px display the phrase window asked for {grown} px — no more than the \
+             {HEIGHT} px it was created at, so the words below the fold are only reachable by \
+             scrolling"
+        );
+        assert!(
+            grown <= MAX_HEIGHT,
+            "the window asked for {grown} px, past the {MAX_HEIGHT} px ceiling"
+        );
+    }
+
+    /// **On a SHORT display the same window is held to a share of the screen.**
+    ///
+    /// The other half, and the one that keeps the window answerable: a consent window taller than
+    /// the display puts its buttons off the bottom edge, where no click can reach them. Asserted
+    /// with the same screen on a 720 px display, so a cap that ignored the monitor — or applied
+    /// only [`MAX_HEIGHT`] — fails here.
+    #[test]
+    fn a_short_display_keeps_the_window_within_the_screen() {
+        let capped = asked_height_on(phrase_screen(), Some(720.0));
+        let allowed = 720.0 * SCREEN_SHARE;
+        assert!(
+            capped <= allowed,
+            "on a 720 px display the window asked for {capped} px, past the {allowed} px this \
+             display can show — its buttons would be off the bottom edge and unanswerable"
+        );
+        assert!(
+            capped >= MIN_HEIGHT,
+            "the window shrank to {capped} px, below the {MIN_HEIGHT} px floor"
+        );
+    }
+
+    /// **A host that will not name its display gets the conservative size.**
+    ///
+    /// The fallback every display can show, and the branch every other test in the suite runs on.
+    #[test]
+    fn a_display_of_unknown_size_falls_back_to_the_created_height() {
+        assert!(
+            asked_height_on(phrase_screen(), None) <= HEIGHT,
+            "a host that reports no monitor size was given a window taller than the size every \
+             display is known to be able to show"
+        );
     }
 
     /// **No display can hide body text without a scrollbar.**
@@ -3271,14 +3745,20 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
         let (reply, _rx) = sync_channel(1);
-        let outcome = draw(Job {
-            screen: sign_screen(),
-            wants_text: false,
-            theme: store.clone(),
-            // Answered by the deadline rather than by a person, so this needs a display but no human.
-            deadline: Duration::from_secs(1),
-            reply,
-        });
+        // Unwatched: this test is about ONE window and has no prompt thread to register with.
+        let outcome = draw_watched(
+            Job {
+                screen: sign_screen(),
+                wants_text: false,
+                theme: store.clone(),
+                // Answered by the deadline rather than by a person, so this needs a display but no
+                // human.
+                deadline: Duration::from_secs(1),
+                over_by: Instant::now() + Duration::from_secs(1) + ANSWER_GRACE,
+                reply,
+            },
+            None,
+        );
 
         assert!(
             matches!(outcome, Some(Outcome::Confirm(WindowIntent::Timeout))),
@@ -3290,6 +3770,467 @@ mod tests {
             "the prompt returned but left {left_behind} visible window(s) behind, with nothing left \
              to pump their messages — that is the frozen consent window the user cannot dismiss"
         );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The prompt thread has to survive its own windows (dig_ecosystem#2074).
+    //
+    // Every prompt in the process is drawn on ONE thread, and that thread cannot be replaced —
+    // `winit` allows a process one event loop, and `eframe` caches it per-thread, so a fresh
+    // prompt thread would be told `RecreationAttempt` forever (see `start`). So the whole consent
+    // surface — approve, deny, unlock, destroy — lives or dies with this loop. The suite had 904
+    // tests and not one of them put a SECOND prompt through it.
+    // ---------------------------------------------------------------------------------------
+
+    /// A prompt thread running `drawn`, plus a way to put jobs through it and read the answers.
+    struct Lane {
+        jobs: mpsc::Sender<Job>,
+        worker: Option<std::thread::JoinHandle<()>>,
+        store: ThemeChoice,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Lane {
+        /// Start the REAL [`serve_with`] loop on its own thread, drawing with `drawn`.
+        fn serving(drawn: impl Fn(Job) -> Option<Outcome> + Send + 'static) -> Self {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let store = ThemeChoice::in_brand_dir(dir.path());
+            let (jobs, rx) = mpsc::channel::<Job>();
+            // Leaked so the loop can hold it for its whole life without borrowing from this frame.
+            let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+            let worker = std::thread::Builder::new()
+                .name("test-prompt-window".to_owned())
+                .spawn(move || serve_with(&rx, drawing, drawn))
+                .expect("the prompt thread spawns");
+            Self {
+                jobs,
+                worker: Some(worker),
+                store,
+                _dir: dir,
+            }
+        }
+
+        /// Put one confirm through the loop and wait for its answer.
+        ///
+        /// The wait is bounded so a loop that died reports as a FAILED ASSERTION rather than hanging
+        /// the suite — a hung test says "something is wrong somewhere", a failed one names it.
+        fn ask(&self) -> Result<Outcome, RecvTimeoutError> {
+            self.ask_expiring_at(Instant::now() + PATIENT + ANSWER_GRACE)
+        }
+
+        /// Queue a confirm whose caller gives up at `over_by`, and wait for the answer.
+        ///
+        /// An `over_by` already in the past is a job whose caller walked away while it sat in the
+        /// queue — which is the ordinary consequence of one window wedging in front of it.
+        fn ask_expiring_at(&self, over_by: Instant) -> Result<Outcome, RecvTimeoutError> {
+            let (reply, answers) = sync_channel(1);
+            self.jobs
+                .send(Job {
+                    screen: sign_screen(),
+                    wants_text: false,
+                    theme: self.store.clone(),
+                    deadline: PATIENT,
+                    over_by,
+                    reply,
+                })
+                .expect("the prompt thread is still accepting jobs");
+            answers.recv_timeout(Duration::from_secs(10))
+        }
+    }
+
+    impl Drop for Lane {
+        fn drop(&mut self) {
+            // Dropping the sender is what ends `serve_with`; joining proves it ended cleanly.
+            let (jobs, _) = mpsc::channel();
+            drop(std::mem::replace(&mut self.jobs, jobs));
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    /// **Two prompts in a row are BOTH answerable.**
+    ///
+    /// The defect that shipped in 5.14.0 was not that a prompt was wrong — it was that after one
+    /// prompt there was never another (dig_ecosystem#2074). Nothing in the suite drove a second
+    /// prompt through the real loop, so nothing could have caught it.
+    ///
+    /// Asserted on the SECOND and THIRD answers specifically: a loop that serves exactly one job
+    /// and then stops passes any test that asks only once.
+    #[test]
+    fn a_second_prompt_is_answerable_after_a_first_one_closes() {
+        let lane = Lane::serving(|_| Some(Outcome::Confirm(WindowIntent::Deny)));
+        for nth in 1..=3 {
+            let answer = lane.ask();
+            assert!(
+                matches!(answer, Ok(Outcome::Confirm(WindowIntent::Deny))),
+                "prompt {nth} of 3 was never answered — the prompt thread stopped serving after \
+                 {} prompt(s), which is a consent lockout for the life of the process",
+                nth - 1
+            );
+        }
+    }
+
+    /// **The window ASKS for the keyboard, once, on its first frame.**
+    ///
+    /// A consent window that opens without keyboard focus has no way out at all: undecorated, so no
+    /// close button; always-on-top, so it cannot be put behind anything; and Escape goes to whoever
+    /// does hold the keyboard — while the input window's own body says *"press Enter. Esc closes
+    /// this."* Measured on a cold start, twice (dig_ecosystem#2079).
+    ///
+    /// Both halves are asserted, because each alone permits a defect. Asking on the FIRST frame is
+    /// the fix; asking on EVERY frame would fight the user for the foreground for the whole life of
+    /// the window, which is worse than the bug.
+    ///
+    /// What this cannot assert is that Windows AGREES — the foreground lock may refuse, and this
+    /// deliberately does not try to defeat it. The decision under test is that DIG asks.
+    #[test]
+    fn the_window_asks_for_the_keyboard_on_its_first_frame_and_only_then() {
+        let (_dir, store) = theme_store();
+        let (reply, _rx) = sync_channel(1);
+        let mut app = PromptApp::new(
+            Job {
+                screen: sign_screen(),
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+
+        fn asked_for_focus(output: &egui::FullOutput) -> bool {
+            output
+                .viewport_output
+                .values()
+                .any(|viewport| viewport.commands.contains(&egui::ViewportCommand::Focus))
+        }
+
+        let first = ctx.run(egui::RawInput::default(), |ctx| app.frame(ctx));
+        assert!(
+            asked_for_focus(&first),
+            "the window never asked for the keyboard, so on a cold start it can open with no \
+             working escape: Escape goes elsewhere and it has no close button"
+        );
+
+        for nth in 2..=4 {
+            let later = ctx.run(egui::RawInput::default(), |ctx| app.frame(ctx));
+            assert!(
+                !asked_for_focus(&later),
+                "frame {nth} asked for the keyboard again — a window that re-claims the foreground \
+                 every frame takes it back off whatever the user switched to"
+            );
+        }
+    }
+
+    /// **A prompt whose caller already gave up is never DRAWN.**
+    ///
+    /// Jobs are served one at a time, so a wedged window parks every later prompt in the queue. Each
+    /// of those callers times out and is refused — but the jobs survive, and once the renderer is
+    /// freed the loop would open every one of them in turn: a genuine sign window, a genuine unlock,
+    /// a genuine destroy confirm, each with a real origin and payload, for operations refused
+    /// minutes earlier, each holding the single renderer for another full deadline
+    /// (dig_ecosystem#2074). One wedge would cost its own outage MULTIPLIED by the queue behind it.
+    ///
+    /// The assertion is on the PROPERTY, not the answer: it COUNTS DRAWS. "The stale job answered
+    /// `Unavailable`" is satisfied identically by a loop that opens the window, holds the thread for
+    /// five minutes and then fails to deliver the answer — which is the defect. Only "the draw never
+    /// happened" distinguishes them.
+    #[test]
+    fn a_prompt_whose_caller_gave_up_is_refused_without_being_drawn() {
+        let draws = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = draws.clone();
+        // The drawing answers `Unavailable` — the SAME answer skipping produces — so that the answer
+        // cannot distinguish the two and the draw count is the only thing that can. A draw that
+        // returned anything else would let the outcome assertions fail first and leave the counts
+        // unreached, which is how "answered Unavailable" sneaks in as the real assertion.
+        let lane = Lane::serving(move |_| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Outcome::Confirm(WindowIntent::Unavailable))
+        });
+
+        // A live prompt first, so the count below cannot pass by the loop simply never drawing.
+        assert!(
+            matches!(lane.ask(), Ok(Outcome::Confirm(WindowIntent::Unavailable))),
+            "the control prompt was not served"
+        );
+        assert_eq!(
+            draws.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the control prompt was not drawn"
+        );
+
+        let stale = lane.ask_expiring_at(Instant::now() - Duration::from_secs(1));
+        assert!(
+            matches!(stale, Ok(Outcome::Confirm(WindowIntent::Unavailable))),
+            "a stale prompt must still answer its (departed) caller, and never with an approval"
+        );
+        assert_eq!(
+            draws.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a prompt whose caller had already given up was DRAWN — that is a real consent window, \
+             with a real origin and payload, opened for an operation nobody is waiting on, holding \
+             the one renderer for another full deadline"
+        );
+
+        // …and the loop is still serving afterwards: skipping must not be a way to stop.
+        assert!(
+            matches!(lane.ask(), Ok(Outcome::Confirm(WindowIntent::Unavailable))),
+            "the prompt thread stopped after skipping a stale job"
+        );
+        assert_eq!(
+            draws.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the prompt after a skipped one was not drawn"
+        );
+    }
+
+    /// **A window that PANICS costs one prompt, not every later one.**
+    ///
+    /// Without the guard, a panic unwinds out of the loop and the process keeps a `PromptThread`
+    /// whose receiver is gone: every later prompt is refused for the life of the process, with
+    /// nothing logged and no window shown. The thread cannot be replaced either (`start`), so
+    /// surviving the panic is the only recovery there is.
+    ///
+    /// Both halves are asserted, because either alone would pass a broken implementation: the
+    /// panicking prompt must come back REFUSED (never an approval, never a hang), and the one after
+    /// it must be answered normally.
+    #[test]
+    fn a_panicking_prompt_is_refused_and_the_next_prompt_still_works() {
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let lane = Lane::serving(move |_| {
+            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                panic!("a prompt window blew up mid-frame (dig_ecosystem#2074)");
+            }
+            Some(Outcome::Confirm(WindowIntent::Approve))
+        });
+
+        // The panic must not become a hang, and must not become consent.
+        let panicked = lane.ask();
+        assert!(
+            matches!(panicked, Ok(Outcome::Confirm(WindowIntent::Unavailable))),
+            "a prompt whose window panicked must answer Unavailable, not hang and not approve"
+        );
+
+        let after = lane.ask();
+        assert!(
+            matches!(after, Ok(Outcome::Confirm(WindowIntent::Approve))),
+            "the prompt after a panicking one was never answered — one bad window took the whole \
+             consent surface down with it"
+        );
+    }
+
+    /// **A window that cannot be opened is refused, and the next one is still tried.**
+    ///
+    /// The headless path, which is also what a display that goes away mid-session looks like. A
+    /// `None` from the draw must be a refusal for THAT prompt only.
+    #[test]
+    fn a_window_that_will_not_open_refuses_only_its_own_prompt() {
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = opened.clone();
+        let lane = Lane::serving(move |_| {
+            match counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => None,
+                _ => Some(Outcome::Confirm(WindowIntent::Deny)),
+            }
+        });
+        assert!(
+            matches!(lane.ask(), Ok(Outcome::Confirm(WindowIntent::Unavailable))),
+            "a window that would not open must be Unavailable, never an approval"
+        );
+        assert!(
+            matches!(lane.ask(), Ok(Outcome::Confirm(WindowIntent::Deny))),
+            "the prompt thread stopped after a window failed to open"
+        );
+        assert_eq!(
+            opened.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the second prompt was never even attempted"
+        );
+    }
+
+    /// **A caller that walked away does not take the prompt thread with it.**
+    ///
+    /// The reply channel is dropped before the answer arrives — an ordinary cancelled task. The
+    /// send fails, and the loop must treat that as this caller's business and take the next job.
+    #[test]
+    fn an_abandoned_caller_does_not_stop_the_prompt_thread() {
+        let lane = Lane::serving(|_| Some(Outcome::Confirm(WindowIntent::Deny)));
+        {
+            let (reply, answers) = sync_channel(1);
+            lane.jobs
+                .send(Job {
+                    screen: sign_screen(),
+                    wants_text: false,
+                    theme: lane.store.clone(),
+                    deadline: PATIENT,
+                    over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                    reply,
+                })
+                .expect("the job is queued");
+            drop(answers);
+        }
+        assert!(
+            matches!(lane.ask(), Ok(Outcome::Confirm(WindowIntent::Deny))),
+            "the prompt thread stopped after a caller abandoned its prompt"
+        );
+    }
+
+    /// **A window past its deadline is forced closed from OUTSIDE the frame loop.**
+    ///
+    /// [`PromptApp::frame`] expires a window by checking the clock on each frame, which is no bound
+    /// at all if the frame loop stops running: the window then holds the only prompt thread there
+    /// is, and no later consent window can ever be drawn (dig_ecosystem#2074).
+    ///
+    /// Driven against a real [`egui::Context`] with no window attached, in milliseconds: the
+    /// watchdog must ask THAT context to close. Asserted on the command the context actually
+    /// received, so a watchdog that wakes the loop without asking it to close — the earlier,
+    /// insufficient shape — fails here.
+    #[test]
+    fn the_watchdog_closes_a_window_that_outlived_its_deadline() {
+        let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+        let ctx = egui::Context::default();
+        set_vigil(drawing, Some(ctx.clone()), Instant::now());
+        std::thread::spawn(move || watch(drawing, Duration::from_millis(10)));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let closed = loop {
+            if commands_of(&ctx).contains(&egui::ViewportCommand::Close) {
+                break true;
+            }
+            if Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            closed,
+            "the watchdog never asked the overdue window to close; a stalled prompt would hold the \
+             one prompt thread for the life of the process"
+        );
+    }
+
+    /// **A window still inside its deadline is left alone.**
+    ///
+    /// The other half of the watchdog, and the one that matters for consent: a person reading a
+    /// spend prompt must not have it shut in their face because a timer is coarse.
+    #[test]
+    fn the_watchdog_leaves_a_window_that_is_still_in_time_alone() {
+        let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+        let ctx = egui::Context::default();
+        set_vigil(
+            drawing,
+            Some(ctx.clone()),
+            Instant::now() + Duration::from_secs(3600),
+        );
+        std::thread::spawn(move || watch(drawing, Duration::from_millis(10)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !commands_of(&ctx).contains(&egui::ViewportCommand::Close),
+            "the watchdog closed a window that was still well inside its deadline"
+        );
+    }
+
+    /// **A finished window is taken off the watchdog's list.**
+    ///
+    /// Otherwise the watchdog would eventually send `Close` to the context of a window that is long
+    /// gone — harmless today, and exactly the kind of stale handle that becomes a cross-prompt bug
+    /// the moment contexts are reused.
+    #[test]
+    fn a_finished_window_is_no_longer_watched() {
+        let drawing = Mutex::new(None);
+        set_vigil(&drawing, Some(egui::Context::default()), Instant::now());
+        assert!(
+            poisonless(&drawing).is_some(),
+            "the window never registered with the watchdog"
+        );
+        clear_vigil(&drawing);
+        assert!(
+            poisonless(&drawing).is_none(),
+            "a window that finished is still being watched"
+        );
+    }
+
+    /// **A poisoned watchdog slot does not disable prompts.**
+    ///
+    /// The slot is touched by a thread that is expected to panic occasionally (that is what the
+    /// guard in `serve_with` is for). If a poisoning made the slot unusable, the FIRST panicking
+    /// prompt would silently switch the deadline enforcement off for the whole session.
+    #[test]
+    fn a_poisoned_watchdog_slot_is_recovered_rather_than_propagated() {
+        let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+        let poisoner = std::thread::spawn(|| {
+            let _held = drawing.lock().expect("the slot locks");
+            panic!("poisoning the slot on purpose");
+        });
+        assert!(
+            poisoner.join().is_err(),
+            "the poisoning thread should panic"
+        );
+
+        set_vigil(drawing, Some(egui::Context::default()), Instant::now());
+        assert!(
+            poisonless(drawing).is_some(),
+            "a poisoned slot stopped later windows from being watched at all"
+        );
+    }
+
+    /// Every viewport command a context has been asked to run, from a frame with no window.
+    fn commands_of(ctx: &egui::Context) -> Vec<egui::ViewportCommand> {
+        let output = ctx.run(egui::RawInput::default(), |_| {});
+        output
+            .viewport_output
+            .values()
+            .flat_map(|viewport| viewport.commands.clone())
+            .collect()
+    }
+
+    /// **THREE real prompts in a row, through the real window.**
+    ///
+    /// The headless tests above pin what the loop does with a window that misbehaves; this one pins
+    /// that a real `eframe` window can be opened, closed and then opened AGAIN on the same thread —
+    /// the claim the whole single-thread design rests on, and the one a mocked draw cannot make.
+    ///
+    /// Ignored because it opens real windows: CI has no display. Run it deliberately on a desktop.
+    #[test]
+    #[ignore = "opens three real windows; run deliberately on a desktop"]
+    fn three_real_prompt_windows_in_a_row_are_all_answered() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        let (jobs, rx) = mpsc::channel::<Job>();
+        let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+        let worker = std::thread::Builder::new()
+            .name("dig-prompt-window".to_owned())
+            .stack_size(4 * 1024 * 1024)
+            .spawn(move || serve(&rx, drawing))
+            .expect("the prompt thread spawns");
+
+        for nth in 1..=3 {
+            let (reply, answers) = sync_channel(1);
+            jobs.send(Job {
+                screen: sign_screen(),
+                wants_text: false,
+                theme: store.clone(),
+                // Answered by the deadline rather than by a person, so this needs a display but no
+                // human. Short enough that three of them fit in a test run.
+                deadline: Duration::from_millis(900),
+                over_by: Instant::now() + Duration::from_millis(900) + ANSWER_GRACE,
+                reply,
+            })
+            .expect("the job is queued");
+            let answer = answers.recv_timeout(Duration::from_secs(30));
+            assert!(
+                matches!(answer, Ok(Outcome::Confirm(WindowIntent::Timeout))),
+                "real prompt {nth} of 3 never answered — a window opened and the thread never came \
+                 back from it"
+            );
+        }
+        drop(jobs);
+        worker.join().expect("the prompt thread exits cleanly");
     }
 
     /// The typed buffer is `Zeroizing`, so a recovery phrase is wiped when the window drops rather

@@ -163,6 +163,8 @@ fn main() {
                    address and everything sealed under it are gone for good. You can view the words \
                    again later from the DIG tray menu.",
             affirm: "Yes, I have them",
+            decline: None,
+            refusal_is_default: true,
             scannable: None,
         identifier: None,
         }),
@@ -192,6 +194,8 @@ fn main() {
                     "asks for settings, they are: time-based, 6 digits, 30 seconds.",
                 ),
                 affirm: "I've added it",
+                decline: None,
+                refusal_is_default: true,
                 scannable: Some(&art),
             identifier: None,
             })

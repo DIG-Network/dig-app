@@ -283,7 +283,11 @@ impl Screen {
             }],
             Presentation::Decide { refusal_is_default } => vec![
                 Button {
-                    label: refusal_label.to_owned(),
+                    // The CONTENT names the refusing control when the backend's own word for it
+                    // would be a lie — on the first-run route fork, declining generates an account,
+                    // and "Cancel" must never be the label on the control that does that
+                    // (dig_ecosystem#2074).
+                    label: content.decline.unwrap_or(refusal_label).to_owned(),
                     weight: Weight::Ghost,
                     answer: Answer::Deny,
                     focused: refusal_is_default,
@@ -459,6 +463,49 @@ pub fn label(text: &str, font: FontId, color: Color32) -> RichText {
 mod tests {
     use super::*;
     use crate::confirm::{ConnectPrompt, DestroyPrompt, NoticePrompt, SignPrompt};
+
+    /// **The CONTENT names the refusing control when the backend's word for it would be a lie.**
+    ///
+    /// The backend passes its own generic label ("Cancel" on every platform today) and that is right
+    /// almost everywhere. It is wrong on the first-run route fork, where declining does not back out
+    /// of anything — it GENERATES AND SEALS A NEW MASTER SEED. A control that does that must not be
+    /// called "Cancel" (dig_ecosystem#2074).
+    ///
+    /// Both directions are asserted: an override must WIN, and a prompt that supplies none must
+    /// still get the backend's word — otherwise "override" quietly becomes "every window relabels
+    /// itself".
+    #[test]
+    fn a_claim_can_name_its_own_refusing_control() {
+        fn refusing_label(decline: Option<&'static str>) -> String {
+            let content = ConfirmContent::claim(&crate::confirm::ClaimPrompt {
+                title: "t",
+                heading: "h",
+                body: "b",
+                affirm: "Import my recovery phrase",
+                decline,
+                refusal_is_default: false,
+                scannable: None,
+                identifier: None,
+            });
+            Screen::confirm(&content, "Cancel")
+                .buttons
+                .into_iter()
+                .find(|button| button.answer == Answer::Deny)
+                .expect("a claim offers a way out")
+                .label
+        }
+
+        assert_eq!(
+            refusing_label(Some("Create a new account")),
+            "Create a new account",
+            "the backend's generic label overrode the content's — so the control that creates a              brand-new account is drawn as \"Cancel\""
+        );
+        assert_eq!(
+            refusing_label(None),
+            "Cancel",
+            "a claim that named no label should still get the backend's own word for refusing"
+        );
+    }
 
     /// A decoded transaction carrying markup AND a script tag — what a hostile dapp supplies.
     const HOSTILE: &str = "Send 0.001 XCH to xch1safe\u{2026}addr</div><div class=\"ok\">\
@@ -699,6 +746,8 @@ mod tests {
             heading: "Write these 24 words down.",
             body: " 1. abandon",
             affirm: "I have written these down",
+            decline: None,
+            refusal_is_default: true,
             scannable: None,
             identifier: None,
         });
@@ -838,6 +887,8 @@ mod tests {
                     heading: "h",
                     body: "b",
                     affirm: "Yes",
+                    decline: None,
+                    refusal_is_default: true,
                     scannable: None,
                     identifier: None,
                 }),
