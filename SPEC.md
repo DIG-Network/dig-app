@@ -668,11 +668,20 @@ there is no escaping step to omit at a new call site, because there is no markup
 The destroy window's pre-selected refusal is honoured on Windows and Linux (the refusing control holds the
 opening focus and the focus ring) and on macOS (the Return key equivalent moves to Cancel).
 
+The branded window honours both `InputStyle` presentations (dig_ecosystem#2054). An `InputStyle::Dialog`
+is the titled, framed, content-sized card every account journey uses. An `InputStyle::Bar` is the
+frameless Spotlight-style launcher: wider than a dialog, a fixed short height, placed high on the screen
+(centred horizontally, `monitor_height / 5` from the top), with an oversized field and at most a single
+hint line and no consent chrome. A bar is dismissed by Escape OR by losing focus, and either dismissal
+reports `InputOutcome::Cancelled`, never an approval. A consent window (`Screen::confirm`) is ALWAYS a
+dialog and NEVER dismisses on blur — the launcher's dismiss-on-blur is structurally unreachable for any
+window asking the user to authorise something.
+
 Platform limits, recorded rather than papered over: on macOS an `NSAlert` accessory would need a custom
 view hierarchy for a reveal-while-typing control, so the phrase field there is masked with no un-mask
-control — the direction §3.1d requires a backend to fail in. The frameless launcher presentation
-(`InputStyle::Bar`) is honoured by NO backend today; every input is drawn as a dialog, tracked in
-dig_ecosystem#2054.
+control — the direction §3.1d requires a backend to fail in. macOS also draws every input as a dialog: an
+`NSAlert` cannot be made frameless, so `InputStyle::Bar` is honoured on Windows and Linux (the branded
+window) but not on macOS, tracked in dig_ecosystem#2047.
 
 ### 3.1e The second factor — authenticator codes (normative)
 

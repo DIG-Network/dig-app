@@ -21,7 +21,68 @@
 use egui::{Align, Color32, FontFamily, FontId, RichText, TextFormat};
 
 use super::theme::{Rgba, Tokens};
-use crate::confirm::{ConfirmContent, InputContent, Presentation};
+use crate::confirm::{ConfirmContent, InputContent, InputStyle, Presentation};
+
+/// The logical width of the frameless launcher bar — wider than the titled [`Chrome::Dialog`] so a
+/// full `dig://` link reads as a single generous field, the way a Spotlight bar does. A dialog is
+/// sized for a wrapped `xch1…` address and a paragraph of body; a bar is sized for one line the user
+/// is typing (dig_ecosystem#1839, restored in dig_ecosystem#2054).
+pub const BAR_WIDTH: f32 = 720.0;
+
+/// The fixed height of the launcher bar. Unlike a dialog — which grows to its content so a 24-word
+/// recovery phrase is never clipped — a bar holds exactly one hint line and one field, so it is a
+/// constant short height rather than content-sized.
+pub const BAR_HEIGHT: f32 = 176.0;
+
+/// Where a bar sits vertically: `monitor_height / BAR_TOP_DIVISOR` from the top, i.e. high on the
+/// screen rather than centred. A launcher the eye expects near the top, not floating in the middle
+/// of whatever is behind it.
+pub const BAR_TOP_DIVISOR: f32 = 5.0;
+
+/// The vertical position a bar is placed at on a monitor `monitor_h` tall.
+///
+/// A free function, and the reason [`Chrome`] carries no window state: the placement is pure
+/// arithmetic a headless test can check, so "the bar sits high" is pinned without opening a window.
+pub fn bar_top(monitor_h: f32) -> f32 {
+    monitor_h / BAR_TOP_DIVISOR
+}
+
+/// How a prompt window is FRAMED — the presentation half of [`InputStyle`], resolved once at the
+/// [`Screen`] seam so the paint layer and the window layer read one field instead of re-deriving it.
+///
+/// # Why this is a Screen-level enum and not a per-caller flag
+///
+/// [`Screen::confirm`] ALWAYS produces [`Chrome::Dialog`]; only [`Screen::input`] can produce
+/// [`Chrome::Bar`], and only when its [`InputContent::style`] asks for it. So "a consent window is
+/// never a bar" is a structural fact — a sign, connect, pair, notice, destroy or claim screen cannot
+/// be constructed as a bar — rather than a rule the paint layer has to remember. The launcher's
+/// dismiss-on-blur, which makes a window vanish when focus leaves it, is therefore unreachable for
+/// any window asking the user to authorise something (dig_ecosystem#2054).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chrome {
+    /// A titled, framed card centred on the screen, sized to its content. Every confirm, and every
+    /// account-journey input.
+    Dialog,
+    /// The frameless Spotlight-style launcher bar: wide, fixed-height, floating high, with an
+    /// oversized field and a single hint line, dismissed by Esc OR by losing focus.
+    Bar,
+}
+
+impl Chrome {
+    /// Whether a window with this chrome dismisses itself the moment it loses focus.
+    ///
+    /// TRUE only for [`Chrome::Bar`]: a launcher the user has clicked away from has been abandoned.
+    /// FALSE for [`Chrome::Dialog`] — a consent window must NEVER vanish because the user glanced at
+    /// another window; it stays until it is answered.
+    pub fn dismiss_on_blur(&self) -> bool {
+        matches!(self, Chrome::Bar)
+    }
+
+    /// Whether this is the launcher bar, for the layout branches that differ between the two.
+    pub fn is_bar(&self) -> bool {
+        matches!(self, Chrome::Bar)
+    }
+}
 
 /// The font family the brand's 600-weight face is registered under.
 ///
@@ -159,6 +220,9 @@ pub struct Screen {
     pub buttons: Vec<Button>,
     /// A text field, when this is an input prompt rather than a confirm.
     pub field: Option<Field>,
+    /// How the window is framed. A confirm is always [`Chrome::Dialog`]; an input follows its
+    /// [`InputContent::style`].
+    pub chrome: Chrome,
 }
 
 /// A text-entry control.
@@ -241,17 +305,39 @@ impl Screen {
             blocks,
             buttons,
             field: None,
+            // A confirm is ALWAYS a dialog — this is what makes "consent is never a bar" structural
+            // rather than a convention (see [`Chrome`]).
+            chrome: Chrome::Dialog,
         }
     }
 
     /// The screen for an input prompt.
+    ///
+    /// Maps [`InputContent::style`] to the window's [`Chrome`]. A [`InputStyle::Bar`] launcher drops
+    /// the heading and keeps at most a single hint line — a bar is one field, not a page of copy —
+    /// while a [`InputStyle::Dialog`] keeps the titled heading-plus-body layout every account journey
+    /// uses (dig_ecosystem#2054).
     pub fn input(content: &InputContent) -> Self {
+        let (chrome, blocks) = match content.style {
+            // The launcher: no heading, and the body only if it carries a hint worth one line.
+            InputStyle::Bar => {
+                let mut blocks = Vec::new();
+                if !content.body.is_empty() {
+                    blocks.push(Block::Body(content.body.clone()));
+                }
+                (Chrome::Bar, blocks)
+            }
+            InputStyle::Dialog => (
+                Chrome::Dialog,
+                vec![
+                    Block::Heading(content.heading.clone()),
+                    Block::Body(content.body.clone()),
+                ],
+            ),
+        };
         Self {
             title: content.title.clone(),
-            blocks: vec![
-                Block::Heading(content.heading.clone()),
-                Block::Body(content.body.clone()),
-            ],
+            blocks,
             buttons: vec![
                 Button {
                     label: "Cancel".to_owned(),
@@ -278,6 +364,7 @@ impl Screen {
                 masked: content.masked,
                 revealable: content.revealable,
             }),
+            chrome,
         }
     }
 
@@ -690,6 +777,162 @@ mod tests {
         assert_eq!(block_color(&warning, &Tokens::DARK), Tokens::DARK.amber);
         // …and the two themes genuinely differ, so the lookup is doing something.
         assert_ne!(Tokens::LIGHT.amber, Tokens::DARK.amber);
+    }
+
+    /// Build an input's content in the requested style. Every field but `style` is fixed, so a
+    /// difference between two screens is a difference the style caused and nothing else.
+    fn input_content(style: InputStyle) -> InputContent {
+        InputContent {
+            title: "DIG \u{2014} Open a dig:// link".into(),
+            heading: "Open a dig:// link".into(),
+            body: "Paste or type a dig:// address.".into(),
+            field_label: "dig:// address".into(),
+            submit: "Open",
+            masked: false,
+            revealable: false,
+            style,
+        }
+    }
+
+    /// A confirm content of each shape, so "consent is never a bar" is pinned against the WHOLE
+    /// consent surface, not one example of it.
+    fn every_confirm() -> Vec<Screen> {
+        use crate::confirm::{ClaimPrompt, PairPrompt, RevealPrompt};
+        vec![
+            Screen::confirm(&sign_content("Send 1 XCH"), "Cancel"),
+            Screen::confirm(
+                &ConfirmContent::connect(&ConnectPrompt {
+                    origin: "https://dapp.example",
+                    dapp_name: Some("Example"),
+                }),
+                "Cancel",
+            ),
+            Screen::confirm(
+                &ConfirmContent::pair(&PairPrompt {
+                    ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah",
+                    ext_label: Some("DIG"),
+                }),
+                "Cancel",
+            ),
+            Screen::confirm(
+                &ConfirmContent::notice(&NoticePrompt {
+                    title: "t",
+                    heading: "h",
+                    body: "b",
+                    acknowledge: "OK",
+                    identifier: None,
+                }),
+                "Cancel",
+            ),
+            Screen::confirm(
+                &ConfirmContent::destroy(&DestroyPrompt {
+                    subject: "the account",
+                    replacement: "",
+                    recoverable: false,
+                }),
+                "Cancel",
+            ),
+            Screen::confirm(
+                &ConfirmContent::claim(&ClaimPrompt {
+                    title: "t",
+                    heading: "h",
+                    body: "b",
+                    affirm: "Yes",
+                    scannable: None,
+                    identifier: None,
+                }),
+                "Cancel",
+            ),
+            Screen::confirm(
+                &ConfirmContent::reveal(&RevealPrompt {
+                    secret: "your recovery phrase",
+                }),
+                "Cancel",
+            ),
+        ]
+    }
+
+    /// **`consent_is_never_a_bar`** — pinned in BOTH directions.
+    ///
+    /// EVERY confirm screen, whatever its shape, is a [`Chrome::Dialog`] and does not dismiss on
+    /// blur — a window asking the user to authorise something must never vanish when they glance
+    /// away. AND the launcher input IS a bar — so the property is a real structural distinction, not
+    /// a constant that happens to read "Dialog" everywhere.
+    #[test]
+    fn consent_is_never_a_bar() {
+        for screen in every_confirm() {
+            assert_eq!(
+                screen.chrome,
+                Chrome::Dialog,
+                "a confirm became a bar: {:?}",
+                screen.title
+            );
+            assert!(
+                !screen.chrome.dismiss_on_blur(),
+                "a consent window would vanish on blur: {:?}",
+                screen.title
+            );
+        }
+        // The other direction: the launcher genuinely IS a bar, so the assertion above is a
+        // distinction and not a tautology.
+        let launcher = Screen::input(&input_content(InputStyle::Bar));
+        assert_eq!(launcher.chrome, Chrome::Bar);
+        assert!(launcher.chrome.dismiss_on_blur());
+    }
+
+    /// A `Bar` input dismisses on blur; a `Dialog` input does not. The one behaviour the bar carries
+    /// beyond its looks (dig_ecosystem#2054).
+    #[test]
+    fn only_a_bar_dismisses_on_blur() {
+        let bar = Screen::input(&input_content(InputStyle::Bar));
+        let dialog = Screen::input(&input_content(InputStyle::Dialog));
+        assert!(bar.chrome.dismiss_on_blur());
+        assert!(!dialog.chrome.dismiss_on_blur());
+    }
+
+    /// A `Bar` drops the heading/body blocks down to at most one hint line and keeps the field; a
+    /// `Dialog` keeps the full heading-plus-body layout. Asserts on the BLOCK SET, so a bar that
+    /// quietly kept the heading fails here.
+    #[test]
+    fn a_bar_drops_the_heading_and_keeps_the_field() {
+        let bar = Screen::input(&input_content(InputStyle::Bar));
+        assert!(
+            !bar.blocks.iter().any(|b| matches!(b, Block::Heading(_))),
+            "the bar kept a heading: {:?}",
+            bar.blocks
+        );
+        // At most one hint line, and it is body copy — never a heading.
+        assert!(bar.blocks.len() <= 1, "the bar kept more than one line");
+        assert!(bar.field.is_some(), "the bar lost its field");
+
+        let dialog = Screen::input(&input_content(InputStyle::Dialog));
+        assert!(
+            dialog.blocks.iter().any(|b| matches!(b, Block::Heading(_))),
+            "the dialog lost its heading"
+        );
+    }
+
+    /// A bar with an empty body has no blocks at all — the hint line is dropped rather than left as
+    /// an empty paragraph that would only add a stray gap above the field.
+    #[test]
+    fn a_bar_with_no_hint_has_no_blocks() {
+        let mut content = input_content(InputStyle::Bar);
+        content.body = String::new();
+        let bar = Screen::input(&content);
+        assert!(bar.blocks.is_empty());
+        assert!(bar.field.is_some());
+    }
+
+    /// The bar sits HIGH: `bar_top` returns a y strictly above the vertical centre of the display,
+    /// pinned from both sides of the divider so a regression to "centred" is caught.
+    #[test]
+    fn a_bar_is_placed_high_on_the_screen() {
+        let monitor_h = 1080.0;
+        let y = bar_top(monitor_h);
+        assert!(y < monitor_h / 2.0, "the bar is not above centre");
+        assert_eq!(y, monitor_h / BAR_TOP_DIVISOR);
+        // And genuinely near the top, not merely a hair above centre.
+        assert!(y < monitor_h / 3.0);
     }
 
     /// Guards the harness itself: if the headless text pipeline ever stops emitting glyphs, the
