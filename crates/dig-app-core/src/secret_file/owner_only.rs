@@ -220,11 +220,20 @@ mod windows_tests {
         let ordinary = dir.path().join("ordinary.txt");
         std::fs::write(&ordinary, b"not a secret").unwrap();
         if !readable_without_owner_sid(&ordinary).unwrap() {
+            // On CI this is a FAILURE, not a skip. The runner is elevated, so the control is
+            // expected to hold there — and `cargo test` captures the output of a PASSING test, so a
+            // skip would be invisible in the log and the suite would look like it proved something
+            // it never ran. Making CI insist on it is the only way the green tick means anything.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "the cross-principal probe cannot discriminate on CI, where it is required to: an \
+                 inherited-ACL file was already unreadable without the owner SID, so this test \
+                 would pass without testing anything"
+            );
             eprintln!(
                 "SKIPPED a_principal_without_the_owner_sid_cannot_open_the_file: an inherited-ACL \
                  file is already unreadable without the owner SID in this session, so the probe \
-                 cannot distinguish the fix from the defect. Requires an elevated session; CI runs \
-                 elevated and does exercise it."
+                 cannot distinguish the fix from the defect. Requires an elevated session."
             );
             return;
         }
