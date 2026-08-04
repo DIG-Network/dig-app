@@ -35,11 +35,10 @@ pub mod console;
 #[cfg(feature = "tray")]
 pub mod hotkey;
 pub mod logging;
-/// Watching the tray's own event loop from OUTSIDE it.
-///
-/// Not tray-gated, for the same reason as [`tray_worker`]: it is two atomics and a clock, with no
-/// desktop dependency, and the property worth pinning — that a loop which stops running is named
-/// rather than silent — is checkable in every build (dig-app#86).
+// No outer doc comment here, for the reason spelled out above `tray_popup` below: outer docs on a
+// `pub mod` are MERGED with the module's own `//!` docs and the merged block resolves its
+// intra-doc links in the crate-root scope, so a link to one of the module's own items fails with
+// an error carrying no file and no line. `pump_vigil` documents itself.
 pub mod pump_vigil;
 /// Surviving a desktop stack that panics instead of failing.
 ///

@@ -325,9 +325,11 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
 - **A menu that outlives its bound MUST be broken from a thread that is not the blocked one**, with a
   POSTED message, so the rescuer never blocks on a thread that is not responding.
 - **The right rule is refuse-to-track rather than track-hopefully**, and reaching it requires owning
-  the popup rather than delegating it to a library. Until the window service owns it, the guards above
-  make the bad state rare and survivable rather than unreachable; this MUST NOT be described as
-  closed.
+  the popup rather than delegating it to a library. Until the window service owns it, the earlier
+  foreground attempt only WIDENS the window in which rights may be held — it is the same call the
+  library already makes, one input edge sooner — and the break is what makes the wedge survivable
+  rather than permanent. This MUST NOT be described as closed, and the trigger that causes the
+  refusal in the field is NOT yet identified.
 
 ### 3.1c The tray account surface (normative)
 

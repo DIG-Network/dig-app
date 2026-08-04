@@ -1,5 +1,9 @@
 //! Liveness for the tray's own event loop — the one thread nothing else was watching.
 //!
+//! Not tray-gated: it is two atomics and a clock with no desktop dependency, and the property
+//! worth pinning — that a loop which stops running is named rather than silent — is checkable in
+//! every build.
+//!
 //! # Why this exists
 //!
 //! Four times now a tray defect has been reported as *"I click and nothing happens"*, and four times
@@ -24,18 +28,19 @@
 //! closure entirely: `tray-icon`'s `show_tray_menu` runs `TrackPopupMenu`, a nested modal message loop,
 //! inside the tray window proc inside tao's dispatch — upstream of every call the closure makes.
 //!
-//! So [`Phase::BetweenTicks`](crate::pump_vigil::Phase::BetweenTicks) is a real, named value rather
-//! than the absence of one. A stale stamp
+//! So [`Phase::BetweenTicks`] is a real, named value rather than the absence of one. A stale stamp
 //! reading `BetweenTicks` means the pump is blocked in platform dispatch; a stale stamp naming a call
 //! means the pump is blocked in that call. Those are different bugs with different fixes, and telling
 //! them apart is the whole job.
 //!
 //! # What this module deliberately does not do
 //!
-//! It does not recover anything. It observes and it reports. A watchdog that also acts is a watchdog
-//! that can be wrong in two ways, and the reclaim ladder belongs to the window service (dig-app#86),
-//! which is a later step. This is the cheapest possible thing that turns a silent permanent wedge into
-//! a named one, and it is worth shipping on its own.
+//! It observes and reports, and it recovers exactly one thing: a tray menu still up past its bound,
+//! which it asks to close (see [`watch`]). That single exception is granted because the action can
+//! choose nothing — a dismissed menu has selected no item — and because the thread that would
+//! otherwise clear it is the thread that is stuck. Everything else it can see, it only names: a
+//! watchdog that acts where there is nothing safe to do is a watchdog with a second way to be wrong,
+//! and the general reclaim ladder belongs to the window service (dig-app#86).
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
