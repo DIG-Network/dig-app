@@ -1715,12 +1715,13 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "5.20.0"
+version = "5.21.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
  "dig-logging",
  "dig-session",
+ "hex",
  "png 0.17.16",
  "sha2 0.10.9",
  "tao",
@@ -1733,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "5.20.0"
+version = "5.21.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2185,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "5.20.0"
+version = "5.21.0"
 dependencies = [
  "clap",
  "dig-app-core",

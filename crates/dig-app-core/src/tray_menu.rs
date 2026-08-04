@@ -84,12 +84,19 @@ pub enum AccountState {
     /// offers a button that will always fail and says nothing about why. The tray must name the situation and
     /// route the user to the only remedy there is — replacing the account (dig_ecosystem#1799 review).
     ///
-    /// The live cause is a **legacy raw-seed blob**: every Windows/macOS host that has ever run dig-app
-    /// auto-enrolled `account.default` at first boot, and those blobs carry the old `DIGVK1` shape. Under
-    /// `dig-account` 0.2 they neither unlock (`SessionError::LegacySeedFormat`) nor re-enrol at the same id
-    /// (`AlreadyExists`) — they are WEDGED, not merely fail-closed. Before this state existed the boot
-    /// swallowed that into a `tracing::warn!` and returned `None`, so the tray reported a locked account and
-    /// the user silently lost signing with no in-app route out. This state is what makes that impossible.
+    /// The live cause is a **legacy raw-seed blob**. dig-app USED to auto-enrol `account.default` at first
+    /// boot on every Windows/macOS host, and those blobs carry the old `DIGVK1` shape. That auto-enrolment
+    /// is long gone — an account now exists only because a user asked (dig_ecosystem#1820), and no boot
+    /// path creates one — but the blobs it left behind are still in the field, which is why this state has
+    /// work to do. Under `dig-account` 0.3 they neither unlock (`SessionError::LegacySeedFormat`) nor
+    /// re-enrol at the same id (`AlreadyExists`) — they are WEDGED, not merely fail-closed. Before this
+    /// state existed the boot swallowed that into a `tracing::warn!` and returned `None`, so the tray
+    /// reported a locked account and the user silently lost signing with no in-app route out.
+    ///
+    /// **Reaching this state requires an unlock ATTEMPT that hit an unreadable seal** — never the mere
+    /// absence of a session (`SPEC.md` §3.1c, dig_ecosystem#2128). The app boots locked and tries nothing,
+    /// so "no session" is the ordinary state of every fresh process; reading it as a failure reported every
+    /// launch as an unreadable account and pointed its owner at the destructive remedy.
     Unopenable,
     /// An account exists, but it is still sealed under a password the MACHINE generated and kept in the
     /// OS credential store — so opening it requires nothing its owner knows (dig_ecosystem#1817).
@@ -221,6 +228,45 @@ pub enum AtRest {
     /// An account is enrolled, and it is still sealed under the machine-generated password — it has no
     /// user-known secret protecting it yet. See [`AccountState::NeedsPassword`].
     PresentUnderMachinePassword,
+}
+
+/// How far the shell has got trying to OPEN the account this run — the fact that separates an account
+/// nobody has unlocked yet from one that will not open (dig_ecosystem#2128).
+///
+/// An enum rather than a `bool`, because the shell used to carry a single `boot_failed` flag it derived
+/// from "there is no live session". Since #1817 the app boots LOCKED and attempts no unlock at start-up,
+/// so that flag read `true` on every launch with an enrolled account and reported every one of them as
+/// [`AccountState::Unopenable`] — an account in an unreadable format, whose only offered remedy is to
+/// replace it. Nothing had failed; nothing had been tried. Only an ATTEMPT can fail, so only an attempt
+/// can be reported as having failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAttempt {
+    /// No unlock has been attempted this run. The normal state of a freshly started app: the account
+    /// boots locked and waits for its owner (#1817).
+    NotAttempted,
+    /// An unlock was attempted and did not complete — the user cancelled, the password did not open the
+    /// seal, or the host could not draw the window. All of these are RETRYABLE, so the account stays
+    /// merely locked and `Unlock…` remains the way in.
+    Refused,
+    /// An unlock was attempted and the SEAL ITSELF could not be read: a legacy raw-seed blob or a seed
+    /// envelope this build does not understand. No password opens such an account, which is what makes
+    /// [`AccountState::Unopenable`]'s replace-it remedy the honest answer — and why nothing else may
+    /// reach it.
+    Wedged,
+}
+
+/// Derive what the host holds at rest from the three facts the shell can observe.
+///
+/// The order is deliberate: an absent account outranks everything (there is nothing to say about opening
+/// one that does not exist), and an account still under the retired machine password outranks a wedge
+/// verdict, because its remedy is to choose a password rather than to replace the account.
+pub fn at_rest_of(enrolled: bool, needs_password: bool, attempt: OpenAttempt) -> AtRest {
+    match () {
+        _ if !enrolled => AtRest::None,
+        _ if needs_password => AtRest::PresentUnderMachinePassword,
+        _ if matches!(attempt, OpenAttempt::Wedged) => AtRest::PresentButUnopenable,
+        _ => AtRest::Present,
+    }
 }
 
 /// What a live tray session knows about its account — the two facts the state derivation needs.
@@ -1389,6 +1435,75 @@ impl fmt::Display for AccountState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Regression, dig_ecosystem#2128 — the account survived every restart; the tray did not.**
+    ///
+    /// A fresh process holds no session, because since #1817 the app boots LOCKED and never attempts an
+    /// unlock at start-up. The shell nevertheless derived "an open was attempted and failed" from
+    /// `session.is_none() && enrolled`, which after #1817 is simply "an account exists" — so every launch
+    /// with an enrolled account reported [`AccountState::Unopenable`], whose only window tells the user
+    /// their account was made by an older DIG and steers them at a destructive replace. The account on
+    /// disk was fine the whole time.
+    ///
+    /// The `Unopenable` arm is asserted alongside deliberately: a fix that simply stopped producing that
+    /// state would pass a boot-only assertion while destroying the one signal a genuinely wedged
+    /// legacy-format account has.
+    #[test]
+    fn a_boot_that_never_tried_to_unlock_is_locked_not_unopenable() {
+        assert_eq!(
+            at_rest_of(true, false, OpenAttempt::NotAttempted),
+            AtRest::Present,
+            "booting with an enrolled account is LOCKED — no unlock was attempted, so nothing failed"
+        );
+        assert_eq!(
+            account_state(
+                true,
+                at_rest_of(true, false, OpenAttempt::NotAttempted),
+                None
+            ),
+            AccountState::Locked,
+            "the user must be offered Unlock…, never the destructive replace path"
+        );
+        assert_eq!(
+            at_rest_of(true, false, OpenAttempt::Wedged),
+            AtRest::PresentButUnopenable,
+            "a genuinely wedged account must still be reported as such"
+        );
+    }
+
+    /// An unlock the user cancelled, or one their password did not open, leaves the account exactly as
+    /// LOCKED as it was — it is retryable, and saying otherwise sends someone who mistyped a password to
+    /// a window offering to replace their account (dig_ecosystem#2128).
+    #[test]
+    fn a_refused_unlock_stays_locked_and_retryable() {
+        assert_eq!(
+            at_rest_of(true, false, OpenAttempt::Refused),
+            AtRest::Present
+        );
+        assert_eq!(
+            account_state(true, at_rest_of(true, false, OpenAttempt::Refused), None),
+            AccountState::Locked
+        );
+    }
+
+    /// The at-rest facts are read in a fixed order, and the earlier ones win: no account at all outranks
+    /// any attempt outcome, and an account with no user-chosen password outranks a wedge verdict —
+    /// otherwise a host in the middle of the machine-password migration would be offered the destructive
+    /// remedy instead of `Set a password…`.
+    #[test]
+    fn absence_and_the_machine_password_outrank_any_attempt_outcome() {
+        for attempt in [
+            OpenAttempt::NotAttempted,
+            OpenAttempt::Refused,
+            OpenAttempt::Wedged,
+        ] {
+            assert_eq!(at_rest_of(false, false, attempt), AtRest::None);
+            assert_eq!(
+                at_rest_of(true, true, attempt),
+                AtRest::PresentUnderMachinePassword
+            );
+        }
+    }
 
     /// Every account state, so a rule can be asserted across all of them rather than on one fixture.
     ///
