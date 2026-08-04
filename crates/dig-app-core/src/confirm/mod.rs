@@ -99,6 +99,9 @@ pub struct NoticePrompt<'a> {
     pub heading: &'a str,
     /// The body — for a phrase reveal, the numbered words.
     pub body: &'a str,
+    /// A bare identifier to show set apart from the prose, rendered in Space Mono (a DIG id, an
+    /// address) — `None` on a notice that shows no such value.
+    pub identifier: Option<&'a str>,
     /// The label of the single dismiss button (e.g. `"OK"`, `"Done"`).
     pub acknowledge: &'static str,
 }
@@ -122,6 +125,9 @@ pub struct ClaimPrompt<'a> {
     pub body: &'a str,
     /// The label of the affirming choice — a first-person claim (e.g. `"I have written these down"`).
     pub affirm: &'static str,
+    /// A bare identifier to show set apart from the prose, rendered in Space Mono — the base32 TOTP
+    /// secret on the two-factor enrolment screen, `None` on every other claim.
+    pub identifier: Option<&'a str>,
     /// Something to be SCANNED, drawn as a QR code between the body and the buttons — `None` on every
     /// claim but two-factor enrolment (dig_ecosystem#1849).
     ///
@@ -491,6 +497,13 @@ pub(crate) struct ConfirmContent {
     /// prose also keeps the amount and recipient in a STRUCTURED field rather than in a string a
     /// caller pre-formatted.
     pub detail: Option<String>,
+    /// The one bare identifier this prompt shows — a DIG id, an `xch1…` address, a pairing ext-id, a
+    /// TOTP secret — or `None` when the prompt shows no such value.
+    ///
+    /// Kept out of [`heading`](Self::heading)/[`body`](Self::body) so the window can render it in Space
+    /// Mono: an identifier is read or transcribed character by character, and a monospace face makes an
+    /// address checkable and tells `1`/`l`, `0`/`O` apart. It is never prose.
+    pub identifier: Option<String>,
     /// The label of the affirmative action (`"Pair"`, `"Connect"`, `"Sign"`, `"OK"`), reused as the reason
     /// string the biometric prompt shows.
     pub action: &'static str,
@@ -533,9 +546,11 @@ pub(crate) enum Presentation {
 impl ConfirmContent {
     /// The content for a pairing confirm (§5.6.3): approve making this extension the paired relay.
     fn pair(prompt: &PairPrompt<'_>) -> Self {
+        // The label (if any) stays in the heading; the ext-id is split out into its own mono block, so
+        // the opaque identifier reads char by char rather than trailing off the end of the question.
         let who = match prompt.ext_label {
-            Some(label) => format!("{label} ({})", prompt.ext_id),
-            None => prompt.ext_id.to_string(),
+            Some(label) => label.to_string(),
+            None => "this browser extension".to_string(),
         };
         Self {
             title: "DIG — Pair extension".to_string(),
@@ -545,6 +560,7 @@ impl ConfirmContent {
                    your DIG identity. You approve every signature individually."
                     .to_string(),
             detail: None,
+            identifier: Some(prompt.ext_id.to_string()),
             action: "Pair",
             qr: None,
             presentation: Self::authorize(),
@@ -565,6 +581,7 @@ impl ConfirmContent {
                    alone before continuing."
                 .to_string(),
             detail: None,
+            identifier: None,
             action: "Reveal",
             qr: None,
             presentation: Self::authorize(),
@@ -580,6 +597,7 @@ impl ConfirmContent {
     fn notice(prompt: &NoticePrompt<'_>) -> Self {
         Self {
             detail: None,
+            identifier: prompt.identifier.map(str::to_string),
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
@@ -593,6 +611,7 @@ impl ConfirmContent {
     fn claim(prompt: &ClaimPrompt<'_>) -> Self {
         Self {
             detail: None,
+            identifier: prompt.identifier.map(str::to_string),
             title: prompt.title.to_string(),
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
@@ -632,6 +651,7 @@ impl ConfirmContent {
                 false => format!("{loss}\n\n{}", prompt.replacement),
             },
             detail: None,
+            identifier: None,
             action: "Destroy",
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
@@ -651,6 +671,7 @@ impl ConfirmContent {
     fn security(prompt: &SecurityPrompt<'_>) -> Self {
         Self {
             detail: None,
+            identifier: None,
             title: "DIG — Change your account security".to_string(),
             heading: format!("Do you want to {}?", prompt.change),
             body: prompt.consequence.to_string(),
@@ -691,6 +712,7 @@ impl ConfirmContent {
                 prompt.origin
             ),
             detail: None,
+            identifier: None,
             action: "Connect",
             qr: None,
             presentation: Self::authorize(),
@@ -720,6 +742,7 @@ impl ConfirmContent {
             // separate all the way to the painter, which gives it its own recessed panel instead of
             // letting it trail off the end of the boilerplate (dig_ecosystem#2038).
             detail: Some(decoded.to_string()),
+            identifier: None,
             action: "Sign",
             qr: None,
             presentation: Self::authorize(),
@@ -1218,7 +1241,10 @@ mod tests {
         });
         assert_eq!(content.action, "Pair");
         assert!(content.heading.contains("My Wallet"));
-        assert!(content.heading.contains("abcdef"));
+        // The ext-id is split OUT of the heading into its own mono identifier block, so the opaque id
+        // reads char by char rather than trailing off the end of the question (dig_ecosystem#2060).
+        assert!(!content.heading.contains("abcdef"));
+        assert_eq!(content.identifier.as_deref(), Some("abcdef"));
     }
 
     #[test]
@@ -1272,6 +1298,7 @@ mod tests {
             body: " 1. abandon",
             affirm: "I have written these down",
             scannable: None,
+            identifier: None,
         });
 
         let label = affirm_label_of(&content)
@@ -1307,6 +1334,7 @@ mod tests {
             heading: "Your DIG ID is on the clipboard.",
             body: "abc123",
             acknowledge: "OK",
+            identifier: None,
         });
 
         assert_eq!(content.presentation, Presentation::Acknowledge);
@@ -1326,6 +1354,7 @@ mod tests {
                 body: "If you continue without them…",
                 affirm: "Yes, I have them",
                 scannable: None,
+                identifier: None,
             }),
             ConfirmDecision::Approve
         );
@@ -1355,6 +1384,7 @@ mod tests {
                 body: "b",
                 affirm: "Yes",
                 scannable: None,
+                identifier: None,
             }),
             ConfirmDecision::Unavailable
         );

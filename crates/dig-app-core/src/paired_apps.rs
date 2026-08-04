@@ -144,6 +144,7 @@ pub fn offer_pairing_code(
         heading: "Your pairing code",
         body: &body,
         acknowledge: "Done",
+        identifier: None,
     });
 
     if matches!(decision, ConfirmDecision::Unavailable) {
@@ -186,6 +187,7 @@ pub fn manage_paired_apps(
                        To pair one, choose \"Pair an app…\" from the Security menu. DIG shows you a \
                        code, you type it into the app, and DIG asks you to approve it by name.",
                 acknowledge: "Close",
+            identifier: None,
             });
             return if revoked == 0 {
                 ManageOutcome::NothingPaired
@@ -261,6 +263,7 @@ fn confirm_revoke(confirmer: &dyn NativeConfirmer, app: &PairedApp) -> bool {
             heading: "Remove this app's access?",
             body: &body,
             affirm: "Remove its access",
+            identifier: None,
         }),
         ConfirmDecision::Approve
     )

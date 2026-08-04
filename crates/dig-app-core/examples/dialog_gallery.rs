@@ -122,6 +122,7 @@ fn main() {
             heading: "Your DIG ID is on the clipboard.",
             body: "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4",
             acknowledge: "OK",
+        identifier: None,
         }),
         // The wallet window in the three states whose DIFFERENCE is the point (dig_ecosystem#1850): a
         // balance that was read, and two that were not. A screenshot is how "an unknown balance never
@@ -151,6 +152,7 @@ fn main() {
                 heading: "This is your DIG wallet.",
                 body: &window_body(&WalletOverview::read(address, &source)),
                 acknowledge: "OK",
+            identifier: None,
             })
         }
         // The enrolment retention claim: a genuine either/or where Cancel abandons setup.
@@ -162,6 +164,7 @@ fn main() {
                    again later from the DIG tray menu.",
             affirm: "Yes, I have them",
             scannable: None,
+        identifier: None,
         }),
         // The two-factor enrolment window (#1849). The URI below is a FIXED, PUBLISHED test vector —
         // RFC 4648's `JBSWY3DPEHPK3PXP...` — not a generated secret, so a photograph of this window,
@@ -190,6 +193,7 @@ fn main() {
                 ),
                 affirm: "I've added it",
                 scannable: Some(&art),
+            identifier: None,
             })
         }
         // The reveal gate: an authorization, which keeps the warning icon honestly.

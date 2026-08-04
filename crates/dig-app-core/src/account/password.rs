@@ -205,6 +205,7 @@ fn explain(confirmer: &dyn NativeConfirmer, heading: &str, body: &str) -> bool {
             heading,
             body,
             acknowledge: "Try again",
+            identifier: None,
         }),
         ConfirmDecision::Unavailable
     )

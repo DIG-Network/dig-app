@@ -73,6 +73,7 @@ impl PhrasePresenter for WindowedPresenter<'_> {
             ),
             affirm: "I have written these down",
             scannable: None,
+            identifier: None,
         });
         if shown != ConfirmDecision::Approve {
             return decision_for(shown);
@@ -88,6 +89,7 @@ impl PhrasePresenter for WindowedPresenter<'_> {
                    again later from the DIG tray menu.",
             affirm: "Yes, I have them",
             scannable: None,
+        identifier: None,
         });
         decision_for(confirmed)
     }
@@ -131,6 +133,7 @@ pub fn reveal_phrase<S: ProfileSealer>(
         heading: "These 24 words are your DIG Account. Keep them secret.",
         body: &words,
         acknowledge: "Done",
+        identifier: None,
     }) {
         ConfirmDecision::Approve | ConfirmDecision::Deny => RevealOutcome::Shown,
         // The window itself could not be drawn, so nothing reached the screen.
@@ -324,6 +327,7 @@ fn backup_warning(target: BackupTarget) -> ClaimPrompt<'static> {
                    them somewhere safe, and copy something else afterwards to clear them sooner.",
             affirm: "I understand — copy my phrase",
             scannable: None,
+        identifier: None,
         },
         BackupTarget::File => ClaimPrompt {
             title: "DIG — Save your recovery phrase",
@@ -333,6 +337,7 @@ fn backup_warning(target: BackupTarget) -> ClaimPrompt<'static> {
                    control, and delete it once your words are somewhere safe.",
             affirm: "I understand — save my phrase",
             scannable: None,
+        identifier: None,
         },
     }
 }
@@ -357,6 +362,7 @@ pub fn explain_missing_phrase(confirmer: &dyn NativeConfirmer) -> ConfirmDecisio
                unreadable.\n\n\
                Nothing has changed yet. Your account still works exactly as before.",
         acknowledge: "I understand",
+    identifier: None,
     })
 }
 
@@ -460,6 +466,7 @@ fn offer_a_last_look<S: ProfileSealer>(
                you have them written down, look now.",
         affirm: "Show me the words first",
         scannable: None,
+    identifier: None,
     });
     if wants_to_see != ConfirmDecision::Approve {
         return;
@@ -523,6 +530,7 @@ pub fn ask_for_phrase(confirmer: &dyn NativeConfirmer, purpose: &str) -> Option<
         body: "Nothing has been changed on this computer. Check the words against what you wrote \
                down — all 24, in the original order — and try again from the DIG menu.",
         acknowledge: "OK",
+        identifier: None,
     });
     None
 }
@@ -555,6 +563,7 @@ pub fn explain_unopenable(confirmer: &dyn NativeConfirmer) -> ConfirmDecision {
         heading: "DIG cannot open the account stored on this computer.",
         body: UNOPENABLE_BODY,
         acknowledge: "I understand",
+        identifier: None,
     })
 }
 
@@ -842,6 +851,7 @@ pub fn first_run_wizard(
                You do not need an account to read content on the DIG Network — that already works.",
         affirm: "Get started",
         scannable: None,
+        identifier: None,
     }) != ConfirmDecision::Approve
     {
         return FirstRunOutcome::Declined;
@@ -858,6 +868,7 @@ pub fn first_run_wizard(
                A recovery phrase from a Chia wallet such as Sage is NOT a DIG recovery phrase.",
         affirm: "Import my recovery phrase",
         scannable: None,
+        identifier: None,
     }) {
         ConfirmDecision::Approve => import_existing_account(confirmer, import),
         ConfirmDecision::Deny => create_new_account(confirmer, create),
@@ -942,6 +953,7 @@ fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &st
         heading,
         body,
         acknowledge: "OK",
+        identifier: None,
     });
 }
 

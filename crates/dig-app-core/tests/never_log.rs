@@ -348,14 +348,13 @@ impl NativeConfirmer for EnrolsSecondFactor {
     }
 
     fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
-        // The key window presents the base32 key as eight space-separated groups of four; reading it
-        // off the window is exactly what a person does, and it is the only way this fixture can learn
-        // a secret the enrolment never returns.
+        // The key window presents the base32 key as its own identifier — eight space-separated groups
+        // of four, set in Space Mono. Reading it off the window is exactly what a person does, and it
+        // is the only way this fixture can learn a secret the enrolment never returns.
         if let Some(line) = prompt
-            .body
-            .lines()
+            .identifier
             .map(str::trim)
-            .find(|line| line.len() == 39 && line.split(' ').all(|g| g.len() == 4))
+            .filter(|line| line.len() == 39 && line.split(' ').all(|g| g.len() == 4))
         {
             let key: String = line.chars().filter(|c| !c.is_whitespace()).collect();
             *self.code.lock().unwrap() = Some(totp_code(&key));
