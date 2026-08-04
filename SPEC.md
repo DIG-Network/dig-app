@@ -436,6 +436,21 @@ Binding rules:
   present-under-a-machine-password) rather than a boolean, and the tray MUST name the state on the surfaces a person looks at — the icon, the tooltip and
   the details window — never only in a log record. Reducing this to a log line costs the user signing
   permanently and silently, which is the defect the state exists to prevent.
+  - **Only an ATTEMPT that hit an unreadable SEAL may reach it (MUST).** The at-rest fact MUST be derived
+    from the outcome of an actual attempt to open the account — never from the absence of a live session.
+    The app boots with the account locked and attempts no unlock at start-up (§3.2a), so "there is no
+    session" is the ordinary state of every fresh process and means only that nobody has unlocked yet;
+    reading it as a failure reports every launch as an unreadable account and points its owner at the
+    destructive remedy. An implementation MUST carry at least three attempt outcomes — not attempted,
+    refused, unreadable — and:
+    - **not attempted** and **refused** MUST both report `Locked`. A cancelled prompt, a password that
+      did not open the seal, and a host that could not draw the window are all RETRYABLE, and `Unlock…`
+      MUST remain the offered way in; the app MUST say what happened without implying the account is lost.
+    - **unreadable** — and only it — MUST report `Unopenable`. It means the sealed blob cannot be read by
+      this build at all (a legacy raw-seed account, or a seed-envelope/keystore format from a later
+      version), so no password can open it. Any failure an implementation cannot positively identify as
+      unreadable MUST be treated as refused, because the cost of the two mistakes is not symmetric: one
+      offers a retry that will not work, the other offers to destroy a working account.
   - **The state offers the remedy, and nothing else.** `Unopenable` MUST offer an explainer naming the
     situation and the exact menu path to replacing the account, and MUST NOT offer `Unlock…` (it is what
     already failed) or the recovery-phrase reveal (its vault is sealed under the same unreadable key). The
