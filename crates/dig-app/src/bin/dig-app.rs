@@ -1407,6 +1407,33 @@ mod tray {
             tracing::warn!(error = %e, "the tray loop's liveness watcher could not be started");
         }
 
+        // Stamp the tray's context menu before it takes this thread.
+        //
+        // `tray-icon` invokes this handler synchronously inside the tray window proc — on THIS
+        // thread, and immediately before `show_tray_menu` runs `TrackPopupMenu`. It is the last
+        // moment anything of ours executes before a nested modal loop owns the thread for as long as
+        // the menu is up, which was measured to be the entire time (dig-app#86: the closure below
+        // does not run at all while the menu is open).
+        //
+        // Naming it is what stops the watcher crying wolf: without this, a person reading the menu
+        // for fifteen seconds is reported as a wedged tray needing a restart.
+        //
+        // Every DOWN click is stamped, because `menu_on_left_click` defaults on and so both buttons
+        // raise the menu. A down click that somehow raises nothing leaves the phase reading
+        // `tray-menu` only until the next tick, half a second later.
+        {
+            let pump = pump.clone();
+            tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
+                if let tray_icon::TrayIconEvent::Click {
+                    button_state: tray_icon::MouseButtonState::Down,
+                    ..
+                } = event
+                {
+                    pump.mark(Phase::TrayMenu);
+                }
+            }));
+        }
+
         // The session is SHARED rather than owned by the loop, because the actions that mutate it no
         // longer run here (see `ActionWorker`). The worker takes the lock for the whole of an action —
         // which is what stops a destroy and a repaint from seeing different accounts — and the loop

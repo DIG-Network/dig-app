@@ -66,6 +66,23 @@ pub enum Phase {
     Presence = 5,
     /// Rebuilding and re-attaching the native menu.
     Repaint = 6,
+    /// The tray's context menu is up, and the loop is inside `TrackPopupMenu`.
+    ///
+    /// # Why this is worth telling apart from [`Phase::BetweenTicks`]
+    ///
+    /// Measured on a real Windows process (dig-app#86): while the tray menu is open the tao user
+    /// closure **does not run at all**, so the pump goes silent for exactly as long as the person
+    /// takes to read the menu. Without this phase every such pause is reported as an unexplained
+    /// stall in platform dispatch — a diagnostic that is loudly wrong several times a day teaches
+    /// its reader to skip it, which is how the log became useless in the first place.
+    ///
+    /// So the menu names itself, gets a patience measured against a *person reading*, and leaves
+    /// [`Phase::BetweenTicks`] meaning what it should: blocked somewhere nobody expected.
+    ///
+    /// Stamped from `tray-icon`'s event handler, which runs synchronously in the tray window proc on
+    /// this same thread, immediately BEFORE `show_tray_menu` — the last moment anything of ours runs
+    /// before the modal loop takes the thread.
+    TrayMenu = 7,
 }
 
 impl Phase {
@@ -80,6 +97,40 @@ impl Phase {
             Self::ReadState => "read-state",
             Self::Presence => "presence (set_icon/set_tooltip)",
             Self::Repaint => "repaint (set_menu)",
+            Self::TrayMenu => "tray-menu (inside TrackPopupMenu)",
+        }
+    }
+
+    /// How long this phase may last before it is a fault.
+    ///
+    /// Two bands, because the phases differ in kind and not merely in degree. Every in-closure phase
+    /// is code that should complete in microseconds, so ten seconds there is already twenty missed
+    /// ticks and unambiguous. [`Phase::TrayMenu`] is a **person reading a menu**, so its bound has to
+    /// be measured against human dithering; two minutes is far longer than anyone browses a tray menu
+    /// and far shorter than "permanent".
+    fn patience(self) -> Duration {
+        match self {
+            Self::TrayMenu => TRAY_MENU_PATIENCE,
+            _ => PATIENCE,
+        }
+    }
+
+    /// What to tell the reader about a stall in this phase — the likely cause, in one clause.
+    ///
+    /// Held beside [`Phase::name`] so the two cannot drift, and returned as a value so the choice is
+    /// testable without capturing a log.
+    fn advice(self) -> &'static str {
+        match self {
+            Self::TrayMenu => {
+                "the tray's context menu has not dismissed. A tracked popup whose \
+                 SetForegroundWindow was refused cannot be dismissed by clicking away or by Escape, \
+                 and it holds this loop for as long as it is up"
+            }
+            Self::BetweenTicks => {
+                "the loop is blocked in the platform's own dispatch, outside anything this shell \
+                 measures"
+            }
+            _ => "the loop is blocked inside the call this phase names",
         }
     }
 
@@ -97,6 +148,7 @@ impl Phase {
             4 => Self::ReadState,
             5 => Self::Presence,
             6 => Self::Repaint,
+            7 => Self::TrayMenu,
             _ => Self::BetweenTicks,
         }
     }
@@ -234,8 +286,10 @@ pub enum Verdict {
 /// stamp, the clock and this.
 #[derive(Debug)]
 pub struct Watcher {
-    /// How long the pump may be silent before it is a stall.
-    patience: Duration,
+    /// Scales every phase's own [`Phase::patience`]. `1.0` in production; a test shrinks it so the
+    /// whole ladder — including the deliberate gap between the two bands — is exercised in
+    /// milliseconds without redefining the relationship being tested.
+    scale: f64,
     /// How long to wait before re-stating a stall that has not cleared.
     restate_after: Duration,
     /// When to re-state, and therefore whether a stall is currently being reported at all.
@@ -252,6 +306,14 @@ pub struct Watcher {
 /// threshold of a person clicking a dead tray.
 pub const PATIENCE: Duration = Duration::from_secs(10);
 
+/// How long the tray's context menu may be up before it is a fault.
+///
+/// A different KIND of bound from [`PATIENCE`]: this one is measured against a person reading a
+/// menu, not against code that should return in microseconds. Two minutes is far beyond anyone
+/// browsing a nine-item tray menu, and far below the "permanent" that the defect actually is
+/// (dig-app#86 held a wedged popup for 180 s and would have held it forever).
+pub const TRAY_MENU_PATIENCE: Duration = Duration::from_secs(120);
+
 /// How long before a continuing stall is stated again.
 const RESTATE_AFTER: Duration = Duration::from_secs(30);
 
@@ -264,23 +326,31 @@ const LOOK_EVERY: Duration = Duration::from_secs(1);
 impl Watcher {
     /// A watcher with the shipped thresholds.
     pub fn new() -> Self {
-        Self::with(PATIENCE, RESTATE_AFTER)
+        Self::scaled(1.0, RESTATE_AFTER)
     }
 
-    /// A watcher with explicit thresholds, so a test drives it in milliseconds.
-    pub fn with(patience: Duration, restate_after: Duration) -> Self {
+    /// A watcher whose per-phase patiences are all `scale`d, so a test drives the whole ladder in
+    /// milliseconds without flattening the difference between the bands it is checking.
+    pub fn scaled(scale: f64, restate_after: Duration) -> Self {
         Self {
-            patience,
+            scale,
             restate_after,
             restate_at: None,
             worst: Duration::ZERO,
         }
     }
 
+    /// How long `phase` may be silent before this watcher calls it a stall.
+    fn patience_for(&self, phase: Phase) -> Duration {
+        phase.patience().mul_f64(self.scale)
+    }
+
     /// Look at `beat` as of `now` and decide what, if anything, to say.
     pub fn look(&mut self, beat: &Heartbeat, now: Instant) -> Verdict {
         let silent_for = beat.silent_for(now);
-        if silent_for < self.patience {
+        // The phase is read BEFORE the comparison, because it chooses which bound applies.
+        let phase = beat.phase();
+        if silent_for < self.patience_for(phase) {
             return match self.restate_at.take() {
                 // It was stalled and is not any more. Say so once; `take` is what makes it once.
                 Some(_) => Verdict::Recovered {
@@ -291,7 +361,6 @@ impl Watcher {
         }
 
         self.worst = self.worst.max(silent_for);
-        let phase = beat.phase();
         match self.restate_at {
             None => {
                 self.restate_at = Some(now + self.restate_after);
@@ -336,8 +405,9 @@ pub fn report(verdict: Verdict) {
         } => tracing::error!(
             phase = phase.name(),
             silent_for_ms = silent_for.as_millis() as u64,
+            cause = phase.advice(),
             "the DIG tray's event loop has stopped running; menu clicks are being dropped before \
-             they reach any handler. The phase names where it stopped."
+             they reach any handler"
         ),
         Verdict::Stalled {
             phase,
@@ -346,6 +416,7 @@ pub fn report(verdict: Verdict) {
         } => tracing::error!(
             phase = phase.name(),
             silent_for_ms = silent_for.as_millis() as u64,
+            cause = phase.advice(),
             "the DIG tray's event loop is STILL not running; the tray will stay unresponsive until \
              DIG is restarted"
         ),
@@ -386,10 +457,14 @@ mod tests {
         Duration::from_millis(n)
     }
 
-    /// The thresholds every test below uses, far apart enough that a mistake in one cannot be read as
-    /// a pass on the other.
+    /// Every test below runs the SHIPPED patience ladder, shrunk by a factor of 100 — so
+    /// [`PATIENCE`] reads as 100 ms and [`TRAY_MENU_PATIENCE`] as 1200 ms, and the *relationship*
+    /// between the bands is what the tests exercise. Hard-coded test thresholds would have kept
+    /// passing after a production constant changed underneath them.
+    const SCALE: f64 = 0.01;
+
     fn watcher() -> Watcher {
-        Watcher::with(ms(100), ms(1000))
+        Watcher::scaled(SCALE, ms(1000))
     }
 
     #[test]
@@ -591,6 +666,7 @@ mod tests {
             Phase::ReadState,
             Phase::Presence,
             Phase::Repaint,
+            Phase::TrayMenu,
         ];
         let beat = Heartbeat::starting_at(base());
         for phase in all {
@@ -602,6 +678,92 @@ mod tests {
         let distinct = names.len();
         names.dedup();
         assert_eq!(names.len(), distinct, "two phases share a log name");
+    }
+
+    /// A person reading the tray menu is not a fault.
+    ///
+    /// Measured (dig-app#86): the tao closure does not run at all while `TrackPopupMenu` is up, so
+    /// every open menu is a pump silence. At the general patience that is an ERROR saying the tray
+    /// needs restarting — several times a day, wrongly — and a diagnostic that is loudly wrong in a
+    /// common case is one its reader learns to skip.
+    ///
+    /// The nearest wrong implementation applies ONE patience to every phase. This test and the next
+    /// share a single instant, so a uniform patience of either length fails one of them.
+    #[test]
+    fn an_open_tray_menu_is_tolerated_where_the_same_silence_elsewhere_is_not() {
+        let base = base();
+        // 400 ms: four times the scaled general patience, still a third of the scaled menu patience.
+        let observed_at = base + ms(400);
+
+        let menu = Heartbeat::starting_at(base);
+        menu.mark_at(Phase::TrayMenu, base);
+        assert_eq!(
+            watcher().look(&menu, observed_at),
+            Verdict::Quiet,
+            "a person reading the tray menu for a moment must not be reported as a wedged tray"
+        );
+
+        let dispatch = Heartbeat::starting_at(base);
+        dispatch.mark_at(Phase::BetweenTicks, base);
+        assert!(
+            matches!(
+                watcher().look(&dispatch, observed_at),
+                Verdict::Stalled {
+                    phase: Phase::BetweenTicks,
+                    ..
+                }
+            ),
+            "the SAME silence with no menu open is the unexplained stall, and must be reported"
+        );
+    }
+
+    /// The menu's own bound, from both sides — a tolerance that never expires is not a tolerance,
+    /// and the wedge this module exists for presents exactly as a menu that never closes.
+    #[test]
+    fn the_tray_menu_bound_holds_from_both_sides() {
+        let base = base();
+        let beat = Heartbeat::starting_at(base);
+        beat.mark_at(Phase::TrayMenu, base);
+        let bound = TRAY_MENU_PATIENCE.mul_f64(SCALE);
+
+        assert_eq!(
+            watcher().look(&beat, base + bound - ms(1)),
+            Verdict::Quiet,
+            "one millisecond under the menu bound must NOT be a stall"
+        );
+        assert!(
+            matches!(
+                watcher().look(&beat, base + bound),
+                Verdict::Stalled {
+                    phase: Phase::TrayMenu,
+                    ..
+                }
+            ),
+            "a menu still up at its bound is the wedge, and must be reported as a menu"
+        );
+    }
+
+    /// A stall report carries the cause of the phase it names, and the tray menu's cause is its own.
+    ///
+    /// Asserted as a value rather than by capturing a log: a test that inspects the thing which
+    /// produces a diagnostic proves nothing about whether the diagnostic ever arrives, so the choice
+    /// is checked here and `report` is a total match over it.
+    #[test]
+    fn each_phase_carries_its_own_cause_and_the_menus_is_distinct() {
+        assert_ne!(
+            Phase::TrayMenu.advice(),
+            Phase::BetweenTicks.advice(),
+            "a stuck menu and an unexplained dispatch block need different advice"
+        );
+        assert!(
+            Phase::TrayMenu.advice().contains("SetForegroundWindow"),
+            "the menu's advice must name the measured cause, so the reader is not left guessing"
+        );
+        assert_ne!(
+            Phase::Presence.advice(),
+            Phase::BetweenTicks.advice(),
+            "a block inside a named call is not a block in platform dispatch"
+        );
     }
 
     /// A mark that cannot be placed on the clock must age like the base, never like the present.
