@@ -596,6 +596,27 @@ mod tests {
             ),
             "once the backoff elapses the stall must be stated again, flagged as a restatement"
         );
+
+        // A SECOND restatement, and a third. One restatement is not the property: `Vigil` latched
+        // after its first line and went quiet forever, and the case that matters most — a permanent
+        // lockout — is precisely the one that then went unreported. Found by mutation: multiplying
+        // the backoff only on the restate branch left the single-restatement version of this test
+        // green (dig-app#86).
+        for restatement in 2..=3u64 {
+            let due = ms(200) + ms(1000) * restatement as u32;
+            assert_eq!(
+                watcher.look(&beat, base + due - ms(50)),
+                Verdict::Quiet,
+                "restatement {restatement} must wait out its own backoff too"
+            );
+            assert!(
+                matches!(
+                    watcher.look(&beat, base + due),
+                    Verdict::Stalled { again: true, .. }
+                ),
+                "a permanent stall must keep saying so — restatement {restatement} is missing"
+            );
+        }
     }
 
     /// A stall that ends is reported ONCE as a recovery, then nothing.

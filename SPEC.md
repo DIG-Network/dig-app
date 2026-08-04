@@ -279,6 +279,29 @@ ever leave it, which would make the lock states lie. It is reported as completen
 (`account::journey::AccountCompleteness`) — a fact about the account — and the first-run flow (§3.2b)
 names the DID as the remaining REQUIRED step while stating plainly that it cannot be taken yet.
 
+### 3.1b-lv The tray event loop MUST be watched from outside itself (normative)
+
+The tray's event loop can stop running, and when it does every menu item is dead. Four reported
+recurrences of that condition (#69, #78, #83, dig-app#86) produced **no log line at all**, because every
+diagnostic the loop has runs inside the loop: a loop that has stopped iterating cannot report that it
+has stopped iterating.
+
+- **A liveness stamp MUST be written from inside the loop and read from a thread that is not the loop.**
+  A watcher sharing the watched thread observes nothing.
+- **The stamp MUST carry a PHASE naming where the loop is**, including a named value for *"returned to
+  the platform's own dispatch"*. A nested modal message loop — the tray's own context menu, drawn by
+  `TrackPopupMenu` inside the tray window proc — runs there, upstream of everything the loop measures,
+  and an instrument that only spans the loop's own calls reports a clean bill of health while the tray
+  is dead.
+- **A phase's tolerance MUST be measured against what that phase IS.** The tray menu is a person
+  reading; every other phase is code that should return in microseconds. One tolerance for both either
+  reports a wedge minutes late or reports every opened menu as a wedge, and a diagnostic that is loudly
+  wrong in a common case is one its reader learns to skip.
+- **A continuing stall MUST keep being reported** on a backoff, and MUST NOT latch after one line: the
+  permanent case is the one that matters most, and latching silences exactly it. A stall that ENDS MUST
+  be reported once, with its duration.
+- The watcher MUST NOT act. It observes and reports; recovery belongs to the window service.
+
 ### 3.1c The tray account surface (normative)
 
 The tray is the only surface a person has on a fresh install, so it MUST expose the whole account
