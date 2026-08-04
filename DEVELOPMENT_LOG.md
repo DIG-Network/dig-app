@@ -544,3 +544,114 @@ Two changes, not one: let the window GROW to what its content needs (bounded by 
 of `ViewportInfo::monitor_size`, falling back to the creation height when no monitor is reported, which
 is also what keeps the headless overflow tests meaningful), and make the bar solid and wide for the
 displays where growing is not enough. Look at the picture after the test goes green.
+
+## `winit` allows ONE event loop per PROCESS, so the prompt thread can never be replaced (dig_ecosystem#2074)
+
+`EventLoopBuilder::build()` opens with `if EVENT_LOOP_CREATED.swap(true, Relaxed) { return
+Err(RecreationAttempt) }` — a **process-global** `AtomicBool` (winit 0.30.13 `src/event_loop.rs:69`,
+`:118`) reset nowhere outside the web backend. Sequential windows work only because eframe caches the
+loop it built in **thread-local** storage and re-enters it via `run_app_on_demand` (`eframe` 0.31.1
+`src/native/run.rs:51`, gated on `NativeOptions::run_and_return`, default `true`).
+
+Both halves matter, and they point the same way:
+
+- Same thread, one window after another: fine. Measured — three real `run_native` calls in a row on one
+  spawned thread all returned `Ok`, including one straight after a panic inside a frame.
+- A NEW thread: never. Its thread-local cache is empty, so it asks winit for a loop and is told
+  `RecreationAttempt` for the life of the process.
+
+So **"detect the dead prompt thread and respawn it" cannot work** — it would look like a recovery and be
+a permanent silent `Unavailable`. The only available strategy is to make the thread unkillable
+(`catch_unwind` per job) and to report loudly if it dies anyway. The same rule is why the crate's
+real-window tests must each be run in their OWN process: `cargo test` gives every `#[test]` its own
+thread, so two of them cannot both open a window.
+
+## A panic inside a winit event handler is SWALLOWED, not raised (dig_ecosystem#2074)
+
+`EventLoopRunner::catch_unwind` (winit 0.30.13 `windows/event_loop/runner.rs:170`) stores the payload
+and — this is the part that bites — **short-circuits every later call while a payload is stored**, so
+the application callback is silently never invoked again. The payload is only re-raised from
+`dispatch_peeked_messages` (`event_loop.rs:423`), *after* a successful `DispatchMessageW`. A panic on a
+path that then finds an empty queue leaves a loop that still pumps messages, still answers `WM_NULL`,
+and never delivers another event to the app: a window frozen on its last frame that cannot be answered
+and never returns. Do not assume a panic in a frame will surface as a crash, or even as a stuck thread
+you can see.
+
+## `Responding = False` on the dig-app tray process is a RED HERRING (dig_ecosystem#2074)
+
+`.NET Process.Responding` sends `WM_NULL` to `MainWindowHandle`, which is the first VISIBLE, unowned,
+top-level window of the process. winit's own 13×13 helper — class **`Winit Thread Event Target`** — is
+all three, and it appears the moment the first prompt is ever drawn and then outlives every prompt.
+Between prompts the prompt thread parks in `rx.recv()` and pumps nothing, so that window stops
+answering and the whole process reads as "not responding" forever.
+
+Verified on the affected machine: `Responding=True` on a freshly started dig-app, `False` from the first
+prompt onward, with **no consent window on screen**. Enumerate the process's windows by class before
+reading anything into `Responding`.
+
+## Diagnosing a GUI from a DPI-UNAWARE shell reports coordinates that do not exist (dig_ecosystem#2074)
+
+PowerShell is `DPI_AWARENESS_UNAWARE` (0); the prompt window is `PER_MONITOR_AWARE` (2) at 240 DPI. So
+`GetWindowRect` came back as `(98,98)-(718,421)` for a window that visibly occupied `(244,244)-(1794,1052)`
+— a 2.5× disagreement that reads exactly like a rendering bug and is not one. `SetThreadDpiAwarenessContext(-4)`
+on the probing thread makes every measurement agree with the screen.
+
+Two other traps in the same session, both of which produced confident wrong conclusions:
+
+- `mouse_event(MOUSEEVENTF_ABSOLUTE | LEFTDOWN, 0, 0, …)` clicks at **screen (0,0)**, not at the cursor:
+  the absolute flag means `dx`/`dy` are normalised 0–65535 coordinates, not "ignored". Use the plain
+  `LEFTDOWN`/`LEFTUP` flags after `SetCursorPos`.
+- A background tray agent's window often opens WITHOUT foreground (`GetForegroundWindow() != hwnd`), so
+  injected keystrokes go somewhere else entirely. Check foreground before concluding "the window ignores
+  the keyboard".
+
+A prompt that self-dismissed at exactly its 300 s deadline is proof the frame loop was alive the whole
+time — which is worth measuring before theorising about a stalled loop.
+
+## Never point a `git checkout --`-based mutation harness at UNCOMMITTED work (dig_ecosystem#2074)
+
+The falsification script restored each mutation with `git checkout -- <file>`, which happily reverted an
+hour of uncommitted fixes on its very first `restore`, and then reported the mutations as "survived"
+because their anchors no longer existed. Commit the baseline first, and make the harness verify each
+mutation actually applied — a silently no-op'd edit reports a green run as a passing falsification.
+
+Also: classify a mutation run by looking for `FAILED` **before** grepping for `^error`, because cargo
+ends every failing test run with `error: test failed, to rerun pass …`.
+
+## A bulk "safe default" is unsafe wherever BOTH controls act (dig_ecosystem#2074)
+
+Flipping every `ClaimPrompt` to `refusal_is_default: true` — right for "I have written these 24 words
+down" — silently inverted the safe side of the first-run route fork, where **declining generates and
+seals a new master seed**. One line of prompt-kind reasoning put a brand-new account one bare Enter
+away, behind a control the branded window still labelled "Cancel".
+
+The rule is not a property of the prompt KIND, it is a property of what each ANSWER DOES. `SPEC.md`
+§3.2 already said "classified per call site, never applied in bulk"; the code inherited a default
+instead, so the compiler never asked. Making the field REQUIRED on `ClaimPrompt` is what turns that
+sentence into something a reviewer cannot skip: every call site now has to state which side is safe,
+and the diff shows all ten of them.
+
+Corollary worth keeping: a control that takes an irreversible action must not wear the backend's
+generic word for refusing. The refusing label now comes from the CONTENT when it supplies one.
+
+## An unbounded message drain on Windows is not obviously bounded (dig_ecosystem#2074)
+
+`drain_pending` looked safely terminating — `PeekMessage` removes what it returns, so the queue only
+shrinks. It does not. The flush runs after winit's `reset_runner()`, when `should_buffer()` is true and
+winit's own `WM_PAINT` handler RE-INVALIDATES the window on every paint (winit 0.30.13
+`windows/event_loop.rs:1276`), so the queue refills as fast as it drains. A harness of winit's exact
+shape dispatched **330,021 `WM_PAINT`s in 5 s without terminating**.
+
+What keeps it latent is an undocumented scheduling rule: `WM_PAINT` is synthesised and low-priority, so
+the `PostMessageW` destroy that `winit::Window::drop` sends is always returned first and the loop ends
+on iteration 1. That is a fine reason to expect it to work and a terrible thing to depend on, on the
+single thread the whole consent surface runs on. Bounded at 8192 — two orders of magnitude above any
+real teardown, and structurally terminating.
+
+## Clearing a "busy" flag after the call is not the same as clearing it on the way out
+
+The hotkey worker's `busy` flag was reset by a statement after `on_press()`. A panic skips statements.
+Measured on the unguarded version: after one panicking press, five further presses reached the handler
+**zero** times — the flag latched, and every later press short-circuited before it could even notice
+the worker was dead. The panic guard fixes the thread; only a drop guard fixes the flag, and it keeps
+fixing it if someone later moves the guard.

@@ -264,6 +264,10 @@ fn confirm_revoke(confirmer: &dyn NativeConfirmer, app: &PairedApp) -> bool {
             body: &body,
             affirm: "Remove its access",
             identifier: None,
+            decline: None,
+            // The user just chose this from the menu, and refusing costs them a retry — but the
+            // affirmative cuts a paired app off mid-operation, so the safe side is the default.
+            refusal_is_default: true,
         }),
         ConfirmDecision::Approve
     )

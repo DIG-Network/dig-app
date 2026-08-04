@@ -2352,6 +2352,8 @@ mod tray {
                 heading: "This will delete some cached content",
                 body: &body,
                 affirm: "Lower it and free the space",
+                decline: None,
+                refusal_is_default: true,
                 scannable: None,
                 identifier: None,
             }) {

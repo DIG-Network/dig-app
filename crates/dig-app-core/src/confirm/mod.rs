@@ -128,6 +128,26 @@ pub struct ClaimPrompt<'a> {
     /// A bare identifier to show set apart from the prose, rendered in Space Mono — the base32 TOTP
     /// secret on the two-factor enrolment screen, `None` on every other claim.
     pub identifier: Option<&'a str>,
+    /// What the NEGATIVE choice is called, when "Cancel" would be a lie.
+    ///
+    /// `None` keeps the backend's own word for refusing. Supply one whenever declining is not
+    /// backing out but CHOOSING SOMETHING ELSE: on the first-run route fork, declining "Import my
+    /// recovery phrase" generates and seals a brand-new master seed, and a control that does that
+    /// must not be labelled "Cancel" (dig_ecosystem#2074).
+    pub decline: Option<&'static str>,
+    /// Whether a bare Enter should REFUSE this claim rather than affirm it.
+    ///
+    /// Decided per call site, deliberately — `SPEC.md` §3.2 requires exactly that and forbids
+    /// applying it in bulk, because the safe direction is a property of what each answer DOES, not
+    /// of the prompt kind:
+    ///
+    /// * `true` where the claim is an assertion about the world and affirming it costs something
+    ///   irreversible. Enter on *"I have written these down"* must not record that a seed is safely
+    ///   written down on behalf of someone holding nothing.
+    /// * `false` where REFUSING is itself an action. On the first-run route fork, Deny creates an
+    ///   account; defaulting to the refusal there would mean a bare Enter generating a master seed
+    ///   (dig_ecosystem#2074).
+    pub refusal_is_default: bool,
     /// Something to be SCANNED, drawn as a QR code between the body and the buttons — `None` on every
     /// claim but two-factor enrolment (dig_ecosystem#1849).
     ///
@@ -510,6 +530,11 @@ pub(crate) struct ConfirmContent {
     pub presentation: Presentation,
     /// A QR code to draw beneath the body, or `None`. See [`ClaimPrompt::scannable`].
     pub qr: Option<QrArt>,
+    /// What to call the refusing control, when the backend's own word for it would be wrong.
+    ///
+    /// `None` means "whatever this backend calls refusing" (`"Cancel"` everywhere today). See
+    /// [`ClaimPrompt::decline`] for the case that needs it.
+    pub decline: Option<&'static str>,
 }
 
 /// Whether a confirm window asks the user to DECIDE something or merely to acknowledge it.
@@ -561,6 +586,8 @@ impl ConfirmContent {
             detail: None,
             identifier: Some(prompt.ext_id.to_string()),
             action: "Pair",
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             qr: None,
             presentation: Self::authorize(),
         }
@@ -582,6 +609,8 @@ impl ConfirmContent {
             detail: None,
             identifier: None,
             action: "Reveal",
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             qr: None,
             presentation: Self::authorize(),
         }
@@ -601,13 +630,15 @@ impl ConfirmContent {
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
             action: prompt.acknowledge,
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             qr: None,
             presentation: Presentation::Acknowledge,
         }
     }
 
     /// The content for a claim prompt (dig_ecosystem#1773): a real either/or with no biometric.
-    fn claim(prompt: &ClaimPrompt<'_>) -> Self {
+    pub(crate) fn claim(prompt: &ClaimPrompt<'_>) -> Self {
         Self {
             detail: None,
             identifier: prompt.identifier.map(str::to_string),
@@ -615,13 +646,23 @@ impl ConfirmContent {
             heading: prompt.heading.to_string(),
             body: prompt.body.to_string(),
             action: prompt.affirm,
+            decline: prompt.decline,
             qr: prompt.scannable.cloned(),
             // The affirming label is a first-person CLAIM ("I have written these down"), so it is quoted as
             // a choice rather than slotted into a "Choose OK to <verb>" sentence that cannot read
             // correctly (#1752). "Not yet" names what Cancel actually does here — it does not reject an
             // authorization, it says the claim is not true yet.
+            //
+            // Taken from the CALL SITE, never decided here. Most claims want the refusal
+            // pre-selected — nobody asks to make a claim, and a bare Enter on "I have written these
+            // down" records that a seed is safely written down on behalf of someone holding nothing
+            // (dig_ecosystem#2074, the destroy window's rule from #1799). But the safe direction is
+            // a property of what each ANSWER DOES, not of the prompt kind: on the first-run route
+            // fork, refusing GENERATES an account, and pre-selecting that would put a new master
+            // seed one Enter away. SPEC.md §3.2 requires this to be classified per call site and
+            // forbids applying it in bulk; a blanket `true` here was exactly that bulk application.
             presentation: Presentation::Decide {
-                refusal_is_default: false,
+                refusal_is_default: prompt.refusal_is_default,
             },
         }
     }
@@ -652,6 +693,8 @@ impl ConfirmContent {
             detail: None,
             identifier: None,
             action: "Destroy",
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             // NOT `Self::authorize`: this is the one window where a bare Enter must not confirm. Both
             // platform dialogs default to their first button, so the refusal is pre-selected here.
             qr: None,
@@ -675,6 +718,8 @@ impl ConfirmContent {
             heading: format!("Do you want to {}?", prompt.change),
             body: prompt.consequence.to_string(),
             action: prompt.affirm,
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             qr: None,
             presentation: Presentation::Decide {
                 refusal_is_default: true,
@@ -713,6 +758,8 @@ impl ConfirmContent {
             detail: None,
             identifier: None,
             action: "Connect",
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             qr: None,
             presentation: Self::authorize(),
         }
@@ -743,6 +790,8 @@ impl ConfirmContent {
             detail: Some(decoded.to_string()),
             identifier: None,
             action: "Sign",
+            // Every other prompt keeps the backend's own word for refusing.
+            decline: None,
             qr: None,
             presentation: Self::authorize(),
         })
@@ -1069,6 +1118,76 @@ mod tests {
         );
     }
 
+    /// **A bare Enter must never make a claim on the user's behalf.**
+    ///
+    /// The prompts split into two groups by who is asking. An AUTHORIZATION is something the user
+    /// just asked for, so its affirmative is the default and refusing costs a retry. A CLAIM, a
+    /// DESTROY and a SECURITY change are not: nobody asks to be shown their recovery phrase and
+    /// told to assert they wrote it down, and a reflexive Enter on *"I have written these down"*
+    /// records that assertion for someone holding nothing. What it costs is the account
+    /// (dig_ecosystem#2074, the same rule as the destroy window #1799).
+    ///
+    /// Pinned as a TABLE over both groups rather than one assertion, so a future prompt has to
+    /// decide which group it is in instead of inheriting whichever literal was nearest.
+    #[test]
+    fn only_prompts_the_user_asked_for_default_to_their_affirmative() {
+        fn refusal_is_default(content: &ConfirmContent) -> bool {
+            match &content.presentation {
+                Presentation::Decide { refusal_is_default } => *refusal_is_default,
+                other => panic!("expected a two-choice window, got {other:?}"),
+            }
+        }
+
+        let claim = ConfirmContent::claim(&ClaimPrompt {
+            title: "DIG — Your recovery phrase",
+            heading: "Write these 24 words down.",
+            body: "…",
+            affirm: "I have written these down",
+            decline: None,
+            refusal_is_default: true,
+            scannable: None,
+            identifier: None,
+        });
+        assert!(
+            refusal_is_default(&claim),
+            "a bare Enter affirms the recovery-phrase claim — someone who pressed Enter without \
+             writing anything down is recorded as having saved their seed"
+        );
+
+        let destroy = ConfirmContent::destroy(&DestroyPrompt {
+            subject: "the DIG Account on this computer",
+            replacement: "",
+            recoverable: false,
+        });
+        assert!(
+            refusal_is_default(&destroy),
+            "a bare Enter destroys an account"
+        );
+
+        let security = ConfirmContent::security(&SecurityPrompt {
+            change: "turn off two-factor",
+            affirm: "Turn it off",
+            consequence: "…",
+        });
+        assert!(
+            refusal_is_default(&security),
+            "a bare Enter weakens the account's security"
+        );
+
+        // The other half of the rule: an authorization the user initiated still defaults to yes,
+        // so this is not "make everything default to no".
+        let sign = ConfirmContent::sign(&SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some("Send 1 XCH"),
+        })
+        .expect("a sign prompt with a decoded transaction");
+        assert!(
+            !refusal_is_default(&sign),
+            "an authorization the user just asked for should still default to its affirmative"
+        );
+    }
+
     // ---- Test doubles: a foreground window + biometric that return scripted outcomes. ----
 
     struct FakeWindow(WindowIntent);
@@ -1296,6 +1415,8 @@ mod tests {
             heading: "Write these 24 words down.",
             body: " 1. abandon",
             affirm: "I have written these down",
+            decline: None,
+            refusal_is_default: true,
             scannable: None,
             identifier: None,
         });
@@ -1352,6 +1473,8 @@ mod tests {
                 heading: "Do you have your 24 words written down somewhere safe?",
                 body: "If you continue without them…",
                 affirm: "Yes, I have them",
+                decline: None,
+                refusal_is_default: true,
                 scannable: None,
                 identifier: None,
             }),
@@ -1382,6 +1505,8 @@ mod tests {
                 heading: "h",
                 body: "b",
                 affirm: "Yes",
+                decline: None,
+                refusal_is_default: true,
                 scannable: None,
                 identifier: None,
             }),

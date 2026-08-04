@@ -201,6 +201,9 @@ pub fn enrol<S: ProfileSealer>(
         heading: "Add a code from your phone to this account?",
         body: EXPLAINER,
         affirm: "Set it up",
+        decline: None,
+        // The user just chose this from the menu; refusing costs them a retry and nothing else.
+        refusal_is_default: false,
         scannable: None,
         identifier: None,
     }) {
@@ -225,6 +228,9 @@ pub fn enrol<S: ProfileSealer>(
         heading: "Add DIG to your authenticator app.",
         body: &add_to_authenticator_body(scannable.is_some()),
         affirm: "I've added it",
+        decline: None,
+        // An assertion about the world: enrolment is only safe if it is actually true.
+        refusal_is_default: true,
         scannable: scannable.as_ref(),
         identifier: Some(&key),
     }) {
@@ -251,6 +257,9 @@ pub fn enrol<S: ProfileSealer>(
             codes = *codes.printable(),
         ),
         affirm: "I have saved these",
+        decline: None,
+        // The recovery codes are the way back in. Enter must not claim they are saved.
+        refusal_is_default: true,
         scannable: None,
     identifier: None,
     }) {

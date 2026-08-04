@@ -72,6 +72,10 @@ impl PhrasePresenter for WindowedPresenter<'_> {
                 *words
             ),
             affirm: "I have written these down",
+            decline: None,
+            // An assertion about the world, and affirming it costs the account: a reflexive Enter
+            // would record that a seed is safely written down for somebody holding nothing.
+            refusal_is_default: true,
             scannable: None,
             identifier: None,
         });
@@ -88,6 +92,9 @@ impl PhrasePresenter for WindowedPresenter<'_> {
                    address and everything sealed under it are gone for good. You can view the words \
                    again later from the DIG tray menu.",
             affirm: "Yes, I have them",
+            decline: None,
+            // As above — this screen exists precisely to make the user stop and check.
+            refusal_is_default: true,
             scannable: None,
         identifier: None,
         });
@@ -326,6 +333,9 @@ fn backup_warning(target: BackupTarget) -> ClaimPrompt<'static> {
                    but clipboard history or sync services may still retain a copy. Only do this to move \
                    them somewhere safe, and copy something else afterwards to clear them sooner.",
             affirm: "I understand — copy my phrase",
+            decline: None,
+            // Affirming puts the 24 words on the clipboard in plain text. Enter must not.
+            refusal_is_default: true,
             scannable: None,
         identifier: None,
         },
@@ -336,6 +346,9 @@ fn backup_warning(target: BackupTarget) -> ClaimPrompt<'static> {
                    who uses this computer — can take your DIG Account. Save it only somewhere you \
                    control, and delete it once your words are somewhere safe.",
             affirm: "I understand — save my phrase",
+            decline: None,
+            // Affirming writes the 24 words to an unencrypted file. Enter must not.
+            refusal_is_default: true,
             scannable: None,
         identifier: None,
         },
@@ -465,6 +478,9 @@ fn offer_a_last_look<S: ProfileSealer>(
                only somewhere else, since it will be gone from this computer. If you are not certain \
                you have them written down, look now.",
         affirm: "Show me the words first",
+        decline: None,
+        // Affirming puts the recovery phrase on screen; declining just carries on.
+        refusal_is_default: true,
         scannable: None,
     identifier: None,
     });
@@ -850,6 +866,10 @@ pub fn first_run_wizard(
                Nothing is created until you choose, and you can stop at any point.\n\n\
                You do not need an account to read content on the DIG Network — that already works.",
         affirm: "Get started",
+        decline: None,
+        // Neither answer creates anything, so the friendly default is the affirmative — this is an
+        // invitation the user is answering, not a claim they are making.
+        refusal_is_default: false,
         scannable: None,
         identifier: None,
     }) != ConfirmDecision::Approve
@@ -857,23 +877,41 @@ pub fn first_run_wizard(
         return FirstRunOutcome::Declined;
     }
 
-    // 2. Choose the route. A real either/or — "yes" imports an existing phrase, "no" creates a new
-    // account — so it is a CLAIM, and a host that cannot ask it creates nothing rather than guessing.
-    match confirmer.confirm_claim(&ClaimPrompt {
-        title: "DIG — Set up your DIG Account",
-        heading: "Do you already have a DIG recovery phrase?",
-        body:
-            "If you have used DIG on another computer, import that account by typing its 24 words. \
-               Choose \"Create a new account\" to start fresh with a brand-new recovery phrase.\n\n\
-               A recovery phrase from a Chia wallet such as Sage is NOT a DIG recovery phrase.",
-        affirm: "Import my recovery phrase",
-        scannable: None,
-        identifier: None,
-    }) {
+    // 2. Choose the route — see `route_fork`, which is the one claim in the app where BOTH controls
+    // act, and where the usual "a claim defaults to its refusal" rule is therefore inverted. A host
+    // that cannot ask creates nothing rather than guessing.
+    match confirmer.confirm_claim(&route_fork()) {
         ConfirmDecision::Approve => import_existing_account(confirmer, import),
         ConfirmDecision::Deny => create_new_account(confirmer, create),
         // No confirm surface at all: create nothing, exactly as the orient screen does on such a host.
         ConfirmDecision::Timeout | ConfirmDecision::Unavailable => FirstRunOutcome::Declined,
+    }
+}
+
+/// The first-run route fork: import an existing phrase, or CREATE A NEW ACCOUNT.
+///
+/// Named rather than written inline so its two safety properties can be asserted directly, and
+/// so a future edit has to walk past the reason they are what they are.
+fn route_fork() -> ClaimPrompt<'static> {
+    ClaimPrompt {
+            title: "DIG — Set up your DIG Account",
+            heading: "Do you already have a DIG recovery phrase?",
+            body:
+                "If you have used DIG on another computer, import that account by typing its 24 words. \
+                   Choose \"Create a new account\" to start fresh with a brand-new recovery phrase.\n\n\
+                   A recovery phrase from a Chia wallet such as Sage is NOT a DIG recovery phrase.",
+            affirm: "Import my recovery phrase",
+            // NOT "Cancel". This control GENERATES AND SEALS A NEW MASTER SEED, and the body has
+            // already told the user to look for "Create a new account" (dig_ecosystem#2074).
+            decline: Some("Create a new account"),
+            // NOT pre-focused, unlike every other claim in the app. Both controls ACT here, so the
+            // usual "a claim defaults to its refusal" rule is inverted: pre-selecting the refusal
+            // would put a brand-new account one bare Enter away. The affirmative keeps the default
+            // because importing is the reversible half — it asks for 24 words and creates nothing
+            // until they are typed.
+            refusal_is_default: false,
+            scannable: None,
+            identifier: None,
     }
 }
 
@@ -1462,6 +1500,63 @@ mod tests {
             AccountCompleteness::of(Some("did:chia:abc")),
             AccountCompleteness::DidBound
         );
+    }
+
+    /// What a claim's window will do with a bare Enter, and what its negative control is called.
+    fn safe_side(prompt: &ClaimPrompt<'_>) -> (bool, Option<&'static str>) {
+        let content = crate::confirm::ConfirmContent::claim(prompt);
+        match content.presentation {
+            crate::confirm::Presentation::Decide { refusal_is_default } => {
+                (refusal_is_default, content.decline)
+            }
+            other => panic!("a claim must be a two-choice window, got {other:?}"),
+        }
+    }
+
+    /// **A bare Enter on the first-run route fork must not create an account.**
+    ///
+    /// This is the one claim in the app where BOTH controls act: affirming imports an existing
+    /// phrase, and DECLINING generates and seals a brand-new master seed. Applying the ordinary
+    /// claim rule here — pre-select the refusal, because nobody asks to make a claim — puts a new
+    /// account one keystroke away, behind a control that would otherwise be labelled "Cancel"
+    /// (dig_ecosystem#2074).
+    #[test]
+    fn a_bare_enter_on_the_first_run_route_fork_does_not_create_an_account() {
+        let (refusal_is_default, decline) = safe_side(&route_fork());
+        assert!(
+            !refusal_is_default,
+            "the route fork pre-selects its negative control, and that control CREATES AND SEALS A              NEW MASTER ACCOUNT — the refusal is only the safe default where refusing does nothing"
+        );
+        assert_eq!(
+            decline,
+            Some("Create a new account"),
+            "the control that creates a brand-new account must say so, not read \"Cancel\""
+        );
+    }
+
+    /// **Every OTHER claim still pre-selects its refusal.**
+    ///
+    /// The companion to the test above: making the fork an exception must not quietly become an
+    /// exemption for the claims the rule exists for. Driven through the REAL prompts the enrolment
+    /// flow builds, so a call site that flips back is caught here rather than in review.
+    #[test]
+    fn the_claims_that_assert_something_still_refuse_on_a_bare_enter() {
+        for (what, prompt) in [
+            (
+                "the clipboard backup warning",
+                backup_warning(BackupTarget::Clipboard),
+            ),
+            (
+                "the file backup warning",
+                backup_warning(BackupTarget::File),
+            ),
+        ] {
+            let (refusal_is_default, _) = safe_side(&prompt);
+            assert!(
+                refusal_is_default,
+                "a bare Enter affirms {what} — which puts the 24 words somewhere in plain text on                  behalf of somebody who only pressed a key"
+            );
+        }
     }
 
     /// A confirmer that plays a SCRIPT of decisions and records every window it drew.

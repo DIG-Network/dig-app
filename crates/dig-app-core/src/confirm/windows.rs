@@ -43,6 +43,9 @@ const VERIFY_DEADLINE: Duration = Duration::from_secs(180);
 ///
 /// Bounded so a busy window cannot starve the check: the caller must come back and notice that
 /// verification finished, however much repainting the desktop is asking for.
+///
+/// This bound belongs to the Hello wait ALONE. The other caller — the prompt window's deferred
+/// destruction — needs the opposite guarantee and gets [`drain_pending`].
 const PUMP_BUDGET: usize = 64;
 
 /// A [`BiometricVerifier`] backed by the WinRT [`UserConsentVerifier`] (Windows Hello).
@@ -93,20 +96,58 @@ fn request_consent(message: String) -> VerifyOutcome {
     outcome
 }
 
-/// Dispatch the messages already waiting for this thread, and return once the queue is empty.
+/// Dispatch up to [`PUMP_BUDGET`] of the messages waiting for this thread, then return.
 ///
-/// Two callers, one mechanism — this is the crate's ONLY message pump:
-///
-/// * the Hello wait above passes it as the "I am still alive" hook, so the tray keeps painting while
-///   the authenticator is up (dig_ecosystem#1926);
-/// * the prompt window calls it after its event loop exits, to dispatch the destroy message `winit`
-///   posted rather than performed (see `gui::window::flush_deferred_window_destruction`).
+/// The "I am still alive" hook for the Hello wait above, so the tray keeps painting while the
+/// authenticator is up (dig_ecosystem#1926). The BUDGET is the point: the caller must get control
+/// back and notice that verification finished, however much repainting the desktop is asking for.
 ///
 /// A `WM_QUIT` is put back rather than consumed: it belongs to the event loop that owns this thread,
 /// and swallowing it here would leave the app unable to exit.
 pub(super) fn pump_pending() {
+    pump(Some(PUMP_BUDGET));
+}
+
+/// Dispatch the messages waiting for this thread, up to [`DRAIN_BUDGET`].
+///
+/// The prompt window calls this after its event loop exits, to deliver the destroy message `winit`
+/// posted rather than performed (see `gui::window::flush_deferred_window_destruction`). Here the
+/// requirement is the opposite of the Hello wait's: nothing is waiting for control back, and a
+/// budget that ran out one message before the destroy would leave the consent window on screen with
+/// a dead message pump — the exact defect the flush exists to prevent (dig_ecosystem#2038). The two
+/// callers shared a bound chosen for one of them (dig_ecosystem#2074).
+///
+/// # Why it is still BOUNDED, generously, rather than unbounded
+///
+/// An unbounded drain here looks safe and is not. The flush runs after winit's `reset_runner()`, so
+/// `should_buffer()` is true and winit's own `WM_PAINT` handler RE-INVALIDATES the window on every
+/// paint (winit 0.30.13 `windows/event_loop.rs:1276`) — the queue refills itself as fast as it is
+/// drained. Measured against a handler of winit's exact shape: **330,021 `WM_PAINT`s in 5 s without
+/// terminating.**
+///
+/// The only reason that is not live today is an undocumented OS scheduling rule — `WM_PAINT` is a
+/// synthesised low-priority message, so the `PostMessageW` destroy that `winit::Window::drop` sends
+/// is always returned first and the loop ends on iteration 1. Depending on that would put an
+/// unbounded loop on the single thread the entire consent surface runs on, one dependency bump away
+/// from a permanent lockout.
+///
+/// So: bounded, but two orders of magnitude above anything a real teardown queues. Termination is
+/// structural; the #2074 concern — a destroy sitting past message 64 — is still covered.
+pub(super) fn drain_pending() {
+    pump(Some(DRAIN_BUDGET));
+}
+
+/// The ceiling on the deferred-destruction drain.
+///
+/// Not a tuning knob: it is the "this queue is pathological, stop" guard described on
+/// [`drain_pending`]. A real teardown dispatches single-digit messages.
+const DRAIN_BUDGET: usize = 8192;
+
+/// The crate's one message pump. `budget` of `None` drains until the queue is empty.
+fn pump(budget: Option<usize>) {
     let mut message = MSG::default();
-    for _ in 0..PUMP_BUDGET {
+    let mut dispatched = 0usize;
+    while budget.map_or(true, |budget| dispatched < budget) {
         // SAFETY: a plain message-queue read on the calling thread's own queue.
         unsafe {
             if !PeekMessageW(&mut message, HWND::default(), 0, 0, PM_REMOVE).as_bool() {
@@ -119,6 +160,7 @@ pub(super) fn pump_pending() {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        dispatched += 1;
     }
 }
 
@@ -272,6 +314,98 @@ mod tests {
             delivered,
             "the pump returned without delivering the posted message — a deferred window \
              destruction would never run, and the consent window would stay on screen frozen"
+        );
+    }
+
+    /// **The DRAIN delivers every queued message, however many are waiting.**
+    ///
+    /// The destroy message `winit` posts sits at an arbitrary depth in a queue that also carries
+    /// paint, input and timer messages for a window that was just answered. Under the shared
+    /// [`PUMP_BUDGET`] — a bound chosen for the Hello wait, where returning early is the
+    /// REQUIREMENT — a busy window's destroy could fall past message 64 and never be delivered,
+    /// leaving the consent window on screen with a dead message pump (dig_ecosystem#2074).
+    ///
+    /// So the assertion is deliberately on a queue LONGER than that budget, with the message that
+    /// matters posted LAST. A drain that stops at 64 leaves the final probe undelivered and fails.
+    #[test]
+    fn the_drain_delivers_every_queued_message_however_many() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, PostMessageW, RegisterClassW,
+            HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WNDCLASSW,
+        };
+
+        /// A private message no other code in the process sends.
+        const PROBE: u32 = WM_APP + 9;
+        /// Comfortably past the Hello wait's budget, so a bounded drain cannot pass this test.
+        const QUEUED: usize = PUMP_BUDGET * 3;
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "system" fn count(
+            window: HWND,
+            message: u32,
+            w: WPARAM,
+            l: LPARAM,
+        ) -> LRESULT {
+            if message == PROBE {
+                SEEN.fetch_add(1, Ordering::SeqCst);
+                return LRESULT(0);
+            }
+            // SAFETY: the default handling for every message this probe does not claim.
+            unsafe { DefWindowProcW(window, message, w, l) }
+        }
+
+        let class = windows::core::w!("DigDrainProbe");
+        // SAFETY: registering a class and creating a message-only window on this thread, then
+        // destroying it below. Every pointer is either null or a `'static` wide literal.
+        let window = unsafe {
+            let module = GetModuleHandleW(PCWSTR::null()).expect("this module's handle");
+            let _ = RegisterClassW(&WNDCLASSW {
+                lpfnWndProc: Some(count),
+                hInstance: module.into(),
+                lpszClassName: class,
+                ..Default::default()
+            });
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                PCWSTR::null(),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                module,
+                None,
+            )
+            .expect("a message-only window")
+        };
+
+        SEEN.store(0, Ordering::SeqCst);
+        for _ in 0..QUEUED {
+            // SAFETY: posting to a window this thread owns.
+            unsafe {
+                PostMessageW(window, PROBE, WPARAM(0), LPARAM(0)).expect("the probe is queued");
+            }
+        }
+
+        drain_pending();
+
+        let seen = SEEN.load(Ordering::SeqCst);
+        // SAFETY: destroying a window this thread created.
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+        assert_eq!(
+            seen, QUEUED,
+            "the drain stopped after {seen} of {QUEUED} messages; a deferred window destruction \
+             queued behind a busy window would never be delivered and the consent window would \
+             stay on screen"
         );
     }
 }

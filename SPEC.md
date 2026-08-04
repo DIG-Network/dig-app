@@ -590,14 +590,27 @@ Binding rules, which matter more for an input control than for a notice:
   A second button nobody reads asks the user to make a decision that does not exist, and a warning icon on
   a success ("your DIG ID is on the clipboard") reads as an error they must resolve. Both are defects.
 
-  **A window whose affirmative is IRREVERSIBLE MUST pre-select the refusal (MUST).** Both platform dialogs
-  default to their first button, so a focused destroy window would confirm the destruction of key material on
-  a bare Enter/Return. The destroy window therefore pre-selects Cancel (`MB_DEFBUTTON2`; the Return key
-  equivalent moved onto Cancel on macOS). Ordinary authorizations — a sign, a pairing, a connect — keep the
-  affirmative as their default: the user just asked for the action, and refusing costs only a retry.
+  **A bare Enter MUST activate whichever control does less (MUST).** Both platform dialogs default to
+  their first button, so a focused destroy window would confirm the destruction of key material on a bare
+  Enter/Return. The destroy window therefore pre-selects Cancel (`MB_DEFBUTTON2`; the Return key
+  equivalent moved onto Cancel on macOS). The same reasoning binds a **security-weakening** window and a
+  **claim** — a window asking the user to assert something is TRUE ("I have written these 24 words
+  down") — because nobody asks to be shown their recovery phrase, and a reflexive Enter would record that
+  the seed is safely written down on behalf of somebody holding nothing. Ordinary authorizations — a
+  sign, a pairing, a connect — keep the affirmative: the user just asked for the action, and refusing
+  costs only a retry.
 
-  This MUST be classified per call site, never applied in bulk: the enrolment retention screens ARE
-  decisions — refusing either abandons setup — so converting every window to a notice would destroy a real
+  The test is what each ANSWER DOES, never what KIND of window it is. Where BOTH controls act, "pre-select
+  the refusal" is not merely unhelpful, it is the dangerous choice: on the first-run route fork, declining
+  "Import my recovery phrase" GENERATES AND SEALS A NEW MASTER SEED, so that window keeps its affirmative
+  as the default because importing creates nothing until 24 words are typed. **A control that takes an
+  irreversible action MUST NOT be labelled with the backend's generic word for refusing** ("Cancel"); it
+  MUST be named for what it does, and a prompt MUST be able to supply that name.
+
+  This MUST be classified per call site, never applied in bulk — and the type system SHOULD force that
+  choice rather than leaving a default to be inherited, because a blanket rule applied to a prompt kind is
+  exactly how the route fork came to pre-select the control that creates an account. The enrolment
+  retention screens ARE decisions — refusing either abandons setup — so converting every window to a notice would destroy a real
   user choice, and drawing every window as a decision is the defect being ruled out. A backend that cannot
   present a decision MUST fail closed (report it could not ask) rather than assume the affirmative.
 - **Cancel MUST always work — wherever there IS a Cancel.** An unescapable modal on a background tray agent
@@ -637,6 +650,38 @@ Binding rules, which matter more for an input control than for a notice:
   one renderer, so an unbounded window is not one stuck caller: it holds every LATER consent window,
   including the unlock and the destroy confirm, for the life of the process. A caller blocked on a window
   MUST also bound its own wait, so a wedged renderer cannot wedge the caller either.
+- **The deadline MUST be enforced from outside the window's own frame loop (MUST).** A deadline checked
+  only while drawing is no bound at all: a frame loop that stops running never reaches the check, and the
+  window then holds the single renderer indefinitely. An implementation MUST have some agent OUTSIDE that
+  loop that can, at the deadline, wake the window and require it to close. Forcing a window closed MUST
+  resolve to the same refusal the window's own expiry produces, and MUST NOT be able to produce an
+  approval.
+- **The renderer MUST survive any single prompt (MUST).** A prompt that panics, fails to open, or is
+  abandoned by its caller MUST cost exactly one refused prompt. The serialising loop MUST catch it,
+  release any window the platform deferred destroying, answer that caller the fail-closed way, and go on
+  to the next prompt. This is not defence in depth: the renderer is the whole consent surface, so a loop
+  that exits leaves a process in which nothing can be approved, denied, unlocked or destroyed again.
+- **A renderer that cannot be restarted MUST NOT be treated as replaceable (MUST).** Where the windowing
+  toolkit permits one event loop per PROCESS, a replacement renderer thread can never obtain one, and
+  "detect the dead thread and respawn it" is a silent permanent failure wearing the costume of a recovery.
+  Such an implementation MUST make the renderer unkillable instead, and MUST report a renderer that died
+  anyway as an operator-visible error naming the remedy (restart the app).
+- **A window MUST ask for the keyboard it tells the user to use (MUST).** A consent window that opens
+  without keyboard focus has no escape at all when it is also undecorated and always-on-top: there is no
+  close button, it cannot be put behind anything, and Escape goes to whichever window does hold the
+  keyboard — while the window's own body may be telling the user to press Escape. Requesting activation
+  at window CREATION is not enough on a platform whose foreground lock refuses a background agent; the
+  window MUST also request focus once it exists. It MUST NOT re-request on every frame, which takes the
+  foreground back off whatever the user switched to. Where the platform refuses, the window MUST remain
+  answerable by pointer and MUST still resolve on its own deadline.
+- **A prompt MUST NOT be drawn for a caller that has already given up (MUST).** Prompts are serialised, so
+  one wedged window parks every later prompt; their callers time out and are refused, but the queued work
+  survives. Opening those windows afterwards shows real consent surfaces — real origins, real payloads —
+  for operations refused minutes earlier, and re-occupies the renderer for each. A queued prompt MUST
+  carry its caller's absolute expiry and MUST be refused WITHOUT being drawn once past it.
+- **Every non-answer MUST be logged (MUST).** A prompt that could not be shown, was never answered, or was
+  refused because the renderer is gone MUST leave a log record identifying the prompt and the reason. A
+  consent surface that stops working silently is one only a user can discover.
 - **The FIRST answer a window records is the one it reports (MUST).** Closing a window is asynchronous —
   the frames between "the user clicked" and "the window is gone" MUST NOT be able to change what was
   answered. A window that recorded nothing MUST still resolve to a refusal.
