@@ -1721,6 +1721,7 @@ dependencies = [
  "dig-keystore",
  "dig-logging",
  "dig-session",
+ "hex",
  "png 0.17.16",
  "sha2 0.10.9",
  "tao",

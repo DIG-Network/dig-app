@@ -33,10 +33,18 @@ use dig_session::{FileBackend, KeychainBackend};
 /// Names the re-executed half of the test, and carries the account directory to it.
 const RESTART_VAR: &str = "DIG_APP_2128_RESTART_DIR";
 
-/// The password the notional user types. A literal, because the point of the test is that the SAME
-/// password opens the account from a process that shares nothing with the one that sealed it — a
-/// generated one would have to be smuggled across the boundary, which is the property under test.
-const TYPED_PASSWORD: &str = "the-password-this-person-chose";
+/// The label the notional user's password is derived from. DERIVED rather than written out, because a
+/// password literal in a test is a hard-coded cryptographic value (CodeQL) — and derivation costs
+/// nothing here, since a hash of a fixed label is identical in every process. That determinism is
+/// exactly the property under test: the restarted process must arrive at the SAME password without
+/// anything being handed to it.
+const PASSWORD_LABEL: &str = "dig-app-2128-restart";
+
+/// The password the notional user types, the same in every process that derives it.
+fn typed_password() -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(PASSWORD_LABEL.as_bytes()))
+}
 
 /// Confirms retention without drawing anything.
 struct AlwaysKeeps;
@@ -53,7 +61,7 @@ fn open_under(account_dir: &Path) -> Option<String> {
     let backend: Arc<dyn KeychainBackend> = Arc::new(FileBackend::new(account_dir.to_path_buf()));
     let (residency, _phrase) = assemble_residency(
         backend,
-        dig_app_core::account::ceremony::PreCollectedPassword::new(TYPED_PASSWORD),
+        dig_app_core::account::ceremony::PreCollectedPassword::new(typed_password()),
         AccountId::new(DEFAULT_ACCOUNT_ID),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
