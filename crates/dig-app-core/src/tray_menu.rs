@@ -287,6 +287,44 @@ pub fn account_state(
     }
 }
 
+/// The native menu-item id that stands for `action`, on every menu this shell will ever build.
+///
+/// **Why the id must not be generated (dig_ecosystem#2074).** `muda` assigns an unnamed `MenuItem` an id
+/// from a process-global counter, so every menu rebuild renames every row. The shell rebuilds whenever the
+/// rendered view changes — and the view carries the node's own description, which the five-second node poll
+/// rewrites whenever a capsule or store count moves — so the ids under a menu the user is looking at are
+/// replaced out from under them on a timer they cannot see. A click then arrives bearing an id the shell no
+/// longer has a handler for, and the only honest thing left to do with it is drop it. That is what
+/// "I click it and nothing happens" was.
+///
+/// Deriving the id from the action instead makes a rebuilt menu name its rows exactly as the previous one
+/// did, so a click that crosses a rebuild still resolves to the verb the user actually chose. The `Debug`
+/// spelling is used because the variant name is already the stable, unique, human-legible thing an id
+/// wants to be; `stable_ids_are_unique_across_every_menu_this_shell_can_build` holds the uniqueness.
+pub fn action_id(action: TrayAction) -> String {
+    format!("dig-tray-action:{action:?}")
+}
+
+/// Every action row in `rows`, as the native id the shell will give it (see [`action_id`]).
+///
+/// Recursive over submenus for the same reason [`MenuModel::find`] is: a verb's id must not depend on how
+/// deeply it happens to be nested.
+pub fn action_ids(rows: &[MenuRow]) -> Vec<(String, TrayAction)> {
+    let mut found = Vec::new();
+    collect_action_ids(rows, &mut found);
+    found
+}
+
+fn collect_action_ids(rows: &[MenuRow], found: &mut Vec<(String, TrayAction)>) {
+    for row in rows {
+        match row {
+            MenuRow::Separator => {}
+            MenuRow::Action { action, .. } => found.push((action_id(*action), *action)),
+            MenuRow::Submenu { rows, .. } => collect_action_ids(rows, found),
+        }
+    }
+}
+
 /// One thing the user can click. The shell maps each to its handler; the model never performs an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrayAction {
@@ -1405,6 +1443,89 @@ mod tests {
                 used_bytes: 350 * crate::cache::MIB,
             }),
         }
+    }
+
+    /// The regression test for dig_ecosystem#2074's second half: "I click it and nothing happens".
+    ///
+    /// The shell resolves a click by looking the native id up in the map it built with the CURRENT menu.
+    /// If a rebuild renames the rows — which `muda` does for every unnamed item, from a process-global
+    /// counter — then a click that crosses a rebuild carries an id the map no longer contains and is
+    /// dropped. The node poll rewrites the view every five seconds, so rebuilds are continuous.
+    ///
+    /// The property that makes the drop impossible is that the same verb has the same id in two
+    /// separately-built menus, so this asserts exactly that and nothing weaker.
+    #[test]
+    fn a_verb_keeps_its_id_across_a_rebuild() {
+        let before = build(&view(AccountState::Unlocked { recoverable: true }));
+
+        // The rebuild a user cannot see: the node's own description changed, nothing else.
+        let mut changed = view(AccountState::Unlocked { recoverable: true });
+        changed.node = "Node v0.84.0 · 9 capsule(s) cached · 4 store(s) hosted".to_string();
+        let after = build(&changed);
+
+        let ids_before: std::collections::HashMap<_, _> = action_ids(&before.rows)
+            .into_iter()
+            .map(|(id, a)| (a, id))
+            .collect();
+        let ids_after: std::collections::HashMap<_, _> = action_ids(&after.rows)
+            .into_iter()
+            .map(|(id, a)| (a, id))
+            .collect();
+
+        assert!(!ids_before.is_empty(), "the fixture menu must offer verbs");
+        for (action, id) in &ids_before {
+            assert_eq!(
+                ids_after.get(action),
+                Some(id),
+                "{action:?} was renamed by a rebuild, so a click on it would be dropped"
+            );
+        }
+    }
+
+    /// A derived id could introduce an ambiguity in exchange for the one it removes: two rows answering
+    /// to one id. That is only a defect when the rows mean DIFFERENT things — the same verb offered in
+    /// two places (`AboutDid` is, in every state) resolves identically either way, which is the whole
+    /// point of naming an id after the verb. So this pins the property that matters: within any one menu,
+    /// an id never stands for two different actions, and every action row gets one.
+    #[test]
+    fn an_id_never_stands_for_two_different_verbs_in_one_menu() {
+        for state in EVERY_STATE {
+            let model = build(&view(state.clone()));
+            let ids = action_ids(&model.rows);
+            let mut seen = std::collections::HashMap::new();
+            for (id, action) in &ids {
+                if let Some(other) = seen.insert(id.clone(), *action) {
+                    assert_eq!(
+                        other, *action,
+                        "in {state:?}, {other:?} and {action:?} share the id {id}"
+                    );
+                }
+            }
+            assert_eq!(
+                ids.len(),
+                every_action(&model).len(),
+                "in {state:?} every action row must get exactly one id"
+            );
+        }
+    }
+
+    /// An id is only useful to the shell if it names the verb unambiguously in BOTH directions — two
+    /// different verbs must never collide, in any menu, ever.
+    #[test]
+    fn different_verbs_never_share_an_id() {
+        let mut seen = std::collections::HashMap::new();
+        for state in EVERY_STATE {
+            for (action, _, _) in every_action(&build(&view(state.clone()))) {
+                let id = action_id(action);
+                if let Some(other) = seen.insert(id.clone(), action) {
+                    assert_eq!(
+                        other, action,
+                        "{other:?} and {action:?} both answer to {id}"
+                    );
+                }
+            }
+        }
+        assert!(seen.len() > 1, "the sweep must have seen real verbs");
     }
 
     /// Every action row anywhere in `model`, submenus included, as `(action, label, enabled)`.
