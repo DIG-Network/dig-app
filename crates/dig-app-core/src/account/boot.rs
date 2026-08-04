@@ -531,6 +531,16 @@ pub fn unlock_existing_account(
     None
 }
 
+/// Linux stub — see [`open_account`]. `Refused` rather than `Wedged`: this host holds no account, so
+/// there is nothing here that could be unreadable, and the destructive remedy must stay out of reach.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn unlock_existing_account_reporting(
+    _brand_dir: &std::path::Path,
+    _reason: &str,
+) -> Result<BootedAccount, UnlockFailure> {
+    Err(UnlockFailure::Refused)
+}
+
 /// Complete a boot: vault a first run's phrase and read back whether the account is recoverable.
 ///
 /// Public so the integration suite can drive it on any platform (the cfg-gated [`open_account`] above

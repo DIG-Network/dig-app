@@ -586,8 +586,12 @@ pub fn ask_for_phrase(confirmer: &dyn NativeConfirmer, purpose: &str) -> Option<
 ///
 /// # Why this window exists
 ///
-/// Every Windows/macOS host that has run dig-app auto-enrols `account.default` at first boot, so real
-/// legacy raw-seed blobs exist in the field — one was found on a developer machine. Such a blob will not
+/// dig-app USED to auto-enrol `account.default` at first boot on every Windows/macOS host, so real
+/// legacy raw-seed blobs exist in the field — one was found on a developer machine. That auto-enrolment
+/// is long gone (an account now exists only because a user asked, dig_ecosystem#1820) and no boot path
+/// creates one; the blobs it left behind are why this window still has work to do. Reading the old
+/// behaviour as current sends an investigation looking for a first-boot enrolment that no longer exists
+/// (dig_ecosystem#2128). Such a blob will not
 /// unlock under a newer custody model AND cannot re-enrol at the same id, so it is WEDGED, not merely
 /// fail-closed. The boot used to reduce that to a `tracing::warn!` and return `None`, which cost the user
 /// signing permanently and silently, with no route out.

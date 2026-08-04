@@ -148,6 +148,48 @@ fn an_enrolled_account_is_still_there_and_still_openable_in_a_new_process() {
     );
 }
 
+/// **Starting the app creates NO account** — an account exists only because a user asked (`SPEC.md`
+/// §3.2a, dig_ecosystem#1820).
+///
+/// Pinned here because the opposite is still asserted in prose that outlived the code: the
+/// `explain_unopenable` docs claimed every Windows/macOS host auto-enrols at first boot, which sent an
+/// investigation of #2128 hunting a boot-time enrolment loop that does not exist. A test says what the
+/// binary does; a comment only says what someone once believed. Confirmed independently by launching the
+/// real 5.19.0 binary against a virgin `LOCALAPPDATA`, which produced one file — the single-instance
+/// lock — and zero `.dks`.
+#[test]
+fn the_boot_path_never_enrols_an_account() {
+    let home = tempfile::tempdir().expect("a temporary brand directory");
+    let brand_dir = home.path();
+
+    assert!(!account_exists(brand_dir), "the fixture starts empty");
+    assert_eq!(
+        state_at_boot(brand_dir),
+        AccountState::Absent,
+        "a host with no account is Absent, and the tray offers to set one up"
+    );
+
+    // The unlock path is what a boot (and every later `Unlock…`) runs. On an empty host it must refuse
+    // rather than mint an account from a recovery phrase nobody was shown.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    assert!(
+        dig_app_core::account::boot::unlock_existing_account_reporting(brand_dir, "a boot")
+            .is_err()
+    );
+
+    assert!(
+        !account_exists(brand_dir),
+        "no sealed seed may appear without a user asking for one"
+    );
+    assert!(
+        !brand_dir
+            .join("account")
+            .join("account.default.dks")
+            .exists(),
+        "no seed blob may be written by a boot"
+    );
+}
+
 /// The wedge state still exists and is still reachable — a fix that simply stopped producing
 /// `Unopenable` would pass the restart assertions above while stranding the users it was built for.
 #[test]

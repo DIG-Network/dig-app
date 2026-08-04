@@ -429,8 +429,9 @@ Binding rules:
 - **An account that cannot be OPENED is `Unopenable`, never `Locked` (MUST).** These are different
   situations and MUST NOT be collapsed: a locked account has a way back in (`Unlock…`), and an unopenable one
   does not, so reporting it as locked offers a control that is guaranteed to fail and says nothing about why.
-  The distinction is not hypothetical — every Windows/macOS host that has run dig-app auto-enrols the default
-  account at first boot, so legacy raw-seed blobs exist in the field, and a custody model that can no longer
+  The distinction is not hypothetical — dig-app USED to auto-enrol the default account at first boot on
+  every Windows/macOS host (it no longer does — §3.2a: an account exists only because a user asked), so
+  legacy raw-seed blobs exist in the field, and a custody model that can no longer
   read them leaves such an account WEDGED: it neither unlocks nor re-enrols at the same id. An implementation
   MUST therefore carry a multi-state at-rest fact (no account / present / present-but-unopenable /
   present-under-a-machine-password) rather than a boolean, and the tray MUST name the state on the surfaces a person looks at — the icon, the tooltip and
