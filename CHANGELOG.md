@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.18.0] - 2026-08-04
+
+### Features
+- **tray:** Add an Apps menu group with Chat launching dig-chat (#2101)
+
+### Testing
+- **account:** Guard refusal_is_default at the 3 custody-critical claim sites (#2098)
+
 ## [5.17.0] - 2026-08-04
 
 ### Features
