@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.17.0] - 2026-08-04
+
+### Features
+- **identity:** Identity.* capability class (attest/seal/unseal) for dig-chat (#57)- **account:** First-run import choice + recovery-phrase backup ceremony (#1564)- **2fa:** Persistent, escalating bound on the challenge window (#1847)- **account:** Auto-clear the recovery phrase from the clipboard after a timeout (#1964)- **dig-app:** Configurable node cache cap in the tray (#2002)- **tray:** The Wallet submenu reports the balance, or why it cannot (#73)- **dig-app:** Branded egui prompt GUI replacing the native OS dialogs (#69)- **confirm:** Render identifiers in Space Mono in the branded prompt window (#2060)- **account:** Native save picker + owner-only ACL for the recovery phrase (#72)- **confirm:** Restore the frameless InputStyle::Bar launcher chrome (#2054)
+
+### Bug Fixes
+- **2fa:** Show the challenge throttle wait before prompting for a code (#1970)- **wallet:** An unlocked account with a failed address derivation no longer says "unlock" (#2059)- **confirm:** One prompt can no longer cost every later one (#78)
+
+### Refactor
+- **account:** Single-source the at-rest seal-write across the two vaults (#1982)
+
+### Documentation
+- **account:** Coherence sweep to the master-HD / separated-keystore model (#1571)- **dig-app-core:** Make cargo doc warning-clean (#2005)- **2fa:** Record the evaluated-and-rejected monotonic/trusted-time throttle decision (#1969)
+
+### Testing
+- **gateway:** Pin control.* two-transport conformance to the shared contract crate (#2019)- **recovery:** Make the bad-checksum recovery-phrase test deterministic (#2062)- **confirm:** Pin the many-output sign window against action-row overflow (#2063)
+
+### CI
+- **dig-app:** Gate cargo doc on -D warnings + fix the doc-link stragglers (#2012)- **dig-app:** Make the doc gate robust to rustc drift + fix the dign private-doc-link (#2056)
+
+### Chores
+- **dig-app:** Zeroize clipboard read-back, gate dead-code, fix doc links (#1978)- **dig-app:** Collapse hard-coded space runs in tray notice bodies (#1973)
+
 ## [5.5.0] - 2026-08-01
 
 ### Bug Fixes
