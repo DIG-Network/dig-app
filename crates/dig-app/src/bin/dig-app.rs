@@ -31,8 +31,8 @@
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, discard_account, open_account, reboot_reunlock, unlock_existing_account,
-    vault_for, BootedAccount, DiscardOutcome,
+    account_exists, discard_account, open_account, reboot_reunlock,
+    unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome, UnlockFailure,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::journey::{
@@ -68,7 +68,7 @@ use dig_app_core::single_instance;
 #[cfg(feature = "tray")]
 use dig_app_core::storage::did_hash;
 #[cfg(feature = "tray")]
-use dig_app_core::tray_menu::{self, AccountState, AtRest, SessionFacts};
+use dig_app_core::tray_menu::{self, AccountState, AtRest, OpenAttempt, SessionFacts};
 #[cfg(feature = "tray")]
 use dig_app_core::Os;
 #[cfg(feature = "tray")]
@@ -336,16 +336,27 @@ fn env_os_of<T>(_agent: &T) -> Os {
 /// any deferral.
 #[cfg(feature = "tray")]
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
-    // Zero-prompt unlock is only available where the OS credential store is the custody primary.
+    start_sign_service_reporting(env).ok()
+}
+
+/// [`start_sign_service`], reporting WHY the account did not open.
+///
+/// The tray needs the reason to say anything honest about it: a password that did not fit leaves the
+/// account merely locked, while an unreadable seal is the only condition whose remedy is to replace the
+/// account (dig_ecosystem#2128). A host that cannot hold an account at all is `Refused` — there is
+/// nothing here to be wedged.
+#[cfg(feature = "tray")]
+fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, UnlockFailure> {
+    // An account unlock is only available where the app has an account model at all.
     if !matches!(env.os, Os::Windows | Os::MacOs) {
-        tracing::info!("APP-SIGN loopback deferred: no zero-prompt account unlock on this OS yet");
-        return None;
+        tracing::info!("APP-SIGN loopback deferred: no account unlock on this OS yet");
+        return Err(UnlockFailure::Refused);
     }
     let brand_dir = match env.brand_dir() {
         Ok(dir) => dir,
         Err(e) => {
             tracing::warn!(error = %e, "APP-SIGN loopback not started: could not resolve the AppData directory");
-            return None;
+            return Err(UnlockFailure::Refused);
         }
     };
 
@@ -361,7 +372,7 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
     // It also never runs at START-UP any more (dig_ecosystem#1817): it draws a password window, so it
     // runs only when the user clicks `Unlock…` (or a signature needs the account). A password prompt at
     // login would be exactly the unbidden window the paragraph above rejects.
-    let booted = unlock_existing_account(
+    let booted = unlock_existing_account_reporting(
         &brand_dir,
         "DIG needs your password to unlock your account.",
     )?;
@@ -414,7 +425,7 @@ fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
         .map(|_| tracing::info!("APP-SIGN loopback signing channel started on port 9779"))
         .unwrap_or_else(|e| tracing::error!(error = %e, "could not spawn the APP-SIGN thread"));
 
-    Some(TraySession {
+    Ok(TraySession {
         lock,
         residency,
         _screen_guard: screen_guard,
@@ -453,22 +464,18 @@ fn account_is_enrolled(env: &AppEnvironment) -> bool {
 fn account_state(
     env: &AppEnvironment,
     session: Option<&TraySession>,
-    boot_failed: bool,
+    attempt: OpenAttempt,
 ) -> AccountState {
     let supported = matches!(env.os, Os::Windows | Os::MacOs);
     // Only worth a filesystem check when there is no session to ask: with one, the account provably
     // exists, and this runs on every repaint tick.
     let at_rest = match session {
         Some(_) => AtRest::Present,
-        None if !brand_dir(env).is_some_and(|dir| account_exists(&dir)) => AtRest::None,
-        // An account still sealed under the machine-generated password has no user-known secret on it.
-        // Reporting it as merely `Locked` would offer `Unlock…`, which asks for a password its owner
-        // has never chosen (dig_ecosystem#1817).
-        None if account_needs_a_password() => AtRest::PresentUnderMachinePassword,
-        // An account IS here and we tried to open it and could not. Reporting this as merely `Locked` would
-        // offer an `Unlock…` that is guaranteed to fail — the silent-signing-outage defect (#1799 review).
-        None if boot_failed => AtRest::PresentButUnopenable,
-        None => AtRest::Present,
+        None => tray_menu::at_rest_of(
+            account_is_enrolled(env),
+            account_needs_a_password(),
+            attempt,
+        ),
     };
     let facts = session.map(|s| SessionFacts::of(&s.residency, s.account.recoverable));
     tray_menu::account_state(supported, at_rest, facts)
@@ -983,11 +990,13 @@ fn current_os() -> Os {
 mod tray {
     use super::{
         account_state, adopt_user_password, notify, notify_identifier, replace_account,
-        restore_account, set_up_account, start_sign_service, AppEnvironment, TraySession,
+        restore_account, set_up_account, start_sign_service_reporting,
+        AppEnvironment, TraySession, UnlockFailure,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
+    use dig_app_core::tray_menu::OpenAttempt;
     use dig_app_core::account::journey::Replacement;
     use dig_app_core::account::journey::{
         back_up_phrase, explain_missing_phrase, explain_unopenable, reveal_phrase, BackupDelivery,
@@ -1220,13 +1229,13 @@ mod tray {
         status: &SharedStatus,
         env: &AppEnvironment,
         session: Option<&TraySession>,
-        boot_failed: bool,
+        attempt: OpenAttempt,
         hotkey: &HotkeyState,
     ) -> TrayView {
         use dig_app_core::account::residency::AddressObservation;
         use dig_app_core::engine::EngineState;
 
-        let account = account_state(env, session, boot_failed);
+        let account = account_state(env, session, attempt);
         // ONE observation of the residency, not two separate calls — so "unlocked" and "no address"
         // always describe the SAME instant (dig_ecosystem#2059). Reading `receiving_address()` on its
         // own let an idle relock or `Lock now` land between the account-state read above and this one,
@@ -1330,11 +1339,16 @@ mod tray {
             })
         };
 
-        // `boot_failed` is the observable half of a wedged account: an open was attempted and did not
-        // produce a session. Sticky until an open SUCCEEDS, so the tray keeps telling the truth rather than
-        // flickering back to "locked" on the next repaint tick.
-        let mut boot_failed = session.is_none() && super::account_is_enrolled(&env);
-        let mut model = snapshot(&status, &env, session.as_ref(), boot_failed, &hotkey);
+        // What the shell has learned by TRYING to open the account, shared with the action worker
+        // because that is where every unlock now runs. It starts at `NotAttempted` and can ONLY be
+        // moved by an actual attempt: since #1817 the app boots with the account locked and tries
+        // nothing at start-up, so inferring a failure from the absence of a session reported every
+        // ordinary launch as an unreadable account (dig_ecosystem#2128).
+        //
+        // Sticky until an open SUCCEEDS, so the tray keeps telling the truth rather than flickering back
+        // on the next repaint tick.
+        let attempt: SharedAttempt = Arc::new(Mutex::new(OpenAttempt::NotAttempted));
+        let mut model = snapshot(&status, &env, session.as_ref(), read_attempt(&attempt), &hotkey);
         // Guarded for the same reason as the mount below: creating native menu objects touches the
         // platform's desktop stack, and a missing library there panics rather than failing.
         let mut menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
@@ -1387,6 +1401,7 @@ mod tray {
         // otherwise hold the tray for as long as it waited.
         let actions = {
             let session = Arc::clone(&session);
+            let attempt = Arc::clone(&attempt);
             let env = env.clone();
             let shutdown = shutdown.clone();
             let status = Arc::clone(&status);
@@ -1400,6 +1415,7 @@ mod tray {
                 dispatch(
                     action,
                     &mut session,
+                    &attempt,
                     &env,
                     confirmer.as_ref(),
                     &shutdown,
@@ -1475,9 +1491,9 @@ mod tray {
             // Repaint only when something actually changed: rebuilding a native menu every 500ms would
             // close the menu under the user's cursor while they are reading it.
             if held.is_some() {
-                boot_failed = false;
+                set_attempt(&attempt, OpenAttempt::NotAttempted);
             }
-            let latest = snapshot(&status, &env, held.as_ref(), boot_failed, &hotkey);
+            let latest = snapshot(&status, &env, held.as_ref(), read_attempt(&attempt), &hotkey);
             if !view_eq(&latest, &model) {
                 // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
                 // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
@@ -1566,9 +1582,29 @@ mod tray {
         }
     }
 
+    /// What the last attempt to OPEN the account came to, shared between the event loop (which paints
+    /// it) and the action worker (which is where unlocks run).
+    type SharedAttempt = Arc<Mutex<OpenAttempt>>;
+
+    /// Read the attempt outcome. A poisoned lock is recovered for the same reason as
+    /// [`lock_session`]'s, and a lock held for the length of a copy can never actually block the tick.
+    fn read_attempt(attempt: &SharedAttempt) -> OpenAttempt {
+        *attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Record what an attempt to open the account came to.
+    fn set_attempt(attempt: &SharedAttempt, outcome: OpenAttempt) {
+        *attempt
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = outcome;
+    }
+
     fn dispatch(
         action: TrayAction,
         session: &mut Option<TraySession>,
+        attempt: &SharedAttempt,
         env: &AppEnvironment,
         confirmer: &dyn NativeConfirmer,
         shutdown: &dig_app_core::shutdown::Shutdown,
@@ -1600,17 +1636,32 @@ mod tray {
             }
             TrayAction::ShowStatus => show_status(status, env, session.as_ref(), confirmer, hotkey),
             TrayAction::Unlock => {
-                // The account exists but did not unlock at boot. Re-running the boot path is the whole
-                // unlock: on Windows/macOS it is zero-prompt from the OS credential store.
-                *session = start_sign_service(env);
-                if session.is_none() {
-                    notify(
-                        confirmer,
-                        "DIG — Could not unlock",
-                        "Your DIG Account could not be unlocked.",
-                        "The stored password for this account could not be read from the system \
-                         credential store. The log folder (in this menu) has the details.",
-                    );
+                // The app boots with the account locked (#1817), so this — the user asking — is the
+                // whole unlock: it draws the password window and opens the sealed seed with what they
+                // type.
+                match start_sign_service_reporting(env) {
+                    Ok(live) => {
+                        set_attempt(attempt, OpenAttempt::NotAttempted);
+                        *session = Some(live);
+                    }
+                    // A password that did not open the seal, or a window the user closed. The account is
+                    // exactly as it was and another try is the way in, so the tray stays LOCKED and says
+                    // so — telling this user their account is unreadable would point them at the
+                    // replace-my-account window over a typo (dig_ecosystem#2128).
+                    Err(UnlockFailure::Refused) => {
+                        set_attempt(attempt, OpenAttempt::Refused);
+                        notify(
+                            confirmer,
+                            "DIG — Not unlocked",
+                            "Your DIG Account was not unlocked.",
+                            "Nothing has been changed on this computer. If you typed your password, \
+                             check it and choose Unlock… again. The log folder (in this menu) has the \
+                             details.",
+                        );
+                    }
+                    // The seal itself cannot be read by this build. No password opens it, so the tray
+                    // moves to `Unopenable` and its explainer — the one place the replace path belongs.
+                    Err(UnlockFailure::Wedged) => set_attempt(attempt, OpenAttempt::Wedged),
                 }
             }
             TrayAction::SetAccountPassword => {
@@ -1644,11 +1695,11 @@ mod tray {
             // up — or a lock that dropped the keys — while the menu sat open must be reflected, not
             // replayed from the model the row was drawn from.
             TrayAction::AboutWallet => explain_wallet(
-                &snapshot(status, env, session.as_ref(), false, hotkey),
+                &snapshot(status, env, session.as_ref(), OpenAttempt::NotAttempted, hotkey),
                 confirmer,
             ),
             TrayAction::CopyReceiveAddress => copy_receive_address(
-                &snapshot(status, env, session.as_ref(), false, hotkey),
+                &snapshot(status, env, session.as_ref(), OpenAttempt::NotAttempted, hotkey),
                 confirmer,
             ),
             // A preset is a known-good value, so it skips input entirely and goes straight to the
@@ -1992,7 +2043,7 @@ mod tray {
         confirmer: &dyn NativeConfirmer,
         hotkey: &HotkeyState,
     ) {
-        let view = snapshot(status, env, session, false, hotkey);
+        let view = snapshot(status, env, session, OpenAttempt::NotAttempted, hotkey);
         notify(
             confirmer,
             "DIG — Status",
