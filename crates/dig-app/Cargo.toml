@@ -44,6 +44,7 @@ zeroize.workspace = true
 # clipboard still holds OUR copy without retaining the plaintext seed for the timeout window
 # (dig_ecosystem#1964).
 sha2.workspace = true
+hex.workspace = true
 # Structured logging (#934): the shared dual-sink (JSONL file + human stderr) building block, so the
 # tray/headless agent shell — the process that actually runs for the user's whole session — gets a
 # durable field log the same way dig-node/dig-dns/dig-updater do. See `src/logging.rs`.

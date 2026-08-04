@@ -194,6 +194,51 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
+/// Why an unlock did not produce an account — the ONE distinction that decides whether the user is
+/// offered another try or told their account cannot be read (dig_ecosystem#2128).
+///
+/// Getting this wrong is expensive in one direction only. Reporting a retryable failure as a wedge sends
+/// someone who mistyped their password to a window whose sole remedy is to REPLACE their account; the
+/// reverse merely offers a retry that will not work. So the wedge set is enumerated and everything else —
+/// including anything unrecognised — is [`Refused`](Self::Refused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnlockFailure {
+    /// The unlock did not complete for a reason another attempt could fix, or that the user chose: a
+    /// cancelled prompt, a wrong password, a host that could not draw the window, a transient I/O error.
+    Refused,
+    /// The sealed blob itself cannot be read by this build — a legacy raw-seed account, or a seed
+    /// envelope / keystore format from a version this one does not understand. No password opens it.
+    Wedged,
+}
+
+/// The substrings that identify a FORMAT verdict in an unlock failure.
+///
+/// dig-account flattens the underlying [`dig_session::SessionError`] /
+/// [`dig_keystore::KeystoreError`] into `AccountError::Keystore(String)`, so the message text is the only
+/// signal that survives to here. Matching it is a bridge, not a design — see the test below, which builds
+/// the REAL upstream errors and asserts their verdicts, so an upstream reword fails the suite rather than
+/// silently reclassifying a user's wedged account as a retryable one. dig_ecosystem#2130 tracks exposing a
+/// typed kind upstream so this can be deleted.
+const WEDGE_MARKERS: [&str; 7] = [
+    "legacy raw-seed format",
+    "unsupported seed-envelope version",
+    "unsupported stored seed kind",
+    "unknown magic",
+    "unsupported format version",
+    "unsupported KDF id",
+    "unsupported cipher id",
+];
+
+/// Classify why an unlock failed, so the tray reports what actually happened.
+pub fn classify_unlock_failure(error: &dig_account::AccountError) -> UnlockFailure {
+    let message = error.to_string();
+    if WEDGE_MARKERS.iter().any(|marker| message.contains(marker)) {
+        UnlockFailure::Wedged
+    } else {
+        UnlockFailure::Refused
+    }
+}
+
 /// A booted account: the live residency plus the two facts the tray needs to describe it honestly.
 pub struct BootedAccount {
     /// The live, unlocked account.
@@ -365,11 +410,29 @@ pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option
 /// when the password does not open the seal — in every case leaving the account locked.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn unlock_existing_account(brand_dir: &std::path::Path, reason: &str) -> Option<BootedAccount> {
+    unlock_existing_account_reporting(brand_dir, reason).ok()
+}
+
+/// [`unlock_existing_account`], reporting WHY it failed.
+///
+/// The tray needs the reason, not merely the absence of a session: a wrong password leaves the account
+/// merely locked and retryable, while an unreadable seal is the one condition whose honest remedy is to
+/// replace the account (dig_ecosystem#2128). A host with no account at all is `Refused` — there is
+/// nothing here to be wedged.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn unlock_existing_account_reporting(
+    brand_dir: &std::path::Path,
+    reason: &str,
+) -> Result<BootedAccount, UnlockFailure> {
     if !account_exists(brand_dir) {
         tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
-        return None;
+        return Err(UnlockFailure::Refused);
     }
-    unlock_existing_account_with(brand_dir, PromptedCeremony::unlocking(reason))
+    open_account_reporting(
+        brand_dir,
+        Seeding::NewPhrase(&NeverEnrols),
+        PromptedCeremony::unlocking(reason),
+    )
 }
 
 /// UNLOCK the default account in `brand_dir` through `ceremony` — the testable form of
@@ -406,6 +469,19 @@ pub fn open_account_with<A>(
 where
     A: AuthCeremony + 'static,
 {
+    open_account_reporting(brand_dir, seeding, ceremony).ok()
+}
+
+/// [`open_account_with`], reporting WHY the open failed — see [`UnlockFailure`].
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn open_account_reporting<A>(
+    brand_dir: &std::path::Path,
+    seeding: Seeding<'_>,
+    ceremony: A,
+) -> Result<BootedAccount, UnlockFailure>
+where
+    A: AuthCeremony + 'static,
+{
     use dig_session::FileBackend;
 
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
@@ -418,21 +494,24 @@ where
     let (residency, fresh_phrase) = match assembled {
         Ok(pair) => pair,
         Err(e) => {
+            let failure = classify_unlock_failure(&e);
             // ERROR, not warn: an account that exists and will not open means this host has NO signing for
-            // the rest of the session, which is an outage rather than a curiosity. The tray reports it as
-            // `AccountState::Unopenable` and offers the replace path — before that state existed this line
-            // was the ONLY trace of it, and the user silently lost signing (dig_ecosystem#1799 review).
+            // the rest of the session, which is an outage rather than a curiosity. Before this line
+            // existed the user silently lost signing (dig_ecosystem#1799 review).
             //
-            // A WRONG PASSWORD lands here too, and must not be read as a wedged account: the tray
-            // distinguishes them by whether the account had ever opened in this session (`SPEC.md` §3.1c).
+            // A WRONG PASSWORD lands here too, and the two must not be conflated: only a `Wedged`
+            // verdict reaches `AccountState::Unopenable` and its replace-the-account remedy
+            // (dig_ecosystem#2128). The verdict is logged beside the error so a support reader can see
+            // which of the two the app decided this was.
             tracing::error!(
                 error = %e,
+                ?failure,
                 "the DIG account could not be opened"
             );
-            return None;
+            return Err(failure);
         }
     };
-    Some(finish_boot(brand_dir, residency, fresh_phrase))
+    Ok(finish_boot(brand_dir, residency, fresh_phrase))
 }
 
 /// Linux (and any host without a per-application-ACL credential store) has no account paths yet, so
@@ -450,6 +529,16 @@ pub fn unlock_existing_account(
     _reason: &str,
 ) -> Option<BootedAccount> {
     None
+}
+
+/// Linux stub — see [`open_account`]. `Refused` rather than `Wedged`: this host holds no account, so
+/// there is nothing here that could be unreadable, and the destructive remedy must stay out of reach.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn unlock_existing_account_reporting(
+    _brand_dir: &std::path::Path,
+    _reason: &str,
+) -> Result<BootedAccount, UnlockFailure> {
+    Err(UnlockFailure::Refused)
 }
 
 /// Complete a boot: vault a first run's phrase and read back whether the account is recoverable.
@@ -576,6 +665,58 @@ mod tests {
 
     fn account() -> AccountId {
         AccountId::new(DEFAULT_ACCOUNT_ID)
+    }
+
+    /// Flatten a real upstream error exactly as dig-account does, so the classifier is measured against
+    /// the text it will actually receive rather than a hand-typed approximation of it.
+    fn as_account_error(source: impl std::fmt::Display) -> dig_account::AccountError {
+        dig_account::AccountError::Keystore(source.to_string())
+    }
+
+    /// **The custody-safety half of dig_ecosystem#2128.** Only a genuine FORMAT verdict may be reported
+    /// as a wedge, because a wedge is the one state whose offered remedy destroys the account.
+    ///
+    /// Every case is built from the REAL `dig_session` / `dig_keystore` error, not from a literal
+    /// message: the classifier reads text, so an upstream reword must break this test rather than
+    /// quietly reclassify a user's account. The wrong-password case is the load-bearing one — it is the
+    /// common failure, and calling it a wedge is what sends someone who mistyped to the replace window.
+    #[test]
+    fn only_a_format_failure_is_a_wedge_and_a_wrong_password_never_is() {
+        use dig_keystore::KeystoreError;
+        use dig_session::SessionError;
+
+        for wedge in [
+            as_account_error(SessionError::LegacySeedFormat),
+            as_account_error(SessionError::UnsupportedEnvelopeVersion(0x09)),
+            as_account_error(SessionError::UnsupportedSeedKind(0x07)),
+            as_account_error(KeystoreError::UnsupportedFormat { found: 9 }),
+            as_account_error(KeystoreError::UnsupportedKdf(0x05)),
+            as_account_error(KeystoreError::UnsupportedCipher(0x06)),
+        ] {
+            assert_eq!(
+                classify_unlock_failure(&wedge),
+                UnlockFailure::Wedged,
+                "must be reported as unreadable: {wedge}"
+            );
+        }
+
+        for retryable in [
+            // The wrong password — indistinguishable from a tampered file at the AEAD tag, and in both
+            // cases another attempt is the only honest offer.
+            as_account_error(KeystoreError::DecryptFailed),
+            dig_account::AccountError::Auth("the user cancelled the password window".into()),
+            as_account_error(KeystoreError::Backend(std::sync::Arc::new(
+                std::io::Error::other("the disk was busy"),
+            ))),
+            // Anything this build does not recognise fails toward the NON-destructive answer.
+            as_account_error("a failure mode invented after this code was written"),
+        ] {
+            assert_eq!(
+                classify_unlock_failure(&retryable),
+                UnlockFailure::Refused,
+                "must stay retryable: {retryable}"
+            );
+        }
     }
 
     /// A presenter that always confirms — the fixture for "the user wrote the words down".

@@ -1,3 +1,33 @@
+## #2128 — a removed step left its failure flag behind, and told every user their account was gone
+
+- **When a step is REMOVED, the flags that inferred its outcome become lies with no compiler to catch
+  them.** #1817 deleted the boot-time account unlock: the app now starts locked and asks for a password
+  only when the user clicks `Unlock…`. The tray shell kept deriving `boot_failed = session.is_none() &&
+  enrolled`, which had meant "an open was attempted and failed" and now means only "an account exists".
+  Every launch therefore reported `AccountState::Unopenable` — the state whose single window says the
+  account was made by an older DIG and offers to replace it. The account was intact on disk the whole
+  time; the user simply saw it declared unreadable at every start and concluded it was not persisting.
+  Both files were internally consistent and both compiled. Grep for the FLAGS that inferred a removed
+  step's result, not only for its call sites.
+- **A boolean cannot distinguish "not tried" from "tried and failed", and the two are opposite answers.**
+  The fix is `OpenAttempt { NotAttempted, Refused, Wedged }`: only an ATTEMPT can fail, so only an attempt
+  can be reported as having failed. The same shape catches the second half — a mistyped password is
+  `Refused` and stays retryable, and only a seal this build genuinely cannot read is `Wedged`. Where the
+  two mistakes have asymmetric cost (one offers a retry that will not work; the other offers to destroy a
+  working account), the unrecognised case must default to the non-destructive one.
+- **The credential store is NOT dig-app's custody root, and its emptiness is CORRECT.** Windows Credential
+  Manager holding zero `dig-app` entries reads like the smoking gun and is not: `keystore/credential.rs`
+  is a retired, migration-only seam and `CredentialCeremony` is test-only. Production seals under a
+  user-chosen password via `PromptedCeremony`, which persists nothing. Two plausible mechanisms were built
+  on that misreading before the module docs settled it in one paragraph — read the doc comment of the
+  thing you are about to accuse.
+- **The tray TOOLTIP is the cheapest external probe of app state.** `AutomationElement` over the
+  notification-area button reads it without opening a menu, without UAC, and without the popup-menu class
+  (`#32768`) that muda's tray menu does not reliably expose to UIA. It named the defect on the live host
+  in one call — `DIG - your account cannot be opened` before, `DIG - your account is locked` after — which
+  is exactly the property `SPEC.md` §3.1c requires it to carry. The DIG icon lives in the hidden-icons
+  overflow, so invoke `Show Hidden Icons` first or the scan reports the icon missing.
+
 ## #2074 — how dig-app went blind, and the two probes that lied about it
 
 - **A directory with listing denied answers "not found" to every recursive search.**
