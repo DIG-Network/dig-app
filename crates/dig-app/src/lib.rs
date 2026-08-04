@@ -46,10 +46,11 @@ pub mod pump_vigil;
 /// Tray-only, for the same reason as [`brand`]: a headless build mounts no tray.
 #[cfg(feature = "tray")]
 pub mod tray_guard;
-/// Keeping the tray's context menu dismissable, and clearing it when it is not.
-///
-/// Tray-only: it exists entirely to guard `tray-icon`'s `TrackPopupMenu`, and a headless build has
-/// no tray menu to track (dig-app#86).
+// NOTE: no outer doc comment here on purpose. A module carrying BOTH outer docs on its `pub mod`
+// declaration and inner `//!` docs has the two MERGED, and the merged block then resolves its
+// intra-doc links in the CRATE-ROOT scope — so a link to one of the module's own items fails to
+// resolve, with a rustdoc error that carries no file and no line. It broke the doc gate twice on
+// dig-app#86. `tray_popup` documents itself.
 #[cfg(feature = "tray")]
 pub mod tray_popup;
 /// Running tray menu actions off the event loop, so no handler can freeze the tray.

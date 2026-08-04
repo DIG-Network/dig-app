@@ -300,7 +300,34 @@ has stopped iterating.
 - **A continuing stall MUST keep being reported** on a backoff, and MUST NOT latch after one line: the
   permanent case is the one that matters most, and latching silences exactly it. A stall that ENDS MUST
   be reported once, with its duration.
-- The watcher MUST NOT act. It observes and reports; recovery belongs to the window service.
+- **The watcher MAY act only where an action can choose nothing.** It observes and reports; recovery
+  in general belongs to the window service. The one exception is a stuck tray menu, and it is granted
+  because breaking one is incapable of authorizing anything: a dismissed menu has selected no item.
+  The watcher MUST NOT poke any other phase — a shell call that will return or will not, and a block
+  in platform dispatch we cannot name, offer nothing safe to do, and a watchdog that acts on them has
+  a second way to be wrong.
+
+### 3.1b-tp The tray context menu MUST be dismissable before it is tracked (normative)
+
+The tray menu is drawn by `TrackPopupMenu`, a nested modal message loop inside the tray window proc
+inside the platform event loop. While it is up the tray's own loop does not run at all, so a menu that
+never dismisses is a tray whose every item is dead, permanently and silently (dig-app#86).
+
+A popup tracked without foreground rights cannot be dismissed by clicking away, by Escape, or by
+anything else — measured, holding the loop 180 s and indefinitely thereafter (MSDN Q135788).
+
+- **The process MUST take the foreground immediately before the popup is tracked**, at the last point
+  its own code runs, and MUST report a refusal at ERROR naming what it predicts — that is the moment
+  the wedge becomes reachable, and the line a later investigation will search for.
+- **Both halves of Q135788 are required.** `SetForegroundWindow` *before* the track is what makes the
+  menu dismissable; `PostMessage(WM_NULL)` *after* finalises the task switch for the next one. Neither
+  alone is sufficient, and the second without the first fixes nothing.
+- **A menu that outlives its bound MUST be broken from a thread that is not the blocked one**, with a
+  POSTED message, so the rescuer never blocks on a thread that is not responding.
+- **The right rule is refuse-to-track rather than track-hopefully**, and reaching it requires owning
+  the popup rather than delegating it to a library. Until the window service owns it, the guards above
+  make the bad state rare and survivable rather than unreachable; this MUST NOT be described as
+  closed.
 
 ### 3.1c The tray account surface (normative)
 

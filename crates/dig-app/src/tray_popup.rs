@@ -1,5 +1,8 @@
 //! Keeping the tray's context menu dismissable, and clearing it when it is not.
 //!
+//! Tray-only: it exists entirely to guard `tray-icon`'s `TrackPopupMenu`, and a headless build
+//! has no tray menu to track.
+//!
 //! # The defect
 //!
 //! `tray-icon` shows the tray menu with `TrackPopupMenu`, a **nested modal message loop** that runs
