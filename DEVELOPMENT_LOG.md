@@ -1,3 +1,49 @@
+## #2074 — how dig-app went blind, and the two probes that lied about it
+
+- **A directory with listing denied answers "not found" to every recursive search.**
+  `%ProgramData%\DigNetwork` is DACL'd `{SYSTEM:F, Administrators:F}` by dig-installer #715, so an
+  unprivileged `Get-ChildItem -Recurse`/`find`/`dir` over it throws on the parent and returns NOTHING for
+  the whole subtree. Two separate investigations concluded "dig-app writes no log file at all" from
+  exactly that; the files were there the whole time, 170 KB and 125 KB of them. `Get-Item` on the EXACT
+  path succeeds, because traverse is granted and enumeration is not. When a search comes back empty on a
+  DIG machine directory, control it by fetching one known filename directly before believing the absence.
+
+- **`create_dir_all` is not a writability probe.** It returns `Ok(())` for a directory that already
+  exists, whatever its ACL — it only errors if creation itself fails. `dig-logging` chooses between the
+  machine log root and its per-user fallback with `|path| create_dir_all(path).is_ok()`
+  (`dig-logging-0.1.4/src/dirs.rs:113`), so once an elevated run has created the machine dir, every
+  later unprivileged run is told it can write a directory it can never write: #728 grants
+  `BUILTIN\Users` read+execute, never write. The per-user fallback that exists for exactly this case is
+  then unreachable, the appender fails on its first file open, and the process runs blind. The root fix
+  belongs in dig-logging — probe by creating and deleting a file, not by calling `create_dir_all`.
+
+- **A GUI-subsystem binary has no stderr, so `eprintln!` is not a fallback — it is a deletion.**
+  dig-app is `PE32+ (GUI)`. Its one message explaining why logging failed went to a handle that does not
+  exist. Any diagnostic that only matters when the logger is broken has to reach a file or a window.
+
+- **Elimination beat instrumentation here.** The decisive measurement was not a stack trace but a
+  negative: launch dig-app and check whether the per-user fallback directory gets CREATED. It does not.
+  Since that branch would have created it, the probe must have chosen the machine root — which is only
+  possible via the `create_dir_all`-on-an-existing-dir path. One `Test-Path` settled a question that
+  three window-handle probes could not.
+
+- **`muda` renames every menu row on every rebuild.** An unnamed `MenuItem` takes its id from a
+  process-global counter (`muda/src/util.rs:13`), so `tray.set_menu(build(...))` invalidates every id the
+  shell recorded. The shell resolves a click by looking its id up in the CURRENT map and, finding
+  nothing, dropped it in silence. Derive the id from the verb (`tray_menu::action_id`) so a click that
+  crosses a rebuild still resolves. The same verb legitimately appears on two rows (`AboutDid` does, in
+  every state), so the invariant to test is "an id never means two DIFFERENT verbs", not "ids are unique".
+
+- **`ActionWorker::busy` is released only when the handler RETURNS.** A handler that never returns latches
+  it for the life of the process, and from the event loop that is indistinguishable from the deliberate
+  "ignore an impatient second click" case. It was logged at DEBUG, below the default filter, so the
+  pathological state left no trace at all. Now WARN, naming the possibility.
+
+- **The confirmer was NOT the wedge, and one keystroke proved it.** `Alt+Space` on the affected live
+  process drew a real prompt window, on a process whose menu clicks did nothing. Whatever "nothing
+  happens" is, it is upstream of the prompt thread — which is why #78's four hardening fixes, all in the
+  prompt thread, could be correct and still not be the cause.
+
 ## #1931 — the identity.* capability class, and the money-derivation drift the dig-account 0.3 bump surfaced
 
 - **DIGCHAT1 is a cross-repo BYTE contract, so pin it against the OTHER implementation, not a round-trip.**
