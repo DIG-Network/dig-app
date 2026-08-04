@@ -715,6 +715,21 @@ Binding rules, which matter more for an input control than for a notice:
   clipboard shadow) beyond the frame. Where the toolkit exposes no way to wipe such a copy, the backend
   MUST at least bound its lifetime to the frame and MUST say so — this reduces exposure rather than
   eliminating it.
+- **An undecorated prompt window MUST be movable, and MUST NOT be movable by its controls (MUST).** A
+  consent window sits above everything and cannot be put behind anything, so one that cannot be moved
+  covers the very thing the user is reading in order to decide; an undecorated window offers the platform
+  no titlebar to move it by. A backend MUST therefore expose a drag affordance in its OWN chrome, and MUST
+  hand the resulting gesture to the window manager rather than repositioning the window itself frame by
+  frame. The platform gesture is what supplies edge snapping, monitor boundaries and per-display scale
+  transitions; a hand-driven reposition reimplements none of them and fights the compositor at exactly the
+  moment a frameless surface is known to lose its content. The draggable region MUST exclude every
+  control, and the action row in particular: hit testing resolves a press-and-move separately from a
+  click, so a drag region merely layered BENEATH a click-only button still captures the gesture — the
+  affirmative control would then travel out from under a cursor already committed to pressing it, and
+  depth cannot prevent that, only geometry can. Moving a window MUST NOT change what it reports, MUST NOT
+  dismiss it, and MUST leave its focus, its always-on-top placement, its Escape path and its deadline
+  exactly as they were. Where a window's position can be influenced by a CALLER, it MUST be clamped to the
+  visible work area, so a hostile origin cannot place a consent window off-screen or beneath another.
 
 **Current state:** Windows and Linux draw the **branded prompt window** — one renderer, in-process,
 shared by every consent and input prompt, in hub.dig.net's visual language, with the field, the masking
@@ -733,6 +748,20 @@ there is no escaping step to omit at a new call site, because there is no markup
 
 The destroy window's pre-selected refusal is honoured on Windows and Linux (the refusing control holds the
 opening focus and the focus ring) and on macOS (the Return key equivalent moves to Cancel).
+
+A dialog prompt is MOVABLE: pressing its header strip hands the move to the window manager, so the
+window follows the pointer with the platform's own behaviour for monitor boundaries and per-display
+scale. The strip is the chrome bar minus the theme toggle and a dead zone in front of it, and its lower
+edge is clamped so that it can never reach the action row at any window height. A finished move
+cannot press a control for a reason that does not depend on that geometry: the handle senses CLICK
+as well as drag, so the move is withheld until the gesture has already been disqualified from
+resolving as a click, and the release that ends it therefore cannot resolve as one wherever it
+lands. The geometry is the backstop. Only a primary-button press moves a window, and the handle
+takes no keyboard focus. Moving a window
+changes nothing else about it — its answer, its focus, its always-on-top placement, its Escape path
+and its deadline are all unaffected. Edge snapping does not apply, because the platform reserves it
+for resizable windows and these are sized to their content. The launcher bar is deliberately not
+movable: it dismisses itself on blur, and a move that blurred it would make it vanish mid-gesture.
 
 The branded window honours both `InputStyle` presentations (dig_ecosystem#2054). An `InputStyle::Dialog`
 is the titled, framed, content-sized card every account journey uses. An `InputStyle::Bar` is the

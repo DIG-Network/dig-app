@@ -69,6 +69,34 @@ const MAX_HEIGHT: f32 = 900.0;
 const SCREEN_SHARE: f32 = 0.9;
 /// The height reserved for the action row — the separator, the buttons and the padding under them.
 const ACTION_ROW: f32 = 72.0;
+/// The height of the window's chrome bar — the brand mark, the title, the theme toggle, and the
+/// strip the window is DRAGGED by ([`PromptApp::drag_region`]).
+const CHROME_HEIGHT: f32 = 44.0;
+/// The width of the theme toggle sitting at the right end of the chrome.
+const TOGGLE_WIDTH: f32 = 110.0;
+/// What the window's drag strip senses.
+///
+/// Two halves, each load-bearing, and NEITHER is what the obvious `Sense::click_and_drag()` or
+/// `Sense::drag()` would give:
+///
+/// * **`CLICK` is kept** even though the handle's click is never read. It is what makes `egui`
+///   withhold the drag until the gesture can no longer be a click, which is the whole reason a
+///   finished move cannot press a consent button — see
+///   [`drag_by_the_header`](PromptApp::drag_by_the_header). `Sense::drag()` alone reports the drag on
+///   the press frame and silently removes that guarantee.
+/// * **`FOCUSABLE` is dropped**, which `Sense::click_and_drag()` would include (egui 0.31.1
+///   `sense.rs:77`). The strip is registered before every other widget, so a focusable one would be
+///   the FIRST tab stop on a consent dialog — an invisible, unlabelled stop with no focus ring, on the
+///   one surface whose keyboard navigation has to be unambiguous. It is decoration for the pointer,
+///   not a control.
+const DRAG_HANDLE_SENSE: egui::Sense = egui::Sense::CLICK.union(egui::Sense::DRAG);
+
+/// The gap left between the end of the drag strip and the theme toggle.
+///
+/// A drag strip that runs right up to a control makes the control's own edge ambiguous: a press a
+/// pixel out lands on the strip and the window moves instead of the theme changing. This is the
+/// same reasoning as the action row's exclusion, at the scale the two things are actually apart.
+const DRAG_DEAD_ZONE: f32 = space::S3;
 /// How much room a scannable QR is given, in logical pixels.
 ///
 /// Big enough that a phone camera resolves the modules at arm's length on a 1× display; the art
@@ -977,9 +1005,129 @@ impl PromptApp {
 }
 
 impl PromptApp {
-    /// The 44 px chrome: the brand mark, the window title, and the theme toggle.
+    /// The strip of the chrome the window may be dragged by.
+    ///
+    /// The chrome bar, minus the theme toggle and a dead zone in front of it. Everything else — the
+    /// body, the field, and above all the action row — is deliberately OUTSIDE it, and that
+    /// exclusion is a consent property rather than a tidiness one. See
+    /// [`drag_by_the_header`](Self::drag_by_the_header).
+    ///
+    /// # Why the bottom edge is clamped rather than just [`CHROME_HEIGHT`]
+    ///
+    /// [`actions`](Self::actions) puts the action row at `full.bottom() - ACTION_ROW`, so on a window
+    /// shorter than `CHROME_HEIGHT + ACTION_ROW` the two would OVERLAP and a press on the strip would
+    /// land on a consent button. Nothing produces such a window today — [`MIN_HEIGHT`] is 320, it is
+    /// also the viewport's `min_inner_size`, and [`fit_to_content`](Self::fit_to_content) re-requests
+    /// a taller window every frame — but that is three separate coincidences holding up a consent
+    /// property. Taking the smaller of the two edges makes it fail closed by construction: at any
+    /// height where the row would reach the chrome, the strip shrinks to nothing and the window
+    /// simply stops being draggable, which is the safe direction.
+    fn drag_region(full: Rect) -> Rect {
+        let action_row_top = full.bottom() - ACTION_ROW;
+        let height = CHROME_HEIGHT.min(action_row_top - full.top());
+        let right = full.right() - TOGGLE_WIDTH - space::S3 - DRAG_DEAD_ZONE;
+        // `Rect::NOTHING` rather than a flattened rect: a zero-height rect still CONTAINS the points
+        // on its own edge, so it could still take a press. There is no such thing as a slightly-safe
+        // drag strip — either there is room for one above the action row or there is none.
+        if height <= 0.0 || right <= full.left() {
+            return Rect::NOTHING;
+        }
+        Rect::from_min_max(full.left_top(), egui::Pos2::new(right, full.top() + height))
+    }
+
+    /// Let the user move the window by its header, the way every other window on their desktop moves.
+    ///
+    /// # Why the window manager does the move, and not this code
+    ///
+    /// [`egui::ViewportCommand::StartDrag`] hands the gesture straight to the platform — on Windows
+    /// `ReleaseCapture` followed by `WM_NCLBUTTONDOWN`/`HTCAPTION`, which is literally what dragging
+    /// a titlebar does. Aero Snap at the screen edges, multi-monitor boundaries, per-monitor DPI
+    /// transitions and the drag shadow all come from that one message. Reading pointer deltas and
+    /// pushing [`egui::ViewportCommand::OuterPosition`] every frame would reimplement each of those,
+    /// badly, and would fight the compositor at exactly the moment the window is moving — the
+    /// condition under which a frameless surface was previously measured losing its content
+    /// (dig_ecosystem#2038). The surface stays OPAQUE for the same reason; this adds a gesture, it
+    /// does not reopen transparency.
+    ///
+    /// # Why a finished move cannot press anything — the STRUCTURAL guarantee
+    ///
+    /// This is the primary reason, and it does not depend on where the strip is.
+    ///
+    /// [`DRAG_HANDLE_SENSE`] senses BOTH click and drag, and for such a widget `egui` will not report
+    /// a drag until [`egui::PointerState::is_decidedly_dragging`] holds (egui 0.31.1
+    /// `interaction.rs:196`), which requires `!could_any_button_be_click()` — the pointer has already
+    /// travelled past `max_click_dist` or been held past `max_click_duration`. **By the time
+    /// [`egui::ViewportCommand::StartDrag`] is sent, the gesture has already been disqualified from
+    /// ever producing a click.** Whatever release arrives afterwards, and wherever it lands, it cannot
+    /// resolve as one. That covers the awkward case geometry alone would not: press, hold still for a
+    /// second and a half, and let go directly on **Sign**.
+    ///
+    /// The sense is therefore load-bearing, not incidental. A `Sense::drag()` handle marks itself
+    /// dragged on the PRESS frame (`interaction.rs:202`) and removes the disqualification entirely,
+    /// which is why [`DRAG_HANDLE_SENSE`] keeps `CLICK` and why a test pins it.
+    ///
+    /// # Why the strip ALSO stops short of the controls — the backstop
+    ///
+    /// An `egui` button senses CLICKS only. Hit testing resolves a click and a drag separately, so a
+    /// drag-sensing region that merely sits UNDER the action row still wins the drag: pressing
+    /// **Sign** and moving a few pixels would move the window instead of signing, and — worse — the
+    /// affirmative control would travel under a cursor already committed to pressing it. Depth does
+    /// not save this; only geometry does, so the strip is bounded to the chrome and stops a dead zone
+    /// short of the theme toggle ([`drag_region`](Self::drag_region)).
+    ///
+    /// Nothing about the gesture can answer the prompt. It sends one viewport command and touches
+    /// neither [`PromptApp::record`] nor the sink, so a moved window still has exactly the outcomes
+    /// it had standing still — including Escape, which stays wired first and unconditionally in
+    /// [`keys`](Self::keys).
+    ///
+    /// # Where the release at `(0, 0)` actually comes from
+    ///
+    /// Windows runs the move in a MODAL loop, so this application's frames stop while the window is
+    /// being dragged and the real button-up is consumed by that loop. winit compensates on
+    /// `WM_EXITSIZEMOVE` by posting a synthetic `WM_LBUTTONUP` — but that arm never reads the
+    /// message's `lparam`; it emits a bare `MouseInput { Released }` with no position at all (winit
+    /// 0.30.13 `windows/event_loop.rs:1797`), and `egui-winit` fills the position in from the LAST
+    /// CACHED cursor position (`egui-winit` 0.31.1 `lib.rs:551`).
+    ///
+    /// The `(0, 0)` is real, and it arrives by a different route: the `WM_NCLBUTTONDOWN`/`HTCAPTION`
+    /// arm posts a dummy `WM_MOUSEMOVE` with `lparam = 0` to stop Windows pausing the loop
+    /// (`windows/event_loop.rs:1244`), and that move is what leaves the cached position at the
+    /// client origin. So the synthetic release lands at either the origin or wherever the pointer
+    /// last genuinely was — and both are inside the strip, because the gesture began there. Recorded
+    /// precisely because this paragraph is what a maintainer reads before moving the strip.
+    ///
+    /// # Aero Snap, honestly
+    ///
+    /// Snapping to a screen edge is a feature of RESIZABLE windows. These are created
+    /// `.with_resizable(false)` so they can be sized to their content, so edge-snap does not apply —
+    /// stated rather than claimed. Everything else the platform gesture provides (monitor
+    /// boundaries, per-display scale, the drag shadow) is unaffected by that.
+    fn drag_by_the_header(&self, ui: &egui::Ui, full: Rect) {
+        // A launcher bar places itself high on the monitor and dismisses itself on blur; whether an
+        // OS-driven move keeps it focused is a claim that needs a real desktop to settle, and getting
+        // it wrong makes the bar vanish mid-gesture. Dialogs are what the user asked to be able to
+        // move, so dialogs are what this covers.
+        if self.screen.chrome.is_bar() {
+            return;
+        }
+        let handle = ui.interact(
+            Self::drag_region(full),
+            ui.id().with("dig-prompt-drag"),
+            DRAG_HANDLE_SENSE,
+        );
+        if handle.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        // Primary button only: a right-drag on a titlebar is the system menu, never a move.
+        if handle.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+    }
+
+    /// The 44 px chrome: the drag strip, the brand mark, the window title, and the theme toggle.
     fn chrome(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) {
-        let bar = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), 44.0));
+        let bar = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), CHROME_HEIGHT));
+        self.drag_by_the_header(ui, full);
         paint::brand_mark(
             ui,
             Rect::from_min_size(
@@ -1005,7 +1153,7 @@ impl PromptApp {
             Theme::Light => "Dark theme",
             Theme::Dark => "Light theme",
         };
-        let width = 110.0;
+        let width = TOGGLE_WIDTH;
         let slot = Rect::from_min_size(
             egui::Pos2::new(bar.right() - width - space::S3, bar.top() + 7.0),
             Vec2::new(width, 30.0),
@@ -1055,7 +1203,7 @@ impl PromptApp {
             false => 88.0,
         };
         let inner = Rect::from_min_max(
-            full.left_top() + Vec2::new(space::S6, 44.0 + space::S6),
+            full.left_top() + Vec2::new(space::S6, CHROME_HEIGHT + space::S6),
             full.right_bottom() - Vec2::new(space::S6, bottom_reserve),
         );
         let mut ui = ui.new_child(
@@ -2383,6 +2531,166 @@ mod tests {
                 if let Ok(mut slot) = self.size.lock() {
                     *slot = Some((w, h));
                 }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Open a REAL prompt window and photograph its framebuffer on a schedule while something
+    /// outside drags it.
+    ///
+    /// # Why this cannot be a headless test
+    ///
+    /// The claim being checked is dig_ecosystem#2038's: that a frameless surface on Windows can lose
+    /// its content when the window MOVES and never recomposite. There is no compositor in a headless
+    /// frame, so the only way to find out is to move a real window on a real desktop and read the
+    /// real framebuffer back — with [`egui::ViewportCommand::Screenshot`], never a screen capture,
+    /// because a GDI capture is blind to a hardware GL surface and would photograph the desktop
+    /// behind it.
+    ///
+    /// The schedule is wall-clock from window creation so an external driver can aim at it:
+    /// `drag-1-before` at 1.5 s, `drag-2-during` at 4.0 s (a drag is expected to be IN PROGRESS),
+    /// `drag-3-after` at 7.0 s, `drag-4-settled` at 9.0 s. Each shot's outer position is written
+    /// beside it, so "the window actually moved" is evidence rather than an impression.
+    ///
+    /// Ignored: it needs a display and a driver. Run with
+    /// `cargo test -p dig-app-core --lib --all-features -- --ignored --nocapture a_real_window_survives_being_dragged`.
+    #[test]
+    #[ignore = "opens a real window and needs an external drag driver; run deliberately on a desktop"]
+    fn a_real_window_survives_being_dragged() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("DIG_PROMPT_SHOTS").unwrap_or_else(|_| "target/prompt-shots".into()),
+        );
+        std::fs::create_dir_all(&dir).expect("the gallery directory");
+
+        let store_dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(store_dir.path());
+        store.write(Theme::Light).expect("the theme persists");
+        let screen = sign_screen();
+        let title = screen.title.clone();
+        let chrome = screen.chrome;
+        let (reply, _rx) = sync_channel(1);
+        let app = PromptApp::new(
+            Job {
+                screen,
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+
+        let log = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let recorded = log.clone();
+        eframe::run_native(
+            &title,
+            native_options(&title, chrome),
+            Box::new(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                Ok(Box::new(DragProbe {
+                    app,
+                    started: Instant::now(),
+                    next: 0,
+                    pending: false,
+                    dir,
+                    log: recorded,
+                }))
+            }),
+        )
+        .expect("the real window opens");
+
+        let log = log.lock().expect("the log is not poisoned");
+        for line in log.iter() {
+            println!("{line}");
+        }
+        assert_eq!(
+            log.len(),
+            DragProbe::SHOTS.len(),
+            "the probe did not complete its schedule"
+        );
+    }
+
+    /// The real window under an external drag, photographing itself on a timetable.
+    struct DragProbe {
+        app: PromptApp,
+        started: Instant,
+        /// Which entry of [`SHOTS`](Self::SHOTS) is next.
+        next: usize,
+        /// Whether a screenshot has been asked for and not yet come back.
+        ///
+        /// A request per frame would queue four of them inside one 60th of a second and the whole
+        /// schedule would be consumed in three frames — measured, and it made the first run of this
+        /// probe report four identical positions.
+        pending: bool,
+        dir: std::path::PathBuf,
+        /// One line per shot: the file, its pixel size, and where the window was.
+        log: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    impl DragProbe {
+        /// When to photograph, and what to call each one.
+        const SHOTS: [(f32, &'static str); 4] = [
+            (1.5, "drag-1-before"),
+            (4.0, "drag-2-during"),
+            (7.0, "drag-3-after"),
+            (9.0, "drag-4-settled"),
+        ];
+    }
+
+    impl eframe::App for DragProbe {
+        fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+            self.app.clear_color(visuals)
+        }
+
+        fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            self.app.frame(ctx);
+            let elapsed = self.started.elapsed().as_secs_f32();
+            if let Some((due, _)) = Self::SHOTS.get(self.next) {
+                if elapsed >= *due && !self.pending {
+                    self.pending = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                }
+            }
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            let Some(image) = shot else { return };
+            let Some((_, name)) = Self::SHOTS.get(self.next) else {
+                return;
+            };
+            let where_it_is = ctx.input(|i| i.viewport().outer_rect);
+            let path = self.dir.join(format!("{name}.png"));
+            let (w, h) = (image.width(), image.height());
+            let bytes: Vec<u8> = image
+                .pixels
+                .iter()
+                .flat_map(|p| [p.r(), p.g(), p.b()])
+                .collect();
+            let file = std::fs::File::create(&path).expect("the screenshot file");
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .and_then(|mut w| w.write_image_data(&bytes))
+                .expect("the screenshot encodes");
+            if let Ok(mut log) = self.log.lock() {
+                log.push(format!(
+                    "{name}: {w}x{h} at {:?} (t+{elapsed:.1}s)",
+                    where_it_is.map(|r| r.min)
+                ));
+            }
+            self.pending = false;
+            self.next += 1;
+            if self.next == Self::SHOTS.len() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -4240,5 +4548,702 @@ mod tests {
         fn assert_zeroizing<T: zeroize::Zeroize>(_: &T) {}
         let buffer: Zeroizing<String> = Zeroizing::new("abandon abandon".into());
         assert_zeroizing(&*buffer);
+    }
+
+    /// A real prompt, driven frame by frame with real pointer input.
+    ///
+    /// [`painted`] answers "what did one frame draw"; the drag gesture is a SEQUENCE — a press, then
+    /// motion while held — and the thing under test is which of those frames asks the windowing
+    /// system to take over. So this keeps the app alive across frames and accumulates every viewport
+    /// command it issued, alongside the answer it recorded.
+    struct Driven {
+        app: PromptApp,
+        ctx: egui::Context,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        commands: Vec<egui::ViewportCommand>,
+        /// Kept alive: the theme store writes into it for the life of the app.
+        _dir: tempfile::TempDir,
+    }
+
+    impl Driven {
+        fn new(screen: Screen) -> Self {
+            Self::with(screen, false)
+        }
+
+        fn with(screen: Screen, wants_text: bool) -> Self {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let store = ThemeChoice::in_brand_dir(dir.path());
+            store.write(Theme::Light).expect("the theme persists");
+            let (reply, _rx) = sync_channel(1);
+            let sink = std::sync::Arc::new(Mutex::new(None));
+            let app = PromptApp::new(
+                Job {
+                    screen,
+                    wants_text,
+                    theme: store.clone(),
+                    deadline: PATIENT,
+                    over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                    reply,
+                },
+                store,
+                sink.clone(),
+            );
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            let mut driven = Self {
+                app,
+                ctx,
+                sink,
+                commands: Vec::new(),
+                _dir: dir,
+            };
+            // The first frame builds the font atlas and lays out against a provisional one, so it is
+            // run and DISCARDED before anything is measured or asserted on.
+            driven.frame(Vec::new());
+            driven.commands.clear();
+            driven
+        }
+
+        /// Run one frame with `events` delivered to it.
+        fn frame(&mut self, events: Vec<egui::Event>) {
+            self.frame_focused(events, None);
+        }
+
+        /// Run one frame with `events`, and with the windowing system reporting `focused`.
+        ///
+        /// Focus arrives as viewport INFO rather than as an event, so it cannot be expressed in
+        /// `events` — and focus is what [`PromptApp::dismiss_on_blur`] reads.
+        fn frame_focused(&mut self, events: Vec<egui::Event>, focused: Option<bool>) {
+            let mut viewports = egui::ViewportIdMap::default();
+            viewports.insert(
+                egui::ViewportId::ROOT,
+                egui::ViewportInfo {
+                    focused,
+                    ..Default::default()
+                },
+            );
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    Vec2::new(WIDTH, HEIGHT),
+                )),
+                events,
+                viewports,
+                ..Default::default()
+            };
+            let app = &mut self.app;
+            let output = self.ctx.run(input, |ctx| app.frame(ctx));
+            for viewport in output.viewport_output.values() {
+                self.commands.extend(viewport.commands.iter().cloned());
+            }
+        }
+
+        /// Press the primary button at `at` and run ONE frame. No movement, no release.
+        fn press_only(&mut self, at: egui::Pos2) {
+            self.press(at, egui::PointerButton::Primary);
+        }
+
+        fn press(&mut self, at: egui::Pos2, button: egui::PointerButton) {
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+        }
+
+        /// Press `button` at `at`, then move while still held.
+        fn press_and_drag_with(&mut self, at: egui::Pos2, button: egui::PointerButton) {
+            self.press(at, button);
+            self.frame(vec![egui::Event::PointerMoved(at + Vec2::new(120.0, 90.0))]);
+        }
+
+        /// Press the primary button at `at`, then move while still held.
+        ///
+        /// Two frames on purpose. A press alone is a click; only motion past egui's threshold while
+        /// the button is down is a DRAG, and it is the drag that must reach the window manager.
+        fn press_and_drag(&mut self, at: egui::Pos2) {
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerMoved(at + Vec2::new(120.0, 90.0))]);
+        }
+
+        /// The whole gesture: press at `from`, move to `to`, and let go THERE.
+        ///
+        /// The release is the half a hit-region test cannot see. A drag that begins on the header
+        /// ends wherever the user stopped moving, and that is very often over a control.
+        fn drag_from_to(&mut self, from: egui::Pos2, to: egui::Pos2) {
+            self.frame(vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerMoved(to)]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+        }
+
+        /// Press and release the primary button at `at`, which is a plain click.
+        fn click(&mut self, at: egui::Pos2) {
+            self.frame(vec![
+                egui::Event::PointerMoved(at),
+                egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+        }
+
+        fn press_key(&mut self, key: Key) {
+            self.frame(vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }]);
+        }
+
+        /// Whether the window ever asked the platform to take over a move.
+        fn asked_the_os_to_move_it(&self) -> bool {
+            self.commands
+                .iter()
+                .any(|cmd| matches!(cmd, egui::ViewportCommand::StartDrag))
+        }
+
+        fn recorded(&self) -> Option<WindowIntent> {
+            match &*self.sink.lock().expect("the sink is not poisoned") {
+                Some(Outcome::Confirm(intent)) => Some(*intent),
+                _ => None,
+            }
+        }
+    }
+
+    /// The frameless launcher bar — the one screen whose chrome is [`Chrome::Bar`].
+    fn bar_screen() -> Screen {
+        Screen::input(&InputContent {
+            title: "DIG — Open a dig:// link".into(),
+            heading: "Open a dig:// link".into(),
+            body: "Paste or type a dig:// address.".into(),
+            field_label: "dig:// address".into(),
+            submit: "Open",
+            masked: false,
+            revealable: false,
+            style: crate::confirm::InputStyle::Bar,
+        })
+    }
+
+    /// The full window rect every driven frame is laid out in.
+    fn full_rect() -> Rect {
+        Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(WIDTH, HEIGHT))
+    }
+
+    /// A point in the middle of the draggable header strip.
+    fn on_the_header() -> egui::Pos2 {
+        PromptApp::drag_region(full_rect()).center()
+    }
+
+    /// A point on the RIGHTMOST control of the action row — the affirmative one.
+    ///
+    /// Derived from the row geometry rather than eyeballed, and every test that uses it also proves
+    /// the point really lands on the button (see
+    /// [`the_action_row_is_not_a_drag_handle`]): a coordinate that quietly missed the control would
+    /// make "no drag started here" true for the wrong reason.
+    fn on_the_affirmative_button() -> egui::Pos2 {
+        let full = full_rect();
+        egui::Pos2::new(
+            full.right() - space::S6 - 40.0,
+            full.bottom() - ACTION_ROW / 2.0,
+        )
+    }
+
+    /// A point on the theme toggle in the chrome.
+    fn on_the_theme_toggle() -> egui::Pos2 {
+        let full = full_rect();
+        egui::Pos2::new(
+            full.right() - space::S3 - TOGGLE_WIDTH / 2.0,
+            CHROME_HEIGHT / 2.0,
+        )
+    }
+
+    /// **A prompt can be moved by its header, and the platform does the moving.**
+    ///
+    /// Asserted as [`egui::ViewportCommand::StartDrag`] specifically, not merely "the window moved".
+    /// That command is what becomes `WM_NCLBUTTONDOWN`/`HTCAPTION` on Windows, and it is where Aero
+    /// Snap, monitor boundaries and DPI transitions come from. A hand-rolled
+    /// [`egui::ViewportCommand::OuterPosition`] loop would also move the window and would have none
+    /// of them, so the test pins the mechanism (dig_ecosystem#2096).
+    #[test]
+    fn a_prompt_is_dragged_by_its_header() {
+        let mut window = Driven::new(sign_screen());
+        window.press_and_drag(on_the_header());
+        assert!(
+            window.asked_the_os_to_move_it(),
+            "a press-and-drag on the header never sent StartDrag, so the window cannot be moved"
+        );
+    }
+
+    /// **The action row is not a drag handle.** Pressing **Sign** and twitching must sign, never move
+    /// the window.
+    ///
+    /// This is a PLACEMENT property, and placement is what an outcome-only assertion cannot see, so
+    /// the test is built in two halves against ONE varied coordinate:
+    ///
+    /// * the same gesture on the header DOES start a move — the honest control, without which
+    ///   "no drag here" would also pass on a build where dragging is broken everywhere;
+    /// * a click at the very same action-row point records an APPROVAL — which proves the coordinate
+    ///   is genuinely on the affirmative control, rather than in some empty corner where nothing was
+    ///   ever going to happen.
+    ///
+    /// The hazard is real rather than theoretical: an `egui` button senses clicks only, and hit
+    /// testing resolves clicks and drags separately, so a drag region merely layered UNDERNEATH the
+    /// action row still wins the drag. Only geometry excludes it.
+    #[test]
+    fn the_action_row_is_not_a_drag_handle() {
+        let at = on_the_affirmative_button();
+
+        let mut control = Driven::new(sign_screen());
+        control.press_and_drag(on_the_header());
+        assert!(
+            control.asked_the_os_to_move_it(),
+            "the control gesture did not start a move, so this test cannot tell a protected action \
+             row from a window that simply never drags"
+        );
+
+        let mut aimed = Driven::new(sign_screen());
+        aimed.click(at);
+        assert_eq!(
+            aimed.recorded(),
+            Some(WindowIntent::Approve),
+            "the action-row coordinate {at:?} is not on the affirmative control, so any assertion \
+             about dragging it proves nothing"
+        );
+
+        let mut dragged = Driven::new(sign_screen());
+        dragged.press_and_drag(at);
+        assert!(
+            !dragged.asked_the_os_to_move_it(),
+            "pressing the affirmative control and moving started a WINDOW DRAG: the button travels \
+             out from under a cursor already committed to pressing it"
+        );
+    }
+
+    /// **The theme toggle is not a drag handle either**, and it still works.
+    ///
+    /// Same THREE-sided shape as the action row, and all three halves are needed. Without the
+    /// header control this test passed on a build where `StartDrag` was never sent at all — measured,
+    /// not supposed — because "the toggle did not start a drag" is trivially true when nothing does.
+    /// Without the click, the coordinate could be sitting in empty chrome.
+    #[test]
+    fn the_theme_toggle_is_not_a_drag_handle() {
+        let at = on_the_theme_toggle();
+
+        let mut control = Driven::new(sign_screen());
+        control.press_and_drag(on_the_header());
+        assert!(
+            control.asked_the_os_to_move_it(),
+            "the control gesture did not start a move, so this test cannot tell a protected toggle \
+             from a window that simply never drags"
+        );
+
+        let mut clicked = Driven::new(sign_screen());
+        let before = clicked.app.theme;
+        clicked.click(at);
+        assert_ne!(
+            clicked.app.theme, before,
+            "the toggle coordinate {at:?} did not flip the theme, so it is not on the toggle"
+        );
+
+        let mut dragged = Driven::new(sign_screen());
+        dragged.press_and_drag(at);
+        assert!(
+            !dragged.asked_the_os_to_move_it(),
+            "dragging the theme toggle moved the window instead of leaving the control alone"
+        );
+    }
+
+    /// **Escape still refuses after the window has been moved.**
+    ///
+    /// The window is undecorated, so Escape is the escape hatch (`professional-ui`, HARD RULE 1) and
+    /// dig_ecosystem#2079 already established there is no titlebar X behind it. A gesture that left
+    /// the app in a dragging state and swallowed the keystroke would take the only way out away.
+    #[test]
+    fn escape_still_refuses_after_a_drag() {
+        let mut window = Driven::new(sign_screen());
+        window.press_and_drag(on_the_header());
+        assert!(window.asked_the_os_to_move_it(), "the window never moved");
+        assert_eq!(
+            window.recorded(),
+            None,
+            "the move answered the prompt by itself"
+        );
+
+        window.press_key(Key::Escape);
+        assert_eq!(
+            window.recorded(),
+            Some(WindowIntent::Deny),
+            "Escape did not refuse the prompt after it had been dragged"
+        );
+    }
+
+    /// **Moving the window cannot answer it.** The gesture sends viewport commands and nothing else.
+    ///
+    /// Checked over the full set of drag targets, because the failure would be one region wiring a
+    /// press into [`PromptApp::finish`] while the others stayed clean.
+    ///
+    /// The header iteration is also the control: at least one of these gestures must genuinely reach
+    /// the window manager, or "no answer was recorded" is a statement about a window that did nothing
+    /// at all.
+    #[test]
+    fn dragging_never_answers_the_prompt() {
+        let mut control = Driven::new(sign_screen());
+        control.press_and_drag(on_the_header());
+        assert!(
+            control.asked_the_os_to_move_it(),
+            "no gesture in this test actually dragged anything"
+        );
+
+        for at in [
+            on_the_header(),
+            on_the_affirmative_button(),
+            on_the_theme_toggle(),
+        ] {
+            let mut window = Driven::new(sign_screen());
+            window.press_and_drag(at);
+            assert_eq!(
+                window.recorded(),
+                None,
+                "a drag beginning at {at:?} recorded an answer nobody gave"
+            );
+        }
+    }
+
+    /// **The launcher bar is deliberately NOT draggable**, and the same gesture on a dialog is.
+    ///
+    /// The bar places itself high on its monitor and dismisses itself the moment it loses focus. An
+    /// OS-driven move that blurs it would make it disappear mid-gesture, and that is a claim about a
+    /// real compositor rather than something this harness can settle — so the scope is dialogs, on
+    /// purpose, and the pairing here is what stops that reading as an accident.
+    #[test]
+    fn only_a_dialog_is_draggable() {
+        let mut dialog = Driven::new(sign_screen());
+        dialog.press_and_drag(on_the_header());
+        assert!(
+            dialog.asked_the_os_to_move_it(),
+            "a dialog must be draggable — that is the whole feature"
+        );
+
+        let mut bar = Driven::with(bar_screen(), true);
+        bar.press_and_drag(on_the_header());
+        assert!(
+            !bar.asked_the_os_to_move_it(),
+            "the launcher bar started an OS move; it dismisses itself on blur and this was scoped out"
+        );
+    }
+
+    /// **A drag that ENDS on the affirmative control does not press it.**
+    ///
+    /// Sharper than "the action row is not a drag handle", and a genuinely different failure: the
+    /// header strip can be perfectly bounded and the gesture still approve a transaction, because a
+    /// drag finishes with a pointer-UP wherever the user stopped — very often over a button, since
+    /// the buttons are where the eye is. A control that treats that release as a click turns "I moved
+    /// the window aside to read what is underneath it" into "I signed".
+    ///
+    /// Both endings are checked, because only the pair distinguishes a safe release from a gesture
+    /// that never reached the button at all: releasing on **Sign** must NOT approve, and a plain
+    /// click at the very same point must.
+    #[test]
+    fn a_drag_that_ends_on_the_affirmative_control_does_not_press_it() {
+        let on_sign = on_the_affirmative_button();
+
+        let mut proof = Driven::new(sign_screen());
+        proof.click(on_sign);
+        assert_eq!(
+            proof.recorded(),
+            Some(WindowIntent::Approve),
+            "the release point {on_sign:?} is not on the affirmative control, so ending a drag \
+             there proves nothing"
+        );
+
+        let mut dragged = Driven::new(sign_screen());
+        dragged.drag_from_to(on_the_header(), on_sign);
+        assert!(
+            dragged.asked_the_os_to_move_it(),
+            "the gesture never became a window move, so this is not the case under test"
+        );
+        assert_eq!(
+            dragged.recorded(),
+            None,
+            "letting go of a window drag over the affirmative control APPROVED the prompt — the \
+             user moved a window and signed a transaction"
+        );
+    }
+
+    /// **A consent dialog still cannot be dismissed by losing focus, dragged or not.**
+    ///
+    /// `dismiss_on_blur` is true for the launcher bar alone, and that asymmetry is what stops an
+    /// attacker who can steal the foreground from making a consent window disappear. A drag
+    /// implementation is exactly the kind of change that could weaken it by accident, since an
+    /// OS-driven move plausibly blurs the window on the way.
+    ///
+    /// The bar is the control: the same blur MUST dismiss it, or this test would pass just as well on
+    /// a build where blur handling had stopped working altogether.
+    #[test]
+    fn a_dragged_dialog_still_never_dismisses_on_blur() {
+        let mut dialog = Driven::new(sign_screen());
+        dialog.press_and_drag(on_the_header());
+        dialog.frame_focused(Vec::new(), Some(true));
+        dialog.frame_focused(Vec::new(), Some(false));
+        assert_eq!(
+            dialog.recorded(),
+            None,
+            "a consent dialog dismissed itself when it lost focus after being dragged"
+        );
+
+        let mut bar = Driven::with(bar_screen(), true);
+        bar.frame_focused(Vec::new(), Some(true));
+        bar.frame_focused(Vec::new(), Some(false));
+        assert!(
+            bar.sink.lock().expect("the sink is not poisoned").is_some(),
+            "the launcher bar did not dismiss on blur either, so the dialog's silence above says \
+             nothing about dismiss-on-blur"
+        );
+    }
+
+    /// **Dragging never computes a position itself.**
+    ///
+    /// The move is delegated whole to the window manager, so the frame must emit `StartDrag` and NO
+    /// [`egui::ViewportCommand::OuterPosition`]. This is not style. `egui` reports a window's
+    /// `monitor_size` but not that monitor's ORIGIN, so any position arithmetic written here is
+    /// implicitly about the primary display — and would drag a window that the user had just moved
+    /// onto a second monitor straight back onto the first. Pinning the absence keeps a future
+    /// "clamp it into view" from silently breaking the multi-monitor behaviour the OS gesture is
+    /// being used FOR. See [`PromptApp::drag_by_the_header`].
+    #[test]
+    fn dragging_delegates_the_position_and_never_computes_one() {
+        let mut window = Driven::new(sign_screen());
+        window.drag_from_to(on_the_header(), on_the_affirmative_button());
+        assert!(
+            window.asked_the_os_to_move_it(),
+            "the gesture never asked the platform to move the window"
+        );
+        let hand_rolled: Vec<_> = window
+            .commands
+            .iter()
+            .filter(|cmd| matches!(cmd, egui::ViewportCommand::OuterPosition(_)))
+            .collect();
+        assert!(
+            hand_rolled.is_empty(),
+            "the drag positioned the window itself ({hand_rolled:?}); that arithmetic has no \
+             monitor origin to work from and moves a second-monitor window back to the primary"
+        );
+    }
+
+    /// **A move only begins once the gesture can no longer be a click.**
+    ///
+    /// This is the guarantee the whole feature rests on, and it is STRUCTURAL rather than
+    /// geometric: because the handle senses click as well as drag, `egui` withholds the drag until
+    /// `is_decidedly_dragging` holds, which requires the gesture to have already failed the click
+    /// test. Whatever release arrives after `StartDrag`, wherever it lands, cannot resolve as a
+    /// click — including the case geometry alone would not cover, of pressing the header, holding
+    /// perfectly still, and letting go on **Sign**.
+    ///
+    /// The observable that distinguishes it: a plain PRESS, with no movement and no dwell, must not
+    /// move the window, because that press could still become a click. A `Sense::drag()` handle
+    /// reports itself dragged on the press frame and fails exactly here — which is the mutation this
+    /// exists for, and which the whole rest of the suite survived.
+    ///
+    /// The second half is the control: once the pointer does move, the move must happen.
+    #[test]
+    fn a_move_only_begins_once_the_gesture_can_no_longer_be_a_click() {
+        let mut window = Driven::new(sign_screen());
+
+        window.press_only(on_the_header());
+        assert!(
+            !window.asked_the_os_to_move_it(),
+            "a bare press on the header started a window move while the gesture could still \
+             resolve to a click, so one gesture can be both a click and a move"
+        );
+
+        window.frame(vec![egui::Event::PointerMoved(
+            on_the_header() + Vec2::new(120.0, 90.0),
+        )]);
+        assert!(
+            window.asked_the_os_to_move_it(),
+            "moving the pointer never started the drag, so the assertion above is about a handle \
+             that does not work at all"
+        );
+    }
+
+    /// **The drag strip senses click, and is not a tab stop.**
+    ///
+    /// Both halves of [`DRAG_HANDLE_SENSE`] are deliberate and neither is what the two obvious
+    /// constructors give, so both are pinned:
+    ///
+    /// * `CLICK` is what makes `egui` withhold the drag until the gesture cannot be a click — the
+    ///   structural guarantee above. `Sense::drag()` would drop it silently.
+    /// * `FOCUSABLE` must be absent. The strip is registered before every other widget, so
+    ///   `Sense::click_and_drag()` would make it the FIRST tab stop on a consent dialog: invisible,
+    ///   unlabelled, no focus ring, on the surface whose keyboard navigation has to be unambiguous.
+    #[test]
+    fn the_drag_strip_senses_click_and_is_not_a_tab_stop() {
+        assert!(
+            DRAG_HANDLE_SENSE.senses_drag(),
+            "the drag strip does not sense dragging"
+        );
+        assert!(
+            DRAG_HANDLE_SENSE.senses_click(),
+            "the drag strip stopped sensing clicks, which is what makes egui withhold the drag \
+             until the gesture can no longer be a click; a finished move can now press a button"
+        );
+        assert!(
+            !DRAG_HANDLE_SENSE.is_focusable(),
+            "the drag strip became focusable, so it is an unlabelled ring-less first tab stop on a \
+             consent dialog"
+        );
+    }
+
+    /// **A drag with a non-primary button never moves the window.**
+    ///
+    /// A secondary press is the system-menu gesture, never a move. Letting it through would also set
+    /// winit's dragging flag, which earns a synthetic LEFT release at the end of a gesture `egui`
+    /// never saw a left press for — a release with no matching press is exactly the kind of unpaired
+    /// input a consent surface should not be inventing.
+    ///
+    /// The primary button is the control, so this cannot pass on a handle that never drags.
+    #[test]
+    fn only_the_primary_button_moves_the_window() {
+        let mut secondary = Driven::new(sign_screen());
+        secondary.press_and_drag_with(on_the_header(), egui::PointerButton::Secondary);
+        assert!(
+            !secondary.asked_the_os_to_move_it(),
+            "a secondary-button drag on the header moved the window"
+        );
+
+        let mut primary = Driven::new(sign_screen());
+        primary.press_and_drag_with(on_the_header(), egui::PointerButton::Primary);
+        assert!(
+            primary.asked_the_os_to_move_it(),
+            "the primary button did not move the window either, so the assertion above is about a \
+             handle that never drags"
+        );
+    }
+
+    /// **The drag strip can never reach the action row, at any window height.**
+    ///
+    /// The strip is chrome-height and the action row is measured up from the bottom, so on a short
+    /// enough window the two would overlap and a press on the strip would land on a consent button.
+    /// Nothing produces such a window today, but that rests on three separate coincidences
+    /// ([`MIN_HEIGHT`], the viewport's `min_inner_size`, and `fit_to_content` asking to grow back),
+    /// and a consent property should not.
+    ///
+    /// Pinned from BOTH sides of the bound, because a one-sided check confirms only itself:
+    ///
+    /// * at and above `CHROME_HEIGHT + ACTION_ROW` the strip must keep its FULL height, so the clamp
+    ///   cannot be quietly stealing room from every real window;
+    /// * below it the strip must not reach the row. It collapses to [`Rect::NOTHING`], which is the
+    ///   safe direction: the window simply stops being draggable rather than becoming dangerous.
+    ///   Emptiness is asserted as "cannot contain a press", not as a height of zero — a flattened
+    ///   rect still contains the points along its own edge, and that was the first shape this took.
+    #[test]
+    fn the_drag_strip_never_reaches_the_action_row_at_any_height() {
+        let at_bound = CHROME_HEIGHT + ACTION_ROW;
+        for height in [at_bound, at_bound + 0.5, MIN_HEIGHT, HEIGHT, MAX_HEIGHT] {
+            let full = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(WIDTH, height));
+            let strip = PromptApp::drag_region(full);
+            assert!(
+                (strip.height() - CHROME_HEIGHT).abs() < 0.001,
+                "at {height} px the strip is {} px tall, not the full {CHROME_HEIGHT}; the clamp is \
+                 stealing room from a window that had none to spare",
+                strip.height()
+            );
+        }
+
+        for height in [at_bound - 0.5, 100.0, 60.0, CHROME_HEIGHT, 10.0, 0.0] {
+            let full = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(WIDTH, height));
+            let strip = PromptApp::drag_region(full);
+            let action_row_top = full.bottom() - ACTION_ROW;
+            let reaches_the_row = strip.bottom() > action_row_top + 0.001;
+            // A press anywhere in the row must miss the strip. Asserted against `contains` rather
+            // than against a height of zero, because a FLATTENED rect still contains its own edge.
+            let takes_a_press_in_the_row = [
+                full.center_bottom(),
+                egui::Pos2::new(full.left() + 1.0, action_row_top.max(full.top()) + 1.0),
+                egui::Pos2::new(full.left(), full.top()),
+            ]
+            .into_iter()
+            .any(|p| strip.contains(p) && reaches_the_row);
+            assert!(
+                !takes_a_press_in_the_row,
+                "at {height} px the strip {strip:?} reaches the action row at {action_row_top} and \
+                 still takes a press: a press on the drag strip lands on a consent button"
+            );
+        }
+    }
+
+    /// **The window options a drag runs against stay exactly as they were.**
+    ///
+    /// Every one of these is load-bearing for a window that can now MOVE:
+    ///
+    /// * `transparent` unset — a transparent frameless surface on Windows was measured losing its
+    ///   content on a move and never recompositing (dig_ecosystem#2038), and a move is now the
+    ///   primary interaction;
+    /// * `always_on_top` — a consent window that can be dragged behind another is one an attacker
+    ///   can hide;
+    /// * `active` — it must still take the foreground;
+    /// * `decorations` off — the card is drawn edge to edge, and the header IS the titlebar now.
+    ///
+    /// Pinned here rather than trusted to review: each is one word in a builder chain, and the
+    /// natural way to add "native window behaviour" is to reach for exactly these.
+    #[test]
+    fn a_draggable_prompt_is_still_opaque_focused_and_on_top() {
+        let viewport = native_options("DIG", Chrome::Dialog).viewport;
+        assert_ne!(
+            viewport.transparent,
+            Some(true),
+            "the prompt surface became transparent; a frameless transparent window loses its \
+             content on a move on Windows (#2038), and moving is now the point"
+        );
+        assert_eq!(
+            viewport.window_level,
+            Some(egui::WindowLevel::AlwaysOnTop),
+            "a consent window that is not always-on-top can be dragged behind another"
+        );
+        assert_eq!(
+            viewport.active,
+            Some(true),
+            "the prompt no longer takes focus"
+        );
+        assert_eq!(
+            viewport.decorations,
+            Some(false),
+            "the prompt grew OS decorations; the card is drawn edge to edge"
+        );
     }
 }
