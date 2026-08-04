@@ -997,6 +997,10 @@ mod tray {
     use dig_app_core::confirm::{native_confirmer, InputStyle, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;
     use dig_app_core::hotkey::HotkeyState;
+    use dig_app_core::secret_file::{
+        choose_secret_file_path, write_owner_only, NativeSavePicker, SaveFileRequest,
+        SecretFileDestination,
+    };
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -1873,8 +1877,8 @@ mod tray {
         }
     }
 
-    /// The platform egress for a phrase backup: the OS clipboard, or a plain `.txt` file in the user's
-    /// home directory. It handles the words for exactly one delivery and never logs or retains them.
+    /// The platform egress for a phrase backup: the OS clipboard, or a plain `.txt` file the user
+    /// chooses. It handles the words for exactly one delivery and never logs or retains them.
     struct TrayBackupSink;
 
     impl PhraseBackupSink for TrayBackupSink {
@@ -1897,15 +1901,44 @@ mod tray {
         }
     }
 
-    /// Write `words` to `dig-recovery-phrase.txt` in the user's home directory, owner-only, and report
-    /// the path. Deliberately a fixed, easy-to-find location rather than a native file picker (which
-    /// dig-app has no toolkit for); the user was warned this file is plaintext and told to delete it.
+    /// The name offered in the save dialog, and the one used when there is no dialog to offer it in.
+    const PHRASE_FILE_NAME: &str = "dig-recovery-phrase.txt";
+
+    /// Ask the user where to save their 24 words, write them there owner-only, and report the path.
+    ///
+    /// The destination is the user's choice rather than a fixed `~/dig-recovery-phrase.txt`
+    /// (dig_ecosystem#1966): a predictable plaintext-seed path is something another local process can
+    /// simply watch for, and it denied the user the one thing that actually makes this backup safe —
+    /// putting it on a removable or encrypted volume of their own. On a host with no dialog to raise
+    /// the old fixed path is still used, so a headless agent keeps the feature.
+    ///
+    /// Dismissing the dialog is a real answer, not an error: it returns
+    /// [`BackupDelivery::Cancelled`], which the ceremony treats exactly like declining the warning.
+    /// Falling back to the fixed path there would write the seed to a location the user had just
+    /// refused, and the dialog would be decoration.
+    ///
+    /// The dialog is raised HERE, inside the delivery, which means the decrypted phrase waits in its
+    /// zeroizing buffer for as long as the user browses. Resolving the destination before the vault
+    /// is opened would close that window — and make a cancel decrypt nothing at all — but it needs a
+    /// second method on the sink trait, so it is tracked separately as dig_ecosystem#2066.
     fn save_phrase_file(words: &str) -> BackupDelivery {
-        let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        else {
-            return BackupDelivery::Failed;
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .map(std::path::PathBuf::from);
+        let destination = choose_secret_file_path(
+            &NativeSavePicker,
+            &SaveFileRequest {
+                title: "Save your DIG recovery phrase",
+                file_name: PHRASE_FILE_NAME,
+                starting_dir: home.as_deref(),
+            },
+            home.as_deref(),
+        );
+        let path = match destination {
+            SecretFileDestination::At(path) => path,
+            SecretFileDestination::Declined => return BackupDelivery::Cancelled,
+            SecretFileDestination::Nowhere => return BackupDelivery::Failed,
         };
-        let path = std::path::Path::new(&home).join("dig-recovery-phrase.txt");
+
         // The line is held in a zeroizing buffer so the plaintext seed is wiped from heap after the
         // write — `format!` would leave a plain `String` recoverable from freed heap / a core dump /
         // swap (dig_ecosystem#1564 security gate). A trailing newline keeps it a well-formed text line.
@@ -1918,37 +1951,6 @@ mod tray {
             },
             Err(_) => BackupDelivery::Failed,
         }
-    }
-
-    /// Write `bytes` to `path`, owner-only, so the seed is NEVER on disk at a looser mode.
-    ///
-    /// The naive `fs::write` + later `chmod 0600` creates the file at the umask default (typically
-    /// 0644) and only tightens it AFTERWARDS — a window in which a colocated unprivileged process can
-    /// read the plaintext seed out of a home dir that is traversable by other local users
-    /// (dig_ecosystem#1564 security gate). Here the mode is set AT CREATION, and a pre-existing file is
-    /// re-tightened while it is still empty (truncated, before any secret byte is written).
-    #[cfg(unix)]
-    fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        // `mode()` only applies when the file is CREATED; a pre-existing (perhaps 0644) file is now
-        // open + truncated to zero length, so tighten it to 0600 while it still holds no secret.
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(bytes)
-    }
-
-    /// Windows has no chmod equivalent; the file inherits the per-user `%USERPROFILE%` ACLs (readable
-    /// by the user + Administrators/SYSTEM only) — the documented Windows posture. Still written from
-    /// the caller's zeroizing buffer.
-    #[cfg(not(unix))]
-    fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-        std::fs::write(path, bytes)
     }
 
     /// Show EVERYTHING the tray knows, in full, in a window that can hold it.
@@ -2506,39 +2508,6 @@ mod tray {
                 );
                 None
             }
-        }
-    }
-
-    #[cfg(all(test, unix))]
-    mod backup_egress_tests {
-        use super::write_owner_only;
-        use std::os::unix::fs::PermissionsExt;
-
-        /// The recovery-phrase file is created owner-only (0600), never at the umask default then
-        /// tightened afterwards — there must be no window where the plaintext seed is world-readable
-        /// (dig_ecosystem#1564 security gate).
-        #[test]
-        fn a_new_seed_file_is_created_owner_only() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("dig-recovery-phrase.txt");
-            write_owner_only(&path, b"abandon ability able\n").unwrap();
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "seed file must be 0600, was {mode:o}");
-            assert_eq!(std::fs::read(&path).unwrap(), b"abandon ability able\n");
-        }
-
-        /// A pre-existing looser-perms file is tightened to 0600 while still empty (truncated), BEFORE
-        /// the secret is written — so the seed never lands on disk at the old mode.
-        #[test]
-        fn a_preexisting_loose_file_is_tightened_before_the_secret_lands() {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("dig-recovery-phrase.txt");
-            std::fs::write(&path, b"stale content").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            write_owner_only(&path, b"new secret\n").unwrap();
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "pre-existing file must end 0600, was {mode:o}");
-            assert_eq!(std::fs::read(&path).unwrap(), b"new secret\n");
         }
     }
 }

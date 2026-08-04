@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "5.14.2"
+version = "5.15.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -292,6 +292,20 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     # `CreateFileW`'s `SECURITY_ATTRIBUTES` parameter lives here, so the file-system feature needs it.
     "Win32_Security",
+    # The owner-only ACL on the recovery-phrase backup (dig_ecosystem#1965). Windows honours no mode
+    # bits, so `0600` has to be spelled as a DACL: `SetEntriesInAclW` builds the single-entry list and
+    # `SetSecurityInfo` applies it, both of which live in the Authorization sub-namespace.
+    "Win32_Security_Authorization",
+    # `OpenProcessToken` — the calling user's own SID is read from the process token, because the one
+    # ACE in that DACL has to name somebody and it is always "whoever is running this".
+    "Win32_System_Threading",
+    # `SECURITY_DESCRIPTOR_REVISION`, the version stamp `InitializeSecurityDescriptor` demands.
+    "Win32_System_SystemServices",
+    # `GetSaveFileNameW` — the native save dialog the recovery-phrase backup opens so the user picks the
+    # destination rather than being handed a fixed one (dig_ecosystem#1966). Preferred over the COM
+    # `IFileSaveDialog`, which wants a single-threaded apartment; this process puts threads into the MTA
+    # for WinRT (#1926). Rationale in `secret_file::picker`.
+    "Win32_UI_Controls_Dialogs",
     # `RoInitialize` (dig_ecosystem#1926): the thread that raises the Windows Hello prompt is spawned by
     # us and belongs to no apartment, so it joins the MTA before activating a WinRT class.
     "Win32_System_WinRT",

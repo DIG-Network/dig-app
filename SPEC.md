@@ -207,6 +207,41 @@ can carry to a new machine.
   holds the copied bytes, matched by a retained SHA-256 fingerprint — NEVER the plaintext, which stays
   wiped. This reduces, not eliminates, exposure (clipboard history/sync may retain a copy), and the
   warning copy MUST disclose it honestly.
+- **Backup destination (MUST).** A file backup MUST ask the user where to write, through the platform's
+  own save dialog (`secret_file::picker`), defaulting the name to `dig-recovery-phrase.txt`. Dismissing
+  that dialog MUST abandon the write and be reported as a refusal — an implementation MUST NOT redirect
+  the words to a default path the user has just declined. Where no dialog can be raised (a headless host,
+  or a desktop with no dialog helper) the implementation MUST fall back to `dig-recovery-phrase.txt` in
+  the user's home directory rather than lose the capability, and where even that directory is unknown it
+  MUST report failure rather than invent a path. A fixed, predictable destination is not acceptable as
+  the primary behaviour: it is a path another local process can watch for, and it denies the user a
+  removable or encrypted volume of their own.
+- **Backup file permissions (MUST).** The file MUST be restricted to its owner **at creation** — there
+  MUST be no interval in which the plaintext seed exists on disk at a wider permission, including when an
+  existing file at that path is being replaced. On Unix this is mode `0600`, supplied to `open(2)` and
+  re-applied while the file is truncated and empty. **On Windows it MUST be an explicit, PROTECTED DACL
+  holding a single access-allowed entry for the calling user's SID**; inheriting the profile directory's
+  ACL is NOT sufficient, because that grants the local Administrators group and SYSTEM — and therefore
+  every service, backup agent and indexer holding those tokens — full access to the account's custody
+  root. Mode bits have no meaning on Windows, so a `set_permissions` call there satisfies nothing. A
+  failure to restrict the file MUST be reported as a failed backup; an implementation MUST NOT write the
+  words and then report success because only the permission step failed, and MUST NOT report success for a
+  file whose restriction did not actually take effect — a platform whose permission call can succeed
+  without changing anything (a `chmod` on a filesystem that stores no mode) MUST therefore be verified
+  after the fact, not assumed. (`secret_file::write_owner_only`.)
+- **Volumes that cannot store permissions (normative, and deliberately asymmetric).** A user-chosen
+  destination may be a filesystem with no access control at all — a FAT/exFAT removable disk, which is a
+  destination the save picker exists to enable.
+  - **On Windows** the write MUST proceed there. The volume is identified by its own reported
+    capabilities (the absence of persistent-ACL support), NOT by inference from a failed permission call,
+    and not by filesystem name — the same capability is absent on some network redirectors and
+    user-space filesystems, and all of them are handled alike. Nothing is downgraded, because such a
+    volume grants everyone everything by design, and the confirmation window's standing disclosure that
+    the file is plaintext and readable by anyone who can reach it is what makes proceeding honest.
+  - **On Unix** such a destination MUST instead be a FAILED backup. The equivalent capability question
+    has no portable spelling, so an implementation refuses rather than guessing. This asymmetry is
+    intentional and is recorded here so it reads as a decision rather than an oversight; closing it
+    requires answering the capability question on Unix properly.
 - **Handling (MUST).** The phrase MUST NOT be logged, serialized, transmitted, or written anywhere but
   its sealed vault. It is held in zeroizing memory, redacted in debug output, and reaches only an
   OS-owned foreground window.
