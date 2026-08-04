@@ -432,6 +432,15 @@ pub enum TrayAction {
     /// action beyond informing, and is always available because it is about the CONCEPT, not this
     /// node's live state.
     AboutCache,
+    /// Open another DIG app from the **Apps** group (dig_ecosystem#2101).
+    ///
+    /// Carries the [`AppId`](crate::apps::AppId) of the registry row clicked, so ONE action serves
+    /// every app and adding one (dig-email, dig-video-chat — §5.4) is a [`crate::apps::APPS`] row, not
+    /// a new variant here. The shell decides launch-vs-notice through the pure
+    /// [`plan_launch`](crate::apps::plan_launch) seam and, when the app is present, spawns it DETACHED
+    /// off the prompt thread (#78) with no argv identity — never a silent no-op when it is absent
+    /// (§6.1), which today is the only reachable case.
+    LaunchApp(crate::apps::AppId),
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.
@@ -723,10 +732,15 @@ pub fn details_text(view: &TrayView) -> String {
 /// Wallet          ▸
 /// Security        ▸
 /// Cache           ▸
+/// Apps            ▸
 /// ──
 /// Open the log folder
 /// Quit DIG
 /// ```
+///
+/// The **Apps** submenu (dig_ecosystem#2101) lists the other DIG apps this install can open — Chat
+/// today, more as they ship (§5.4) — from the [`crate::apps`] registry. Like `Open URL…` and `Cache`
+/// it is not gated on an account, because using another app is not a custody action.
 ///
 /// The **Wallet** submenu (dig_ecosystem#1841) carries the receive address, the balance reading, and the
 /// explainer — and nothing that moves money, since the money path is parked (#1702). Its parent label is
@@ -789,6 +803,10 @@ pub fn build(view: &TrayView) -> MenuModel {
         cache_label(view.cache.as_ref()),
         cache_actions(view.cache.as_ref()),
     ));
+    // The other DIG apps this install can open (dig_ecosystem#2101). A submenu built from the
+    // `crate::apps` registry, so a second app is a data row. Like reading, using another app is not
+    // gated on an account, so it sits outside the account block.
+    rows.push(MenuRow::submenu("Apps", apps_actions()));
     rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
@@ -1149,6 +1167,20 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     rows
 }
 
+/// The **Apps** submenu — other DIG apps this install can open (dig_ecosystem#2101).
+///
+/// Data-driven from [`crate::apps::APPS`]: a second app (dig-email, dig-video-chat — §5.4) is a
+/// registry row, not new code here. Every row is ENABLED, because clicking it always DOES something
+/// visible — it either launches the app or shows the honest "not available yet" notice — never a
+/// greyed dead end or a silent no-op (#1800, §6.1). The launch-vs-notice choice is the shell's, made
+/// through the pure [`crate::apps::plan_launch`] seam; the menu only says the app exists to be opened.
+fn apps_actions() -> Vec<MenuRow> {
+    crate::apps::APPS
+        .iter()
+        .map(|app| MenuRow::action(TrayAction::LaunchApp(app.id), app.display_name, true))
+        .collect()
+}
+
 /// The `Open URL…` row, carrying the global shortcut when there IS one.
 ///
 /// A shortcut nobody can discover is a shortcut nobody uses, and a tray menu is the one place every user
@@ -1408,6 +1440,59 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no {label} submenu"))
+    }
+
+    // ---- Apps group (dig_ecosystem#2101). ----
+
+    /// The **Apps** submenu lists Chat, wired to launch dig-chat, in EVERY account state.
+    ///
+    /// Asserted across all states because using another app is not gated on custody — the group must
+    /// not appear and vanish with the account (the drift #1836 fixed for the rest of the spine). It
+    /// checks the row lives INSIDE the Apps submenu (via the recursive `submenu` helper, not a
+    /// top-level index) so a Chat row that drifted elsewhere would fail rather than pass.
+    #[test]
+    fn the_apps_submenu_lists_chat_and_launches_dig_chat_in_every_state() {
+        use crate::apps::AppId;
+        for account in EVERY_STATE {
+            let menu = build(&view(account.clone()));
+            let rows = submenu(&menu, "Apps");
+            let chat = rows
+                .iter()
+                .find_map(|row| match row {
+                    MenuRow::Action {
+                        action,
+                        label,
+                        enabled,
+                    } => Some((*action, label.clone(), *enabled)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{account:?}: the Apps submenu has no action row"));
+            assert_eq!(
+                chat,
+                (TrayAction::LaunchApp(AppId::Chat), "Chat".to_string(), true),
+                "{account:?}: Apps must offer an enabled Chat row launching dig-chat"
+            );
+        }
+    }
+
+    /// The Apps group is data-driven: the submenu offers exactly one launch row per registry entry, in
+    /// registry order. This is what makes "a second app is a data row" true rather than aspirational —
+    /// adding to `apps::APPS` adds a row here with no menu-code change.
+    #[test]
+    fn the_apps_submenu_mirrors_the_registry() {
+        let menu = build(&view(AccountState::Unlocked { recoverable: true }));
+        let launched: Vec<TrayAction> = submenu(&menu, "Apps")
+            .iter()
+            .filter_map(|row| match row {
+                MenuRow::Action { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<TrayAction> = crate::apps::APPS
+            .iter()
+            .map(|app| TrayAction::LaunchApp(app.id))
+            .collect();
+        assert_eq!(launched, expected);
     }
 
     // ---- Paired apps (dig_ecosystem#1848). ----
@@ -2014,17 +2099,18 @@ mod tests {
 
     /// The top-level menu must stay SHORT — a native menu the length of the old one is a wall of text.
     ///
-    /// The bound is 10, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
+    /// The bound is 11, and since dig_ecosystem#1836 it is a bound on a FIXED spine rather than on a menu
     /// that grew with state: Status · Open URL · View Account · Manage Account · Wallet · Security · Cache ·
-    /// logs · quit is nine, plus at most ONE contextual row when the account needs something (no account,
-    /// locked, or unopenable).
+    /// Apps · logs · quit is ten, plus at most ONE contextual row when the account needs something (no
+    /// account, locked, or unopenable).
     ///
-    /// The number has moved four times, each for a recorded reason rather than as a bumped constant:
+    /// The number has moved five times, each for a recorded reason rather than as a bumped constant:
     /// 7 → 8 when `Open` arrived (#1821), because opening content is what the product is FOR and burying it
     /// under the custody menu would hide the one verb a content consumer wants; 8 → 9 when `Wallet` arrived
     /// (#1841), because money is a top-level concern of this product (§6.0) and it is a SUBMENU, so it costs
     /// one row and hides its own contents; 9 → 10 when `Cache` arrived (#2002), a SUBMENU carrying the
-    /// node's size-limit control with its usage on the parent label.
+    /// node's size-limit control with its usage on the parent label; 10 → 11 when `Apps` arrived (#2101), a
+    /// SUBMENU grouping the other DIG apps so they never each claim a spine row.
     ///
     /// The rule the number enforces is unchanged and is the thing to defend: every *further* verb goes in a
     /// submenu or the details window, never onto the top level. Seven named rows still fit on one screen
@@ -2040,7 +2126,7 @@ mod tests {
                 .filter(|row| matches!(row, MenuRow::Action { .. } | MenuRow::Submenu { .. }))
                 .count();
             assert!(
-                clickable <= 10,
+                clickable <= 11,
                 "{account:?}: {clickable} top-level rows is a wall, not a menu"
             );
         }

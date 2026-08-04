@@ -565,6 +565,27 @@ any lower request at **64 MiB**.
   MUST say so, so the displayed number matches the stored bytes. The copy MUST NOT present lowering the cap
   as free of a privacy cost.
 
+**The Apps surface (MUST, dig_ecosystem#2101).** The menu MUST offer an **Apps** submenu grouping the other
+DIG apps this install can open, so a sibling app (Chat today; dig-email, dig-video-chat to follow — §5.4) is
+reachable from the one surface a person has on a fresh install. Binding rules:
+
+- **Data-driven (MUST).** The submenu MUST be built from a registry, so adding an app is a data row, not a
+  new menu action or a new `TrayAction` variant. ONE action (`TrayAction::LaunchApp`) carries the app's
+  identity; the registry (`dig_app_core::apps::APPS`) holds each app's display name and installed-binary
+  identity. The submenu offers exactly one enabled launch row per registry entry, in registry order.
+- **Never a silent no-op (MUST, §6.1).** Clicking an app row MUST always do something visible. Presence is
+  a per-entry check for the app's installed binary as a SIBLING of dig-app in the shared bin dir (the
+  canonical install root, where every component lands). When the binary is present the app is launched;
+  when it is absent the user MUST be shown an honest notice — never nothing, and never a greyed dead end.
+- **Honest copy (MUST, §6.0).** dig-chat is not yet packaged or carried by the installer, so the absent
+  case is the only reachable one today. Its notice MUST NOT fabricate an install or "run X" step the user
+  cannot satisfy; it states that the app is coming and will appear in this menu on its own once it ships.
+- **A launch runs off the prompt thread with no identity on argv (MUST).** The app is spawned as a detached
+  child — never on the single-threaded prompt thread (#78) — with NO arguments; identity, keys and pairing
+  material MUST NOT be placed on the child's command line, because pairing is the launched app's own job
+  (§5.4). The launch-vs-notice decision is a pure function (`dig_app_core::apps::plan_launch`) so both
+  outcomes are tested without spawning a process or drawing a window.
+
 ### 3.1d Native input, modals and prompts (normative)
 
 **Whenever dig-app needs input from the user it MUST use the platform's native input box, modal or
