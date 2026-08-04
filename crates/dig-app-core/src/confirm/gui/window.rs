@@ -119,6 +119,8 @@ const BODY_SCROLL_ID: &str = "dig-prompt-body";
 const FONT_REGULAR: &[u8] = include_bytes!("../../../assets/space-grotesk-400.ttf");
 /// The 600 weight — a distinct cut, never a synthetic bold.
 const FONT_SEMIBOLD: &[u8] = include_bytes!("../../../assets/space-grotesk-600.ttf");
+/// Space Mono — the face identifiers, hex and codes are set in (see [`render::MONO`]).
+const FONT_MONO: &[u8] = include_bytes!("../../../assets/space-mono-400.ttf");
 
 /// What a prompt window answered.
 enum Outcome {
@@ -353,11 +355,23 @@ fn install_fonts(ctx: &egui::Context) {
         .cloned()
         .unwrap_or_default();
     let mut semibold = vec![super::render::SEMIBOLD.to_owned()];
-    semibold.extend(fallback);
+    semibold.extend(fallback.clone());
     fonts.families.insert(
         egui::FontFamily::Name(super::render::SEMIBOLD.into()),
         semibold,
     );
+    // Space Mono as its OWN family — never inserted into `Proportional`, so only a `Block::Identifier`
+    // (which asks for it by name) is set in it. The same proportional fallback stack follows it, for the
+    // glyphs the mono cut does not carry.
+    fonts.font_data.insert(
+        super::render::MONO.into(),
+        std::sync::Arc::new(egui::FontData::from_static(FONT_MONO)),
+    );
+    let mut mono = vec![super::render::MONO.to_owned()];
+    mono.extend(fallback);
+    fonts
+        .families
+        .insert(egui::FontFamily::Name(super::render::MONO.into()), mono);
     ctx.set_fonts(fonts);
 }
 
@@ -712,11 +726,32 @@ impl PromptApp {
                     ));
                     ui.add_space(space::S4);
                 }
+                Block::Identifier(text) => {
+                    // A bare identifier, set in Space Mono so an address reads char by char, with no
+                    // panel — it sits inline under its prose like a `Block::Body`, in full-contrast
+                    // `--text`.
+                    ui.label(super::render::paragraph(
+                        text,
+                        super::render::mono(size::BASE),
+                        rgba(super::render::block_color(&block, t)),
+                        width,
+                        size::BASE * 1.55,
+                    ));
+                    ui.add_space(space::S4);
+                }
                 Block::Detail(text) | Block::Warning(text) => {
                     let warning = matches!(block, Block::Warning(_));
+                    // The decoded transaction is set in Space Mono — it column-aligns amount/recipient/
+                    // fee and makes the `xch1…` address checkable — while a warning stays prose. Only
+                    // the font differs between the two; the recessed panel, the muted colour and the
+                    // galley-height measurement are shared.
+                    let font = match warning {
+                        true => regular(size::BASE),
+                        false => super::render::mono(size::BASE),
+                    };
                     let job = super::render::paragraph(
                         text,
-                        regular(size::BASE),
+                        font,
                         rgba(super::render::block_color(&block, t)),
                         width - space::S5 * 2.0,
                         size::BASE * 1.55,
@@ -1162,6 +1197,7 @@ mod tests {
             heading: "DIG could not open the folder for you.",
             body: "Open it yourself at C:\\Users\\you\\AppData\\DIG.",
             acknowledge: "OK",
+            identifier: None,
         });
         Screen::confirm(&content, "Cancel")
     }
@@ -1412,6 +1448,7 @@ mod tests {
             heading: "DIG could not open the folder for you.",
             body: HOSTILE_BODY,
             acknowledge: "OK",
+            identifier: None,
         });
         let (_ctx, output) = painted(Screen::confirm(&notice, "Cancel"), false, Theme::Light);
         let drawn = drawn_text(&output.shapes).join("\u{1}");
@@ -1555,6 +1592,7 @@ mod tests {
                 heading: "h",
                 body: "b",
                 acknowledge: "OK",
+                identifier: None,
             }),
             "Cancel",
         );
@@ -1590,6 +1628,7 @@ mod tests {
                         heading: "h",
                         body: "b",
                         acknowledge: "OK",
+                        identifier: None,
                     }),
                     "Cancel",
                 ),
@@ -1618,6 +1657,7 @@ mod tests {
                         heading: "h",
                         body: "b",
                         acknowledge: "OK",
+                        identifier: None,
                     }),
                     "Cancel",
                 ),
@@ -1709,7 +1749,8 @@ mod tests {
             ("notice", confirm(ConfirmContent::notice(&NoticePrompt {
                 title: "DIG — DIG ID copied",
                 heading: "Your DIG ID is on the clipboard.",
-                body: "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4",
+                body: "DIG ID copied to your clipboard.",
+                identifier: Some("b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4"),
                 acknowledge: "OK",
             })), false),
             // The 24-word enrolment screen. It was the ONE confirm view the gallery did not
@@ -1724,6 +1765,7 @@ mod tests {
                        on another computer.",
                 affirm: "Yes, I have them",
                 scannable: None,
+            identifier: None,
             })), false),
             ("destroy", confirm(ConfirmContent::destroy(&DestroyPrompt {
                 subject: "the DIG Account on this computer",
@@ -1733,7 +1775,7 @@ mod tests {
             ("two-factor-qr", confirm(ConfirmContent::claim(&ClaimPrompt {
                 title: "DIG — Set up two-factor codes",
                 heading: "Scan this with your authenticator",
-                body: "Or type the key by hand: JBSW Y3DP EHPK 3PXP",
+                body: "Or add it by hand. Then type this key:",
                 affirm: "I have added it",
                 scannable: Some(
                     &crate::confirm::QrArt::encode(
@@ -1741,6 +1783,7 @@ mod tests {
                     )
                     .expect("the demo provisioning URI encodes"),
                 ),
+                identifier: Some("JBSW Y3DP EHPK 3PXP"),
             })), false),
             ("passphrase", Screen::input(&InputContent {
                 title: "DIG — Unlock your account".into(),
@@ -2237,6 +2280,231 @@ mod tests {
             .unwrap_or_else(|| panic!("the frame never drew a body containing {needle:?}"))
     }
 
+    /// Every string the frame drew, paired with the font FAMILY it was actually set in.
+    ///
+    /// The family is read off the galley's own layout job — `sections[0].format.font_id.family`, the
+    /// same field the shaper consumed — not from our own structs, so it proves an identifier reached
+    /// the screen in Space Mono and prose did not, rather than restating what we asked for.
+    fn drawn_with_family(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::FontFamily)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::FontFamily)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let family = text
+                        .galley
+                        .job
+                        .sections
+                        .first()
+                        .map(|s| s.format.font_id.family.clone())
+                        .unwrap_or(egui::FontFamily::Proportional);
+                    out.push((text.galley.text().to_owned(), family));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The font family the one galley containing `needle` was set in.
+    fn family_of(output: &egui::FullOutput, needle: &str) -> egui::FontFamily {
+        drawn_with_family(&output.shapes)
+            .into_iter()
+            .find(|(text, _)| text.contains(needle))
+            .unwrap_or_else(|| panic!("the frame never drew a galley containing {needle:?}"))
+            .1
+    }
+
+    /// The Space Mono family every identifier must be set in.
+    fn mono_family() -> egui::FontFamily {
+        egui::FontFamily::Name(super::super::render::MONO.into())
+    }
+
+    /// A pairing confirm — a label in the heading and the opaque ext-id split out as its identifier.
+    fn pair_screen() -> Screen {
+        Screen::confirm(
+            &ConfirmContent::pair(&crate::confirm::PairPrompt {
+                ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah",
+                ext_label: Some("DIG Network"),
+            }),
+            "Cancel",
+        )
+    }
+
+    /// A two-factor enrolment claim — the base32 TOTP secret split out as its identifier.
+    fn two_factor_screen() -> Screen {
+        Screen::confirm(
+            &ConfirmContent::claim(&crate::confirm::ClaimPrompt {
+                title: "DIG — Set up two-factor codes",
+                heading: "Scan this with your authenticator",
+                body: "Or add it by hand. Then type this key:",
+                affirm: "I have added it",
+                scannable: None,
+                identifier: Some("JBSW Y3DP EHPK 3PXP"),
+            }),
+            "Cancel",
+        )
+    }
+
+    /// The receive-address notice — prose plus the `xch1…` address split out as its identifier. The
+    /// same identifier class as the sign address, so it must reach the screen in the same mono face.
+    fn receive_address_notice_screen() -> Screen {
+        Screen::confirm(
+            &ConfirmContent::notice(&NoticePrompt {
+                title: "DIG — Address copied",
+                heading: "Your receiving address is on the clipboard.",
+                body: "Receiving address copied to your clipboard.",
+                identifier: Some("xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln"),
+                acknowledge: "OK",
+            }),
+            "Cancel",
+        )
+    }
+
+    /// The DIG-id notice — prose plus the id split out as its identifier.
+    fn dig_id_notice_screen() -> Screen {
+        Screen::confirm(
+            &ConfirmContent::notice(&NoticePrompt {
+                title: "DIG — DIG ID copied",
+                heading: "Your DIG ID is on the clipboard.",
+                body: "DIG ID copied to your clipboard.",
+                identifier: Some(
+                    "b6f1c0a94e2d7c5183ab0f39d84e6c72b1590adf3e7c48d2916b05fa7c3d81e4",
+                ),
+                acknowledge: "OK",
+            }),
+            "Cancel",
+        )
+    }
+
+    /// **Every identifier reaches the screen in Space Mono (dig_ecosystem#2060).** The sign `xch1…`
+    /// address, the pairing ext-id, the TOTP secret, the DIG id and the copied receiving address are
+    /// each read or transcribed character by character, and a monospace face is what makes an address
+    /// checkable and tells `1`/`l`, `0`/`O` apart. Read off the shaped galley's own font family, so
+    /// reverting any one value back to the proportional face fails the matching assertion.
+    #[test]
+    fn each_identifier_is_set_in_space_mono() {
+        let mono = mono_family();
+
+        let sign = painted(sign_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&sign, "xch1safe"),
+            mono,
+            "the decoded-transaction address must be Space Mono"
+        );
+
+        let pair = painted(pair_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&pair, "mlibddmb"),
+            mono,
+            "the pairing ext-id must be Space Mono"
+        );
+
+        let two_factor = painted(two_factor_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&two_factor, "JBSW Y3DP"),
+            mono,
+            "the TOTP secret must be Space Mono"
+        );
+
+        let notice = painted(dig_id_notice_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&notice, "b6f1c0a9"),
+            mono,
+            "the DIG id must be Space Mono"
+        );
+
+        let receive = painted(receive_address_notice_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&receive, "xch1up0"),
+            mono,
+            "the receiving address must be Space Mono"
+        );
+    }
+
+    /// …and the CONTROL that makes the mono assertions meaningful: the prose around each identifier is
+    /// NOT mono. The pair heading is the brand semibold cut and its body is the proportional face; the
+    /// two-factor prose is proportional. Without this, setting the WHOLE window in mono would satisfy
+    /// every assertion above.
+    #[test]
+    fn prose_beside_an_identifier_keeps_its_proportional_face() {
+        let semibold = egui::FontFamily::Name(super::super::render::SEMIBOLD.into());
+
+        let pair = painted(pair_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&pair, "with your DIG identity"),
+            semibold,
+            "the pair heading is the brand semibold cut, not mono"
+        );
+        assert_eq!(
+            family_of(&pair, "browser extension will be allowed"),
+            egui::FontFamily::Proportional,
+            "the pair body is prose"
+        );
+
+        let two_factor = painted(two_factor_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&two_factor, "Then type this key"),
+            egui::FontFamily::Proportional,
+            "the two-factor body is prose"
+        );
+
+        let receive = painted(receive_address_notice_screen(), false, Theme::Light).1;
+        assert_eq!(
+            family_of(&receive, "Receiving address copied"),
+            egui::FontFamily::Proportional,
+            "the receive-address notice body is prose"
+        );
+    }
+
+    /// **The guard: no heading, body or warning on any identifier-bearing surface is ever set in mono.**
+    ///
+    /// The mono treatment is reserved for identifier-bearing values; a prose line drifting into it
+    /// would read as code and is exactly the drift this pins. Checked across every such screen at once,
+    /// on the shaped galley, so a stray `mono(...)` on a prose block fails here.
+    #[test]
+    fn no_prose_on_any_surface_is_ever_set_in_mono() {
+        let mono = mono_family();
+        let cases: [(Screen, &[&str]); 5] = [
+            (
+                sign_screen(),
+                &["wants you to sign", "Requested via your paired"],
+            ),
+            (
+                pair_screen(),
+                &[
+                    "with your DIG identity",
+                    "browser extension will be allowed",
+                ],
+            ),
+            (
+                two_factor_screen(),
+                &["Scan this with your authenticator", "Then type this key"],
+            ),
+            (
+                dig_id_notice_screen(),
+                &["is on the clipboard", "copied to your clipboard"],
+            ),
+            (
+                receive_address_notice_screen(),
+                &["is on the clipboard", "Receiving address copied"],
+            ),
+        ];
+        for (screen, needles) in cases {
+            let out = painted(screen, false, Theme::Light).1;
+            for needle in needles {
+                assert_ne!(
+                    family_of(&out, needle),
+                    mono,
+                    "prose {needle:?} must never be set in Space Mono"
+                );
+            }
+        }
+    }
+
     /// **Clicking the affirmative approves.** Not "records an approval" — *ends up* an approval,
     /// after the frame that actually closes the window has run.
     ///
@@ -2357,6 +2625,7 @@ mod tests {
                 body: &body,
                 affirm: "I have written these down",
                 scannable: None,
+                identifier: None,
             }),
             "Not yet",
         )

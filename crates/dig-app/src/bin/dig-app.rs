@@ -670,6 +670,25 @@ fn notify(confirmer: &dyn NativeConfirmer, title: &str, heading: &str, body: &st
         title,
         heading,
         body,
+        identifier: None,
+        acknowledge: "OK",
+    });
+}
+
+/// Draw an informational window whose substance is a bare IDENTIFIER — a DIG id — shown set apart from
+/// the prose so it renders in Space Mono and reads character by character (dig_ecosystem#2060).
+#[cfg(feature = "tray")]
+fn notify_identifier(
+    confirmer: &dyn NativeConfirmer,
+    title: &str,
+    heading: &str,
+    identifier: &str,
+) {
+    confirmer.show_notice(&NoticePrompt {
+        title,
+        heading,
+        body: "",
+        identifier: Some(identifier),
         acknowledge: "OK",
     });
 }
@@ -963,8 +982,8 @@ fn current_os() -> Os {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, adopt_user_password, notify, replace_account, restore_account,
-        set_up_account, start_sign_service, AppEnvironment, TraySession,
+        account_state, adopt_user_password, notify, notify_identifier, replace_account,
+        restore_account, set_up_account, start_sign_service, AppEnvironment, TraySession,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app::tray_worker::ActionWorker;
@@ -1966,14 +1985,14 @@ mod tray {
         let Some(session) = session else { return };
         let id = &session.account.profile_id;
         if write_clipboard(id) {
-            notify(
+            notify_identifier(
                 confirmer,
                 "DIG — DIG ID copied",
                 "Your DIG ID is on the clipboard.",
                 id,
             );
         } else {
-            notify(
+            notify_identifier(
                 confirmer,
                 "DIG — Your DIG ID",
                 "Here is your DIG ID (select it to copy).",
@@ -2066,17 +2085,17 @@ mod tray {
             return;
         };
         if write_clipboard(address) {
-            notify(
+            notify_identifier(
                 confirmer,
                 "DIG — Address copied",
-                "Your receive address is on the clipboard.",
+                "Your receiving address is on the clipboard.",
                 address,
             );
         } else {
-            notify(
+            notify_identifier(
                 confirmer,
                 "DIG — Your receive address",
-                "Here is your receive address (select it to copy).",
+                "Here is your receiving address (select it to copy).",
                 address,
             );
         }
@@ -2332,6 +2351,7 @@ mod tray {
                 body: &body,
                 affirm: "Lower it and free the space",
                 scannable: None,
+                identifier: None,
             }) {
                 ConfirmDecision::Approve => {}
                 // Declined or closed: leave the cap untouched and return quietly. The confirmation

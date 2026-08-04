@@ -30,6 +30,14 @@ use crate::confirm::{ConfirmContent, InputContent, Presentation};
 /// detail that makes a port look like an imitation.
 pub const SEMIBOLD: &str = "dig-semibold";
 
+/// The font family identifiers are set in — Space Mono, the sanctioned second face.
+///
+/// `professional-ui` pairs Space Grotesk with Space Mono and reserves the mono cut for
+/// identifiers, hex and code ("no third font, ever"). A monospace face is also materially more
+/// legible for reading an `xch1…` address character by character and telling `1`/`l` and `0`/`O`
+/// apart — which is exactly what a person does before authorising a spend.
+pub const MONO: &str = "dig-mono";
+
 /// Type sizes, mirroring hub's `--text-*` scale.
 pub mod size {
     /// hub's `--text-xs` — the window-chrome title.
@@ -89,6 +97,10 @@ pub enum Block {
     Detail(String),
     /// A warning panel — the amber treatment. Used where the copy states an irreversible loss.
     Warning(String),
+    /// A literal identifier — a DIG id, an `xch1…` address, a pairing ext-id, a TOTP secret — set in
+    /// Space Mono for char-by-char legibility. Never prose: only a bare value the user reads or
+    /// transcribes, split out of its surrounding copy so the mono treatment lands on the value alone.
+    Identifier(String),
     /// A QR code, drawn beneath the body. Always accompanied by the same secret as text (see
     /// [`ClaimPrompt::scannable`](crate::confirm::ClaimPrompt::scannable)).
     ///
@@ -172,11 +184,21 @@ impl Screen {
         let blocks = {
             let mut blocks = vec![Block::Heading(content.heading.clone())];
             // A destroy states an irreversible loss, so its body takes the warning treatment rather
-            // than reading like ordinary explanatory copy.
-            blocks.push(match destructive {
-                true => Block::Warning(content.body.clone()),
-                false => Block::Body(content.body.clone()),
-            });
+            // than reading like ordinary explanatory copy. An EMPTY body is dropped entirely — a
+            // notice whose whole substance is an identifier (a copied DIG id) carries no prose, and an
+            // empty paragraph would only add a stray gap above the value.
+            if !content.body.is_empty() {
+                blocks.push(match destructive {
+                    true => Block::Warning(content.body.clone()),
+                    false => Block::Body(content.body.clone()),
+                });
+            }
+            // The one bare identifier this prompt shows, set apart from its prose so it reaches the
+            // mono treatment alone. It sits directly under its explanatory copy, and — for two-factor
+            // enrolment — just above the QR that encodes the same secret.
+            if let Some(id) = content.identifier.clone() {
+                blocks.push(Block::Identifier(id));
+            }
             if let Some(detail) = content.detail.clone() {
                 blocks.push(Block::Detail(detail));
             }
@@ -266,9 +288,11 @@ impl Screen {
     #[cfg(test)]
     pub fn visible_text(&self) -> Vec<&str> {
         let blocks = self.blocks.iter().filter_map(|b| match b {
-            Block::Heading(t) | Block::Body(t) | Block::Detail(t) | Block::Warning(t) => {
-                Some(t.as_str())
-            }
+            Block::Heading(t)
+            | Block::Body(t)
+            | Block::Detail(t)
+            | Block::Warning(t)
+            | Block::Identifier(t) => Some(t.as_str()),
             Block::Qr(_) => None,
         });
         std::iter::once(self.title.as_str())
@@ -282,7 +306,9 @@ impl Screen {
 /// The colour a [`Block`] draws its text in.
 pub fn block_color(block: &Block, t: &Tokens) -> Rgba {
     match block {
-        Block::Heading(_) => t.text,
+        // Full-contrast `--text`, not `--muted`: an identifier is the value the user must read
+        // exactly, so it takes the strongest text tier rather than the recessed one prose uses.
+        Block::Heading(_) | Block::Identifier(_) => t.text,
         Block::Body(_) | Block::Detail(_) => t.muted,
         Block::Warning(_) => t.amber,
         Block::Qr(_) => t.text,
@@ -302,6 +328,11 @@ pub fn semibold(size: f32) -> FontId {
 /// The brand's 400-weight face at `size`.
 pub fn regular(size: f32) -> FontId {
     FontId::proportional(size)
+}
+
+/// Space Mono at `size` — the face every identifier, hex string and code is set in.
+pub fn mono(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(MONO.into()))
 }
 
 /// A wrapping paragraph of PLAIN text, laid out at `width`.
@@ -474,6 +505,7 @@ mod tests {
             heading: "Your DIG ID is on the clipboard.",
             body: "abc123",
             acknowledge: "OK",
+            identifier: None,
         });
         let screen = Screen::confirm(&content, "Cancel");
         assert_eq!(screen.buttons.len(), 1);
@@ -581,6 +613,7 @@ mod tests {
             body: " 1. abandon",
             affirm: "I have written these down",
             scannable: None,
+            identifier: None,
         });
         let screen = Screen::confirm(&content, "Not yet");
         assert_eq!(screen.buttons[1].label, "I have written these down");
@@ -640,6 +673,7 @@ mod tests {
                     heading: "h",
                     body: "b",
                     acknowledge: "OK",
+                    identifier: None,
                 }),
                 "Cancel",
             ),

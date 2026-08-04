@@ -116,19 +116,21 @@ pub enum EnrolOutcome {
 /// the key that is right there. `has_qr` comes from the confirmer's own
 /// [`draws_qr`](crate::confirm::NativeConfirmer::draws_qr), so the sentence and the square agree.
 ///
-/// Pure, so both bodies are unit-testable without a display.
-fn add_to_authenticator_body(secret: &TotpSecret, has_qr: bool) -> String {
+/// The key itself is NOT here: it is rendered separately in Space Mono (a `Block::Identifier`) so the
+/// base32 secret reads group by group, and this body ends on the line that introduces it. Pure, so
+/// both bodies are unit-testable without a display.
+fn add_to_authenticator_body(has_qr: bool) -> String {
     let opening = match has_qr {
         true => {
             "Scan the square below with your authenticator app.\n\nOr add it by hand — choose to \
-                 add an account by ENTERING A KEY, and type:"
+                 add an account by ENTERING A KEY."
         }
-        false => "Choose to add an account by ENTERING A KEY, and type:",
+        false => "Choose to add an account by ENTERING A KEY.",
     };
     format!(
-        "{opening}\n\n{key}\n\nName it anything you like — DIG will appear as \"{issuer}\". If your \
-         app asks for settings, they are: time-based, {digits} digits, {period} seconds.",
-        key = *secret.base32_grouped(),
+        "{opening}\n\nName it anything you like — DIG will appear as \"{issuer}\". If your app asks \
+         for settings, they are: time-based, {digits} digits, {period} seconds.\n\nThen type this \
+         key:",
         issuer = super::totp::ISSUER,
         digits = CODE_DIGITS,
         period = super::totp::STEP_SECONDS,
@@ -200,6 +202,7 @@ pub fn enrol<S: ProfileSealer>(
         body: EXPLAINER,
         affirm: "Set it up",
         scannable: None,
+        identifier: None,
     }) {
         ConfirmDecision::Approve => {}
         ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
@@ -213,12 +216,17 @@ pub fn enrol<S: ProfileSealer>(
         .draws_qr()
         .then(|| QrArt::encode(&secret.provisioning_uri()))
         .flatten();
+    // The grouped base32 key is the one identifier on this screen: split out of the prose so it is set
+    // in Space Mono and read group by group. It carries the secret, so it is `Zeroizing` and lives no
+    // longer than the window that shows it.
+    let key = secret.base32_grouped();
     match confirmer.confirm_claim(&ClaimPrompt {
         title: "DIG — Add DIG to your authenticator",
         heading: "Add DIG to your authenticator app.",
-        body: &add_to_authenticator_body(&secret, scannable.is_some()),
+        body: &add_to_authenticator_body(scannable.is_some()),
         affirm: "I've added it",
         scannable: scannable.as_ref(),
+        identifier: Some(&key),
     }) {
         ConfirmDecision::Approve => {}
         ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
@@ -244,6 +252,7 @@ pub fn enrol<S: ProfileSealer>(
         ),
         affirm: "I have saved these",
         scannable: None,
+    identifier: None,
     }) {
         ConfirmDecision::Approve => {}
         ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
@@ -399,6 +408,7 @@ pub fn report_recovery_code_spent(confirmer: &dyn NativeConfirmer, remaining: us
         heading: "You used a recovery code, and it is now spent.",
         body: &body,
         acknowledge: "OK",
+        identifier: None,
     });
 }
 
@@ -645,6 +655,12 @@ mod tests {
         fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
             self.record(prompt.body);
             self.record_heading(prompt.heading);
+            // The key now reaches the window as its own identifier, not inside the prose — record and
+            // scrape it from there, exactly as a person reads the mono block off the screen.
+            if let Some(id) = prompt.identifier {
+                self.record(id);
+                self.learn_secret(id);
+            }
             self.learn_secret(prompt.body);
             if let Some(art) = prompt.scannable {
                 *self.scanned.lock().unwrap() = Some(art.clone());
