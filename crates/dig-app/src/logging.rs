@@ -101,7 +101,7 @@ where
 fn install<G, S, I, T>(get: G, set: S, mut init_once: I) -> (Option<T>, Vec<String>)
 where
     G: Fn(&str) -> Option<String> + Copy,
-    S: Fn(&std::path::Path),
+    S: Fn(Option<&std::path::Path>),
     I: FnMut() -> std::result::Result<T, String>,
 {
     let first = match init_once() {
@@ -118,7 +118,7 @@ where
         );
     };
 
-    set(&root);
+    set(Some(&root));
     match init_once() {
         Ok(guard) => (
             Some(guard),
@@ -127,14 +127,21 @@ where
                 root.display()
             )],
         ),
-        Err(second) => (
-            None,
-            vec![format!(
-                "could not install structured logging ({first}), and the per-user fallback \
-                 {} also failed ({second}); continuing without a log file",
-                root.display()
-            )],
-        ),
+        Err(second) => {
+            // Put the override back the way it was found. It named a directory that has now failed
+            // too, and the tray's "Open logs" resolves the folder it offers through the very same
+            // variable — so leaving it set would point the user's one escape hatch at a directory
+            // that does not exist.
+            set(None);
+            (
+                None,
+                vec![format!(
+                    "could not install structured logging ({first}), and the per-user fallback \
+                     {} also failed ({second}); continuing without a log file",
+                    root.display()
+                )],
+            )
+        }
     }
 }
 
@@ -145,18 +152,64 @@ where
 /// If the directory `dig_logging` resolves on its own is unusable, this retries once against the
 /// per-user root ([`install`] explains why that case is the common one, not the exotic one) and reports
 /// the switch through `tracing` — so the recovered log explains its own location instead of leaving the
-/// reader to wonder why it moved. Reporting through `tracing` rather than `eprintln!` is deliberate:
-/// this binary is GUI-subsystem and has no console, so anything written to stderr is written to nowhere.
+/// reader to wonder why it moved.
+///
+/// # Why the total failure is reported TWICE
+///
+/// When a guard came back, `tracing` is the right channel and the only one that reaches a file. When one
+/// did not, **there is no subscriber**, so a `tracing` event on that path is discarded — the exact shape
+/// this whole fix exists to remove ("the one message explaining the silence was itself silent"). So the
+/// unrecoverable branch ALSO writes to stderr. This binary is GUI-subsystem and usually has no console,
+/// which makes stderr a poor channel; it does not make it a worse one than a sink that is provably
+/// absent, and a launcher that captures stderr gets the message.
 pub fn init() -> Option<LogGuard> {
     let (guard, diagnostics) = install(
         |key| std::env::var(key).ok(),
-        |root| std::env::set_var(ENV_LOG_DIR, root),
+        |root| match root {
+            Some(root) => std::env::set_var(ENV_LOG_DIR, root),
+            None => std::env::remove_var(ENV_LOG_DIR),
+        },
         || dig_logging::init(service()).map_err(|e| e.to_string()),
     );
-    for diagnostic in diagnostics {
-        tracing::warn!("{diagnostic}");
-    }
+    report(
+        &diagnostics,
+        guard.is_some(),
+        |channel, message| match channel {
+            Channel::Log => tracing::warn!("{message}"),
+            Channel::Stderr => eprintln!("dig-app: WARN {message}"),
+        },
+    );
     guard
+}
+
+/// Where a diagnostic is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    /// The `tracing` subscriber — a real file, but ONLY when one was installed.
+    Log,
+    /// This process's stderr, which a GUI-subsystem run usually does not have.
+    Stderr,
+}
+
+/// Emit each diagnostic on every channel that can still carry it.
+///
+/// Split out from [`init`] and given the emitter so the routing is asserted on the messages that ARRIVE,
+/// rather than on the fact that a string was built. A test that only counts produced strings passes just
+/// as happily when nothing is ever written anywhere, which is the failure this whole module is about.
+fn report<E>(diagnostics: &[String], installed: bool, mut emit: E)
+where
+    E: FnMut(Channel, &str),
+{
+    // With a logger installed, `tracing` reaches a file and stderr would only duplicate it. Without one
+    // there is NO subscriber, so a `tracing` event is discarded — stderr is then the only channel left,
+    // poor as it is. It is still emitted on both: `installed` describes dig-app's own guard, and a host
+    // that installed its own subscriber first would otherwise lose the message entirely.
+    for diagnostic in diagnostics {
+        emit(Channel::Log, diagnostic);
+        if !installed {
+            emit(Channel::Stderr, diagnostic);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -228,7 +281,7 @@ mod tests {
         let desktop = desktop();
         let (guard, diagnostics) = install(
             env(&desktop),
-            |root| *chosen.borrow_mut() = Some(root.to_path_buf()),
+            |root| *chosen.borrow_mut() = root.map(std::path::Path::to_path_buf),
             || installer(&attempts),
         );
 
@@ -255,7 +308,7 @@ mod tests {
 
         let (guard, diagnostics) = install(
             env(&desktop()),
-            |root| *chosen.borrow_mut() = Some(root.to_path_buf()),
+            |root| *chosen.borrow_mut() = root.map(std::path::Path::to_path_buf),
             || installer(&attempts),
         );
 
@@ -272,7 +325,7 @@ mod tests {
 
         let (guard, diagnostics) = install(
             env(&[(ENV_LOG_DIR, "/operator/choice")]),
-            |root| *chosen.borrow_mut() = Some(root.to_path_buf()),
+            |root| *chosen.borrow_mut() = root.map(std::path::Path::to_path_buf),
             || installer(&attempts),
         );
 
@@ -282,7 +335,63 @@ mod tests {
         );
         assert_eq!(attempts.get(), 1);
         assert!(chosen.borrow().is_none());
-        assert_eq!(diagnostics.len(), 1, "the failure must still be reported");
+
+        // Not `diagnostics.len() == 1`: a produced string that reaches no channel is exactly the
+        // silence this module exists to remove, and counting strings cannot tell the two apart.
+        assert_eq!(
+            emitted(&diagnostics, guard.is_some())
+                .into_iter()
+                .map(|(channel, message)| (channel, message.contains("attempt 1 denied")))
+                .collect::<Vec<_>>(),
+            vec![(Channel::Log, true), (Channel::Stderr, true)],
+            "an unrecoverable failure must reach BOTH channels, naming the error"
+        );
+    }
+
+    /// Every message [`report`] actually hands to an emitter, in order.
+    fn emitted(diagnostics: &[String], installed: bool) -> Vec<(Channel, String)> {
+        let mut seen = Vec::new();
+        report(diagnostics, installed, |channel, message| {
+            seen.push((channel, message.to_string()))
+        });
+        seen
+    }
+
+    /// With no subscriber installed a `tracing` event is discarded, so stderr is the only channel left
+    /// and the diagnostic MUST also go there — the regression guard for "the one message explaining the
+    /// silence was itself silent".
+    #[test]
+    fn a_diagnostic_with_no_logger_installed_still_reaches_stderr() {
+        let diagnostics = vec!["nowhere to log".to_string()];
+
+        let channels: Vec<Channel> = emitted(&diagnostics, false)
+            .into_iter()
+            .map(|(channel, _)| channel)
+            .collect();
+
+        assert!(
+            channels.contains(&Channel::Stderr),
+            "a failure that left no logger must not be reported only to the logger, got {channels:?}"
+        );
+    }
+
+    /// The converse: once a logger exists it reaches a file, and duplicating every line onto stderr
+    /// would be noise. This is what stops the rule above from degenerating into "always print".
+    #[test]
+    fn a_diagnostic_with_a_working_logger_is_not_duplicated_to_stderr() {
+        let diagnostics = vec!["relocated".to_string()];
+
+        assert_eq!(
+            emitted(&diagnostics, true),
+            vec![(Channel::Log, "relocated".to_string())]
+        );
+    }
+
+    /// A run with nothing to report writes nothing at all, on either channel.
+    #[test]
+    fn silence_is_reported_as_silence() {
+        assert!(emitted(&[], true).is_empty());
+        assert!(emitted(&[], false).is_empty());
     }
 
     #[test]

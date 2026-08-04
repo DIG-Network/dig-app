@@ -1454,7 +1454,8 @@ mod tray {
                     // happens" left no trace at all.
                     tracing::warn!(
                         ?action,
-                        "a tray action was ignored while another is in flight; if this repeats for                          every item, the in-flight action never finished"
+                        "a tray action was ignored while another is in flight; if this repeats \
+                         for every item, the in-flight action never finished"
                     );
                 }
             }
