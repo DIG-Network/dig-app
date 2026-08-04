@@ -34,7 +34,10 @@ use egui::{Key, Rect, Vec2};
 use zeroize::Zeroizing;
 
 use super::paint;
-use super::render::{radius, regular, rgba, semibold, size, space, Answer, Block, Screen};
+use super::render::{
+    bar_top, radius, regular, rgba, semibold, size, space, Answer, Block, Chrome, Screen,
+    BAR_HEIGHT, BAR_WIDTH,
+};
 use super::theme::{Theme, ThemeChoice, Tokens};
 use crate::confirm::{
     ConfirmContent, ForegroundInput, ForegroundWindow, InputContent, InputOutcome, WindowIntent,
@@ -209,12 +212,19 @@ fn serve(rx: &Receiver<Job>) {
 ///
 /// One function so the screenshot harness photographs the SAME window a user is shown — a gallery
 /// built from a second, slightly-different set of options is a gallery of something else.
-fn native_options(title: &str) -> eframe::NativeOptions {
+fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
+    // A bar is a fixed-size frameless launcher; a dialog is created at [`HEIGHT`] and then sized to
+    // its content ([`PromptApp::fit_to_content`]). Both are frameless and always-on-top — the bar
+    // regains the width and placement the deleted Win32 renderer gave it (dig_ecosystem#2054).
+    let (width, height, min_height) = match chrome {
+        Chrome::Bar => (BAR_WIDTH, BAR_HEIGHT, BAR_HEIGHT),
+        Chrome::Dialog => (WIDTH, HEIGHT, MIN_HEIGHT),
+    };
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
-            .with_inner_size([WIDTH, HEIGHT])
-            .with_min_inner_size([WIDTH, MIN_HEIGHT])
+            .with_inner_size([width, height])
+            .with_min_inner_size([width, min_height])
             .with_resizable(false)
             // A consent window must be SEEN. It steals focus and sits above the requesting app,
             // exactly as the Win32 and NSAlert windows did.
@@ -250,7 +260,7 @@ fn draw(job: Job) -> Option<Outcome> {
     let theme_store = job.theme.clone();
     let title = job.screen.title.clone();
 
-    let options = native_options(&title);
+    let options = native_options(&title, job.screen.chrome);
 
     // The app writes its answer here before the loop exits, so it survives `run_native` returning.
     let slot = std::sync::Arc::new(Mutex::new(None::<Outcome>));
@@ -397,6 +407,14 @@ struct PromptApp {
     revealed: bool,
     /// Whether the text field has already been given its opening keyboard focus.
     field_focused: bool,
+    /// Whether this window has EVER held focus. Latched so a launcher bar cannot dismiss itself on
+    /// blur before it has ever been focused — the frame that reports `focused == Some(false)` on the
+    /// way UP would otherwise close it the instant it opened (dig_ecosystem#2054).
+    has_been_focused: bool,
+    /// Whether the launcher bar has been placed high on its monitor yet. Placement waits for the
+    /// first frame that reports a real `monitor_size`, then latches so the bar is positioned once and
+    /// does not fight the compositor every frame.
+    placed: bool,
     /// Whether an answer has already been recorded.
     ///
     /// The window keeps drawing for the frames it takes the windowing system to take the close
@@ -433,6 +451,8 @@ impl PromptApp {
             typed: Zeroizing::new(String::new()),
             revealed: false,
             field_focused: false,
+            has_been_focused: false,
+            placed: false,
             answered: false,
             opened: Instant::now(),
             deadline: job.deadline,
@@ -564,6 +584,8 @@ impl PromptApp {
 
         let t = self.theme.tokens();
         self.keys(ctx);
+        self.place_bar(ctx);
+        self.dismiss_on_blur(ctx);
         // Answer for the human who never came back, so one ignored window cannot hold the single
         // prompt thread — and therefore every later consent window — for the life of the process.
         if !self.answered && self.opened.elapsed() >= self.deadline {
@@ -581,7 +603,57 @@ impl PromptApp {
                 (full, content_bottom)
             })
             .inner;
-        self.fit_to_content(ctx, full, content_bottom);
+        // A bar is a fixed short height; only a dialog grows to its content.
+        if !self.screen.chrome.is_bar() {
+            self.fit_to_content(ctx, full, content_bottom);
+        }
+    }
+
+    /// Place the launcher bar HIGH on the screen — centred horizontally, `bar_top` from the top.
+    ///
+    /// A dialog is left centred (the compositor's default); only a bar is moved, and only once, on
+    /// the first frame that reports a real monitor size. A headless frame reports no monitor, so this
+    /// is a no-op there — which is exactly what the tests run under.
+    fn place_bar(&mut self, ctx: &egui::Context) {
+        if self.placed || !self.screen.chrome.is_bar() {
+            return;
+        }
+        let monitor = ctx.input(|i| i.viewport().monitor_size);
+        if let Some(monitor) = monitor {
+            if monitor.x.is_finite() && monitor.y.is_finite() && monitor.y > 0.0 {
+                let x = ((monitor.x - BAR_WIDTH) / 2.0).max(0.0);
+                let y = bar_top(monitor.y);
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(x, y)));
+                self.placed = true;
+            }
+        }
+    }
+
+    /// Close the launcher bar the moment it loses focus — Esc is not the only way out of it.
+    ///
+    /// # Why the has-been-focused latch
+    ///
+    /// A window reports `focused == Some(false)` on the frames BEFORE it is first raised, so acting
+    /// on the first unfocused frame would close the bar before the user ever saw it. The latch waits
+    /// for one focused frame, so only a REAL blur — focus that was held and then left — dismisses it.
+    ///
+    /// # Why this is safe for a dialog
+    ///
+    /// [`Chrome::dismiss_on_blur`] is FALSE for every dialog, so a consent window can never reach the
+    /// close below. A window asking the user to authorise a spend must never vanish because they
+    /// clicked another window; it stays until it is answered. The existing no-answer path in [`draw`]
+    /// maps this close to [`InputOutcome::Cancelled`] — a definite non-answer, never an approval.
+    fn dismiss_on_blur(&mut self, ctx: &egui::Context) {
+        if !self.screen.chrome.dismiss_on_blur() {
+            return;
+        }
+        let focused = ctx.input(|i| i.viewport().focused);
+        if focused == Some(true) {
+            self.has_been_focused = true;
+        }
+        if self.has_been_focused && focused == Some(false) {
+            self.finish(ctx, Answer::Deny);
+        }
     }
 }
 
@@ -657,9 +729,15 @@ impl PromptApp {
     /// should not have to scroll the thing they are transcribing. Short prompts are unaffected: the
     /// window still shrinks to them and no bar appears.
     fn body(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
+        // A bar has no action row, so its body runs to the bottom padding; a dialog reserves the
+        // room the [`actions`](Self::actions) row occupies.
+        let bottom_reserve = match self.screen.chrome.is_bar() {
+            true => space::S6,
+            false => 88.0,
+        };
         let inner = Rect::from_min_max(
             full.left_top() + Vec2::new(space::S6, 44.0 + space::S6),
-            full.right_bottom() - Vec2::new(space::S6, 88.0),
+            full.right_bottom() - Vec2::new(space::S6, bottom_reserve),
         );
         let mut ui = ui.new_child(
             egui::UiBuilder::new()
@@ -784,6 +862,13 @@ impl PromptApp {
         }
 
         if let Some(field) = self.screen.field.clone() {
+            // The launcher's field is oversized — a Spotlight bar is one big field the user types a
+            // link into, not a labelled form control — while a dialog's field keeps the form scale.
+            let bar = self.screen.chrome.is_bar();
+            let (field_size, field_pad) = match bar {
+                true => (size::HEADING, space::S4),
+                false => (size::BASE, space::S3),
+            };
             ui.label(super::render::label(
                 &field.label,
                 regular(size::SM),
@@ -793,9 +878,9 @@ impl PromptApp {
             let edit = egui::TextEdit::singleline(&mut *self.typed)
                 .password(field.masked && !self.revealed)
                 .desired_width(width)
-                .margin(egui::Margin::symmetric(space::S3 as i8, space::S3 as i8))
+                .margin(egui::Margin::symmetric(space::S3 as i8, field_pad as i8))
                 .background_color(rgba(t.surface_2))
-                .font(regular(size::BASE));
+                .font(regular(field_size));
             let response = ui.add(edit);
             forget_the_undo_history(ui.ctx(), response.id);
             // A field the user has to click before typing is a field they will type past — so it
@@ -867,7 +952,15 @@ impl PromptApp {
     }
 
     /// The action row, right-aligned, refusal first.
+    ///
+    /// A bar draws NO buttons: it is a Spotlight-style launcher dismissed by Esc or by blur and
+    /// submitted by Enter (the pre-focused submit button in the model still resolves Enter — see
+    /// [`PromptApp::keys`]), so a visible action row would only be consent chrome the launcher does
+    /// not have.
     fn actions(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) {
+        if self.screen.chrome.is_bar() {
+            return;
+        }
         let row = Rect::from_min_max(
             egui::Pos2::new(full.left(), full.bottom() - ACTION_ROW),
             full.right_bottom() - Vec2::new(space::S6, space::S5),
@@ -1805,6 +1898,18 @@ mod tests {
                 revealable: true,
                 style: crate::confirm::InputStyle::Dialog,
             }), true),
+            // The frameless launcher bar — the ONE view that exercises `Chrome::Bar`, so the
+            // reshoot covers the wide oversized field and the dropped heading (dig_ecosystem#2054).
+            ("launcher-bar", Screen::input(&InputContent {
+                title: "DIG — Open a dig:// link".into(),
+                heading: "Open a dig:// link".into(),
+                body: "Paste or type a dig:// address.".into(),
+                field_label: "dig:// address".into(),
+                submit: "Open",
+                masked: false,
+                revealable: false,
+                style: crate::confirm::InputStyle::Bar,
+            }), true),
         ]
     }
 
@@ -1827,6 +1932,7 @@ mod tests {
         let store = ThemeChoice::in_brand_dir(dir.path());
         store.write(theme).ok()?;
         let title = screen.title.clone();
+        let chrome = screen.chrome;
         let (reply, _rx) = sync_channel(1);
         let app = PromptApp::new(
             Job {
@@ -1845,7 +1951,7 @@ mod tests {
         let target = path.to_path_buf();
         eframe::run_native(
             &title,
-            native_options(&title),
+            native_options(&title, chrome),
             Box::new(move |cc| {
                 install_fonts(&cc.egui_ctx);
                 Ok(Box::new(Photographer {
@@ -1967,6 +2073,115 @@ mod tests {
             matches!(outcome, Some(Outcome::Input(InputOutcome::Cancelled))),
             "Escape must cancel, got {:?}",
             Describe(&outcome)
+        );
+    }
+
+    /// A launcher-bar input, every field fixed but the style, so the window under test differs from a
+    /// dialog only by what the bar chrome changes.
+    fn launcher_input() -> InputContent {
+        InputContent {
+            title: "DIG — Open a dig:// link".into(),
+            heading: "Open a dig:// link".into(),
+            body: "Paste or type a dig:// address.".into(),
+            field_label: "dig:// address".into(),
+            submit: "Open",
+            masked: false,
+            revealable: false,
+            style: crate::confirm::InputStyle::Bar,
+        }
+    }
+
+    /// The launcher bar is created at [`BAR_WIDTH`] × [`BAR_HEIGHT`], NOT the dialog's [`WIDTH`] ×
+    /// [`HEIGHT`] — the geometric half of the presentation the branded window had dropped (#2054).
+    #[test]
+    fn a_bar_window_is_created_wider_and_shorter_than_a_dialog() {
+        let bar = native_options("t", Chrome::Bar);
+        assert_eq!(
+            bar.viewport.inner_size,
+            Some([BAR_WIDTH, BAR_HEIGHT].into())
+        );
+        let dialog = native_options("t", Chrome::Dialog);
+        assert_eq!(dialog.viewport.inner_size, Some([WIDTH, HEIGHT].into()));
+        // Compare the widths the two windows are actually created at, not the raw consts — the point
+        // is that a launcher is a wider bar than the dialog it replaces.
+        let bar_width = bar
+            .viewport
+            .inner_size
+            .expect("the bar has an inner size")
+            .x;
+        let dialog_width = dialog
+            .viewport
+            .inner_size
+            .expect("the dialog has an inner size")
+            .x;
+        assert!(
+            bar_width > dialog_width,
+            "the bar ({bar_width}) must be wider than the dialog ({dialog_width})"
+        );
+    }
+
+    /// Both windows are frameless and always-on-top — the bar regains the launcher chrome without
+    /// giving up the properties every prompt window has.
+    #[test]
+    fn a_bar_stays_frameless_and_on_top() {
+        let bar = native_options("t", Chrome::Bar);
+        assert_eq!(bar.viewport.decorations, Some(false));
+        assert_eq!(
+            bar.viewport.window_level,
+            Some(egui::WindowLevel::AlwaysOnTop)
+        );
+    }
+
+    /// **A launcher bar dismisses itself when it loses focus, and reports [`InputOutcome::Cancelled`]
+    /// — never an approval.** The one behaviour beyond looks the bar carries (dig_ecosystem#2054).
+    ///
+    /// Driven through real focus frames: two focused frames set the has-been-focused latch, then one
+    /// unfocused frame is the blur that closes it. The existing no-answer path is not exercised here
+    /// because [`PromptApp::dismiss_on_blur`] records the cancellation directly.
+    #[test]
+    fn a_bar_dismisses_when_it_loses_focus() {
+        let mut driver = Driver::shown(Screen::input(&launcher_input()), true);
+        driver.focus_frame(true);
+        driver.focus_frame(true);
+        driver.focus_frame(false);
+        assert!(
+            matches!(
+                driver.answer(),
+                Some(Outcome::Input(InputOutcome::Cancelled))
+            ),
+            "a bar that lost focus must cancel, not approve"
+        );
+    }
+
+    /// A bar does NOT dismiss on an unfocused frame it sees BEFORE it has ever been focused — the
+    /// has-been-focused latch stops it closing the instant it opens, before the user sees it.
+    #[test]
+    fn a_bar_does_not_self_dismiss_before_it_is_ever_focused() {
+        let mut driver = Driver::shown(Screen::input(&launcher_input()), true);
+        driver.focus_frame(false);
+        driver.focus_frame(false);
+        assert!(
+            driver.answer().is_none(),
+            "the bar closed before it was ever focused"
+        );
+    }
+
+    /// **A dialog NEVER dismisses on blur.** A consent-shaped input window (and every confirm) must
+    /// stay put when the user glances at another window — the exact opposite of the bar. Pins the
+    /// other direction of dismiss-on-blur through the real frame loop.
+    #[test]
+    fn a_dialog_input_does_not_dismiss_on_blur() {
+        let dialog = InputContent {
+            style: crate::confirm::InputStyle::Dialog,
+            ..launcher_input()
+        };
+        let mut driver = Driver::shown(Screen::input(&dialog), true);
+        driver.focus_frame(true);
+        driver.focus_frame(false);
+        driver.focus_frame(false);
+        assert!(
+            driver.answer().is_none(),
+            "a dialog vanished on blur — a consent window must never do that"
         );
     }
 
@@ -2194,6 +2409,22 @@ mod tests {
                 .expect("the root viewport")
                 .events
                 .push(egui::ViewportEvent::Close);
+            let app = &mut self.app;
+            self.ctx.run(input, |ctx| app.frame(ctx))
+        }
+
+        /// Run one frame reporting the window's focus state, the way the compositor does.
+        ///
+        /// `focused` is a property of the viewport, not an event: egui reads it from
+        /// `ViewportInfo::focused`, so it is set on the root viewport rather than pushed as an event.
+        /// This is how a blur (`Some(false)` after a `Some(true)`) is reproduced headlessly.
+        fn focus_frame(&mut self, focused: bool) -> egui::FullOutput {
+            let mut input = self.input();
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .expect("the root viewport")
+                .focused = Some(focused);
             let app = &mut self.app;
             self.ctx.run(input, |ctx| app.frame(ctx))
         }
