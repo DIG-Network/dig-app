@@ -144,41 +144,44 @@ valid signature for purpose B — including an attach challenge, a spend hash, o
 verifier reconstructs the identical tagged byte string; the construction is byte-identical across the
 app and every counterpart (the engine, a reimplementation).
 
-**At-rest storage precedence (bootstrap unlock).** The precedence is PLATFORM-DEPENDENT, because an
-OS credential store is only a safe custody primary where its access gate is per-application:
+**At-rest storage (bootstrap unlock).** The account master seed MUST be held as a DIGOP1 blob sealed
+under **Argon2id over a password the USER chooses**, in a per-user file backend
+(`<brand-dir>/account/account.<id>.dks`), written durably and atomically (temp file → fsync → rename →
+parent-dir fsync) and ACL'd to the owning user (mode `0600` where POSIX modes apply). There is ONE
+custody primary on every platform, and this is it.
 
-1. **OS credential store (primary on Windows + macOS ONLY)** — Windows Credential Manager · macOS
-   Keychain, reached through the `keyring` crate. The sealed blob and a freshly-generated 256-bit
-   random unlock password are stored together in ONE credential entry, so password rotation is a
-   single atomic overwrite. The login session releases the entry with no prompt. On these platforms
-   the store enforces a **per-application access ACL** — that ACL is the actual access control. The
-   DIGOP1 sealing is defense-in-depth UNDER that ACL, NOT an independent second secret: because the
-   unlock password rides in the same entry as the ciphertext, an attacker who defeats the ACL and
-   dumps the entry obtains both and can open the blob (splitting the password away from the
-   ciphertext is a separate follow-up hardening — §7). Fallback to the sealed file (below) if the
-   store is unavailable.
-2. **Sealed file (primary on Linux; fallback elsewhere)** — the sealed blob is a file
-   (`identity.digop1`) in the profile's AppData directory (home-directory-ACL'd to the owning user,
-   mode `0600`), written durably and atomically (temp file → fsync → rename → parent-dir fsync) and
-   opened with a user-supplied passphrase (Argon2id); the passphrase is never persisted. This is the
-   **primary on Linux**: the kernel keyutils session keyring is deliberately NOT used there because
-   it is readable by any same-UID process in the session (it has no per-application ACL, so a
-   same-UID background process could harvest the key) AND it is non-persistent across reboot/logout
-   (a plain reboot would destroy the only copy of the sealed seed, and the machine-held unlock password with it — see §3.1a: the recovery phrase, not the sealed blob, is what survives losing a machine). The
-   passphrase-sealed file is persistent, home-ACL'd, and — needing a user passphrase — not
-   harvestable by a background same-UID process. It is also the fallback anywhere the OS credential
-   store is unusable (a headless server, a minimal container).
+**The password MUST NOT be persisted — not on disk, not in an OS credential store, not in a log.** It is
+collected at unlock from the person, in the app's own native masked window (§3.2a, dig_ecosystem#1817).
+That separation is the whole guarantee: an attacker who dumps the sealed blob obtains Argon2id-hardened
+ciphertext and nothing that opens it, because the two never live beside each other.
 
-The precedence is detected once at vault-open time. Unlock **fails closed**: a wrong passphrase, a
-tampered blob, or a foreign key yields an opaque error that never distinguishes the cause and never
-produces partial plaintext.
+- **There is NO storage precedence and NO fallback tier.** Earlier revisions of this section specified an
+  OS-credential-store primary on Windows/macOS with a sealed-file fallback, and described the two as a
+  detected-once precedence. That model is RETIRED and MUST NOT be implemented: it kept a
+  machine-generated password in the credential entry beside the ciphertext, so any code running as the
+  logged-in user could open the account and no user-known secret protected custody at all. No boot,
+  unlock or sign path may source a password from an OS credential store. An implementation that offers a
+  password-less unlock path has reinstated the retired model, whatever it stores it in.
+- **The OS credential store is a MIGRATION-ONLY seam** (Windows/macOS; Linux never used one — the kernel
+  keyutils session keyring is readable by any same-UID process and does not survive a reboot). Its two
+  permitted uses are: reading a retired machine password ONCE to re-seal the same seed under a password
+  the user chooses (§3.2a), and deleting a leftover entry when an account is discarded. A host whose
+  credential backend is unavailable therefore loses NOTHING — there is no fallback to reach, because
+  there is nothing here custody depends on.
+- **Linux** has no account paths yet: it has no window stack for the password prompt, so account boot
+  defers rather than enrolling something it cannot ask to unlock (dig_ecosystem#962).
+
+Unlock **fails closed**: a wrong password, a tampered blob, or a foreign key yields an error that never
+produces partial plaintext. It MUST, however, be distinguishable at the TRAY from a blob this build
+cannot read at all — see §3.1c, where only the latter may report `Unopenable`.
 
 ### 3.1a The recovery phrase (normative)
 
 An account's master seed MUST be the entropy of a **24-word BIP-39 mnemonic**, the account's *recovery
-phrase*. The phrase is the ONE portable custody root: the sealed seed blob is openable only on the
-machine whose credential store holds its unlock password (§3.1), so the words are the only thing a user
-can carry to a new machine.
+phrase*. The phrase is the ONE portable custody root: a sealed seed blob copied to another machine is
+inert without the password its owner chose (§3.1), and a blob whose password is forgotten is
+unrecoverable, so the words are the only thing a user can carry to a new machine — or back from a lost
+one.
 
 - **Mapping.** A 24-word phrase carries exactly 32 bytes of entropy, which IS the `SEED_LEN` master
   seed, taken verbatim. Phrase to seed is therefore a lossless bijection, and a restore reaches the
@@ -385,7 +388,7 @@ Binding rules:
   existence is discoverable — **but only when the label can say WHY.** A disabled row with no reason in it
   is a small unexplained mystery; where there is no reason worth printing, the row MUST be omitted instead.
   A disabled row MUST also sit beside an ENABLED row that resolves it, so no state is a dead end. Five rows
-  currently qualify: setting up an account on a host with no per-application credential store, plus
+  currently qualify: setting up an account on a host whose OS has no account support yet (Linux — §3.1), plus
   revealing the recovery phrase and copying the receive address in each of the two states that withhold key
   material — locked (remedy: `Unlock…`) and never-given-a-password (remedy: `Set a password…`). A disabled
   row's label MUST name the remedy that state actually has: offering "unlock first" to an account that has
@@ -2096,7 +2099,7 @@ day one; the security-critical subsystems are implemented by later work units to
 | `engine` | the node link the status surface renders: `EngineState` (connected-with-snapshot / disconnected-with-reason) + the live `NodeConnector` over `control` (`NullConnector` is a test double only) | #949 |
 | `shutdown` | the cooperative shutdown latch (`Shutdown`) that stops the run loop promptly | U3 |
 | `agent` | the per-user agent lifecycle: start/stop, reconcile run loop, live `AgentStatus` | U3 |
-| `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; OS-credential-store primary + sealed-file fallback | U4 |
+| `keystore` | hold / unlock / sign; DIGOP1 sealing; rotation; plus the RETIRED OS-credential-store seam, kept for migration only — it is NOT a custody primary and no boot, unlock or sign path reads a password from it (§3.2a), and there is no sealed-file fallback | U4 |
 | `account` | master-HD custody harness (SECURITY-CRITICAL, 2.0.0): [`registry`] (default/active account tracking), [`residency`] (live, lockable unlocked-account home with fail-closed [`ResidencySigner`]/[`ResidencySealer`]), [`money`] (authorize-before-sign [`SpendSummary`] gate + signing), [`sealer`] (profile DEK derivation), [`ceremony`]/[`auth`]/[`lifecycle`] (confirmation/enrollment/lifecycle) | 2.0.0 |
 | `wallet` | per-profile wallet state (address/coins/balance, DIGOP1-sealed per-profile), engine broadcast seam (`WalletEngine`), signed bundle encoding | U5 |
 | `events` | event-driven wallet UI seam: `EventFeed`/`EventSink` + `EventDriver` (cursor/filter, `catch_up` backfill, graceful resync) + reactive `WalletView` (§3.7) | #1008 |

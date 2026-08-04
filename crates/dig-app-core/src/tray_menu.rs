@@ -84,12 +84,19 @@ pub enum AccountState {
     /// offers a button that will always fail and says nothing about why. The tray must name the situation and
     /// route the user to the only remedy there is — replacing the account (dig_ecosystem#1799 review).
     ///
-    /// The live cause is a **legacy raw-seed blob**: every Windows/macOS host that has ever run dig-app
-    /// auto-enrolled `account.default` at first boot, and those blobs carry the old `DIGVK1` shape. Under
-    /// `dig-account` 0.2 they neither unlock (`SessionError::LegacySeedFormat`) nor re-enrol at the same id
-    /// (`AlreadyExists`) — they are WEDGED, not merely fail-closed. Before this state existed the boot
-    /// swallowed that into a `tracing::warn!` and returned `None`, so the tray reported a locked account and
-    /// the user silently lost signing with no in-app route out. This state is what makes that impossible.
+    /// The live cause is a **legacy raw-seed blob**. dig-app USED to auto-enrol `account.default` at first
+    /// boot on every Windows/macOS host, and those blobs carry the old `DIGVK1` shape. That auto-enrolment
+    /// is long gone — an account now exists only because a user asked (dig_ecosystem#1820), and no boot
+    /// path creates one — but the blobs it left behind are still in the field, which is why this state has
+    /// work to do. Under `dig-account` 0.3 they neither unlock (`SessionError::LegacySeedFormat`) nor
+    /// re-enrol at the same id (`AlreadyExists`) — they are WEDGED, not merely fail-closed. Before this
+    /// state existed the boot swallowed that into a `tracing::warn!` and returned `None`, so the tray
+    /// reported a locked account and the user silently lost signing with no in-app route out.
+    ///
+    /// **Reaching this state requires an unlock ATTEMPT that hit an unreadable seal** — never the mere
+    /// absence of a session (`SPEC.md` §3.1c, dig_ecosystem#2128). The app boots locked and tries nothing,
+    /// so "no session" is the ordinary state of every fresh process; reading it as a failure reported every
+    /// launch as an unreadable account and pointed its owner at the destructive remedy.
     Unopenable,
     /// An account exists, but it is still sealed under a password the MACHINE generated and kept in the
     /// OS credential store — so opening it requires nothing its owner knows (dig_ecosystem#1817).
