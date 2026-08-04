@@ -217,7 +217,7 @@ pub enum UnlockFailure {
 /// [`dig_keystore::KeystoreError`] into `AccountError::Keystore(String)`, so the message text is the only
 /// signal that survives to here. Matching it is a bridge, not a design — see the test below, which builds
 /// the REAL upstream errors and asserts their verdicts, so an upstream reword fails the suite rather than
-/// silently reclassifying a user's wedged account as a retryable one. dig_ecosystem#2129 tracks exposing a
+/// silently reclassifying a user's wedged account as a retryable one. dig_ecosystem#2130 tracks exposing a
 /// typed kind upstream so this can be deleted.
 const WEDGE_MARKERS: [&str; 7] = [
     "legacy raw-seed format",
