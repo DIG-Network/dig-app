@@ -1449,7 +1449,11 @@ mod tests {
             "booting with an enrolled account is LOCKED — no unlock was attempted, so nothing failed"
         );
         assert_eq!(
-            account_state(true, at_rest_of(true, false, OpenAttempt::NotAttempted), None),
+            account_state(
+                true,
+                at_rest_of(true, false, OpenAttempt::NotAttempted),
+                None
+            ),
             AccountState::Locked,
             "the user must be offered Unlock…, never the destructive replace path"
         );

@@ -990,13 +990,12 @@ fn current_os() -> Os {
 mod tray {
     use super::{
         account_state, adopt_user_password, notify, notify_identifier, replace_account,
-        restore_account, set_up_account, start_sign_service_reporting,
-        AppEnvironment, TraySession, UnlockFailure,
+        restore_account, set_up_account, start_sign_service_reporting, AppEnvironment, TraySession,
+        UnlockFailure,
     };
     use dig_app::tray_guard::mount_or_degrade;
     use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
-    use dig_app_core::tray_menu::OpenAttempt;
     use dig_app_core::account::journey::Replacement;
     use dig_app_core::account::journey::{
         back_up_phrase, explain_missing_phrase, explain_unopenable, reveal_phrase, BackupDelivery,
@@ -1011,6 +1010,7 @@ mod tray {
         SecretFileDestination,
     };
     use dig_app_core::tray_menu::action_id;
+    use dig_app_core::tray_menu::OpenAttempt;
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -1347,8 +1347,13 @@ mod tray {
         //
         // Sticky until an open SUCCEEDS, so the tray keeps telling the truth rather than flickering back
         // on the next repaint tick.
-        let attempt: SharedAttempt = Arc::new(Mutex::new(OpenAttempt::NotAttempted));
-        let mut model = snapshot(&status, &env, session.as_ref(), read_attempt(&attempt), &hotkey);
+        let mut model = snapshot(
+            &status,
+            &env,
+            session.as_ref(),
+            OpenAttempt::NotAttempted,
+            &hotkey,
+        );
         // Guarded for the same reason as the mount below: creating native menu objects touches the
         // platform's desktop stack, and a missing library there panics rather than failing.
         let mut menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
@@ -1393,7 +1398,10 @@ mod tray {
         // longer run here (see `ActionWorker`). The worker takes the lock for the whole of an action —
         // which is what stops a destroy and a repaint from seeing different accounts — and the loop
         // only ever TRIES for it, so a dialog left open on the worker can never stall the tray.
-        let session: SharedSession = Arc::new(Mutex::new(session));
+        let session: SharedSession = Arc::new(Mutex::new(LiveAccount {
+            session,
+            attempt: OpenAttempt::NotAttempted,
+        }));
 
         // Every menu action runs on this worker, never on the event loop. That is the fix for the whole
         // class of freezes (dig_ecosystem#1926): the biometric deadlock was the worst of them, but every
@@ -1401,7 +1409,6 @@ mod tray {
         // otherwise hold the tray for as long as it waited.
         let actions = {
             let session = Arc::clone(&session);
-            let attempt = Arc::clone(&attempt);
             let env = env.clone();
             let shutdown = shutdown.clone();
             let status = Arc::clone(&status);
@@ -1411,11 +1418,10 @@ mod tray {
             // worker because that is where every window is now raised.
             let confirmer: Box<dyn NativeConfirmer> = native_confirmer();
             ActionWorker::spawn(move |action: TrayAction| {
-                let mut session = lock_session(&session);
+                let mut live = lock_session(&session);
                 dispatch(
                     action,
-                    &mut session,
-                    &attempt,
+                    &mut live,
                     &env,
                     confirmer.as_ref(),
                     &shutdown,
@@ -1454,7 +1460,7 @@ mod tray {
                 };
                 // Any tray interaction is activity — postpone the idle auto-lock.
                 if let Some(held) = peek_session(&session) {
-                    if let Some(session) = held.as_ref() {
+                    if let Some(session) = held.session.as_ref() {
                         session.lock.note_activity();
                     }
                 }
@@ -1479,21 +1485,23 @@ mod tray {
             // Everything below reads the session, so it is skipped entirely while an action holds it:
             // the tray keeps its last picture rather than blocking, and the idle auto-lock does not run
             // while the user is standing at a dialog.
-            let Some(held) = peek_session(&session) else {
+            let Some(mut held) = peek_session(&session) else {
                 return;
             };
 
+            // A live session is proof the account DOES open, so any earlier attempt verdict is stale.
+            if held.session.is_some() {
+                held.attempt = OpenAttempt::NotAttempted;
+            }
+
             // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
-            if let Some(session) = held.as_ref() {
+            if let Some(session) = held.session.as_ref() {
                 session.lock.poll_idle();
             }
 
             // Repaint only when something actually changed: rebuilding a native menu every 500ms would
             // close the menu under the user's cursor while they are reading it.
-            if held.is_some() {
-                set_attempt(&attempt, OpenAttempt::NotAttempted);
-            }
-            let latest = snapshot(&status, &env, held.as_ref(), read_attempt(&attempt), &hotkey);
+            let latest = snapshot(&status, &env, held.session.as_ref(), held.attempt, &hotkey);
             if !view_eq(&latest, &model) {
                 // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
                 // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
@@ -1551,19 +1559,32 @@ mod tray {
     /// Every arm ends in something the user can see — a window, a new menu state, or the app closing.
     /// A handler that silently did nothing would leave a person clicking a menu item that appears
     /// broken, which is the failure mode §6.1 exists to prevent.
-    /// The tray's live session, shared between the event loop and the action worker.
+    /// Everything the tray knows about its account right now: the live session, and what the last
+    /// attempt to OPEN one came to.
+    ///
+    /// The two travel together under one lock deliberately — they are read together on every repaint,
+    /// and a tick that saw a fresh session beside a stale attempt outcome would paint a state neither
+    /// of them describes.
+    struct LiveAccount {
+        /// The live session, or `None` while the account is not open.
+        session: Option<TraySession>,
+        /// How far the shell has got trying to open the account (dig_ecosystem#2128).
+        attempt: OpenAttempt,
+    }
+
+    /// The tray's live account, shared between the event loop and the action worker.
     ///
     /// A mutex rather than a channel because the loop needs to READ it on every tick while the worker
     /// needs to REPLACE it (setting up, restoring and destroying an account all swap the session), and
     /// a lock states that "a repaint never sees a half-applied account change" in one place.
-    type SharedSession = Arc<Mutex<Option<TraySession>>>;
+    type SharedSession = Arc<Mutex<LiveAccount>>;
 
     /// Take the session for the length of one action, waiting if the loop is mid-tick.
     ///
     /// A poisoned lock is RECOVERED rather than propagated: the poison means some earlier action
     /// panicked, and refusing every future action — leaving the user a tray that can no longer set up,
     /// unlock or destroy anything — is a far worse answer than carrying on with the session as it was.
-    fn lock_session(session: &SharedSession) -> MutexGuard<'_, Option<TraySession>> {
+    fn lock_session(session: &SharedSession) -> MutexGuard<'_, LiveAccount> {
         session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1574,7 +1595,7 @@ mod tray {
     /// [`None`] means an action holds it right now. This is what keeps the event loop free while a
     /// dialog is open: the tray skips one repaint rather than joining the queue behind a human
     /// (dig_ecosystem#1926).
-    fn peek_session(session: &SharedSession) -> Option<MutexGuard<'_, Option<TraySession>>> {
+    fn peek_session(session: &SharedSession) -> Option<MutexGuard<'_, LiveAccount>> {
         match session.try_lock() {
             Ok(held) => Some(held),
             Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
@@ -1582,35 +1603,16 @@ mod tray {
         }
     }
 
-    /// What the last attempt to OPEN the account came to, shared between the event loop (which paints
-    /// it) and the action worker (which is where unlocks run).
-    type SharedAttempt = Arc<Mutex<OpenAttempt>>;
-
-    /// Read the attempt outcome. A poisoned lock is recovered for the same reason as
-    /// [`lock_session`]'s, and a lock held for the length of a copy can never actually block the tick.
-    fn read_attempt(attempt: &SharedAttempt) -> OpenAttempt {
-        *attempt
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Record what an attempt to open the account came to.
-    fn set_attempt(attempt: &SharedAttempt, outcome: OpenAttempt) {
-        *attempt
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = outcome;
-    }
-
     fn dispatch(
         action: TrayAction,
-        session: &mut Option<TraySession>,
-        attempt: &SharedAttempt,
+        live: &mut LiveAccount,
         env: &AppEnvironment,
         confirmer: &dyn NativeConfirmer,
         shutdown: &dig_app_core::shutdown::Shutdown,
         status: &SharedStatus,
         hotkey: &HotkeyState,
     ) -> bool {
+        let LiveAccount { session, attempt } = live;
         match action {
             TrayAction::SetUpAccount => {
                 if session.is_none() {
@@ -1641,7 +1643,7 @@ mod tray {
                 // type.
                 match start_sign_service_reporting(env) {
                     Ok(live) => {
-                        set_attempt(attempt, OpenAttempt::NotAttempted);
+                        *attempt = OpenAttempt::NotAttempted;
                         *session = Some(live);
                     }
                     // A password that did not open the seal, or a window the user closed. The account is
@@ -1649,7 +1651,7 @@ mod tray {
                     // so — telling this user their account is unreadable would point them at the
                     // replace-my-account window over a typo (dig_ecosystem#2128).
                     Err(UnlockFailure::Refused) => {
-                        set_attempt(attempt, OpenAttempt::Refused);
+                        *attempt = OpenAttempt::Refused;
                         notify(
                             confirmer,
                             "DIG — Not unlocked",
@@ -1661,7 +1663,7 @@ mod tray {
                     }
                     // The seal itself cannot be read by this build. No password opens it, so the tray
                     // moves to `Unopenable` and its explainer — the one place the replace path belongs.
-                    Err(UnlockFailure::Wedged) => set_attempt(attempt, OpenAttempt::Wedged),
+                    Err(UnlockFailure::Wedged) => *attempt = OpenAttempt::Wedged,
                 }
             }
             TrayAction::SetAccountPassword => {
@@ -1695,11 +1697,23 @@ mod tray {
             // up — or a lock that dropped the keys — while the menu sat open must be reflected, not
             // replayed from the model the row was drawn from.
             TrayAction::AboutWallet => explain_wallet(
-                &snapshot(status, env, session.as_ref(), OpenAttempt::NotAttempted, hotkey),
+                &snapshot(
+                    status,
+                    env,
+                    session.as_ref(),
+                    OpenAttempt::NotAttempted,
+                    hotkey,
+                ),
                 confirmer,
             ),
             TrayAction::CopyReceiveAddress => copy_receive_address(
-                &snapshot(status, env, session.as_ref(), OpenAttempt::NotAttempted, hotkey),
+                &snapshot(
+                    status,
+                    env,
+                    session.as_ref(),
+                    OpenAttempt::NotAttempted,
+                    hotkey,
+                ),
                 confirmer,
             ),
             // A preset is a known-good value, so it skips input entirely and goes straight to the
