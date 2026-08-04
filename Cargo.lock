@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "5.22.0"
+version = "5.23.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "5.22.0"
+version = "5.23.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "5.22.0"
+version = "5.23.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -2274,7 +2274,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -4001,21 +4001,22 @@ dependencies = [
 
 [[package]]
 name = "muda"
-version = "0.15.3"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdae9c00e61cc0579bcac625e8ad22104c60548a025bfc972dc83868a28e1484"
+checksum = "1dd04e60bc0b07438a6771710ee1698f98f6ebbc7f89b61264af1563b8aeb878"
 dependencies = [
  "crossbeam-channel",
  "dpi",
  "gtk",
  "keyboard-types",
- "objc2 0.5.2",
- "objc2-app-kit 0.2.2",
- "objc2-foundation 0.2.2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
  "once_cell",
- "png 0.17.16",
- "thiserror 1.0.69",
- "windows-sys 0.59.0",
+ "png 0.18.1",
+ "thiserror 2.0.18",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6421,9 +6422,9 @@ dependencies = [
 
 [[package]]
 name = "tray-icon"
-version = "0.19.3"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eadd75f5002e2513eaa19b2365f533090cc3e93abd38788452d9ea85cff7b48a"
+checksum = "15edbb0d80583e85ee8df283410038e17314df5cba30da2087a54a85216c0773"
 dependencies = [
  "crossbeam-channel",
  "dirs",
@@ -6435,9 +6436,9 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "once_cell",
- "png 0.17.16",
+ "png 0.18.1",
  "thiserror 2.0.18",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

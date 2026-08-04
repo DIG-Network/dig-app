@@ -995,6 +995,7 @@ mod tray {
     };
     use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
+    use dig_app::tray_popup;
     use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::Replacement;
@@ -1403,7 +1404,10 @@ mod tray {
         // The observer thread is cheap and its failure costs diagnostics only, so a machine that
         // cannot spawn it still gets a tray.
         let pump = pump_vigil::Heartbeat::now();
-        if let Err(e) = pump_vigil::watch(pump.clone()) {
+        // The watcher is also the only thing that can clear a stuck tray menu, because the thread
+        // that would otherwise do it is the thread that is stuck (dig-app#86). Breaking a menu
+        // selects nothing, so this rescue cannot authorize anything.
+        if let Err(e) = pump_vigil::watch(pump.clone(), |_phase| tray_popup::break_modal_menu()) {
             tracing::warn!(error = %e, "the tray loop's liveness watcher could not be started");
         }
 
@@ -1424,12 +1428,38 @@ mod tray {
         {
             let pump = pump.clone();
             tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
-                if let tray_icon::TrayIconEvent::Click {
-                    button_state: tray_icon::MouseButtonState::Down,
+                use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+                use tray_popup::Edge;
+
+                let TrayIconEvent::Click {
+                    button,
+                    button_state,
                     ..
                 } = event
-                {
-                    pump.mark(Phase::TrayMenu);
+                else {
+                    return;
+                };
+
+                // Middle clicks open nothing, so they are neither worth a foreground attempt nor a
+                // word in the log. Left and right both open the menu (`menu_on_left_click` and
+                // `menu_on_right_click` default on, and this shell does not change them).
+                let opens_menu = matches!(button, MouseButton::Left | MouseButton::Right);
+                match tray_popup::edge_of(opens_menu, button_state == MouseButtonState::Down) {
+                    // One free attempt a whole click early. Silent: a refusal here predicts nothing,
+                    // because the UP edge may still be granted.
+                    Edge::Speculative => {
+                        let _ = tray_popup::claim_foreground();
+                    }
+                    // The edge `tray-icon` tracks on, and the last of our code to run before
+                    // `TrackPopupMenu`. A popup tracked without foreground rights cannot be
+                    // dismissed by clicking away or by Escape — measured, and it held the tray dead
+                    // for 180 s (dig-app#86, MSDN Q135788). So this is where the claim is required
+                    // and where a refusal is worth an ERROR.
+                    Edge::BeforeTrack => {
+                        tray_popup::report_claim(tray_popup::claim_foreground());
+                        pump.mark(Phase::TrayMenu);
+                    }
+                    Edge::Irrelevant => {}
                 }
             }));
         }

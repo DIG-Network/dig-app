@@ -17,6 +17,8 @@
 //! * [`pump_vigil`] — watching the tray's own event loop from outside it, so a loop that stops
 //!   running can say so.
 //! * [`tray_guard`] — surviving a desktop stack that panics instead of failing (tray builds only).
+//! * `tray_popup` — keeping the tray's context menu dismissable, and clearing it when it is not
+//!   (tray builds only).
 
 pub mod argv;
 pub mod autostart;
@@ -33,17 +35,23 @@ pub mod console;
 #[cfg(feature = "tray")]
 pub mod hotkey;
 pub mod logging;
-/// Watching the tray's own event loop from OUTSIDE it.
-///
-/// Not tray-gated, for the same reason as [`tray_worker`]: it is two atomics and a clock, with no
-/// desktop dependency, and the property worth pinning — that a loop which stops running is named
-/// rather than silent — is checkable in every build (dig-app#86).
+// No outer doc comment here, for the reason spelled out above `tray_popup` below: outer docs on a
+// `pub mod` are MERGED with the module's own `//!` docs and the merged block resolves its
+// intra-doc links in the crate-root scope, so a link to one of the module's own items fails with
+// an error carrying no file and no line. `pump_vigil` documents itself.
 pub mod pump_vigil;
 /// Surviving a desktop stack that panics instead of failing.
 ///
 /// Tray-only, for the same reason as [`brand`]: a headless build mounts no tray.
 #[cfg(feature = "tray")]
 pub mod tray_guard;
+// NOTE: no outer doc comment here on purpose. A module carrying BOTH outer docs on its `pub mod`
+// declaration and inner `//!` docs has the two MERGED, and the merged block then resolves its
+// intra-doc links in the CRATE-ROOT scope — so a link to one of the module's own items fails to
+// resolve, with a rustdoc error that carries no file and no line. It broke the doc gate twice on
+// dig-app#86. `tray_popup` documents itself.
+#[cfg(feature = "tray")]
+pub mod tray_popup;
 /// Running tray menu actions off the event loop, so no handler can freeze the tray.
 ///
 /// Not tray-gated: it is plain threading with no desktop dependency, and its guarantees (nothing runs

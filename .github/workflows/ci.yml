@@ -121,3 +121,14 @@ jobs:
         run: cargo clippy -p dig-app-core --all-targets --all-features --locked -- -D warnings
       - name: cargo test (dig-app-core)
         run: cargo test -p dig-app-core --all-features --locked
+      # The tray SHELL has per-OS code too, and until dig-app#86 none of it was built by any CI job:
+      # the ubuntu gate runs `-p dig-app` but compiles no `cfg(target_os = "windows")` item, and this
+      # job only ran `-p dig-app-core`. So `tray_popup`'s Win32 lookup, its `unsafe` callback, and the
+      # pin that is supposed to shout when `tray-icon` renames its window class were all invisible —
+      # a green board said nothing whatever about them, which is how a rescue that never ran shipped.
+      - name: cargo clippy -D warnings (dig-app shell)
+        if: runner.os == 'Windows'
+        run: cargo clippy -p dig-app --all-targets --features tray --locked -- -D warnings
+      - name: cargo test (dig-app shell)
+        if: runner.os == 'Windows'
+        run: cargo test -p dig-app --lib --features tray --locked

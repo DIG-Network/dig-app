@@ -1,5 +1,9 @@
 //! Liveness for the tray's own event loop — the one thread nothing else was watching.
 //!
+//! Not tray-gated: it is two atomics and a clock with no desktop dependency, and the property
+//! worth pinning — that a loop which stops running is named rather than silent — is checkable in
+//! every build.
+//!
 //! # Why this exists
 //!
 //! Four times now a tray defect has been reported as *"I click and nothing happens"*, and four times
@@ -24,18 +28,19 @@
 //! closure entirely: `tray-icon`'s `show_tray_menu` runs `TrackPopupMenu`, a nested modal message loop,
 //! inside the tray window proc inside tao's dispatch — upstream of every call the closure makes.
 //!
-//! So [`Phase::BetweenTicks`](crate::pump_vigil::Phase::BetweenTicks) is a real, named value rather
-//! than the absence of one. A stale stamp
+//! So [`Phase::BetweenTicks`] is a real, named value rather than the absence of one. A stale stamp
 //! reading `BetweenTicks` means the pump is blocked in platform dispatch; a stale stamp naming a call
 //! means the pump is blocked in that call. Those are different bugs with different fixes, and telling
 //! them apart is the whole job.
 //!
 //! # What this module deliberately does not do
 //!
-//! It does not recover anything. It observes and it reports. A watchdog that also acts is a watchdog
-//! that can be wrong in two ways, and the reclaim ladder belongs to the window service (dig-app#86),
-//! which is a later step. This is the cheapest possible thing that turns a silent permanent wedge into
-//! a named one, and it is worth shipping on its own.
+//! It observes and reports, and it recovers exactly one thing: a tray menu still up past its bound,
+//! which it asks to close (see [`watch`]). That single exception is granted because the action can
+//! choose nothing — a dismissed menu has selected no item — and because the thread that would
+//! otherwise clear it is the thread that is stuck. Everything else it can see, it only names: a
+//! watchdog that acts where there is nothing safe to do is a watchdog with a second way to be wrong,
+//! and the general reclaim ladder belongs to the window service (dig-app#86).
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -428,18 +433,54 @@ pub fn report(verdict: Verdict) {
     }
 }
 
-/// Watch `beat` forever, reporting every stall and every recovery.
+/// Whether a stall in `phase` is one this process can do anything about.
 ///
-/// Spawned beside the tray loop. Failing to spawn it costs diagnostics and nothing else, so the caller
-/// may ignore the result — a machine that cannot start an observer thread must still get a tray.
-pub fn watch(beat: Heartbeat) -> std::io::Result<std::thread::JoinHandle<()>> {
+/// Only the tray menu is. A modal menu loop can be broken from another thread with a posted
+/// `WM_CANCELMODE` (measured, dig-app#86), and breaking one chooses nothing — a dismissed menu has
+/// selected no item, so no consent can be manufactured by it.
+///
+/// Every other phase is either a call into the shell that will return or will not, or a block in
+/// platform dispatch we cannot name. There is nothing safe to poke, and a watchdog that pokes
+/// anyway is a watchdog that can be wrong in a second way.
+fn is_breakable(phase: Phase) -> bool {
+    matches!(phase, Phase::TrayMenu)
+}
+
+/// Decide whether `verdict` calls for the breaker, having already reported it.
+///
+/// Split from the loop so the decision is a value a test can assert on. Returns the phase to break,
+/// or `None`.
+fn breakable(verdict: Verdict) -> Option<Phase> {
+    match verdict {
+        Verdict::Stalled { phase, .. } if is_breakable(phase) => Some(phase),
+        _ => None,
+    }
+}
+
+/// Watch `beat` forever, reporting every stall and — where there is something safe to do — asking
+/// `breaker` to clear it.
+///
+/// Spawned beside the tray loop. Failing to spawn it costs diagnostics and nothing else, so the
+/// caller may ignore the result — a machine that cannot start an observer thread must still get a
+/// tray.
+///
+/// The breaker runs on THIS thread, which is the point: the tray loop is by definition not running
+/// when it is needed, so a rescue dispatched from the tray loop is a rescue that never happens.
+pub fn watch(
+    beat: Heartbeat,
+    breaker: impl Fn(Phase) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("dig-tray-vigil".to_owned())
         .spawn(move || {
             let mut watcher = Watcher::new();
             loop {
                 std::thread::sleep(LOOK_EVERY);
-                report(watcher.look(&beat, Instant::now()));
+                let verdict = watcher.look(&beat, Instant::now());
+                report(verdict);
+                if let Some(phase) = breakable(verdict) {
+                    breaker(phase);
+                }
             }
         })
 }
@@ -785,6 +826,65 @@ mod tests {
             Phase::Presence.advice(),
             Phase::BetweenTicks.advice(),
             "a block inside a named call is not a block in platform dispatch"
+        );
+    }
+
+    /// The breaker is offered a stuck tray menu and nothing else.
+    ///
+    /// The nearest wrong implementation breaks on any stall. That is not merely untidy: the other
+    /// phases are a shell call that will return or will not, and a block in platform dispatch we
+    /// cannot name — there is nothing safe to poke, and poking anyway gives the watchdog a second
+    /// way to be wrong. So a non-menu stall is asserted to yield `None`, not merely left untested.
+    #[test]
+    fn only_a_stuck_tray_menu_is_offered_to_the_breaker() {
+        let stall = |phase| Verdict::Stalled {
+            phase,
+            silent_for: ms(1),
+            again: false,
+        };
+
+        assert_eq!(breakable(stall(Phase::TrayMenu)), Some(Phase::TrayMenu));
+
+        for unbreakable in [
+            Phase::BetweenTicks,
+            Phase::Tick,
+            Phase::ClipboardClear,
+            Phase::DrainClicks,
+            Phase::ReadState,
+            Phase::Presence,
+            Phase::Repaint,
+        ] {
+            assert_eq!(
+                breakable(stall(unbreakable)),
+                None,
+                "{unbreakable:?} has nothing safe to poke and must not be broken"
+            );
+        }
+    }
+
+    /// A healthy pump is never broken. Both non-stall verdicts, because a breaker fired on a
+    /// RECOVERY would dismiss the menu of a user who is using it perfectly normally.
+    #[test]
+    fn a_pump_that_is_not_stalled_is_never_broken() {
+        assert_eq!(breakable(Verdict::Quiet), None);
+        assert_eq!(
+            breakable(Verdict::Recovered { lasted: ms(500) }),
+            None,
+            "a recovered pump is working; breaking its menu would close it under the user"
+        );
+    }
+
+    /// A restatement is still a stall, so a menu that survived the first break is offered again.
+    /// Breaking once and then giving up silently is the latch failure in another costume.
+    #[test]
+    fn a_restated_stall_is_offered_to_the_breaker_again() {
+        assert_eq!(
+            breakable(Verdict::Stalled {
+                phase: Phase::TrayMenu,
+                silent_for: ms(1),
+                again: true,
+            }),
+            Some(Phase::TrayMenu),
         );
     }
 
