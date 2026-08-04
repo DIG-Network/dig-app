@@ -64,10 +64,19 @@ pub const CREDENTIAL_SERVICE: &str = "dig-app";
 /// The real OS credential store on Windows/macOS, backed by the [`keyring`] crate.
 ///
 /// On construction it probes the platform backend with a throwaway lookup; if the backend is
-/// unavailable (a locked keychain, an unreachable Credential Manager), construction returns `None`
-/// so the caller falls back to the sealed-file path. This keeps "is the OS store usable?" a single
-/// decision made once, rather than a failure surfacing mid-unlock. (Compiled only on Windows/macOS
-/// — Linux never uses an OS credential store; see the module docs.)
+/// unavailable (a locked keychain, an unreachable Credential Manager), construction returns `None`.
+/// This keeps "is the OS store usable?" a single decision made once, rather than a failure surfacing
+/// mid-unlock. (Compiled only on Windows/macOS — Linux never uses an OS credential store; see the
+/// module docs.)
+///
+/// **`None` means the two migration-only callers do nothing, and nothing else changes.** Earlier
+/// versions of this doc said the caller "falls back to the sealed-file path". There is no such
+/// fallback and there never was one — grep finds the phrase only in this file's own comments. The
+/// sentence described the pre-#1817 world, where this store WAS the custody primary and a missing
+/// backend would have needed one; today the password comes from the user's head, so a `None` here
+/// costs a leftover credential entry at discard and a skipped migration check, nothing more. The
+/// phantom cost real investigation time on dig_ecosystem#2128, where it read as a live code path that
+/// might be silently persisting a key somewhere else.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub struct OsCredentialStore {
     service: String,
@@ -75,9 +84,9 @@ pub struct OsCredentialStore {
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl OsCredentialStore {
-    /// Open the OS credential store, or return `None` if this host has no usable backend (⇒ the
-    /// caller uses the sealed-file fallback). The `probe_account` is looked up only to detect
-    /// backend availability; its presence or absence is irrelevant.
+    /// Open the OS credential store, or return `None` if this host has no usable backend. The
+    /// `probe_account` is looked up only to detect backend availability; its presence or absence is
+    /// irrelevant.
     pub fn open(probe_account: &str) -> Option<Self> {
         let store = Self {
             service: CREDENTIAL_SERVICE.to_string(),
@@ -130,14 +139,16 @@ mod tests {
     use super::*;
 
     /// Exercise the REAL OS credential store end-to-end where a backend exists (Windows Credential
-    /// Manager · macOS Keychain). Self-skips on a host with no usable backend so
-    /// it is never flaky — the sealed-file fallback is what covers that case (see `vault::tests`).
+    /// Manager · macOS Keychain). Self-skips on a host with no usable backend so it is never flaky —
+    /// a host without one simply has no migration to run and no entry to clean up.
     /// The entry is namespaced and always cleaned up so it cannot pollute a developer's real store.
     #[test]
     fn os_store_set_get_delete_round_trips_where_available() {
         let account = format!("dig-app-test:{}", std::process::id());
         let Some(store) = OsCredentialStore::open(&account) else {
-            eprintln!("no OS credential store on this host — skipping (fallback path covers it)");
+            eprintln!(
+                "no OS credential store on this host — skipping (nothing here is load-bearing)"
+            );
             return;
         };
 
