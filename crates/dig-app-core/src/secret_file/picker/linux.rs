@@ -117,8 +117,7 @@ impl Helper {
 ///
 /// `0` is a chosen path and `1` is a dismissal, in both helpers. Anything else — a helper that could
 /// not reach the display, one killed by a signal, a version that failed to parse its own arguments —
-/// is the MACHINE failing rather than the user declining, and must not be read as a refusal: a
-/// refusal abandons the backup, where an unavailable dialog falls back to a known path.
+/// is the machine failing rather than the user declining, and is reported as such (see [`PickedPath`]).
 fn interpret(code: Option<i32>, stdout: &[u8]) -> PickedPath {
     match code {
         Some(0) => {

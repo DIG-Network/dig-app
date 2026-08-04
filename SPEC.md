@@ -225,12 +225,23 @@ can carry to a new machine.
   every service, backup agent and indexer holding those tokens — full access to the account's custody
   root. Mode bits have no meaning on Windows, so a `set_permissions` call there satisfies nothing. A
   failure to restrict the file MUST be reported as a failed backup; an implementation MUST NOT write the
-  words and then report success because only the permission step failed. The single exception is a volume
-  with NO access control at all — an exFAT/FAT32 removable disk, which is a destination this feature
-  exists to enable — where there is no restriction to apply and none to downgrade; the write proceeds, and
-  the confirmation window's standing disclosure that the file is plaintext and readable by anyone who can
-  reach it is what makes that honest. An implementation MUST detect that case from the volume's own
-  capabilities and MUST NOT infer it from a failed permission call. (`secret_file::write_owner_only`.)
+  words and then report success because only the permission step failed, and MUST NOT report success for a
+  file whose restriction did not actually take effect — a platform whose permission call can succeed
+  without changing anything (a `chmod` on a filesystem that stores no mode) MUST therefore be verified
+  after the fact, not assumed. (`secret_file::write_owner_only`.)
+- **Volumes that cannot store permissions (normative, and deliberately asymmetric).** A user-chosen
+  destination may be a filesystem with no access control at all — a FAT/exFAT removable disk, which is a
+  destination the save picker exists to enable.
+  - **On Windows** the write MUST proceed there. The volume is identified by its own reported
+    capabilities (the absence of persistent-ACL support), NOT by inference from a failed permission call,
+    and not by filesystem name — the same capability is absent on some network redirectors and
+    user-space filesystems, and all of them are handled alike. Nothing is downgraded, because such a
+    volume grants everyone everything by design, and the confirmation window's standing disclosure that
+    the file is plaintext and readable by anyone who can reach it is what makes proceeding honest.
+  - **On Unix** such a destination MUST instead be a FAILED backup. The equivalent capability question
+    has no portable spelling, so an implementation refuses rather than guessing. This asymmetry is
+    intentional and is recorded here so it reads as a decision rather than an oversight; closing it
+    requires answering the capability question on Unix properly.
 - **Handling (MUST).** The phrase MUST NOT be logged, serialized, transmitted, or written anywhere but
   its sealed vault. It is held in zeroizing memory, redacted in debug output, and reaches only an
   OS-owned foreground window.

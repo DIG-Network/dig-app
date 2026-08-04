@@ -1916,6 +1916,11 @@ mod tray {
     /// [`BackupDelivery::Cancelled`], which the ceremony treats exactly like declining the warning.
     /// Falling back to the fixed path there would write the seed to a location the user had just
     /// refused, and the dialog would be decoration.
+    ///
+    /// The dialog is raised HERE, inside the delivery, which means the decrypted phrase waits in its
+    /// zeroizing buffer for as long as the user browses. Resolving the destination before the vault
+    /// is opened would close that window — and make a cancel decrypt nothing at all — but it needs a
+    /// second method on the sink trait, so it is tracked separately as dig_ecosystem#2066.
     fn save_phrase_file(words: &str) -> BackupDelivery {
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(std::path::PathBuf::from);

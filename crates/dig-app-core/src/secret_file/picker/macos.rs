@@ -26,8 +26,7 @@ pub(super) fn ask(request: &SaveFileRequest<'_>) -> PickedPath {
 ///
 /// A failure is only a REFUSAL when AppleScript says the user cancelled. Any other failure — no
 /// window server, an automation-policy denial, a script that would not compile — is the machine
-/// being unable to ask, and must fall back rather than be read as "no": a refusal abandons the
-/// backup, where an unavailable dialog writes to a known path instead.
+/// being unable to ask, and is reported as such (see [`PickedPath`]).
 fn interpret(succeeded: bool, stdout: &[u8], stderr: &[u8]) -> PickedPath {
     if succeeded {
         let path = String::from_utf8_lossy(stdout).trim().to_string();

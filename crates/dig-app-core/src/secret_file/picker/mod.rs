@@ -11,8 +11,10 @@
 //! # Why these three platform implementations
 //!
 //! * **Windows** — `GetSaveFileNameW`, the common-dialog entry point, called directly. It is
-//!   preferred over the COM `IFileSaveDialog` because it needs no apartment initialisation, and
-//!   this process already joins the MTA for WinRT elsewhere (dig_ecosystem#1926).
+//!   preferred over the COM `IFileSaveDialog` because it does not require the calling thread to be
+//!   in a single-threaded apartment. That matters here: this process puts threads into the MTA to
+//!   activate WinRT (dig_ecosystem#1926), and the shell integration `IFileSaveDialog` relies on is
+//!   the part that behaves poorly from an MTA thread.
 //! * **macOS and Linux** — the desktop's own dialog helper, driven as a subprocess: `osascript`'s
 //!   `choose file name` and `zenity`/`kdialog` respectively.
 //!
@@ -44,10 +46,19 @@ pub struct SaveFileRequest<'a> {
 
 /// The user's answer to [`SaveFilePicker::ask`].
 ///
-/// [`Cancelled`](Self::Cancelled) and [`Unavailable`](Self::Unavailable) are kept apart because
-/// they mean opposite things: one is the user declining, the other is the machine being unable to
-/// ask. Collapsing them would either write a secret the user just refused, or refuse to write one
-/// on every host without a desktop.
+/// # Cancelled and Unavailable are not the same answer
+///
+/// This distinction is the one load-bearing idea in the module, so it is stated here and referred to
+/// everywhere else. A dialog can end without a path for two opposite reasons:
+///
+/// * **[`Cancelled`](Self::Cancelled)** — the user was asked and said no. The write is abandoned.
+///   Falling back to a default path here would put the secret somewhere they had just declined, and
+///   the dialog would be theatre.
+/// * **[`Unavailable`](Self::Unavailable)** — the machine could not ask (headless, no dialog helper,
+///   a failing one). The user never got the choice, so the caller falls back rather than dropping a
+///   capability from every such host.
+///
+/// Collapsing them breaks one direction or the other, so every platform arm reports which it means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickedPath {
     /// The user chose this path.

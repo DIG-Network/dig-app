@@ -48,12 +48,41 @@ compile_error!(
 );
 
 /// Create-or-truncate `path` at mode `0600` and write `bytes` into it.
-///
-/// `mode()` only applies when the file is CREATED, so a pre-existing (perhaps `0644`) file would
-/// keep its old mode. It is therefore tightened explicitly as well — at that point the file is
-/// open and truncated to zero length, so it holds no secret to leak while the mode is still loose.
 #[cfg(unix)]
 fn unix_write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    write_at_mode_600(path, bytes, |file| {
+        Ok(file.metadata()?.permissions().mode() & 0o777)
+    })
+}
+
+/// The body of [`unix_write_owner_only`], with the mode read-back injected.
+///
+/// # Why the mode is READ BACK rather than assumed
+///
+/// `mode()` applies only when the file is CREATED, so a pre-existing (perhaps `0644`) file keeps its
+/// old mode — hence the explicit tighten, done while the file is open and truncated to zero length,
+/// so it holds no secret to leak at the looser mode.
+///
+/// Neither step is enough on its own, because **not every filesystem stores a mode**. A FAT/exFAT
+/// volume — the removable disk this feature's save picker exists to enable — either rejects the
+/// change (`EPERM`, caught by `?`) or, worse, *accepts it and does nothing*: `chmod` on macOS
+/// `msdosfs` is a silent no-op. That second case would return `Ok(())` for a file that is not
+/// owner-only, which is precisely what this function's contract says can never happen.
+///
+/// So the mode is verified after being set. Anything other than `0600` fails the backup — the caller
+/// reports that the backup did not complete, and the user picks a destination that can hold a secret.
+/// This is deliberately STRICTER than the Windows arm, which detects an ACL-less volume and proceeds:
+/// the equivalent capability question on Unix (`statfs` filesystem-magic matching) is per-OS, has no
+/// portable spelling, and cannot be exercised on any CI runner, so refusing is the honest behaviour
+/// until it can be answered properly. SPEC §3.1a records that asymmetry as intentional.
+#[cfg(unix)]
+fn write_at_mode_600(
+    path: &Path,
+    bytes: &[u8],
+    mode_of: impl Fn(&std::fs::File) -> io::Result<u32>,
+) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
@@ -64,13 +93,55 @@ fn unix_write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .mode(0o600)
         .open(path)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+
+    let mode = mode_of(&file)?;
+    if mode != 0o600 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("this location cannot restrict the file to its owner (mode {mode:o})"),
+        ));
+    }
     file.write_all(bytes)
 }
 
 #[cfg(all(test, unix))]
 mod unix_tests {
-    use super::write_owner_only;
+    use super::{write_at_mode_600, write_owner_only};
+    use std::io;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A destination that cannot actually hold the mode is a FAILED backup, never a quiet success.
+    ///
+    /// This is the case a `chmod` that returns `Ok` while changing nothing produces — macOS
+    /// `msdosfs` on a FAT stick, the destination the save picker exists to enable. Without the
+    /// read-back the function would report success for a file anyone can read, which is the one
+    /// thing its contract promises it will never do.
+    #[test]
+    fn a_volume_that_ignores_the_mode_fails_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+
+        // A filesystem whose chmod is a no-op: the call succeeded, the mode did not change.
+        let error = write_at_mode_600(&path, b"redacted\n", |_| Ok(0o644)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"",
+            "the secret must not be written to a file that could not be restricted"
+        );
+    }
+
+    /// The read-back accepts the mode it asked for, so the check cannot reject every write.
+    #[test]
+    fn a_volume_that_honours_the_mode_completes_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.txt");
+
+        write_at_mode_600(&path, b"redacted\n", |_| Ok(0o600)).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"redacted\n");
+    }
 
     /// A new secret file is CREATED owner-only, never at the umask default and tightened after.
     #[test]
@@ -187,21 +258,15 @@ mod windows_tests {
     /// nothing. It is the check an owner-run test cannot make, and the class of check that catches a
     /// permission bug a whole suite of owner-run scenarios will happily miss.
     ///
-    /// **It refuses to pass vacuously, and it took two controls to get that right.**
+    /// Two controls, because one is not enough to make the denial mean anything:
     ///
-    /// The first control proves the PROBE works: a file granted to Everyone must be readable through
-    /// the restricted token, since Everyone is still enabled in it. A probe that denied everything
-    /// would otherwise "prove" any file secure.
-    ///
-    /// The second control proves the probe DISCRIMINATES, and it is the one that matters. A plain
-    /// `fs::write` file — the exact before-state this ticket fixes — must be readable without the
-    /// owner's SID, or the probe cannot tell the fixed file from the broken one. It only can when the
-    /// session is elevated, because a non-elevated token has Administrators deny-only already and so
-    /// reaches an inherited-ACL file by no route either.
-    ///
-    /// Getting this wrong was demonstrated, not theorised: with only the Everyone control, this test
-    /// PASSED against a reverted `fs::write` implementation. Where the second control cannot be
-    /// established the test skips loudly instead of banking a pass it did not earn.
+    /// 1. A file granted to Everyone must be READABLE through the restricted token — otherwise the
+    ///    probe denies everything and would "prove" any file secure.
+    /// 2. A plain `fs::write` file must be readable too. That is the before-state the subject is
+    ///    compared against; without it the test passes against a reverted implementation, since a
+    ///    non-elevated token reaches an inherited-ACL file by no route either. It only holds when
+    ///    elevated, so where it cannot be established the test skips rather than bank an unearned
+    ///    pass — and on CI, where the runner IS elevated, failing to establish it is an error.
     #[test]
     fn a_principal_without_the_owner_sid_cannot_open_the_file() {
         let dir = tempfile::tempdir().unwrap();

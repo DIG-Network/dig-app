@@ -39,21 +39,11 @@ pub enum SecretFileDestination {
 
 /// Ask the user where to save, and say what should happen with the answer.
 ///
-/// # The two failure directions, which are not the same failure
-///
-/// A save dialog can end without a path for two unrelated reasons, and treating them alike breaks
-/// something either way:
-///
-/// * **The user cancelled.** They were shown a dialog and said no. Falling back to `fallback_dir`
-///   here would write the secret to a predictable path they had just declined to write it to — the
-///   dialog would be theatre. So a cancel is [`SecretFileDestination::Declined`], full stop.
-/// * **No dialog could be raised.** A headless host, or a desktop with no dialog helper installed.
-///   The user asked for a file and never got the chance to choose; refusing would remove a working
-///   feature from every such host. So this falls back to `fallback_dir`, which is exactly the fixed
-///   path this flow used before it could ask (dig_ecosystem#1966).
-///
-/// `fallback_dir` is normally the user's home directory. When it is unknown as well, there is
-/// genuinely nowhere to put the file and the caller must say so rather than invent a path.
+/// The cancel-versus-unavailable rule this turns on is documented once, on [`PickedPath`]. Here it
+/// simply becomes a destination: a cancel declines, an unreachable dialog falls back to
+/// `fallback_dir` — normally the user's home directory, and the fixed path this flow used before it
+/// could ask (dig_ecosystem#1966). When even that is unknown there is nowhere to put the file, and
+/// the caller must be told rather than handed an invented path.
 pub fn choose_secret_file_path(
     picker: &dyn SaveFilePicker,
     request: &SaveFileRequest<'_>,
