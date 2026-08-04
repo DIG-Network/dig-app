@@ -319,6 +319,13 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
 - **The process MUST take the foreground immediately before the popup is tracked**, at the last point
   its own code runs, and MUST report a refusal at ERROR naming what it predicts — that is the moment
   the wedge becomes reachable, and the line a later investigation will search for.
+- **The implementation MUST identify which input edge the library tracks on, and claim there.** The
+  edge is a property of the library, not a constant: `tray-icon` 0.19.3 tracked on button-DOWN and
+  0.23.1 tracks on button-UP. Claiming at any other edge does not satisfy the bullet above, however
+  close it looks — an attempt one edge early is a useful EXTRA try and is never the required one.
+- **An edge that opens no menu MUST stay silent.** A refusal only predicts an undismissable popup
+  where a popup follows; predicting one on a middle click, or at an edge the library does not track
+  on, is a false alarm on the surface whose whole purpose is to be believed.
 - **Both halves of Q135788 are required.** `SetForegroundWindow` *before* the track is what makes the
   menu dismissable; `PostMessage(WM_NULL)` *after* finalises the task switch for the next one. Neither
   alone is sufficient, and the second without the first fixes nothing.

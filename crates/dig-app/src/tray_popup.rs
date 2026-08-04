@@ -18,8 +18,11 @@
 //!
 //! # The two things this module does
 //!
-//! **1. Try for the foreground one edge EARLIER.** [`claim_foreground`] runs from `tray-icon`'s own
-//! event handler, on button-DOWN.
+//! **1. Try for the foreground at BOTH edges of the click.** [`claim_foreground`] runs from
+//! `tray-icon`'s own event handler, which fires synchronously on button-DOWN and again on button-UP
+//! with `show_tray_menu` immediately after. The UP attempt is the one `SPEC.md` §3.1b-tp requires —
+//! it is literally the last of our code to run before `TrackPopupMenu` — and the DOWN attempt is a
+//! free extra try one whole click earlier. See [`Edge`] for why only one of them may speak.
 //!
 //! Be precise about what this is and is not, because the first version of this comment overstated
 //! it. `tray-icon` has **always** called `SetForegroundWindow` immediately before the track — 0.19.3
@@ -27,10 +30,20 @@
 //! What 0.23.1 adds is the *other* half, the `PostMessageW(WM_NULL)` after the track (`:557`), and
 //! that one cannot help a menu whose track never returns.
 //!
-//! So this is the same Win32 call, on the same window, one input edge sooner — and 0.23.1 also moved
-//! the track from button-DOWN to button-**UP** (`:491`), which widens that gap to a whole click. It
-//! helps in exactly one situation: foreground rights exist at DOWN and have lapsed by UP. Where
-//! rights are absent for the whole click it changes nothing, and it is honest to say so.
+//! So this is the same Win32 call, on the same window, tried one input edge sooner — and 0.23.1 also
+//! moved the track from button-DOWN to button-**UP** (`:491`), which widens that gap to a whole
+//! click. All four combinations, stated exhaustively, because the first version of this comment
+//! split the cases in its own favour:
+//!
+//! | rights at DOWN | rights at UP | effect of the extra attempt |
+//! |---|---|---|
+//! | yes | yes | none — the library's own call would have succeeded |
+//! | yes | no  | **the case this helps**: the foreground is taken while it can be |
+//! | no  | yes | none — and note the menu opens dismissable anyway |
+//! | no  | no  | none; this is where rung 2 is the whole answer |
+//!
+//! The third row is why the refusal ERROR is emitted on **UP** and not on DOWN: a refusal at DOWN
+//! predicts nothing, because UP may still be granted.
 //!
 //! **2. Break a menu that got tracked anyway.** [`break_modal_menu`] posts `WM_CANCELMODE`, which
 //! **was measured to break a foreign thread out of `TrackPopupMenu`** — cross-process, cross-thread,
@@ -59,7 +72,12 @@
 //! what refuses the foreground in the field is not. Rung 2 is justified by that chain, and it is the
 //! rung that holds regardless of the trigger.
 
-/// The class name `tray-icon` gives its hidden message-only tray window.
+/// The class name `tray-icon` gives its hidden tray window.
+///
+/// **Not a message-only (`HWND_MESSAGE`) window** — it is a hidden top-level window created with
+/// `WS_EX_TOOLWINDOW` (`tray-icon` `mod.rs:100-118`). That distinction is load-bearing rather than
+/// pedantic: `EnumWindows` does not enumerate message-only windows, so had it truly been one,
+/// [`tray_window`] would find nothing and the rescue would be a SECOND silent no-op.
 ///
 /// A private detail of that crate, and named here on purpose rather than reached for through an
 /// accessor that does not exist. Pinned by [`tests::the_tray_window_class_matches_the_crate`], which
@@ -81,6 +99,43 @@ pub enum NoForeground {
     Refused,
 }
 
+/// What a tray click edge means for the popup that may follow it.
+///
+/// # Why the edge has to be classified at all
+///
+/// `tray-icon` 0.23.1 tracks the menu on button-**UP** (`mod.rs:491-492`), where 0.19.3 tracked on
+/// DOWN. Its event handler fires synchronously on *both* edges, so a handler that does not
+/// distinguish them either misses the moment that matters or speaks at a moment where nothing
+/// happens. The first version of this module claimed on DOWN only, which did nothing at the instant
+/// `SPEC.md` §3.1b-tp names, and fired its ERROR on middle clicks that open no menu at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    /// A button-DOWN on a button that opens the menu. The track is one whole click away.
+    ///
+    /// Worth a foreground attempt — that is the widening, and it is free — but NOT worth a word in
+    /// the log: rights absent here may still be granted by UP, so a refusal predicts nothing.
+    Speculative,
+    /// The button-UP `tray-icon` tracks on: the last point our code runs before `TrackPopupMenu`.
+    ///
+    /// This is where §3.1b-tp's MUST applies, and the only edge where a refusal is real news.
+    BeforeTrack,
+    /// No menu follows this edge — a middle click, or a button that cannot open the menu.
+    Irrelevant,
+}
+
+/// Classify a tray click for the popup that may follow.
+///
+/// `opens_menu` is whether this button is configured to open the menu at all
+/// (`menu_on_left_click` / `menu_on_right_click`; both default on, and dig-app does not change
+/// them). Taken as an argument rather than assumed so the classification stays true if it ever is.
+pub fn edge_of(opens_menu: bool, pressed: bool) -> Edge {
+    match (opens_menu, pressed) {
+        (false, _) => Edge::Irrelevant,
+        (true, true) => Edge::Speculative,
+        (true, false) => Edge::BeforeTrack,
+    }
+}
+
 /// Take the foreground for the tray's window, so the popup about to be tracked can be dismissed.
 ///
 /// Returns `Ok(())` when this process now holds the foreground.
@@ -90,8 +145,9 @@ pub enum NoForeground {
 #[cfg(target_os = "windows")]
 pub fn claim_foreground() -> Result<(), NoForeground> {
     let hwnd = tray_window().ok_or(NoForeground::NoTrayWindow)?;
-    // SAFETY: `hwnd` was just enumerated from this thread's own windows, so it is live and owned
-    // here. `SetForegroundWindow` has no other precondition and cannot fail unsoundly.
+    // SAFETY: `hwnd` was just enumerated from THIS PROCESS's windows (`tray_window` filters on the
+    // owning process id), so it is a live handle we own. `SetForegroundWindow` has no other
+    // precondition and cannot fail unsoundly; a refusal is a `false` return, not undefined behaviour.
     let taken = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd) };
     match taken.as_bool() {
         true => Ok(()),
@@ -259,9 +315,12 @@ static REFUSALS: Throttle = Throttle::new(RESTATE_REFUSAL_AFTER);
 
 /// Log the outcome of a foreground claim made on the way into a tray menu.
 ///
-/// A refusal is ERROR and says what it predicts, because it is the moment the wedge becomes
-/// reachable and it is the line a future investigation will search for. Rate-limited, because this
-/// path is reachable by any process running as this user.
+/// Call this ONLY for [`Edge::BeforeTrack`]. At that edge a refusal genuinely predicts an
+/// undismissable menu, which is the moment the wedge becomes reachable and the line a future
+/// investigation will search for. At [`Edge::Speculative`] a refusal predicts nothing — UP may still
+/// be granted — so reporting there would be crying wolf on an ordinary click.
+///
+/// Rate-limited, because this path is reachable by any process running as this user (dig-app#91).
 pub fn report_claim(outcome: Result<(), NoForeground>) {
     match outcome {
         Ok(()) => {}
@@ -296,6 +355,35 @@ mod tests {
             TRAY_WINDOW_CLASS, "tray_icon_app",
             "tray-icon's window class changed; claim_foreground and break_modal_menu are now no-ops"
         );
+    }
+
+    /// Every click edge is classified, and the three outcomes are genuinely distinct.
+    ///
+    /// This is the table the first version got wrong twice over: it claimed on DOWN, which is not
+    /// the edge `tray-icon` 0.23.1 tracks on, and it did not constrain the button, so a middle click
+    /// produced an ERROR predicting that "the menu about to open may not be dismissable" at an edge
+    /// where no menu ever opens.
+    ///
+    /// All four inputs are asserted rather than a representative one, because the two mistakes were
+    /// in different cells.
+    #[test]
+    fn every_click_edge_is_classified_and_only_the_tracking_one_may_speak() {
+        assert_eq!(
+            edge_of(true, false),
+            Edge::BeforeTrack,
+            "button-UP on a menu button is where tray-icon tracks and where the MUST applies"
+        );
+        assert_eq!(
+            edge_of(true, true),
+            Edge::Speculative,
+            "button-DOWN is a free early attempt, but a refusal there predicts nothing"
+        );
+        assert_eq!(
+            edge_of(false, true),
+            Edge::Irrelevant,
+            "a button that opens no menu must not produce a claim or a prediction"
+        );
+        assert_eq!(edge_of(false, false), Edge::Irrelevant, "…on either edge");
     }
 
     /// The two refusals are distinct values, because they mean opposite things: one says the wedge
@@ -366,10 +454,11 @@ mod tests {
         use windows::core::PCWSTR;
         use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::System::Threading::GetCurrentThreadId;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE, WM_CANCELMODE, WM_QUIT,
-            WNDCLASSW, WS_OVERLAPPED,
+            PostThreadMessageW, RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE,
+            WM_CANCELMODE, WM_QUIT, WNDCLASSW, WS_OVERLAPPED,
         };
 
         /// How many `WM_CANCELMODE`s the window proc has actually received. A `static` because a
@@ -384,7 +473,11 @@ mod tests {
             unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
 
+        /// The owning thread's id, so the pump can be ended even when nothing was delivered.
+        static OWNER_TID: AtomicU32 = AtomicU32::new(0);
+
         CANCELS.store(0, Ordering::SeqCst);
+        OWNER_TID.store(0, Ordering::SeqCst);
         let ready = Arc::new(AtomicBool::new(false));
         let owner_ready = Arc::clone(&ready);
 
@@ -420,6 +513,7 @@ mod tests {
                 )
                 .expect("test tray window");
 
+                OWNER_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
                 owner_ready.store(true, Ordering::SeqCst);
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -456,6 +550,20 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let delivered = CANCELS.load(Ordering::SeqCst);
+
+        // End the owner's pump UNCONDITIONALLY, before asserting. The owner only leaves `GetMessageW`
+        // when a cancel arrives, so joining first hangs forever on exactly the failure this test
+        // exists to catch: a mutant posting the wrong message ran 208 s with no output. A test that
+        // hangs instead of failing is not a test — the assertion below was correct and unreachable.
+        // SAFETY: posting to a thread id this test published above; takes no pointer.
+        unsafe {
+            let _ = PostThreadMessageW(
+                OWNER_TID.load(Ordering::SeqCst),
+                WM_QUIT,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
         owner.join().expect("owner thread");
 
         assert_eq!(
