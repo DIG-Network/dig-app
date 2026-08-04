@@ -17,6 +17,8 @@
 //! * [`pump_vigil`] — watching the tray's own event loop from outside it, so a loop that stops
 //!   running can say so.
 //! * [`tray_guard`] — surviving a desktop stack that panics instead of failing (tray builds only).
+//! * `tray_popup` — keeping the tray's context menu dismissable, and clearing it when it is not
+//!   (tray builds only).
 
 pub mod argv;
 pub mod autostart;
@@ -44,6 +46,12 @@ pub mod pump_vigil;
 /// Tray-only, for the same reason as [`brand`]: a headless build mounts no tray.
 #[cfg(feature = "tray")]
 pub mod tray_guard;
+/// Keeping the tray's context menu dismissable, and clearing it when it is not.
+///
+/// Tray-only: it exists entirely to guard `tray-icon`'s `TrackPopupMenu`, and a headless build has
+/// no tray menu to track (dig-app#86).
+#[cfg(feature = "tray")]
+pub mod tray_popup;
 /// Running tray menu actions off the event loop, so no handler can freeze the tray.
 ///
 /// Not tray-gated: it is plain threading with no desktop dependency, and its guarantees (nothing runs

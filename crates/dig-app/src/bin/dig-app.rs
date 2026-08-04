@@ -995,6 +995,7 @@ mod tray {
     };
     use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
+    use dig_app::tray_popup;
     use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
     use dig_app_core::account::journey::Replacement;
@@ -1403,7 +1404,10 @@ mod tray {
         // The observer thread is cheap and its failure costs diagnostics only, so a machine that
         // cannot spawn it still gets a tray.
         let pump = pump_vigil::Heartbeat::now();
-        if let Err(e) = pump_vigil::watch(pump.clone()) {
+        // The watcher is also the only thing that can clear a stuck tray menu, because the thread
+        // that would otherwise do it is the thread that is stuck (dig-app#86). Breaking a menu
+        // selects nothing, so this rescue cannot authorize anything.
+        if let Err(e) = pump_vigil::watch(pump.clone(), |_phase| tray_popup::break_modal_menu()) {
             tracing::warn!(error = %e, "the tray loop's liveness watcher could not be started");
         }
 
@@ -1429,6 +1433,11 @@ mod tray {
                     ..
                 } = event
                 {
+                    // Take the foreground BEFORE `tray-icon` tries. This handler is the last of our
+                    // code to run before `show_tray_menu`, and a popup tracked without foreground
+                    // rights cannot be dismissed by clicking away or by Escape — measured, and it
+                    // held the tray dead for 180 s (dig-app#86, MSDN Q135788).
+                    tray_popup::report_claim(tray_popup::claim_foreground());
                     pump.mark(Phase::TrayMenu);
                 }
             }));
