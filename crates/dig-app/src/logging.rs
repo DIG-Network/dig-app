@@ -148,7 +148,7 @@ where
 /// log dir is unwritable, or a subscriber is already set — never stops the agent from starting.
 ///
 /// If the directory `dig_logging` resolves on its own is unusable, this retries once against the
-/// per-user root ([`install`] explains why that case is the common one, not the exotic one) and reports
+/// per-user root (`install` explains why that case is the common one, not the exotic one) and reports
 /// the switch through `tracing` — so the recovered log explains its own location instead of leaving the
 /// reader to wonder why it moved.
 ///
