@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.20.0] - 2026-08-04
+
+### Features
+- **confirm:** Prompt windows are draggable by their header (#81)
+
+### Bug Fixes
+- **logging:** A per-user run no longer goes silently blind, and a rebuilt menu no longer eats clicks (#83)
+
 ## [5.18.0] - 2026-08-04
 
 ### Features
