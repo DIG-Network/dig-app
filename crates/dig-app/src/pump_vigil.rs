@@ -24,7 +24,8 @@
 //! closure entirely: `tray-icon`'s `show_tray_menu` runs `TrackPopupMenu`, a nested modal message loop,
 //! inside the tray window proc inside tao's dispatch — upstream of every call the closure makes.
 //!
-//! So [`Phase::BetweenTicks`] is a real, named value rather than the absence of one. A stale stamp
+//! So [`Phase::BetweenTicks`](crate::pump_vigil::Phase::BetweenTicks) is a real, named value rather
+//! than the absence of one. A stale stamp
 //! reading `BetweenTicks` means the pump is blocked in platform dispatch; a stale stamp naming a call
 //! means the pump is blocked in that call. Those are different bugs with different fixes, and telling
 //! them apart is the whole job.
