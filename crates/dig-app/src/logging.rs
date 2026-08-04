@@ -190,21 +190,31 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            vec![("HOME", "/home/tester"), ("XDG_STATE_HOME", "/home/tester/.state")]
+            vec![
+                ("HOME", "/home/tester"),
+                ("XDG_STATE_HOME", "/home/tester/.state"),
+            ]
         }
     }
 
     /// An installer that fails `failures` times and then succeeds, counting every attempt.
-    fn flaky(failures: usize) -> (std::cell::Cell<usize>, impl Fn(&std::cell::Cell<usize>) -> Result<&'static str, String>)
-    {
-        (std::cell::Cell::new(0), move |attempts: &std::cell::Cell<usize>| {
-            attempts.set(attempts.get() + 1);
-            if attempts.get() <= failures {
-                Err(format!("attempt {} denied", attempts.get()))
-            } else {
-                Ok("guard")
-            }
-        })
+    fn flaky(
+        failures: usize,
+    ) -> (
+        std::cell::Cell<usize>,
+        impl Fn(&std::cell::Cell<usize>) -> Result<&'static str, String>,
+    ) {
+        (
+            std::cell::Cell::new(0),
+            move |attempts: &std::cell::Cell<usize>| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() <= failures {
+                    Err(format!("attempt {} denied", attempts.get()))
+                } else {
+                    Ok("guard")
+                }
+            },
+        )
     }
 
     /// The regression test for dig_ecosystem#2074: the machine log root exists but is unwritable, so
@@ -266,7 +276,10 @@ mod tests {
             || installer(&attempts),
         );
 
-        assert_eq!(guard, None, "an operator's unusable choice must not be papered over");
+        assert_eq!(
+            guard, None,
+            "an operator's unusable choice must not be papered over"
+        );
         assert_eq!(attempts.get(), 1);
         assert!(chosen.borrow().is_none());
         assert_eq!(diagnostics.len(), 1, "the failure must still be reported");
@@ -276,7 +289,11 @@ mod tests {
     fn a_blank_override_does_not_disable_the_retry() {
         let (attempts, installer) = flaky(1);
         let (guard, _) = install(
-            env(&[(ENV_LOG_DIR, "   ")].iter().chain(desktop().iter()).copied().collect::<Vec<_>>()),
+            env(&[(ENV_LOG_DIR, "   ")]
+                .iter()
+                .chain(desktop().iter())
+                .copied()
+                .collect::<Vec<_>>()),
             |_| {},
             || installer(&attempts),
         );
@@ -294,7 +311,8 @@ mod tests {
         assert_eq!(attempts.get(), 2, "a doomed install must not loop");
         assert_eq!(diagnostics.len(), 1);
         assert!(
-            diagnostics[0].contains("attempt 1 denied") && diagnostics[0].contains("attempt 2 denied"),
+            diagnostics[0].contains("attempt 1 denied")
+                && diagnostics[0].contains("attempt 2 denied"),
             "both failures must be named, got {diagnostics:?}"
         );
     }
@@ -321,7 +339,11 @@ mod tests {
         let (guard, diagnostics) = install(env(&[]), |_| {}, || installer(&attempts));
 
         assert_eq!(guard, None, "no logger is honest; a fake relocation is not");
-        assert_eq!(attempts.get(), 1, "the same failed directory must not be retried");
+        assert_eq!(
+            attempts.get(),
+            1,
+            "the same failed directory must not be retried"
+        );
         assert_eq!(diagnostics.len(), 1);
         assert!(
             !diagnostics[0].contains("instead"),

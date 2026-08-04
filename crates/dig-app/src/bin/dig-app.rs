@@ -1001,6 +1001,7 @@ mod tray {
         choose_secret_file_path, write_owner_only, NativeSavePicker, SaveFileRequest,
         SecretFileDestination,
     };
+    use dig_app_core::tray_menu::action_id;
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
@@ -1161,7 +1162,12 @@ mod tray {
                     label,
                     enabled,
                 } => {
-                    let item = MenuItem::new(label, *enabled, None);
+                    // The id is DERIVED from the verb, never left to muda's process-global counter:
+                    // an unnamed item is renamed on every rebuild, and the shell rebuilds whenever the
+                    // node poll changes the view — so a click that crossed a rebuild used to arrive
+                    // bearing an id no handler answered to (dig_ecosystem#2074). See
+                    // `dig_app_core::tray_menu::action_id`.
+                    let item = MenuItem::with_id(action_id(*action), label, *enabled, None);
                     actions.insert(item.id().clone(), *action);
                     parent
                         .add(&item)
@@ -1420,6 +1426,14 @@ mod tray {
 
             while let Ok(event) = menu_events.try_recv() {
                 let Some(action) = menu.actions.get(&event.id).copied() else {
+                    // Unreachable for any verb this shell offers, now that ids are derived from the
+                    // action rather than generated per rebuild. It is logged rather than dropped in
+                    // silence because the silence is precisely what made the generated-id bug so hard
+                    // to see: the user's click simply vanished (dig_ecosystem#2074).
+                    tracing::warn!(
+                        id = %event.id.as_ref(),
+                        "a tray menu click named an item this shell has no handler for; it was ignored"
+                    );
                     continue;
                 };
                 // Any tray interaction is activity — postpone the idle auto-lock.
@@ -1431,9 +1445,16 @@ mod tray {
                 if !actions.submit(action) {
                     // Another action is already on screen. Dropping this one is deliberate: the answer
                     // to an impatient second click is the dialog already open, not a second one.
-                    tracing::debug!(
+                    //
+                    // WARN rather than DEBUG (dig_ecosystem#2074) because the deliberate case and the
+                    // pathological one are indistinguishable from here: `busy` is released only when the
+                    // handler RETURNS, so a handler that never returns latches it forever and every
+                    // later click on every item is discarded exactly like this. At DEBUG that state was
+                    // invisible at the default filter, which is why "a lot of options where nothing
+                    // happens" left no trace at all.
+                    tracing::warn!(
                         ?action,
-                        "a tray action was ignored while another is in flight"
+                        "a tray action was ignored while another is in flight; if this repeats for                          every item, the in-flight action never finished"
                     );
                 }
             }
