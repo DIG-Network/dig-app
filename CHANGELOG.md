@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.21.0] - 2026-08-04
+
+### Bug Fixes
+- **account:** The account survives a restart (#85)
+
 ## [5.20.0] - 2026-08-04
 
 ### Features
