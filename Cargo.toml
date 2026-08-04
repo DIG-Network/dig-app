@@ -211,7 +211,7 @@ chia-sdk-utils = "0.30"
 # fallback could ever run (dig_ecosystem#1753). Pinned by `tests/linux_runtime_deps.rs` in the
 # `dig-app` crate. The Linux tray still needs the GTK 3 runtime, which is inherent to
 # AppIndicator/GTK menus rather than an unused extra; see `README.md`.
-tray-icon = { version = "0.19", default-features = false }
+tray-icon = { version = "0.23", default-features = false }
 tao = "0.30"
 # The branded prompt GUI (dig_ecosystem#2038) — the ONE renderer every DIG consent/notice/input
 # window is drawn with, on all three platforms, replacing the Win32 GDI dialog, the macOS `NSAlert`
