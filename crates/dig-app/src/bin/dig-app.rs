@@ -1637,6 +1637,7 @@ mod tray {
             // The tray row asks in the framed dialog; the Alt+Space chord asks in the bar. Same handler,
             // same validation, same resolution — only the presentation differs.
             TrayAction::Open => open_dig_link(status, confirmer, InputStyle::Dialog),
+            TrayAction::LaunchApp(id) => launch_app(id, confirmer),
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
                 shutdown.trigger();
@@ -2447,6 +2448,52 @@ mod tray {
             masked: false,
             revealable: false,
             style,
+        }
+    }
+
+    /// Open another DIG app from the tray's **Apps** group, or explain honestly why it cannot be yet
+    /// (dig_ecosystem#2101).
+    ///
+    /// The launch-vs-notice choice is decided by the pure [`dig_app_core::apps::plan_launch`] seam, so
+    /// only the two impure acts live here: spawning the child, and drawing the notice. The child is
+    /// spawned DETACHED and with NO arguments — it outlives this click, is never run on the
+    /// single-threaded prompt thread (#78, this handler runs on the `dig-tray-actions`
+    /// ActionWorker thread, submitted from the tray event loop), and carries no
+    /// identity or pairing material on its argv (pairing is the app's own job, §5.4). When the app is
+    /// not installed — the only reachable case today, since dig-chat is not yet packaged or shipped by
+    /// the installer — the user gets the honest "not available yet" notice rather than a silent no-op
+    /// (§6.1). The launch path is live so it activates on its own once dig-chat ships as a sibling
+    /// binary in the shared bin dir.
+    fn launch_app(id: dig_app_core::apps::AppId, confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::apps::{
+            app, not_available_notice, plan_launch, InstalledApps, LaunchPlan,
+        };
+
+        let entry = app(id);
+        // A missing/undeterminable exe path means we cannot locate siblings, which is indistinguishable
+        // from "nothing installed" — take the honest notice, never a blind spawn.
+        let plan = match InstalledApps::beside_this_exe() {
+            Some(locator) => plan_launch(entry, &locator),
+            None => LaunchPlan::NotInstalled(id),
+        };
+        match plan {
+            LaunchPlan::Launch(path) => {
+                // No shell and no arguments — a single detached child. If it will not start, say so
+                // rather than leaving the click looking ignored.
+                if std::process::Command::new(&path).spawn().is_err() {
+                    notify(
+                        confirmer,
+                        "DIG — Apps",
+                        &format!("DIG {} could not be started.", entry.display_name),
+                        "It is installed but did not launch. The log folder (in the DIG menu) has the \
+                         details.",
+                    );
+                }
+            }
+            LaunchPlan::NotInstalled(id) => {
+                let notice = not_available_notice(id);
+                notify(confirmer, notice.title, &notice.heading, &notice.body);
+            }
         }
     }
 
