@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.23.0] - 2026-08-05
+
+### Features
+- **tray:** Watch the tray event loop, so a stall names itself (#88)
+
+### Bug Fixes
+- **tray:** Claim the foreground on the edge that matters, and make the breaker actually reach the window (#89)
+
 ## [5.21.0] - 2026-08-04
 
 ### Bug Fixes
