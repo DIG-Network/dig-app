@@ -35,10 +35,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// nowhere to put captured state, and because there is exactly one screen to be in front of.
 static RAISED: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether a consent surface is on screen.
+/// Whether a consent surface — one of THIS app's own prompt windows — is on screen.
 ///
 /// Cheap and non-blocking by construction: callers ask from inside a window proc, where blocking is
 /// how a tray stops responding.
+///
+/// # What it does not count
+///
+/// Only windows this process draws and wraps in a [`Raised`]. A platform-owned consent UI — the
+/// Windows Hello `UserConsentVerifier` prompt, raised after the app's own window has closed — is not
+/// counted, so this reads `false` while it is up and the tray will claim the foreground off it. That
+/// is a denial nuisance and not an authorization defect: a Hello prompt that loses focus and is
+/// cancelled maps to a refusal, never an approval. Do not read this as "no consent is being asked
+/// for anywhere".
 pub fn consent_surface_is_up() -> bool {
     RAISED.load(Ordering::Acquire) > 0
 }
@@ -72,9 +81,20 @@ impl Drop for Raised {
 /// it turned this module's own assertions red on CI while passing locally, because the machine that
 /// runs eight prompt lanes at once is the one with eight cores.
 ///
-/// Every raiser takes it — which in practice means the prompt renderer's test lane, since
-/// `serve_with` is the only thing in the crate that raises — so holding it is sufficient and not
-/// merely conventional.
+/// **It does NOT cover every raiser, and the gap is known rather than theoretical.** Two live tests
+/// raise the count without holding it, so this serialises the tests that DO take it against each
+/// other and nothing more:
+///
+/// - `gui::window`'s `three_real_prompt_windows_in_a_row_are_all_answered` drives `serve`, which
+///   raises at `window.rs:429`. It is `#[ignore]`d — it opens real windows — so the collision is
+///   latent, not live. Filed as dig-app#99.
+/// - `dig-app`'s `tray_popup` raises from a DIFFERENT crate, where this mutex is not reachable at
+///   all: it is `pub(crate)` to `dig-app-core`.
+///
+/// Closing the gap means exporting the exclusion across the crate boundary and taking it in both
+/// places, which is dig-app#99's job. Until then this doc states what the lock actually provides,
+/// because a comment claiming an exclusion the code does not enforce is how the next person writes a
+/// test that races and cannot see why.
 ///
 /// A plain `Mutex` rather than `serial_test`: the dependency would be carried for a handful of tests.
 #[cfg(test)]

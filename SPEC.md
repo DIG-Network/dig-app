@@ -279,29 +279,57 @@ ever leave it, which would make the lock states lie. It is reported as completen
 (`account::journey::AccountCompleteness`) — a fact about the account — and the first-run flow (§3.2b)
 names the DID as the remaining REQUIRED step while stating plainly that it cannot be taken yet.
 
-### 3.1b-lv The shell's state loop MUST be watched from outside itself (normative)
+### 3.1b-lv Every loop the user waits on MUST be watched from outside itself (normative)
 
-The shell's state loop can stop running, and when it does every deadline the app owes a user is dead
-with it. Four reported recurrences of that condition (#69, #78, #83, dig-app#86) produced **no log
-line at all**, because every diagnostic the loop has runs inside the loop: a loop that has stopped
-iterating cannot report that it has stopped iterating.
+The shell runs two loops a user can be frozen out by, and they freeze them out of different things.
+The **state loop** owns every deadline the app owes a person — the clipboard timeout, the idle
+auto-lock, the dispatch of a menu click. The **render loop** owns the native objects — the tray icon
+and tooltip via `Shell_NotifyIcon`, the menu via `set_menu` — each an unbounded `SendMessage` to the
+Windows shell. Either can stop running. Four reported recurrences (#69, #78, #83, dig-app#86)
+produced **no log line at all**, because every diagnostic a loop has runs inside that loop: a loop
+that has stopped iterating cannot report that it has stopped iterating.
 
 - **A liveness stamp MUST be written from inside the loop and read from a thread that is not the loop.**
   A watcher sharing the watched thread observes nothing.
+- **EVERY loop that can freeze a user out MUST carry its own stamp, and moving work between loops MUST
+  move the instrument with it.** Watching one loop and not the other reproduces the original silence
+  for whatever the unwatched loop owns. This is a MUST about the *work*, not about a fixed list of
+  threads: dig-app#97 was created by relocating the native calls to the render loop while the watchdog
+  went on observing the thread they had left, so a render loop wedged in `Shell_NotifyIcon` against a
+  hung shell froze the tray permanently and silently.
+
+  A single observer thread MAY read every stamp, and SHOULD: its whole qualification is being none of
+  the watched loops, which one thread satisfies for all of them. Loops MUST NOT watch each other —
+  that makes the loss of one loop the loss of the report about it.
 - **The stamp MUST carry a PHASE naming where the loop is**, including a named value for *"blocked
   somewhere this shell does not measure"*. An instrument that spans only the loop's own calls reports
   a clean bill of health for every block upstream of them — which is where the block actually was the
   one time this was chased to ground.
-- **A phase's tolerance MUST be measured against what that phase IS.** Every phase of the watched
-  loop is now code that should return in microseconds, so one tolerance governs all of them. This is
-  a MUST about matching the bound to the phase, not a licence for a single constant: the moment a
-  phase names something a PERSON is doing, it MUST get a bound measured against a person. The tray's
-  context menu used to be such a phase and carried a two-minute band for exactly that reason; it is
-  not a phase of this loop any more (§3.1b-tp), so the band went with it.
+- **A phase's tolerance MUST be measured against what that phase IS.** Every phase that names code
+  is code that should return in microseconds, so one tolerance governs all of them. This is a MUST
+  about matching the bound to the phase, not a licence for a single constant: the moment a phase names
+  something a PERSON is doing, it MUST NOT be held to a bound written for code.
+
+  The tray's context menu is such a phase. It is no longer a phase of the state loop (§3.1b-tp), but
+  it did not stop existing — it moved, and it is now indistinguishable from the render loop's idle
+  state, since `TrackPopupMenu` runs its nested modal loop inside the platform's dispatch. That phase
+  MUST therefore be EXEMPT from any bound rather than given a long one: there is no duration after
+  which a menu a person has not closed becomes a fault, and the previous attempt at naming one — two
+  minutes — is what dig-app#93 reported. The exemption's price MUST be stated where the exemption is:
+  a render loop blocked in dispatch for some reason that is not a menu is also not reported, so the
+  reportable class is a native call the loop itself makes.
 
   A phase MUST NOT carry a longer private tolerance than its neighbours without naming a
   human-paced subject for it. One phase quietly twelve times more patient than the rest is how a
   wedge came to be first reported at 120 seconds under a ten-second bound.
+- **A phase MUST be stamped by production code, not only by tests.** A phase no live path can reach is
+  a diagnostic contract the shell does not actually offer, and a test ranging over it reads as broader
+  coverage than it is — dig-app#97 found two such phases surviving a relocation, still asserted over
+  by a bound test that could not fail on them.
+- **A report MUST name the loop that stalled, its real consequence and its real remedy.** These differ:
+  a state loop that will not come back needs DIG restarting; a render loop wedged in the Windows shell
+  does not, and telling the reader otherwise sends them round a loop of their own. A user-facing ERROR
+  that is confidently wrong about the fix is worse than no line at all.
 - **A phase MUST NOT be able to outlive what it names.** Every phase a guard restores to MUST be
   either a fixed resting value or a phase held by a guard that is still alive — never a value read back
   out of the shared stamp. Every phase is now written from inside a guard, so none can be stranded;
@@ -325,11 +353,12 @@ iterating cannot report that it has stopped iterating.
   menu selects nothing and because the thread that would otherwise clear it was the stuck one. That
   exception is REVOKED with the condition that earned it: the tray no longer shares a thread with
   this loop (§3.1b-tp), so a menu that will not dismiss costs the user the menu and not the app.
-- **The loop that is watched MUST be the one that owes the user its deadlines.** Watching a loop
-  whose stalling harms nobody produces a diagnostic that is loudly wrong in a common case, which is
-  the failure the tolerance rule above also exists to prevent. The watched loop is therefore the
-  state tick — where the clipboard timeout, the idle auto-lock and click dispatch live — and NOT the
-  render loop, whose only stall is a person reading a menu.
+- **What is watched is decided by the PHASE, not by the thread.** Watching a state that harms nobody
+  produces a diagnostic that is loudly wrong in a common case, which is the failure the tolerance rule
+  above also exists to prevent — but scoping the watch to a whole thread to avoid that is what
+  dig-app#97 caught, because the render loop parks in a menu *and* wedges in the shell, and only one
+  of those is a fault. Both loops are watched; the exemption lives on the one phase that names a
+  person waiting.
 
 ### 3.1b-tp The tray context menu MUST be dismissable before it is tracked (normative)
 
@@ -381,11 +410,23 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
   wraps, and the system's last-input tick can legitimately be NEWER than the message, because moving
   the mouse after releasing the button is itself input.
 
-  This MUST be described as a BOUND and not a fix. It gates only this process's own claim —
-  `tray-icon` makes its own `SetForegroundWindow` call, which no rule here can reach — and an
-  attacker posting while the user is actively typing lands inside the tolerance. It is a nuisance
-  lever being narrowed, not an authorization bypass being closed; nothing on this path selects a
-  menu item or answers a prompt.
+  This MUST NOT be described as a bound, and MUST NOT be sized as though it were one. It stops
+  UNSOPHISTICATED forgeries only. Two limits, both unconditional: it gates just this process's own
+  claim — `tray-icon` makes its own `SetForegroundWindow` call, which no rule here can reach — and the
+  evidence it reads is the same-user `GetLastInputInfo` counter, which any process at this integrity
+  level refreshes with one `SendInput` call carrying a zero-delta `MOUSEEVENTF_MOVE`, invisibly, on an
+  idle machine (measured: last-input age 5,454,546 ms → 63 ms). A deliberate attacker therefore pays
+  one extra Win32 call and this rule contributes nothing.
+
+  The tolerance MUST NOT be tightened in response: the attacker controls the value being compared, so
+  a shorter window declines genuine clicks under load without excluding a single forgery. The rule
+  stays because it costs nothing and removes the free case. **The only remedy that bounds this is
+  refuse-to-track**, below, which requires the window service to own the popup — anyone sizing that
+  work MUST read this lever as currently unbounded.
+
+  Bounded honestly: nothing on this path selects a menu item or answers a prompt, and the consent
+  decline above — which reads this process's own state rather than an attacker-writable counter — is
+  not bypassable this way. This is a nuisance lever, not an authorization bypass.
 - **A DECLINED claim MUST NOT be reported as a REFUSED one.** A refusal warns that a menu may wedge;
   a decline is the process choosing correctly. Reporting the second at the first's severity teaches
   the reader to skip the one line that means something.

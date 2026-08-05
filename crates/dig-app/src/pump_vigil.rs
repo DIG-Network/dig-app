@@ -250,7 +250,9 @@ impl Phase {
             }
             // Unreachable in a report: an unbounded phase never becomes a stall. Answered anyway,
             // because a diagnostic that can itself fail is a diagnostic that needs a diagnostic.
-            Self::Waiting => "the loop is inside the platform's own dispatch, which is where it rests",
+            Self::Waiting => {
+                "the loop is inside the platform's own dispatch, which is where it rests"
+            }
             _ => "the loop is blocked inside the call this phase names",
         }
     }

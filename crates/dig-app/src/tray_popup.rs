@@ -49,15 +49,31 @@
 //!    click twice, which is a far smaller harm than a consent window losing focus.
 //! 2. **The click was not preceded by real input** ([`input_evidence`]). A genuine tray click IS a
 //!    system input event, so the message's timestamp sits within milliseconds of the system's
-//!    last-input tick. A forged post carries no input at all.
+//!    last-input tick. A *naive* forged post carries no input at all.
 //!
-//! **What (2) does NOT do**, stated plainly because the ticket's phrasing ("kills the forgery
-//! outright") is too strong in two ways. First, it gates only OUR claim: `tray-icon` makes its own
-//! `SetForegroundWindow` call inside `show_tray_menu`, which this module cannot reach, so a forged
-//! post still reaches that one. Second, it bounds rather than eliminates: an attacker who posts
-//! while the user happens to be typing or moving the mouse lands inside the tolerance. It raises the
-//! cost from "at any moment, unconditionally" to "only during active input, and only for the extra
-//! claim" — worth having, and not a fix.
+//! **What (2) does NOT do**, stated over the whole class of attacker rather than over one attacker
+//! behaviour, because the narrower statement was wrong twice:
+//!
+//! - It gates only OUR claim. `tray-icon` makes its own `SetForegroundWindow` call inside
+//!   `show_tray_menu`, which this module cannot reach, so a forged post still reaches that one.
+//! - **It contributes nothing at all against an attacker who is trying.** The evidence it checks is
+//!   the same-user, unprivileged `GetLastInputInfo` counter, and one `SendInput` call with a
+//!   zero-delta `MOUSEEVENTF_MOVE` refreshes it — invisibly, with no cursor motion, on a completely
+//!   idle machine. Measured: a last-input age of 5,454,546 ms became 63 ms after a single call, well
+//!   inside [`INPUT_TOLERANCE`]. So the sequence `SendInput` → `PostMessageW(tray_hwnd, 6002, …,
+//!   WM_RBUTTONUP)` passes this gate every time. The earlier claim here — that it narrows the lever
+//!   to "only during active input" — understated it: the real cost to an attacker is one extra Win32
+//!   call, at any moment of their choosing.
+//!
+//! The gate STAYS. It costs nothing, it stops the unsophisticated forgery, and removing it would only
+//! make the lazy case free too. But it MUST NOT be sized as a bound, and [`INPUT_TOLERANCE`] MUST NOT
+//! be tightened in the hope of making it one: the attacker controls the numerator, so a shorter
+//! window declines real clicks under load and still admits every deliberate forgery. The only real
+//! remedy is refuse-to-track, which needs the window service to own the popup (SPEC §3.1b-tp).
+//!
+//! Bounded honestly, then: gate (1) is the one that protects the asset dig-app#91 names, and it is
+//! not bypassable this way — a consent surface being on screen is this process's own state, not a
+//! counter the attacker can write.
 
 /// The class name `tray-icon` gives its hidden tray window.
 ///
@@ -83,9 +99,12 @@ const TRAY_WINDOW_CLASS: &str = "tray_icon_app";
 /// thread's queue. That queue is short by construction now — the tray thread does nothing but draw —
 /// and a second is roughly three orders of magnitude more than the hop costs.
 ///
-/// Erring generous is the right direction. Too tight silently drops the foreground claim on ordinary
-/// clicks under load, which reintroduces the wedge this module exists to prevent; too loose only
-/// narrows the window in which a forged post is ignored.
+/// Erring generous is the right direction, and the asymmetry is total rather than merely favourable.
+/// Too tight silently drops the foreground claim on ordinary clicks under load, which reintroduces
+/// the wedge this module exists to prevent. Too loose costs nothing whatsoever against a deliberate
+/// attacker, because the counter this is compared against can be refreshed on demand with one
+/// `SendInput` call — see the module docs. Shrinking this value buys no security and spends real
+/// reliability, so it MUST NOT be tuned downward as a hardening measure.
 #[cfg(target_os = "windows")]
 const INPUT_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -727,6 +746,15 @@ mod tests {
              does, the control proves nothing"
         );
 
+        // Raised WITHOUT `dig_app_core`'s `ONE_SURFACE_AT_A_TIME` exclusion, because that mutex is
+        // `pub(crate)` to dig-app-core and unreachable from this crate. Safe only because this is the
+        // one test in this binary that touches the process-global count, and `cargo test` gives each
+        // crate its own test process — so nothing here can run beside it.
+        //
+        // That is a property of the current test set, not of the design. Adding a SECOND
+        // count-touching test to this binary breaks it, and the symptom is a parallel-only flake in
+        // whichever test asserts "nothing is up". Closing it properly means exporting the exclusion
+        // across the crate boundary (dig-app#99).
         let _on_screen = dig_app_core::confirm::surface::Raised::now();
         assert_eq!(
             claim_foreground(),

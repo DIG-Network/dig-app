@@ -775,3 +775,46 @@ The constraint that buys is easy to miss: **every frame must then be a complete 
 carrying "and the icon changed" as a delta is lost the moment a newer frame replaces it. That bug is
 invisible in any test that sends one frame.
 
+
+## Moving work between threads must move the diagnostic with it (dig-app#97)
+
+dig-app#90 moved `Shell_NotifyIcon` and `set_menu` off the state loop and onto a render loop of their
+own — and left the liveness watchdog watching the thread those calls had LEFT. The two `Phase`
+variants that named them, `Presence` and `Repaint`, went on existing, went on being asserted over by a
+bound test, and were stamped by nothing at all. A render loop wedged against a hung shell therefore
+froze the tray permanently with zero log lines: exactly the condition the watchdog exists to remove,
+reintroduced by relocating the work.
+
+Two things generalise. **A watchdog's scope is stated in terms of the WORK, not the thread** — "watch
+the loop that owes the user its deadlines" was true when one loop owed all of them and silently wrong
+the moment the work split. And **an enum variant nothing produces is a coverage lie**: the test
+ranging over every phase read as the broadest assertion in the module while two of its eight cases
+could not fail. `grep` for the variant's constructors before trusting a table-driven test's breadth.
+
+## Two mechanisms guarding one property hide each other from mutation testing
+
+The render heartbeat rests at an unbounded phase, the state heartbeat at a bounded one, so a guard
+that restored the wrong loop's resting phase would report an idle renderer as stalled forever.
+Reverting that fix — restoring a shared constant — left **every** test in the module green, because
+the reader (`Phase::from_byte`) discards a byte belonging to the other loop and quietly corrected the
+answer on the way out.
+
+Neither mechanism was wrong and the property genuinely held; what was wrong was a test that CLAIMED to
+pin the writer while only ever observing the reader. The fix is to assert at the layer the mechanism
+acts on — here, the raw atomic byte rather than the interpreted phase. Belt-and-braces defences are
+worth having, but each brace needs a test that fails when it alone is cut, or the second one silently
+becomes the only one.
+
+## `GetLastInputInfo` is attacker-writable, so "recent input" is not evidence of a human
+
+The tray's foreground claim checks that a click's timestamp sits beside the system's last-input tick,
+on the reasoning that a forged `WM_USER_TRAYICON` post carries no input. Measured: one `SendInput`
+with a zero-delta `MOUSEEVENTF_MOVE`, from an ordinary same-user process, took the last-input age from
+5,454,546 ms to 63 ms — invisibly, no cursor motion, on an idle machine. The gate costs a deliberate
+attacker one extra Win32 call.
+
+Keep the gate (it is free and stops the lazy case) but never size it as a bound, and never tighten its
+tolerance: the attacker controls the value being compared, so a shorter window declines real clicks
+under load and excludes no forgeries at all. The recurring lesson is the one this repo keeps
+relearning — **state a guard's rationale over the CLASS of attacker, not over one attacker behaviour**,
+because "a forged post carries no input" is true only of the forgery that did not try.

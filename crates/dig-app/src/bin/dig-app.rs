@@ -1600,9 +1600,9 @@ mod tray {
                         canvas.during(Phase::Presence, || show_presence(&tray, &frame.presence));
                         attached.presence = frame.presence;
                     }
-                    if let Some(rendered) = canvas.during(Phase::Repaint, || {
-                        repaint(&tray, &frame.menu)
-                    }) {
+                    if let Some(rendered) =
+                        canvas.during(Phase::Repaint, || repaint(&tray, &frame.menu))
+                    {
                         // Destroying the previous menu's native objects happens HERE and nowhere
                         // earlier: `repaint` has already pointed the tray at the replacement, so
                         // this is the first moment nothing references the old one. Spelled as an
@@ -1699,12 +1699,30 @@ mod tray {
                 let _phase = tick.enter(Phase::DrainClicks);
                 while let Ok(event) = menu_events.try_recv() {
                     let Some(action) = verbs.get(event.id.as_ref()).copied() else {
-                        // Unreachable for any verb this shell offers. Logged rather than dropped in
-                        // silence because the silence is precisely what made the generated-id bug so
-                        // hard to see: the user's click simply vanished (dig_ecosystem#2074).
+                        // Reachable in exactly one situation, and it is worth naming because the
+                        // answer here is a deliberate change of behaviour (dig-app#97).
+                        //
+                        // `verbs` tracks the MODEL; the menu on screen tracks the last SUCCESSFUL
+                        // repaint. Those are the same thing until a repaint fails, after which the
+                        // user is looking at rows the model has already moved past. Ids are derived
+                        // from the verb, not generated per rebuild, so every row that survived into
+                        // the new model still dispatches — only a row the new model DROPPED lands
+                        // here.
+                        //
+                        // The previous shape advanced its map only when a rebuild had succeeded, so
+                        // it would have dispatched that click. Dropping it instead is the safer of
+                        // two imperfect answers: the row is offered by a picture of a state the app
+                        // is no longer in, and running "Unlock" against a session that has since
+                        // unlocked — or worse, the reverse — acts on a model the user cannot see.
+                        // The cost is a click that appears to do nothing, which is why it is a WARN
+                        // and not a silent `continue`: silence is what made the generated-id bug so
+                        // hard to find (dig_ecosystem#2074), and it is the whole failure class this
+                        // shell has been chasing.
                         tracing::warn!(
                             id = %event.id.as_ref(),
-                            "a tray menu click named an item this shell has no handler for; it was ignored"
+                            "a tray menu click named an item that is no longer offered; the menu on \
+                             screen is probably stale after a failed repaint, and the click was \
+                             dropped rather than run against a state the user cannot see"
                         );
                         continue;
                     };
