@@ -25,7 +25,7 @@
 //! A popup tracked without foreground rights cannot be dismissed by clicking away, by Escape, or by
 //! anything else — measured here, holding a loop 180 s (MSDN Q135788, still printed in the current
 //! `TrackPopupMenu` Remarks; wxWidgets has carried the same dance in `src/msw/taskbar.cpp` for about
-//! thirty years). Isolating the tray does not make a menu dismiss itself. So [`claim_foreground`]
+//! thirty years). Isolating the tray does not make a menu dismiss itself. So `claim_foreground`
 //! stays, moved to the tray thread.
 //!
 //! Be precise about what it is, because an earlier version of this comment overstated it.
@@ -168,7 +168,7 @@
 /// A private detail of that crate, and named here on purpose rather than reached for through an
 /// accessor that does not exist. Pinned by
 /// `tests::the_tray_window_class_matches_the_crates_own_source`, which reads the literal out of the
-/// vendored dependency — if a bump renames it, [`tray_window`] finds nothing and [`claim_foreground`]
+/// vendored dependency — if a bump renames it, `tray_window` finds nothing and `claim_foreground`
 /// becomes a silent no-op, which is the worst failure a guard has because it is indistinguishable
 /// from a guard that is working.
 #[cfg(target_os = "windows")]
@@ -568,7 +568,7 @@ fn last_input_tick() -> u32 {
 /// Find `tray-icon`'s hidden tray window.
 ///
 /// Process-scoped rather than thread-scoped, filtered by owning process. The tray thread that calls
-/// [`claim_foreground`] does own this window, so a thread-scoped lookup would work today — but that
+/// `claim_foreground` does own this window, so a thread-scoped lookup would work today — but that
 /// was the shape that made the old rescue a silent no-op once its caller moved threads, and a lookup
 /// that is only correct because of where it happens to be called from is a trap for the next caller.
 #[cfg(target_os = "windows")]
@@ -723,8 +723,8 @@ pub const SUPPRESSED_MENU_TOOLTIP: &str =
 mod tests {
     use super::*;
 
-    /// The class name is a private detail of `tray-icon`, so a bump can rename it and [`tray_window`]
-    /// would then find nothing and [`claim_foreground`] would silently do nothing at all.
+    /// The class name is a private detail of `tray-icon`, so a bump can rename it and `tray_window`
+    /// would then find nothing and `claim_foreground` would silently do nothing at all.
     ///
     /// # Why this reads the dependency's source instead of restating the literal
     ///
@@ -1000,7 +1000,7 @@ mod tests {
         report_claim(Claim::Failed(NoForeground::NoTrayWindow));
     }
 
-    /// A real consent surface makes the real [`claim_foreground`] decline, without touching a window.
+    /// A real consent surface makes the real `claim_foreground` decline, without touching a window.
     ///
     /// This is the end-to-end of dig-app#91's first fix, and it is worth driving through the actual
     /// function rather than only through [`refusal_to_claim`]: the pure policy being right proves
