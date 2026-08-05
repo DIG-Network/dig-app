@@ -1405,22 +1405,24 @@ mod tray {
 
         let menu_events = MenuEvent::receiver();
 
-        // Watch the tick from OUTSIDE it (dig-app#86). Every diagnostic the shell has lives inside
-        // that loop, so a loop that has STOPPED RUNNING cannot report that it has stopped running —
-        // which is why four recurrences of this defect class were each found by a user rather than
-        // by the log.
+        // Watch BOTH loops from OUTSIDE them (dig-app#86, #97). Every diagnostic the shell has lives
+        // inside one of these two loops, so a loop that has STOPPED RUNNING cannot report that it
+        // has stopped running — which is why four recurrences of this defect class were each found
+        // by a user rather than by the log.
         //
-        // It watches the TICK and not this render loop, and that is a choice rather than an
-        // oversight: the tick is where every deadline the app owes a user now lives, and a render
-        // loop parked in `TrackPopupMenu` is no longer a fault at all — it is a person reading a
-        // menu, and it costs them nothing but the menu. Watching it would reintroduce exactly the
-        // "loudly wrong several times a day" diagnostic that the old two-band tolerance existed to
-        // avoid, for a condition no longer worth a word.
+        // Both, and not just the tick, because the split above MOVED the unbounded work rather than
+        // removing it. The tick owns the deadlines; the render loop owns `Shell_NotifyIcon` and
+        // `set_menu`, which are `SendMessage`s to the shell and can hang against a hung one. Leaving
+        // the renderer unwatched would have reintroduced the silence for that half — the mistake
+        // dig-app#97 caught, and the reason the earlier note here (that the render loop's only stall
+        // is a person reading a menu) was wrong. A menu IS tolerated, indefinitely; a wedged shell
+        // call is not. `pump_vigil::Phase` is where that distinction lives.
         //
         // The observer thread is cheap and its failure costs diagnostics only, so a machine that
         // cannot spawn it still gets a tray.
-        let pump = pump_vigil::Heartbeat::now();
-        if let Err(e) = pump_vigil::watch(pump.clone()) {
+        let pump = pump_vigil::Heartbeat::state_loop();
+        let canvas = pump_vigil::Heartbeat::render_loop();
+        if let Err(e) = pump_vigil::watch(pump.clone(), canvas.clone()) {
             tracing::warn!(error = %e, "the tray shell's liveness watcher could not be started");
         }
 
@@ -1584,14 +1586,23 @@ mod tray {
                         // A wake whose frame an earlier wake already collected. Ordinary.
                         return;
                     };
-                    // The icon and tooltip go first: they are the only surfaces a user sees
-                    // without clicking, so a failed menu rebuild (which keeps the old menu, see
-                    // `repaint`) must not also leave a stale picture.
+                    // Both native calls below are stamped, and that is dig-app#97's fix. They are
+                    // the only unbounded things this thread does: `Shell_NotifyIcon` and `set_menu`
+                    // are `SendMessage`s to the shell, so a shell that stops answering freezes this
+                    // loop inside one of them. Every other moment on this thread is `Phase::Waiting`
+                    // — idle, or a person reading a menu — which is deliberately never a fault.
+                    //
+                    // The stamp goes around the call and NOT around the whole match arm: an arm-wide
+                    // guard would name whichever phase it opened with, so a wedge in `set_menu`
+                    // would be reported as a wedge in `Shell_NotifyIcon`, and the reader would go
+                    // looking in the wrong place.
                     if frame.presence != attached.presence {
-                        show_presence(&tray, &frame.presence);
+                        canvas.during(Phase::Presence, || show_presence(&tray, &frame.presence));
                         attached.presence = frame.presence;
                     }
-                    if let Some(rendered) = repaint(&tray, &frame.menu) {
+                    if let Some(rendered) = canvas.during(Phase::Repaint, || {
+                        repaint(&tray, &frame.menu)
+                    }) {
                         // Destroying the previous menu's native objects happens HERE and nowhere
                         // earlier: `repaint` has already pointed the tray at the replacement, so
                         // this is the first moment nothing references the old one. Spelled as an
