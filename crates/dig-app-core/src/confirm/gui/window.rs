@@ -4585,9 +4585,15 @@ mod tests {
     /// the claim the whole single-thread design rests on, and the one a mocked draw cannot make.
     ///
     /// Ignored because it opens real windows: CI has no display. Run it deliberately on a desktop.
+    /// The exclusion below is what makes running it deliberately SAFE — see the comment on it.
     #[test]
     #[ignore = "opens three real windows; run deliberately on a desktop"]
     fn three_real_prompt_windows_in_a_row_are_all_answered() {
+        // This drives the real `serve`, which raises the process-global consent-surface count around
+        // each draw. Held before the thread starts, so no window of this test's can be on screen
+        // while another test's count assertions run. Without it, un-ignoring this test measured 15
+        // failures in 40 runs; with it, 0 in 40 (dig-app#99).
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
         let (jobs, rx) = mpsc::channel::<Job>();

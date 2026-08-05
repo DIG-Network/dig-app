@@ -219,6 +219,9 @@ mod tests {
 
     #[test]
     fn a_composed_linux_confirmer_approves_only_on_dialog_ok_plus_polkit_ok() {
+        // Driving a `BackedConfirmer` raises the consent-surface count via `gate`
+        // (dig-app#100), so this must exclude the other raisers or it races them.
+        let _held = crate::confirm::surface::one_surface_at_a_time();
         let confirmer = BackedConfirmer::new(
             ApprovingWindow,
             PolkitVerifier {
@@ -240,6 +243,9 @@ mod tests {
 
     #[test]
     fn a_denied_polkit_prompt_denies_the_confirm_even_with_dialog_ok() {
+        // Driving a `BackedConfirmer` raises the consent-surface count via `gate`
+        // (dig-app#100), so this must exclude the other raisers or it races them.
+        let _held = crate::confirm::surface::one_surface_at_a_time();
         let confirmer = BackedConfirmer::new(
             ApprovingWindow,
             PolkitVerifier {

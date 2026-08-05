@@ -960,6 +960,10 @@ pub(crate) trait BiometricVerifier: Send + Sync {
 /// AND re-authenticated. Every non-approval maps to the honest [`ConfirmDecision`], and every failure
 /// mode (dismissed window, cancelled/failed/unavailable biometric) fails closed. No path returns
 /// [`ConfirmDecision::Approve`] without a [`VerifyOutcome::Verified`].
+///
+/// Pure: it decides, and touches no global state. Reporting that a consent surface is on screen for
+/// the span of BOTH steps is [`BackedConfirmer::gate`]'s job, and the reasoning for that split is
+/// recorded there.
 pub(crate) fn gated_consent(
     content: &ConfirmContent,
     window: &dyn ForegroundWindow,
@@ -1004,8 +1008,36 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfir
         }
     }
 
+    /// Run the full two-step gate over `content` — the shared body of every AUTHORIZING prompt.
+    ///
+    /// This is where the consent surface is counted as on screen, and it wraps BOTH steps
+    /// deliberately (dig-app#100). Consent is asked for over two surfaces in a row: this app's own
+    /// window, and then the platform authenticator's — on Windows the `UserConsentVerifier` prompt.
+    /// The renderer raises the count around its own draw only, so between `show` returning and Hello
+    /// appearing, and for the whole time Hello is up, the count would read zero while the user is
+    /// still being asked, and the tray would claim the foreground off the Hello dialog.
+    ///
+    /// It sits HERE rather than inside [`gated_consent`] because `gated_consent` is a pure decision
+    /// function over two traits — raising a process-global UI counter from it would make even a
+    /// doubles-only policy test a mutator of global state. This type is the composition that actually
+    /// drives OS UI, and every authorizing prompt in the app goes through it.
+    ///
+    /// The fix is about the foreground claim, not authorization: a Hello prompt that loses focus and
+    /// is cancelled maps to [`VerifyOutcome::Declined`] and then to [`ConfirmDecision::Deny`], so the
+    /// unguarded behaviour cost a denial, never an approval.
+    fn gate(&self, content: &ConfirmContent) -> ConfirmDecision {
+        // RAII, so an unwind out of either step still lowers the count. Over-reporting is the
+        // fail-safe direction: it only ever declines a tray foreground claim.
+        let _consent_on_screen = surface::Raised::now();
+        gated_consent(content, &self.window, &self.verifier)
+    }
+
     /// Draw `content` and report what came back, with NO biometric step — the shared body of the two
     /// non-authorizing prompts (a notice and a claim).
+    ///
+    /// No [`surface::Raised`] here, unlike [`Self::gate`]: there is only one surface in this path and
+    /// the renderer already counts it for exactly the span it is drawn. The second surface is what
+    /// [`Self::gate`] exists to cover.
     fn draw(&self, content: &ConfirmContent) -> ConfirmDecision {
         match self.window.show(content) {
             WindowIntent::Approve => ConfirmDecision::Approve,
@@ -1024,25 +1056,17 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfir
     }
 
     fn confirm_pair(&self, prompt: &PairPrompt<'_>) -> ConfirmDecision {
-        gated_consent(&ConfirmContent::pair(prompt), &self.window, &self.verifier)
+        self.gate(&ConfirmContent::pair(prompt))
     }
 
     fn confirm_connect(&self, prompt: &ConnectPrompt<'_>) -> ConfirmDecision {
-        gated_consent(
-            &ConfirmContent::connect(prompt),
-            &self.window,
-            &self.verifier,
-        )
+        self.gate(&ConfirmContent::connect(prompt))
     }
 
     fn confirm_reveal(&self, prompt: &RevealPrompt<'_>) -> ConfirmDecision {
         // The same two-step gate as a signature: the window explains the risk, the biometric proves who
         // is asking. Revealing the phrase is at least as consequential as one signature.
-        gated_consent(
-            &ConfirmContent::reveal(prompt),
-            &self.window,
-            &self.verifier,
-        )
+        self.gate(&ConfirmContent::reveal(prompt))
     }
 
     fn show_notice(&self, prompt: &NoticePrompt<'_>) -> ConfirmDecision {
@@ -1061,21 +1085,13 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfir
         // The SAME gate as a signature, deliberately: the window states the irreversible loss, the
         // biometric proves it is the machine's owner asking. Destroying a master seed must never be
         // reachable by a passer-by at an unlocked desk clicking two menu items (dig_ecosystem#1799).
-        gated_consent(
-            &ConfirmContent::destroy(prompt),
-            &self.window,
-            &self.verifier,
-        )
+        self.gate(&ConfirmContent::destroy(prompt))
     }
 
     fn confirm_security_change(&self, prompt: &SecurityPrompt<'_>) -> ConfirmDecision {
         // The same gate as a destroy, and for the same reason: the window names what is being weakened,
         // the biometric proves it is the owner asking (dig_ecosystem#1840).
-        gated_consent(
-            &ConfirmContent::security(prompt),
-            &self.window,
-            &self.verifier,
-        )
+        self.gate(&ConfirmContent::security(prompt))
     }
 
     fn request_input(&self, prompt: &InputPrompt<'_>) -> InputOutcome {
@@ -1088,7 +1104,7 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfir
     fn confirm_sign(&self, prompt: &SignPrompt<'_>) -> ConfirmDecision {
         // Never blind-sign: no decoded transaction ⇒ deny WITHOUT raising a window (§5.6.5).
         match ConfirmContent::sign(prompt) {
-            Some(content) => gated_consent(&content, &self.window, &self.verifier),
+            Some(content) => self.gate(&content),
             None => ConfirmDecision::Deny,
         }
     }
@@ -1232,6 +1248,16 @@ mod tests {
 
     // ---- gated_consent: the shared security policy, exhaustively. ----
 
+    /// Run `body` with no other consent-surface test running beside it.
+    ///
+    /// Every prompt through a [`BackedConfirmer`] raises the process-global consent-surface count,
+    /// so a test driving one would otherwise be read by a concurrent "nothing is up" assertion. See
+    /// `surface::ONE_SURFACE_AT_A_TIME`.
+    fn exclusively<T>(body: impl FnOnce() -> T) -> T {
+        let _held = surface::one_surface_at_a_time();
+        body()
+    }
+
     #[test]
     fn approve_requires_both_the_shown_action_and_a_verified_biometric() {
         let content = ConfirmContent::sign(&sign_prompt(Some(SPEND_TX))).unwrap();
@@ -1284,6 +1310,158 @@ mod tests {
         }
     }
 
+    // ---- The consent surface spans the whole gate, not just the window (dig-app#100). ----
+
+    /// A window and a verifier that each record whether a consent surface was reported WHILE THEY
+    /// RAN.
+    ///
+    /// Neither raises the count itself — in production the renderer does that around its own draw,
+    /// and there is no renderer here — so every `true` these observe comes from the guard under test
+    /// and from nothing else.
+    #[derive(Default)]
+    struct SurfaceWatch {
+        during_window: std::sync::atomic::AtomicBool,
+        during_verify: std::sync::atomic::AtomicBool,
+    }
+
+    impl ForegroundWindow for &SurfaceWatch {
+        fn show(&self, _content: &ConfirmContent) -> WindowIntent {
+            self.during_window
+                .store(consent_surface_is_up(), std::sync::atomic::Ordering::SeqCst);
+            WindowIntent::Approve
+        }
+    }
+
+    impl BiometricVerifier for &SurfaceWatch {
+        fn verify(&self, _reason: &str) -> VerifyOutcome {
+            self.during_verify
+                .store(consent_surface_is_up(), std::sync::atomic::Ordering::SeqCst);
+            VerifyOutcome::Verified
+        }
+    }
+
+    impl SurfaceWatch {
+        fn during_window(&self) -> bool {
+            self.during_window.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn during_verify(&self) -> bool {
+            self.during_verify.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// **A consent surface is reported for the WHOLE gate — including the biometric step.**
+    ///
+    /// The tray's foreground claim is disabled for exactly the span this reads true (dig-app#91), and
+    /// the span that matters is the one the user is being asked over: this app's window AND THEN the
+    /// platform authenticator's prompt. Before dig-app#100 only the renderer raised the count, around
+    /// its own draw, so it read FALSE for the entire time Windows Hello was up and the tray would
+    /// claim the foreground off it.
+    ///
+    /// Both observations are load-bearing and they fail against DIFFERENT wrong implementations.
+    /// Dropping the during-verify one leaves the shipped bug passing. Dropping the during-window one
+    /// leaves a guard scoped to just the `Approve` arm of [`gated_consent`] passing — the version
+    /// that still reads false in the gap between the window closing and Hello appearing.
+    ///
+    /// The trailing assertion is the leak check, and it is not decoration: over-reporting is the
+    /// fail-safe direction, so a leaked count breaks nothing loudly — it silently disables the tray's
+    /// foreground claim for the rest of the process, which looks exactly like the claim working.
+    #[test]
+    fn the_consent_surface_is_reported_across_the_biometric_verification() {
+        exclusively(|| {
+            let watch = SurfaceWatch::default();
+            assert!(
+                !consent_surface_is_up(),
+ "nothing may be on screen before the gate opens, or neither observation below distinguishes anything"
+            );
+
+            let confirmer = BackedConfirmer::new(&watch, &watch, NoInputWindow);
+            assert_eq!(
+                confirmer.confirm_sign(&sign_prompt(Some(SPEND_TX))),
+                ConfirmDecision::Approve,
+                "the gate must still authorize an approved window plus a verified biometric"
+            );
+
+            assert!(
+                watch.during_window(),
+                "the app's own window is a consent surface"
+            );
+            assert!(
+                watch.during_verify(),
+ "so is the platform authenticator's prompt; with this reading false the tray claims the foreground off the Windows Hello dialog (dig-app#100)"
+            );
+            assert!(
+                !consent_surface_is_up(),
+ "and the guard must lower on the way out — a leak disables the tray's foreground claim for the life of the process"
+            );
+        });
+    }
+
+    /// **EVERY authorizing prompt reports the surface across its biometric step, not just signing.**
+    ///
+    /// The guard is one line in one shared helper, and the nearest wrong implementation is that same
+    /// line pasted into whichever prompt someone happened to be testing. Signing is the obvious one
+    /// to guard and destroy is the one that costs the most to leave unguarded, so a single-prompt
+    /// test cannot tell the shared placement from a lucky one. Five prompts can.
+    #[test]
+    fn every_authorizing_prompt_reports_the_surface_across_its_biometric() {
+        type Ask = (&'static str, fn(&dyn NativeConfirmer) -> ConfirmDecision);
+
+        let asks: [Ask; 5] = [
+            ("pair", |c| {
+                c.confirm_pair(&PairPrompt {
+                    ext_id: "id",
+                    ext_label: None,
+                })
+            }),
+            ("connect", |c| {
+                c.confirm_connect(&ConnectPrompt {
+                    origin: "https://dapp.example",
+                    dapp_name: None,
+                })
+            }),
+            ("reveal", |c| {
+                c.confirm_reveal(&RevealPrompt {
+                    secret: "your recovery phrase",
+                })
+            }),
+            ("destroy", |c| {
+                c.confirm_destroy(&DestroyPrompt {
+                    subject: "the DIG Account on this computer",
+                    replacement: "",
+                    recoverable: true,
+                })
+            }),
+            ("security change", |c| {
+                c.confirm_security_change(&SecurityPrompt {
+                    change: "turn off two-factor",
+                    consequence: "anyone at this desk can spend",
+                    affirm: "Turn it off",
+                })
+            }),
+        ];
+
+        exclusively(|| {
+            for (name, ask) in asks {
+                let watch = SurfaceWatch::default();
+                let confirmer = BackedConfirmer::new(&watch, &watch, NoInputWindow);
+                assert_eq!(
+                    ask(&confirmer),
+                    ConfirmDecision::Approve,
+                    "the {name} prompt must still authorize"
+                );
+                assert!(
+                    watch.during_verify(),
+ "the {name} prompt leaves the authenticator prompt unreported, so the tray claims the foreground off it (dig-app#100)"
+                );
+                assert!(
+                    !consent_surface_is_up(),
+                    "the {name} prompt leaked the count on its way out"
+                );
+            }
+        });
+    }
+
     // ---- BackedConfirmer: the trait wiring + the never-blind-sign guard. ----
 
     fn confirmer(
@@ -1295,25 +1473,30 @@ mod tests {
 
     #[test]
     fn backed_confirmer_approves_each_prompt_when_window_and_biometric_agree() {
-        let c = confirmer(WindowIntent::Approve, VerifyOutcome::Verified);
-        assert_eq!(
-            c.confirm_pair(&PairPrompt {
-                ext_id: "id",
-                ext_label: Some("My Wallet")
-            }),
-            ConfirmDecision::Approve
-        );
-        assert_eq!(
-            c.confirm_connect(&ConnectPrompt {
-                origin: "https://dapp.example",
-                dapp_name: None
-            }),
-            ConfirmDecision::Approve
-        );
-        assert_eq!(
-            c.confirm_sign(&sign_prompt(Some(SPEND_TX))),
-            ConfirmDecision::Approve
-        );
+        // Takes the exclusion because driving a `BackedConfirmer` now raises the count via `gate`.
+        // Before dig-app#100 moved the raise there this test raised nothing, so the requirement is
+        // new — and it is the reason `surface`'s "every raiser inside this crate takes it" holds.
+        exclusively(|| {
+            let c = confirmer(WindowIntent::Approve, VerifyOutcome::Verified);
+            assert_eq!(
+                c.confirm_pair(&PairPrompt {
+                    ext_id: "id",
+                    ext_label: Some("My Wallet")
+                }),
+                ConfirmDecision::Approve
+            );
+            assert_eq!(
+                c.confirm_connect(&ConnectPrompt {
+                    origin: "https://dapp.example",
+                    dapp_name: None
+                }),
+                ConfirmDecision::Approve
+            );
+            assert_eq!(
+                c.confirm_sign(&sign_prompt(Some(SPEND_TX))),
+                ConfirmDecision::Approve
+            );
+        });
     }
 
     #[test]
@@ -1493,13 +1676,16 @@ mod tests {
     /// confirmer that ignored the biometric everywhere would pass the test above.
     #[test]
     fn an_authorization_with_the_same_unavailable_verifier_fails_closed() {
-        let confirmer = confirmer(WindowIntent::Approve, VerifyOutcome::Unavailable);
-        assert_eq!(
-            confirmer.confirm_reveal(&RevealPrompt {
-                secret: "your recovery phrase"
-            }),
-            ConfirmDecision::Unavailable
-        );
+        // `confirm_reveal` is one of the six that route through `gate`, so this raises the count.
+        exclusively(|| {
+            let confirmer = confirmer(WindowIntent::Approve, VerifyOutcome::Unavailable);
+            assert_eq!(
+                confirmer.confirm_reveal(&RevealPrompt {
+                    secret: "your recovery phrase"
+                }),
+                ConfirmDecision::Unavailable
+            );
+        });
     }
 
     /// The fail-closed default: a backend that has not implemented `confirm_claim` refuses rather than
