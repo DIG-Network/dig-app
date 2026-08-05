@@ -174,6 +174,17 @@ pub struct TrayView {
     /// reading unlock-state and the address as two separate calls lets an idle relock or `Lock now` land
     /// between them and misreport an ordinary lock as this fault.
     pub address_derivation_failed: bool,
+    /// The account's balance as the node last reported it, or why it is not known
+    /// (dig_ecosystem#2206).
+    ///
+    /// Polled on its own cadence by [`crate::wallet::node::NodeBalance`] rather than read while the
+    /// menu is built: a snapshot is taken on every repaint, and a chain read is a rate-limited
+    /// network round trip.
+    ///
+    /// The default — [`BalanceUnknown::NoNode`](crate::wallet::overview::BalanceUnknown::NoNode) —
+    /// is the truth before the first poll: at that point nothing has answered. It is deliberately
+    /// NOT a zero; see [`crate::wallet::overview`] for why those are different types.
+    pub balance: crate::wallet::overview::BalanceReading,
     /// The profile's **minted on-chain** `did:chia:` DID, or `None` when it has none.
     ///
     /// This must be set from evidence that a DID was actually minted on chain — never from a local
@@ -1063,10 +1074,12 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
 /// # The balance row
 ///
 /// "What do I hold?" is half of what a wallet is for, so the answer belongs on the menu rather than one
-/// click into a window. It is ALWAYS present and ALWAYS enabled: today nothing can read a balance — the
-/// node's control catalog serves no wallet method — so in practice the row reads
-/// `Balance not known — no DIG node is running…`, and that sentence is the honest content the ticket
-/// asked for, not a placeholder. Its label carries the short reason and clicking it opens the window
+/// click into a window. It is ALWAYS present and ALWAYS enabled: it renders the reading
+/// [`crate::wallet::node::NodeBalance`] polled from the node — a figure when the node answered with
+/// one, and otherwise the node's OWN reason (`Balance not known — your node has no chain connection
+/// yet…`, `…no DIG node is running…`, `…this node cannot read balances yet…`). Whichever it is, the
+/// sentence is honest content rather than a placeholder. Its label carries the short reason and
+/// clicking it opens the window
 /// with the full one, which is how the **Cache** submenu's disconnected row behaves for the same
 /// reason: an enabled row that states the situation, never a greyed one the user must guess at (#1800).
 ///
@@ -1562,6 +1575,9 @@ mod tests {
             account: Some(account),
             receive_address,
             address_derivation_failed: false,
+            // Not yet polled — the honest pre-first-read state, and NOT a zero. Tests that care
+            // about a figure set it explicitly.
+            balance: crate::wallet::overview::BalanceReading::default(),
             profile_id: Some("a".repeat(96)),
             did: None,
             second_factor: false,
@@ -2958,12 +2974,33 @@ mod tests {
 
     /// The labels of the Wallet submenu's action rows, in render order.
     fn wallet_labels(account: AccountState) -> Vec<String> {
+        wallet_labels_with(account, crate::wallet::overview::BalanceReading::default())
+    }
+
+    /// [`wallet_labels`] for a view carrying an explicit balance reading, so a test can drive the
+    /// row from what the NODE reported rather than only from the not-yet-polled default.
+    fn wallet_labels_with(
+        account: AccountState,
+        balance: crate::wallet::overview::BalanceReading,
+    ) -> Vec<String> {
+        let view = TrayView {
+            balance,
+            ..view(account)
+        };
         every_action(&MenuModel {
-            rows: submenu(&build(&view(account)), "Wallet"),
+            rows: submenu(&build(&view), "Wallet"),
         })
         .into_iter()
         .map(|(_, label, _)| label)
         .collect()
+    }
+
+    /// The balance row for `account`, whatever else the Wallet submenu holds.
+    fn balance_row(labels: Vec<String>) -> String {
+        labels
+            .into_iter()
+            .find(|label| label.starts_with("Balance"))
+            .expect("a balance row in every state")
     }
 
     /// **The balance is on the submenu, in EVERY account state** (dig_ecosystem#1841's third row).
@@ -3083,27 +3120,60 @@ mod tests {
                 "set a password for your account first",
             ),
             (AccountState::Unopenable, "your account cannot be opened"),
-            // The unlocked states DO have an address, so their row fails for the only remaining
-            // reason: nothing can read a balance for it yet.
+            // The unlocked states DO have an address, so their row carries the reading the poller
+            // took — here the fixture's not-yet-polled default, which is honestly "no node yet".
             (
                 AccountState::Unlocked { recoverable: true },
-                "this node cannot read balances yet",
+                "no DIG node is running",
             ),
             (
                 AccountState::Unlocked { recoverable: false },
-                "this node cannot read balances yet",
+                "no DIG node is running",
             ),
         ];
         for (account, clause) in expected {
-            let label = wallet_labels(account.clone())
-                .into_iter()
-                .find(|label| label.starts_with("Balance"))
-                .expect("a balance row in every state");
+            let label = balance_row(wallet_labels(account.clone()));
             assert!(
                 label.contains(clause),
                 "{account:?}: expected {clause:?}, got {label:?}"
             );
         }
+    }
+
+    /// **The row shows the money once the node has reported it** (dig_ecosystem#2206), and shows the
+    /// node's own reason when it could not.
+    ///
+    /// The fixture varies ONE thing — the reading the poller carried in — against an account state
+    /// that is otherwise identical, so a row still deriving its text from anything but that reading
+    /// cannot pass both halves.
+    #[test]
+    fn the_balance_row_shows_the_figure_the_node_reported() {
+        use crate::wallet::overview::{BalanceReading, BalanceUnknown, Balances};
+
+        let held = balance_row(wallet_labels_with(
+            AccountState::Unlocked { recoverable: true },
+            BalanceReading::Known(Balances {
+                xch_mojos: 1_250_000_000_000,
+                dig_units: 2_500_000_000_000,
+            }),
+        ));
+        assert!(held.contains("2.5 $DIG"), "{held}");
+        assert!(held.contains("1.25 XCH"), "{held}");
+        assert!(!held.contains("not known"), "{held}");
+
+        // The same account, the same menu, an older node: the row states that instead of a figure.
+        let cannot = balance_row(wallet_labels_with(
+            AccountState::Unlocked { recoverable: true },
+            BalanceReading::Unknown(BalanceUnknown::NodeCannotRead),
+        ));
+        assert!(
+            cannot.contains("this node cannot read balances yet"),
+            "{cannot}"
+        );
+        assert!(
+            !cannot.chars().any(|c| c.is_ascii_digit()),
+            "an unknown must never show a figure: {cannot}"
+        );
     }
 
     /// The balance row does not DISPLACE the explainer — both rows are present, and the explainer keeps

@@ -458,13 +458,26 @@ Measured against pristine `ubuntu:24.04` in a container, with a release `dig-app
 
 ## The wallet's receive address and balance (dig_ecosystem#1850)
 
-- **dig-app has NO chain source for a balance today, and the reason is one level down.**
-  `dig-node-control-interface` 0.2.0's method catalog carries no `control.wallet.*` entry, and the
-  `WalletEngine` seam has no production implementation — so a node can be running, reachable and healthy
-  and still be unable to answer "what do I hold?". That is why the wallet window distinguishes *no node*
-  from *a node that does not serve wallet reads*: the two look identical from the app and call for
-  completely different things from the user. Adding a balance read means adding the method to the node's
-  published contract first (release-first), not reaching for a chain from the app.
+- **A dependency pin kept a false comment alive for months (dig_ecosystem#2206).** dig-app pinned
+  `dig-node-control-interface = "0.2"`, and `ControlMethod::WalletBalance` only exists from 0.3.0 —
+  caret `0.2` does not resolve `0.3`. So `overview.rs` carried a comment saying "dig-node's published
+  control catalog carries no wallet method", which was *locally consistent with what dig-app compiled
+  against* and therefore survived review, while dig-node had been dispatching `control.wallet.balance`
+  since #1851. The lesson generalises: **a claim about another system's capability, made from inside a
+  pinned dependency, is a claim about your lockfile.** Verify it against the other system, not against
+  what your build can see.
+- **The balance reason must come from the node's `data.code`, never from a local table.** A node answers
+  a balance read in at least five distinguishable ways, and they call for different things from the user:
+  `METHOD_NOT_FOUND`/`NOT_SUPPORTED`/`UNAUTHORIZED` (this build cannot — upgrade), `WALLET_NOT_SYNCED`
+  (wait), `WALLET_NO_CHAIN_SOURCE` (the node has no chain to read from), a genuine read failure, and a
+  success whose `synced: false` makes the figures stale. Keying on the human message instead would break
+  on a reword; keying on the node's VERSION would be the same hardcode in a new hat.
+- **A default dig-node install answers `-32040 WALLET_NO_CHAIN_SOURCE` (measured, node 0.98.0).** The
+  method is reachable without a token — `is_open_control_read` genuinely exempts it, while
+  `control.status` on the same socket still demands one — but the node's live chain source is gated
+  behind `DIG_WALLET_ENABLE_LIVE_BROADCAST`, the same flag that arms real mainnet spends. So today the
+  honest end state on a stock machine is an UNKNOWN with a correct reason, not a figure. Never set that
+  flag to make a balance appear; it is a node-side defect, tracked separately.
 - **An address that is merely `xch1`-shaped proves nothing.** Every wrong derivation — the wrong profile
   index, a dropped `.derive_synthetic()`, a seed one bit out — produces a perfectly well-formed address
   that receives nothing recoverable. The check that has teeth is a SECOND derivation, in-test, from

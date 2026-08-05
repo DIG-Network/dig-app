@@ -10,17 +10,26 @@
 //! balance" with no reason is a dead end in the sense dig_ecosystem#1800 removed from the tray: the
 //! reason is what tells a person whether to start their node, wait, or unlock.
 //!
-//! # Where the numbers would come from
+//! # Where the numbers come from
 //!
-//! Balances are chain state, which dig-app deliberately cannot read for itself — the engine holds the
+//! Balances are chain state, which dig-app deliberately cannot read for itself — the node holds the
 //! peer connections and the coinset access (the `control.wallet.*` seam, [`super::engine`]). So the
-//! source is an input ([`ChainSource`]) rather than something this module reaches for, and today's
-//! production value is [`ChainSource::WithoutWalletReads`] or [`ChainSource::Absent`]: dig-node's
-//! published control catalog carries no wallet method yet, so nothing can answer. That is a fact to
-//! state, not a zero to show.
+//! source is an input ([`ChainSource`]) rather than something this module reaches for; the production
+//! source is [`super::node::NodeWalletEngine`], which speaks `control.wallet.balance` to whichever
+//! node the §5.3 ladder found.
+//!
+//! # Why the reasons are not decided here
+//!
+//! There are two honest sources — no node at all, or a node to ask — and this module never guesses
+//! which of the *further* reasons applies. Whether a node can serve a wallet read, and whether its
+//! chain view is caught up, are answers only the node can give: they arrive as
+//! [`WalletError::EngineUnsupported`] / [`WalletError::EngineNotSynced`] from the read itself and are
+//! translated where the read happens. A constant in this file claiming to know them is exactly the
+//! defect dig_ecosystem#2206 removed.
 
 use super::engine::{BalanceRequest, WalletEngine};
 use super::state::Asset;
+use super::WalletError;
 
 /// Mojos in one XCH, and base units in one $DIG — both assets carry 12 decimal places on Chia.
 const UNITS_PER_COIN: u64 = 1_000_000_000_000;
@@ -92,6 +101,15 @@ pub enum BalanceReading {
     Unknown(BalanceUnknown),
 }
 
+impl Default for BalanceReading {
+    /// Before anything has been asked, nothing has answered — which is
+    /// [`BalanceUnknown::NoNode`], not a zero. A `Default` of `Known(0)` would hand every
+    /// not-yet-populated snapshot a balance it never read.
+    fn default() -> Self {
+        BalanceReading::Unknown(BalanceUnknown::NoNode)
+    }
+}
+
 /// Why a balance could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BalanceUnknown {
@@ -102,6 +120,14 @@ pub enum BalanceUnknown {
     NoNode,
     /// A node answered, but this build of it does not serve wallet chain reads.
     NodeCannotRead,
+    /// A node answered and DOES serve wallet reads, but has no live view of the chain to read from.
+    ///
+    /// Deliberately NOT folded into [`NodeCannotRead`](Self::NodeCannotRead) or
+    /// [`NotSynced`](Self::NotSynced): the build is capable, and the node is not merely behind — it
+    /// has no chain source at all. Those three call for different things (upgrade / wait / the
+    /// node's own connection), and a surface that names the wrong one sends a person after a fault
+    /// they do not have. This is the state a default dig-node install is in today.
+    NoChainSource,
     /// A source is there and still catching up to the chain tip, so any figure it gave would be
     /// stale. Reported as unknown rather than shown with a caveat: a stale number still reads as
     /// the truth.
@@ -111,15 +137,16 @@ pub enum BalanceUnknown {
     ReadFailed(String),
 }
 
-/// What can answer a balance read right now. The caller decides — this module never probes.
+/// What there is to ask about a balance right now.
+///
+/// Exactly two states, because there are only two things the caller can know without asking: either
+/// the §5.3 ladder found nothing, or it found a node. Everything else — whether that node serves
+/// wallet reads at all, whether it is caught up, whether the read failed — is the NODE's answer, and
+/// arrives as a typed [`WalletError`] from the engine rather than as a variant guessed here.
 pub enum ChainSource<'a> {
-    /// No node is reachable.
+    /// Nothing answered the §5.3 endpoint ladder, so there is nobody to ask.
     Absent,
-    /// A node is reachable but serves no wallet chain reads.
-    WithoutWalletReads,
-    /// A source is reachable and still syncing.
-    NotSynced,
-    /// A source ready to answer.
+    /// A node to ask. Its answer decides the rest.
     Ready(&'a dyn WalletEngine),
 }
 
@@ -143,10 +170,6 @@ impl WalletOverview {
                 BalanceReading::Unknown(BalanceUnknown::NoAddress(*why))
             }
             (_, ChainSource::Absent) => BalanceReading::Unknown(BalanceUnknown::NoNode),
-            (_, ChainSource::WithoutWalletReads) => {
-                BalanceReading::Unknown(BalanceUnknown::NodeCannotRead)
-            }
-            (_, ChainSource::NotSynced) => BalanceReading::Unknown(BalanceUnknown::NotSynced),
             (AddressReading::Known(address), ChainSource::Ready(engine)) => {
                 read_balances(address, *engine)
             }
@@ -195,15 +218,18 @@ impl WalletOverview {
             }
         };
 
-        // dig-node's published control catalog carries no wallet method, so even a reachable node
-        // cannot answer a balance read today. Which of the two applies matters: "start your node" and
-        // "your node cannot do this yet" ask different things of the user.
-        let source = if view.node_connected {
-            ChainSource::WithoutWalletReads
-        } else {
-            ChainSource::Absent
+        // The balance is NOT read here. A tray snapshot is taken on every repaint (twice a second),
+        // and a chain read is a network round trip the node rate-limits — so the reading is polled on
+        // its own cadence by `super::node::NodeBalance` and carried in the view. This mapping only
+        // decides whether that reading is the one to show: with no address there is nothing the
+        // figure could be ABOUT, and the address's reason is the actionable one.
+        let balance = match &address {
+            AddressReading::Unavailable(why) => {
+                BalanceReading::Unknown(BalanceUnknown::NoAddress(*why))
+            }
+            AddressReading::Known(_) => view.balance.clone(),
         };
-        Self::read(address, &source)
+        Self { address, balance }
     }
 }
 
@@ -236,9 +262,22 @@ fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
             xch_mojos,
             dig_units,
         }),
-        (Err(e), _) | (_, Err(e)) => {
-            BalanceReading::Unknown(BalanceUnknown::ReadFailed(e.to_string()))
-        }
+        (Err(e), _) | (_, Err(e)) => BalanceReading::Unknown(why_unread(e)),
+    }
+}
+
+/// Translate the engine's typed failure into the reason a person is shown.
+///
+/// The three named variants exist so that the node's own answer — not a constant in this file —
+/// decides which remedy the window offers. Anything else is a genuine read failure and carries the
+/// source's words, because a fault we cannot classify must not be dressed up as one we can.
+fn why_unread(error: WalletError) -> BalanceUnknown {
+    match error {
+        WalletError::EngineUnreachable(_) => BalanceUnknown::NoNode,
+        WalletError::EngineUnsupported => BalanceUnknown::NodeCannotRead,
+        WalletError::EngineNotSynced => BalanceUnknown::NotSynced,
+        WalletError::EngineNoChainSource => BalanceUnknown::NoChainSource,
+        other => BalanceUnknown::ReadFailed(other.to_string()),
     }
 }
 
@@ -360,6 +399,7 @@ fn menu_reason(why: &BalanceUnknown) -> &'static str {
         }
         BalanceUnknown::NoNode => "no DIG node is running",
         BalanceUnknown::NodeCannotRead => "this node cannot read balances yet",
+        BalanceUnknown::NoChainSource => "your node has no chain connection yet",
         BalanceUnknown::NotSynced => "your node is still syncing",
         BalanceUnknown::ReadFailed(_) => "the read failed",
     }
@@ -403,6 +443,13 @@ fn unknown_reason(why: &BalanceUnknown) -> String {
              Nothing is wrong with your account — the figure simply is not available."
                 .to_string()
         }
+        BalanceUnknown::NoChainSource => {
+            "your DIG node is running and can read balances, but it has no live connection to the \
+             Chia blockchain to read one from. Nothing is wrong with your account or your address — \
+             money sent to it still arrives, and the figure appears once your node has a chain \
+             connection."
+                .to_string()
+        }
         BalanceUnknown::NotSynced => {
             "your node is still catching up with the blockchain. A figure now would be out of date, so \
              DIG waits rather than showing one."
@@ -434,22 +481,29 @@ mod tests {
         }
     }
 
-    /// A source that FAILS every chain read — the "reachable but broken" case.
-    struct FailingEngine;
+    /// A source that REFUSES every chain read with a chosen error — the "reachable but not
+    /// answering" case, parameterised because WHICH refusal a node gives is now what decides the
+    /// reason the user is shown (dig_ecosystem#2206).
+    struct RefusingEngine(fn() -> WalletError);
 
-    impl WalletEngine for FailingEngine {
+    impl WalletEngine for RefusingEngine {
         fn broadcast(&self, _: BroadcastRequest) -> Result<BroadcastResponse, WalletError> {
             unreachable!("the overview never broadcasts")
         }
         fn coins(&self, _: CoinsRequest) -> Result<CoinsResponse, WalletError> {
-            Err(WalletError::Engine("upstream refused".to_string()))
+            Err((self.0)())
         }
         fn balance(
             &self,
             _: BalanceRequest,
         ) -> Result<super::super::engine::BalanceResponse, WalletError> {
-            Err(WalletError::Engine("upstream refused".to_string()))
+            Err((self.0)())
         }
+    }
+
+    /// The engine every "the read reached a source and failed" fixture uses.
+    fn failing_engine() -> RefusingEngine {
+        RefusingEngine(|| WalletError::Engine("upstream refused".to_string()))
     }
 
     /// **The headline property.** A wallet holding genuinely nothing and a wallet whose balance could
@@ -519,11 +573,19 @@ mod tests {
                 "no DIG node is running",
             ),
             (
-                WalletOverview::read(known(), &ChainSource::WithoutWalletReads).balance,
+                WalletOverview::read(
+                    known(),
+                    &ChainSource::Ready(&RefusingEngine(|| WalletError::EngineUnsupported)),
+                )
+                .balance,
                 "does not read wallet balances yet",
             ),
             (
-                WalletOverview::read(known(), &ChainSource::NotSynced).balance,
+                WalletOverview::read(
+                    known(),
+                    &ChainSource::Ready(&RefusingEngine(|| WalletError::EngineNotSynced)),
+                )
+                .balance,
                 "catching up with the blockchain",
             ),
             (
@@ -543,7 +605,7 @@ mod tests {
                 "no account on this computer",
             ),
             (
-                WalletOverview::read(known(), &ChainSource::Ready(&FailingEngine)).balance,
+                WalletOverview::read(known(), &ChainSource::Ready(&failing_engine())).balance,
                 "upstream refused",
             ),
         ];
@@ -572,6 +634,7 @@ mod tests {
             BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed),
             BalanceUnknown::NoNode,
             BalanceUnknown::NodeCannotRead,
+            BalanceUnknown::NoChainSource,
             BalanceUnknown::NotSynced,
             // A detail full of digits — the case that would smuggle a numeral into a menu label if the
             // renderer passed the upstream string through.
@@ -616,6 +679,7 @@ mod tests {
             "your address could not be derived",
             "no DIG node is running",
             "this node cannot read balances yet",
+            "your node has no chain connection yet",
             "your node is still syncing",
             "the read failed",
         ];
@@ -798,36 +862,88 @@ mod tests {
         assert_eq!(format_amount(u64::MAX), "18446744.073709551615");
     }
 
-    /// **The window a user actually reads must not turn an unknown balance into a zero either.**
+    /// **A real user with a real reading sees the number.** This is the whole of dig_ecosystem#2206
+    /// at the surface a person looks at: the window renders the balance the node reported, rather
+    /// than a constant claiming no node could ever answer.
     ///
-    /// Asserted on the rendered BODY rather than the `BalanceReading`, because the mapping from the tray
-    /// snapshot to that reading is itself a place the distinction could be lost — and the body is what a
-    /// person acts on. Two views differing ONLY in whether a node is connected must both say "not known",
-    /// each for its own reason.
+    /// It fails against the previous mapping, which derived the reading from `node_connected` alone
+    /// and could only ever produce "not known".
     #[test]
-    fn the_wallet_window_never_states_a_balance_it_could_not_read() {
-        let mut view = crate::tray_menu::TrayView {
+    fn the_window_states_the_balance_the_node_reported() {
+        let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
             account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
             receive_address: Some(ADDRESS.to_string()),
-            node_connected: false,
+            node_connected: true,
+            balance: BalanceReading::Known(Balances {
+                xch_mojos: 1_250_000_000_000,
+                dig_units: 2_500_000_000_000,
+            }),
             ..Default::default()
+        }));
+        assert!(body.contains("Balance: 2.5 $DIG and 1.25 XCH."), "{body}");
+        assert!(!body.contains("not known"), "{body}");
+    }
+
+    /// **The window a user actually reads must not turn an unknown balance into a zero either.**
+    ///
+    /// Asserted on the rendered BODY rather than the `BalanceReading`, because the mapping from the
+    /// tray snapshot to that reading is itself a place the distinction could be lost — and the body
+    /// is what a person acts on. Every reason the poller can carry reaches the window as its own
+    /// words, and none of them as a numeral.
+    #[test]
+    fn the_wallet_window_never_states_a_balance_it_could_not_read() {
+        let body_for = |balance| {
+            window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+                account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+                receive_address: Some(ADDRESS.to_string()),
+                node_connected: true,
+                balance,
+                ..Default::default()
+            }))
         };
+        let cases = [
+            (BalanceUnknown::NoNode, "no DIG node is running"),
+            (
+                BalanceUnknown::NodeCannotRead,
+                "does not read wallet balances yet",
+            ),
+            (BalanceUnknown::NotSynced, "catching up with the blockchain"),
+        ];
 
-        let offline = window_body(&WalletOverview::of_tray(&view));
-        view.node_connected = true;
-        let online = window_body(&WalletOverview::of_tray(&view));
-
-        for body in [&offline, &online] {
-            assert!(body.contains(ADDRESS), "the address is readable in both");
+        let mut seen = std::collections::HashSet::new();
+        for (why, expected) in cases {
+            let body = body_for(BalanceReading::Unknown(why));
+            assert!(body.contains(ADDRESS), "the address is readable regardless");
             assert!(body.contains("Balance: not known"), "{body}");
+            assert!(body.contains(expected), "{body}");
             assert!(
                 !body.contains("0 $DIG"),
                 "an unread balance must never appear as zero: {body}"
             );
+            assert!(seen.insert(body), "each reason is a different fact");
         }
-        assert!(offline.contains("no DIG node is running"));
-        assert!(online.contains("does not read wallet balances yet"));
-        assert_ne!(offline, online, "the two reasons are different facts");
+    }
+
+    /// **An unavailable address outranks even a balance that WAS read.** A locked account must not
+    /// keep showing the figure its last unlocked poll captured — the address is withheld, and the
+    /// money it describes goes with it.
+    #[test]
+    fn a_withheld_address_suppresses_a_reading_already_taken() {
+        let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Locked),
+            receive_address: None,
+            node_connected: true,
+            balance: BalanceReading::Known(Balances {
+                xch_mojos: 1_250_000_000_000,
+                dig_units: 2_500_000_000_000,
+            }),
+            ..Default::default()
+        }));
+        assert!(body.contains("account is locked"), "{body}");
+        assert!(
+            !body.contains("2.5 $DIG"),
+            "a locked account must not still show its last figure: {body}"
+        );
     }
 
     /// A locked account and an account that does not exist reach DIFFERENT windows — the remedies are

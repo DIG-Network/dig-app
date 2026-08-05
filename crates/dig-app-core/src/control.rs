@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dig_node_control_interface::envelope::{JsonRpcResponse, RequestId};
+use dig_node_control_interface::error::ControlError;
 use dig_node_control_interface::params::StatusParams;
 use dig_node_control_interface::results::StatusResult;
 use dig_node_control_interface::traits::{build_request, parse_response, ControlCall};
@@ -271,13 +272,64 @@ pub fn call_control<C>(
 where
     C: ControlCall,
 {
+    call_control_result(endpoint, call, token, timeout).map_err(|failure| match failure {
+        ControlFailure::Transport(e) => e,
+        ControlFailure::Rejected(e) => ControlCallError::Refused(e.message),
+    })
+}
+
+/// Why a control call did not produce a result, **keeping the node's typed refusal intact**.
+///
+/// [`call_control`] flattens a rejection to its human message, which is all its callers need. A
+/// caller that must BRANCH on what the node said — "you are running a build without this method"
+/// reads differently to "the read failed" — needs the stable `data.code` symbol and the numeric wire
+/// code, and neither survives that flattening.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlFailure {
+    /// The call never reached a node, or its reply was unreadable.
+    Transport(ControlCallError),
+    /// A node answered with a JSON-RPC error, carried whole so the caller can key off
+    /// [`ControlError::data`]'s stable symbol rather than the human message.
+    Rejected(ControlError),
+}
+
+impl std::fmt::Display for ControlFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlFailure::Transport(e) => write!(f, "{e}"),
+            ControlFailure::Rejected(e) => write!(f, "{}", e.message),
+        }
+    }
+}
+
+impl std::error::Error for ControlFailure {}
+
+/// [`call_control`], but surfacing the node's typed [`ControlError`] instead of only its message.
+///
+/// The transport is identical; only the error shape differs. `call_control` is written in terms of
+/// this, so there is exactly one request/response path and the two can never drift.
+pub fn call_control_result<C>(
+    endpoint: &str,
+    call: &C,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<C::Output, ControlFailure>
+where
+    C: ControlCall,
+{
     let request = build_request(RequestId::from(1), call);
-    let body = serde_json::to_vec(&request)
-        .map_err(|e| ControlCallError::BadResponse(format!("could not encode the request: {e}")))?;
-    let raw = post_json(endpoint, &body, token, timeout)?;
-    let response: JsonRpcResponse = serde_json::from_slice(&raw)
-        .map_err(|e| ControlCallError::BadResponse(format!("not a JSON-RPC response: {e}")))?;
-    parse_response::<C>(response).map_err(|e| ControlCallError::Refused(e.message))
+    let body = serde_json::to_vec(&request).map_err(|e| {
+        ControlFailure::Transport(ControlCallError::BadResponse(format!(
+            "could not encode the request: {e}"
+        )))
+    })?;
+    let raw = post_json(endpoint, &body, token, timeout).map_err(ControlFailure::Transport)?;
+    let response: JsonRpcResponse = serde_json::from_slice(&raw).map_err(|e| {
+        ControlFailure::Transport(ControlCallError::BadResponse(format!(
+            "not a JSON-RPC response: {e}"
+        )))
+    })?;
+    parse_response::<C>(response).map_err(ControlFailure::Rejected)
 }
 
 /// Set the node's content-cache size cap, returning the cap the node now holds.
