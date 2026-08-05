@@ -281,7 +281,7 @@ impl Heartbeat {
     /// So did the next tick, and every tick after it: **one tray click pinned `TrayMenu` for the
     /// life of the process**, in a perfectly healthy app (dig-app#93).
     ///
-    /// That was not merely a stale label. [`Phase::patience`] gives `TrayMenu`
+    /// That was not merely a stale label. `Phase::patience` (private, so unlinked) gives `TrayMenu`
     /// [`TRAY_MENU_PATIENCE`] where every other phase gets [`PATIENCE`], so the watchdog became
     /// twelve times less sensitive and stayed that way — which is why #93's first ERROR arrived at
     /// `silent_for_ms=120141` instead of at ten seconds.
