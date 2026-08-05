@@ -287,3 +287,66 @@ the mutant confirmed to compile**, since a build failure reads identically to a 
 **Open question I am carrying, not hiding:** §1's three candidates are unresolved and one run of the
 instrument resolves them. If the answer turns out to be the `TrackPopupMenu` case, PR-A grows the
 foreground-ordering work described in §4.2; the rest of the shape is unaffected either way.
+
+---
+
+### 9. 2026-08-04 — the shape was re-decided, and one premise of the new shape is FALSE
+
+This section is appended rather than edited into the sections above, because the sections above are a
+record of what was believed at the time and are still useful as that.
+
+**The "window registry/service class" frame (§3) is dropped.** The replacement plan is three steps:
+declare DPI awareness in a manifest (step 0), move the tray to its own tao thread with
+`with_any_thread` and then DELETE the whack-a-mole layer that guards `TrackPopupMenu` (step 1), and
+make a stranded phase unrepresentable (step 2). Steps 0 and 2 shipped in the PR carrying this file.
+
+**Step 1 did not ship, because its stated rationale is falsified at source.**
+
+The plan's four dependency facts were re-verified in the locked versions and all four HOLD:
+
+| fact | verified at |
+|---|---|
+| `TrackPopupMenu` runs in `tray-icon`'s OWN window proc, not tao's | `tray-icon-0.23.1/src/platform_impl/windows/mod.rs:541-545` |
+| `tray-icon` does not require the main thread on Windows/Linux | `tray-icon-0.23.1/src/lib.rs:17` |
+| tao's main-thread gate is per-THREAD and `with_any_thread` disables it | `tao-0.30.8/src/platform_impl/windows/event_loop.rs:170-178`; `src/platform/windows.rs:106` |
+| DPI awareness is set by whichever event loop is built first, behind a `Once` | `tao-0.30.8/.../event_loop.rs:180-182` -> `dpi.rs:20-26` |
+
+A FIFTH fact, not in the plan, decides step 1:
+
+> **`tray_icon::TrayIcon` is `Rc<RefCell<platform_impl::TrayIcon>>`** (`tray-icon-0.23.1/src/lib.rs:346`),
+> and the crate declares no `unsafe impl Send` for it — the only one in the crate is for `WinIcon`
+> (`platform_impl/windows/icon.rs:67`). The tray handle is therefore `!Send` and `!Sync`.
+
+Everything that repaints the tray — `set_icon`, `set_tooltip`, `set_menu` — must run on the thread
+that created it. The tick loop repaints. So the tick loop CANNOT be separated from the tray, and
+moving the tray to its own thread moves the tick loop with it.
+
+The consequence is the one that matters: after the move, an open `TrackPopupMenu` still stops the
+tick, exactly as it does today. The plan's premise — *"a wedged `TrackPopupMenu` then blocks only the
+tray thread; the main loop keeps ticking"* — does not hold, and with it the deletion rationale
+(*"with the tray isolated these have no subject"*) does not hold either:
+
+- `Phase::TrayMenu` still has a subject. Deleting it would make every ordinary menu-read of more than
+  ten seconds an ERROR telling the user to restart DIG. That is the false-alarm regression 3.1b-lv
+  exists to prevent, several times a day.
+- `break_modal_menu` still has a subject. A wedged popup still ends the tray permanently; the rescue
+  is still the only thing that ends it short of a restart.
+- `claim_foreground` still has a subject, for the same reason.
+
+Deleting them would not remove whack-a-mole; it would remove the only mitigation and leave the wedge.
+
+**What the thread move is still worth, and what it needs first.** Freeing the main thread is real, but
+its value is entirely in step 3 (the prompt host, whose `PROMPT_THREAD: OnceLock` sits behind winit's
+per-PROCESS latch). Doing the topology change now, on a consent-bearing surface, with no present-tense
+benefit and a rationale known to be wrong, is building on an unsettled shape.
+
+**Recommendation for the next decider.** Re-scope step 1 as *"give the prompt host the main thread"*
+rather than *"isolate the tray"*, and settle the two questions the `!Send` fact raises before any code
+is written:
+
+1. Does the tick keep the tray's thread (simple; the menu still stalls it; keep the mitigations), or
+   is the repaint made message-driven so the tick can live elsewhere (a real redesign; only then does
+   the deletion argument become available)?
+2. With DPI now declared in the manifest, the ordering constraint that made step 0 a prerequisite is
+   discharged — a second event loop can no longer change this process's awareness. That is the one
+   part of the plan that step 0 has already made safe.
