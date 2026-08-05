@@ -1372,7 +1372,7 @@ mod tests {
             let watch = SurfaceWatch::default();
             assert!(
                 !consent_surface_is_up(),
-                "nothing may be on screen before the gate opens, or neither observation below                  distinguishes anything"
+ "nothing may be on screen before the gate opens, or neither observation below distinguishes anything"
             );
 
             let confirmer = BackedConfirmer::new(&watch, &watch, NoInputWindow);
@@ -1388,11 +1388,11 @@ mod tests {
             );
             assert!(
                 watch.during_verify(),
-                "so is the platform authenticator's prompt; with this reading false the tray claims                  the foreground off the Windows Hello dialog (dig-app#100)"
+ "so is the platform authenticator's prompt; with this reading false the tray claims the foreground off the Windows Hello dialog (dig-app#100)"
             );
             assert!(
                 !consent_surface_is_up(),
-                "and the guard must lower on the way out — a leak disables the tray's foreground                  claim for the life of the process"
+ "and the guard must lower on the way out — a leak disables the tray's foreground claim for the life of the process"
             );
         });
     }
@@ -1452,7 +1452,7 @@ mod tests {
                 );
                 assert!(
                     watch.during_verify(),
-                    "the {name} prompt leaves the authenticator prompt unreported, so the tray                      claims the foreground off it (dig-app#100)"
+ "the {name} prompt leaves the authenticator prompt unreported, so the tray claims the foreground off it (dig-app#100)"
                 );
                 assert!(
                     !consent_surface_is_up(),

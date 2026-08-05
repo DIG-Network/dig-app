@@ -17,8 +17,9 @@
 //!
 //! A flag makes "cleared while another surface is still up" expressible, and that is the bug this
 //! would otherwise ship with: the second surface's exit would clear the first's. A count cannot be
-//! wrong that way. The renderer draws one window at a time today, so the count is normally 0 or 1 —
-//! it is a count so that staying correct does not depend on that remaining true.
+//! wrong that way. In production it genuinely nests: `gate` raises for the whole consent step and
+//! the renderer raises again for the window drawn inside it, so 2 is ordinary. Nothing may assume
+//! an upper bound of 1 — a `debug_assert!(RAISED <= 1)` would fire on the normal path.
 //!
 //! # Why the guard, and not a pair of calls
 //!
