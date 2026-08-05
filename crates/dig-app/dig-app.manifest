@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  The application manifest for the `dig-app` shell.
+
+  Its whole job is to make this process's DPI awareness a BUILD-TIME FACT rather than a race.
+
+  Windows decides a process's DPI awareness once, at the first call that sets it, and thereafter
+  ignores every later attempt. Before this manifest existed the first such call was made by whichever
+  event loop happened to be constructed first: tao sets PER_MONITOR_AWARE_V2 from `EventLoop::new`
+  (tao 0.30.8 `platform_impl/windows/event_loop.rs:171` -> `dpi.rs:20 become_dpi_aware`, behind a
+  `Once`), and winit does the same from its own. So awareness depended on which surface the user
+  reached first, and a headless build (no default features) — which constructs no loop at all — was
+  never aware.
+
+  That is worse than being unaware, because the hand-built consent windows COMPENSATE for awareness:
+  they read the monitor's real DPI and scale themselves (`Win32_UI_HiDpi`, dig_ecosystem#1832). Under
+  a process that turned out unaware, Windows also scales them, and the two multiply. Declaring the
+  awareness here removes the order-dependence entirely: it is set by the loader, before any of our
+  code runs, in every build and on every path.
+
+  Nothing else is declared beyond the two things a manifest must state to be well-formed and honest.
+  In particular there is NO <compatibility> block: this app reads no OS version, and a supportedOS
+  list is a claim that would then have to be maintained.
+
+  Every comment in this file avoids a double hyphen. XML forbids one inside a comment, and mt.exe
+  rejects the entire manifest for it with a parse error that names no line and no column.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="net.dig.dig-app" version="1.0.0.0" />
+
+  <!--
+    asInvoker, stated explicitly rather than left to the linker's default.
+
+    dig-app is a per-user identity agent that guards custody actions behind its own consent windows.
+    It must never run elevated: an elevated process cannot be sent input by the unelevated desktop it
+    lives on, and asking a user for admin to run a tray app trains them to grant it. Pinned by
+    `tests/windows_manifest.rs`.
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <!--
+        Per-monitor v2 — the same awareness tao would have set, now set unconditionally. v2 is what
+        the consent windows are written against: it scales the non-client area and dialog fonts with
+        the monitor, so a window dragged between a 100% and a 200% display stays the size it was
+        drawn at.
+      -->
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!--
+        The Windows 8.1 spelling of the same intent, for hosts older than the 1703 release that
+        introduced v2. Windows reads whichever it understands; on 1703+ the element above wins.
+      -->
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>
