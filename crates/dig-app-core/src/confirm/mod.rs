@@ -1473,25 +1473,30 @@ mod tests {
 
     #[test]
     fn backed_confirmer_approves_each_prompt_when_window_and_biometric_agree() {
-        let c = confirmer(WindowIntent::Approve, VerifyOutcome::Verified);
-        assert_eq!(
-            c.confirm_pair(&PairPrompt {
-                ext_id: "id",
-                ext_label: Some("My Wallet")
-            }),
-            ConfirmDecision::Approve
-        );
-        assert_eq!(
-            c.confirm_connect(&ConnectPrompt {
-                origin: "https://dapp.example",
-                dapp_name: None
-            }),
-            ConfirmDecision::Approve
-        );
-        assert_eq!(
-            c.confirm_sign(&sign_prompt(Some(SPEND_TX))),
-            ConfirmDecision::Approve
-        );
+        // Takes the exclusion because driving a `BackedConfirmer` now raises the count via `gate`.
+        // Before dig-app#100 moved the raise there this test raised nothing, so the requirement is
+        // new — and it is the reason `surface`'s "every raiser inside this crate takes it" holds.
+        exclusively(|| {
+            let c = confirmer(WindowIntent::Approve, VerifyOutcome::Verified);
+            assert_eq!(
+                c.confirm_pair(&PairPrompt {
+                    ext_id: "id",
+                    ext_label: Some("My Wallet")
+                }),
+                ConfirmDecision::Approve
+            );
+            assert_eq!(
+                c.confirm_connect(&ConnectPrompt {
+                    origin: "https://dapp.example",
+                    dapp_name: None
+                }),
+                ConfirmDecision::Approve
+            );
+            assert_eq!(
+                c.confirm_sign(&sign_prompt(Some(SPEND_TX))),
+                ConfirmDecision::Approve
+            );
+        });
     }
 
     #[test]
@@ -1671,13 +1676,16 @@ mod tests {
     /// confirmer that ignored the biometric everywhere would pass the test above.
     #[test]
     fn an_authorization_with_the_same_unavailable_verifier_fails_closed() {
-        let confirmer = confirmer(WindowIntent::Approve, VerifyOutcome::Unavailable);
-        assert_eq!(
-            confirmer.confirm_reveal(&RevealPrompt {
-                secret: "your recovery phrase"
-            }),
-            ConfirmDecision::Unavailable
-        );
+        // `confirm_reveal` is one of the six that route through `gate`, so this raises the count.
+        exclusively(|| {
+            let confirmer = confirmer(WindowIntent::Approve, VerifyOutcome::Unavailable);
+            assert_eq!(
+                confirmer.confirm_reveal(&RevealPrompt {
+                    secret: "your recovery phrase"
+                }),
+                ConfirmDecision::Unavailable
+            );
+        });
     }
 
     /// The fail-closed default: a backend that has not implemented `confirm_claim` refuses rather than
