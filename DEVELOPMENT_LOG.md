@@ -17,8 +17,12 @@
   return as "asked to close so the tray can respond again" and fired five times against a queue nobody
   was reading. A remedy must verify its effect; a successful post is not one.
 - **The tray menu is the only route to every action this app has.** A wedged menu is a wedged product,
-  regardless of which threads are still ticking. Two separate design notes described it as costing "the
-  menu and not the app"; both were wrong in the way that matters to the person holding the mouse.
+  regardless of which threads are still ticking. FOUR separate places described it as costing "the menu
+  and nothing else" — two module headers, a `watch()` doc where it was the stated JUSTIFICATION for
+  dropping a watchdog tolerance, and a SPEC bullet. Every one was wrong in the way that matters to the
+  person holding the mouse, and a review caught the last three after the first pass claimed to have
+  swept them. When a framing is retracted, grep the PHRASE across the whole repo; fixing the instances
+  you remember writing is not a sweep.
 
 ## #2128 — a removed step left its failure flag behind, and told every user their account was gone
 

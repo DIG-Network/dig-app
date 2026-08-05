@@ -427,13 +427,22 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
   refuse-to-track**, immediately below. An earlier revision of this section said that remedy required
   the window service; it does not, and it is now implemented.
 
-- **A popup MUST NOT be tracked when the foreground claim was MADE and REFUSED.** This is the primary
-  remedy and the only one that bounds the lever above. An undismissable menu is strictly worse than an
-  absent one: an absent menu can be clicked again, and an undismissable one can never be anything
-  again. Refused is the ONLY outcome that refuses the track, because it is the only one that is
-  positive evidence Q135788 applies — a DECLINE means the claim was never made and nothing was
-  learned, and a missing tray window means there is nothing to protect and nothing to suppress
-  through.
+- **A popup MUST NOT be tracked where there is EVIDENCE this process does not hold the foreground.**
+  An undismissable menu is strictly worse than an absent one: an absent menu can be clicked again, and
+  an undismissable one can never be anything again. Two outcomes are such evidence — a claim that was
+  MADE and REFUSED, and a decline taken because a consent surface already owns the foreground (which
+  is reachable with no attacker at all, by clicking the tray during a platform credential prompt).
+  A decline for want of recent input is NOT: a real click can outrun the tolerance under load, and
+  refusing a genuine menu costs more than the forged one it would also refuse. A missing tray window
+  is not either — there is nothing to protect and nothing to suppress through.
+
+  **What this bounds MUST be stated precisely: it bounds tracks this process can predict, not the
+  lever above.** `tray-icon` makes its own `SetForegroundWindow` call that no rule here can reach, so
+  a forged click arriving with manufactured input evidence still reaches a track. Anyone sizing
+  further work MUST NOT read this rule as closing that lever.
+- **Only a claim that SUCCEEDED may clear a standing suppression.** Re-enabling the menu is not the
+  same act as permitting this click: it discards an earlier refusal. Doing that on a path where the
+  process never established its foreground rights disarms the guard at the moment it is most needed.
 - **A suppression MUST be per-click and MUST NOT be sticky.** A menu that stops appearing forever is
   its own outage. Eligibility MUST be re-tested on the following click and the menu restored the
   moment a claim succeeds, so the user'''s entire remedy is to click again.

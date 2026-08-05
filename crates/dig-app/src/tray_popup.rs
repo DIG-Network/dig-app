@@ -12,8 +12,10 @@
 //! `TrackPopupMenu` is a nested modal message loop. It used to run on the thread that also ran the
 //! app's tick, so an undismissable menu was not a broken menu — it was a broken *app*, permanently
 //! and silently (dig-app#86). The tray now owns a thread of its own (see `tray::spawn_renderer`), so
-//! a wedged menu costs the user the menu and nothing else: the tick keeps running, the next view
-//! keeps being computed, and the paint that cannot be applied waits for the menu to close. The
+//! a wedge no longer stalls the tick: it keeps running, the next view keeps being computed, and the
+//! paint that cannot be applied waits for the menu to close. That bounds the BLAST RADIUS and
+//! nothing more — the menu is the only route to every action this app has, so an undismissable one
+//! is still an unusable app, which is why the rest of this module refuses to track it. The
 //! rescue existed to survive an app-wide stall that can no longer happen, and it never worked
 //! anyway — a `PostMessageW` returning `Ok` means the message was *enqueued*, which the old code
 //! logged as though it were an effect.
@@ -111,10 +113,23 @@
 //! cached load. That is an argument from how the code is shaped, not a measurement, and it is the
 //! part of this module a reader should be most suspicious of.
 //!
-//! **What makes it safe to rest on anyway is the direction it fails in.** If a suppression somehow
-//! does not take effect, the menu is tracked — which is exactly today's behaviour, the behaviour on
-//! every build before this one. The fix can fail to help; it cannot make anything worse. A guard
-//! whose failure mode is the status quo needs no second guard behind it.
+//! **Measured, not assumed** (dig-app#107 security review): `tray-icon` 0.23.1 built with rustc
+//! 1.96.1 at `-C codegen-units=1` emits no `noalias` on any `tray_proc` parameter, and the loads of
+//! both flag offsets appear AFTER the call to our handler with no alias metadata. The handler is an
+//! indirect call through a `OnceCell<Option<Box<dyn Fn>>>`, so even fat LTO cannot devirtualise it.
+//! One toolchain and one config — not a guarantee for a future rustc, which is what
+//! `the_handler_runs_before_the_crate_reads_its_menu_flag` exists to notice.
+//!
+//! **The direction it fails in is what makes it safe to rest on.** A suppression that does not land
+//! leaves the flag at its default and the menu is tracked — exactly today's behaviour, on every
+//! build before this one. An ALLOW that does not land costs one click: the write did reach memory,
+//! so the next click's read, in a separate proc frame, sees it.
+//!
+//! One honest caveat: two `&mut TrayUserData` do coexist here — the outer frame's and the nested
+//! one's — which is invalid under Stacked Borrows in the abstract, even though the emitted code is
+//! correct and the provenance is a wildcard from `GetWindowLongPtrW` anyway. So "cannot make things
+//! worse" is an empirical claim about this build, not one derived from the language rules. The
+//! crate's own setters never take this path; they send from outside the proc.
 //!
 //! ## Why only [`NoForeground::Refused`], and nothing else, refuses the track
 //!
@@ -222,10 +237,21 @@ pub enum Track {
 /// module docs for why exactly one outcome refuses.
 pub fn track_after(claim: Claim) -> Track {
     match claim {
+        // Asked, and denied. The next TrackPopupMenu is the wedge.
         Claim::Failed(NoForeground::Refused) => Track::Refused,
-        Claim::Taken | Claim::Declined(_) | Claim::Failed(NoForeground::NoTrayWindow) => {
-            Track::Allowed
-        }
+        // Not asked, but we already KNOW the answer: a consent surface owns the foreground, so
+        // `tray-icon`'s own SetForegroundWindow — which no rule here can reach — will be refused for
+        // exactly the reason ours would have been, and it tracks anyway. Declining to ask is not the
+        // same as learning nothing when the thing that stopped us asking is itself the evidence.
+        // Reachable with no attacker at all: click the tray during a Windows Hello prompt.
+        Claim::Declined(Decline::ConsentSurfaceUp) => Track::Refused,
+        // Genuinely no evidence: a click can outrun INPUT_TOLERANCE under load, and refusing a real
+        // user's menu on a missed deadline costs more than the forged menu it would also refuse.
+        Claim::Declined(Decline::NoRecentInput) => Track::Allowed,
+        // We hold it, so the popup dismisses normally.
+        Claim::Taken => Track::Allowed,
+        // No window to protect, and none to suppress through either.
+        Claim::Failed(NoForeground::NoTrayWindow) => Track::Allowed,
     }
 }
 
@@ -368,25 +394,38 @@ pub fn refusal_to_claim(consent_surface_up: bool, evidence: InputEvidence) -> Op
 /// It runs on the tray thread, inside a window proc, so it must never block — everything it consults
 /// is an atomic load or a Win32 read.
 #[cfg(target_os = "windows")]
-fn claim_foreground() -> Claim {
+///
+/// Hands back the tray window it had to find anyway, for two reasons. The caller writes the menu
+/// gate through the SAME handle instead of enumerating a second time — this runs inside a window
+/// proc documented as never blocking, and `tray_window` is an `EnumWindows` sweep. And it makes "the
+/// gate was actually written" checkable, which is what keeps [`MENU_SUPPRESSED`] from publishing a
+/// write that never happened.
+fn claim_foreground() -> (Claim, Option<windows::Win32::Foundation::HWND>) {
     let evidence = input_evidence(message_time(), last_input_tick(), INPUT_TOLERANCE);
     if let Some(decline) =
         refusal_to_claim(dig_app_core::confirm::consent_surface_is_up(), evidence)
     {
-        return Claim::Declined(decline);
+        // A consent-surface decline still needs the window, because that arm SUPPRESSES. A
+        // no-input decline deliberately does not look: it is the attacker-forged path, and an
+        // EnumWindows sweep per forged message is a cost this proc should not pay.
+        let window = matches!(decline, Decline::ConsentSurfaceUp)
+            .then(tray_window)
+            .flatten();
+        return (Claim::Declined(decline), window);
     }
 
     let Some(hwnd) = tray_window() else {
-        return Claim::Failed(NoForeground::NoTrayWindow);
+        return (Claim::Failed(NoForeground::NoTrayWindow), None);
     };
     // SAFETY: `hwnd` was just enumerated from THIS PROCESS's windows (`tray_window` filters on the
     // owning process id), so it is a live handle we own. `SetForegroundWindow` has no other
     // precondition and cannot fail unsoundly; a refusal is a `false` return, not undefined behaviour.
     let taken = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd) };
-    match taken.as_bool() {
+    let claim = match taken.as_bool() {
         true => Claim::Taken,
         false => Claim::Failed(NoForeground::Refused),
-    }
+    };
+    (claim, Some(hwnd))
 }
 
 /// Tell `tray-icon` whether either mouse button may open the menu.
@@ -421,19 +460,15 @@ fn set_menu_opens_on_click(hwnd: windows::Win32::Foundation::HWND, enable: bool)
 /// outstanding: the flags live in `tray-icon`'s userdata, not here, so "outstanding" is a belief this
 /// module would have to keep in sync with a value it does not own.
 #[cfg(target_os = "windows")]
-fn allow_menu() {
-    if let Some(hwnd) = tray_window() {
-        set_menu_opens_on_click(hwnd, true);
-    }
+fn allow_menu(hwnd: windows::Win32::Foundation::HWND) {
+    set_menu_opens_on_click(hwnd, true);
     MENU_SUPPRESSED.store(false, std::sync::atomic::Ordering::Release);
 }
 
 /// Stop the popup `tray-icon` is about to track, because it could not be dismissed.
 #[cfg(target_os = "windows")]
-fn suppress_menu() {
-    if let Some(hwnd) = tray_window() {
-        set_menu_opens_on_click(hwnd, false);
-    }
+fn suppress_menu(hwnd: windows::Win32::Foundation::HWND) {
+    set_menu_opens_on_click(hwnd, false);
     MENU_SUPPRESSED.store(true, std::sync::atomic::Ordering::Release);
 }
 
@@ -447,11 +482,21 @@ fn suppress_menu() {
 /// suppression lands in time to matter.
 #[cfg(target_os = "windows")]
 pub fn claim_and_decide() -> (Claim, Track) {
-    let claim = claim_foreground();
+    let (claim, window) = claim_foreground();
     let track = track_after(claim);
-    match track {
-        Track::Refused => suppress_menu(),
-        Track::Allowed => allow_menu(),
+    // No window means no gate was written, so nothing may be PUBLISHED as written either. Saying
+    // otherwise gives the user a tooltip that contradicts the menu in front of them, in whichever
+    // direction it is wrong (dig-app#107 review).
+    if let Some(hwnd) = window {
+        match (track, claim) {
+            (Track::Refused, _) => suppress_menu(hwnd),
+            // ONLY a claim we actually took re-enables the menu. Anything else leaves a standing
+            // suppression standing: `allow_menu` does not merely permit this click, it CLEARS an
+            // earlier refusal, so calling it on a path where we never established our rights would
+            // disarm the guard at the moment it is most needed (dig-app#107 security review).
+            (Track::Allowed, Claim::Taken) => allow_menu(hwnd),
+            (Track::Allowed, _) => {}
+        }
     }
     (claim, track)
 }
@@ -465,8 +510,8 @@ pub fn claim_and_decide() -> (Claim, Track) {
 /// Silent by design — a refusal here predicts nothing, because UP may still be granted.
 #[cfg(target_os = "windows")]
 pub fn claim_early() {
-    if claim_foreground() == Claim::Taken {
-        allow_menu();
+    if let (Claim::Taken, Some(hwnd)) = claim_foreground() {
+        allow_menu(hwnd);
     }
 }
 
@@ -578,8 +623,8 @@ fn tray_window() -> Option<windows::Win32::Foundation::HWND> {
 /// Nothing to do off Windows: no other platform draws its tray menu with a nested modal loop, so
 /// there is no foreground to claim.
 #[cfg(not(target_os = "windows"))]
-pub fn claim_foreground() -> Claim {
-    Claim::Taken
+pub fn claim_foreground() -> (Claim, Option<()>) {
+    (Claim::Taken, None)
 }
 
 /// How often a repeated foreground refusal may be restated.
@@ -971,7 +1016,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn a_live_consent_surface_declines_the_claim_before_any_window_is_touched() {
-        let control = claim_foreground();
+        let control = claim_foreground().0;
         assert_ne!(
             control,
             Claim::Declined(Decline::ConsentSurfaceUp),
@@ -990,7 +1035,7 @@ mod tests {
         // across the crate boundary (dig-app#99).
         let _on_screen = dig_app_core::confirm::surface::Raised::now();
         assert_eq!(
-            claim_foreground(),
+            claim_foreground().0,
             Claim::Declined(Decline::ConsentSurfaceUp),
             "with a consent surface up the claim must be declined before the tray window is even \
              looked for"
@@ -1000,16 +1045,19 @@ mod tests {
     /// The whole of dig-app#86's policy, stated over every outcome rather than only the one that
     /// fixes the bug.
     ///
-    /// The expected side is derived from Q135788, not from reading `track_after`: a popup is
-    /// undismissable exactly when the foreground claim was MADE and REFUSED. Everything else is
-    /// either evidence we hold the foreground or the absence of evidence that we do not, and
-    /// refusing a menu on absence of evidence costs a real menu for no measured gain.
+    /// The expected side is derived from Q135788 rather than read back out of `track_after`: a
+    /// popup cannot be dismissed when this process does not hold the foreground as it is tracked.
+    /// So the question each arm answers is "do we have EVIDENCE we lack it" — not "did we ask".
+    /// Being denied is such evidence; so is a consent surface already owning the foreground, which
+    /// is reachable with no attacker at all by clicking the tray during a Windows Hello prompt. A
+    /// click that merely outran `INPUT_TOLERANCE` is not, and refusing on it would cost a real
+    /// user's menu under load.
     ///
     /// Exhaustive on purpose. A fifth `Claim` variant will not compile against this match, which is
     /// the point: a new way to fail to take the foreground is a new chance to track a popup into a
     /// wedge, and adding one silently should not be possible.
     #[test]
-    fn only_a_refused_foreground_claim_refuses_the_track() {
+    fn a_track_is_refused_exactly_where_we_have_evidence_we_lack_the_foreground() {
         for claim in [
             Claim::Taken,
             Claim::Declined(Decline::ConsentSurfaceUp),
@@ -1018,19 +1066,23 @@ mod tests {
             Claim::Failed(NoForeground::Refused),
         ] {
             let expected = match claim {
-                // Q135788 applies only where the claim was made and denied.
+                // Asked and denied: the strongest evidence there is.
                 Claim::Failed(NoForeground::Refused) => Track::Refused,
+                // Not asked, but the reason we did not ask IS the evidence -- a consent surface owns
+                // the foreground, so `tray-icon`'s own claim will be denied for the same reason.
+                Claim::Declined(Decline::ConsentSurfaceUp) => Track::Refused,
                 // We hold it, so the popup dismisses normally.
                 Claim::Taken => Track::Allowed,
-                // Never asked, so nothing learned; `tray-icon` still makes its own claim.
-                Claim::Declined(_) => Track::Allowed,
-                // No window to protect, and none to send a suppression to either.
+                // A click that outran the input tolerance tells us nothing about our rights, and a
+                // real click can outrun it under load.
+                Claim::Declined(Decline::NoRecentInput) => Track::Allowed,
+                // No window to protect, and none to send a suppression through either.
                 Claim::Failed(NoForeground::NoTrayWindow) => Track::Allowed,
             };
             assert_eq!(
                 track_after(claim),
                 expected,
-                "{claim:?} must map to {expected:?}: only a claim that was MADE and REFUSED is evidence the next TrackPopupMenu cannot be dismissed (MSDN Q135788)"
+                "{claim:?} must map to {expected:?}: a popup is undismissable when this process does not hold the foreground while it is tracked (MSDN Q135788), so the track is refused exactly where we have EVIDENCE we lack it"
             );
         }
     }
@@ -1068,6 +1120,30 @@ mod tests {
                 declaration.contains(&format!("= {ours};")),
                 "tray-icon declares `{}`, but this module sends {ours} for {name}; a suppression would be ignored and the menu would wedge again (dig-app#86)",
                 declaration.trim()
+            );
+
+            // The number matching is not enough on its own: a bump that KEEPS the constant and the
+            // read but drops or guards the arm that WRITES the flag leaves both other pins green
+            // while `suppress_menu` becomes a silent no-op. That is the worst failure this module
+            // has, so the write is pinned too (dig-app#107 security review, F2).
+            let field = name
+                .strip_prefix("WM_USER_SHOW_MENU_ON_")
+                .and_then(|rest| rest.strip_suffix("_CLICK"))
+                .map(|side| format!("menu_on_{}_click =", side.to_lowercase()))
+                .expect("the gate message constants are named WM_USER_SHOW_MENU_ON_<SIDE>_CLICK");
+            let arm = source
+                .split(&format!("{name} =>"))
+                .nth(1)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "tray-icon no longer handles `{name}` in its window proc, so sending it does nothing and a refused popup would be tracked anyway (dig-app#86)"
+                    )
+                });
+            let body = arm.split('}').next().unwrap_or("");
+            assert!(
+                body.contains(&field),
+                "tray-icon's `{name}` arm no longer assigns `{field}`; `suppress_menu` is now a silent no-op and the wedge is reachable again. Arm body: {}",
+                body.trim()
             );
         }
     }

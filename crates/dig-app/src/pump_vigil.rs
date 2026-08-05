@@ -71,8 +71,12 @@
 //! loop's own thread, so a menu that would not dismiss was an app that would not run — the rescue was
 //! the difference between a lost menu and a lost process.
 //!
-//! The tray draws on a thread of its own now (dig-app#90). A wedged menu costs the user the menu, the
-//! state loop keeps ticking, and there is nothing left here that is both stuck and safe to poke. So
+//! The tray draws on a thread of its own now (dig-app#90), so a wedged menu no longer stalls the
+//! state loop with it. That is the bound, and it MUST NOT be read as "only the menu is lost": the
+//! tray menu is the sole route to every action this app has, so a wedged menu is still an unusable
+//! app to the person clicking it — it is simply no longer a silent one (dig-app#86 refuses to track
+//! such a popup at all). What matters HERE is narrower: the state loop keeps ticking, so there is
+//! nothing left in this module that is both stuck and safe to poke. So
 //! the exception is gone with the condition that earned it: a watchdog that acts where there is
 //! nothing safe to do is a watchdog with a second way to be wrong, and the general reclaim ladder
 //! belongs to the window service.
@@ -647,9 +651,14 @@ pub fn report(verdict: Verdict) {
 /// It used to also RECOVER one thing: a tray context menu still up past a two-minute bound, which it
 /// asked to close with a posted `WM_CANCELMODE`. That existed because the menu ran a nested modal
 /// loop on the state loop's own thread, so a menu that would not dismiss was an app that would not
-/// run. The tray draws on its own thread now (dig-app#90) and a wedged menu costs the user the menu
-/// alone, so there is nothing left here that is both stuck and safe to poke — and a watchdog that
-/// acts where there is nothing safe to do is a watchdog with a second way to be wrong.
+/// run. The tray draws on its own thread now (dig-app#90), so the stall no longer reaches this loop
+/// and there is nothing left here that is both stuck and safe to poke — a watchdog that acts where
+/// there is nothing safe to do is a watchdog with a second way to be wrong.
+///
+/// That is the whole of the justification, and it is deliberately narrow. It does NOT rest on a
+/// wedged menu being cheap for the user: the menu is the only route to every action this app has, so
+/// it is not. It rests on the recovery having belonged to a thread that is no longer the stuck one.
+/// The user-facing half is dig-app#86's refuse-to-track, which stops the popup being tracked at all.
 pub fn watch(state: Heartbeat, render: Heartbeat) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("dig-tray-vigil".to_owned())
