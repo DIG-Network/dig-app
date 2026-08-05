@@ -421,7 +421,14 @@ fn serve_with(
 
         tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt");
 
-        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw(job)));
+        // A consent surface is on screen for exactly the span of the draw, and the tray's foreground
+        // claim is disabled for exactly that span (dig-app#91). The guard is INSIDE `catch_unwind`
+        // and around nothing else: a job refused above without being drawn raised no window, so
+        // counting it would disable the claim over an empty screen.
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _on_screen = crate::confirm::surface::Raised::now();
+            draw(job)
+        }));
 
         // Whatever happened in there, this window is over: stop the watchdog nudging a context
         // that no longer has a window, before anything else can go wrong.
@@ -4096,11 +4103,19 @@ mod tests {
         worker: Option<std::thread::JoinHandle<()>>,
         store: ThemeChoice,
         _dir: tempfile::TempDir,
+        /// A drawing lane RAISES the process-global consent-surface count, so two lanes running at
+        /// once make any assertion about that count read another lane's window. Held for the lane's
+        /// whole life, which is exactly the span in which it may draw. See
+        /// [`crate::confirm::surface::ONE_SURFACE_AT_A_TIME`].
+        _exclusive: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Lane {
         /// Start the REAL [`serve_with`] loop on its own thread, drawing with `drawn`.
         fn serving(drawn: impl Fn(Job) -> Option<Outcome> + Send + 'static) -> Self {
+            // Taken BEFORE the thread starts, so no window of this lane's can be drawn while
+            // another lane's assertions are running.
+            let exclusive = crate::confirm::surface::one_surface_at_a_time();
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (jobs, rx) = mpsc::channel::<Job>();
@@ -4115,6 +4130,7 @@ mod tests {
                 worker: Some(worker),
                 store,
                 _dir: dir,
+                _exclusive: exclusive,
             }
         }
 
@@ -4155,6 +4171,71 @@ mod tests {
                 let _ = worker.join();
             }
         }
+    }
+
+    /// **A drawn prompt reports itself as a consent surface, for exactly as long as it is drawn.**
+    ///
+    /// The tray disables its foreground claim while this reads true (dig-app#91), so BOTH edges are
+    /// load-bearing in opposite directions: a signal that never rises leaves a prompt fighting the
+    /// tray for focus, and one that never falls silently disables the claim for the life of the
+    /// process — which looks exactly like a claim that is working.
+    ///
+    /// The "after" assertion is made while `lane` is STILL ALIVE and still serving. That is the
+    /// whole point of it: the neighbouring wrong implementation raises the guard for the span of
+    /// `serve_with` — "the prompt thread is running, so a surface is up" — and that reads identical
+    /// to this one at every moment except this one.
+    #[test]
+    fn a_prompt_is_a_consent_surface_only_while_it_is_being_drawn() {
+        use crate::confirm::surface::consent_surface_is_up;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let seen_during_draw = Arc::new(AtomicBool::new(false));
+        let recorder = Arc::clone(&seen_during_draw);
+        let lane = Lane::serving(move |_job| {
+            recorder.store(consent_surface_is_up(), Ordering::SeqCst);
+            Some(Outcome::Confirm(WindowIntent::Deny))
+        });
+
+        lane.ask().expect("the prompt thread answers");
+
+        assert!(
+            seen_during_draw.load(Ordering::SeqCst),
+            "a window being drawn IS a consent surface; with no signal the tray would keep \
+             claiming the foreground over a prompt the user is reading"
+        );
+        assert!(
+            !consent_surface_is_up(),
+            "the surface is gone the moment the draw returns — and the lane is still serving, \
+             which is what distinguishes this from a guard held for the thread's whole life"
+        );
+    }
+
+    /// **A prompt that panicked mid-draw is not left reported as on screen.**
+    ///
+    /// `serve_with` catches the panic and keeps the thread alive, so a leaked signal would cost
+    /// nothing visible: it would just disable the tray's foreground claim from then on, forever,
+    /// indistinguishably from the claim working. That is why the signal is an RAII guard and why
+    /// this drives a real panic through the real loop rather than trusting the guard's own unit test
+    /// — the unwind here passes through `eframe`-shaped frames and `catch_unwind`.
+    #[test]
+    fn a_panicking_prompt_does_not_leave_a_consent_surface_reported() {
+        use crate::confirm::surface::consent_surface_is_up;
+
+        let lane = Lane::serving(|_job| panic!("a prompt window panicked mid-draw"));
+
+        let outcome = lane
+            .ask()
+            .expect("the loop survives its window's panic and answers");
+        assert!(
+            matches!(outcome, Outcome::Confirm(WindowIntent::Unavailable)),
+            "a panicked draw is fail-closed, as it already was"
+        );
+        assert!(
+            !consent_surface_is_up(),
+            "the unwind must lower the signal; a raise/lower pair leaks it here and silently \
+             disables the tray's foreground claim for the rest of the process"
+        );
     }
 
     /// **Two prompts in a row are BOTH answerable.**

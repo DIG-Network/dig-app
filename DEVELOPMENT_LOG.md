@@ -731,3 +731,90 @@ Measured on the unguarded version: after one panicking press, five further press
 **zero** times — the flag latched, and every later press short-circuited before it could even notice
 the worker was dead. The panic guard fixes the thread; only a drop guard fixes the flag, and it keeps
 fixing it if someone later moves the guard.
+
+## `mt.exe` rejects `--` inside an XML comment, and names no line (dig-app#94)
+
+The Windows manifest embedder fails on a manifest whose comment contains a `--` — an em-dash typed as
+two hyphens, a `<!-- ... -- ... -->`, anything. XML genuinely forbids `--` inside a comment, so the
+rejection is correct; what costs the time is the report. The parse error names **no line and no
+column**, and the manifest it points at is generated, so the obvious reading is that the embedder or
+the build script is broken rather than that one comment has two hyphens in it. It cost a build cycle
+on #94. Write manifest comments with an en-dash or a single hyphen and the problem never appears.
+
+## `tray_icon::TrayIcon` is `!Send`, and "the crate allows a non-main thread" does not imply otherwise
+
+`tray-icon`'s docs say the tray may be built off the main thread on Windows and Linux
+(`tray-icon-0.23.1/src/lib.rs:17`), and that is true. It is a different claim from *the handle can be
+REACHED from another thread*, which is false: `TrayIcon` is an `Rc<RefCell<platform_impl::TrayIcon>>`
+(`lib.rs:346`) and the crate declares exactly one `unsafe impl Send`, for `WinIcon`
+(`platform_impl/windows/icon.rs:67`). So `set_icon`/`set_tooltip`/`set_menu` are pinned to whichever
+thread built the tray, forever.
+
+Conflating the two sank the first plan for dig-app#86: "move the tray to its own thread" would have
+dragged every repaint — and therefore the whole tick that drives them — along with it, and changed
+nothing. The fix was to move the STATE instead and let data cross where handles cannot. Worth
+remembering as a shape: when a plan depends on a type crossing a thread, check for the `Send` impl,
+not for a sentence about threads.
+
+## `with_any_thread` is not portable, so "spawn the event loop" is a platform fork
+
+tao exposes `with_any_thread` on `platform/windows.rs` and `platform/unix.rs` and **nowhere else** —
+macOS requires its event loop on the main thread with no escape. Any design that begins "run this
+event loop on a spawned thread" is therefore a three-way fork on a cross-platform surface. Inverting
+such a design — keep the loop where it must be, move the other thing — is usually one code path
+instead of three, and was here.
+
+## A one-slot latch beats a queue between a producer and a wedgeable renderer
+
+While a tray menu is open its thread runs nothing, so paints pile up. Queueing them means the menu
+closing is followed by a redraw of every state the app passed through, none of which anyone can see
+and only the last of which is true. A latch that REPLACES gives the renderer the current state and
+one redraw.
+
+The constraint that buys is easy to miss: **every frame must then be a complete picture.** A frame
+carrying "and the icon changed" as a delta is lost the moment a newer frame replaces it. That bug is
+invisible in any test that sends one frame.
+
+
+## Moving work between threads must move the diagnostic with it (dig-app#97)
+
+dig-app#90 moved `Shell_NotifyIcon` and `set_menu` off the state loop and onto a render loop of their
+own — and left the liveness watchdog watching the thread those calls had LEFT. The two `Phase`
+variants that named them, `Presence` and `Repaint`, went on existing, went on being asserted over by a
+bound test, and were stamped by nothing at all. A render loop wedged against a hung shell therefore
+froze the tray permanently with zero log lines: exactly the condition the watchdog exists to remove,
+reintroduced by relocating the work.
+
+Two things generalise. **A watchdog's scope is stated in terms of the WORK, not the thread** — "watch
+the loop that owes the user its deadlines" was true when one loop owed all of them and silently wrong
+the moment the work split. And **an enum variant nothing produces is a coverage lie**: the test
+ranging over every phase read as the broadest assertion in the module while two of its eight cases
+could not fail. `grep` for the variant's constructors before trusting a table-driven test's breadth.
+
+## Two mechanisms guarding one property hide each other from mutation testing
+
+The render heartbeat rests at an unbounded phase, the state heartbeat at a bounded one, so a guard
+that restored the wrong loop's resting phase would report an idle renderer as stalled forever.
+Reverting that fix — restoring a shared constant — left **every** test in the module green, because
+the reader (`Phase::from_byte`) discards a byte belonging to the other loop and quietly corrected the
+answer on the way out.
+
+Neither mechanism was wrong and the property genuinely held; what was wrong was a test that CLAIMED to
+pin the writer while only ever observing the reader. The fix is to assert at the layer the mechanism
+acts on — here, the raw atomic byte rather than the interpreted phase. Belt-and-braces defences are
+worth having, but each brace needs a test that fails when it alone is cut, or the second one silently
+becomes the only one.
+
+## `GetLastInputInfo` is attacker-writable, so "recent input" is not evidence of a human
+
+The tray's foreground claim checks that a click's timestamp sits beside the system's last-input tick,
+on the reasoning that a forged `WM_USER_TRAYICON` post carries no input. Measured: one `SendInput`
+with a zero-delta `MOUSEEVENTF_MOVE`, from an ordinary same-user process, took the last-input age from
+5,454,546 ms to 63 ms — invisibly, no cursor motion, on an idle machine. The gate costs a deliberate
+attacker one extra Win32 call.
+
+Keep the gate (it is free and stops the lazy case) but never size it as a bound, and never tighten its
+tolerance: the attacker controls the value being compared, so a shorter window declines real clicks
+under load and excludes no forgeries at all. The recurring lesson is the one this repo keeps
+relearning — **state a guard's rationale over the CLASS of attacker, not over one attacker behaviour**,
+because "a forged post carries no input" is true only of the forgery that did not try.

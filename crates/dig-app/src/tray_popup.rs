@@ -1,102 +1,157 @@
-//! Keeping the tray's context menu dismissable, and clearing it when it is not.
+//! Keeping the tray's context menu dismissable, and refusing to fight for the foreground when the
+//! screen belongs to someone else.
 //!
-//! Tray-only: it exists entirely to guard `tray-icon`'s `TrackPopupMenu`, and a headless build
-//! has no tray menu to track.
+//! Tray-only: it exists entirely to guard `tray-icon`'s `TrackPopupMenu`, and a headless build has
+//! no tray menu to track.
 //!
-//! # The defect
+//! # What this module is now, and what it stopped being
 //!
-//! `tray-icon` shows the tray menu with `TrackPopupMenu`, a **nested modal message loop** that runs
-//! inside the tray window proc, inside tao's dispatch, on the main thread. Measured on dig-app#86:
-//! while that loop is up, the tao user closure **does not run at all** — no menu-event drain, no
-//! repaint, no diagnostics. A menu that never dismisses is therefore a tray whose every item is dead,
-//! permanently, in silence, which is exactly what was reported.
+//! It used to do two things: claim the foreground before a popup was tracked, and BREAK a popup that
+//! got tracked anyway. The second one is gone, because the condition it recovered from is gone.
 //!
-//! What makes a menu never dismiss is documented (MSDN Q135788) and was reproduced here: the
-//! `SetForegroundWindow` that must precede the track was **refused**, the popup was tracked anyway,
-//! and it then could not be dismissed by clicking away, by Escape, or by anything else. It held the
-//! loop for 180 s and would have held it forever.
+//! `TrackPopupMenu` is a nested modal message loop. It used to run on the thread that also ran the
+//! app's tick, so an undismissable menu was not a broken menu — it was a broken *app*, permanently
+//! and silently (dig-app#86). The tray now owns a thread of its own (see `tray::spawn_renderer`), so
+//! a wedged menu costs the user the menu and nothing else: the tick keeps running, the next view
+//! keeps being computed, and the paint that cannot be applied waits for the menu to close. The
+//! rescue existed to survive an app-wide stall that can no longer happen, and it never worked
+//! anyway — a `PostMessageW` returning `Ok` means the message was *enqueued*, which the old code
+//! logged as though it were an effect.
 //!
-//! # The two things this module does
+//! # What remains: the Q135788 dance, which is PREVENTION and not recovery
 //!
-//! **1. Try for the foreground at BOTH edges of the click.** [`claim_foreground`] runs from
-//! `tray-icon`'s own event handler, which fires synchronously on button-DOWN and again on button-UP
-//! with `show_tray_menu` immediately after. The UP attempt is the one `SPEC.md` §3.1b-tp requires —
-//! it is literally the last of our code to run before `TrackPopupMenu` — and the DOWN attempt is a
-//! free extra try one whole click earlier. See [`Edge`] for why only one of them may speak.
+//! A popup tracked without foreground rights cannot be dismissed by clicking away, by Escape, or by
+//! anything else — measured here, holding a loop 180 s (MSDN Q135788, still printed in the current
+//! `TrackPopupMenu` Remarks; wxWidgets has carried the same dance in `src/msw/taskbar.cpp` for about
+//! thirty years). Isolating the tray does not make a menu dismiss itself. So [`claim_foreground`]
+//! stays, moved to the tray thread.
 //!
-//! Be precise about what this is and is not, because the first version of this comment overstated
-//! it. `tray-icon` has **always** called `SetForegroundWindow` immediately before the track — 0.19.3
-//! at `mod.rs:508`, 0.23.1 at `:544`. That half of Q135788 was never missing; it was **refused**.
-//! What 0.23.1 adds is the *other* half, the `PostMessageW(WM_NULL)` after the track (`:557`), and
-//! that one cannot help a menu whose track never returns.
+//! Be precise about what it is, because an earlier version of this comment overstated it.
+//! `tray-icon` has **always** called `SetForegroundWindow` immediately before the track (0.23.1 at
+//! `mod.rs:544`). That half of Q135788 was never missing; it was **refused**. This is the same Win32
+//! call, on the same window, tried one input edge sooner — a widening of the window in which rights
+//! may be held, never a guarantee. See [`Edge`] for which edge is the required one.
 //!
-//! So this is the same Win32 call, on the same window, tried one input edge sooner — and 0.23.1 also
-//! moved the track from button-DOWN to button-**UP** (`:491`), which widens that gap to a whole
-//! click. All four combinations, stated exhaustively, because the first version of this comment
-//! split the cases in its own favour:
+//! # Two reasons to decline the claim (dig-app#91)
 //!
-//! | rights at DOWN | rights at UP | effect of the extra attempt |
-//! |---|---|---|
-//! | yes | yes | none — the library's own call would have succeeded |
-//! | yes | no  | **the case this helps**: the foreground is taken while it can be |
-//! | no  | yes | none — and note the menu opens dismissable anyway |
-//! | no  | no  | none; this is where rung 2 is the whole answer |
+//! `WM_USER_TRAYICON` (6002) is an ordinary window message, so any process running as this user can
+//! post one and drive this whole path. Bounded honestly: that is a **nuisance lever against the
+//! consent surface**, not an authorization bypass — nothing in this path selects a menu item or
+//! answers a prompt, and an attacker already at this integrity level has easier options. What it can
+//! do is yank the foreground off a prompt the user is mid-read of, so they re-focus it and answer
+//! having lost their place.
 //!
-//! The third row is why the refusal ERROR is emitted on **UP** and not on DOWN: a refusal at DOWN
-//! predicts nothing, because UP may still be granted.
+//! So the claim is DECLINED in two situations, and the distinction from a FAILED claim is kept in
+//! the type ([`Claim`]) because they call for opposite reactions in the log:
 //!
-//! **2. Break a menu that got tracked anyway.** [`break_modal_menu`] posts `WM_CANCELMODE`, which
-//! **was measured to break a foreign thread out of `TrackPopupMenu`** — cross-process, cross-thread,
-//! from a plain `PostMessage` that never blocks the sender. The watchdog calls it when the pump has
-//! been parked in [`Phase::TrayMenu`](crate::pump_vigil::Phase::TrayMenu) past its bound.
+//! 1. **A consent surface is on screen** ([`dig_app_core::confirm::consent_surface_is_up`]). The
+//!    prompt outranks the menu; a menu opening without foreground rights is a menu the user has to
+//!    click twice, which is a far smaller harm than a consent window losing focus.
+//! 2. **The click was not preceded by real input** ([`input_evidence`]). A genuine tray click IS a
+//!    system input event, so the message's timestamp sits within milliseconds of the system's
+//!    last-input tick. A *naive* forged post carries no input at all.
 //!
-//! # What this is NOT, stated plainly
+//! **What (2) does NOT do**, stated over the whole class of attacker rather than over one attacker
+//! behaviour, because the narrower statement was wrong twice:
 //!
-//! This is **break, not refuse**. The right rule is *refuse to track rather than track hopefully* —
-//! but the track happens inside `tray-icon`, and there is no public API that withdraws the menu from
-//! a `Fn + Send + Sync` handler on the way into it. Genuinely refusing means owning the popup
-//! ourselves (`muda`'s `ContextMenu::show_context_menu_for_hwnd`, which is documented for exactly
-//! this), and that belongs with the window service, which is the thing entitled to decide whether a
-//! surface may be raised at all.
+//! - It gates only OUR claim. `tray-icon` makes its own `SetForegroundWindow` call inside
+//!   `show_tray_menu`, which this module cannot reach, so a forged post still reaches that one.
+//! - **It contributes nothing at all against an attacker who is trying.** The evidence it checks is
+//!   the same-user, unprivileged `GetLastInputInfo` counter, and one `SendInput` call with a
+//!   zero-delta `MOUSEEVENTF_MOVE` refreshes it — invisibly, with no cursor motion, on a completely
+//!   idle machine. Measured: a last-input age of 5,454,546 ms became 63 ms after a single call, well
+//!   inside `INPUT_TOLERANCE`. So the sequence `SendInput` → `PostMessageW(tray_hwnd, 6002, …,
+//!   WM_RBUTTONUP)` passes this gate every time. The earlier claim here — that it narrows the lever
+//!   to "only during active input" — understated it: the real cost to an attacker is one extra Win32
+//!   call, at any moment of their choosing.
 //!
-//! Until then: rung 1 may widen the window in which rights are held, and **rung 2 is what actually
-//! makes the wedge survivable** — it ends a stuck menu at the bound instead of leaving it until the
-//! user restarts DIG. Neither can manufacture consent, because a dismissed menu has selected no item.
+//! The gate STAYS. It costs nothing, it stops the unsophisticated forgery, and removing it would only
+//! make the lazy case free too. But it MUST NOT be sized as a bound, and `INPUT_TOLERANCE` MUST NOT
+//! be tightened in the hope of making it one: the attacker controls the numerator, so a shorter
+//! window declines real clicks under load and still admits every deliberate forgery. The only real
+//! remedy is refuse-to-track, which needs the window service to own the popup (SPEC §3.1b-tp).
 //!
-//! # What is still unknown
-//!
-//! **The field trigger is not identified.** The wedge was reproduced by posting `WM_USER_TRAYICON`
-//! synthetically, which bypasses the shell's input grant, so a refusal there is close to guaranteed
-//! — while a real click on a healthy process is granted, which the control confirmed. The chain
-//! *refused foreground ⇒ undismissable popup ⇒ permanent pump death* is measured end to end, but
-//! what refuses the foreground in the field is not. Rung 2 is justified by that chain, and it is the
-//! rung that holds regardless of the trigger.
+//! Bounded honestly, then: gate (1) is the one that protects the asset dig-app#91 names, and it is
+//! not bypassable this way — a consent surface being on screen is this process's own state, not a
+//! counter the attacker can write.
 
 /// The class name `tray-icon` gives its hidden tray window.
 ///
 /// **Not a message-only (`HWND_MESSAGE`) window** — it is a hidden top-level window created with
 /// `WS_EX_TOOLWINDOW` (`tray-icon` `mod.rs:100-118`). That distinction is load-bearing rather than
-/// pedantic: `EnumWindows` does not enumerate message-only windows, so had it truly been one,
-/// [`tray_window`] would find nothing and the rescue would be a SECOND silent no-op.
+/// pedantic: `EnumWindows` does not enumerate message-only windows.
 ///
 /// A private detail of that crate, and named here on purpose rather than reached for through an
-/// accessor that does not exist. Pinned by [`tests::the_tray_window_class_matches_the_crate`], which
-/// fails if a future bump renames it — the alternative is this silently finding nothing and the guard
-/// quietly becoming a no-op.
+/// accessor that does not exist. Pinned by
+/// `tests::the_tray_window_class_matches_the_crates_own_source`, which reads the literal out of the
+/// vendored dependency — if a bump renames it, [`tray_window`] finds nothing and [`claim_foreground`]
+/// becomes a silent no-op, which is the worst failure a guard has because it is indistinguishable
+/// from a guard that is working.
 #[cfg(target_os = "windows")]
 const TRAY_WINDOW_CLASS: &str = "tray_icon_app";
 
-/// Why the foreground could not be taken.
+/// How far apart a tray click's message timestamp and the system's last-input tick may be before the
+/// click is treated as having no input behind it.
+///
+/// Both are millisecond tick counts from the same `GetTickCount` base, so this is a real duration
+/// and not a fudge factor. One second is chosen from what has to fit inside it: the shell's own hop
+/// from the input event to `Shell_NotifyIcon`'s callback, plus this message's wait in the tray
+/// thread's queue. That queue is short by construction now — the tray thread does nothing but draw —
+/// and a second is roughly three orders of magnitude more than the hop costs.
+///
+/// Erring generous is the right direction, and the asymmetry is total rather than merely favourable.
+/// Too tight silently drops the foreground claim on ordinary clicks under load, which reintroduces
+/// the wedge this module exists to prevent. Too loose costs nothing whatsoever against a deliberate
+/// attacker, because the counter this is compared against can be refreshed on demand with one
+/// `SendInput` call — see the module docs. Shrinking this value buys no security and spends real
+/// reliability, so it MUST NOT be tuned downward as a hardening measure.
+#[cfg(target_os = "windows")]
+const INPUT_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Why the foreground could not be taken, when it was actually attempted.
 ///
 /// Carried rather than collapsed to a `bool` so the log says which of the two happened: a refusal is
-/// the interesting case (the wedge is now reachable), a missing window means the tray is not mounted
-/// and there is nothing to protect.
+/// the interesting case (an undismissable menu is now reachable), a missing window means the tray is
+/// not mounted and there is nothing to protect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoForeground {
     /// The tray's own window could not be found in this process.
     NoTrayWindow,
     /// Windows refused the request. The next tracked popup may be undismissable.
     Refused,
+}
+
+/// Why the foreground claim was deliberately not attempted (dig-app#91).
+///
+/// Kept apart from [`NoForeground`] because the two are opposite news. A refusal is a warning that
+/// the menu may wedge; a decline is this process behaving correctly, and reporting it at ERROR would
+/// be crying wolf on the one line an investigation is meant to trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decline {
+    /// A consent prompt is on screen and outranks the menu.
+    ConsentSurfaceUp,
+    /// No real input preceded this click, so it did not come from the user's hand.
+    NoRecentInput,
+}
+
+/// What came of a foreground claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// This process now holds the foreground.
+    Taken,
+    /// Not attempted, for a reason that is this process working as intended.
+    Declined(Decline),
+    /// Attempted, and did not succeed.
+    Failed(NoForeground),
+}
+
+/// Whether a tray click's timing is consistent with a human having caused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEvidence {
+    /// The message sits beside a real system input event.
+    Recent,
+    /// It does not, so nothing the user did produced it.
+    Absent,
 }
 
 /// What a tray click edge means for the popup that may follow it.
@@ -136,75 +191,122 @@ pub fn edge_of(opens_menu: bool, pressed: bool) -> Edge {
     }
 }
 
+/// Whether `message_time` sits close enough to `last_input` to have been caused by it.
+///
+/// Both are `GetTickCount`-based millisecond counters, which is why this takes them as bare `u32`s
+/// and does its own arithmetic: the counter **wraps every 49.7 days**, and a plain subtraction on
+/// either side of a wrap yields a gap of weeks. The modular distance — the smaller of the two
+/// directions — is correct across the wrap and is what this computes.
+///
+/// The backward direction is not a curiosity either. The system's last-input tick can be NEWER than
+/// the message being handled, because moving the mouse after releasing the button is itself input;
+/// that ordinary sequence must read as [`InputEvidence::Recent`], and a one-directional subtraction
+/// would call it a forgery.
+///
+/// Pure, and takes its inputs rather than reading the clock, so the table in
+/// `tests::input_evidence_is_a_modular_distance_in_both_directions` can state every case.
+pub fn input_evidence(
+    message_time: u32,
+    last_input: u32,
+    tolerance: std::time::Duration,
+) -> InputEvidence {
+    let forward = message_time.wrapping_sub(last_input);
+    let backward = last_input.wrapping_sub(message_time);
+    let apart = u64::from(forward.min(backward));
+    match apart <= tolerance.as_millis() as u64 {
+        true => InputEvidence::Recent,
+        false => InputEvidence::Absent,
+    }
+}
+
+/// Whether the foreground may be claimed at all, and why not if not.
+///
+/// Pure and separate from the Win32 call so the policy is a value a test can assert on. The order is
+/// deliberate: a consent surface is reported even when the input evidence is also absent, because it
+/// is the reason a reader would act on.
+pub fn refusal_to_claim(consent_surface_up: bool, evidence: InputEvidence) -> Option<Decline> {
+    if consent_surface_up {
+        return Some(Decline::ConsentSurfaceUp);
+    }
+    match evidence {
+        InputEvidence::Absent => Some(Decline::NoRecentInput),
+        InputEvidence::Recent => None,
+    }
+}
+
 /// Take the foreground for the tray's window, so the popup about to be tracked can be dismissed.
 ///
-/// Returns `Ok(())` when this process now holds the foreground.
-///
-/// Call it from `tray-icon`'s event handler and nowhere else: that handler is the last of our code to
-/// run before `show_tray_menu`, and the value of the call is entirely in its timing.
+/// Call it from `tray-icon`'s event handler and nowhere else: that handler is the last of our code
+/// to run before `show_tray_menu`, and the value of the call is entirely in its timing. It runs on
+/// the tray thread, inside a window proc, so it must never block — everything it consults is an
+/// atomic load or a Win32 read.
 #[cfg(target_os = "windows")]
-pub fn claim_foreground() -> Result<(), NoForeground> {
-    let hwnd = tray_window().ok_or(NoForeground::NoTrayWindow)?;
+pub fn claim_foreground() -> Claim {
+    let evidence = input_evidence(message_time(), last_input_tick(), INPUT_TOLERANCE);
+    if let Some(decline) =
+        refusal_to_claim(dig_app_core::confirm::consent_surface_is_up(), evidence)
+    {
+        return Claim::Declined(decline);
+    }
+
+    let Some(hwnd) = tray_window() else {
+        return Claim::Failed(NoForeground::NoTrayWindow);
+    };
     // SAFETY: `hwnd` was just enumerated from THIS PROCESS's windows (`tray_window` filters on the
     // owning process id), so it is a live handle we own. `SetForegroundWindow` has no other
     // precondition and cannot fail unsoundly; a refusal is a `false` return, not undefined behaviour.
     let taken = unsafe { windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd) };
     match taken.as_bool() {
-        true => Ok(()),
-        false => Err(NoForeground::Refused),
+        true => Claim::Taken,
+        false => Claim::Failed(NoForeground::Refused),
     }
 }
 
-/// Ask a modal menu loop on the tray's window to end.
+/// When the message being handled right now was posted, as a `GetTickCount` millisecond value.
 ///
-/// `WM_CANCELMODE` is **posted**, never sent: the caller is the watchdog thread and must not block on
-/// a thread that is by definition not responding. Measured to break `TrackPopupMenu` on another
-/// thread (dig-app#86).
-///
-/// Breaking a menu selects nothing, so this cannot authorize anything. That is why it is safe for a
-/// watchdog to do at all — see the module docs.
+/// Thread-local to the caller and therefore only meaningful inside a window proc, which is the only
+/// place this module is called from.
 #[cfg(target_os = "windows")]
-pub fn break_modal_menu() {
-    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CANCELMODE};
+fn message_time() -> u32 {
+    // SAFETY: no arguments and no preconditions; returns the current thread's last message time.
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageTime() as u32 }
+}
 
-    let Some(hwnd) = tray_window() else {
-        tracing::error!(
-            "a DIG tray menu is stuck, and the tray window could not be found to clear it; the tray \
-             will stay unresponsive until DIG is restarted"
-        );
-        return;
+/// When the system last saw input from the user, as a `GetTickCount` millisecond value.
+///
+/// A failure is reported as a tick half the counter away from now, which is the farthest any value
+/// can be in BOTH modular directions — so [`input_evidence`] reads `Absent` and the claim is
+/// DECLINED. Failing closed is right here: the cost is one menu that may need a second click, and
+/// the alternative — treating an unreadable clock as evidence of a human — hands the forgery back
+/// the path this check exists to narrow.
+#[cfg(target_os = "windows")]
+fn last_input_tick() -> u32 {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+
+    let mut info = LASTINPUTINFO {
+        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
     };
-    // SAFETY: posting is asynchronous and takes no pointer; `hwnd` is this process's own window.
-    let posted = unsafe {
-        PostMessageW(
-            hwnd,
-            WM_CANCELMODE,
-            windows::Win32::Foundation::WPARAM(0),
-            windows::Win32::Foundation::LPARAM(0),
-        )
-    };
-    match posted {
-        Ok(()) => tracing::warn!(
-            "a DIG tray menu outlived its bound and was asked to close so the tray can respond again"
-        ),
-        Err(e) => tracing::error!(error = %e, "a stuck DIG tray menu could not be asked to close"),
+    // SAFETY: `info` is a live local whose `cbSize` is set to its own size, which is the call's one
+    // precondition.
+    let read = unsafe { GetLastInputInfo(&mut info) };
+    match read.as_bool() {
+        true => info.dwTime,
+        false => {
+            // SAFETY: no arguments and no preconditions.
+            let now = unsafe { GetTickCount() };
+            now.wrapping_add(u32::MAX / 2)
+        }
     }
 }
 
-/// Find `tray-icon`'s hidden tray window, from ANY thread in this process.
+/// Find `tray-icon`'s hidden tray window.
 ///
-/// # Why this is process-scoped, and why the thread-scoped version was a silent no-op
-///
-/// The first version of this enumerated `EnumThreadWindows(GetCurrentThreadId(), …)` and its own
-/// doc asserted that both callers ran on the window's thread. That was false for the caller that
-/// matters: [`break_modal_menu`] runs on the `dig-tray-vigil` watchdog, which owns no windows at all
-/// — and it runs there *by design*, because the thread that owns the window is the thread that is
-/// stuck. So on the one path this module exists for, the lookup returned `None`, the rescue never
-/// posted, and the log said the tray window could not be found — a false diagnosis, from the module
-/// written to stop false diagnoses.
-///
-/// It is process-scoped now, filtered by owning process, and there is a test that drives it from a
-/// thread that owns nothing ([`tests::the_breaker_reaches_a_window_owned_by_another_thread`]).
+/// Process-scoped rather than thread-scoped, filtered by owning process. The tray thread that calls
+/// [`claim_foreground`] does own this window, so a thread-scoped lookup would work today — but that
+/// was the shape that made the old rescue a silent no-op once its caller moved threads, and a lookup
+/// that is only correct because of where it happens to be called from is a trap for the next caller.
 #[cfg(target_os = "windows")]
 fn tray_window() -> Option<windows::Win32::Foundation::HWND> {
     use std::sync::atomic::{AtomicIsize, Ordering};
@@ -217,8 +319,7 @@ fn tray_window() -> Option<windows::Win32::Foundation::HWND> {
     /// Where the callback leaves what it found.
     ///
     /// A `static` rather than a thread-local: `EnumWindows` takes a bare `extern "system"` function
-    /// pointer, and unlike the thread-scoped version this may now be called from more than one
-    /// thread. A racing second search can only store the same handle — there is exactly one such
+    /// pointer. A racing second search can only store the same handle — there is exactly one such
     /// window per process — so the store is benign, and it is reset before each enumeration.
     static FOUND: AtomicIsize = AtomicIsize::new(0);
 
@@ -255,31 +356,25 @@ fn tray_window() -> Option<windows::Win32::Foundation::HWND> {
     }
 }
 
-/// Nothing to do off Windows: no other platform draws its tray menu with a nested modal loop inside
-/// our own message pump, so there is no foreground to claim and no loop to break.
+/// Nothing to do off Windows: no other platform draws its tray menu with a nested modal loop, so
+/// there is no foreground to claim.
 #[cfg(not(target_os = "windows"))]
-pub fn claim_foreground() -> Result<(), NoForeground> {
-    Ok(())
+pub fn claim_foreground() -> Claim {
+    Claim::Taken
 }
-
-/// See the Windows implementation. A no-op elsewhere, for the same reason.
-#[cfg(not(target_os = "windows"))]
-pub fn break_modal_menu() {}
 
 /// How often a repeated foreground refusal may be restated.
 ///
-/// The same shape as the watchdog's own backoff, and for the same reason: the condition is worth
-/// saying and worth saying AGAIN, but not on every occurrence. `WM_USER_TRAYICON` is an ordinary
-/// window message, so any process running as this user can post one and drive this path as fast as
-/// it likes; without a bound that is a log-flooding lever. Bounded, it is a nuisance that costs one
-/// line every half minute.
+/// The condition is worth saying and worth saying AGAIN, but not on every occurrence.
+/// `WM_USER_TRAYICON` is an ordinary window message, so any process running as this user can drive
+/// this path as fast as it likes; without a bound that is a log-flooding lever (dig-app#91).
+/// Bounded, it is a nuisance that costs one line every half minute.
 const RESTATE_REFUSAL_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Rate-limits a repeated condition to one report per interval.
 ///
 /// Deliberately not a latch. The permanent case is the one that matters, and a latch reports it once
-/// and then goes quiet forever — the failure `Vigil` had, and the one the watchdog's own backoff was
-/// shaped to avoid.
+/// and then goes quiet forever.
 #[derive(Debug)]
 struct Throttle {
     every: std::time::Duration,
@@ -320,21 +415,29 @@ static REFUSALS: Throttle = Throttle::new(RESTATE_REFUSAL_AFTER);
 /// investigation will search for. At [`Edge::Speculative`] a refusal predicts nothing — UP may still
 /// be granted — so reporting there would be crying wolf on an ordinary click.
 ///
-/// Rate-limited, because this path is reachable by any process running as this user (dig-app#91).
-pub fn report_claim(outcome: Result<(), NoForeground>) {
+/// A DECLINE is not a refusal and is reported at DEBUG. It is this process choosing correctly, and
+/// putting it at ERROR would teach the reader to skip the one line that means something.
+pub fn report_claim(outcome: Claim) {
     match outcome {
-        Ok(()) => {}
-        Err(NoForeground::NoTrayWindow) => {
+        Claim::Taken => {}
+        Claim::Declined(Decline::ConsentSurfaceUp) => tracing::debug!(
+            "a DIG consent prompt is on screen, so the tray did not take the foreground from it"
+        ),
+        Claim::Declined(Decline::NoRecentInput) => tracing::debug!(
+            "a tray click arrived with no input behind it, so the tray did not take the foreground"
+        ),
+        Claim::Failed(NoForeground::NoTrayWindow) => {
             tracing::debug!("no DIG tray window to bring forward before its menu opens")
         }
-        Err(NoForeground::Refused) if REFUSALS.allows(std::time::Instant::now()) => {
+        Claim::Failed(NoForeground::Refused) if REFUSALS.allows(std::time::Instant::now()) => {
             tracing::error!(
                 "Windows refused to bring the DIG tray forward, so the menu about to open may not \
-                 be dismissable by clicking away or by Escape. If the tray stops responding, this \
-                 is why."
+                 be dismissable by clicking away or by Escape. The rest of DIG keeps running \
+                 either way — the tray draws on its own thread — but the menu may need a second \
+                 click to clear."
             )
         }
-        Err(NoForeground::Refused) => {}
+        Claim::Failed(NoForeground::Refused) => {}
     }
 }
 
@@ -342,24 +445,123 @@ pub fn report_claim(outcome: Result<(), NoForeground>) {
 mod tests {
     use super::*;
 
-    /// The class name is a private detail of `tray-icon`, so a bump can rename it and this guard
-    /// would then find nothing and silently do nothing at all — the worst failure a guard has,
-    /// because it looks exactly like a guard that is working.
+    /// The class name is a private detail of `tray-icon`, so a bump can rename it and [`tray_window`]
+    /// would then find nothing and [`claim_foreground`] would silently do nothing at all.
     ///
-    /// Read from the dependency's own source rather than restated, so the assertion cannot drift
-    /// into agreeing with itself.
+    /// # Why this reads the dependency's source instead of restating the literal
+    ///
+    /// The previous version of this test was `assert_eq!(TRAY_WINDOW_CLASS, "tray_icon_app")`, whose
+    /// own doc claimed the value was "read from the dependency's own source rather than restated, so
+    /// the assertion cannot drift into agreeing with itself". It was exactly a restatement and it
+    /// agreed with itself by construction (dig-app#90): a `tray-icon` bump that renamed the class
+    /// would leave this test GREEN and the guard dead.
+    ///
+    /// So the version is read out of `Cargo.lock` and the literal out of the vendored crate. A run
+    /// that cannot find either FAILS rather than skipping — a skip here reproduces the same
+    /// self-agreement, just more quietly.
     #[cfg(target_os = "windows")]
     #[test]
-    fn the_tray_window_class_matches_the_crate() {
-        assert_eq!(
-            TRAY_WINDOW_CLASS, "tray_icon_app",
-            "tray-icon's window class changed; claim_foreground and break_modal_menu are now no-ops"
+    fn the_tray_window_class_matches_the_crates_own_source() {
+        let source = vendored_tray_icon_source();
+        let registration = source
+            .lines()
+            .find(|line| line.contains("encode_wide(\""))
+            .unwrap_or_else(|| {
+                panic!(
+                    "tray-icon no longer registers its window class with `encode_wide(\"…\")`; \
+                     this pin cannot read the class name any more and must be rewritten against \
+                     however the crate spells it now"
+                )
+            });
+
+        assert!(
+            registration.contains(&format!("\"{TRAY_WINDOW_CLASS}\"")),
+            "tray-icon registers its window class in `{}`, which is not `{TRAY_WINDOW_CLASS}`; \
+             `claim_foreground` is now a silent no-op",
+            registration.trim()
         );
+    }
+
+    /// The `platform_impl/windows/mod.rs` of the exact `tray-icon` this workspace locks.
+    ///
+    /// Resolved from `Cargo.lock` rather than from a hardcoded version so the pin follows a bump
+    /// instead of quietly reading the source of a crate that is no longer built.
+    #[cfg(target_os = "windows")]
+    fn vendored_tray_icon_source() -> String {
+        let lock = workspace_root().join("Cargo.lock");
+        let locked = std::fs::read_to_string(&lock)
+            .unwrap_or_else(|e| panic!("Cargo.lock must be readable at {}: {e}", lock.display()));
+        let version = locked_version(&locked, "tray-icon").unwrap_or_else(|| {
+            panic!("tray-icon must appear in Cargo.lock; this crate depends on it directly")
+        });
+
+        let registry = cargo_home().join("registry").join("src");
+        let indexes = std::fs::read_dir(&registry).unwrap_or_else(|e| {
+            panic!(
+                "the cargo registry source dir must exist at {}: {e}",
+                registry.display()
+            )
+        });
+        for index in indexes.flatten() {
+            let candidate = index
+                .path()
+                .join(format!("tray-icon-{version}"))
+                .join("src")
+                .join("platform_impl")
+                .join("windows")
+                .join("mod.rs");
+            if let Ok(source) = std::fs::read_to_string(&candidate) {
+                return source;
+            }
+        }
+        panic!(
+            "tray-icon {version}'s vendored source was not found under {}; this pin must read the \
+             dependency's own source, and a run that cannot is the self-agreeing assertion \
+             dig-app#90 removed",
+            registry.display()
+        )
+    }
+
+    /// The version `Cargo.lock` pins for `name`.
+    ///
+    /// A three-line parse rather than a TOML dependency: the lock's `[[package]]` blocks put `name`
+    /// and `version` on consecutive lines, and pulling in a parser for one field would be the more
+    /// surprising choice in a test.
+    #[cfg(target_os = "windows")]
+    fn locked_version(lock: &str, name: &str) -> Option<String> {
+        let mut lines = lock.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() == format!("name = \"{name}\"") {
+                let version = lines.next()?.trim().strip_prefix("version = \"")?;
+                return Some(version.trim_end_matches('"').to_owned());
+            }
+        }
+        None
+    }
+
+    /// The workspace root: two levels up from `crates/dig-app`.
+    #[cfg(target_os = "windows")]
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/dig-app sits two levels below the workspace root")
+            .to_path_buf()
+    }
+
+    /// Where cargo keeps its registry, honouring `CARGO_HOME`.
+    #[cfg(target_os = "windows")]
+    fn cargo_home() -> std::path::PathBuf {
+        if let Ok(home) = std::env::var("CARGO_HOME") {
+            return std::path::PathBuf::from(home);
+        }
+        let profile = std::env::var("USERPROFILE").expect("USERPROFILE on Windows");
+        std::path::Path::new(&profile).join(".cargo")
     }
 
     /// Every click edge is classified, and the three outcomes are genuinely distinct.
     ///
-    /// This is the table the first version got wrong twice over: it claimed on DOWN, which is not
+    /// This is the table an earlier version got wrong twice over: it claimed on DOWN, which is not
     /// the edge `tray-icon` 0.23.1 tracks on, and it did not constrain the button, so a middle click
     /// produced an ERROR predicting that "the menu about to open may not be dismissable" at an edge
     /// where no menu ever opens.
@@ -386,11 +588,97 @@ mod tests {
         assert_eq!(edge_of(false, false), Edge::Irrelevant, "…on either edge");
     }
 
-    /// The two refusals are distinct values, because they mean opposite things: one says the wedge
-    /// just became reachable, the other says there is no tray at all.
+    /// The input cross-check is a MODULAR distance, measured in both directions.
+    ///
+    /// Three neighbouring wrong implementations get a row each, because each is a plausible way to
+    /// write this and each is silently wrong in only some inputs:
+    ///
+    /// * A one-directional `message_time - last_input` calls the ordinary sequence of moving the
+    ///   mouse *after* releasing the button a forgery, so real clicks silently lose their claim.
+    /// * Ignoring the `GetTickCount` wrap makes every click in the first second after 49.7 days of
+    ///   uptime read as a forgery.
+    /// * A tolerance applied to only one side lets a post fifty seconds after the last input pass.
+    ///
+    /// The bound is pinned from BOTH sides: exactly at tolerance must pass, one millisecond over
+    /// must fail. A bound tested only from below can only confirm itself.
     #[test]
-    fn the_two_failures_are_told_apart() {
+    fn input_evidence_is_a_modular_distance_in_both_directions() {
+        let tolerance = std::time::Duration::from_secs(1);
+
+        assert_eq!(
+            input_evidence(10_000, 10_000, tolerance),
+            InputEvidence::Recent,
+            "a click whose message time IS the last input time is as genuine as it gets"
+        );
+        assert_eq!(
+            input_evidence(11_000, 10_000, tolerance),
+            InputEvidence::Recent,
+            "exactly at the tolerance is inside it; a bound tested only from below confirms itself"
+        );
+        assert_eq!(
+            input_evidence(11_001, 10_000, tolerance),
+            InputEvidence::Absent,
+            "one millisecond over the tolerance is outside it"
+        );
+        assert_eq!(
+            input_evidence(10_000, 10_500, tolerance),
+            InputEvidence::Recent,
+            "input NEWER than the message is the ordinary mouse-move-after-release sequence, not a \
+             forgery; a one-directional subtraction rejects every one of those clicks"
+        );
+        assert_eq!(
+            input_evidence(50, u32::MAX - 50, tolerance),
+            InputEvidence::Recent,
+            "101 ms apart across the 49.7-day GetTickCount wrap is 101 ms, not seven weeks"
+        );
+        assert_eq!(
+            input_evidence(60_000, 10_000, tolerance),
+            InputEvidence::Absent,
+            "a message posted fifty seconds after the user last touched anything had no hand \
+             behind it — the forged post dig-app#91 demonstrated"
+        );
+    }
+
+    /// The claim is declined for a consent surface and for a forged click, and for nothing else.
+    ///
+    /// The first row is the one that makes the other three mean anything: with both conditions
+    /// healthy the claim MUST go ahead, or this "fix" would have disabled the Q135788 dance
+    /// altogether and turned every ordinary menu into the wedge the dance prevents.
+    #[test]
+    fn the_claim_is_declined_only_for_a_prompt_or_a_click_with_no_hand_behind_it() {
+        assert_eq!(
+            refusal_to_claim(false, InputEvidence::Recent),
+            None,
+            "an ordinary click with no prompt on screen MUST still claim the foreground; \
+             declining here reintroduces the undismissable menu"
+        );
+        assert_eq!(
+            refusal_to_claim(true, InputEvidence::Recent),
+            Some(Decline::ConsentSurfaceUp),
+            "a real click must not yank the foreground off a prompt the user is reading"
+        );
+        assert_eq!(
+            refusal_to_claim(false, InputEvidence::Absent),
+            Some(Decline::NoRecentInput),
+            "a forged post gets no help from us"
+        );
+        assert_eq!(
+            refusal_to_claim(true, InputEvidence::Absent),
+            Some(Decline::ConsentSurfaceUp),
+            "when both hold, the prompt is the reason a reader would act on"
+        );
+    }
+
+    /// A decline and a failure are different values, because they are opposite news: one says this
+    /// process chose correctly, the other says a menu may be about to wedge.
+    #[test]
+    fn a_decline_is_never_reported_as_a_refusal() {
+        assert_ne!(
+            Claim::Declined(Decline::ConsentSurfaceUp),
+            Claim::Failed(NoForeground::Refused)
+        );
         assert_ne!(NoForeground::Refused, NoForeground::NoTrayWindow);
+        assert_ne!(Decline::ConsentSurfaceUp, Decline::NoRecentInput);
     }
 
     /// The refusal line is rate-limited, and NOT latched.
@@ -427,149 +715,52 @@ mod tests {
     /// a panic unwinds through foreign frames.
     #[test]
     fn reporting_is_total() {
-        report_claim(Ok(()));
-        report_claim(Err(NoForeground::Refused));
-        report_claim(Err(NoForeground::NoTrayWindow));
+        report_claim(Claim::Taken);
+        report_claim(Claim::Declined(Decline::ConsentSurfaceUp));
+        report_claim(Claim::Declined(Decline::NoRecentInput));
+        report_claim(Claim::Failed(NoForeground::Refused));
+        report_claim(Claim::Failed(NoForeground::NoTrayWindow));
     }
 
-    /// The rescue must reach a window owned by a DIFFERENT thread, because that is the only
-    /// situation it is ever used in.
+    /// A real consent surface makes the real [`claim_foreground`] decline, without touching a window.
     ///
-    /// # Why the fixture has two threads and not one
+    /// This is the end-to-end of dig-app#91's first fix, and it is worth driving through the actual
+    /// function rather than only through [`refusal_to_claim`]: the pure policy being right proves
+    /// nothing if `claim_foreground` never consults it, which is exactly the placement mistake this
+    /// pair of assertions can see.
     ///
-    /// This is the test whose absence let a no-op ship. `break_modal_menu` runs on the watchdog,
-    /// which owns no windows — deliberately, since the thread that owns the tray window is the
-    /// thread that is stuck. A single-threaded fixture passes against a thread-scoped lookup and
-    /// therefore proves nothing about the only path that matters. So the window is created and
-    /// pumped on one thread and the breaker is called from another, and the assertion is that the
-    /// message ARRIVED at the window proc — counted there — rather than that the call returned.
-    ///
-    /// A test asserting `PostMessageW` returned `Ok` would pass against a handle from the wrong
-    /// process, which is the neighbouring wrong implementation.
+    /// The control is what makes it a placement test rather than an outcome test. With nothing on
+    /// screen the call must produce something OTHER than the consent decline — whatever the rest of
+    /// the path decides in a windowless test process — so the second assertion is pinning the
+    /// consent gate specifically and not a value the function returns anyway. And because a test
+    /// process owns no tray window, a gate placed after the lookup would answer `NoTrayWindow` there
+    /// and fail that second assertion.
     #[cfg(target_os = "windows")]
     #[test]
-    fn the_breaker_reaches_a_window_owned_by_another_thread() {
-        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-        use std::sync::Arc;
-        use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::System::Threading::GetCurrentThreadId;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            PostThreadMessageW, RegisterClassW, TranslateMessage, MSG, WINDOW_EX_STYLE,
-            WM_CANCELMODE, WM_QUIT, WNDCLASSW, WS_OVERLAPPED,
-        };
-
-        /// How many `WM_CANCELMODE`s the window proc has actually received. A `static` because a
-        /// window proc is a bare `extern "system"` function with nowhere to put captured state.
-        static CANCELS: AtomicU32 = AtomicU32::new(0);
-
-        unsafe extern "system" fn proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-            if msg == WM_CANCELMODE {
-                CANCELS.fetch_add(1, Ordering::SeqCst);
-            }
-            // SAFETY: forwarding the same arguments the system supplied.
-            unsafe { DefWindowProcW(hwnd, msg, w, l) }
-        }
-
-        /// The owning thread's id, so the pump can be ended even when nothing was delivered.
-        static OWNER_TID: AtomicU32 = AtomicU32::new(0);
-
-        CANCELS.store(0, Ordering::SeqCst);
-        OWNER_TID.store(0, Ordering::SeqCst);
-        let ready = Arc::new(AtomicBool::new(false));
-        let owner_ready = Arc::clone(&ready);
-
-        // The owning thread: registers `tray-icon`'s class, creates the window, and pumps. It must
-        // keep pumping, because a posted message is only delivered by a running pump.
-        let owner = std::thread::spawn(move || {
-            let class: Vec<u16> = TRAY_WINDOW_CLASS.encode_utf16().chain([0]).collect();
-            // SAFETY: every pointer below is to a live local that outlives the call.
-            unsafe {
-                let instance = GetModuleHandleW(PCWSTR::null()).expect("module handle");
-                let hinstance: windows::Win32::Foundation::HINSTANCE = instance.into();
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(proc),
-                    hInstance: hinstance,
-                    lpszClassName: PCWSTR(class.as_ptr()),
-                    ..Default::default()
-                };
-                // A non-zero atom, or the class already exists from an earlier run in this process.
-                RegisterClassW(&wc);
-                let hwnd = CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
-                    PCWSTR(class.as_ptr()),
-                    PCWSTR::null(),
-                    WS_OVERLAPPED,
-                    0,
-                    0,
-                    0,
-                    0,
-                    None,
-                    None,
-                    hinstance,
-                    None,
-                )
-                .expect("test tray window");
-
-                OWNER_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
-                owner_ready.store(true, Ordering::SeqCst);
-                let mut msg = MSG::default();
-                while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                    if msg.message == WM_QUIT {
-                        break;
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                    if CANCELS.load(Ordering::SeqCst) > 0 {
-                        break;
-                    }
-                }
-                let _ = DestroyWindow(hwnd);
-            }
-        });
-
-        while !ready.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        // The control: this thread owns no windows, exactly like the watchdog. A thread-scoped
-        // lookup returns `None` here and the breaker becomes a silent no-op — which is the bug this
-        // test exists for.
-        assert!(
-            tray_window().is_some(),
-            "the tray window must be findable from a thread that owns no windows; a thread-scoped \
-             lookup made the whole rescue a no-op"
+    fn a_live_consent_surface_declines_the_claim_before_any_window_is_touched() {
+        let control = claim_foreground();
+        assert_ne!(
+            control,
+            Claim::Declined(Decline::ConsentSurfaceUp),
+            "no prompt is on screen in this fixture, so the consent decline must not fire; if it \
+             does, the control proves nothing"
         );
 
-        break_modal_menu();
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while CANCELS.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let delivered = CANCELS.load(Ordering::SeqCst);
-
-        // End the owner's pump UNCONDITIONALLY, before asserting. The owner only leaves `GetMessageW`
-        // when a cancel arrives, so joining first hangs forever on exactly the failure this test
-        // exists to catch: a mutant posting the wrong message ran 208 s with no output. A test that
-        // hangs instead of failing is not a test — the assertion below was correct and unreachable.
-        // SAFETY: posting to a thread id this test published above; takes no pointer.
-        unsafe {
-            let _ = PostThreadMessageW(
-                OWNER_TID.load(Ordering::SeqCst),
-                WM_QUIT,
-                WPARAM(0),
-                LPARAM(0),
-            );
-        }
-        owner.join().expect("owner thread");
-
+        // Raised WITHOUT `dig_app_core`'s `ONE_SURFACE_AT_A_TIME` exclusion, because that mutex is
+        // `pub(crate)` to dig-app-core and unreachable from this crate. Safe only because this is the
+        // one test in this binary that touches the process-global count, and `cargo test` gives each
+        // crate its own test process — so nothing here can run beside it.
+        //
+        // That is a property of the current test set, not of the design. Adding a SECOND
+        // count-touching test to this binary breaks it, and the symptom is a parallel-only flake in
+        // whichever test asserts "nothing is up". Closing it properly means exporting the exclusion
+        // across the crate boundary (dig-app#99).
+        let _on_screen = dig_app_core::confirm::surface::Raised::now();
         assert_eq!(
-            delivered, 1,
-            "WM_CANCELMODE must ARRIVE at the window proc on the other thread; a call that merely \
-             returned Ok proves nothing about delivery"
+            claim_foreground(),
+            Claim::Declined(Decline::ConsentSurfaceUp),
+            "with a consent surface up the claim must be declined before the tray window is even \
+             looked for"
         );
     }
 }

@@ -300,7 +300,7 @@ declare DPI awareness in a manifest (step 0), move the tray to its own tao threa
 `with_any_thread` and then DELETE the whack-a-mole layer that guards `TrackPopupMenu` (step 1), and
 make a stranded phase unrepresentable (step 2). Steps 0 and 2 shipped in the PR carrying this file.
 
-**Step 1 did not ship, because its stated rationale is falsified at source.**
+**Step 1's stated rationale WAS falsified at source, and step 1 shipped anyway — inverted.**
 
 The plan's four dependency facts were re-verified in the locked versions and all four HOLD:
 
@@ -311,42 +311,48 @@ The plan's four dependency facts were re-verified in the locked versions and all
 | tao's main-thread gate is per-THREAD and `with_any_thread` disables it | `tao-0.30.8/src/platform_impl/windows/event_loop.rs:170-178`; `src/platform/windows.rs:106` |
 | DPI awareness is set by whichever event loop is built first, behind a `Once` | `tao-0.30.8/.../event_loop.rs:180-182` -> `dpi.rs:20-26` |
 
-A FIFTH fact, not in the plan, decides step 1:
+A FIFTH fact, not in the plan, is what forced the inversion:
 
 > **`tray_icon::TrayIcon` is `Rc<RefCell<platform_impl::TrayIcon>>`** (`tray-icon-0.23.1/src/lib.rs:346`),
 > and the crate declares no `unsafe impl Send` for it — the only one in the crate is for `WinIcon`
 > (`platform_impl/windows/icon.rs:67`). The tray handle is therefore `!Send` and `!Sync`.
 
 Everything that repaints the tray — `set_icon`, `set_tooltip`, `set_menu` — must run on the thread
-that created it. The tick loop repaints. So the tick loop CANNOT be separated from the tray, and
-moving the tray to its own thread moves the tick loop with it.
+that created it. So the plan's shape, *move the tray to a spawned thread*, would have dragged the
+tick along with it and changed nothing; the first attempt at step 1 correctly refused to build it.
 
-The consequence is the one that matters: after the move, an open `TrackPopupMenu` still stops the
-tick, exactly as it does today. The plan's premise — *"a wedged `TrackPopupMenu` then blocks only the
-tray thread; the main loop keeps ticking"* — does not hold, and with it the deletion rationale
-(*"with the tray isolated these have no subject"*) does not hold either:
+**What shipped instead (dig-app#90/#91).** The question the previous reviewer left open — *"is the
+repaint made message-driven so the tick can live elsewhere?"* — was answered YES, and the direction
+of the move was reversed:
 
-- `Phase::TrayMenu` still has a subject. Deleting it would make every ordinary menu-read of more than
-  ten seconds an ERROR telling the user to restart DIG. That is the false-alarm regression 3.1b-lv
-  exists to prevent, several times a day.
-- `break_modal_menu` still has a subject. A wedged popup still ends the tray permanently; the rescue
-  is still the only thing that ends it short of a restart.
-- `claim_foreground` still has a subject, for the same reason.
+- The **tray keeps the main thread**. That is where it has to be anyway: macOS requires the event
+  loop on the main thread, and tao's `with_any_thread` exists only on Windows and Unix, so the
+  plan's shape would have been a three-way platform fork. Keeping the tray put makes it one path.
+- The **tick moved** to `dig-app-tick`, and became a pure state producer. It reads shared state,
+  compares views, builds a `MenuModel`, and posts a `Paint` — arithmetic over plain data, touching
+  no native object, so nothing native can stop it.
+- The seam is `dig_app::tray_link`: a one-slot latch plus a wake. Data crosses, handles never do.
+  The latch REPLACES rather than queues, so a menu wedged for three minutes leaves the renderer the
+  state the app is in when the menu closes, not three hundred stale frames. Every frame is therefore
+  a complete picture — a partial frame would lose whatever the frame it replaced was carrying.
+- The synchronous dependency that made the split impossible dissolved with it. The old loop advanced
+  its `model` only `if let Some(rendered) = repaint(..)` — the tick's own progress was conditional on
+  a native rebuild succeeding. The tick now advances unconditionally, and the renderer holds what is
+  attached.
 
-Deleting them would not remove whack-a-mole; it would remove the only mitigation and leave the wedge.
+**And so the deletion argument became available after all.** With the tick unable to be stalled by
+the tray:
 
-**What the thread move is still worth, and what it needs first.** Freeing the main thread is real, but
-its value is entirely in step 3 (the prompt host, whose `PROMPT_THREAD: OnceLock` sits behind winit's
-per-PROCESS latch). Doing the topology change now, on a consent-bearing surface, with no present-tense
-benefit and a rationale known to be wrong, is building on an unsettled shape.
+- `Phase::TrayMenu`, `TRAY_MENU_PATIENCE` and `Heartbeat::note_tray_menu` are **deleted**. An open
+  menu is no longer a pump silence, so there is nothing to name and no reason for a second tolerance
+  band. The watchdog now watches the tick, where every deadline the app owes a user lives.
+- `break_modal_menu` is **deleted**. It recovered from an app-wide stall that can no longer happen,
+  and it never worked: `PostMessageW` returning `Ok` means *enqueued*, which the code logged as an
+  effect.
+- `claim_foreground` is **KEPT**, and moved to the tray's handler on the main thread. It is
+  PREVENTION, not recovery — the Q135788 dance is what makes a popup dismissable at all, and
+  isolation does not change that. `tray_popup.rs` shrank to it.
 
-**Recommendation for the next decider.** Re-scope step 1 as *"give the prompt host the main thread"*
-rather than *"isolate the tray"*, and settle the two questions the `!Send` fact raises before any code
-is written:
-
-1. Does the tick keep the tray's thread (simple; the menu still stalls it; keep the mitigations), or
-   is the repaint made message-driven so the tick can live elsewhere (a real redesign; only then does
-   the deletion argument become available)?
-2. With DPI now declared in the manifest, the ordering constraint that made step 0 a prerequisite is
-   discharged — a second event loop can no longer change this process's awareness. That is the one
-   part of the plan that step 0 has already made safe.
+**What did NOT change.** The prompt host (step 3) still needs the main thread for its
+`PROMPT_THREAD: OnceLock` behind winit's per-process latch, and still does not have it — the tray is
+sitting there. That remains #95's problem, and #86 stays open until it lands.
