@@ -69,7 +69,76 @@
 //! make the lazy case free too. But it MUST NOT be sized as a bound, and `INPUT_TOLERANCE` MUST NOT
 //! be tightened in the hope of making it one: the attacker controls the numerator, so a shorter
 //! window declines real clicks under load and still admits every deliberate forgery. The only real
-//! remedy is refuse-to-track, which needs the window service to own the popup (SPEC §3.1b-tp).
+//! remedy is refuse-to-track — which is now implemented here, and did NOT need the window service
+//! after all. See below.
+//!
+//! # Refuse-to-track: the actual fix for dig-app#86
+//!
+//! Everything above is PREVENTION that can fail, and when it fails the popup is tracked anyway. That
+//! is the whole defect. Measured on the user's own machine: nine watchdog reports, `silent_for_ms`
+//! climbing 120141 → 360244 over six minutes, the menu never dismissing, ended only by relaunching
+//! dig-app. **The tray menu is not one feature among several — it is the only route to every action
+//! this app has**, so a wedged menu is a wedged app from the seat of the person using it. An earlier
+//! note here called it "the menu and nothing else"; that was wrong, and it is corrected in `SPEC.md`
+//! too.
+//!
+//! An undismissable menu is strictly worse than no menu, because no menu can be clicked again and an
+//! undismissable one cannot be anything again. So when the claim comes back
+//! [`NoForeground::Refused`] — the one outcome that is POSITIVE evidence Q135788 applies — the menu
+//! is suppressed for that click instead of being tracked into a wedge.
+//!
+//! ## How a refusal is enforced, given `tray-icon` does the tracking
+//!
+//! `tray-icon` 0.23.1's window proc calls our handler synchronously (`TrayIconEvent::send`) and only
+//! THEN reaches its track, which is gated on two of its own userdata flags:
+//!
+//! ```text
+//! TrayIconEvent::send(event);                                    // <- our handler runs here
+//! if (userdata.menu_on_right_click && lparam == WM_RBUTTONUP)    // <- and this is read after it
+//!     || (userdata.menu_on_left_click && lparam == WM_LBUTTONUP) { … show_tray_menu(…) }
+//! ```
+//!
+//! Those flags are writable from inside that same handler: the crate sets them by `SendMessageW` to
+//! its own tray window, which — posted from the tray thread to a window that thread owns — is a
+//! direct, synchronous, re-entrant call into the same proc, writing the same heap `TrayUserData` the
+//! outer frame is about to read. [`allow_menu`] and [`suppress_menu`] send exactly those two
+//! messages. No fork, no patch, no vendoring.
+//!
+//! **The one assumption, stated because it is the load-bearing one.** The outer frame must re-read
+//! the flag after the nested write rather than having cached it across `TrayIconEvent::send`. It
+//! reaches the field through a `&mut *raw` local rather than a function parameter, so rustc emits no
+//! `noalias` for it and the opaque cross-crate call between the write and the read clobbers any
+//! cached load. That is an argument from how the code is shaped, not a measurement, and it is the
+//! part of this module a reader should be most suspicious of.
+//!
+//! **What makes it safe to rest on anyway is the direction it fails in.** If a suppression somehow
+//! does not take effect, the menu is tracked — which is exactly today's behaviour, the behaviour on
+//! every build before this one. The fix can fail to help; it cannot make anything worse. A guard
+//! whose failure mode is the status quo needs no second guard behind it.
+//!
+//! ## Why only [`NoForeground::Refused`], and nothing else, refuses the track
+//!
+//! Refusing on any softer signal would cost real menus for no measured gain, so the suppression is
+//! narrowed to the single outcome that is EVIDENCE of the wedge condition rather than absence of
+//! evidence:
+//!
+//! - [`Claim::Taken`] — we hold the foreground, so Q135788 is satisfied and the menu will dismiss.
+//! - [`Claim::Declined`] — we chose not to try, so we learned NOTHING about our rights.
+//!   `tray-icon` still makes its own `SetForegroundWindow` call and it may well succeed. Suppressing
+//!   here would refuse the menu on the strength of a question never asked.
+//! - [`Claim::Failed(NoTrayWindow)`] — there is no window, so there is also nothing to send the
+//!   suppression message TO. Unsuppressible and uninformative at once.
+//! - [`Claim::Failed(Refused)`] — Windows was asked, on the exact window and the exact edge that
+//!   matter, and said no. The next `TrackPopupMenu` is the wedge. This one, and only this one.
+//!
+//! ## A refusal must be recoverable, and the DOWN edge is what recovers it
+//!
+//! A menu that stops appearing forever is its own outage, so suppression is per-click and never
+//! sticky. [`Edge::Speculative`] (button-DOWN) claims a whole click early and RESTORES the menu the
+//! moment that claim succeeds — so the very next click after eligibility returns opens normally,
+//! with no restart and nothing for the user to do but click again. The suppressed state is published
+//! through [`menu_is_suppressed`] so the shell can say so on the tray's hover text; a menu that
+//! silently does not appear would trade one baffling state for another.
 //!
 //! Bounded honestly, then: gate (1) is the one that protects the asset dig-app#91 names, and it is
 //! not bypassable this way — a consent surface being on screen is this process's own state, not a
@@ -107,6 +176,58 @@ const TRAY_WINDOW_CLASS: &str = "tray_icon_app";
 /// reliability, so it MUST NOT be tuned downward as a hardening measure.
 #[cfg(target_os = "windows")]
 const INPUT_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `tray-icon`'s private "show the menu on left click" message.
+///
+/// A private constant of that crate (`platform_impl/windows/mod.rs:48`), named here for the same
+/// reason and with the same protection as [`TRAY_WINDOW_CLASS`]: pinned by
+/// `tests::the_menu_gate_messages_match_the_crates_own_source`, which reads the literals out of the
+/// vendored dependency. If a bump renumbers them, [`suppress_menu`] would send a message the proc
+/// does not understand and the refusal would become a silent no-op — the worst failure a guard has,
+/// because it is indistinguishable from a guard that is working.
+#[cfg(target_os = "windows")]
+const WM_USER_SHOW_MENU_ON_LEFT_CLICK: u32 = 6009;
+
+/// `tray-icon`'s private "show the menu on right click" message. See
+/// [`WM_USER_SHOW_MENU_ON_LEFT_CLICK`].
+#[cfg(target_os = "windows")]
+const WM_USER_SHOW_MENU_ON_RIGHT_CLICK: u32 = 6010;
+
+/// Whether the tray menu is currently suppressed, for the shell's hover text.
+///
+/// A plain atomic rather than a channel: the writer is a window proc that must never block, and the
+/// reader is the tick, which only wants the latest answer.
+static MENU_SUPPRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the last tray click had its menu refused because Windows would not bring DIG forward.
+///
+/// Read by the tick so the tray's hover text can explain a menu that did not appear. Clears itself
+/// as soon as a claim succeeds, so the text never outlives the condition.
+pub fn menu_is_suppressed() -> bool {
+    MENU_SUPPRESSED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// What to do about the popup `tray-icon` is about to track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Track {
+    /// Let it track. Either we hold the foreground, or we have no evidence we do not.
+    Allowed,
+    /// Do not track: Windows refused the foreground, so this popup could not be dismissed.
+    Refused,
+}
+
+/// Whether a popup may be tracked, given how the foreground claim went.
+///
+/// Pure and separate from the Win32 calls so the policy is a value a test can state in full. See the
+/// module docs for why exactly one outcome refuses.
+pub fn track_after(claim: Claim) -> Track {
+    match claim {
+        Claim::Failed(NoForeground::Refused) => Track::Refused,
+        Claim::Taken | Claim::Declined(_) | Claim::Failed(NoForeground::NoTrayWindow) => {
+            Track::Allowed
+        }
+    }
+}
 
 /// Why the foreground could not be taken, when it was actually attempted.
 ///
@@ -236,12 +357,18 @@ pub fn refusal_to_claim(consent_surface_up: bool, evidence: InputEvidence) -> Op
 
 /// Take the foreground for the tray's window, so the popup about to be tracked can be dismissed.
 ///
-/// Call it from `tray-icon`'s event handler and nowhere else: that handler is the last of our code
-/// to run before `show_tray_menu`, and the value of the call is entirely in its timing. It runs on
-/// the tray thread, inside a window proc, so it must never block — everything it consults is an
-/// atomic load or a Win32 read.
+/// # Private, and that is the fix for the shape dig-app#86 shipped in
+///
+/// The wedge was not a missing claim — the claim was made, on the right edge, and its ANSWER was
+/// dropped on the floor (`let _ = claim_foreground()`). A `Claim` that a caller is free to discard
+/// is a `Claim` that will be discarded. So the only ways in are [`claim_and_decide`], which acts on
+/// the answer before returning it, and [`claim_early`], which is silent by construction. Nothing
+/// outside this module can ask the question without the consequence being applied.
+///
+/// It runs on the tray thread, inside a window proc, so it must never block — everything it consults
+/// is an atomic load or a Win32 read.
 #[cfg(target_os = "windows")]
-pub fn claim_foreground() -> Claim {
+fn claim_foreground() -> Claim {
     let evidence = input_evidence(message_time(), last_input_tick(), INPUT_TOLERANCE);
     if let Some(decline) =
         refusal_to_claim(dig_app_core::confirm::consent_surface_is_up(), evidence)
@@ -261,6 +388,98 @@ pub fn claim_foreground() -> Claim {
         false => Claim::Failed(NoForeground::Refused),
     }
 }
+
+/// Tell `tray-icon` whether either mouse button may open the menu.
+///
+/// Both buttons together, always: dig-app leaves `menu_on_left_click` and `menu_on_right_click` at
+/// their defaults, so a refusal that silenced only one of them would refuse the menu on one button
+/// and wedge on the other.
+///
+/// Sends the crate's own private messages to its own window, which is what its public setters do —
+/// they are unreachable from here because the `TrayIcon` lives on the render loop and this runs
+/// inside a window proc. From the tray thread to a window that thread owns, `SendMessageW` is a
+/// direct synchronous call into the proc, so the write lands before this returns.
+#[cfg(target_os = "windows")]
+fn set_menu_opens_on_click(hwnd: windows::Win32::Foundation::HWND, enable: bool) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
+    for message in [
+        WM_USER_SHOW_MENU_ON_LEFT_CLICK,
+        WM_USER_SHOW_MENU_ON_RIGHT_CLICK,
+    ] {
+        // SAFETY: `hwnd` was enumerated from this process's own windows and is live. These two
+        // messages carry no pointer — the proc reads `wparam != 0` and stores a bool — so there is
+        // nothing for a mismatched signature to dereference.
+        unsafe { SendMessageW(hwnd, message, WPARAM(usize::from(enable)), LPARAM(0)) };
+    }
+}
+
+/// Let the next click open the menu again, clearing any suppression from an earlier click.
+///
+/// Idempotent and cheap, and called on every successful claim rather than only when a suppression is
+/// outstanding: the flags live in `tray-icon`'s userdata, not here, so "outstanding" is a belief this
+/// module would have to keep in sync with a value it does not own.
+#[cfg(target_os = "windows")]
+fn allow_menu() {
+    if let Some(hwnd) = tray_window() {
+        set_menu_opens_on_click(hwnd, true);
+    }
+    MENU_SUPPRESSED.store(false, std::sync::atomic::Ordering::Release);
+}
+
+/// Stop the popup `tray-icon` is about to track, because it could not be dismissed.
+#[cfg(target_os = "windows")]
+fn suppress_menu() {
+    if let Some(hwnd) = tray_window() {
+        set_menu_opens_on_click(hwnd, false);
+    }
+    MENU_SUPPRESSED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Claim the foreground for the popup about to be tracked, and decide whether to let it be tracked.
+///
+/// The whole of dig-app#86's fix at one call site, so the claim and the decision cannot drift apart
+/// — a claim whose answer is discarded is what shipped the wedge.
+///
+/// Call it ONLY from [`Edge::BeforeTrack`]. That edge is the last of our code to run before
+/// `TrackPopupMenu`, so it is both the only place the claim is worth making and the only place the
+/// suppression lands in time to matter.
+#[cfg(target_os = "windows")]
+pub fn claim_and_decide() -> (Claim, Track) {
+    let claim = claim_foreground();
+    let track = track_after(claim);
+    match track {
+        Track::Refused => suppress_menu(),
+        Track::Allowed => allow_menu(),
+    }
+    (claim, track)
+}
+
+/// Claim the foreground early, and restore a menu suppressed by an earlier click if it succeeds.
+///
+/// The recovery half of the refusal, and the reason a suppression is never sticky: this runs on
+/// button-DOWN, so a click made once eligibility has returned re-enables the menu a whole edge before
+/// `tray-icon` reads the flag on button-UP. The user's remedy is to click again, and it works.
+///
+/// Silent by design — a refusal here predicts nothing, because UP may still be granted.
+#[cfg(target_os = "windows")]
+pub fn claim_early() {
+    if claim_foreground() == Claim::Taken {
+        allow_menu();
+    }
+}
+
+/// Nothing to claim and nothing to suppress off Windows: no other platform tracks its tray menu in a
+/// nested modal loop, so no popup can be undismissable.
+#[cfg(not(target_os = "windows"))]
+pub fn claim_and_decide() -> (Claim, Track) {
+    (Claim::Taken, Track::Allowed)
+}
+
+/// See [`claim_early`]. A no-op off Windows, for the reason on [`claim_and_decide`].
+#[cfg(not(target_os = "windows"))]
+pub fn claim_early() {}
 
 /// When the message being handled right now was posted, as a `GetTickCount` millisecond value.
 ///
@@ -431,15 +650,29 @@ pub fn report_claim(outcome: Claim) {
         }
         Claim::Failed(NoForeground::Refused) if REFUSALS.allows(std::time::Instant::now()) => {
             tracing::error!(
-                "Windows refused to bring the DIG tray forward, so the menu about to open may not \
-                 be dismissable by clicking away or by Escape. The rest of DIG keeps running \
-                 either way — the tray draws on its own thread — but the menu may need a second \
-                 click to clear."
+                outcome = "menu-suppressed",
+                cause = "SetForegroundWindow refused before TrackPopupMenu (MSDN Q135788)",
+                "Windows refused to bring the DIG tray forward, so its menu was NOT opened: a popup \
+                 tracked without foreground rights cannot be dismissed by clicking away or by \
+                 Escape, and it would hold the tray thread open forever (dig-app#86). Click the DIG \
+                 icon again — the next click re-tries the claim and opens the menu as soon as \
+                 Windows allows it."
             )
         }
         Claim::Failed(NoForeground::Refused) => {}
     }
 }
+
+/// What the tray's hover text should say while its menu is suppressed.
+///
+/// A value rather than a `format!` at the call site so the wording is assertable, and appended to
+/// the ordinary tooltip rather than replacing it — the user still wants to know what DIG is doing,
+/// and a suppressed menu is one more fact about it rather than a reason to hide the rest.
+///
+/// It has to survive being read by someone who never opens a log, so it says the observable thing
+/// first (the menu did not open), then the remedy (click again), and never the mechanism.
+pub const SUPPRESSED_MENU_TOOLTIP: &str =
+    "\n\nWindows would not bring DIG to the front, so this menu did not open. Click the icon again.";
 
 #[cfg(test)]
 mod tests {

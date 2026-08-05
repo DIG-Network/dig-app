@@ -1454,14 +1454,18 @@ mod tray {
             // `menu_on_right_click` default on, and this shell does not change them).
             let opens_menu = matches!(button, MouseButton::Left | MouseButton::Right);
             match tray_popup::edge_of(opens_menu, button_state == MouseButtonState::Down) {
-                // One free attempt a whole click early. Silent: a refusal here predicts nothing,
-                // because the UP edge may still be granted.
-                Edge::Speculative => {
-                    let _ = tray_popup::claim_foreground();
-                }
+                // One free attempt a whole click early, which also RESTORES a menu suppressed by
+                // an earlier click the moment eligibility returns. Silent: a refusal here predicts
+                // nothing, because the UP edge may still be granted.
+                Edge::Speculative => tray_popup::claim_early(),
                 // The edge `tray-icon` tracks on, and the last of our code to run before
-                // `TrackPopupMenu`.
-                Edge::BeforeTrack => tray_popup::report_claim(tray_popup::claim_foreground()),
+                // `TrackPopupMenu` — so the only edge where a suppression still lands in time.
+                // The claim and the decision are taken together on purpose: a claim whose answer
+                // was discarded is exactly what shipped the wedge (dig-app#86).
+                Edge::BeforeTrack => {
+                    let (claim, _decided) = tray_popup::claim_and_decide();
+                    tray_popup::report_claim(claim);
+                }
                 Edge::Irrelevant => {}
             }
         }));
