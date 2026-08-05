@@ -1,3 +1,25 @@
+## #86 — two probes that lie about a wedged tray, and where the logs actually are
+
+- **dig-app in a normal user session cannot write `%ProgramData%\DigNetwork\logs\dig-app\` at all.** The
+  live logs are `%LOCALAPPDATA%\DigNetwork\logs\dig-app\dig-app.jsonl.<date>`. Anything found under
+  `%ProgramData%` is evidence that dig-app was once launched ELEVATED, not evidence of where it logs —
+  an installer that self-elevates and then starts the app from the elevated context leaves exactly that
+  artifact. Compounding it: that directory is DACL'd to SYSTEM+Administrators, so an unprivileged
+  RECURSIVE search reports the subtree EMPTY rather than access-denied. One investigation concluded
+  "dig-app writes no logs" against 295 KB of them, and a later one nearly read the elevated leftovers as
+  the live ones. Probe `%LOCALAPPDATA%` first, with exact paths.
+- **`SendMessageTimeout(WM_NULL)` is useless as a liveness probe for the tray.** Measured answering
+  normally while the tray was completely unusable. `WM_NULL` is handled by `DefWindowProc` inside the
+  nested `TrackPopupMenu` modal loop, so a wedged tray passes the probe — the modal loop IS a message
+  pump, which is the same property that makes `WM_CANCELMODE` reach it. A liveness check must observe
+  work the wedged loop cannot do, not a message it can still answer.
+- **`PostMessageW` returning `Ok` means ENQUEUED, never handled.** The breaker shipped in #88 logged that
+  return as "asked to close so the tray can respond again" and fired five times against a queue nobody
+  was reading. A remedy must verify its effect; a successful post is not one.
+- **The tray menu is the only route to every action this app has.** A wedged menu is a wedged product,
+  regardless of which threads are still ticking. Two separate design notes described it as costing "the
+  menu and not the app"; both were wrong in the way that matters to the person holding the mouse.
+
 ## #2128 — a removed step left its failure flag behind, and told every user their account was gone
 
 - **When a step is REMOVED, the flags that inferred its outcome become lies with no compiler to catch
