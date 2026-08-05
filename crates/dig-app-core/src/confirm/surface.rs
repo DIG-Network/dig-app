@@ -81,19 +81,25 @@ impl Drop for Raised {
 /// it turned this module's own assertions red on CI while passing locally, because the machine that
 /// runs eight prompt lanes at once is the one with eight cores.
 ///
-/// **Every raiser inside this crate now takes it, with ONE named exception.** Since dig-app#100,
-/// `gated_consent` raises the count for its whole span, which makes every test that
-/// calls it a raiser — including the ones driving nothing but test doubles. Those all take this lock.
-/// What does not:
+/// **Every raiser inside this crate takes it. One raiser outside it cannot, and that is the whole
+/// remaining gap.**
 ///
-/// - `confirm::offload`'s `a_timed_out_verification_does_not_authorize_the_gated_action` calls
-///   `gated_consent` and so raises for the ~50ms its verifier stalls, without holding this. That file
-///   is deliberately frozen — its safety comes from never naming `VerifyOutcome::Verified` — so the
-///   exclusion was not added there in the same change. Filed as dig-app#102.
-/// - `dig-app`'s `tray_popup` raises from a DIFFERENT crate, where this mutex is not reachable at
-///   all: it is `pub(crate)` to `dig-app-core`. `cargo test` gives that crate its own process, and it
-///   is the only count-touching test in that binary, so nothing can run beside it — a property of
-///   that test set, not of the design. The comment at its raise says so.
+/// Inside `dig-app-core` there are exactly two ways to raise the count, and both are covered:
+/// `gui::window`'s renderer, driven by tests that hold this lock for the life of their prompt lane
+/// (including `three_real_prompt_windows_in_a_row_are_all_answered`, which drives the real `serve` —
+/// dig-app#99), and `BackedConfirmer::gate`, driven by tests that take it too (dig-app#100).
+///
+/// The guard deliberately does NOT live in `gated_consent`. That function is pure policy over two
+/// traits, so raising a process-global counter from it would make every doubles-only policy test a
+/// mutator of this state — including one in `confirm::offload`, a file that is frozen because its
+/// safety rests on never naming `VerifyOutcome::Verified` and so cannot take this lock. Keeping the
+/// guard at the composition instead is what keeps the raiser set small enough to cover.
+///
+/// What is outside reach: `dig-app`'s `tray_popup` raises from a DIFFERENT crate, where this mutex is
+/// `pub(crate)` to `dig-app-core` and not nameable at all. `cargo test` gives that crate its own
+/// process and it is the only count-touching test in that binary, so nothing can run beside it — a
+/// property of that test set, not of the design. The comment at its raise says exactly that, and a
+/// second count-touching test added there breaks it.
 ///
 /// This doc states what the lock actually provides, because a comment claiming an exclusion the code
 /// does not enforce is how the next person writes a test that races and cannot see why.
