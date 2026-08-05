@@ -1286,6 +1286,16 @@ mod tests {
     ///
     /// The second unit of work is load-bearing too: the wrong implementation is self-sustaining, so a
     /// single-pass fixture cannot tell "cleared once" from "cleared for good".
+    ///
+    /// # Why this reads the RAW byte and not [`Heartbeat::phase`]
+    ///
+    /// Two independent mechanisms keep an idle renderer out of a bounded phase: the guard restores
+    /// this heartbeat's own resting phase, and [`Phase::from_byte`] discards a byte belonging to the
+    /// other loop. Either one alone produces the right answer from `phase()` — which was measured,
+    /// not assumed: restoring a shared `BetweenTicks` constant left every assertion in this module
+    /// green, because the owner filter corrected the reading on the way back out. Reading the stamp
+    /// directly is what separates the two, so each is pinned by a test that fails when it alone is
+    /// removed.
     #[test]
     fn a_unit_of_work_rests_at_its_own_loops_resting_phase() {
         for (resting, stamped, working) in [
@@ -1293,6 +1303,8 @@ mod tests {
             (Phase::Waiting, Phase::Repaint, Phase::Presence),
         ] {
             let beat = Heartbeat::resting_at(resting, base());
+            let stamped_byte = || beat.stamp.phase.load(Ordering::Acquire);
+
             beat.mark_at(stamped, base());
             assert_eq!(
                 beat.phase(),
@@ -1302,13 +1314,19 @@ mod tests {
 
             drop(beat.enter(working));
             assert_eq!(
+                stamped_byte(),
+                resting as u8,
+                "a {resting:?} loop must WRITE {resting:?} when a guard drops, never a constant \
+                 belonging to the other loop"
+            );
+            assert_eq!(
                 beat.phase(),
                 resting,
                 "a {resting:?} loop must rest at {resting:?}, never in whatever it happened to find"
             );
 
             drop(beat.enter(working));
-            assert_eq!(beat.phase(), resting);
+            assert_eq!(stamped_byte(), resting as u8);
         }
     }
 
