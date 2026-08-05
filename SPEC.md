@@ -297,6 +297,18 @@ has stopped iterating.
   reading; every other phase is code that should return in microseconds. One tolerance for both either
   reports a wedge minutes late or reports every opened menu as a wedge, and a diagnostic that is loudly
   wrong in a common case is one its reader learns to skip.
+- **A phase MUST NOT be able to outlive what it names.** Every phase a guard restores to MUST be
+  either a fixed resting value or a phase held by a guard that is still alive — never a value read back
+  out of the shared stamp. The one phase written from outside a guard is the tray menu, whose stamp
+  cannot be scoped because the library's handler must RETURN before the modal loop starts; it is
+  therefore forbidden as a restore target, so the next tick clears it.
+
+  This MUST is stated at the level of the API, not of its call sites, because a rule enforced only by
+  review has already failed once: `Heartbeat::enter` captured its restore target from the stamp, so the
+  first tick after ONE tray click adopted the menu's phase and every later tick re-adopted it. The
+  phase — and with it the menu's two-minute tolerance instead of the general ten seconds — was pinned
+  for the life of an otherwise healthy process, which is why dig-app#93's first ERROR arrived at
+  120 seconds. A build MUST make the stranded state unrepresentable rather than merely undocumented.
 - **A continuing stall MUST keep being reported** on a backoff, and MUST NOT latch after one line: the
   permanent case is the one that matters most, and latching silences exactly it. A stall that ENDS MUST
   be reported once, with its duration.
@@ -337,6 +349,33 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
   library already makes, one input edge sooner — and the break is what makes the wedge survivable
   rather than permanent. This MUST NOT be described as closed, and the trigger that causes the
   refusal in the field is NOT yet identified.
+
+### 3.1b-dp DPI awareness MUST be declared, not acquired (normative)
+
+Windows fixes a process's DPI awareness at the first call that sets it and ignores every later one. It
+MUST therefore be a property of the BUILD, declared in the application manifest, rather than a side
+effect of which surface the user reached first.
+
+- **The shipped Windows binary MUST carry an embedded manifest declaring per-monitor v2 awareness**, on
+  both spellings: `<dpiAwareness>PerMonitorV2</dpiAwareness>` for 1703 and later, and
+  `<dpiAware>true/pm</dpiAware>` for hosts that read only the older element. A bare
+  `<dpiAware>true</dpiAware>` is SYSTEM awareness and MUST NOT be used: it looks correct in a summary
+  and gives the whole desktop one scale factor chosen at logon.
+- **The manifest MUST be embedded in the binary's resources**, not shipped beside it, so no installer
+  step can separate the two.
+- **The manifest MUST request `asInvoker`** and MUST NOT request `requireAdministrator`,
+  `highestAvailable`, or `uiAccess`. dig-app guards custody actions with its own consent windows and
+  has nothing to do as an administrator; an elevated process also cannot be sent input by the
+  unelevated desktop it lives on.
+- **A build that cannot embed the manifest MUST say so**, not skip in silence — a silent skip returns
+  the process to deciding its awareness by event-loop construction order.
+
+Rationale (dig-app#87). Before this, awareness came from whichever event loop was constructed first:
+tao sets `PER_MONITOR_AWARE_V2` from `EventLoop::new`, winit from its own, each behind a process-wide
+`Once`; a headless build constructed neither. The issue's premise — that dig-app is DPI-unaware — was
+wrong, and the truth was worse: it was CONDITIONALLY aware. The hand-built consent windows COMPENSATE
+for awareness by reading the monitor's real DPI and scaling themselves, so on a path where the process
+turned out unaware Windows scaled them as well and the two multiplied.
 
 ### 3.1c The tray account surface (normative)
 

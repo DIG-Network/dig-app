@@ -188,10 +188,36 @@ pub struct Heartbeat {
 /// precisely the thing being detected, and it is the watcher's clock — not this guard — that reports
 /// it. (dig-app#86: `hotkey.rs:123` and `ActionWorker::busy` are both correct `Drop` releases that do
 /// not survive a call which never returns.)
+///
+/// # Nesting is through the guard, and that is what makes a stranded phase impossible
+///
+/// A guard restores the phase of the guard it was created FROM — a value carried in this struct, set
+/// when that outer guard was built — and a guard created from the [`Heartbeat`] itself restores
+/// [`Phase::BetweenTicks`]. Neither restore target is ever read back out of the shared atomic, so no
+/// stamp made outside a guard can become one. See [`Heartbeat::enter`] for the defect this replaced.
 #[must_use = "the phase reverts when this guard is dropped, so it must be held for the call it names"]
 pub struct InPhase<'a> {
     beat: &'a Heartbeat,
+    /// The phase this guard entered — what a guard nested inside it restores to.
+    phase: Phase,
+    /// The phase to restore when this guard is dropped.
     restore_to: Phase,
+}
+
+impl<'a> InPhase<'a> {
+    /// Enter `phase` for the duration of the returned guard, reverting to THIS guard's phase after.
+    ///
+    /// The only way to nest. Wrapping a blocking call inside a tick restores the tick's phase rather
+    /// than the resting state, so a stall in the remainder of the tick is not misreported as a stall
+    /// in platform dispatch.
+    pub fn enter(&self, phase: Phase) -> InPhase<'a> {
+        self.beat.mark(phase);
+        InPhase {
+            beat: self.beat,
+            phase,
+            restore_to: self.phase,
+        }
+    }
 }
 
 impl Drop for InPhase<'_> {
@@ -221,7 +247,9 @@ impl Heartbeat {
     }
 
     /// Record that the pump is in `phase`, as of `now`.
-    pub fn mark_at(&self, phase: Phase, now: Instant) {
+    ///
+    /// Private, and that is the fix for dig-app#93 — see [`Heartbeat::enter`].
+    fn mark_at(&self, phase: Phase, now: Instant) {
         // Saturating rather than wrapping: a clock that somehow ran backwards must not read as a
         // heartbeat from the far future, which would report a wedged pump as healthy forever.
         let millis = now.saturating_duration_since(self.base).as_millis();
@@ -232,21 +260,57 @@ impl Heartbeat {
     }
 
     /// Record that the pump is in `phase`, now.
-    pub fn mark(&self, phase: Phase) {
+    ///
+    /// Private, for the reason given on [`Heartbeat::enter`].
+    fn mark(&self, phase: Phase) {
         self.mark_at(phase, Instant::now());
     }
 
-    /// Enter `phase` for the duration of the returned guard, reverting to the current phase after.
+    /// Begin a tick: enter `phase` until the returned guard drops, then rest in
+    /// [`Phase::BetweenTicks`].
     ///
-    /// Nesting is honest: wrapping a call inside a tick restores the tick's phase, not the resting
-    /// state, so a stall in the remainder of the tick is not misreported as a stall in dispatch.
+    /// This is the OUTERMOST guard. Nesting goes through [`InPhase::enter`], which restores the
+    /// enclosing guard's phase.
+    ///
+    /// # Why the resting state is a constant here rather than whatever was last stamped
+    ///
+    /// It used to read the current phase back out of the atomic and restore that. Because
+    /// [`Phase::TrayMenu`] is stamped from outside any guard — by [`Heartbeat::note_tray_menu`],
+    /// from a callback that must return before the modal loop takes the thread — the first tick
+    /// after a tray click captured `TrayMenu` as its resting state and restored it on the way out.
+    /// So did the next tick, and every tick after it: **one tray click pinned `TrayMenu` for the
+    /// life of the process**, in a perfectly healthy app (dig-app#93).
+    ///
+    /// That was not merely a stale label. `Phase::patience` (private, so unlinked) gives `TrayMenu`
+    /// [`TRAY_MENU_PATIENCE`] where every other phase gets [`PATIENCE`], so the watchdog became
+    /// twelve times less sensitive and stayed that way — which is why #93's first ERROR arrived at
+    /// `silent_for_ms=120141` instead of at ten seconds.
+    ///
+    /// A restore target that is either a constant or a phase held by a live guard cannot be
+    /// stranded, because both are bounded by a scope. That property is what the private `mark`
+    /// above enforces: outside this module there is no way to set a phase that nothing will clear.
     pub fn enter(&self, phase: Phase) -> InPhase<'_> {
-        let restore_to = self.phase();
         self.mark(phase);
         InPhase {
             beat: self,
-            restore_to,
+            phase,
+            restore_to: Phase::BetweenTicks,
         }
+    }
+
+    /// Stamp that the tray's context menu is opening, and that the pump is about to lose the thread.
+    ///
+    /// The one stamp that cannot be a guard. `tray-icon` calls its event handler synchronously from
+    /// the tray window proc and then runs `TrackPopupMenu` — a nested modal loop — in the very next
+    /// statement (`tray-icon-0.23.1/src/platform_impl/windows/mod.rs:541-545`). The handler must
+    /// RETURN for the menu to open at all, so there is no scope that could span the thing being
+    /// named.
+    ///
+    /// It is safe to have no scope because [`Phase::TrayMenu`] is never a restore target: the next
+    /// tick's [`Heartbeat::enter`] rests at [`Phase::BetweenTicks`] regardless, so this stamp is
+    /// cleared by the first tick that runs after the menu closes and cannot outlive it.
+    pub fn note_tray_menu(&self) {
+        self.mark(Phase::TrayMenu);
     }
 
     /// The phase last stamped.
@@ -582,15 +646,22 @@ mod tests {
         // A whole healthy tick: enter every in-closure phase and leave it again, exactly as the loop
         // does, so the resting state is REACHED rather than merely never departed from. A fixture
         // that only ever stamps the default could not tell the two apart.
-        beat.mark_at(Phase::Tick, base);
         {
-            let _inside = beat.enter(Phase::Repaint);
-            assert_eq!(beat.phase(), Phase::Repaint);
+            let tick = beat.enter(Phase::Tick);
+            {
+                let _inside = tick.enter(Phase::Repaint);
+                assert_eq!(beat.phase(), Phase::Repaint);
+            }
+            assert_eq!(
+                beat.phase(),
+                Phase::Tick,
+                "leaving a call must restore the ENCLOSING phase, not the resting state"
+            );
         }
         assert_eq!(
             beat.phase(),
-            Phase::Tick,
-            "leaving a call must restore the ENCLOSING phase, not the resting state"
+            Phase::BetweenTicks,
+            "leaving the outermost guard must rest in platform dispatch"
         );
         beat.mark_at(Phase::BetweenTicks, base);
 
@@ -885,6 +956,108 @@ mod tests {
                 again: true,
             }),
             Some(Phase::TrayMenu),
+        );
+    }
+
+    /// One tray click must not rename every later tick (dig-app#93).
+    ///
+    /// # The fixture, and why it has a healthy tick in it
+    ///
+    /// This replays the shipped sequence exactly: `tray-icon`'s handler stamps the menu and returns
+    /// (there is no scope it could hold — the modal loop runs in the statement after the handler),
+    /// the person reads the menu, the menu closes, and the loop runs ONE ordinary tick.
+    ///
+    /// The tick is the load-bearing part. Without it the assertion would read the stamp the click
+    /// just made and pass against anything. The defect lives entirely in what a tick does on its way
+    /// OUT: `enter` used to read the phase back out of the atomic and restore it, so the first tick
+    /// after a click adopted `TrayMenu` as its resting state and every tick after it did the same.
+    #[test]
+    fn one_tray_click_does_not_rename_the_ticks_that_follow_it() {
+        let beat = Heartbeat::starting_at(base());
+
+        beat.note_tray_menu();
+        assert_eq!(
+            beat.phase(),
+            Phase::TrayMenu,
+            "the stamp must take effect, or this test is asserting nothing"
+        );
+
+        drop(beat.enter(Phase::Tick));
+        assert_eq!(
+            beat.phase(),
+            Phase::BetweenTicks,
+            "a healthy tick after a tray click must rest in platform dispatch; adopting TrayMenu \
+             pins it for the life of the process"
+        );
+
+        // A second tick, because the wrong implementation is self-sustaining: once the resting
+        // state is TrayMenu every later tick re-restores it, so a single-tick fixture cannot tell
+        // "cleared once" from "cleared for good".
+        drop(beat.enter(Phase::Tick));
+        assert_eq!(beat.phase(), Phase::BetweenTicks);
+    }
+
+    /// The consequence that reached a user: a tray click must not blunt the watchdog.
+    ///
+    /// # Why this is asserted separately from the phase byte above
+    ///
+    /// The phase is a label; the harm is the patience it selects. A fix that cleared the stamp on
+    /// some other schedule — or a future phase that acquires its own long bound — would satisfy the
+    /// byte test and still leave the watchdog twelve times less sensitive, which is what #93
+    /// actually reported (`silent_for_ms=120141` for a first ERROR whose bound is ten seconds).
+    ///
+    /// The observation instant is chosen from the two SHIPPED bounds rather than picked: 400 ms is
+    /// four times the scaled [`PATIENCE`] and a third of the scaled [`TRAY_MENU_PATIENCE`], so it
+    /// is unambiguously a stall under one and unambiguously quiet under the other.
+    ///
+    /// # Two things this fixture had to get right, having got both wrong first
+    ///
+    /// **It must not re-stamp the phase after the tick.** The first version ended with an explicit
+    /// `mark_at(Phase::BetweenTicks, base)` to place the clock, which also overwrote the phase the
+    /// tick had just restored — erasing the defect and passing against the unfixed code. So the
+    /// tick's own guard is the last thing to touch the phase here, exactly as in the shipped loop.
+    ///
+    /// **It needs a control that differs by ONE actor.** `menu_still_open` runs the identical
+    /// sequence minus the tick, and must be Quiet at the same instant. Without it, "stalled at
+    /// 400 ms" would also be satisfied by an implementation that had simply lost the menu's
+    /// tolerance altogether — which is the opposite defect and a real regression of #86.
+    ///
+    /// `silent_for` is asserted only as "past the general patience" rather than to the millisecond,
+    /// because `note_tray_menu` and the guards stamp on the wall clock by construction (they run
+    /// where no fixture clock exists). The quantity under test is WHICH BOUND applied, and the
+    /// control pins that from the other side.
+    #[test]
+    fn a_wedge_after_a_tray_click_is_still_reported_at_the_general_patience() {
+        let base = base();
+        let observed_at = base + ms(400);
+
+        let after_a_click = Heartbeat::starting_at(base);
+        after_a_click.note_tray_menu();
+        // The menu closed, and the loop ran one ordinary tick. Its guard is the last thing to touch
+        // the phase, which is the whole point.
+        drop(after_a_click.enter(Phase::Tick));
+
+        assert!(
+            matches!(
+                watcher().look(&after_a_click, observed_at),
+                Verdict::Stalled {
+                    phase: Phase::BetweenTicks,
+                    ..
+                }
+            ),
+            "a tray click earlier in the session must not buy every later stall the menu's \
+             two-minute patience"
+        );
+
+        // The control: the same click, and no tick after it, because the menu is still up. This is
+        // a person reading a menu and must stay quiet — the tolerance is not being removed, it is
+        // being confined to the menu that earned it.
+        let menu_still_open = Heartbeat::starting_at(base);
+        menu_still_open.note_tray_menu();
+        assert_eq!(
+            watcher().look(&menu_still_open, observed_at),
+            Verdict::Quiet,
+            "an OPEN menu must keep its own patience; only a menu that has already closed loses it"
         );
     }
 

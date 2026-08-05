@@ -1422,9 +1422,12 @@ mod tray {
         // Naming it is what stops the watcher crying wolf: without this, a person reading the menu
         // for fifteen seconds is reported as a wedged tray needing a restart.
         //
-        // Every DOWN click is stamped, because `menu_on_left_click` defaults on and so both buttons
-        // raise the menu. A down click that somehow raises nothing leaves the phase reading
-        // `tray-menu` only until the next tick, half a second later.
+        // The stamp is bounded by the next tick and not by a scope, because there is no scope it
+        // could have: this handler must RETURN for the menu to open at all. `note_tray_menu` is the
+        // one stamp shaped for that, and `Phase::TrayMenu` is never a phase any guard restores to —
+        // so a click on a button that somehow raises no menu leaves the phase reading `tray-menu`
+        // only until the next tick, half a second later. It used to leave it there forever
+        // (dig-app#93).
         {
             let pump = pump.clone();
             tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
@@ -1457,7 +1460,7 @@ mod tray {
                     // and where a refusal is worth an ERROR.
                     Edge::BeforeTrack => {
                         tray_popup::report_claim(tray_popup::claim_foreground());
-                        pump.mark(Phase::TrayMenu);
+                        pump.note_tray_menu();
                     }
                     Edge::Irrelevant => {}
                 }
@@ -1506,17 +1509,22 @@ mod tray {
         event_loop.run(move |_event, _target, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
 
-            // Held for the whole closure, so EVERY way out of it — including the early returns below
-            // — restores `BetweenTicks`. That resting value is not decoration: a stall reported as
-            // `BetweenTicks` means the loop is blocked in the platform's own dispatch, which is where
-            // `tray-icon`'s `TrackPopupMenu` runs, and no diagnostic inside this closure can see it.
-            // A closure that never returns keeps its phase, which is exactly the reading wanted.
-            let _tick = pump.enter(Phase::Tick);
+            // The tick's own guard, and the parent of every phase entered below — nesting goes
+            // through `tick.enter`, which the borrow checker now requires, so a phase can only be
+            // entered inside a scope that will leave it again (dig-app#93).
+            //
+            // Held for the whole closure, so EVERY way out of it — including the early returns
+            // below — restores `BetweenTicks`. That resting value is not decoration: a stall
+            // reported as `BetweenTicks` means the loop is blocked in the platform's own dispatch,
+            // which is where `tray-icon`'s `TrackPopupMenu` runs, and no diagnostic inside this
+            // closure can see it. A closure that never returns keeps its phase, which is exactly
+            // the reading wanted.
+            let tick = pump.enter(Phase::Tick);
 
             // A recovery phrase copied to the clipboard is best-effort auto-cleared once its timeout
             // elapses (dig_ecosystem#1964); the tick is where that deadline is checked.
             {
-                let _phase = pump.enter(Phase::ClipboardClear);
+                let _phase = tick.enter(Phase::ClipboardClear);
                 poll_clipboard_clear();
             }
 
@@ -1527,7 +1535,7 @@ mod tray {
             }
 
             {
-            let _phase = pump.enter(Phase::DrainClicks);
+            let _phase = tick.enter(Phase::DrainClicks);
             while let Ok(event) = menu_events.try_recv() {
                 let Some(action) = menu.actions.get(&event.id).copied() else {
                     // Unreachable for any verb this shell offers, now that ids are derived from the
@@ -1569,7 +1577,7 @@ mod tray {
             // the tray keeps its last picture rather than blocking, and the idle auto-lock does not run
             // while the user is standing at a dialog.
             let latest = {
-                let _phase = pump.enter(Phase::ReadState);
+                let _phase = tick.enter(Phase::ReadState);
                 let Some(mut held) = peek_session(&session) else {
                     return;
                 };
@@ -1598,11 +1606,11 @@ mod tray {
                 if fresh != presence {
                     // `Shell_NotifyIcon` under the covers: an unbounded `SendMessage` to the shell,
                     // and one of the calls this tick makes that has no timeout of its own.
-                    let _phase = pump.enter(Phase::Presence);
+                    let _phase = tick.enter(Phase::Presence);
                     show_presence(&tray, &fresh);
                     presence = fresh;
                 }
-                let _phase = pump.enter(Phase::Repaint);
+                let _phase = tick.enter(Phase::Repaint);
                 if let Some(rendered) = repaint(&tray, &tray_menu::build(&latest)) {
                     menu = rendered;
                     model = latest;
