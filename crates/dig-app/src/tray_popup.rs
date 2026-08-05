@@ -103,7 +103,7 @@
 //! Those flags are writable from inside that same handler: the crate sets them by `SendMessageW` to
 //! its own tray window, which — posted from the tray thread to a window that thread owns — is a
 //! direct, synchronous, re-entrant call into the same proc, writing the same heap `TrayUserData` the
-//! outer frame is about to read. [`allow_menu`] and [`suppress_menu`] send exactly those two
+//! outer frame is about to read. `allow_menu` and `suppress_menu` send exactly those two
 //! messages. No fork, no patch, no vendoring.
 //!
 //! **The one assumption, stated because it is the load-bearing one.** The outer frame must re-read
@@ -141,9 +141,9 @@
 //! - [`Claim::Declined`] — we chose not to try, so we learned NOTHING about our rights.
 //!   `tray-icon` still makes its own `SetForegroundWindow` call and it may well succeed. Suppressing
 //!   here would refuse the menu on the strength of a question never asked.
-//! - [`Claim::Failed(NoTrayWindow)`] — there is no window, so there is also nothing to send the
+//! - `Claim::Failed(NoTrayWindow)` — there is no window, so there is also nothing to send the
 //!   suppression message TO. Unsuppressible and uninformative at once.
-//! - [`Claim::Failed(Refused)`] — Windows was asked, on the exact window and the exact edge that
+//! - `Claim::Failed(Refused)` — Windows was asked, on the exact window and the exact edge that
 //!   matter, and said no. The next `TrackPopupMenu` is the wedge. This one, and only this one.
 //!
 //! ## A refusal must be recoverable, and the DOWN edge is what recovers it
@@ -197,7 +197,7 @@ const INPUT_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(1);
 /// A private constant of that crate (`platform_impl/windows/mod.rs:48`), named here for the same
 /// reason and with the same protection as [`TRAY_WINDOW_CLASS`]: pinned by
 /// `tests::the_menu_gate_messages_match_the_crates_own_source`, which reads the literals out of the
-/// vendored dependency. If a bump renumbers them, [`suppress_menu`] would send a message the proc
+/// vendored dependency. If a bump renumbers them, `suppress_menu` would send a message the proc
 /// does not understand and the refusal would become a silent no-op — the worst failure a guard has,
 /// because it is indistinguishable from a guard that is working.
 #[cfg(target_os = "windows")]
