@@ -731,3 +731,47 @@ Measured on the unguarded version: after one panicking press, five further press
 **zero** times — the flag latched, and every later press short-circuited before it could even notice
 the worker was dead. The panic guard fixes the thread; only a drop guard fixes the flag, and it keeps
 fixing it if someone later moves the guard.
+
+## `mt.exe` rejects `--` inside an XML comment, and names no line (dig-app#94)
+
+The Windows manifest embedder fails on a manifest whose comment contains a `--` — an em-dash typed as
+two hyphens, a `<!-- ... -- ... -->`, anything. XML genuinely forbids `--` inside a comment, so the
+rejection is correct; what costs the time is the report. The parse error names **no line and no
+column**, and the manifest it points at is generated, so the obvious reading is that the embedder or
+the build script is broken rather than that one comment has two hyphens in it. It cost a build cycle
+on #94. Write manifest comments with an en-dash or a single hyphen and the problem never appears.
+
+## `tray_icon::TrayIcon` is `!Send`, and "the crate allows a non-main thread" does not imply otherwise
+
+`tray-icon`'s docs say the tray may be built off the main thread on Windows and Linux
+(`tray-icon-0.23.1/src/lib.rs:17`), and that is true. It is a different claim from *the handle can be
+REACHED from another thread*, which is false: `TrayIcon` is an `Rc<RefCell<platform_impl::TrayIcon>>`
+(`lib.rs:346`) and the crate declares exactly one `unsafe impl Send`, for `WinIcon`
+(`platform_impl/windows/icon.rs:67`). So `set_icon`/`set_tooltip`/`set_menu` are pinned to whichever
+thread built the tray, forever.
+
+Conflating the two sank the first plan for dig-app#86: "move the tray to its own thread" would have
+dragged every repaint — and therefore the whole tick that drives them — along with it, and changed
+nothing. The fix was to move the STATE instead and let data cross where handles cannot. Worth
+remembering as a shape: when a plan depends on a type crossing a thread, check for the `Send` impl,
+not for a sentence about threads.
+
+## `with_any_thread` is not portable, so "spawn the event loop" is a platform fork
+
+tao exposes `with_any_thread` on `platform/windows.rs` and `platform/unix.rs` and **nowhere else** —
+macOS requires its event loop on the main thread with no escape. Any design that begins "run this
+event loop on a spawned thread" is therefore a three-way fork on a cross-platform surface. Inverting
+such a design — keep the loop where it must be, move the other thing — is usually one code path
+instead of three, and was here.
+
+## A one-slot latch beats a queue between a producer and a wedgeable renderer
+
+While a tray menu is open its thread runs nothing, so paints pile up. Queueing them means the menu
+closing is followed by a redraw of every state the app passed through, none of which anyone can see
+and only the last of which is true. A latch that REPLACES gives the renderer the current state and
+one redraw.
+
+The constraint that buys is easy to miss: **every frame must then be a complete picture.** A frame
+carrying "and the icon changed" as a delta is lost the moment a newer frame replaces it. That bug is
+invisible in any test that sends one frame.
+

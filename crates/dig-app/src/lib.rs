@@ -45,6 +45,14 @@ pub mod pump_vigil;
 /// Tray-only, for the same reason as [`brand`]: a headless build mounts no tray.
 #[cfg(feature = "tray")]
 pub mod tray_guard;
+// NOTE: no outer doc comment here, for the same reason as `tray_popup` below — an outer doc on a
+// `pub mod` is MERGED with the module's own `//!` docs and the merged block resolves its intra-doc
+// links in the CRATE-ROOT scope, so `[`Latest`]` fails to resolve with an error carrying no file and
+// no line. That is the trap this file already warns about, and it caught this module too.
+// `tray_link` documents itself. Not tray-gated: it is a mailbox and a wake, with no desktop
+// dependency, and the property it exists for — a producer that never waits for its consumer — is
+// worth checking in every build.
+pub mod tray_link;
 // NOTE: no outer doc comment here on purpose. A module carrying BOTH outer docs on its `pub mod`
 // declaration and inner `//!` docs has the two MERGED, and the merged block then resolves its
 // intra-doc links in the CRATE-ROOT scope — so a link to one of the module's own items fails to

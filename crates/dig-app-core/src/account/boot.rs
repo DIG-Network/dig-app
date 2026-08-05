@@ -438,7 +438,7 @@ pub fn unlock_existing_account_reporting(
 /// UNLOCK the default account in `brand_dir` through `ceremony` — the testable form of
 /// [`unlock_existing_account`].
 ///
-/// Refuses when no account exists, and can NEVER enrol one ([`NeverEnrols`]), so an unlock is
+/// Refuses when no account exists, and can NEVER enrol one (`NeverEnrols`, private), so an unlock is
 /// structurally incapable of creating an account with a recovery phrase nobody saw.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn unlock_existing_account_with<A>(

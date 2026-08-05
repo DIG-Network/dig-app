@@ -445,6 +445,13 @@ pub mod qr;
 
 pub use qr::QrArt;
 
+// Whether a consent surface is on screen, for the one caller that must know from another thread
+// without touching it: the tray's foreground claim, which must not fight a prompt the user is
+// reading (dig-app#91).
+pub mod surface;
+
+pub use surface::consent_surface_is_up;
+
 // The branded prompt GUI (dig_ecosystem#2038) — the ONE window implementation all three platforms
 // draw, replacing the Win32 GDI dialog, the macOS `NSAlert` and the Linux `zenity`/`kdialog`
 // subprocess. It is a `ForegroundWindow` + `ForegroundInput` pair and nothing more: the security

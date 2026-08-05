@@ -995,6 +995,7 @@ mod tray {
     };
     use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
+    use dig_app::tray_link::{Latest, TrayLink};
     use dig_app::tray_popup;
     use dig_app::tray_worker::ActionWorker;
     use dig_app_core::account::boot::vault_for;
@@ -1017,8 +1018,9 @@ mod tray {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
     use std::time::{Duration, Instant};
+    use tao::event::Event;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
     use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
     /// How long to let the agent thread flush + stop after "Quit" before the loop exits the process.
@@ -1125,15 +1127,6 @@ mod tray {
             .then(|| zeroize::Zeroizing::new(output.stdout))
     }
 
-    /// A rendered native menu plus the map from each native item id back to the action it stands for.
-    ///
-    /// The map is what lets the shell stay ignorant of the menu's shape: a click arrives as an opaque
-    /// [`MenuId`], and this translates it into the [`TrayAction`] the model named.
-    struct RenderedMenu {
-        menu: Menu,
-        actions: HashMap<MenuId, TrayAction>,
-    }
-
     /// Turn a [`MenuModel`] into a native menu.
     ///
     /// Returns an error string (not a panic) if the platform refuses an item, so a menu that cannot be
@@ -1145,11 +1138,10 @@ mod tray {
     /// event loop, so it belongs with the event loop, where the coverage gate correctly excludes platform
     /// glue rather than inviting a test that only pretends to check it. Every RULE about what the menu
     /// contains is separately tested in [`dig_app_core::tray_menu`].
-    fn render(model: &MenuModel) -> Result<RenderedMenu, String> {
+    fn render(model: &MenuModel) -> Result<Menu, String> {
         let menu = Menu::new();
-        let mut actions = HashMap::new();
-        append_rows(&menu, &model.rows, &mut actions)?;
-        Ok(RenderedMenu { menu, actions })
+        append_rows(&menu, &model.rows)?;
+        Ok(menu)
     }
 
     /// Append `rows` to `parent`, recording each action row's native id in `actions`.
@@ -1158,11 +1150,7 @@ mod tray {
     /// down so the top level stays short (dig_ecosystem#1800). `muda`'s `Submenu` and `Menu` are different
     /// types with the same `append`, so the recursion is expressed over the [`ContainerMenu`] trait below
     /// rather than duplicated per level.
-    fn append_rows(
-        parent: &dyn ContainerMenu,
-        rows: &[MenuRow],
-        actions: &mut HashMap<MenuId, TrayAction>,
-    ) -> Result<(), String> {
+    fn append_rows(parent: &dyn ContainerMenu, rows: &[MenuRow]) -> Result<(), String> {
         for row in rows {
             match row {
                 MenuRow::Separator => parent
@@ -1179,7 +1167,6 @@ mod tray {
                     // bearing an id no handler answered to (dig_ecosystem#2074). See
                     // `dig_app_core::tray_menu::action_id`.
                     let item = MenuItem::with_id(action_id(*action), label, *enabled, None);
-                    actions.insert(item.id().clone(), *action);
                     parent
                         .add(&item)
                         .map_err(|e| format!("menu action row failed: {e}"))?;
@@ -1188,7 +1175,7 @@ mod tray {
                     // Enabled unconditionally: a submenu is not an action, and its own rows carry whatever
                     // gating applies. A greyed submenu would hide the way out of a bad state.
                     let submenu = Submenu::new(label, true);
-                    append_rows(&submenu, rows, actions)?;
+                    append_rows(&submenu, rows)?;
                     parent
                         .add(&submenu)
                         .map_err(|e| format!("menu submenu failed: {e}"))?;
@@ -1321,7 +1308,7 @@ mod tray {
         session: Option<TraySession>,
         env: AppEnvironment,
     ) -> Result<(), (String, Agent<NodeConnector>)> {
-        let event_loop = EventLoopBuilder::new().build();
+        let event_loop = EventLoopBuilder::<Nudge>::with_user_event().build();
         let status = agent.status_handle();
 
         // Claim the global shortcut BEFORE the menu is built, so the very first menu already carries it
@@ -1349,7 +1336,7 @@ mod tray {
         //
         // Sticky until an open SUCCEEDS, so the tray keeps telling the truth rather than flickering back
         // on the next repaint tick.
-        let mut model = snapshot(
+        let model = snapshot(
             &status,
             &env,
             session.as_ref(),
@@ -1358,7 +1345,7 @@ mod tray {
         );
         // Guarded for the same reason as the mount below: creating native menu objects touches the
         // platform's desktop stack, and a missing library there panics rather than failing.
-        let mut menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
+        let menu = match mount_or_degrade(|| render(&tray_menu::build(&model))) {
             Ok(rendered) => rendered,
             Err(e) => return Err((e, agent)),
         };
@@ -1369,9 +1356,9 @@ mod tray {
         //
         // The icon is attached only if it decoded. A tray with no picture is still a working tray, so a bad
         // brand mark must never be the reason the user has no agent at all.
-        let mut presence = tray_menu::status(&model);
+        let presence = tray_menu::status(&model);
         let mut builder = TrayIconBuilder::new()
-            .with_menu(Box::new(menu.menu.clone()))
+            .with_menu(Box::new(menu.clone()))
             .with_tooltip(&presence.tooltip);
         if let Some(icon) = brand_icon(presence.glyph) {
             builder = builder.with_icon(icon);
@@ -1389,106 +1376,116 @@ mod tray {
             Err(e) => return Err((e, agent)),
         };
 
-        // The shell mounted — run the agent core on its own thread. We hand it owned handles for the
-        // status surface + shutdown BEFORE moving the agent into the thread.
+        // The shell mounted. The agent's own handles are taken here, but the agent itself is not
+        // started until every thread that could still FAIL to start has started (see the tick
+        // below) — a degrade path that has already handed `agent` back cannot hand it back twice.
         let shutdown = agent.shutdown_handle();
-        std::thread::spawn(move || agent.run());
+
+        // ---------------------------------------------------------------------------------------
+        // From here the shell runs on TWO threads, and which one does what is the whole of
+        // dig-app#90's fix.
+        //
+        // `tray-icon` draws its context menu with `TrackPopupMenu`, a nested modal message loop
+        // inside the tray window proc. Measured: while that menu is up, NOTHING else on that thread
+        // runs. When the tray and the app's tick shared a thread, a menu that would not dismiss was
+        // not a stuck menu but a stuck application — no clipboard timeout, no idle auto-lock, no
+        // status poll, no diagnostics, permanently and in silence (dig-app#86).
+        //
+        // The tray's handle cannot be the thing that moves. `tray_icon::TrayIcon` is an
+        // `Rc<RefCell<..>>` (`tray-icon-0.23.1/src/lib.rs:346`) with no `unsafe impl Send`, so
+        // `set_icon`/`set_tooltip`/`set_menu` are pinned to the thread that built the tray — and
+        // that thread must be the MAIN one, because macOS requires it and tao's `with_any_thread`
+        // exists only on Windows and Unix.
+        //
+        // So the TICK moves instead, and the split falls on the pure/native seam rather than on a
+        // platform: everything that reads state, compares views and builds a `MenuModel` is
+        // arithmetic over plain data and runs on `dig-app-tick`; everything that touches a native
+        // object stays here on the main thread. Data crosses (`Paint`), handles never do.
+        // ---------------------------------------------------------------------------------------
 
         let menu_events = MenuEvent::receiver();
 
-        // Watch this loop from OUTSIDE it (dig-app#86). Every diagnostic the tray has — including
-        // #83's unmapped-id and click-while-busy WARNs — lives inside the closure below, so a loop
-        // that has STOPPED RUNNING cannot report that it has stopped running. That silence is why
-        // four recurrences of this defect class were each found by a user rather than by the log.
+        // Watch the tick from OUTSIDE it (dig-app#86). Every diagnostic the shell has lives inside
+        // that loop, so a loop that has STOPPED RUNNING cannot report that it has stopped running —
+        // which is why four recurrences of this defect class were each found by a user rather than
+        // by the log.
+        //
+        // It watches the TICK and not this render loop, and that is a choice rather than an
+        // oversight: the tick is where every deadline the app owes a user now lives, and a render
+        // loop parked in `TrackPopupMenu` is no longer a fault at all — it is a person reading a
+        // menu, and it costs them nothing but the menu. Watching it would reintroduce exactly the
+        // "loudly wrong several times a day" diagnostic that the old two-band tolerance existed to
+        // avoid, for a condition no longer worth a word.
         //
         // The observer thread is cheap and its failure costs diagnostics only, so a machine that
         // cannot spawn it still gets a tray.
         let pump = pump_vigil::Heartbeat::now();
-        // The watcher is also the only thing that can clear a stuck tray menu, because the thread
-        // that would otherwise do it is the thread that is stuck (dig-app#86). Breaking a menu
-        // selects nothing, so this rescue cannot authorize anything.
-        if let Err(e) = pump_vigil::watch(pump.clone(), |_phase| tray_popup::break_modal_menu()) {
-            tracing::warn!(error = %e, "the tray loop's liveness watcher could not be started");
+        if let Err(e) = pump_vigil::watch(pump.clone()) {
+            tracing::warn!(error = %e, "the tray shell's liveness watcher could not be started");
         }
 
-        // Stamp the tray's context menu before it takes this thread.
+        // Take the foreground before `tray-icon` tracks its popup.
         //
         // `tray-icon` invokes this handler synchronously inside the tray window proc — on THIS
-        // thread, and immediately before `show_tray_menu` runs `TrackPopupMenu`. It is the last
-        // moment anything of ours executes before a nested modal loop owns the thread for as long as
-        // the menu is up, which was measured to be the entire time (dig-app#86: the closure below
-        // does not run at all while the menu is open).
+        // thread, immediately before `show_tray_menu` runs `TrackPopupMenu`. It is the last moment
+        // anything of ours executes before the modal loop owns this thread, which is precisely why
+        // the claim is worth anything at all (SPEC §3.1b-tp, MSDN Q135788).
         //
-        // Naming it is what stops the watcher crying wolf: without this, a person reading the menu
-        // for fifteen seconds is reported as a wedged tray needing a restart.
-        //
-        // The stamp is bounded by the next tick and not by a scope, because there is no scope it
-        // could have: this handler must RETURN for the menu to open at all. `note_tray_menu` is the
-        // one stamp shaped for that, and `Phase::TrayMenu` is never a phase any guard restores to —
-        // so a click on a button that somehow raises no menu leaves the phase reading `tray-menu`
-        // only until the next tick, half a second later. It used to leave it there forever
-        // (dig-app#93).
-        {
-            let pump = pump.clone();
-            tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
-                use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
-                use tray_popup::Edge;
+        // It no longer stamps a phase. There is nothing left on this thread whose silence would be
+        // misread: the pump it used to warn about runs on the tick thread now and keeps ticking
+        // straight through an open menu.
+        tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
+            use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+            use tray_popup::Edge;
 
-                let TrayIconEvent::Click {
-                    button,
-                    button_state,
-                    ..
-                } = event
-                else {
-                    return;
-                };
+            let TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+            else {
+                return;
+            };
 
-                // Middle clicks open nothing, so they are neither worth a foreground attempt nor a
-                // word in the log. Left and right both open the menu (`menu_on_left_click` and
-                // `menu_on_right_click` default on, and this shell does not change them).
-                let opens_menu = matches!(button, MouseButton::Left | MouseButton::Right);
-                match tray_popup::edge_of(opens_menu, button_state == MouseButtonState::Down) {
-                    // One free attempt a whole click early. Silent: a refusal here predicts nothing,
-                    // because the UP edge may still be granted.
-                    Edge::Speculative => {
-                        let _ = tray_popup::claim_foreground();
-                    }
-                    // The edge `tray-icon` tracks on, and the last of our code to run before
-                    // `TrackPopupMenu`. A popup tracked without foreground rights cannot be
-                    // dismissed by clicking away or by Escape — measured, and it held the tray dead
-                    // for 180 s (dig-app#86, MSDN Q135788). So this is where the claim is required
-                    // and where a refusal is worth an ERROR.
-                    Edge::BeforeTrack => {
-                        tray_popup::report_claim(tray_popup::claim_foreground());
-                        pump.note_tray_menu();
-                    }
-                    Edge::Irrelevant => {}
+            // Middle clicks open nothing, so they are neither worth a foreground attempt nor a word
+            // in the log. Left and right both open the menu (`menu_on_left_click` and
+            // `menu_on_right_click` default on, and this shell does not change them).
+            let opens_menu = matches!(button, MouseButton::Left | MouseButton::Right);
+            match tray_popup::edge_of(opens_menu, button_state == MouseButtonState::Down) {
+                // One free attempt a whole click early. Silent: a refusal here predicts nothing,
+                // because the UP edge may still be granted.
+                Edge::Speculative => {
+                    let _ = tray_popup::claim_foreground();
                 }
-            }));
-        }
+                // The edge `tray-icon` tracks on, and the last of our code to run before
+                // `TrackPopupMenu`.
+                Edge::BeforeTrack => tray_popup::report_claim(tray_popup::claim_foreground()),
+                Edge::Irrelevant => {}
+            }
+        }));
 
-        // The session is SHARED rather than owned by the loop, because the actions that mutate it no
-        // longer run here (see `ActionWorker`). The worker takes the lock for the whole of an action —
-        // which is what stops a destroy and a repaint from seeing different accounts — and the loop
+        // The session is SHARED rather than owned by the tick, because the actions that mutate it do
+        // not run there (see `ActionWorker`). The worker takes the lock for the whole of an action —
+        // which is what stops a destroy and a repaint from seeing different accounts — and the tick
         // only ever TRIES for it, so a dialog left open on the worker can never stall the tray.
         let session: SharedSession = Arc::new(Mutex::new(LiveAccount {
             session,
             attempt: OpenAttempt::NotAttempted,
         }));
 
-        // Every menu action runs on this worker, never on the event loop. That is the fix for the whole
-        // class of freezes (dig_ecosystem#1926): the biometric deadlock was the worst of them, but every
-        // handler that opens a window, waits for the agent to stop, or waits on a child process would
-        // otherwise hold the tray for as long as it waited.
+        // Every menu action runs on this worker, never on the tick. That is the fix for the whole
+        // class of freezes (dig_ecosystem#1926): the biometric deadlock was the worst of them, but
+        // every handler that opens a window, waits for the agent to stop, or waits on a child
+        // process would otherwise hold the tick for as long as it waited.
         let actions = {
             let session = Arc::clone(&session);
             let env = env.clone();
             let shutdown = shutdown.clone();
             let status = Arc::clone(&status);
             let hotkey = hotkey.clone();
-            // ONE confirmer for the whole shell: every account window (setup, reveal, the explainers) is
-            // drawn by the same OS-owned, biometric-backed surface the signing path uses. It lives on the
-            // worker because that is where every window is now raised.
+            // ONE confirmer for the whole shell: every account window (setup, reveal, the
+            // explainers) is drawn by the same OS-owned, biometric-backed surface the signing path
+            // uses. It lives on the worker because that is where every window is now raised.
             let confirmer: Box<dyn NativeConfirmer> = native_confirmer();
             ActionWorker::spawn(move |action: TrayAction| {
                 let mut live = lock_session(&session);
@@ -1504,21 +1501,173 @@ mod tray {
             })
         };
 
-        // The event loop diverges; `tray` + `session` stay alive on this frame for the whole process
-        // (dropping `session` would drop the OS screen-lock subscription guard it holds).
-        event_loop.run(move |_event, _target, control_flow| {
-            *control_flow = ControlFlow::WaitUntil(Instant::now() + REFRESH);
+        // The seam. `pending` holds at most ONE frame: a menu wedged for three minutes leaves the
+        // renderer the state the app is in when the menu closes, not a queue of three hundred
+        // intermediate frames nobody can see.
+        let pending: Arc<Latest<Paint>> = Arc::new(Latest::empty());
+        let proxy = event_loop.create_proxy();
+        let link = {
+            let proxy = proxy.clone();
+            // A failed wake is dropped rather than reported: the only way `send_event` fails is a
+            // loop that has already exited, which is the process shutting down.
+            TrayLink::new(Arc::clone(&pending), move || {
+                let _ = proxy.send_event(Nudge::Paint);
+            })
+        };
+
+        // The tick, on a thread of its own. Nothing in it touches a native object, which is what
+        // lets it live there. Failing to spawn it would leave a tray that never updates, so it
+        // degrades to headless like every other mount failure rather than shipping that.
+        let ticking = {
+            let session = Arc::clone(&session);
+            let status = Arc::clone(&status);
+            let env = env.clone();
+            let hotkey = hotkey.clone();
+            std::thread::Builder::new()
+                .name("dig-app-tick".to_owned())
+                .spawn(move || {
+                    tick_forever(
+                        &pump,
+                        &link,
+                        &proxy,
+                        &actions,
+                        menu_events,
+                        &session,
+                        &status,
+                        &env,
+                        &hotkey,
+                        model,
+                    )
+                })
+        };
+        if let Err(e) = ticking {
+            // A tray whose state thread never started would sit on screen showing the launch
+            // snapshot forever, answering nothing — the invisible failure this shell degrades
+            // rather than ships. The agent has deliberately not been started yet, so it can still
+            // be handed back and run headless.
+            return Err((
+                format!("the shell's state thread could not be started: {e}"),
+                agent,
+            ));
+        }
+
+        // Every thread that could fail to start has started. Run the agent core on its own.
+        std::thread::spawn(move || agent.run());
+
+        // The render loop, and nothing else. It owns the tray and the native menu, and no deadline
+        // anyone is waiting on — so `TrackPopupMenu` parking it is now a local event.
+        //
+        // `tray` + `menu` stay alive on this frame for the whole process: dropping the tray removes
+        // the icon, and dropping the attached `Menu` destroys the native objects the tray points at.
+        // What the tray is pointing at right now. A struct rather than two loose locals because
+        // `attached.menu` is never READ — holding it is its entire purpose, since dropping a
+        // `muda::Menu` destroys the native objects the tray still references. A bare binding
+        // assigned and never read reads like a mistake; a field of a thing called `Attached` reads
+        // like what it is.
+        struct Attached {
+            /// Kept alive for exactly as long as the tray points at it.
+            menu: Menu,
+            /// The last icon and tooltip actually put on screen, so an unchanged presence is not
+            /// re-applied. `Shell_NotifyIcon` is an unbounded `SendMessage` to the shell.
+            presence: tray_menu::TrayStatus,
+        }
+        let mut attached = Attached { menu, presence };
+
+        event_loop.run(move |event, _target, control_flow| {
+            // `Wait`, not `WaitUntil`: this loop has no deadline of its own any more. It sleeps
+            // until a frame arrives or a click does, which is also why a paint has to WAKE it.
+            *control_flow = ControlFlow::Wait;
+
+            match event {
+                Event::UserEvent(Nudge::Paint) => {
+                    let Some(frame) = pending.take() else {
+                        // A wake whose frame an earlier wake already collected. Ordinary.
+                        return;
+                    };
+                    // The icon and tooltip go first: they are the only surfaces a user sees
+                    // without clicking, so a failed menu rebuild (which keeps the old menu, see
+                    // `repaint`) must not also leave a stale picture.
+                    if frame.presence != attached.presence {
+                        show_presence(&tray, &frame.presence);
+                        attached.presence = frame.presence;
+                    }
+                    if let Some(rendered) = repaint(&tray, &frame.menu) {
+                        // Destroying the previous menu's native objects happens HERE and nowhere
+                        // earlier: `repaint` has already pointed the tray at the replacement, so
+                        // this is the first moment nothing references the old one. Spelled as an
+                        // explicit `drop(replace(..))` because that is the whole content of the
+                        // statement — the value is retained for its lifetime, never read.
+                        drop(std::mem::replace(&mut attached.menu, rendered));
+                    }
+                }
+                Event::UserEvent(Nudge::Quit) => *control_flow = ControlFlow::Exit,
+                _ => {}
+            }
+        });
+    }
+
+    /// What the tray should show, as plain data.
+    ///
+    /// Every field is an owned `String` or a plain enum, which is what lets a frame cross a thread
+    /// when the native objects it describes cannot (see `tray_link`).
+    struct Paint {
+        /// The menu to build. Already reduced from a [`TrayView`] on the tick thread, because
+        /// reducing is pure and rendering is not.
+        menu: MenuModel,
+        /// The icon and hover text — the two surfaces a user sees without clicking.
+        presence: tray_menu::TrayStatus,
+    }
+
+    /// Why the render loop is being woken.
+    ///
+    /// It is otherwise entirely idle: it holds no timer and polls nothing, because nothing left on
+    /// that thread has to happen on a schedule.
+    enum Nudge {
+        /// A fresh frame is waiting to be collected.
+        Paint,
+        /// The user chose Quit, and only the render loop can end the process.
+        Quit,
+    }
+
+    /// Read the world, decide what the tray should say, and hand it over — forever.
+    ///
+    /// This is the shell's heartbeat, and since dig-app#90 it is a PURE STATE PRODUCER: it reads
+    /// shared state, does arithmetic over plain data, and posts the answer. It touches no native
+    /// object and therefore cannot be stopped by one. Everything a user is waiting on — the
+    /// clipboard timeout, the idle auto-lock, their click on a menu item — lives here, which is why
+    /// it had to stop sharing a thread with a modal menu loop.
+    ///
+    /// Returns once the user has chosen Quit and the render loop has been told to exit.
+    #[allow(clippy::too_many_arguments)]
+    fn tick_forever(
+        pump: &pump_vigil::Heartbeat,
+        link: &TrayLink<Paint>,
+        proxy: &tao::event_loop::EventLoopProxy<Nudge>,
+        actions: &ActionWorker<TrayAction>,
+        menu_events: &tray_icon::menu::MenuEventReceiver,
+        session: &SharedSession,
+        status: &SharedStatus,
+        env: &AppEnvironment,
+        hotkey: &HotkeyState,
+        mut model: TrayView,
+    ) {
+        // What each native menu id means, kept here rather than read off the rendered menu. Ids are
+        // DERIVED from the verb (`tray_menu::action_id`), never generated per rebuild, so this pure
+        // map is exactly as authoritative as the native one was — and unlike the native one it can
+        // live on the thread that handles the click. Generated ids are what made a click crossing a
+        // rebuild vanish in silence (dig_ecosystem#2074).
+        let mut verbs: HashMap<String, TrayAction> =
+            tray_menu::action_ids(&tray_menu::build(&model).rows)
+                .into_iter()
+                .collect();
+
+        loop {
+            std::thread::sleep(REFRESH);
 
             // The tick's own guard, and the parent of every phase entered below — nesting goes
-            // through `tick.enter`, which the borrow checker now requires, so a phase can only be
-            // entered inside a scope that will leave it again (dig-app#93).
-            //
-            // Held for the whole closure, so EVERY way out of it — including the early returns
-            // below — restores `BetweenTicks`. That resting value is not decoration: a stall
-            // reported as `BetweenTicks` means the loop is blocked in the platform's own dispatch,
-            // which is where `tray-icon`'s `TrackPopupMenu` runs, and no diagnostic inside this
-            // closure can see it. A closure that never returns keeps its phase, which is exactly
-            // the reading wanted.
+            // through `tick.enter`, which the borrow checker requires, so a phase can only be
+            // entered inside a scope that will leave it again (dig-app#93). Held for the whole
+            // iteration, so EVERY way out of it restores `BetweenTicks`.
             let tick = pump.enter(Phase::Tick);
 
             // A recovery phrase copied to the clipboard is best-effort auto-cleared once its timeout
@@ -1528,95 +1677,99 @@ mod tray {
                 poll_clipboard_clear();
             }
 
-            // Quit runs on the worker like every other action, but only this loop can exit.
+            // Quit runs on the worker like every other action, but only the render loop can end the
+            // process.
             if actions.stop_requested() {
-                *control_flow = ControlFlow::Exit;
+                let _ = proxy.send_event(Nudge::Quit);
                 return;
             }
 
             {
-            let _phase = tick.enter(Phase::DrainClicks);
-            while let Ok(event) = menu_events.try_recv() {
-                let Some(action) = menu.actions.get(&event.id).copied() else {
-                    // Unreachable for any verb this shell offers, now that ids are derived from the
-                    // action rather than generated per rebuild. It is logged rather than dropped in
-                    // silence because the silence is precisely what made the generated-id bug so hard
-                    // to see: the user's click simply vanished (dig_ecosystem#2074).
-                    tracing::warn!(
-                        id = %event.id.as_ref(),
-                        "a tray menu click named an item this shell has no handler for; it was ignored"
-                    );
-                    continue;
-                };
-                // Any tray interaction is activity — postpone the idle auto-lock.
-                if let Some(held) = peek_session(&session) {
-                    if let Some(session) = held.session.as_ref() {
-                        session.lock.note_activity();
+                let _phase = tick.enter(Phase::DrainClicks);
+                while let Ok(event) = menu_events.try_recv() {
+                    let Some(action) = verbs.get(event.id.as_ref()).copied() else {
+                        // Unreachable for any verb this shell offers. Logged rather than dropped in
+                        // silence because the silence is precisely what made the generated-id bug so
+                        // hard to see: the user's click simply vanished (dig_ecosystem#2074).
+                        tracing::warn!(
+                            id = %event.id.as_ref(),
+                            "a tray menu click named an item this shell has no handler for; it was ignored"
+                        );
+                        continue;
+                    };
+                    // Any tray interaction is activity — postpone the idle auto-lock.
+                    if let Some(held) = peek_session(session) {
+                        if let Some(session) = held.session.as_ref() {
+                            session.lock.note_activity();
+                        }
+                    }
+                    if !actions.submit(action) {
+                        // Another action is already on screen. Dropping this one is deliberate: the
+                        // answer to an impatient second click is the dialog already open, not a
+                        // second one behind it.
+                        //
+                        // WARN rather than DEBUG (dig_ecosystem#2074) because the deliberate case
+                        // and the pathological one are indistinguishable from here: `busy` is
+                        // released only when the handler RETURNS, so a handler that never returns
+                        // latches it forever and every later click on every item is discarded
+                        // exactly like this.
+                        tracing::warn!(
+                            ?action,
+                            "a tray action was ignored while another is in flight; if this repeats \
+                             for every item, the in-flight action never finished"
+                        );
                     }
                 }
-                if !actions.submit(action) {
-                    // Another action is already on screen. Dropping this one is deliberate: the answer
-                    // to an impatient second click is the dialog already open, not a second one.
-                    //
-                    // WARN rather than DEBUG (dig_ecosystem#2074) because the deliberate case and the
-                    // pathological one are indistinguishable from here: `busy` is released only when the
-                    // handler RETURNS, so a handler that never returns latches it forever and every
-                    // later click on every item is discarded exactly like this. At DEBUG that state was
-                    // invisible at the default filter, which is why "a lot of options where nothing
-                    // happens" left no trace at all.
-                    tracing::warn!(
-                        ?action,
-                        "a tray action was ignored while another is in flight; if this repeats \
-                         for every item, the in-flight action never finished"
-                    );
-                }
-            }
             }
 
-            // Everything below reads the session, so it is skipped entirely while an action holds it:
-            // the tray keeps its last picture rather than blocking, and the idle auto-lock does not run
-            // while the user is standing at a dialog.
+            // Everything below reads the session, so it is skipped entirely while an action holds
+            // it: the tray keeps its last picture rather than blocking, and the idle auto-lock does
+            // not run while the user is standing at a dialog.
             let latest = {
                 let _phase = tick.enter(Phase::ReadState);
-                let Some(mut held) = peek_session(&session) else {
-                    return;
+                let Some(mut held) = peek_session(session) else {
+                    continue;
                 };
 
-                // A live session is proof the account DOES open, so any earlier attempt verdict is stale.
+                // A live session is proof the account DOES open, so any earlier attempt verdict is
+                // stale.
                 if held.session.is_some() {
                     held.attempt = OpenAttempt::NotAttempted;
                 }
 
-                // Idle auto-lock: each tick, drop the DEK if the session has been idle past its timeout.
+                // Idle auto-lock: each tick, drop the DEK if the session has been idle past its
+                // timeout.
                 if let Some(session) = held.session.as_ref() {
                     session.lock.poll_idle();
                 }
 
-                snapshot(&status, &env, held.session.as_ref(), held.attempt, &hotkey)
+                snapshot(status, env, held.session.as_ref(), held.attempt, hotkey)
             };
 
-            // Repaint only when something actually changed: rebuilding a native menu every 500ms would
-            // close the menu under the user's cursor while they are reading it.
-            if !view_eq(&latest, &model) {
-                // The icon and tooltip are refreshed BEFORE the menu, and unconditionally: they are the
-                // only surfaces a user sees without clicking, so a failed menu rebuild (which keeps the old
-                // menu, see `repaint`) must not also leave a stale picture. `set_icon`/`set_tooltip` touch
-                // only the already-mounted tray, not the desktop's menu stack.
-                let fresh = tray_menu::status(&latest);
-                if fresh != presence {
-                    // `Shell_NotifyIcon` under the covers: an unbounded `SendMessage` to the shell,
-                    // and one of the calls this tick makes that has no timeout of its own.
-                    let _phase = tick.enter(Phase::Presence);
-                    show_presence(&tray, &fresh);
-                    presence = fresh;
-                }
-                let _phase = tick.enter(Phase::Repaint);
-                if let Some(rendered) = repaint(&tray, &tray_menu::build(&latest)) {
-                    menu = rendered;
-                    model = latest;
-                }
+            // Post only when something actually changed. Rebuilding a native menu every 500 ms would
+            // close the menu under the user's cursor while they are reading it. The comparison stays
+            // HERE rather than moving to the render thread because it is pure, and because leaving
+            // it here is what keeps the renderer free of any state the tick depends on.
+            if view_eq(&latest, &model) {
+                continue;
             }
-        });
+            let fresh = tray_menu::build(&latest);
+            verbs = tray_menu::action_ids(&fresh.rows).into_iter().collect();
+            // Every frame carries the FULL picture, including a presence that may be unchanged.
+            // That is what makes coalescing safe: a frame that replaces an uncollected one has to
+            // be a complete description on its own, or the replaced frame's changes are lost. The
+            // renderer decides what is worth re-applying, because only it knows what is on screen.
+            let presence = tray_menu::status(&latest);
+            model = latest;
+            // Unconditional, and it cannot fail. Advancing `model` above WITHOUT waiting to hear
+            // whether the paint landed is the change that dissolves the old synchronous dependency:
+            // the previous loop advanced its model only if a native menu rebuild had succeeded,
+            // which is exactly what tied the tick's progress to the tray's.
+            link.paint(Paint {
+                menu: fresh,
+                presence,
+            });
+        }
     }
 
     /// Put the app's state on the tray's two non-menu surfaces: its picture and its hover text.
@@ -2300,10 +2453,10 @@ mod tray {
     ///
     /// A failed repaint is not fatal: the previously-rendered menu is still mounted and still correct about
     /// everything except the status lines, so the user keeps a working tray and the next tick tries again.
-    fn repaint(tray: &TrayIcon, model: &MenuModel) -> Option<RenderedMenu> {
+    fn repaint(tray: &TrayIcon, model: &MenuModel) -> Option<Menu> {
         match mount_or_degrade(|| render(model)) {
             Ok(rendered) => {
-                tray.set_menu(Some(Box::new(rendered.menu.clone())));
+                tray.set_menu(Some(Box::new(rendered.clone())));
                 Some(rendered)
             }
             Err(e) => {

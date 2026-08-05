@@ -279,29 +279,33 @@ ever leave it, which would make the lock states lie. It is reported as completen
 (`account::journey::AccountCompleteness`) — a fact about the account — and the first-run flow (§3.2b)
 names the DID as the remaining REQUIRED step while stating plainly that it cannot be taken yet.
 
-### 3.1b-lv The tray event loop MUST be watched from outside itself (normative)
+### 3.1b-lv The shell's state loop MUST be watched from outside itself (normative)
 
-The tray's event loop can stop running, and when it does every menu item is dead. Four reported
-recurrences of that condition (#69, #78, #83, dig-app#86) produced **no log line at all**, because every
-diagnostic the loop has runs inside the loop: a loop that has stopped iterating cannot report that it
-has stopped iterating.
+The shell's state loop can stop running, and when it does every deadline the app owes a user is dead
+with it. Four reported recurrences of that condition (#69, #78, #83, dig-app#86) produced **no log
+line at all**, because every diagnostic the loop has runs inside the loop: a loop that has stopped
+iterating cannot report that it has stopped iterating.
 
 - **A liveness stamp MUST be written from inside the loop and read from a thread that is not the loop.**
   A watcher sharing the watched thread observes nothing.
-- **The stamp MUST carry a PHASE naming where the loop is**, including a named value for *"returned to
-  the platform's own dispatch"*. A nested modal message loop — the tray's own context menu, drawn by
-  `TrackPopupMenu` inside the tray window proc — runs there, upstream of everything the loop measures,
-  and an instrument that only spans the loop's own calls reports a clean bill of health while the tray
-  is dead.
-- **A phase's tolerance MUST be measured against what that phase IS.** The tray menu is a person
-  reading; every other phase is code that should return in microseconds. One tolerance for both either
-  reports a wedge minutes late or reports every opened menu as a wedge, and a diagnostic that is loudly
-  wrong in a common case is one its reader learns to skip.
+- **The stamp MUST carry a PHASE naming where the loop is**, including a named value for *"blocked
+  somewhere this shell does not measure"*. An instrument that spans only the loop's own calls reports
+  a clean bill of health for every block upstream of them — which is where the block actually was the
+  one time this was chased to ground.
+- **A phase's tolerance MUST be measured against what that phase IS.** Every phase of the watched
+  loop is now code that should return in microseconds, so one tolerance governs all of them. This is
+  a MUST about matching the bound to the phase, not a licence for a single constant: the moment a
+  phase names something a PERSON is doing, it MUST get a bound measured against a person. The tray's
+  context menu used to be such a phase and carried a two-minute band for exactly that reason; it is
+  not a phase of this loop any more (§3.1b-tp), so the band went with it.
+
+  A phase MUST NOT carry a longer private tolerance than its neighbours without naming a
+  human-paced subject for it. One phase quietly twelve times more patient than the rest is how a
+  wedge came to be first reported at 120 seconds under a ten-second bound.
 - **A phase MUST NOT be able to outlive what it names.** Every phase a guard restores to MUST be
   either a fixed resting value or a phase held by a guard that is still alive — never a value read back
-  out of the shared stamp. The one phase written from outside a guard is the tray menu, whose stamp
-  cannot be scoped because the library's handler must RETURN before the modal loop starts; it is
-  therefore forbidden as a restore target, so the next tick clears it.
+  out of the shared stamp. Every phase is now written from inside a guard, so none can be stranded;
+  the rule binds the API regardless, because it is what keeps that true for the next phase added.
 
   This MUST is stated at the level of the API, not of its call sites, because a rule enforced only by
   review has already failed once: `Heartbeat::enter` captured its restore target from the stamp, so the
@@ -312,18 +316,44 @@ has stopped iterating.
 - **A continuing stall MUST keep being reported** on a backoff, and MUST NOT latch after one line: the
   permanent case is the one that matters most, and latching silences exactly it. A stall that ENDS MUST
   be reported once, with its duration.
-- **The watcher MAY act only where an action can choose nothing.** It observes and reports; recovery
-  in general belongs to the window service. The one exception is a stuck tray menu, and it is granted
-  because breaking one is incapable of authorizing anything: a dismissed menu has selected no item.
-  The watcher MUST NOT poke any other phase — a shell call that will return or will not, and a block
-  in platform dispatch we cannot name, offer nothing safe to do, and a watchdog that acts on them has
-  a second way to be wrong.
+- **The watcher observes and reports, and recovers nothing.** It MUST NOT poke any phase: a shell
+  call that will return or will not, and a block in platform dispatch we cannot name, offer nothing
+  safe to do, and a watchdog that acts on them has a second way to be wrong. Recovery belongs to the
+  window service.
+
+  It held ONE exception — breaking a tray menu still up past its bound — granted because breaking a
+  menu selects nothing and because the thread that would otherwise clear it was the stuck one. That
+  exception is REVOKED with the condition that earned it: the tray no longer shares a thread with
+  this loop (§3.1b-tp), so a menu that will not dismiss costs the user the menu and not the app.
+- **The loop that is watched MUST be the one that owes the user its deadlines.** Watching a loop
+  whose stalling harms nobody produces a diagnostic that is loudly wrong in a common case, which is
+  the failure the tolerance rule above also exists to prevent. The watched loop is therefore the
+  state tick — where the clipboard timeout, the idle auto-lock and click dispatch live — and NOT the
+  render loop, whose only stall is a person reading a menu.
 
 ### 3.1b-tp The tray context menu MUST be dismissable before it is tracked (normative)
 
 The tray menu is drawn by `TrackPopupMenu`, a nested modal message loop inside the tray window proc
-inside the platform event loop. While it is up the tray's own loop does not run at all, so a menu that
-never dismisses is a tray whose every item is dead, permanently and silently (dig-app#86).
+inside the platform event loop. While it is up, NOTHING else on that thread runs.
+
+- **No state a user is waiting on MAY live on the thread that draws the tray.** This is the primary
+  requirement, and the one that bounds the harm of everything below it. While the two shared a
+  thread, a menu that never dismissed was not a dead menu but a dead application — no clipboard
+  timeout, no idle auto-lock, no status poll, no diagnostics, permanently and in silence
+  (dig-app#86).
+
+  The tray's handle cannot be what moves: `tray_icon::TrayIcon` is an `Rc<RefCell<..>>` with no
+  `unsafe impl Send`, so its three surfaces are pinned to the thread that built it — which MUST be
+  the main thread, because macOS requires it. So the STATE moves, and the seam MUST carry data
+  rather than handles.
+- **The producer MUST NOT wait for the renderer, ever.** Not "usually not": no lock may be held
+  across a draw, and the cost of posting a frame MUST be the same whether the renderer is idle or
+  parked in a modal menu. A producer that can be delayed by the renderer has not been separated
+  from it.
+- **A pending frame MUST be a complete picture, and a newer one MUST replace an uncollected older
+  one.** Replacing is what keeps a wedged menu from costing three hundred stale redraws when it
+  closes; completeness is what makes replacing safe, since a partial frame would discard whatever
+  the frame it replaced was carrying.
 
 A popup tracked without foreground rights cannot be dismissed by clicking away, by Escape, or by
 anything else — measured, holding the loop 180 s and indefinitely thereafter (MSDN Q135788).
@@ -341,14 +371,35 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
 - **Both halves of Q135788 are required.** `SetForegroundWindow` *before* the track is what makes the
   menu dismissable; `PostMessage(WM_NULL)` *after* finalises the task switch for the next one. Neither
   alone is sufficient, and the second without the first fixes nothing.
-- **A menu that outlives its bound MUST be broken from a thread that is not the blocked one**, with a
-  POSTED message, so the rescuer never blocks on a thread that is not responding.
+- **The foreground claim MUST be DECLINED while a consent surface is on screen.** `WM_USER_TRAYICON`
+  is an ordinary window message, so any process running as this user can post one and drive this
+  path (dig-app#91). A prompt that loses focus mid-read is a prompt the user may re-focus and answer
+  having lost their place; a menu that opens without foreground rights is a menu they click twice.
+  The lesser harm is chosen deliberately.
+- **A tray click whose timestamp does not sit beside a real system input event MUST NOT produce a
+  foreground claim.** The comparison MUST be a MODULAR distance in both directions: the tick counter
+  wraps, and the system's last-input tick can legitimately be NEWER than the message, because moving
+  the mouse after releasing the button is itself input.
+
+  This MUST be described as a BOUND and not a fix. It gates only this process's own claim —
+  `tray-icon` makes its own `SetForegroundWindow` call, which no rule here can reach — and an
+  attacker posting while the user is actively typing lands inside the tolerance. It is a nuisance
+  lever being narrowed, not an authorization bypass being closed; nothing on this path selects a
+  menu item or answers a prompt.
+- **A DECLINED claim MUST NOT be reported as a REFUSED one.** A refusal warns that a menu may wedge;
+  a decline is the process choosing correctly. Reporting the second at the first's severity teaches
+  the reader to skip the one line that means something.
 - **The right rule is refuse-to-track rather than track-hopefully**, and reaching it requires owning
   the popup rather than delegating it to a library. Until the window service owns it, the earlier
   foreground attempt only WIDENS the window in which rights may be held — it is the same call the
-  library already makes, one input edge sooner — and the break is what makes the wedge survivable
-  rather than permanent. This MUST NOT be described as closed, and the trigger that causes the
-  refusal in the field is NOT yet identified.
+  library already makes, one input edge sooner.
+
+  There is no longer a rescue for a popup tracked anyway. Breaking one used to be the difference
+  between a lost menu and a lost process; with the state tick on its own thread it would be the
+  difference between a lost menu and a lost menu, and it never worked in any case — a posted message
+  returning `Ok` means enqueued, which is not an effect. **This MUST NOT be described as closed**: an
+  undismissable popup is still possible, it is now merely local, and the trigger that causes the
+  foreground refusal in the field is still NOT identified.
 
 ### 3.1b-dp DPI awareness MUST be declared, not acquired (normative)
 

@@ -22,11 +22,11 @@
 //!
 //! # Why a PHASE and not a set of call spans
 //!
-//! The obvious instrument wraps each blocking OS call the tick makes (`set_tooltip`, `set_icon`,
-//! `set_menu`) and reports the one that is outstanding. That instrument would have reported **nothing**
-//! for the defect actually being chased, because the leading hypothesis is a block *outside* the
-//! closure entirely: `tray-icon`'s `show_tray_menu` runs `TrackPopupMenu`, a nested modal message loop,
-//! inside the tray window proc inside tao's dispatch — upstream of every call the closure makes.
+//! The obvious instrument wraps each blocking OS call the tick makes and reports the one that is
+//! outstanding. That instrument would have reported **nothing** for the defect actually chased here,
+//! because the block was *outside* the closure entirely — in the platform's own dispatch, upstream
+//! of every call the closure makes. Any future block there will be just as invisible to a call-span
+//! instrument, which is why the named resting value outlived the specific defect that motivated it.
 //!
 //! So [`Phase::BetweenTicks`] is a real, named value rather than the absence of one. A stale stamp
 //! reading `BetweenTicks` means the pump is blocked in platform dispatch; a stale stamp naming a call
@@ -35,12 +35,17 @@
 //!
 //! # What this module deliberately does not do
 //!
-//! It observes and reports, and it recovers exactly one thing: a tray menu still up past its bound,
-//! which it asks to close (see [`watch`]). That single exception is granted because the action can
-//! choose nothing — a dismissed menu has selected no item — and because the thread that would
-//! otherwise clear it is the thread that is stuck. Everything else it can see, it only names: a
-//! watchdog that acts where there is nothing safe to do is a watchdog with a second way to be wrong,
-//! and the general reclaim ladder belongs to the window service (dig-app#86).
+//! It observes and reports, and it recovers nothing at all. It used to recover exactly one thing: a
+//! tray context menu still up past a two-minute bound, which it asked to close with a posted
+//! `WM_CANCELMODE`. That exception existed because the menu ran a nested modal loop on this pump's
+//! own thread, so a menu that would not dismiss was an app that would not run — the rescue was the
+//! difference between a lost menu and a lost process.
+//!
+//! The tray draws on a thread of its own now (dig-app#90). A wedged menu costs the user the menu,
+//! this loop keeps ticking, and there is nothing left here that is both stuck and safe to poke. So
+//! the exception is gone with the condition that earned it: a watchdog that acts where there is
+//! nothing safe to do is a watchdog with a second way to be wrong, and the general reclaim ladder
+//! belongs to the window service.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -72,23 +77,6 @@ pub enum Phase {
     Presence = 5,
     /// Rebuilding and re-attaching the native menu.
     Repaint = 6,
-    /// The tray's context menu is up, and the loop is inside `TrackPopupMenu`.
-    ///
-    /// # Why this is worth telling apart from [`Phase::BetweenTicks`]
-    ///
-    /// Measured on a real Windows process (dig-app#86): while the tray menu is open the tao user
-    /// closure **does not run at all**, so the pump goes silent for exactly as long as the person
-    /// takes to read the menu. Without this phase every such pause is reported as an unexplained
-    /// stall in platform dispatch — a diagnostic that is loudly wrong several times a day teaches
-    /// its reader to skip it, which is how the log became useless in the first place.
-    ///
-    /// So the menu names itself, gets a patience measured against a *person reading*, and leaves
-    /// [`Phase::BetweenTicks`] meaning what it should: blocked somewhere nobody expected.
-    ///
-    /// Stamped from `tray-icon`'s event handler, which runs synchronously in the tray window proc on
-    /// this same thread, immediately BEFORE `show_tray_menu` — the last moment anything of ours runs
-    /// before the modal loop takes the thread.
-    TrayMenu = 7,
 }
 
 impl Phase {
@@ -103,22 +91,18 @@ impl Phase {
             Self::ReadState => "read-state",
             Self::Presence => "presence (set_icon/set_tooltip)",
             Self::Repaint => "repaint (set_menu)",
-            Self::TrayMenu => "tray-menu (inside TrackPopupMenu)",
         }
     }
 
     /// How long this phase may last before it is a fault.
     ///
-    /// Two bands, because the phases differ in kind and not merely in degree. Every in-closure phase
-    /// is code that should complete in microseconds, so ten seconds there is already twenty missed
-    /// ticks and unambiguous. [`Phase::TrayMenu`] is a **person reading a menu**, so its bound has to
-    /// be measured against human dithering; two minutes is far longer than anyone browses a tray menu
-    /// and far shorter than "permanent".
+    /// ONE bound for every phase now. There used to be two, because the tray's context menu was a
+    /// phase of this loop and its bound had to be measured against a person reading rather than
+    /// against code that should return in microseconds. The menu no longer runs on this thread
+    /// (dig-app#90), so no phase here is a human waiting, and every one of them is code that should
+    /// complete in microseconds — ten seconds is already twenty missed ticks and unambiguous.
     fn patience(self) -> Duration {
-        match self {
-            Self::TrayMenu => TRAY_MENU_PATIENCE,
-            _ => PATIENCE,
-        }
+        PATIENCE
     }
 
     /// What to tell the reader about a stall in this phase — the likely cause, in one clause.
@@ -127,11 +111,6 @@ impl Phase {
     /// testable without capturing a log.
     fn advice(self) -> &'static str {
         match self {
-            Self::TrayMenu => {
-                "the tray's context menu has not dismissed. A tracked popup whose \
-                 SetForegroundWindow was refused cannot be dismissed by clicking away or by Escape, \
-                 and it holds this loop for as long as it is up"
-            }
             Self::BetweenTicks => {
                 "the loop is blocked in the platform's own dispatch, outside anything this shell \
                  measures"
@@ -154,7 +133,6 @@ impl Phase {
             4 => Self::ReadState,
             5 => Self::Presence,
             6 => Self::Repaint,
-            7 => Self::TrayMenu,
             _ => Self::BetweenTicks,
         }
     }
@@ -274,21 +252,18 @@ impl Heartbeat {
     ///
     /// # Why the resting state is a constant here rather than whatever was last stamped
     ///
-    /// It used to read the current phase back out of the atomic and restore that. Because
-    /// [`Phase::TrayMenu`] is stamped from outside any guard — by [`Heartbeat::note_tray_menu`],
-    /// from a callback that must return before the modal loop takes the thread — the first tick
-    /// after a tray click captured `TrayMenu` as its resting state and restored it on the way out.
-    /// So did the next tick, and every tick after it: **one tray click pinned `TrayMenu` for the
-    /// life of the process**, in a perfectly healthy app (dig-app#93).
+    /// It used to read the current phase back out of the atomic and restore that, which let a phase
+    /// stamped from OUTSIDE any guard become a resting state and then be re-adopted by every tick
+    /// after it — one tray click pinned a phase for the life of a perfectly healthy process, along
+    /// with the two-minute tolerance that phase carried, which is why dig-app#93's first ERROR
+    /// arrived at `silent_for_ms=120141` instead of at ten seconds.
     ///
-    /// That was not merely a stale label. `Phase::patience` (private, so unlinked) gives `TrayMenu`
-    /// [`TRAY_MENU_PATIENCE`] where every other phase gets [`PATIENCE`], so the watchdog became
-    /// twelve times less sensitive and stayed that way — which is why #93's first ERROR arrived at
-    /// `silent_for_ms=120141` instead of at ten seconds.
-    ///
-    /// A restore target that is either a constant or a phase held by a live guard cannot be
-    /// stranded, because both are bounded by a scope. That property is what the private `mark`
-    /// above enforces: outside this module there is no way to set a phase that nothing will clear.
+    /// There is no longer any stamp from outside a guard (dig-app#90 moved the tray menu off this
+    /// thread entirely), so nothing can reach that state today. The constant stays anyway, because
+    /// it is what makes the state UNREPRESENTABLE rather than merely unreached: a restore target
+    /// that is either a constant or a phase held by a live guard is bounded by a scope by
+    /// construction. That property is what the private `mark` above enforces — outside this module
+    /// there is no way to set a phase that nothing will clear.
     pub fn enter(&self, phase: Phase) -> InPhase<'_> {
         self.mark(phase);
         InPhase {
@@ -296,21 +271,6 @@ impl Heartbeat {
             phase,
             restore_to: Phase::BetweenTicks,
         }
-    }
-
-    /// Stamp that the tray's context menu is opening, and that the pump is about to lose the thread.
-    ///
-    /// The one stamp that cannot be a guard. `tray-icon` calls its event handler synchronously from
-    /// the tray window proc and then runs `TrackPopupMenu` — a nested modal loop — in the very next
-    /// statement (`tray-icon-0.23.1/src/platform_impl/windows/mod.rs:541-545`). The handler must
-    /// RETURN for the menu to open at all, so there is no scope that could span the thing being
-    /// named.
-    ///
-    /// It is safe to have no scope because [`Phase::TrayMenu`] is never a restore target: the next
-    /// tick's [`Heartbeat::enter`] rests at [`Phase::BetweenTicks`] regardless, so this stamp is
-    /// cleared by the first tick that runs after the menu closes and cannot outlive it.
-    pub fn note_tray_menu(&self) {
-        self.mark(Phase::TrayMenu);
     }
 
     /// The phase last stamped.
@@ -375,14 +335,6 @@ pub struct Watcher {
 /// merely slow, or a user holding the context menu open, and far below the "did anyone notice?"
 /// threshold of a person clicking a dead tray.
 pub const PATIENCE: Duration = Duration::from_secs(10);
-
-/// How long the tray's context menu may be up before it is a fault.
-///
-/// A different KIND of bound from [`PATIENCE`]: this one is measured against a person reading a
-/// menu, not against code that should return in microseconds. Two minutes is far beyond anyone
-/// browsing a nine-item tray menu, and far below the "permanent" that the defect actually is
-/// (dig-app#86 held a wedged popup for 180 s and would have held it forever).
-pub const TRAY_MENU_PATIENCE: Duration = Duration::from_secs(120);
 
 /// How long before a continuing stall is stated again.
 const RESTATE_AFTER: Duration = Duration::from_secs(30);
@@ -497,54 +449,28 @@ pub fn report(verdict: Verdict) {
     }
 }
 
-/// Whether a stall in `phase` is one this process can do anything about.
-///
-/// Only the tray menu is. A modal menu loop can be broken from another thread with a posted
-/// `WM_CANCELMODE` (measured, dig-app#86), and breaking one chooses nothing — a dismissed menu has
-/// selected no item, so no consent can be manufactured by it.
-///
-/// Every other phase is either a call into the shell that will return or will not, or a block in
-/// platform dispatch we cannot name. There is nothing safe to poke, and a watchdog that pokes
-/// anyway is a watchdog that can be wrong in a second way.
-fn is_breakable(phase: Phase) -> bool {
-    matches!(phase, Phase::TrayMenu)
-}
-
-/// Decide whether `verdict` calls for the breaker, having already reported it.
-///
-/// Split from the loop so the decision is a value a test can assert on. Returns the phase to break,
-/// or `None`.
-fn breakable(verdict: Verdict) -> Option<Phase> {
-    match verdict {
-        Verdict::Stalled { phase, .. } if is_breakable(phase) => Some(phase),
-        _ => None,
-    }
-}
-
-/// Watch `beat` forever, reporting every stall and — where there is something safe to do — asking
-/// `breaker` to clear it.
+/// Watch `beat` forever, reporting every stall and every recovery.
 ///
 /// Spawned beside the tray loop. Failing to spawn it costs diagnostics and nothing else, so the
 /// caller may ignore the result — a machine that cannot start an observer thread must still get a
 /// tray.
 ///
-/// The breaker runs on THIS thread, which is the point: the tray loop is by definition not running
-/// when it is needed, so a rescue dispatched from the tray loop is a rescue that never happens.
-pub fn watch(
-    beat: Heartbeat,
-    breaker: impl Fn(Phase) + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
+/// # Why it only reports
+///
+/// It used to also RECOVER one thing: a tray context menu still up past a two-minute bound, which it
+/// asked to close with a posted `WM_CANCELMODE`. That existed because the menu ran a nested modal
+/// loop on this very pump's thread, so a menu that would not dismiss was an app that would not run.
+/// The tray draws on its own thread now (dig-app#90) and a wedged menu costs the user the menu
+/// alone, so there is nothing left here that is both stuck and safe to poke — and a watchdog that
+/// acts where there is nothing safe to do is a watchdog with a second way to be wrong.
+pub fn watch(beat: Heartbeat) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("dig-tray-vigil".to_owned())
         .spawn(move || {
             let mut watcher = Watcher::new();
             loop {
                 std::thread::sleep(LOOK_EVERY);
-                let verdict = watcher.look(&beat, Instant::now());
-                report(verdict);
-                if let Some(phase) = breakable(verdict) {
-                    breaker(phase);
-                }
+                report(watcher.look(&beat, Instant::now()));
             }
         })
 }
@@ -563,10 +489,9 @@ mod tests {
         Duration::from_millis(n)
     }
 
-    /// Every test below runs the SHIPPED patience ladder, shrunk by a factor of 100 — so
-    /// [`PATIENCE`] reads as 100 ms and [`TRAY_MENU_PATIENCE`] as 1200 ms, and the *relationship*
-    /// between the bands is what the tests exercise. Hard-coded test thresholds would have kept
-    /// passing after a production constant changed underneath them.
+    /// Every test below runs the SHIPPED [`PATIENCE`], shrunk by a factor of 100, so it reads as
+    /// 100 ms. Derived from the production constant rather than hard-coded: a literal threshold
+    /// keeps passing after the constant it was chosen to match has moved underneath it.
     const SCALE: f64 = 0.01;
 
     fn watcher() -> Watcher {
@@ -800,7 +725,6 @@ mod tests {
             Phase::ReadState,
             Phase::Presence,
             Phase::Repaint,
-            Phase::TrayMenu,
         ];
         let beat = Heartbeat::starting_at(base());
         for phase in all {
@@ -814,109 +738,19 @@ mod tests {
         assert_eq!(names.len(), distinct, "two phases share a log name");
     }
 
-    /// A person reading the tray menu is not a fault.
+    /// ONE bound now governs every phase, checked from both sides.
     ///
-    /// Measured (dig-app#86): the tao closure does not run at all while `TrackPopupMenu` is up, so
-    /// every open menu is a pump silence. At the general patience that is an ERROR saying the tray
-    /// needs restarting — several times a day, wrongly — and a diagnostic that is loudly wrong in a
-    /// common case is one its reader learns to skip.
+    /// There used to be two, because the tray menu was a phase of this loop and a person reading it
+    /// could not be held to a bound written for code. The menu is not on this thread any more
+    /// (dig-app#90), so the second band was deleted — and the test that deleted it has to prove the
+    /// remaining one is a real bound rather than an absent one, hence both sides.
     ///
-    /// The nearest wrong implementation applies ONE patience to every phase. This test and the next
-    /// share a single instant, so a uniform patience of either length fails one of them.
+    /// Every phase is asserted, not a representative: the defect this replaces was one phase quietly
+    /// carrying a tolerance twelve times the others, which any single-phase test passes.
     #[test]
-    fn an_open_tray_menu_is_tolerated_where_the_same_silence_elsewhere_is_not() {
-        let base = base();
-        // 400 ms: four times the scaled general patience, still a third of the scaled menu patience.
-        let observed_at = base + ms(400);
-
-        let menu = Heartbeat::starting_at(base);
-        menu.mark_at(Phase::TrayMenu, base);
-        assert_eq!(
-            watcher().look(&menu, observed_at),
-            Verdict::Quiet,
-            "a person reading the tray menu for a moment must not be reported as a wedged tray"
-        );
-
-        let dispatch = Heartbeat::starting_at(base);
-        dispatch.mark_at(Phase::BetweenTicks, base);
-        assert!(
-            matches!(
-                watcher().look(&dispatch, observed_at),
-                Verdict::Stalled {
-                    phase: Phase::BetweenTicks,
-                    ..
-                }
-            ),
-            "the SAME silence with no menu open is the unexplained stall, and must be reported"
-        );
-    }
-
-    /// The menu's own bound, from both sides — a tolerance that never expires is not a tolerance,
-    /// and the wedge this module exists for presents exactly as a menu that never closes.
-    #[test]
-    fn the_tray_menu_bound_holds_from_both_sides() {
-        let base = base();
-        let beat = Heartbeat::starting_at(base);
-        beat.mark_at(Phase::TrayMenu, base);
-        let bound = TRAY_MENU_PATIENCE.mul_f64(SCALE);
-
-        assert_eq!(
-            watcher().look(&beat, base + bound - ms(1)),
-            Verdict::Quiet,
-            "one millisecond under the menu bound must NOT be a stall"
-        );
-        assert!(
-            matches!(
-                watcher().look(&beat, base + bound),
-                Verdict::Stalled {
-                    phase: Phase::TrayMenu,
-                    ..
-                }
-            ),
-            "a menu still up at its bound is the wedge, and must be reported as a menu"
-        );
-    }
-
-    /// A stall report carries the cause of the phase it names, and the tray menu's cause is its own.
-    ///
-    /// Asserted as a value rather than by capturing a log: a test that inspects the thing which
-    /// produces a diagnostic proves nothing about whether the diagnostic ever arrives, so the choice
-    /// is checked here and `report` is a total match over it.
-    #[test]
-    fn each_phase_carries_its_own_cause_and_the_menus_is_distinct() {
-        assert_ne!(
-            Phase::TrayMenu.advice(),
-            Phase::BetweenTicks.advice(),
-            "a stuck menu and an unexplained dispatch block need different advice"
-        );
-        assert!(
-            Phase::TrayMenu.advice().contains("SetForegroundWindow"),
-            "the menu's advice must name the measured cause, so the reader is not left guessing"
-        );
-        assert_ne!(
-            Phase::Presence.advice(),
-            Phase::BetweenTicks.advice(),
-            "a block inside a named call is not a block in platform dispatch"
-        );
-    }
-
-    /// The breaker is offered a stuck tray menu and nothing else.
-    ///
-    /// The nearest wrong implementation breaks on any stall. That is not merely untidy: the other
-    /// phases are a shell call that will return or will not, and a block in platform dispatch we
-    /// cannot name — there is nothing safe to poke, and poking anyway gives the watchdog a second
-    /// way to be wrong. So a non-menu stall is asserted to yield `None`, not merely left untested.
-    #[test]
-    fn only_a_stuck_tray_menu_is_offered_to_the_breaker() {
-        let stall = |phase| Verdict::Stalled {
-            phase,
-            silent_for: ms(1),
-            again: false,
-        };
-
-        assert_eq!(breakable(stall(Phase::TrayMenu)), Some(Phase::TrayMenu));
-
-        for unbreakable in [
+    fn every_phase_shares_one_bound_and_it_holds_from_both_sides() {
+        let bound = PATIENCE.mul_f64(SCALE);
+        for phase in [
             Phase::BetweenTicks,
             Phase::Tick,
             Phase::ClipboardClear,
@@ -925,60 +759,58 @@ mod tests {
             Phase::Presence,
             Phase::Repaint,
         ] {
+            let base = base();
+            let beat = Heartbeat::starting_at(base);
+            beat.mark_at(phase, base);
+
             assert_eq!(
-                breakable(stall(unbreakable)),
-                None,
-                "{unbreakable:?} has nothing safe to poke and must not be broken"
+                watcher().look(&beat, base + bound - ms(1)),
+                Verdict::Quiet,
+                "{phase:?} one millisecond under the bound must NOT be a stall"
+            );
+            assert!(
+                matches!(
+                    watcher().look(&beat, base + bound),
+                    Verdict::Stalled { .. }
+                ),
+                "{phase:?} at the bound must be reported; a phase with a longer private tolerance                  is exactly the defect dig-app#93 reported"
             );
         }
     }
 
-    /// A healthy pump is never broken. Both non-stall verdicts, because a breaker fired on a
-    /// RECOVERY would dismiss the menu of a user who is using it perfectly normally.
+    /// A stall report carries the cause of the phase it names.
+    ///
+    /// Asserted as a value rather than by capturing a log: a test that inspects the thing which
+    /// produces a diagnostic proves nothing about whether the diagnostic ever arrives, so the choice
+    /// is checked here and `report` is a total match over it.
     #[test]
-    fn a_pump_that_is_not_stalled_is_never_broken() {
-        assert_eq!(breakable(Verdict::Quiet), None);
-        assert_eq!(
-            breakable(Verdict::Recovered { lasted: ms(500) }),
-            None,
-            "a recovered pump is working; breaking its menu would close it under the user"
+    fn a_named_call_and_platform_dispatch_are_told_apart() {
+        assert_ne!(
+            Phase::Presence.advice(),
+            Phase::BetweenTicks.advice(),
+            "a block inside a named call is not a block in platform dispatch"
         );
     }
 
-    /// A restatement is still a stall, so a menu that survived the first break is offered again.
-    /// Breaking once and then giving up silently is the latch failure in another costume.
+    /// A tick's guard rests at [`Phase::BetweenTicks`] whatever was stamped before it.
+    ///
+    /// This is dig-app#93's regression guard, kept after the defect became unreachable. `enter` used
+    /// to read the phase back out of the atomic and restore THAT, so any phase stamped outside a
+    /// guard was adopted by the next tick as its resting state and re-adopted by every tick after
+    /// it — pinning a label, and the tolerance that label carried, for the life of a healthy
+    /// process. Nothing stamps from outside a guard any more, so the fixture uses `mark_at` to put
+    /// the loop in the state the old tray-menu stamp used to produce.
+    ///
+    /// The second tick is load-bearing: the wrong implementation is self-sustaining, so a
+    /// single-tick fixture cannot tell "cleared once" from "cleared for good".
     #[test]
-    fn a_restated_stall_is_offered_to_the_breaker_again() {
-        assert_eq!(
-            breakable(Verdict::Stalled {
-                phase: Phase::TrayMenu,
-                silent_for: ms(1),
-                again: true,
-            }),
-            Some(Phase::TrayMenu),
-        );
-    }
-
-    /// One tray click must not rename every later tick (dig-app#93).
-    ///
-    /// # The fixture, and why it has a healthy tick in it
-    ///
-    /// This replays the shipped sequence exactly: `tray-icon`'s handler stamps the menu and returns
-    /// (there is no scope it could hold — the modal loop runs in the statement after the handler),
-    /// the person reads the menu, the menu closes, and the loop runs ONE ordinary tick.
-    ///
-    /// The tick is the load-bearing part. Without it the assertion would read the stamp the click
-    /// just made and pass against anything. The defect lives entirely in what a tick does on its way
-    /// OUT: `enter` used to read the phase back out of the atomic and restore it, so the first tick
-    /// after a click adopted `TrayMenu` as its resting state and every tick after it did the same.
-    #[test]
-    fn one_tray_click_does_not_rename_the_ticks_that_follow_it() {
-        let beat = Heartbeat::starting_at(base());
-
-        beat.note_tray_menu();
+    fn a_tick_rests_in_platform_dispatch_whatever_was_stamped_before_it() {
+        let base = base();
+        let beat = Heartbeat::starting_at(base);
+        beat.mark_at(Phase::Repaint, base);
         assert_eq!(
             beat.phase(),
-            Phase::TrayMenu,
+            Phase::Repaint,
             "the stamp must take effect, or this test is asserting nothing"
         );
 
@@ -986,79 +818,11 @@ mod tests {
         assert_eq!(
             beat.phase(),
             Phase::BetweenTicks,
-            "a healthy tick after a tray click must rest in platform dispatch; adopting TrayMenu \
-             pins it for the life of the process"
+            "a tick must rest in platform dispatch, never in whatever it happened to find"
         );
 
-        // A second tick, because the wrong implementation is self-sustaining: once the resting
-        // state is TrayMenu every later tick re-restores it, so a single-tick fixture cannot tell
-        // "cleared once" from "cleared for good".
         drop(beat.enter(Phase::Tick));
         assert_eq!(beat.phase(), Phase::BetweenTicks);
-    }
-
-    /// The consequence that reached a user: a tray click must not blunt the watchdog.
-    ///
-    /// # Why this is asserted separately from the phase byte above
-    ///
-    /// The phase is a label; the harm is the patience it selects. A fix that cleared the stamp on
-    /// some other schedule — or a future phase that acquires its own long bound — would satisfy the
-    /// byte test and still leave the watchdog twelve times less sensitive, which is what #93
-    /// actually reported (`silent_for_ms=120141` for a first ERROR whose bound is ten seconds).
-    ///
-    /// The observation instant is chosen from the two SHIPPED bounds rather than picked: 400 ms is
-    /// four times the scaled [`PATIENCE`] and a third of the scaled [`TRAY_MENU_PATIENCE`], so it
-    /// is unambiguously a stall under one and unambiguously quiet under the other.
-    ///
-    /// # Two things this fixture had to get right, having got both wrong first
-    ///
-    /// **It must not re-stamp the phase after the tick.** The first version ended with an explicit
-    /// `mark_at(Phase::BetweenTicks, base)` to place the clock, which also overwrote the phase the
-    /// tick had just restored — erasing the defect and passing against the unfixed code. So the
-    /// tick's own guard is the last thing to touch the phase here, exactly as in the shipped loop.
-    ///
-    /// **It needs a control that differs by ONE actor.** `menu_still_open` runs the identical
-    /// sequence minus the tick, and must be Quiet at the same instant. Without it, "stalled at
-    /// 400 ms" would also be satisfied by an implementation that had simply lost the menu's
-    /// tolerance altogether — which is the opposite defect and a real regression of #86.
-    ///
-    /// `silent_for` is asserted only as "past the general patience" rather than to the millisecond,
-    /// because `note_tray_menu` and the guards stamp on the wall clock by construction (they run
-    /// where no fixture clock exists). The quantity under test is WHICH BOUND applied, and the
-    /// control pins that from the other side.
-    #[test]
-    fn a_wedge_after_a_tray_click_is_still_reported_at_the_general_patience() {
-        let base = base();
-        let observed_at = base + ms(400);
-
-        let after_a_click = Heartbeat::starting_at(base);
-        after_a_click.note_tray_menu();
-        // The menu closed, and the loop ran one ordinary tick. Its guard is the last thing to touch
-        // the phase, which is the whole point.
-        drop(after_a_click.enter(Phase::Tick));
-
-        assert!(
-            matches!(
-                watcher().look(&after_a_click, observed_at),
-                Verdict::Stalled {
-                    phase: Phase::BetweenTicks,
-                    ..
-                }
-            ),
-            "a tray click earlier in the session must not buy every later stall the menu's \
-             two-minute patience"
-        );
-
-        // The control: the same click, and no tick after it, because the menu is still up. This is
-        // a person reading a menu and must stay quiet — the tolerance is not being removed, it is
-        // being confined to the menu that earned it.
-        let menu_still_open = Heartbeat::starting_at(base);
-        menu_still_open.note_tray_menu();
-        assert_eq!(
-            watcher().look(&menu_still_open, observed_at),
-            Verdict::Quiet,
-            "an OPEN menu must keep its own patience; only a menu that has already closed loses it"
-        );
     }
 
     /// A mark that cannot be placed on the clock must age like the base, never like the present.
