@@ -1282,6 +1282,10 @@ mod tray {
                 .map(|dir| dig_app_core::account::second_factor::vault::enrolment_present(&dir))
                 .unwrap_or(false),
             hotkey: Some(hotkey.clone()),
+            // Read once per tick rather than at paint time: the renderer repaints only on a CHANGED
+            // view, so carrying this in the view is what makes a refusal actually reach the tooltip
+            // (dig-app#86).
+            menu_suppressed: tray_popup::menu_is_suppressed(),
             // The node's own cache figures, straight from the status snapshot — so the tray shows the
             // node's real cap + usage and the cache submenu is empty-handed (and says so) only when
             // there is genuinely no node to read from (dig_ecosystem#2002).
@@ -1837,6 +1841,10 @@ mod tray {
             // changed cap or a moved usage figure must repaint — otherwise a just-applied new cap would
             // not show as current until something else changed (dig_ecosystem#2002).
             && a.cache == b.cache
+            // A menu refused for want of foreground rights explains a click that produced nothing,
+            // so the tooltip must repaint the moment it flips -- in both directions, since the
+            // recovery is what tells the user their next click will work (dig-app#86).
+            && a.menu_suppressed == b.menu_suppressed
     }
 
     /// Run one menu action. Returns `true` when the process should exit.

@@ -196,6 +196,13 @@ pub struct TrayView {
     /// [`HotkeyState`](crate::hotkey::HotkeyState): "not tried yet" and "tried and refused" are different
     /// facts, and only the second is worth telling the user about.
     pub hotkey: Option<crate::hotkey::HotkeyState>,
+    /// Whether the last tray click had its menu refused because Windows would not bring DIG
+    /// forward (dig-app#86).
+    ///
+    /// Carried in the view rather than read from its atomic at paint time so that a flip actually
+    /// REPAINTS: the renderer only redraws when the view changes, so a fact the view does not carry
+    /// is a fact the user never sees change.
+    pub menu_suppressed: bool,
     /// The node's content-cache cap + usage, or `None` when no node is connected to report it
     /// (dig_ecosystem#2002).
     ///
@@ -730,6 +737,14 @@ fn tooltip_text(view: &TrayView, glyph: TrayGlyph) -> String {
     };
     // The node line is dropped from the tooltip when it would only repeat the headline; two lines saying
     // the same thing waste the whole budget.
+    // A refused menu outranks the node line: it is the one thing here that explains something the
+    // user just tried and did not get, and it names the remedy, which is simply to click again.
+    if view.menu_suppressed {
+        return format!(
+            "{headline}
+Menu blocked by Windows — click the DIG icon again"
+        );
+    }
     if matches!(glyph, TrayGlyph::NoNode) || view.node.is_empty() {
         headline.to_string()
     } else {
@@ -1551,6 +1566,8 @@ mod tests {
             did: None,
             second_factor: false,
             hotkey: None,
+            // The fixture's default: the suppressed case is exercised by the test that flips it.
+            menu_suppressed: false,
             // A connected node reporting a default 1 GiB cap with 350 MiB in use — the ordinary
             // success case. Tests that need the disconnected surface null this out explicitly.
             cache: Some(crate::cache::CacheSnapshot {
@@ -3338,5 +3355,40 @@ mod tests {
             used_bytes: 350 * crate::cache::MIB,
         })));
         assert!(text.contains("Cache: 350 MiB of 1 GiB used"), "got: {text}");
+    }
+
+    /// SPEC 3.1b-tp: a suppressed menu MUST be reported to the user, not only to the log.
+    ///
+    /// The tooltip is the only surface a person has for a menu that did not appear — they clicked
+    /// the icon and got nothing, so the text has to say why AND that clicking again is the remedy.
+    /// Asserted on the substance rather than the exact sentence: the requirement is that the user
+    /// learns Windows blocked it and that a second click works, not any particular wording.
+    #[test]
+    fn a_suppressed_menu_says_so_on_the_tooltip_and_names_the_remedy() {
+        let mut view = TrayView {
+            running: true,
+            node_connected: true,
+            node: "connected".into(),
+            ..Default::default()
+        };
+
+        let quiet = status(&view).tooltip;
+        assert!(
+            !quiet.to_lowercase().contains("blocked"),
+            "an unsuppressed menu must not mention being blocked; got {quiet:?}"
+        );
+
+        view.menu_suppressed = true;
+        let loud = status(&view).tooltip;
+        assert!(
+            loud.to_lowercase().contains("blocked"),
+            "a suppressed menu must say so on the tooltip -- it is the only surface the user has \
+             for a menu that did not appear (SPEC 3.1b-tp); got {loud:?}"
+        );
+        assert!(
+            loud.to_lowercase().contains("again"),
+            "the tooltip must name the remedy, because the suppression is per-click and clicking \
+             again is the entire fix; got {loud:?}"
+        );
     }
 }
