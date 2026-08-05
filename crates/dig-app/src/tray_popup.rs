@@ -996,4 +996,103 @@ mod tests {
              looked for"
         );
     }
+
+    /// The whole of dig-app#86's policy, stated over every outcome rather than only the one that
+    /// fixes the bug.
+    ///
+    /// The expected side is derived from Q135788, not from reading `track_after`: a popup is
+    /// undismissable exactly when the foreground claim was MADE and REFUSED. Everything else is
+    /// either evidence we hold the foreground or the absence of evidence that we do not, and
+    /// refusing a menu on absence of evidence costs a real menu for no measured gain.
+    ///
+    /// Exhaustive on purpose. A fifth `Claim` variant will not compile against this match, which is
+    /// the point: a new way to fail to take the foreground is a new chance to track a popup into a
+    /// wedge, and adding one silently should not be possible.
+    #[test]
+    fn only_a_refused_foreground_claim_refuses_the_track() {
+        for claim in [
+            Claim::Taken,
+            Claim::Declined(Decline::ConsentSurfaceUp),
+            Claim::Declined(Decline::NoRecentInput),
+            Claim::Failed(NoForeground::NoTrayWindow),
+            Claim::Failed(NoForeground::Refused),
+        ] {
+            let expected = match claim {
+                // Q135788 applies only where the claim was made and denied.
+                Claim::Failed(NoForeground::Refused) => Track::Refused,
+                // We hold it, so the popup dismisses normally.
+                Claim::Taken => Track::Allowed,
+                // Never asked, so nothing learned; `tray-icon` still makes its own claim.
+                Claim::Declined(_) => Track::Allowed,
+                // No window to protect, and none to send a suppression to either.
+                Claim::Failed(NoForeground::NoTrayWindow) => Track::Allowed,
+            };
+            assert_eq!(
+                track_after(claim),
+                expected,
+                "{claim:?} must map to {expected:?}: only a claim that was MADE and REFUSED is evidence the next TrackPopupMenu cannot be dismissed (MSDN Q135788)"
+            );
+        }
+    }
+
+    /// The two private `tray-icon` messages `suppress_menu` sends, pinned to the crate's own source
+    /// for the reason [`the_tray_window_class_matches_the_crates_own_source`] gives.
+    ///
+    /// A renumbering bump is the worst case this module has: `suppress_menu` would send a message
+    /// the proc ignores, every refusal would become a silent no-op, and nothing would look wrong —
+    /// the menu would simply start wedging again exactly as it does today.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_menu_gate_messages_match_the_crates_own_source() {
+        let source = vendored_tray_icon_source();
+        for (name, ours) in [
+            (
+                "WM_USER_SHOW_MENU_ON_LEFT_CLICK",
+                WM_USER_SHOW_MENU_ON_LEFT_CLICK,
+            ),
+            (
+                "WM_USER_SHOW_MENU_ON_RIGHT_CLICK",
+                WM_USER_SHOW_MENU_ON_RIGHT_CLICK,
+            ),
+        ] {
+            let declaration = source
+                .lines()
+                .find(|line| line.contains(&format!("const {name}: u32 =")))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "tray-icon no longer declares `{name}`; the menu gate this module writes through has been renamed or removed, so `suppress_menu` is a silent no-op that cannot refuse a wedging popup"
+                    )
+                });
+
+            assert!(
+                declaration.contains(&format!("= {ours};")),
+                "tray-icon declares `{}`, but this module sends {ours} for {name}; a suppression would be ignored and the menu would wedge again (dig-app#86)",
+                declaration.trim()
+            );
+        }
+    }
+
+    /// The ordering the whole fix rests on: `tray-icon` hands our handler the click BEFORE it reads
+    /// the flag deciding whether to track a menu.
+    ///
+    /// Without that order a suppression written from inside the handler lands too late and does
+    /// nothing. It is a property of someone else's source, so it is pinned to that source rather
+    /// than argued in prose — the module docs make the argument, and this keeps it true across a
+    /// bump.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_handler_runs_before_the_crate_reads_its_menu_flag() {
+        let source = vendored_tray_icon_source();
+        let dispatch = source.find("TrayIconEvent::send(event);").expect(
+            "tray-icon must still deliver the click to our handler with `TrayIconEvent::send`",
+        );
+        let gate = source
+            .find("menu_on_right_click && ")
+            .expect("tray-icon must still gate its track on `menu_on_right_click`");
+
+        assert!(
+            dispatch < gate,
+            "tray-icon now reads its menu flag BEFORE calling our handler, so a suppression written from inside the handler lands too late: refuse-to-track is dead and the dig-app#86 wedge is reachable again"
+        );
+    }
 }
