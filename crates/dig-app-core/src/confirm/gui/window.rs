@@ -3931,9 +3931,6 @@ mod tests {
             }
         }
 
-        // `gated_consent` raises the process-global consent-surface count for its whole span, so
-        // even a doubles-only call is a raiser (dig-app#100).
-        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
         assert_eq!(
             crate::confirm::gated_consent(&sign_content(), &TimingOutWindow, &AlwaysVerified),
             ConfirmDecision::Timeout
