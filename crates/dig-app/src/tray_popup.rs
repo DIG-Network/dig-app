@@ -60,13 +60,13 @@
 //!   the same-user, unprivileged `GetLastInputInfo` counter, and one `SendInput` call with a
 //!   zero-delta `MOUSEEVENTF_MOVE` refreshes it — invisibly, with no cursor motion, on a completely
 //!   idle machine. Measured: a last-input age of 5,454,546 ms became 63 ms after a single call, well
-//!   inside [`INPUT_TOLERANCE`]. So the sequence `SendInput` → `PostMessageW(tray_hwnd, 6002, …,
+//!   inside `INPUT_TOLERANCE`. So the sequence `SendInput` → `PostMessageW(tray_hwnd, 6002, …,
 //!   WM_RBUTTONUP)` passes this gate every time. The earlier claim here — that it narrows the lever
 //!   to "only during active input" — understated it: the real cost to an attacker is one extra Win32
 //!   call, at any moment of their choosing.
 //!
 //! The gate STAYS. It costs nothing, it stops the unsophisticated forgery, and removing it would only
-//! make the lazy case free too. But it MUST NOT be sized as a bound, and [`INPUT_TOLERANCE`] MUST NOT
+//! make the lazy case free too. But it MUST NOT be sized as a bound, and `INPUT_TOLERANCE` MUST NOT
 //! be tightened in the hope of making it one: the attacker controls the numerator, so a shorter
 //! window declines real clicks under load and still admits every deliberate forgery. The only real
 //! remedy is refuse-to-track, which needs the window service to own the popup (SPEC §3.1b-tp).

@@ -163,7 +163,7 @@ pub enum Phase {
     ///
     /// Two very different situations share this value, and neither is a fault: the loop is idle with
     /// nothing to draw, or it is parked in the nested modal loop `TrackPopupMenu` runs while a person
-    /// reads the menu. Hence [`Phase::patience`] returns nothing for it. See the module docs for what
+    /// reads the menu. Hence `Phase::patience` returns nothing for it. See the module docs for what
     /// that tolerance costs.
     Waiting = 5,
     /// RENDER LOOP: updating the tray icon and tooltip — `Shell_NotifyIcon`, an unbounded
@@ -304,7 +304,7 @@ struct Stamp {
 /// A loop's end of the instrument: stamp where you are, cheaply, often.
 ///
 /// One per watched loop. Which loop a heartbeat belongs to is fixed at construction by its resting
-/// phase and never inferred from what it happens to contain — see [`Phase::from_byte`].
+/// phase and never inferred from what it happens to contain — see `Phase::from_byte`.
 #[derive(Debug, Clone)]
 pub struct Heartbeat {
     stamp: Arc<Stamp>,
@@ -515,7 +515,7 @@ pub struct Watcher {
 /// long a single `Shell_NotifyIcon` or `set_menu` may take before a hung shell is the likelier
 /// explanation than a slow one. Ten seconds is generous for both readings, which is why one constant
 /// serves. [`Phase::Waiting`] is exempt outright rather than given a longer value — see
-/// [`Phase::patience`].
+/// `Phase::patience`.
 pub const PATIENCE: Duration = Duration::from_secs(10);
 
 /// How long before a continuing stall is stated again.
