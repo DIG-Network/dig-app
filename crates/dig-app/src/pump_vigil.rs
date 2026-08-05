@@ -1009,28 +1009,55 @@ mod tests {
     /// The observation instant is chosen from the two SHIPPED bounds rather than picked: 400 ms is
     /// four times the scaled [`PATIENCE`] and a third of the scaled [`TRAY_MENU_PATIENCE`], so it
     /// is unambiguously a stall under one and unambiguously quiet under the other.
+    ///
+    /// # Two things this fixture had to get right, having got both wrong first
+    ///
+    /// **It must not re-stamp the phase after the tick.** The first version ended with an explicit
+    /// `mark_at(Phase::BetweenTicks, base)` to place the clock, which also overwrote the phase the
+    /// tick had just restored — erasing the defect and passing against the unfixed code. So the
+    /// tick's own guard is the last thing to touch the phase here, exactly as in the shipped loop.
+    ///
+    /// **It needs a control that differs by ONE actor.** `menu_still_open` runs the identical
+    /// sequence minus the tick, and must be Quiet at the same instant. Without it, "stalled at
+    /// 400 ms" would also be satisfied by an implementation that had simply lost the menu's
+    /// tolerance altogether — which is the opposite defect and a real regression of #86.
+    ///
+    /// `silent_for` is asserted only as "past the general patience" rather than to the millisecond,
+    /// because `note_tray_menu` and the guards stamp on the wall clock by construction (they run
+    /// where no fixture clock exists). The quantity under test is WHICH BOUND applied, and the
+    /// control pins that from the other side.
     #[test]
     fn a_wedge_after_a_tray_click_is_still_reported_at_the_general_patience() {
         let base = base();
-        let beat = Heartbeat::starting_at(base);
+        let observed_at = base + ms(400);
 
-        beat.note_tray_menu();
-        // The menu closed and one tick ran, stamping the clock at `base`. The pump then blocks in
-        // platform dispatch and says nothing more.
-        {
-            let _tick = beat.enter(Phase::Tick);
-        }
-        beat.mark_at(Phase::BetweenTicks, base);
+        let after_a_click = Heartbeat::starting_at(base);
+        after_a_click.note_tray_menu();
+        // The menu closed, and the loop ran one ordinary tick. Its guard is the last thing to touch
+        // the phase, which is the whole point.
+        drop(after_a_click.enter(Phase::Tick));
 
-        assert_eq!(
-            watcher().look(&beat, base + ms(400)),
-            Verdict::Stalled {
-                phase: Phase::BetweenTicks,
-                silent_for: ms(400),
-                again: false,
-            },
+        assert!(
+            matches!(
+                watcher().look(&after_a_click, observed_at),
+                Verdict::Stalled {
+                    phase: Phase::BetweenTicks,
+                    ..
+                }
+            ),
             "a tray click earlier in the session must not buy every later stall the menu's \
              two-minute patience"
+        );
+
+        // The control: the same click, and no tick after it, because the menu is still up. This is
+        // a person reading a menu and must stay quiet — the tolerance is not being removed, it is
+        // being confined to the menu that earned it.
+        let menu_still_open = Heartbeat::starting_at(base);
+        menu_still_open.note_tray_menu();
+        assert_eq!(
+            watcher().look(&menu_still_open, observed_at),
+            Verdict::Quiet,
+            "an OPEN menu must keep its own patience; only a menu that has already closed loses it"
         );
     }
 

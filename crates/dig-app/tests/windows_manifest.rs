@@ -62,7 +62,11 @@ fn the_manifest_never_asks_to_be_elevated() {
         manifest.contains(r#"level="asInvoker""#),
         "the requested execution level must be stated, and must be asInvoker"
     );
-    for elevated in ["requireAdministrator", "highestAvailable", r#"uiAccess="true""#] {
+    for elevated in [
+        "requireAdministrator",
+        "highestAvailable",
+        r#"uiAccess="true""#,
+    ] {
         assert!(
             !manifest.contains(elevated),
             "the manifest must not request {elevated}: dig-app guards custody actions with its own \
@@ -109,8 +113,8 @@ fn the_built_binary_carries_the_manifest_in_its_resources() {
     // loaded AS A DATA FILE — nothing in it is executed, no entry point runs, and the handle is
     // freed at the end. The resource bytes are read only while that handle is alive.
     let manifest = unsafe {
-        let module =
-            LoadLibraryExW(PCWSTR(exe.as_ptr()), None, LOAD_LIBRARY_AS_DATAFILE).expect("the built dig-app.exe must be loadable as a data file");
+        let module = LoadLibraryExW(PCWSTR(exe.as_ptr()), None, LOAD_LIBRARY_AS_DATAFILE)
+            .expect("the built dig-app.exe must be loadable as a data file");
         let found = FindResourceW(module, EXE_MANIFEST_ID, RT_MANIFEST);
         assert!(
             !found.is_invalid(),
@@ -120,7 +124,10 @@ fn the_built_binary_carries_the_manifest_in_its_resources() {
         let size = SizeofResource(module, found) as usize;
         let handle = LoadResource(module, found).expect("the manifest resource must load");
         let bytes = LockResource(handle) as *const u8;
-        assert!(!bytes.is_null() && size > 0, "the manifest resource is empty");
+        assert!(
+            !bytes.is_null() && size > 0,
+            "the manifest resource is empty"
+        );
         let embedded = std::slice::from_raw_parts(bytes, size).to_vec();
         let _ = FreeLibrary(module);
         embedded
