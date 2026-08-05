@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.25.0] - 2026-08-05
+
+### Bug Fixes
+- **shell:** Declare DPI in a manifest, and make a stranded pump phase unrepresentable (#94)- **tray:** Give the tick its own thread, and delete the mitigation it needed (#97)- **confirm:** Hold the consent-surface guard across the biometric prompt (#103)- **tray:** Refuse to track a popup Windows will not let us dismiss (#107)
+
 ## [5.23.0] - 2026-08-05
 
 ### Features
