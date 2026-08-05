@@ -67,6 +67,9 @@ fn main() {
                 cap_bytes: dig_app_core::cache::GIB,
                 used_bytes: 350 * dig_app_core::cache::MIB,
             }),
+            // The gallery photographs the ordinary states; the refused-menu tooltip is asserted in
+            // `tray_menu`'s tests rather than shot here (dig-app#86).
+            menu_suppressed: false,
         };
         let status = tray_menu::status(&view);
 

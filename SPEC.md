@@ -352,7 +352,10 @@ that has stopped iterating cannot report that it has stopped iterating.
   It held ONE exception — breaking a tray menu still up past its bound — granted because breaking a
   menu selects nothing and because the thread that would otherwise clear it was the stuck one. That
   exception is REVOKED with the condition that earned it: the tray no longer shares a thread with
-  this loop (§3.1b-tp), so a menu that will not dismiss costs the user the menu and not the app.
+  this loop (§3.1b-tp), so a menu that will not dismiss no longer stalls the state loop with it. That
+  is narrower than it sounds and MUST NOT be read as "costs the user only the menu": the tray menu is
+  the ONLY route to every action this application has, so an undismissable menu is an unusable
+  application from the seat of the person using it. It is bounded, not benign (§3.1b-tp).
 - **What is watched is decided by the PHASE, not by the thread.** Watching a state that harms nobody
   produces a diagnostic that is loudly wrong in a common case, which is the failure the tolerance rule
   above also exists to prevent — but scoping the watch to a whole thread to avoid that is what
@@ -421,8 +424,35 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
   The tolerance MUST NOT be tightened in response: the attacker controls the value being compared, so
   a shorter window declines genuine clicks under load without excluding a single forgery. The rule
   stays because it costs nothing and removes the free case. **The only remedy that bounds this is
-  refuse-to-track**, below, which requires the window service to own the popup — anyone sizing that
-  work MUST read this lever as currently unbounded.
+  refuse-to-track**, immediately below. An earlier revision of this section said that remedy required
+  the window service; it does not, and it is now implemented.
+
+- **A popup MUST NOT be tracked where there is EVIDENCE this process does not hold the foreground.**
+  An undismissable menu is strictly worse than an absent one: an absent menu can be clicked again, and
+  an undismissable one can never be anything again. Two outcomes are such evidence — a claim that was
+  MADE and REFUSED, and a decline taken because a consent surface already owns the foreground (which
+  is reachable with no attacker at all, by clicking the tray during a platform credential prompt).
+  A decline for want of recent input is NOT: a real click can outrun the tolerance under load, and
+  refusing a genuine menu costs more than the forged one it would also refuse. A missing tray window
+  is not either — there is nothing to protect and nothing to suppress through.
+
+  **What this bounds MUST be stated precisely: it bounds tracks this process can predict, not the
+  lever above.** `tray-icon` makes its own `SetForegroundWindow` call that no rule here can reach, so
+  a forged click arriving with manufactured input evidence still reaches a track. Anyone sizing
+  further work MUST NOT read this rule as closing that lever.
+- **Only a claim that SUCCEEDED may clear a standing suppression.** Re-enabling the menu is not the
+  same act as permitting this click: it discards an earlier refusal. Doing that on a path where the
+  process never established its foreground rights disarms the guard at the moment it is most needed.
+- **A suppression MUST be per-click and MUST NOT be sticky.** A menu that stops appearing forever is
+  its own outage. Eligibility MUST be re-tested on the following click and the menu restored the
+  moment a claim succeeds, so the user'''s entire remedy is to click again.
+- **A suppressed menu MUST be reported to the user, not only to the log.** A menu that silently does
+  not appear trades one baffling state for another, and the person holding the mouse is not reading
+  the log.
+- **The enforcement MUST fail towards tracking.** Whatever mechanism suppresses the popup, the
+  consequence of it not taking effect MUST be that the menu is tracked — the behaviour of every build
+  before this rule existed. A guard whose failure mode is the status quo needs no second guard behind
+  it; one that could fail towards a worse state would.
 
   Bounded honestly: nothing on this path selects a menu item or answers a prompt, and the consent
   decline above — which reads this process's own state rather than an attacker-writable counter — is
