@@ -326,9 +326,10 @@ pub struct Heartbeat {
 /// # Nesting is through the guard, and that is what makes a stranded phase impossible
 ///
 /// A guard restores the phase of the guard it was created FROM — a value carried in this struct, set
-/// when that outer guard was built — and a guard created from the [`Heartbeat`] itself restores
-/// [`Phase::BetweenTicks`]. Neither restore target is ever read back out of the shared atomic, so no
-/// stamp made outside a guard can become one. See [`Heartbeat::enter`] for the defect this replaced.
+/// when that outer guard was built — and a guard created from the [`Heartbeat`] itself restores that
+/// heartbeat's OWN resting phase, which differs per loop. Neither restore target is ever read back
+/// out of the shared atomic, so no stamp made outside a guard can become one. See
+/// [`Heartbeat::enter`] for the defect this replaced.
 #[must_use = "the phase reverts when this guard is dropped, so it must be held for the call it names"]
 pub struct InPhase<'a> {
     beat: &'a Heartbeat,

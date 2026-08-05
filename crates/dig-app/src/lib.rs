@@ -14,11 +14,11 @@
 //!   beacon's health probe (dig_ecosystem#1797).
 //! * [`hotkey`] — claiming the global shortcut that opens the URN bar (tray builds only).
 //! * [`logging`] — the shared dual-sink field log the shell installs for the user's whole session.
-//! * [`pump_vigil`] — watching the tray's own event loop from outside it, so a loop that stops
-//!   running can say so.
+//! * [`pump_vigil`] — watching BOTH of the shell's loops from outside them, so whichever one stops
+//!   running says so, and names itself.
 //! * [`tray_guard`] — surviving a desktop stack that panics instead of failing (tray builds only).
-//! * `tray_popup` — keeping the tray's context menu dismissable, and clearing it when it is not
-//!   (tray builds only).
+//! * `tray_popup` — keeping the tray's context menu dismissable: the foreground claim a tracked
+//!   popup needs, and the input-evidence gate on serving one (tray builds only).
 
 pub mod argv;
 pub mod autostart;
