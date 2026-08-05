@@ -40,22 +40,22 @@ static RAISED: AtomicUsize = AtomicUsize::new(0);
 /// Cheap and non-blocking by construction: callers ask from inside a window proc, where blocking is
 /// how a tray stops responding.
 ///
-/// # What it does not count
+/// # What it counts
 ///
-/// Only windows this process draws and wraps in a [`Raised`]. A platform-owned consent UI — the
-/// Windows Hello `UserConsentVerifier` prompt, raised after the app's own window has closed — is not
-/// counted, so this reads `false` while it is up and the tray will claim the foreground off it. That
-/// is a denial nuisance and not an authorization defect: a Hello prompt that loses focus and is
-/// cancelled maps to a refusal, never an approval. Do not read this as "no consent is being asked
-/// for anywhere".
+/// Anything wrapped in a [`Raised`]: this process's own prompt windows, for the span of each draw,
+/// AND the whole of a `gated_consent` gate — which includes the platform-owned authenticator UI
+/// raised after the app's window has closed, such as the Windows Hello `UserConsentVerifier` prompt
+/// (dig-app#100). It does not count a consent UI some OTHER process is showing; nothing here can see
+/// one. Do not read this as "no consent is being asked for anywhere".
 pub fn consent_surface_is_up() -> bool {
     RAISED.load(Ordering::Acquire) > 0
 }
 
 /// A consent surface is on screen for as long as this value lives.
 ///
-/// Hold it across the draw and nothing else. Its whole contract is in [`Drop`]: see the module docs
-/// for why the lowering may not be a separate call.
+/// Hold it across the span the user is being asked over — a draw, or a whole consent gate — and
+/// nothing else. Its whole contract is in [`Drop`]: see the module docs for why the lowering may not
+/// be a separate call.
 #[derive(Debug)]
 #[must_use = "the surface is only counted as raised for as long as this guard is held"]
 pub struct Raised(());
@@ -81,20 +81,22 @@ impl Drop for Raised {
 /// it turned this module's own assertions red on CI while passing locally, because the machine that
 /// runs eight prompt lanes at once is the one with eight cores.
 ///
-/// **It does NOT cover every raiser, and the gap is known rather than theoretical.** Two live tests
-/// raise the count without holding it, so this serialises the tests that DO take it against each
-/// other and nothing more:
+/// **Every raiser inside this crate now takes it, with ONE named exception.** Since dig-app#100,
+/// `gated_consent` raises the count for its whole span, which makes every test that
+/// calls it a raiser — including the ones driving nothing but test doubles. Those all take this lock.
+/// What does not:
 ///
-/// - `gui::window`'s `three_real_prompt_windows_in_a_row_are_all_answered` drives `serve`, which
-///   raises at `window.rs:429`. It is `#[ignore]`d — it opens real windows — so the collision is
-///   latent, not live. Filed as dig-app#99.
+/// - `confirm::offload`'s `a_timed_out_verification_does_not_authorize_the_gated_action` calls
+///   `gated_consent` and so raises for the ~50ms its verifier stalls, without holding this. That file
+///   is deliberately frozen — its safety comes from never naming `VerifyOutcome::Verified` — so the
+///   exclusion was not added there in the same change. Filed as dig-app#102.
 /// - `dig-app`'s `tray_popup` raises from a DIFFERENT crate, where this mutex is not reachable at
-///   all: it is `pub(crate)` to `dig-app-core`.
+///   all: it is `pub(crate)` to `dig-app-core`. `cargo test` gives that crate its own process, and it
+///   is the only count-touching test in that binary, so nothing can run beside it — a property of
+///   that test set, not of the design. The comment at its raise says so.
 ///
-/// Closing the gap means exporting the exclusion across the crate boundary and taking it in both
-/// places, which is dig-app#99's job. Until then this doc states what the lock actually provides,
-/// because a comment claiming an exclusion the code does not enforce is how the next person writes a
-/// test that races and cannot see why.
+/// This doc states what the lock actually provides, because a comment claiming an exclusion the code
+/// does not enforce is how the next person writes a test that races and cannot see why.
 ///
 /// A plain `Mutex` rather than `serial_test`: the dependency would be carried for a handful of tests.
 #[cfg(test)]
