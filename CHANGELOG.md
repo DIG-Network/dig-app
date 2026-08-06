@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.27.0] - 2026-08-06
+
+### Features
+- **account:** Pin wallet operations to the sole active derivation index (#111)
+
 ## [5.26.0] - 2026-08-06
 
 ### Features
