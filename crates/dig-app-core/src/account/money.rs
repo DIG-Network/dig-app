@@ -32,8 +32,9 @@
 //! the `no_user_key_on_wire` integration test).
 
 use chia_protocol::{CoinSpend, SpendBundle};
+use crate::account::active_profile::ActiveProfile;
 use dig_account::{
-    AccountId, AuthProvider, CustodyPolicy, MoneySigner, ProfileIx, SpendAuthorizer,
+    AccountId, AuthProvider, CustodyPolicy, MoneySigner, SpendAuthorizer,
     SpendConfirmRequest, SpendDecision, SpendTier,
 };
 use dig_wallet_backend::types::Network;
@@ -141,8 +142,13 @@ where
         // 3. The human confirm ceremony, REQUIRED for every tier above auto-send. This is the #1522
         //    gate: a RequireAuth-class spend cannot complete on authorize()==Ok alone.
         if requires_confirmation(summary.tier) {
-            let request =
-                SpendConfirmRequest::new(self.account_id.clone(), ProfileIx::ROOT, summary.clone());
+            // The wallet signs at exactly one derivation index (dig_ecosystem#2236), so the profile
+            // the user is shown in the confirm dialog is that same sole active one.
+            let request = SpendConfirmRequest::new(
+                self.account_id.clone(),
+                ActiveProfile::SOLE.ix(),
+                summary.clone(),
+            );
             match self
                 .auth_provider
                 .confirm_spend(request)
@@ -180,7 +186,7 @@ mod tests {
     use chia_sdk_driver::{SpendContext, StandardLayer};
     use chia_sdk_types::Conditions;
     use dig_account::{
-        AccountSession, AccountStore, AuthFactors, HotWallet, Result as AccountResult,
+        AccountSession, AccountStore, AuthFactors, HotWallet, ProfileIx, Result as AccountResult,
         SpendSummary, UnlockRequest, Vault, WalletKey,
     };
     use dig_keystore::MemoryBackend;

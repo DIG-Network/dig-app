@@ -27,6 +27,7 @@
 //! the master seed through it, and the retired keystore no longer holds custody. The `dig-account`
 //! object model + crypto is fully adopted here, and consumers sign through [`residency::AccountResidency`].
 
+pub mod active_profile;
 pub mod auth;
 pub mod boot;
 pub mod ceremony;
@@ -52,4 +53,11 @@ pub use dig_account::AccountId;
 /// The profile index within an account, re-exported so harness code (the tray shell, the boot glue)
 /// names the default profile ([`ProfileIx::ROOT`](dig_account::ProfileIx::ROOT)) without depending on
 /// `dig-account` directly.
+///
+/// A bare `ProfileIx` names ANY index in the HD tree. The subset the WALLET is active on is declared
+/// once in [`active_profile::ACTIVE_PROFILES`] and carried by [`active_profile::ActiveProfile`]
+/// (dig_ecosystem#2236) — prefer that type wherever an index selects the wallet's address.
 pub use dig_account::ProfileIx;
+
+/// The wallet's sole active derivation index, re-exported for the same reason as [`ProfileIx`].
+pub use active_profile::{is_active, ActiveProfile, ACTIVE_PROFILES};

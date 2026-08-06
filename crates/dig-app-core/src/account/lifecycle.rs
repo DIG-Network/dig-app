@@ -28,10 +28,11 @@
 
 use std::sync::Arc;
 
+use crate::account::active_profile::ActiveProfile;
 use crate::account::recovery::RecoveryPhrase;
 use dig_account::{AccountError, AccountStore};
 use dig_account::{
-    AccountId, AccountSession, AuthPolicy, AuthProvider, ProfileIx, Result as AccountResult,
+    AccountId, AccountSession, AuthPolicy, AuthProvider, Result as AccountResult,
     UnlockRequest, UnlockedAccount,
 };
 use dig_session::{KeychainBackend, Password};
@@ -102,11 +103,19 @@ impl Opened {
 /// in production, keyed by `account`). `provider` collects the unlock factors through the OS-native
 /// ceremony the harness injects; `policy` gates them (fail-closed on refusal). `default_profile_ix` is
 /// the profile the returned handle's [`signer`](UnlockedAccount::signer) / [`dek`](UnlockedAccount::dek)
-/// default to (normally [`ProfileIx::ROOT`]).
+/// default to — always [`ActiveProfile::SOLE`] while the app is single-address.
 ///
 /// A first run NEVER invents an unwritable-down seed: per the #1500 derived model the seed is the
 /// entropy of a 24-word BIP-39 phrase, which is either shown-and-confirmed
 /// ([`Seeding::NewPhrase`]) or supplied by the user ([`Seeding::Restore`]).
+///
+/// # The index is an [`ActiveProfile`], deliberately (dig_ecosystem#2236)
+///
+/// The opened handle's [`wallet_ops`](dig_account::UnlockedAccount::wallet_ops) — and therefore the
+/// receive address the tray shows and the key that signs spends — derives at `default_profile_ix`.
+/// Taking an [`ActiveProfile`] rather than a bare [`ProfileIx`](dig_account::ProfileIx) means this funnel CANNOT open a
+/// wallet at an index the app does not watch. **Add multi-address support in
+/// [`ACTIVE_PROFILES`](crate::account::active_profile::ACTIVE_PROFILES), not here.**
 ///
 /// # Errors
 ///
@@ -119,9 +128,10 @@ pub async fn open_or_enroll(
     account: AccountId,
     provider: &dyn AuthProvider,
     policy: &dyn AuthPolicy,
-    default_profile_ix: ProfileIx,
+    default_profile_ix: ActiveProfile,
     seeding: Seeding<'_>,
 ) -> AccountResult<Opened> {
+    let default_profile_ix = default_profile_ix.ix();
     let already_enrolled = store
         .exists(&account)
         .map_err(|why| AccountError::Keystore(why.to_string()))?;
@@ -276,7 +286,7 @@ mod tests {
             account.clone(),
             &provider,
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -319,7 +329,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("pw-a"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await;
@@ -344,7 +354,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("pw-a"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await;
@@ -369,7 +379,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("machine-one-password"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -389,7 +399,7 @@ mod tests {
             account,
             &FixedProvider::new("machine-two-password"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::Restore(&phrase),
         )
         .await
@@ -414,7 +424,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("pw"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::Restore(&RecoveryPhrase::generate()),
         )
         .await
@@ -425,7 +435,7 @@ mod tests {
             account,
             &FixedProvider::new("pw"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::Restore(&RecoveryPhrase::generate()),
         )
         .await
@@ -450,7 +460,7 @@ mod tests {
             account.clone(),
             &provider,
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -469,7 +479,7 @@ mod tests {
             account,
             &provider,
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&returning),
         )
         .await
@@ -497,7 +507,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("right"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -508,7 +518,7 @@ mod tests {
             account,
             &FixedProvider::new("wrong"),
             &PasswordOnlyPolicy,
-            ProfileIx::ROOT,
+            ActiveProfile::SOLE,
             Seeding::NewPhrase(&presenter),
         )
         .await;
