@@ -24,8 +24,12 @@
 
 use std::time::Duration;
 
-use dig_app_core::confirm::gui::{open_app_window, Theme, ThemeChoice};
+use std::sync::Arc;
+
+use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
+use dig_app_core::confirm::gui::{open_app_window, AppWindow, Theme, ThemeChoice};
 use dig_app_core::confirm::{native_confirmer, SignPrompt};
+use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 
 /// How long the shell is left alone before a prompt is raised over it — long enough to photograph
 /// the unscrimmed window first.
@@ -53,6 +57,32 @@ fn match_the_trays_dpi_awareness() {
 #[cfg(not(windows))]
 fn match_the_trays_dpi_awareness() {}
 
+/// The view the gallery photographs: an unlocked, recoverable account on a connected node.
+///
+/// The RICHEST state on purpose. A screenshot of a default view would show mostly-empty panes and
+/// would not answer the question a gallery exists to answer — whether the busiest tab still reads
+/// well. The narrow and empty states are photographed by resizing the window and by the states the
+/// headless suite covers.
+fn gallery_view() -> TrayView {
+    TrayView {
+        running: true,
+        node_connected: true,
+        node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
+        account: Some(AccountState::Unlocked { recoverable: true }),
+        profile_id: Some("dig1qqqqexamplepublicidentitykeyforthegalleryonly".to_string()),
+        receive_address: Some(
+            "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string(),
+        ),
+        second_factor: true,
+        window_host: WindowHost::Available,
+        cache: Some(CacheSnapshot {
+            cap_bytes: GIB,
+            used_bytes: 350 * MIB,
+        }),
+        ..TrayView::default()
+    }
+}
+
 fn main() {
     match_the_trays_dpi_awareness();
 
@@ -73,7 +103,14 @@ fn main() {
     let previous = store.read();
     store.write(theme).expect("the theme preference is written");
 
-    if !open_app_window(store) {
+    if !open_app_window(AppWindow {
+        theme: store,
+        view: Arc::new(gallery_view),
+        // A gallery DRAWS; it does not act. Printing the verb is what makes a click legible in the
+        // terminal beside the screenshot, and it is the honest thing for an example with no worker
+        // and no account behind it to do.
+        act: Arc::new(|action| println!("a row was clicked: {action:?}")),
+    }) {
         eprintln!("this host cannot draw the DIG app window");
         std::process::exit(1);
     }

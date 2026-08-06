@@ -1016,7 +1016,7 @@ mod tray {
     use dig_app_core::tray_menu::OpenAttempt;
     use dig_app_core::tray_menu::{self, MenuModel, MenuRow, TrayAction, TrayView};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
     use std::time::{Duration, Instant};
     use tao::event::Event;
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -1316,15 +1316,12 @@ mod tray {
                         used_bytes: st.cache.used_bytes,
                     })
             }),
-            // Filled honestly ahead of the trim that will read it (dig_ecosystem#2253): macOS has no
-            // egui host at all, and `confirm::gui::available()` reports the same "no display server"
-            // condition on a headless Linux session — the two hosts a runtime-capability check must
-            // treat identically, which a `cfg!(target_os = ...)` inside the model could not.
-            window_host: if !cfg!(target_os = "macos") && dig_app_core::confirm::gui::available() {
-                dig_app_core::tray_menu::WindowHost::Available
-            } else {
-                dig_app_core::tray_menu::WindowHost::Unavailable
-            },
+            // The OBSERVED answer, not merely the probe (dig_ecosystem#2253). It starts at the
+            // static capability check — macOS has no egui host at all, and a display-less Linux
+            // session reports the same condition — and degrades the moment an attempt to open the
+            // window is seen to fail, which puts the full menu back. Read every tick, so the tray
+            // recovers on the very next repaint rather than at the next restart.
+            window_host: dig_app_core::window_host::observed(),
         }
     }
 
@@ -1515,12 +1512,18 @@ mod tray {
         // class of freezes (dig_ecosystem#1926): the biometric deadlock was the worst of them, but
         // every handler that opens a window, waits for the agent to stop, or waits on a child
         // process would otherwise hold the tick for as long as it waited.
+        // What the app window needs, and what it hands back. Built before the worker because the
+        // worker's handler opens the window; the worker's own submitter is installed into it
+        // immediately afterwards — see `WindowSeam`.
+        let window = WindowSeam::default();
+
         let actions = {
             let session = Arc::clone(&session);
             let env = env.clone();
             let shutdown = shutdown.clone();
             let status = Arc::clone(&status);
             let hotkey = hotkey.clone();
+            let window = window.clone();
             // ONE confirmer for the whole shell: every account window (setup, reveal, the
             // explainers) is drawn by the same OS-owned, biometric-backed surface the signing path
             // uses. It lives on the worker because that is where every window is now raised.
@@ -1535,9 +1538,12 @@ mod tray {
                     &shutdown,
                     &status,
                     &hotkey,
+                    &window,
                 )
             })
         };
+        // Closes the loop: from here a window row reaches the same worker a tray click does.
+        let _ = window.submit.set(actions.submitter());
 
         // The seam. `pending` holds at most ONE frame: a menu wedged for three minutes leaves the
         // renderer the state the app is in when the menu closes, not a queue of three hundred
@@ -1561,6 +1567,7 @@ mod tray {
             let status = Arc::clone(&status);
             let env = env.clone();
             let hotkey = hotkey.clone();
+            let live_view = window.view.clone();
             std::thread::Builder::new()
                 .name("dig-app-tick".to_owned())
                 .spawn(move || {
@@ -1574,6 +1581,7 @@ mod tray {
                         &status,
                         &env,
                         &hotkey,
+                        &live_view,
                         model,
                     )
                 })
@@ -1684,6 +1692,91 @@ mod tray {
     /// clipboard timeout, the idle auto-lock, their click on a menu item — lives here, which is why
     /// it had to stop sharing a thread with a modal menu loop.
     ///
+    /// The newest [`TrayView`] the tick has built, for the app window to read.
+    ///
+    /// # Why the window reads a published snapshot instead of building its own
+    ///
+    /// Building a view touches the session lock, the status lock and the disk. The window draws
+    /// sixty times a second on the prompt thread, and a frame that took the session lock would
+    /// contend with the very action a row on it just dispatched. So the tick — which already builds
+    /// one twice a second, and is the one place allowed to block — publishes, and the window reads.
+    ///
+    /// A `Mutex<TrayView>` rather than a channel because the window wants the LATEST, not every
+    /// intermediate: it re-reads each frame and has no use for a backlog.
+    #[derive(Clone, Default)]
+    struct LiveView(Arc<Mutex<TrayView>>);
+
+    impl LiveView {
+        /// Replace the published snapshot.
+        fn publish(&self, view: TrayView) {
+            if let Ok(mut slot) = self.0.lock() {
+                *slot = view;
+            }
+        }
+
+        /// The newest snapshot, or an empty one.
+        ///
+        /// A poisoned lock returns the DEFAULT view rather than panicking on the prompt thread: the
+        /// window then shows the honest not-yet-known state, which is what it shows at start-up
+        /// anyway. Taking the prompt thread down would cost every consent prompt in the process.
+        fn read(&self) -> TrayView {
+            self.0
+                .lock()
+                .map(|view| view.clone())
+                .unwrap_or_else(|_| TrayView::default())
+        }
+    }
+
+    /// Everything `TrayAction::OpenWindow` needs in order to open a window that works.
+    ///
+    /// # Why the submitter is filled in afterwards
+    ///
+    /// The window hands verbs back to the SAME action worker that runs them, and that worker is
+    /// spawned with a handler that opens the window. Neither can be built first, so the submitter
+    /// arrives through a [`OnceLock`] set immediately after the worker exists. The alternative — a
+    /// second worker for window rows — would let a row and a tray click start two custody flows at
+    /// once, which is the one thing the single worker exists to prevent.
+    #[derive(Clone, Default)]
+    struct WindowSeam {
+        /// The live view the window renders.
+        view: LiveView,
+        /// How a clicked row reaches the worker. Empty only in the instant before the worker exists.
+        submit: Arc<OnceLock<dig_app::tray_worker::Submitter<TrayAction>>>,
+    }
+
+    impl WindowSeam {
+        /// Open the app window, or report that this host could not.
+        ///
+        /// Returns as soon as the request is QUEUED — never when the window closes. A handler that
+        /// waited would hold the single worker for the whole life of the window, and Quit would stop
+        /// working for as long as it was open.
+        fn open(&self) -> bool {
+            let view = self.view.clone();
+            let submit = Arc::clone(&self.submit);
+            dig_app_core::confirm::gui::open_app_window(dig_app_core::confirm::gui::AppWindow {
+                theme: dig_app_core::confirm::gui::theme::ThemeChoice::for_host(),
+                view: Arc::new(move || view.read()),
+                act: Arc::new(move |action| {
+                    let Some(worker) = submit.get() else {
+                        tracing::warn!(
+                            ?action,
+                            "the action worker is not up yet; the click was dropped"
+                        );
+                        return;
+                    };
+                    // A refused submission is a second action asked for while one is in flight —
+                    // the same answer a second tray click gets, and deliberately not a queue.
+                    if !worker.submit(action) {
+                        tracing::info!(
+                            ?action,
+                            "another DIG action is already in flight; this one was not started"
+                        );
+                    }
+                }),
+            })
+        }
+    }
+
     /// Returns once the user has chosen Quit and the render loop has been told to exit.
     #[allow(clippy::too_many_arguments)]
     fn tick_forever(
@@ -1696,6 +1789,7 @@ mod tray {
         status: &SharedStatus,
         env: &AppEnvironment,
         hotkey: &HotkeyState,
+        live_view: &LiveView,
         mut model: TrayView,
     ) {
         // What each native menu id means, kept here rather than read off the rendered menu. Ids are
@@ -1815,6 +1909,11 @@ mod tray {
             // close the menu under the user's cursor while they are reading it. The comparison stays
             // HERE rather than moving to the render thread because it is pure, and because leaving
             // it here is what keeps the renderer free of any state the tick depends on.
+            // Published BEFORE the equality check: the window reads this every frame, and a view
+            // withheld because the TRAY did not need repainting would leave the window showing the
+            // state at the moment it opened.
+            live_view.publish(latest.clone());
+
             if view_eq(&latest, &model) {
                 continue;
             }
@@ -1928,6 +2027,7 @@ mod tray {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch(
         action: TrayAction,
         live: &mut LiveAccount,
@@ -1936,6 +2036,7 @@ mod tray {
         shutdown: &dig_app_core::shutdown::Shutdown,
         status: &SharedStatus,
         hotkey: &HotkeyState,
+        window: &WindowSeam,
     ) -> bool {
         let LiveAccount { session, attempt } = live;
         match action {
@@ -2050,6 +2151,23 @@ mod tray {
             // same validation, same resolution — only the presentation differs.
             TrayAction::Open => open_dig_link(status, confirmer, InputStyle::Dialog),
             TrayAction::LaunchApp(id) => launch_app(id, confirmer),
+            // Acks on OPEN, not on close. The window is one a person leaves up for as long as they
+            // like, and a handler that returned only when it closed would hold the single worker for
+            // that whole time — so every later click, INCLUDING Quit, would be refused
+            // (dig_ecosystem#2253). Re-clicking while it is open raises the window it already
+            // opened; the shell does that itself, because only it knows the window is up.
+            TrayAction::OpenWindow => {
+                if !window.open() {
+                    notify(
+                        confirmer,
+                        "DIG — The app window could not be opened",
+                        "The DIG app window could not be opened on this computer.",
+                        "Nothing has been changed. The tray menu now offers everything the window \
+                         would have, so nothing is out of reach. The log folder (in this menu) has \
+                         the details.",
+                    );
+                }
+            }
             TrayAction::OpenLogs => open_log_folder(confirmer),
             TrayAction::Quit => {
                 shutdown.trigger();

@@ -308,7 +308,7 @@ impl ShellApp {
         // Admitted BEFORE the shell is drawn so that the scrim and the pane agree with each other
         // within a single frame: a prompt admitted afterwards would show for one frame over an
         // unscrimmed, live-looking shell.
-        self.admit_one_prompt(queue);
+        self.admit_one_prompt(ctx, queue);
 
         let t = self.theme.tokens();
         let prompt_is_up = self.prompt.is_some();
@@ -362,17 +362,21 @@ impl ShellApp {
     ///
     /// Non-blocking by construction. `try_recv` is not called at all while a prompt is up, which is
     /// where one-modal-at-a-time is enforced.
-    fn admit_one_prompt(&mut self, queue: &Receiver<Work>) {
+    fn admit_one_prompt(&mut self, ctx: &egui::Context, queue: &Receiver<Work>) {
         if self.prompt.is_some() {
             return;
         }
         match queue.try_recv() {
             Ok(Work::Prompt(job)) => self.open(job),
-            // A second open-the-window request while the window is open. There is nobody blocked on
-            // it and nothing to answer, so dropping it is the whole handling; raising the window is
-            // the caller's job, not the queue's.
+            // A second open-the-window request while the window is open. Nobody is blocked on it and
+            // there is nothing to answer, so it is not queued behind anything — but it is not
+            // discarded either: the person asked for this window, so the window comes forward.
+            //
+            // `Focus` rather than a `WindowLevel` re-assert, which was measured to lift z-order while
+            // leaving keyboard focus behind — a window the person can see and cannot type into.
             Ok(Work::Shell(_)) => {
-                tracing::debug!("the DIG app window is already open; a second request was ignored");
+                tracing::debug!("the DIG app window is already open; raising it instead");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             Err(_) => {}
         }
@@ -1116,10 +1120,14 @@ mod tests {
         );
     }
 
-    /// **A second open-the-window request while the window is open is discarded, not left in front
-    /// of the next real prompt.** Nobody is blocked on it, so there is nothing to answer.
+    /// **A second open-the-window request RAISES the window it already opened**, and does not queue a
+    /// second one in front of the next real prompt.
+    ///
+    /// Both halves are asserted. A shell that merely dropped the request would satisfy the queueing
+    /// half while leaving a person clicking `Open App` at a window buried behind their editor, with
+    /// nothing happening — the shape of dig_ecosystem#2074's silent click.
     #[test]
-    fn a_second_open_request_while_the_shell_is_open_is_discarded() {
+    fn a_second_open_request_raises_the_window_rather_than_queueing_another() {
         let mut shelf = Shelf::open();
         shelf.settle();
         shelf
@@ -1132,10 +1140,23 @@ mod tests {
             .expect("the queue is open");
         let answers = shelf.queue_live_prompt();
 
+        let mut raised = false;
         for _ in 0..4 {
-            shelf.frame(Vec::new());
+            let output = shelf.frame(Vec::new());
+            raised |= output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|root| {
+                    root.commands
+                        .iter()
+                        .any(|command| matches!(command, egui::ViewportCommand::Focus))
+                });
         }
 
+        assert!(
+            raised,
+            "the window was not brought forward, so a second Open App does nothing visible"
+        );
         assert!(
             shelf.app.prompt.is_some(),
             "the duplicate open request blocked the prompt behind it"
