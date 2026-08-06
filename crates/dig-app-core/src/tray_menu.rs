@@ -246,7 +246,7 @@ impl TrayView {
 /// Whether this host can open the tabbed app window, as opposed to the tray menu alone
 /// (dig_ecosystem#2253).
 ///
-/// A three-state capability rather than something inferred at each call site from the target triple:
+/// A two-state capability rather than something inferred at each call site from the target triple:
 /// the SAME two hosts — macOS, and a Linux session with no display server reachable — must answer this
 /// identically, and a `cfg!(target_os = ...)` inside the model would let one of them go unexercised by
 /// CI. The shell is the only thing that knows whether a window host is actually reachable right now, so
@@ -1010,9 +1010,9 @@ fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
 /// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering a
 /// disabled "show my recovery phrase" to someone who has none tells them nothing about why (#1800).
 ///
-/// `pub(crate)`: this is a shared rule, not tray-private. A window model built elsewhere in this crate
-/// composes the same rows into a tab section rather than re-deriving which recovery-phrase row to show
-/// (dig_ecosystem#2253) — the presence/enablement decision above is the contract both containers depend on.
+/// `pub(crate)` so it can be shared: this is a shared rule, not tray-private. The planned window model
+/// (dig_ecosystem#2253) will compose these rows rather than re-derive which recovery-phrase row to show
+/// — the presence/enablement decision above is the contract every container depends on.
 pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     if !account.exists() {
         // Nothing to view. The DID explainer still applies — it is about the CONCEPT, not this account —
@@ -1127,8 +1127,9 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
 /// (rightly) absent, and a submenu holding only `My wallet…` makes a person click to be told there is
 /// nothing — so the balance row names that state on the menu itself.
 ///
-/// `pub(crate)`: shared with the window model's Wallet tab (dig_ecosystem#2253) — which rows appear and
-/// whether the address row is enabled is decided HERE, once, for both containers.
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. Which rows appear, and whether the address row is enabled, is
+/// decided HERE — once, for every container that renders them.
 pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     if account.exists() && !matches!(account, AccountState::Unopenable) {
@@ -1169,8 +1170,9 @@ pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<Men
 /// from this computer` would be a menu where the routine and the irreversible sit together, which is how a
 /// mis-click becomes a loss.
 ///
-/// `pub(crate)`: shared with the window model's Security tab (dig_ecosystem#2253) — the lock/unlock row
-/// and the two-factor offer are decided by account state alone, so both containers read the same verdict.
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. The lock/unlock row and the two-factor offer are decided by account
+/// state alone, so every container reads the same verdict.
 pub(crate) fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
     match account {
         AccountState::Unlocked { .. } => {
@@ -1273,8 +1275,9 @@ fn paired_app_rows() -> Vec<MenuRow> {
 /// The verbs here are therefore gated on their REAL precondition — whether an account exists, which
 /// decides whether the verb CREATES or REPLACES — never on it being absent.
 ///
-/// `pub(crate)`: shared with the window model's Account tab (dig_ecosystem#2253) — the create-vs-replace
-/// choice lives here so both containers offer the same verbs for the same account.
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. The create-vs-replace choice lives here, so every container offers
+/// the same verbs for the same account.
 pub(crate) fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     // A host with no credential store can neither create nor destroy an account, so the submenu holds
     // only what it can actually deliver: the explanation.
@@ -1331,8 +1334,8 @@ pub(crate) fn management_actions(account: &AccountState) -> Vec<MenuRow> {
 /// greyed dead end or a silent no-op (#1800, §6.1). The launch-vs-notice choice is the shell's, made
 /// through the pure [`crate::apps::plan_launch`] seam; the menu only says the app exists to be opened.
 ///
-/// `pub(crate)`: shared with the window model's Apps tab (dig_ecosystem#2253) — one registry read,
-/// composed into whichever container is rendering.
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. One registry read, rendered by whichever container is asking.
 pub(crate) fn apps_actions() -> Vec<MenuRow> {
     crate::apps::APPS
         .iter()
@@ -1383,8 +1386,8 @@ fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
 /// disabled dead end — clicking it opens the same explainer, so the user always learns why (#1800).
 /// The explainer itself is offered in every state because it is about the concept, not the live node.
 ///
-/// `pub(crate)`: shared with the window model's Cache tab (dig_ecosystem#2253) — the same async-state
-/// collapse applies whichever container is asking.
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. The same async-state collapse applies whichever container is asking.
 pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     match cache {
