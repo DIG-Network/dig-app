@@ -156,14 +156,13 @@ pub fn reseal_under<C: CredentialStore>(
     ) {
         // Put it back exactly as it was. The seed is still in hand, so this restores a working account
         // rather than leaving the user with none.
-        let restored =
-            AccountSession::enroll(
-                store,
-                account.clone(),
-                old_password,
-                &seed,
-                ActiveProfile::SOLE.ix(),
-            );
+        let restored = AccountSession::enroll(
+            store,
+            account.clone(),
+            old_password,
+            &seed,
+            ActiveProfile::SOLE.ix(),
+        );
         return MigrationOutcome::Failed(match restored {
             Ok(_) => format!("the new password could not be applied ({e}); nothing was changed"),
             Err(restore) => format!(
@@ -234,11 +233,11 @@ pub fn default_account() -> AccountId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dig_account::ProfileIx;
     use crate::account::boot::finish_boot;
     use crate::account::ceremony::CredentialCeremony;
     use crate::account::lifecycle::PhrasePresenter;
     use crate::keystore::KeystoreError;
+    use dig_account::ProfileIx;
     use dig_ipc_protocol::signer::SessionSigner;
     use dig_keystore::MemoryBackend;
     use std::collections::HashMap;

@@ -32,8 +32,8 @@ use crate::account::active_profile::ActiveProfile;
 use crate::account::recovery::RecoveryPhrase;
 use dig_account::{AccountError, AccountStore};
 use dig_account::{
-    AccountId, AccountSession, AuthPolicy, AuthProvider, Result as AccountResult,
-    UnlockRequest, UnlockedAccount,
+    AccountId, AccountSession, AuthPolicy, AuthProvider, Result as AccountResult, UnlockRequest,
+    UnlockedAccount,
 };
 use dig_session::{KeychainBackend, Password};
 

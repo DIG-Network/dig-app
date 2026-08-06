@@ -31,11 +31,11 @@
 //! [`crate::wallet::engine`]). No key material ever crosses that wire (asserted at the wire level by
 //! the `no_user_key_on_wire` integration test).
 
-use chia_protocol::{CoinSpend, SpendBundle};
 use crate::account::active_profile::ActiveProfile;
+use chia_protocol::{CoinSpend, SpendBundle};
 use dig_account::{
-    AccountId, AuthProvider, CustodyPolicy, MoneySigner, SpendAuthorizer,
-    SpendConfirmRequest, SpendDecision, SpendTier,
+    AccountId, AuthProvider, CustodyPolicy, MoneySigner, SpendAuthorizer, SpendConfirmRequest,
+    SpendDecision, SpendTier,
 };
 use dig_wallet_backend::types::Network;
 
