@@ -154,12 +154,16 @@ impl Tab {
             .collect()
     }
 
-    /// Whether the tab has nothing to show. Such a tab is dropped rather than rendered empty.
+    /// Whether this tab shows the user anything at all — a clickable row, or a heading carrying a fact.
     ///
-    /// A tab that SUBSUMES an action is never empty even with no rows: the subsumption map is a promise
-    /// that this tab renders that action's content, and dropping the tab would break the promise.
-    fn is_empty(&self) -> bool {
-        self.actions().is_empty() && !subsumes_anything(self.id)
+    /// A tab that SUBSUMES an action gets no exemption here, and that is the whole correction: the
+    /// exemption used to make a subsuming tab "non-empty" by definition, so the Wallet tab survived the
+    /// emptiness filter while rendering nothing, and the map's promise that it explains the absence of a
+    /// wallet went unkept. A tab must now PROVE it renders something; claiming to is not enough.
+    pub fn has_content(&self) -> bool {
+        self.sections
+            .iter()
+            .any(|section| !section.rows.is_empty() || section.heading.is_some())
     }
 }
 
@@ -199,11 +203,6 @@ fn subsuming_tab(action: TrayAction) -> Option<TabId> {
         .iter()
         .find(|(subsumed, _)| *subsumed == action)
         .map(|(_, tab)| *tab)
-}
-
-/// Whether `tab` renders any action as page content.
-fn subsumes_anything(tab: TabId) -> bool {
-    SUBSUMED_BY_TAB.iter().any(|(_, owner)| *owner == tab)
 }
 
 /// The rows that stay on the tray once the window ships, whatever else moves into it.
@@ -319,7 +318,7 @@ pub fn build(view: &TrayView) -> WindowModel {
     ];
 
     WindowModel {
-        tabs: tabs.into_iter().filter(|tab| !tab.is_empty()).collect(),
+        tabs: tabs.into_iter().filter(Tab::has_content).collect(),
     }
 }
 
@@ -341,7 +340,12 @@ fn tab(id: TabId, sections: Vec<Section>) -> Tab {
             heading: section.heading,
             rows: tidy(drop_subsumed(section.rows, id)),
         })
-        .filter(|section| !section.rows.is_empty())
+        // A heading-only section SURVIVES. The heading is content, not decoration: the Wallet tab's
+        // is the balance reading and the Cache tab's is the live usage. Dropping a section for having
+        // no rows discarded it with them, and on a host with no credential store — where subsumption
+        // removes both `AboutWallet` rows and `wallet_actions` emits nothing else — that left the
+        // Wallet tab an EMPTY PANE while the subsumption map still promised it explained the absence.
+        .filter(|section| !section.rows.is_empty() || section.heading.is_some())
         .collect();
 
     Tab {
@@ -524,6 +528,18 @@ mod tests {
         )
     }
 
+    /// Whether a tab puts anything on screen, computed from the RENDERED structure alone.
+    ///
+    /// Deliberately not [`Tab::has_content`]. Asserting a tab is non-empty by calling the predicate
+    /// that DECIDES whether it is emitted is circular: a bug in that predicate — an exemption, say —
+    /// makes both the code and the test agree, and the test proves nothing. This walks the sections a
+    /// renderer would walk instead, so the assertion has an opinion of its own.
+    fn renders_something(tab: &Tab) -> bool {
+        tab.sections
+            .iter()
+            .any(|section| !section.rows.is_empty() || section.heading.is_some())
+    }
+
     fn names(actions: impl IntoIterator<Item = TrayAction>) -> BTreeSet<String> {
         actions
             .into_iter()
@@ -550,6 +566,15 @@ mod tests {
         );
         // A greyed tab is not a route: its rows cannot be clicked and its content cannot be read, so
         // neither its actions nor anything it claims to subsume counts as reachable.
+        //
+        // **`Tab.unavailable` is being deleted in PR3** — per-row `enabled` is strictly better than a
+        // tab-level reason string, and `cache_actions(None)` is already the house pattern. Deleting the
+        // field deletes these two `unavailable.is_none()` filters, and this invariant would get quietly
+        // WEAKER while every test stayed green. It does not, because `every_rendered_tab_has_content`
+        // now carries that weight: a tab either shows the user something or is not emitted, so no
+        // present-but-unusable tab remains for these filters to exclude. Whoever removes the field
+        // removes these filters KNOWING that — never merely drops them, and never restores the field
+        // without restoring the filter with it.
         reachable.extend(names(
             model
                 .tabs
@@ -689,16 +714,9 @@ mod tests {
     }
 
     #[test]
-    fn no_tab_is_empty_and_advanced_never_renders() {
+    fn advanced_never_renders_because_it_holds_nothing() {
         for view in every_view() {
-            let model = build(&view);
-            for tab in &model.tabs {
-                assert!(
-                    !tab.is_empty(),
-                    "{:?} rendered with nothing in it\n  view: {}",
-                    tab.id,
-                    describe(&view)
-                );
+            for tab in &build(&view).tabs {
                 assert_ne!(tab.id, TabId::Advanced, "Advanced holds nothing yet");
             }
         }
@@ -739,18 +757,57 @@ mod tests {
     }
 
     /// Subsumption is the one place the invariant takes a human's word for it, so bound what it can
-    /// excuse: a subsuming tab must ACTUALLY render, in every view, or the promise that it carries the
-    /// action's content is void and the invariant has waved through an unreachable verb.
+    /// excuse: a subsuming tab must actually render CONTENT, in every view, or the promise that it
+    /// carries the action's own material is void and the invariant has waved through an unreachable
+    /// verb.
+    ///
+    /// This asserted `.is_some()` once — presence, not content — and that shape is why the Wallet tab
+    /// could render as an empty pane in 96 views with this test green. An assertion bounds what any
+    /// amount of testing beneath it can find, so the assertion is the thing that had to change.
     #[test]
-    fn a_subsuming_tab_always_renders() {
+    fn a_subsuming_tab_always_renders_content() {
         for view in every_view() {
             let model = build(&view);
             for (action, tab) in SUBSUMED_BY_TAB {
+                let rendered = model.tab(tab).unwrap_or_else(|| {
+                    panic!(
+                        "{tab:?} claims to render {action:?} but is not shown\n  view: {}",
+                        describe(&view)
+                    )
+                });
                 assert!(
-                    model.tab(tab).is_some(),
-                    "{tab:?} claims to render {action:?} but is not shown\n  view: {}",
+                    renders_something(rendered),
+                    "{tab:?} claims to render {action:?} and is an EMPTY PANE\n  view: {}",
                     describe(&view)
                 );
+            }
+        }
+    }
+
+    /// **Every tab that renders shows the user something.** The assertion that would have caught the
+    /// empty Wallet pane, so it is the one that must exist.
+    ///
+    /// It also closes a second hole for free: `SUBSUMED_BY_TAB` was guarded against a MISSING entry but
+    /// not a WRONG one — an action mapped to a tab that renders nothing of it would have passed. A tab
+    /// cannot claim to carry content it does not show.
+    #[test]
+    fn every_rendered_tab_has_content() {
+        for view in every_view() {
+            for tab in &build(&view).tabs {
+                assert!(
+                    renders_something(tab),
+                    "{:?} rendered as an empty pane\n  view: {}",
+                    tab.id,
+                    describe(&view)
+                );
+                for section in &tab.sections {
+                    assert!(
+                        !section.rows.is_empty() || section.heading.is_some(),
+                        "{:?} holds a section with neither rows nor a heading\n  view: {}",
+                        tab.id,
+                        describe(&view)
+                    );
+                }
             }
         }
     }
