@@ -221,6 +221,19 @@ pub struct TrayView {
     /// `None` is the honest value when the node is unreachable — the cache submenu then says the cap
     /// cannot be changed until a node is connected rather than inventing a figure.
     pub cache: Option<crate::cache::CacheSnapshot>,
+    /// Whether this host can open the app window at all (dig_ecosystem#2253).
+    ///
+    /// `Unavailable` is what keeps every verb on the tray once a window-hosted surface exists: while
+    /// no window can be opened, the tray remains the ONLY route to the 25 actions a future trim would
+    /// otherwise move off it. Filled by the shell from a RUNTIME capability check
+    /// (`confirm::gui::available()` plus the macOS host restriction) rather than the target triple,
+    /// because a headless Linux session with neither `$WAYLAND_DISPLAY` nor `$DISPLAY` set hits the
+    /// exact same "no window host" condition macOS does.
+    ///
+    /// Nothing reads this field yet — it exists so its value is exercised by `cargo test` on every
+    /// platform ahead of the trim that will consume it, rather than living behind a `cfg!` that only
+    /// one CI runner could ever prove.
+    pub window_host: WindowHost,
 }
 
 impl TrayView {
@@ -228,6 +241,24 @@ impl TrayView {
     fn account(&self) -> AccountState {
         self.account.clone().unwrap_or(AccountState::Absent)
     }
+}
+
+/// Whether this host can open the tabbed app window, as opposed to the tray menu alone
+/// (dig_ecosystem#2253).
+///
+/// A two-state capability rather than something inferred at each call site from the target triple:
+/// the SAME two hosts — macOS, and a Linux session with no display server reachable — must answer this
+/// identically, and a `cfg!(target_os = ...)` inside the model would let one of them go unexercised by
+/// CI. The shell is the only thing that knows whether a window host is actually reachable right now, so
+/// it fills this field once per snapshot and the model reads it as plain data like everything else in
+/// [`TrayView`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowHost {
+    /// A window can be opened on this host right now.
+    #[default]
+    Available,
+    /// No window can be opened on this host — every verb must stay reachable from the tray alone.
+    Unavailable,
 }
 
 /// What the host holds at rest, independent of any live session.
@@ -978,7 +1009,11 @@ fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
 ///
 /// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering a
 /// disabled "show my recovery phrase" to someone who has none tells them nothing about why (#1800).
-fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
+///
+/// `pub(crate)` so it can be shared: this is a shared rule, not tray-private. The planned window model
+/// (dig_ecosystem#2253) will compose these rows rather than re-derive which recovery-phrase row to show
+/// — the presence/enablement decision above is the contract every container depends on.
+pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     if !account.exists() {
         // Nothing to view. The DID explainer still applies — it is about the CONCEPT, not this account —
         // and leaving the submenu empty would be a row that opens onto nothing.
@@ -1091,7 +1126,11 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
 /// The row is what makes the no-account case say something. With no account the address row is
 /// (rightly) absent, and a submenu holding only `My wallet…` makes a person click to be told there is
 /// nothing — so the balance row names that state on the menu itself.
-fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
+///
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. Which rows appear, and whether the address row is enabled, is
+/// decided HERE — once, for every container that renders them.
+pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     if account.exists() && !matches!(account, AccountState::Unopenable) {
         rows.push(match &view.receive_address {
@@ -1130,7 +1169,11 @@ fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
 /// safe right now*; Manage is *I want a different account*. Putting `Lock now` beside `Remove this account
 /// from this computer` would be a menu where the routine and the irreversible sit together, which is how a
 /// mis-click becomes a loss.
-fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
+///
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. The lock/unlock row and the two-factor offer are decided by account
+/// state alone, so every container reads the same verdict.
+pub(crate) fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
     match account {
         AccountState::Unlocked { .. } => {
             let mut rows = vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)];
@@ -1231,7 +1274,11 @@ fn paired_app_rows() -> Vec<MenuRow> {
 ///
 /// The verbs here are therefore gated on their REAL precondition — whether an account exists, which
 /// decides whether the verb CREATES or REPLACES — never on it being absent.
-fn management_actions(account: &AccountState) -> Vec<MenuRow> {
+///
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. The create-vs-replace choice lives here, so every container offers
+/// the same verbs for the same account.
+pub(crate) fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     // A host with no credential store can neither create nor destroy an account, so the submenu holds
     // only what it can actually deliver: the explanation.
     if !account.supported() {
@@ -1286,7 +1333,10 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
 /// visible — it either launches the app or shows the honest "not available yet" notice — never a
 /// greyed dead end or a silent no-op (#1800, §6.1). The launch-vs-notice choice is the shell's, made
 /// through the pure [`crate::apps::plan_launch`] seam; the menu only says the app exists to be opened.
-fn apps_actions() -> Vec<MenuRow> {
+///
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. One registry read, rendered by whichever container is asking.
+pub(crate) fn apps_actions() -> Vec<MenuRow> {
     crate::apps::APPS
         .iter()
         .map(|app| MenuRow::action(TrayAction::LaunchApp(app.id), app.display_name, true))
@@ -1335,7 +1385,10 @@ fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
 /// omitted and a single enabled row explains that a connected node is needed. That row is NOT a
 /// disabled dead end — clicking it opens the same explainer, so the user always learns why (#1800).
 /// The explainer itself is offered in every state because it is about the concept, not the live node.
-fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
+///
+/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
+/// rows rather than re-derive them. The same async-state collapse applies whichever container is asking.
+pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     match cache {
         Some(snapshot) => {
@@ -1590,6 +1643,9 @@ mod tests {
                 cap_bytes: crate::cache::GIB,
                 used_bytes: 350 * crate::cache::MIB,
             }),
+            // Not the subject of this suite: a window host is assumed available, as it is on every CI
+            // runner. The `Unavailable` fallback is exercised by `tray_menu`'s own tests instead.
+            window_host: WindowHost::Available,
         }
     }
 
@@ -3460,5 +3516,117 @@ mod tests {
             "the tooltip must name the remedy, because the suppression is per-click and clicking \
              again is the entire fix; got {loud:?}"
         );
+    }
+
+    /// The `Submenu` row whose label starts with `prefix`, or `None`.
+    ///
+    /// A prefix match rather than an exact one because the Cache row's label carries the live
+    /// usage figure (see [`cache_label`]) and would otherwise have to be reconstructed here —
+    /// which would make this helper a second copy of that formatting logic instead of a lookup.
+    fn find_submenu<'a>(model: &'a MenuModel, prefix: &str) -> Option<&'a [MenuRow]> {
+        model.rows.iter().find_map(|row| match row {
+            MenuRow::Submenu { label, rows } if label.starts_with(prefix) => Some(rows.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// **`build()` composes the six shared group builders verbatim — dig_ecosystem#2253.**
+    ///
+    /// This is PR1's whole point: the builders extracted for a second consumer (the window model,
+    /// PR2) must still be EXACTLY what `build()` puts in each submenu, or the two containers would
+    /// silently drift the moment either one changes. Rather than capturing `build()`'s own output
+    /// and asserting it matches itself — which would kill no mutant, since any bug in `build`
+    /// would land in both sides of the comparison — each submenu is checked against a call to the
+    /// now-`pub(crate)` builder made from OUTSIDE `build`, exactly as PR2's window model will call
+    /// it. If `build` ever stopped calling one of these functions, or called it with different
+    /// arguments, this diverges; today, with the extraction unchanged, it must not.
+    #[test]
+    fn build_composes_the_six_shared_group_builders_verbatim() {
+        for account_state in EVERY_STATE {
+            for second_factor in [false, true] {
+                for cache in [
+                    None,
+                    Some(crate::cache::CacheSnapshot {
+                        cap_bytes: crate::cache::GIB,
+                        used_bytes: 350 * crate::cache::MIB,
+                    }),
+                ] {
+                    let mut fixture = view(account_state.clone());
+                    fixture.second_factor = second_factor;
+                    fixture.cache = cache;
+                    let account = fixture.account();
+
+                    let menu = build(&fixture);
+
+                    assert_eq!(
+                        find_submenu(&menu, "View Account"),
+                        Some(view_account_actions(&fixture, &account).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: View Account drifted from \
+                         view_account_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Manage Account"),
+                        Some(management_actions(&account).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Manage Account drifted from \
+                         management_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Wallet"),
+                        Some(wallet_actions(&fixture, &account).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Wallet drifted from \
+                         wallet_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Security"),
+                        Some(security_actions(&account, second_factor).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Security drifted from \
+                         security_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Cache"),
+                        Some(cache_actions(cache.as_ref()).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Cache drifted from \
+                         cache_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Apps"),
+                        Some(apps_actions().as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Apps drifted from \
+                         apps_actions"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Nothing reads `window_host` yet — so `build()` must be byte-identical for both values,
+    /// on every account state (dig_ecosystem#2253).**
+    ///
+    /// This is the test that gives the field-not-`cfg!` decision teeth: the whole reason
+    /// `window_host` is plain data on `TrayView` rather than a `cfg!(target_os = ...)` inside the
+    /// model is that BOTH values must be exercisable by ordinary `cargo test` on every platform.
+    /// A field nothing ever sets to `Unavailable` in a test would make that claim unearned — this
+    /// constructs both and proves today's `build()` cannot tell them apart. PR4 is what teaches it
+    /// to: the moment the trim reads this field, one of these two menus will stop matching the
+    /// other, and THIS test is what will fail and point at the diff.
+    #[test]
+    fn window_host_is_plumbed_but_unread_build_is_identical_for_both_values() {
+        for account_state in EVERY_STATE {
+            let available = TrayView {
+                window_host: WindowHost::Available,
+                ..view(account_state.clone())
+            };
+            let unavailable = TrayView {
+                window_host: WindowHost::Unavailable,
+                ..view(account_state.clone())
+            };
+
+            assert_eq!(
+                build(&available),
+                build(&unavailable),
+                "{account_state:?}: build() must not yet depend on window_host — PR4 is what \
+                 teaches it to, and this assertion is what will then fail"
+            );
+        }
     }
 }

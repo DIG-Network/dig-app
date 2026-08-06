@@ -1316,6 +1316,15 @@ mod tray {
                         used_bytes: st.cache.used_bytes,
                     })
             }),
+            // Filled honestly ahead of the trim that will read it (dig_ecosystem#2253): macOS has no
+            // egui host at all, and `confirm::gui::available()` reports the same "no display server"
+            // condition on a headless Linux session — the two hosts a runtime-capability check must
+            // treat identically, which a `cfg!(target_os = ...)` inside the model could not.
+            window_host: if !cfg!(target_os = "macos") && dig_app_core::confirm::gui::available() {
+                dig_app_core::tray_menu::WindowHost::Available
+            } else {
+                dig_app_core::tray_menu::WindowHost::Unavailable
+            },
         }
     }
 
