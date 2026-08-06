@@ -576,7 +576,7 @@ mod tests {
                                         account: Some(account.clone()),
                                         window_host: host,
                                         second_factor,
-                                        cache: cache.clone(),
+                                        cache,
                                         profile_id: profile_id.clone(),
                                         receive_address: receive_address.clone(),
                                         running,
