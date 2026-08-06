@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.26.0] - 2026-08-06
+
+### Features
+- **wallet:** Read the real balance from the node instead of asserting it is unknowable (#109)
+
+### Documentation
+- **tray:** Unlink seven references to items that are private on Windows (#110)
+
 ## [5.25.0] - 2026-08-05
 
 ### Bug Fixes
