@@ -3550,7 +3550,7 @@ mod tests {
                 ] {
                     let mut fixture = view(account_state.clone());
                     fixture.second_factor = second_factor;
-                    fixture.cache = cache.clone();
+                    fixture.cache = cache;
                     let account = fixture.account();
 
                     let menu = build(&fixture);
