@@ -238,7 +238,11 @@ pub struct TrayView {
 
 impl TrayView {
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
-    fn account(&self) -> AccountState {
+    ///
+    /// `pub(crate)`: the window model builds from the same snapshot and must read the same default
+    /// (dig_ecosystem#2253). Re-deriving "no report yet means Absent" there would let the two surfaces
+    /// disagree about a freshly started app.
+    pub(crate) fn account(&self) -> AccountState {
         self.account.clone().unwrap_or(AccountState::Absent)
     }
 }
@@ -395,7 +399,26 @@ pub fn account_state(
 /// Deriving the id from the action instead makes a rebuilt menu name its rows exactly as the previous one
 /// did, so a click that crosses a rebuild still resolves to the verb the user actually chose. The `Debug`
 /// spelling is used because the variant name is already the stable, unique, human-legible thing an id
-/// wants to be; `stable_ids_are_unique_across_every_menu_this_shell_can_build` holds the uniqueness.
+/// wants to be.
+///
+/// # The property this actually has (dig_ecosystem#2257)
+///
+/// The id is **injective over ACTIONS**: two different [`TrayAction`] values — including two
+/// [`SetCacheCap`](TrayAction::SetCacheCap) presets and two [`LaunchApp`](TrayAction::LaunchApp) apps —
+/// never share one.
+/// `window_model::tests::stable_ids_are_unique_across_every_variant_this_shell_can_build` holds that.
+///
+/// It is **not** injective over ROWS, and that is intended. Eight variants render two rows each in the
+/// same menu (`Unlock`, `SetAccountPassword`, `ExplainUnopenable`, `SetUpAccount`, `AboutDid`,
+/// `AboutWallet`, `AboutCache`, `ShowStatus`) — the top-level urgent row repeated inside a submenu, or
+/// the wallet's balance line beside its explainer — and each pair deliberately shares one id, because
+/// both rows do the same thing. The shell's `verbs` map collapses them onto one handler for exactly that
+/// reason; that collapse is correct and must not be "fixed". A surface that must address one particular
+/// ROW (a sidebar highlighting the active entry) needs a row key of its own, not a change here.
+///
+/// An earlier version of this comment cited a test named
+/// `stable_ids_are_unique_across_every_menu_this_shell_can_build`, which had never been written and
+/// claimed the per-row property that does not hold.
 pub fn action_id(action: TrayAction) -> String {
     format!("dig-tray-action:{action:?}")
 }
@@ -1359,7 +1382,7 @@ fn open_url_label(view: &TrayView) -> String {
 /// display-only disabled row (SPEC §3.1c forbids one): a submenu parent is an action — it opens — so
 /// the number rides on something clickable. When no node is connected there are no live figures, so
 /// the label says exactly that rather than showing a stale or invented number.
-fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
+pub(crate) fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
     use crate::cache::format_cap;
     match cache {
         Some(snapshot) => format!(
