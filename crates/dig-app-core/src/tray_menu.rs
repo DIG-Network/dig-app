@@ -238,7 +238,11 @@ pub struct TrayView {
 
 impl TrayView {
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
-    fn account(&self) -> AccountState {
+    ///
+    /// `pub(crate)`: the window model builds from the same snapshot and must read the same default
+    /// (dig_ecosystem#2253). Re-deriving "no report yet means Absent" there would let the two surfaces
+    /// disagree about a freshly started app.
+    pub(crate) fn account(&self) -> AccountState {
         self.account.clone().unwrap_or(AccountState::Absent)
     }
 }
@@ -246,7 +250,7 @@ impl TrayView {
 /// Whether this host can open the tabbed app window, as opposed to the tray menu alone
 /// (dig_ecosystem#2253).
 ///
-/// A two-state capability rather than something inferred at each call site from the target triple:
+/// A three-state capability rather than something inferred at each call site from the target triple:
 /// the SAME two hosts — macOS, and a Linux session with no display server reachable — must answer this
 /// identically, and a `cfg!(target_os = ...)` inside the model would let one of them go unexercised by
 /// CI. The shell is the only thing that knows whether a window host is actually reachable right now, so
@@ -395,7 +399,26 @@ pub fn account_state(
 /// Deriving the id from the action instead makes a rebuilt menu name its rows exactly as the previous one
 /// did, so a click that crosses a rebuild still resolves to the verb the user actually chose. The `Debug`
 /// spelling is used because the variant name is already the stable, unique, human-legible thing an id
-/// wants to be; `stable_ids_are_unique_across_every_menu_this_shell_can_build` holds the uniqueness.
+/// wants to be.
+///
+/// # The property this actually has (dig_ecosystem#2257)
+///
+/// The id is **injective over ACTIONS**: two different [`TrayAction`] values — including two
+/// [`SetCacheCap`](TrayAction::SetCacheCap) presets and two [`LaunchApp`](TrayAction::LaunchApp) apps —
+/// never share one.
+/// `window_model::tests::stable_ids_are_unique_across_every_variant_this_shell_can_build` holds that.
+///
+/// It is **not** injective over ROWS, and that is intended. Eight variants render two rows each in the
+/// same menu (`Unlock`, `SetAccountPassword`, `ExplainUnopenable`, `SetUpAccount`, `AboutDid`,
+/// `AboutWallet`, `AboutCache`, `ShowStatus`) — the top-level urgent row repeated inside a submenu, or
+/// the wallet's balance line beside its explainer — and each pair deliberately shares one id, because
+/// both rows do the same thing. The shell's `verbs` map collapses them onto one handler for exactly that
+/// reason; that collapse is correct and must not be "fixed". A surface that must address one particular
+/// ROW (a sidebar highlighting the active entry) needs a row key of its own, not a change here.
+///
+/// An earlier version of this comment cited a test named
+/// `stable_ids_are_unique_across_every_menu_this_shell_can_build`, which had never been written and
+/// claimed the per-row property that does not hold.
 pub fn action_id(action: TrayAction) -> String {
     format!("dig-tray-action:{action:?}")
 }
@@ -1010,9 +1033,9 @@ fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
 /// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering a
 /// disabled "show my recovery phrase" to someone who has none tells them nothing about why (#1800).
 ///
-/// `pub(crate)` so it can be shared: this is a shared rule, not tray-private. The planned window model
-/// (dig_ecosystem#2253) will compose these rows rather than re-derive which recovery-phrase row to show
-/// — the presence/enablement decision above is the contract every container depends on.
+/// `pub(crate)`: this is a shared rule, not tray-private. A window model built elsewhere in this crate
+/// composes the same rows into a tab section rather than re-deriving which recovery-phrase row to show
+/// (dig_ecosystem#2253) — the presence/enablement decision above is the contract both containers depend on.
 pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     if !account.exists() {
         // Nothing to view. The DID explainer still applies — it is about the CONCEPT, not this account —
@@ -1127,9 +1150,8 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
 /// (rightly) absent, and a submenu holding only `My wallet…` makes a person click to be told there is
 /// nothing — so the balance row names that state on the menu itself.
 ///
-/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
-/// rows rather than re-derive them. Which rows appear, and whether the address row is enabled, is
-/// decided HERE — once, for every container that renders them.
+/// `pub(crate)`: shared with the window model's Wallet tab (dig_ecosystem#2253) — which rows appear and
+/// whether the address row is enabled is decided HERE, once, for both containers.
 pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     if account.exists() && !matches!(account, AccountState::Unopenable) {
@@ -1170,9 +1192,8 @@ pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<Men
 /// from this computer` would be a menu where the routine and the irreversible sit together, which is how a
 /// mis-click becomes a loss.
 ///
-/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
-/// rows rather than re-derive them. The lock/unlock row and the two-factor offer are decided by account
-/// state alone, so every container reads the same verdict.
+/// `pub(crate)`: shared with the window model's Security tab (dig_ecosystem#2253) — the lock/unlock row
+/// and the two-factor offer are decided by account state alone, so both containers read the same verdict.
 pub(crate) fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
     match account {
         AccountState::Unlocked { .. } => {
@@ -1275,9 +1296,8 @@ fn paired_app_rows() -> Vec<MenuRow> {
 /// The verbs here are therefore gated on their REAL precondition — whether an account exists, which
 /// decides whether the verb CREATES or REPLACES — never on it being absent.
 ///
-/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
-/// rows rather than re-derive them. The create-vs-replace choice lives here, so every container offers
-/// the same verbs for the same account.
+/// `pub(crate)`: shared with the window model's Account tab (dig_ecosystem#2253) — the create-vs-replace
+/// choice lives here so both containers offer the same verbs for the same account.
 pub(crate) fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     // A host with no credential store can neither create nor destroy an account, so the submenu holds
     // only what it can actually deliver: the explanation.
@@ -1334,8 +1354,8 @@ pub(crate) fn management_actions(account: &AccountState) -> Vec<MenuRow> {
 /// greyed dead end or a silent no-op (#1800, §6.1). The launch-vs-notice choice is the shell's, made
 /// through the pure [`crate::apps::plan_launch`] seam; the menu only says the app exists to be opened.
 ///
-/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
-/// rows rather than re-derive them. One registry read, rendered by whichever container is asking.
+/// `pub(crate)`: shared with the window model's Apps tab (dig_ecosystem#2253) — one registry read,
+/// composed into whichever container is rendering.
 pub(crate) fn apps_actions() -> Vec<MenuRow> {
     crate::apps::APPS
         .iter()
@@ -1362,7 +1382,7 @@ fn open_url_label(view: &TrayView) -> String {
 /// display-only disabled row (SPEC §3.1c forbids one): a submenu parent is an action — it opens — so
 /// the number rides on something clickable. When no node is connected there are no live figures, so
 /// the label says exactly that rather than showing a stale or invented number.
-fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
+pub(crate) fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
     use crate::cache::format_cap;
     match cache {
         Some(snapshot) => format!(
@@ -1386,8 +1406,8 @@ fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
 /// disabled dead end — clicking it opens the same explainer, so the user always learns why (#1800).
 /// The explainer itself is offered in every state because it is about the concept, not the live node.
 ///
-/// `pub(crate)` so it can be shared: the planned window model (dig_ecosystem#2253) will compose these
-/// rows rather than re-derive them. The same async-state collapse applies whichever container is asking.
+/// `pub(crate)`: shared with the window model's Cache tab (dig_ecosystem#2253) — the same async-state
+/// collapse applies whichever container is asking.
 pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     match cache {
