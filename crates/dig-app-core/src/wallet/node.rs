@@ -28,6 +28,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use dig_node_control_interface::error::ControlErrorCode;
 use dig_node_control_interface::params::{Asset as WireAsset, WalletBalanceParams};
 
 use crate::control::{self, ControlCallError, ControlFailure};
@@ -130,7 +131,15 @@ fn wire_asset(asset: Asset) -> WireAsset {
 /// authorization grounds can only come from a build that gates it behind the control plane — one
 /// without the method. Telling that user "the read failed" would send them hunting a fault in their
 /// account; "this node does not read balances yet" names the upgrade that actually fixes it.
-const CANNOT_SERVE: &[&str] = &["METHOD_NOT_FOUND", "NOT_SUPPORTED", "UNAUTHORIZED"];
+const CANNOT_SERVE: &[&str] = &[
+    // Taken from the contract crate rather than retyped. The doc directly above argues the client
+    // must key on the stable contract symbol and never on a locally re-derived one -- hand-typing
+    // these was doing exactly what it warns against, and no test could have caught a divergence
+    // because the fixtures would have retyped the same literal (dig-app#109 review).
+    ControlErrorCode::MethodNotFound.name(),
+    ControlErrorCode::NotSupported.name(),
+    ControlErrorCode::Unauthorized.name(),
+];
 
 /// The stable symbol for "answered, but still catching up".
 const NOT_SYNCED: &str = "WALLET_NOT_SYNCED";

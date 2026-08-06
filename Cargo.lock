@@ -1715,11 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-<<<<<<< HEAD
-version = "5.25.1"
-=======
 version = "5.26.0"
->>>>>>> c20b9fd (feat(wallet): read the real balance from the node instead of asserting it is unknowable)
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1738,11 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-<<<<<<< HEAD
-version = "5.25.1"
-=======
 version = "5.26.0"
->>>>>>> c20b9fd (feat(wallet): read the real balance from the node instead of asserting it is unknowable)
 dependencies = [
  "async-trait",
  "base64",
@@ -2194,11 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-<<<<<<< HEAD
-version = "5.25.1"
-=======
 version = "5.26.0"
->>>>>>> c20b9fd (feat(wallet): read the real balance from the node instead of asserting it is unknowable)
 dependencies = [
  "clap",
  "dig-app-core",

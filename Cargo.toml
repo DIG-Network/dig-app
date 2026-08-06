@@ -15,11 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-<<<<<<< HEAD
-version = "5.25.1"
-=======
 version = "5.26.0"
->>>>>>> c20b9fd (feat(wallet): read the real balance from the node instead of asserting it is unknowable)
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
