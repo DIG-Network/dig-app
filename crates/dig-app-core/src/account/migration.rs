@@ -28,7 +28,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use dig_account::{AccountId, AccountSession, ProfileIx};
+use crate::account::active_profile::ActiveProfile;
+use dig_account::{AccountId, AccountSession};
 use dig_session::{KeychainBackend, Password};
 
 use crate::account::boot::{assemble_residency, vault_for, DEFAULT_ACCOUNT_ID};
@@ -144,17 +145,24 @@ pub fn reseal_under<C: CredentialStore>(
     if let Err(e) = store.delete(account) {
         return MigrationOutcome::Failed(format!("the old seal could not be removed: {e}"));
     }
+    // Re-enrolment must land the wallet back on the SAME index it was on, so the user's receive
+    // address survives a password change (dig_ecosystem#2236).
     if let Err(e) = AccountSession::enroll(
         store.clone(),
         account.clone(),
         chosen,
         &seed,
-        ProfileIx::ROOT,
+        ActiveProfile::SOLE.ix(),
     ) {
         // Put it back exactly as it was. The seed is still in hand, so this restores a working account
         // rather than leaving the user with none.
-        let restored =
-            AccountSession::enroll(store, account.clone(), old_password, &seed, ProfileIx::ROOT);
+        let restored = AccountSession::enroll(
+            store,
+            account.clone(),
+            old_password,
+            &seed,
+            ActiveProfile::SOLE.ix(),
+        );
         return MigrationOutcome::Failed(match restored {
             Ok(_) => format!("the new password could not be applied ({e}); nothing was changed"),
             Err(restore) => format!(
@@ -229,6 +237,7 @@ mod tests {
     use crate::account::ceremony::CredentialCeremony;
     use crate::account::lifecycle::PhrasePresenter;
     use crate::keystore::KeystoreError;
+    use dig_account::ProfileIx;
     use dig_ipc_protocol::signer::SessionSigner;
     use dig_keystore::MemoryBackend;
     use std::collections::HashMap;

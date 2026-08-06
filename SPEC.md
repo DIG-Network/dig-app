@@ -1124,6 +1124,19 @@ prefs) }`. Every profile's identity key AND its DEK are DERIVED from the single 
 the profile's index (§3.1) — a profile holds no independently-stored secret. `ProfileIx::ROOT` is the
 default profile the boot opens.
 
+**The wallet is ACTIVE on exactly one derivation index (MUST).** The set of indices the wallet
+operates on is declared once, as `account::active_profile::ACTIVE_PROFILES`, and is today the single
+element `ProfileIx::ROOT`. The account-open funnel `account::lifecycle::open_or_enroll` MUST take an
+`ActiveProfile` — a `ProfileIx` checked against that set — so a wallet-bearing account CANNOT be
+opened at an index the app does not watch. Consumers that need to know which addresses the app uses
+(the node subscription set, request routing) MUST read `ACTIVE_PROFILES` rather than re-deriving the
+question.
+
+HD derivation itself is **deactivated, not removed**: the unhardened wallet path, `ProfileIx`, and the
+per-profile signer / DEK / sealing-key plumbing remain whole and MUST keep deriving correctly at any
+index. Multi-address support is restored by widening `ACTIVE_PROFILES`, never by restoring deleted
+code.
+
 **The on-chain DID is a later phase.** A profile's public on-chain identity is a `did:chia:` singleton
 paired with a chip35 DataLayer store (via `dig-identity` [dig_ecosystem#771]); minting it is owned by
 `dig-account`'s `ProfileMinter` (phase 2) and is NOT yet wired. Until it lands, a profile is identified

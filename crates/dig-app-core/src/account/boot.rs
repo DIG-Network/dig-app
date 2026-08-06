@@ -29,6 +29,7 @@
 
 use std::sync::Arc;
 
+use crate::account::active_profile::ActiveProfile;
 use dig_account::{AccountId, PasswordOnlyPolicy, ProfileIx, Result as AccountResult};
 
 /// A [`PhrasePresenter`] that can never approve an enrolment — used on paths where enrolment is
@@ -83,7 +84,10 @@ where
         account,
         &provider,
         &PasswordOnlyPolicy,
-        ProfileIx::ROOT,
+        // The wallet is pinned to ONE derivation index (dig_ecosystem#2236). HD is deactivated, not
+        // removed: to make the app multi-address again, widen `ACTIVE_PROFILES` — do not pass a bare
+        // index here.
+        ActiveProfile::SOLE,
         seeding,
     ))
 }
