@@ -532,13 +532,16 @@ fn serve_shell(
     rx: &Receiver<Work>,
     draw: &impl Fn(Work, &Receiver<Work>) -> Option<Outcome>,
 ) {
-    let drawn =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| draw(Work::Shell(shell), rx)));
+    let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        draw(Work::Shell(shell), rx)
+    }));
     if drawn.is_err() {
         // A panic inside `run_native` skips the flush at the end of the draw, leaving the window
         // undestroyed on Windows — the same hole the prompt arm plugs here.
         flush_deferred_window_destruction();
-        tracing::error!("the DIG app window panicked; it was closed and the prompt thread kept alive");
+        tracing::error!(
+            "the DIG app window panicked; it was closed and the prompt thread kept alive"
+        );
     }
 }
 

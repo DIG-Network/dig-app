@@ -43,8 +43,8 @@ use super::super::paint;
 use super::super::render::{regular, rgba, semibold, size, space, Weight};
 use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
 use super::{
-    install_fonts, unavailable, Job, Outcome, PromptApp, Shell, Work, CHROME_HEIGHT, MAX_HEIGHT,
-    TOGGLE_WIDTH, WIDTH,
+    install_fonts, unavailable, Job, Outcome, PromptApp, Shell, Work, CHROME_HEIGHT, TOGGLE_WIDTH,
+    WIDTH,
 };
 
 /// The shell's opening size. Wide enough for the content column this window is designed around.
@@ -131,7 +131,10 @@ fn native_options() -> eframe::NativeOptions {
             .with_title("DIG")
             .with_inner_size([SHELL_WIDTH, SHELL_HEIGHT])
             .with_min_inner_size([SHELL_MIN, SHELL_MIN])
-            .with_max_inner_size([f32::INFINITY, MAX_HEIGHT.max(SHELL_HEIGHT)])
+            // No maximum. An infinite one was tried and it is a TRAP: winit converts the logical
+            // size to physical before clamping, and the window came up ~23% wider than the size
+            // asked for — caught in the gallery, invisible to every headless test, because the
+            // wrongness is in what the operating system drew.
             .with_resizable(true)
             .with_active(true)
             .with_decorations(false),
@@ -306,12 +309,8 @@ impl ShellApp {
     /// [`super::INPUT_DEADLINE`] via [`super::PromptApp::expire`] — with a timeout or a
     /// cancellation, never an approval — and the shell's Escape works again the moment it does.
     fn keys(&mut self, ctx: &egui::Context) {
-        let (escape, close_requested) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::Escape),
-                i.viewport().close_requested(),
-            )
-        });
+        let (escape, close_requested) =
+            ctx.input(|i| (i.key_pressed(Key::Escape), i.viewport().close_requested()));
         if close_requested {
             self.closing = true;
             return;
@@ -448,7 +447,10 @@ impl ShellApp {
         let bar = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), CHROME_HEIGHT));
         paint::brand_mark(
             ui,
-            Rect::from_min_size(bar.left_top() + Vec2::new(space::S4, 12.0), Vec2::splat(20.0)),
+            Rect::from_min_size(
+                bar.left_top() + Vec2::new(space::S4, 12.0),
+                Vec2::splat(20.0),
+            ),
             t,
         );
         ui.painter().text(
@@ -504,11 +506,14 @@ impl ShellApp {
             egui::Pos2::new(toggle.left() - space::S2, bar.bottom()),
         );
         let dragged = ui
-            .interact(strip, egui::Id::new("dig-app-shell-drag"), egui::Sense::drag())
+            .interact(
+                strip,
+                egui::Id::new("dig-app-shell-drag"),
+                egui::Sense::drag(),
+            )
             .dragged();
         if dragged {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
     }
 
@@ -530,7 +535,8 @@ impl ShellApp {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_clip_rect(full);
-                ui.painter().rect_filled(full, 0, rgba(scrim(t, self.theme)));
+                ui.painter()
+                    .rect_filled(full, 0, rgba(scrim(t, self.theme)));
 
                 let size = Vec2::new(PILL_WIDTH, PILL_HEIGHT);
                 let at = Rect::from_center_size(full.center(), size);
@@ -1207,7 +1213,9 @@ mod tests {
 
         let ctx = shelf.ctx.clone();
         let prompt = shelf.app.prompt.as_mut().expect("the prompt is up");
-        prompt.app.record(&ctx, Outcome::Confirm(WindowIntent::Deny));
+        prompt
+            .app
+            .record(&ctx, Outcome::Confirm(WindowIntent::Deny));
         // The frame that observes the answer still draws the prompt; the NEXT one must not.
         shelf.frame(Vec::new());
         let after = shelf.frame(Vec::new());
@@ -1319,6 +1327,15 @@ mod tests {
             Some(Vec2::splat(SHELL_MIN)),
             "the shell keeps a floor a person cannot shrink the way out of"
         );
+        assert_eq!(
+            shell.inner_size,
+            Some(Vec2::new(SHELL_WIDTH, SHELL_HEIGHT)),
+            "the shell opens at the size it asks for"
+        );
+        assert_eq!(
+            shell.max_inner_size, None,
+            "an infinite maximum made the real window come up ~23% too wide; there must be none"
+        );
 
         let prompt = super::super::native_options("t", super::super::Chrome::Dialog).viewport;
         assert_eq!(
@@ -1346,7 +1363,10 @@ mod tests {
             edge_at(full, egui::Pos2::new(full.right() - inside, mid_y)),
             Some(D::East)
         );
-        assert_eq!(edge_at(full, egui::Pos2::new(mid_x, inside)), Some(D::North));
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(mid_x, inside)),
+            Some(D::North)
+        );
         assert_eq!(
             edge_at(full, egui::Pos2::new(mid_x, full.bottom() - inside)),
             Some(D::South)
