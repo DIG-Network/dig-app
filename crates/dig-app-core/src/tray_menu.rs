@@ -3514,4 +3514,116 @@ mod tests {
              again is the entire fix; got {loud:?}"
         );
     }
+
+    /// The `Submenu` row whose label starts with `prefix`, or `None`.
+    ///
+    /// A prefix match rather than an exact one because the Cache row's label carries the live
+    /// usage figure (see [`cache_label`]) and would otherwise have to be reconstructed here —
+    /// which would make this helper a second copy of that formatting logic instead of a lookup.
+    fn find_submenu<'a>(model: &'a MenuModel, prefix: &str) -> Option<&'a [MenuRow]> {
+        model.rows.iter().find_map(|row| match row {
+            MenuRow::Submenu { label, rows } if label.starts_with(prefix) => Some(rows.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// **`build()` composes the six shared group builders verbatim — dig_ecosystem#2253.**
+    ///
+    /// This is PR1's whole point: the builders extracted for a second consumer (the window model,
+    /// PR2) must still be EXACTLY what `build()` puts in each submenu, or the two containers would
+    /// silently drift the moment either one changes. Rather than capturing `build()`'s own output
+    /// and asserting it matches itself — which would kill no mutant, since any bug in `build`
+    /// would land in both sides of the comparison — each submenu is checked against a call to the
+    /// now-`pub(crate)` builder made from OUTSIDE `build`, exactly as PR2's window model will call
+    /// it. If `build` ever stopped calling one of these functions, or called it with different
+    /// arguments, this diverges; today, with the extraction unchanged, it must not.
+    #[test]
+    fn build_composes_the_six_shared_group_builders_verbatim() {
+        for account_state in EVERY_STATE {
+            for second_factor in [false, true] {
+                for cache in [
+                    None,
+                    Some(crate::cache::CacheSnapshot {
+                        cap_bytes: crate::cache::GIB,
+                        used_bytes: 350 * crate::cache::MIB,
+                    }),
+                ] {
+                    let mut fixture = view(account_state.clone());
+                    fixture.second_factor = second_factor;
+                    fixture.cache = cache.clone();
+                    let account = fixture.account();
+
+                    let menu = build(&fixture);
+
+                    assert_eq!(
+                        find_submenu(&menu, "View Account"),
+                        Some(view_account_actions(&fixture, &account).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: View Account drifted from \
+                         view_account_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Manage Account"),
+                        Some(management_actions(&account).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Manage Account drifted from \
+                         management_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Wallet"),
+                        Some(wallet_actions(&fixture, &account).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Wallet drifted from \
+                         wallet_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Security"),
+                        Some(security_actions(&account, second_factor).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Security drifted from \
+                         security_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Cache"),
+                        Some(cache_actions(cache.as_ref()).as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Cache drifted from \
+                         cache_actions"
+                    );
+                    assert_eq!(
+                        find_submenu(&menu, "Apps"),
+                        Some(apps_actions().as_slice()),
+                        "{account_state:?}/{second_factor}/{cache:?}: Apps drifted from \
+                         apps_actions"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Nothing reads `window_host` yet — so `build()` must be byte-identical for both values,
+    /// on every account state (dig_ecosystem#2253).**
+    ///
+    /// This is the test that gives the field-not-`cfg!` decision teeth: the whole reason
+    /// `window_host` is plain data on `TrayView` rather than a `cfg!(target_os = ...)` inside the
+    /// model is that BOTH values must be exercisable by ordinary `cargo test` on every platform.
+    /// A field nothing ever sets to `Unavailable` in a test would make that claim unearned — this
+    /// constructs both and proves today's `build()` cannot tell them apart. PR4 is what teaches it
+    /// to: the moment the trim reads this field, one of these two menus will stop matching the
+    /// other, and THIS test is what will fail and point at the diff.
+    #[test]
+    fn window_host_is_plumbed_but_unread_build_is_identical_for_both_values() {
+        for account_state in EVERY_STATE {
+            let available = TrayView {
+                window_host: WindowHost::Available,
+                ..view(account_state.clone())
+            };
+            let unavailable = TrayView {
+                window_host: WindowHost::Unavailable,
+                ..view(account_state.clone())
+            };
+
+            assert_eq!(
+                build(&available),
+                build(&unavailable),
+                "{account_state:?}: build() must not yet depend on window_host — PR4 is what \
+                 teaches it to, and this assertion is what will then fail"
+            );
+        }
+    }
 }
