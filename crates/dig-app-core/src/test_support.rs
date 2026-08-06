@@ -102,12 +102,14 @@ pub fn test_residency() -> AccountResidency {
 pub mod node {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
+    use std::sync::Arc;
     use std::thread::JoinHandle;
 
     use crate::control::CONTROL_TOKEN_HEADER;
 
-    /// How a [`FakeNode`] should answer the one request it accepts.
+    /// How a [`FakeNode`] should answer the requests it accepts.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Behaviour {
         /// Reply `200` with a `control.status` result — a healthy, authorized node.
@@ -118,13 +120,54 @@ pub mod node {
         Http(u16, String),
         /// Accept the connection and close it without replying — a node that is up but mute.
         Silent,
+        /// A healthy node that also answers `control.wallet.balance` per the given [`WalletReply`],
+        /// serving it as the OPEN read a real node does (dig_ecosystem#1851) while every other
+        /// method stays behind the control token.
+        Wallet(WalletReply),
     }
 
-    /// A one-shot fake control plane on loopback. Dropping it joins the server thread.
+    /// How a [`FakeNode`] should answer `control.wallet.balance`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum WalletReply {
+        /// Answer with per-asset figures and the node's own view of whether they are current.
+        ///
+        /// The two amounts are separate so a fixture can distinguish an implementation that reads
+        /// each asset from one that reads a single figure and reuses it.
+        Balance {
+            /// The XCH balance in mojos.
+            xch: u64,
+            /// The DIG balance in base units.
+            dig: u64,
+            /// The node's `synced` flag: `false` means the figures are STALE.
+            synced: bool,
+        },
+        /// Refuse, exactly as the node's error envelope does: a numeric wire code plus the stable
+        /// UPPER_SNAKE `data.code` symbol a client is contractually required to branch on.
+        Rejected {
+            /// The numeric JSON-RPC error code.
+            code: i64,
+            /// The stable `data.code` symbol.
+            symbol: String,
+        },
+    }
+
+    impl WalletReply {
+        /// A refusal carrying `code` + its stable `symbol`.
+        pub fn rejected(code: i64, symbol: &str) -> Self {
+            WalletReply::Rejected {
+                code,
+                symbol: symbol.to_string(),
+            }
+        }
+    }
+
+    /// A fake control plane on loopback, serving requests until dropped (dropping it joins the
+    /// server thread).
     pub struct FakeNode {
         addr: SocketAddr,
         token: String,
         requests: mpsc::Receiver<String>,
+        served: Arc<AtomicUsize>,
         server: Option<JoinHandle<()>>,
     }
 
@@ -141,18 +184,35 @@ pub mod node {
             Self::with_behaviour(Behaviour::Status)
         }
 
+        /// A fake that answers `control.status` like a healthy node AND `control.wallet.balance`
+        /// with `reply`.
+        pub fn serving_wallet(reply: WalletReply) -> Self {
+            Self::with_behaviour(Behaviour::Wallet(reply))
+        }
+
         /// A fake with an explicit [`Behaviour`], bound to an ephemeral loopback port.
         pub fn with_behaviour(behaviour: Behaviour) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
             let addr = listener.local_addr().expect("local addr");
             let (tx, requests) = mpsc::channel();
-            let server = std::thread::spawn(move || serve_once(listener, behaviour, tx));
+            let served = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&served);
+            let server = std::thread::spawn(move || serve(listener, behaviour, tx, counter));
             Self {
                 addr,
                 token: Self::TOKEN.to_string(),
                 requests,
+                served,
                 server: Some(server),
             }
+        }
+
+        /// How many requests the fake has actually served.
+        ///
+        /// Counted at the SERVER so a test can prove a call did — or did not — reach the wire,
+        /// rather than trusting the client's own account of what it sent.
+        pub fn request_count(&self) -> usize {
+            self.served.load(Ordering::SeqCst)
         }
 
         /// The `http://…` endpoint a client should dial.
@@ -187,33 +247,110 @@ pub mod node {
         }
     }
 
-    /// Accept exactly one connection, report the request text, and answer per `behaviour`.
-    fn serve_once(listener: TcpListener, behaviour: Behaviour, tx: mpsc::Sender<String>) {
-        let Ok((mut stream, _)) = listener.accept() else {
-            return;
-        };
-        let request = read_request(&mut stream);
-        let authorized = request
-            .to_lowercase()
-            .contains(&format!("{}: {}", CONTROL_TOKEN_HEADER, FakeNode::TOKEN).to_lowercase());
-        let _ = tx.send(request);
+    /// Serve connections until the listener is closed or a caller connects without sending anything
+    /// (which is how [`FakeNode::drop`] unblocks the accept).
+    ///
+    /// Serving repeatedly rather than once is what lets a test drive a client that makes more than
+    /// one call — a balance read asks per asset, so a one-shot fake could only ever prove half of it.
+    fn serve(
+        listener: TcpListener,
+        behaviour: Behaviour,
+        tx: mpsc::Sender<String>,
+        served: Arc<AtomicUsize>,
+    ) {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let request = read_request(&mut stream);
+            // The wake-up poke from `Drop` sends no bytes; anything else is a real request.
+            if request.trim().is_empty() {
+                return;
+            }
+            served.fetch_add(1, Ordering::SeqCst);
+            let authorized = request
+                .to_lowercase()
+                .contains(&format!("{}: {}", CONTROL_TOKEN_HEADER, FakeNode::TOKEN).to_lowercase());
+            let method_is_open_read = request.contains("control.wallet.balance");
+            let asset = if request.contains("\"asset\":\"dig\"") {
+                Asset::Dig
+            } else {
+                Asset::Xch
+            };
+            let _ = tx.send(request);
 
-        let (code, body) = match &behaviour {
-            Behaviour::Silent => return,
-            // A real node gates `control.*` on the token, so the fake must too — otherwise a client
-            // that forgot the header would still see a green test.
-            _ if !authorized => (401, "401: unauthorized control request".to_string()),
-            Behaviour::Status => (200, status_result()),
-            Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
-            Behaviour::Http(code, body) => (*code, body.clone()),
-        };
-        let _ = write!(
-            stream,
-            "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = stream.flush();
+            let (code, body) = match &behaviour {
+                Behaviour::Silent => return,
+                // `control.wallet.balance` is an OPEN read on every node build that has it, so the
+                // fake must serve it without a token — otherwise a client that never learned to work
+                // tokenless would still pass.
+                Behaviour::Wallet(reply) if method_is_open_read => {
+                    (200, wallet_result(reply, asset))
+                }
+                // Every other `control.*` method is gated exactly as the real node gates it,
+                // otherwise a client that forgot the header would still see a green test.
+                _ if !authorized => (401, "401: unauthorized control request".to_string()),
+                Behaviour::Status | Behaviour::Wallet(_) => (200, status_result()),
+                Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
+                Behaviour::Http(code, body) => (*code, body.clone()),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
+        }
+    }
+
+    /// Which asset a balance request named.
+    #[derive(Clone, Copy)]
+    enum Asset {
+        Xch,
+        Dig,
+    }
+
+    /// The `control.wallet.balance` reply for `asset`, in the exact envelope
+    /// `dig-node-service`'s `control::wallet_balance` emits.
+    fn wallet_result(reply: &WalletReply, asset: Asset) -> String {
+        match reply {
+            WalletReply::Balance { xch, dig, synced } => {
+                let balance = match asset {
+                    Asset::Xch => *xch,
+                    Asset::Dig => *dig,
+                };
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "balance": balance,
+                        "pending": 0,
+                        "synced": synced,
+                        "peak_height": 6_000_000,
+                    }
+                })
+                .to_string()
+            }
+            WalletReply::Rejected { code, symbol } => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": code,
+                    "message": "the node refused this balance read",
+                    "data": { "code": symbol, "origin": "node" }
+                }
+            })
+            .to_string(),
+        }
+    }
+
+    /// The `control.status` snapshot as a typed result, for a test that needs an
+    /// [`EngineState::Connected`](crate::engine::EngineState::Connected) without running a probe.
+    pub fn fake_status_result() -> dig_node_control_interface::results::StatusResult {
+        serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(&status_result()).expect("valid JSON")
+                ["result"]
+                .clone(),
+        )
+        .expect("the fake's status body must match the contract's StatusResult")
     }
 
     /// Read the request head plus its declared `Content-Length` body.

@@ -45,6 +45,13 @@ fn main() {
             running: true,
             node_connected: true,
             node: "Node v0.66.0 · 0 capsule(s) cached · 0 store(s) hosted".to_string(),
+            // A real reading, so the gallery photographs the Wallet row as a funded account sees it.
+            balance: dig_app_core::wallet::overview::BalanceReading::Known(
+                dig_app_core::wallet::overview::Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 3_400_000_000_000,
+                },
+            ),
             account: Some(account.clone()),
             // Present exactly while unlocked, as the shell's live derivation off the residency is.
             receive_address: matches!(account, AccountState::Unlocked { .. }).then(|| {

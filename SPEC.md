@@ -544,7 +544,8 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
 - **A balance that could not be read MUST NOT be rendered as a zero.** The surface MUST distinguish a
   balance READ from a chain source (where `0` means nothing is held) from one that is UNKNOWN, and every
   unknown MUST name which thing is missing — no address, no node, a node that does not serve wallet reads,
-  a source still syncing, or a read that failed. Showing a zero for an unreadable balance is how a person
+  a node with no live chain source to read from, a source still syncing, or a read that failed. Showing a
+  zero for an unreadable balance is how a person
   concludes their funds are gone, and is forbidden. This holds on the MENU ROW as well as in the window: a
   glanced-at numeral is where the mistaken conclusion is cheapest to reach.
 - **The balance MUST be on the submenu itself, in every account state, and MUST be enabled.** "What do I
@@ -1319,7 +1320,25 @@ contract-first pattern as the §5.3 session methods). The engine's chain access 
 - `control.wallet.coins` — `{ address, asset }` → `{ coins: [{ coin_id, asset, amount }] }`. The
   address's spendable coins for the asset.
 - `control.wallet.balance` — `{ address, asset }` → `{ balance }`. The address's spendable balance in
-  the asset's base unit.
+  the asset's base unit. The node's reply is a strict SUPERSET of that shape; dig-app reads `balance`
+  plus `synced`, and MUST treat a reply carrying `synced: false` as UNKNOWN rather than rendering the
+  stale figure it contains.
+
+**Reading the balance for real (MUST).** dig-app MUST obtain the balance by ASKING a node, never by
+asserting an outcome it did not test:
+
+- The reading MUST come from a `control.wallet.balance` call against the endpoint the §5.3 ladder
+  resolved. The method is served as an OPEN read, so the call MUST be made whether or not a control
+  token is readable on this machine.
+- The reason an unknown carries MUST be derived from the node's own reply, keyed on the stable
+  `data.code` symbol and never on the human message: `METHOD_NOT_FOUND` / `NOT_SUPPORTED` /
+  `UNAUTHORIZED` mean this build does not serve the read; `WALLET_NOT_SYNCED` means it is catching up;
+  `WALLET_NO_CHAIN_SOURCE` means it serves the read but has no chain to read from. Those three MUST NOT
+  be collapsed into one another — they call for an upgrade, a wait, and a node connection respectively.
+- The read MUST be throttled independently of the repaint rate, because the tray snapshot is taken on
+  every repaint and a balance is a rate-limited chain read.
+- dig-app MUST NOT enable, or require the user to enable, any node-side flag that arms spending in order
+  to obtain a read-only balance.
 
 `asset` is the lowercase wire enum `"xch" | "dig"`. dig-app depends only on the `WalletEngine` trait
 seam, so it compiles + tests standalone; the real IPC-session transport (the §5.3 `SessionClient`)

@@ -1213,6 +1213,16 @@ mod tray {
         }
     }
 
+    /// The process-wide balance poller (dig_ecosystem#2206).
+    ///
+    /// A single instance so its refresh window spans repaints — a per-snapshot poller would have an
+    /// empty cache every time and turn the twice-a-second repaint into twice-a-second chain reads.
+    fn balance_poller() -> &'static dig_app_core::wallet::node::NodeBalance {
+        static POLLER: std::sync::OnceLock<dig_app_core::wallet::node::NodeBalance> =
+            std::sync::OnceLock::new();
+        POLLER.get_or_init(dig_app_core::wallet::node::NodeBalance::default)
+    }
+
     /// Read the current state of the world into the one snapshot the menu is built from.
     fn snapshot(
         status: &SharedStatus,
@@ -1268,8 +1278,17 @@ mod tray {
             // `address_derivation_failed` (dig_ecosystem#2059) rather than swallowed here — see that
             // field's docs for why the wallet window must be told which of the two `None` reasons this
             // is.
-            receive_address,
+            receive_address: receive_address.clone(),
             address_derivation_failed,
+            // The account's money, as the node last reported it (dig_ecosystem#2206). The poller
+            // owns the cadence — this repaint runs twice a second and a balance is a rate-limited
+            // chain read — and every decision about what the reading MEANS lives in
+            // `dig_app_core::wallet`, because a binary is a test-free zone.
+            balance: match status.read() {
+                Ok(status) => balance_poller().observe(&status.engine, receive_address.as_deref()),
+                // A poisoned lock says nothing about the balance, and "nothing" is not zero.
+                Err(_) => dig_app_core::wallet::overview::BalanceReading::default(),
+            },
             // No on-chain DID can exist yet: minting is unimplemented, so there is nothing that could
             // have produced one. This was previously filled from `config.active_profile` — a LOCAL
             // string, not chain evidence — which would have made the tray report an on-chain identity
@@ -1833,6 +1852,10 @@ mod tray {
             // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
             // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
             && a.receive_address == b.receive_address
+            // The Wallet row RENDERS the balance, so a reading that changed must repaint — without
+            // this the first real figure would never replace "Balance not known" until something
+            // else in the menu happened to move (dig_ecosystem#2206).
+            && a.balance == b.balance
             && a.did == b.did
             // Without this the Security submenu would keep offering "Set up..." after an enrolment
             // completed, because nothing else in the view changed and the menu would not repaint.

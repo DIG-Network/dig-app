@@ -108,6 +108,36 @@ impl dig_app_core::wallet::engine::WalletEngine for FixedBalances {
     }
 }
 
+/// A [`WalletEngine`] double for a node whose chain view is still catching up, so the gallery can
+/// photograph the "still syncing" window without a real node behind it.
+struct SyncingNode;
+
+impl dig_app_core::wallet::engine::WalletEngine for SyncingNode {
+    fn broadcast(
+        &self,
+        _: dig_app_core::wallet::engine::BroadcastRequest,
+    ) -> Result<dig_app_core::wallet::engine::BroadcastResponse, dig_app_core::wallet::WalletError>
+    {
+        unreachable!("the wallet window never broadcasts")
+    }
+
+    fn coins(
+        &self,
+        _: dig_app_core::wallet::engine::CoinsRequest,
+    ) -> Result<dig_app_core::wallet::engine::CoinsResponse, dig_app_core::wallet::WalletError>
+    {
+        unreachable!("the wallet window reads balances, not coins")
+    }
+
+    fn balance(
+        &self,
+        _: dig_app_core::wallet::engine::BalanceRequest,
+    ) -> Result<dig_app_core::wallet::engine::BalanceResponse, dig_app_core::wallet::WalletError>
+    {
+        Err(dig_app_core::wallet::WalletError::EngineNotSynced)
+    }
+}
+
 fn main() {
     #[cfg(windows)]
     match_the_trays_dpi_awareness();
@@ -142,9 +172,12 @@ fn main() {
                 xch_mojos: 1_250_000_000_000,
                 dig_units: 3_400_000_000_000,
             });
+            // A node that answers "still catching up" — the reason now comes from what the node
+            // says, not from a variant the caller picks (dig_ecosystem#2206).
+            let syncing = SyncingNode;
             let source = match which.as_str() {
                 "wallet-balance" => ChainSource::Ready(&funded),
-                "wallet-not-synced" => ChainSource::NotSynced,
+                "wallet-not-synced" => ChainSource::Ready(&syncing),
                 _ => ChainSource::Absent,
             };
             confirmer.show_notice(&NoticePrompt {

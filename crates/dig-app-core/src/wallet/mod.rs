@@ -22,6 +22,7 @@
 //! `dig-account` signer; the engine only ever sees signed bytes.
 
 pub mod engine;
+pub mod node;
 pub mod overview;
 pub mod state;
 
@@ -61,6 +62,33 @@ pub enum WalletError {
     /// The engine seam reported a failure (broadcast rejected, chain read failed, transport down).
     #[error("wallet engine error: {0}")]
     Engine(String),
+
+    /// Nothing answered the engine seam — no node is reachable.
+    ///
+    /// Distinct from [`Engine`](Self::Engine) because the remedy differs: this one says *start your
+    /// node*, and the surface that renders it must not tell the user their read failed.
+    #[error("no DIG node answered: {0}")]
+    EngineUnreachable(String),
+
+    /// A node answered, but this build of it does not serve the requested wallet read.
+    ///
+    /// The honest end of a capability probe: the app asked, and the running node said it cannot.
+    /// The remedy is an upgrade, not a retry.
+    #[error("this DIG node does not serve wallet reads")]
+    EngineUnsupported,
+
+    /// A node answered, but its chain view is still catching up, so any figure it gave would be
+    /// stale. Reported rather than rendered — a stale number still reads as the truth.
+    #[error("the DIG node is still syncing")]
+    EngineNotSynced,
+
+    /// A node answered and DOES serve the read, but has no live chain source to answer it FROM.
+    ///
+    /// Separate from [`EngineUnsupported`](Self::EngineUnsupported) (that build is not capable) and
+    /// from [`EngineNotSynced`](Self::EngineNotSynced) (there is no chain view to be behind). This
+    /// is the state a default dig-node install is actually in today.
+    #[error("the DIG node has no live chain source")]
+    EngineNoChainSource,
 }
 
 /// Serialize a fully-signed [`SpendBundle`] to the lowercase-hex wire form the engine broadcast seam
