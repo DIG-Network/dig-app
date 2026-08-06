@@ -26,8 +26,17 @@ use dig_account::ProfileIx;
 /// Every HD derivation index the wallet is active on.
 ///
 /// **This is the single declaration** the whole app's single-address model rests on (#2236). To make
-/// the wallet multi-address again, add indices HERE; every seam that must then generalize is surfaced
-/// by the compiler rather than by inspection.
+/// the wallet multi-address again, add indices HERE — and the build then HARD-STOPS with `E0080`
+/// naming this ticket, so the change cannot happen by accident.
+///
+/// Be precise about what that stop does and does not give you, because the difference matters to
+/// whoever widens this. It is ONE loud halt, not compiler-driven exhaustiveness: removing the
+/// tripwire (which widening requires) leaves the crate compiling clean, because `ActiveProfile::SOLE`
+/// still resolves to `ACTIVE_PROFILES[0]` and its callers keep silently using index 0. Measured, not
+/// assumed (dig-app#111 review). So after removing the tripwire, grep `SOLE` — four call sites today
+/// — and generalize each deliberately. The identity/sealing seams hardcode `ProfileIx::ROOT`
+/// independently of this list and must be reviewed at the same time; they agree today and cannot
+/// diverge without first tripping the halt.
 ///
 /// It is `ProfileIx::ROOT` (index 0) — the index the user's existing address was derived at, so this
 /// declaration is deliberately *descriptive of today*, not a renumbering.
