@@ -86,6 +86,8 @@ fn view_for(state: AccountState) -> TrayView {
             cap_bytes: dig_app_core::cache::GIB,
             used_bytes: 0,
         }),
+        // Not the subject here: this suite is about the account LOCK state.
+        window_host: dig_app_core::tray_menu::WindowHost::Available,
     }
 }
 

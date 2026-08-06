@@ -77,6 +77,8 @@ fn main() {
             // The gallery photographs the ordinary states; the refused-menu tooltip is asserted in
             // `tray_menu`'s tests rather than shot here (dig-app#86).
             menu_suppressed: false,
+            // The gallery is about account states, not the window-host fallback.
+            window_host: dig_app_core::tray_menu::WindowHost::Available,
         };
         let status = tray_menu::status(&view);
 

@@ -221,6 +221,19 @@ pub struct TrayView {
     /// `None` is the honest value when the node is unreachable — the cache submenu then says the cap
     /// cannot be changed until a node is connected rather than inventing a figure.
     pub cache: Option<crate::cache::CacheSnapshot>,
+    /// Whether this host can open the app window at all (dig_ecosystem#2253).
+    ///
+    /// `Unavailable` is what keeps every verb on the tray once a window-hosted surface exists: while
+    /// no window can be opened, the tray remains the ONLY route to the 25 actions a future trim would
+    /// otherwise move off it. Filled by the shell from a RUNTIME capability check
+    /// (`confirm::gui::available()` plus the macOS host restriction) rather than the target triple,
+    /// because a headless Linux session with neither `$WAYLAND_DISPLAY` nor `$DISPLAY` set hits the
+    /// exact same "no window host" condition macOS does.
+    ///
+    /// Nothing reads this field yet — it exists so its value is exercised by `cargo test` on every
+    /// platform ahead of the trim that will consume it, rather than living behind a `cfg!` that only
+    /// one CI runner could ever prove.
+    pub window_host: WindowHost,
 }
 
 impl TrayView {
@@ -228,6 +241,24 @@ impl TrayView {
     fn account(&self) -> AccountState {
         self.account.clone().unwrap_or(AccountState::Absent)
     }
+}
+
+/// Whether this host can open the tabbed app window, as opposed to the tray menu alone
+/// (dig_ecosystem#2253).
+///
+/// A three-state capability rather than something inferred at each call site from the target triple:
+/// the SAME two hosts — macOS, and a Linux session with no display server reachable — must answer this
+/// identically, and a `cfg!(target_os = ...)` inside the model would let one of them go unexercised by
+/// CI. The shell is the only thing that knows whether a window host is actually reachable right now, so
+/// it fills this field once per snapshot and the model reads it as plain data like everything else in
+/// [`TrayView`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowHost {
+    /// A window can be opened on this host right now.
+    #[default]
+    Available,
+    /// No window can be opened on this host — every verb must stay reachable from the tray alone.
+    Unavailable,
 }
 
 /// What the host holds at rest, independent of any live session.
@@ -978,7 +1009,11 @@ fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
 ///
 /// The recovery-phrase row is *either* "show it" or "you don't have one" — never both, because offering a
 /// disabled "show my recovery phrase" to someone who has none tells them nothing about why (#1800).
-fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
+///
+/// `pub(crate)`: this is a shared rule, not tray-private. A window model built elsewhere in this crate
+/// composes the same rows into a tab section rather than re-deriving which recovery-phrase row to show
+/// (dig_ecosystem#2253) — the presence/enablement decision above is the contract both containers depend on.
+pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     if !account.exists() {
         // Nothing to view. The DID explainer still applies — it is about the CONCEPT, not this account —
         // and leaving the submenu empty would be a row that opens onto nothing.
@@ -1091,7 +1126,10 @@ fn view_account_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow>
 /// The row is what makes the no-account case say something. With no account the address row is
 /// (rightly) absent, and a submenu holding only `My wallet…` makes a person click to be told there is
 /// nothing — so the balance row names that state on the menu itself.
-fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
+///
+/// `pub(crate)`: shared with the window model's Wallet tab (dig_ecosystem#2253) — which rows appear and
+/// whether the address row is enabled is decided HERE, once, for both containers.
+pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     if account.exists() && !matches!(account, AccountState::Unopenable) {
         rows.push(match &view.receive_address {
@@ -1130,7 +1168,10 @@ fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<MenuRow> {
 /// safe right now*; Manage is *I want a different account*. Putting `Lock now` beside `Remove this account
 /// from this computer` would be a menu where the routine and the irreversible sit together, which is how a
 /// mis-click becomes a loss.
-fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
+///
+/// `pub(crate)`: shared with the window model's Security tab (dig_ecosystem#2253) — the lock/unlock row
+/// and the two-factor offer are decided by account state alone, so both containers read the same verdict.
+pub(crate) fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
     match account {
         AccountState::Unlocked { .. } => {
             let mut rows = vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)];
@@ -1231,7 +1272,10 @@ fn paired_app_rows() -> Vec<MenuRow> {
 ///
 /// The verbs here are therefore gated on their REAL precondition — whether an account exists, which
 /// decides whether the verb CREATES or REPLACES — never on it being absent.
-fn management_actions(account: &AccountState) -> Vec<MenuRow> {
+///
+/// `pub(crate)`: shared with the window model's Account tab (dig_ecosystem#2253) — the create-vs-replace
+/// choice lives here so both containers offer the same verbs for the same account.
+pub(crate) fn management_actions(account: &AccountState) -> Vec<MenuRow> {
     // A host with no credential store can neither create nor destroy an account, so the submenu holds
     // only what it can actually deliver: the explanation.
     if !account.supported() {
@@ -1286,7 +1330,10 @@ fn management_actions(account: &AccountState) -> Vec<MenuRow> {
 /// visible — it either launches the app or shows the honest "not available yet" notice — never a
 /// greyed dead end or a silent no-op (#1800, §6.1). The launch-vs-notice choice is the shell's, made
 /// through the pure [`crate::apps::plan_launch`] seam; the menu only says the app exists to be opened.
-fn apps_actions() -> Vec<MenuRow> {
+///
+/// `pub(crate)`: shared with the window model's Apps tab (dig_ecosystem#2253) — one registry read,
+/// composed into whichever container is rendering.
+pub(crate) fn apps_actions() -> Vec<MenuRow> {
     crate::apps::APPS
         .iter()
         .map(|app| MenuRow::action(TrayAction::LaunchApp(app.id), app.display_name, true))
@@ -1335,7 +1382,10 @@ fn cache_label(cache: Option<&crate::cache::CacheSnapshot>) -> String {
 /// omitted and a single enabled row explains that a connected node is needed. That row is NOT a
 /// disabled dead end — clicking it opens the same explainer, so the user always learns why (#1800).
 /// The explainer itself is offered in every state because it is about the concept, not the live node.
-fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
+///
+/// `pub(crate)`: shared with the window model's Cache tab (dig_ecosystem#2253) — the same async-state
+/// collapse applies whichever container is asking.
+pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     match cache {
         Some(snapshot) => {
@@ -1590,6 +1640,9 @@ mod tests {
                 cap_bytes: crate::cache::GIB,
                 used_bytes: 350 * crate::cache::MIB,
             }),
+            // Not the subject of this suite: a window host is assumed available, as it is on every CI
+            // runner. The `Unavailable` fallback is exercised by `tray_menu`'s own tests instead.
+            window_host: WindowHost::Available,
         }
     }
 
