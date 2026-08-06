@@ -4219,7 +4219,7 @@ mod tests {
     // ---------------------------------------------------------------------------------------
 
     /// A prompt thread running `drawn`, plus a way to put jobs through it and read the answers.
-    struct Lane {
+    pub(super) struct Lane {
         jobs: mpsc::Sender<Work>,
         worker: Option<std::thread::JoinHandle<()>>,
         store: ThemeChoice,
@@ -4242,7 +4242,7 @@ mod tests {
         }
 
         /// Start a lane over the whole of [`Work`], for the rules that are about the SHELL.
-        fn serving_work(
+        pub(super) fn serving_work(
             drawn: impl Fn(Work, &Receiver<Work>) -> Option<Outcome> + Send + 'static,
         ) -> Self {
             // Taken BEFORE the thread starts, so no window of this lane's can be drawn while
@@ -4270,8 +4270,18 @@ mod tests {
         ///
         /// The wait is bounded so a loop that died reports as a FAILED ASSERTION rather than hanging
         /// the suite — a hung test says "something is wrong somewhere", a failed one names it.
-        fn ask(&self) -> Result<Outcome, RecvTimeoutError> {
+        pub(super) fn ask(&self) -> Result<Outcome, RecvTimeoutError> {
             self.ask_expiring_at(Instant::now() + PATIENT + ANSWER_GRACE)
+        }
+
+        /// Ask the loop to open the app shell. Returns as soon as it is QUEUED — nothing is
+        /// blocked on a shell, so there is no answer to wait for.
+        pub(super) fn open_shell(&self) {
+            self.jobs
+                .send(Work::Shell(Shell {
+                    theme: self.store.clone(),
+                }))
+                .expect("the prompt thread is still accepting jobs");
         }
 
         /// Queue a confirm whose caller gives up at `over_by`, and wait for the answer.

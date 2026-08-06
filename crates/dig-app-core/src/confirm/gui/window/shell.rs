@@ -654,3 +654,754 @@ const PANE_HEADING: &str = "DIG";
 const PANE_BODY: &str = "This window is not finished yet.";
 /// The gap between the placeholder heading and its body line.
 const PANE_LINE: f32 = 34.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::confirm::gui::window::ANSWER_GRACE;
+    use crate::confirm::{InputOutcome, SignPrompt, WindowIntent};
+    use std::sync::mpsc::{self, sync_channel, Receiver, TryRecvError};
+    use std::time::Duration;
+
+    /// A deadline no test reaches by accident, so nothing here is timing-dependent.
+    const PATIENT: Duration = Duration::from_secs(3600);
+
+    /// The shell's test size. Real numbers, so the layout under test is the shipped one.
+    fn shell_size() -> Vec2 {
+        Vec2::new(SHELL_WIDTH, SHELL_HEIGHT)
+    }
+
+    fn sign_screen() -> super::super::Screen {
+        let content = crate::confirm::ConfirmContent::sign(&SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some("Send 0.001 XCH to xch1safe\u{2026}addr"),
+        })
+        .expect("a decoded transaction yields content");
+        super::super::Screen::confirm(&content, "Cancel")
+    }
+
+    /// A shell driven frame by frame, with a queue a test can put prompts on.
+    struct Shelf {
+        app: ShellApp,
+        ctx: egui::Context,
+        jobs: mpsc::Sender<Work>,
+        queue: Receiver<Work>,
+        store: ThemeChoice,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Shelf {
+        fn open() -> Self {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let store = ThemeChoice::in_brand_dir(dir.path());
+            let (jobs, queue) = mpsc::channel::<Work>();
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            Self {
+                app: ShellApp::new(Theme::Light, store.clone()),
+                ctx,
+                jobs,
+                queue,
+                store,
+                _dir: dir,
+            }
+        }
+
+        /// Queue a prompt whose caller gives up at `over_by`, and hand back its reply channel.
+        fn queue_prompt(&self, over_by: Instant) -> Receiver<Outcome> {
+            let (reply, answers) = sync_channel(1);
+            self.jobs
+                .send(Work::Prompt(Job {
+                    screen: sign_screen(),
+                    wants_text: false,
+                    theme: self.store.clone(),
+                    deadline: PATIENT,
+                    over_by,
+                    reply,
+                }))
+                .expect("the shell queue is open");
+            answers
+        }
+
+        /// Queue a prompt the caller is still waiting on.
+        fn queue_live_prompt(&self) -> Receiver<Outcome> {
+            self.queue_prompt(Instant::now() + PATIENT + ANSWER_GRACE)
+        }
+
+        fn raw_input(&self, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, shell_size())),
+                events,
+                ..Default::default()
+            }
+        }
+
+        /// Run one frame carrying `events`.
+        fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+            let input = self.raw_input(events);
+            let (app, queue) = (&mut self.app, &self.queue);
+            self.ctx.run(input, |ctx| app.frame(ctx, queue))
+        }
+
+        /// Two quiet frames: the first builds the font atlas, the second lays out against it.
+        fn settle(&mut self) {
+            self.frame(Vec::new());
+            self.frame(Vec::new());
+        }
+
+        /// The frame the windowing system delivers when the shell itself is asked to close.
+        fn close_frame(&mut self) -> egui::FullOutput {
+            let mut input = self.raw_input(Vec::new());
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .expect("the root viewport")
+                .events
+                .push(egui::ViewportEvent::Close);
+            let (app, queue) = (&mut self.app, &self.queue);
+            self.ctx.run(input, |ctx| app.frame(ctx, queue))
+        }
+    }
+
+    /// Every string the painter was actually asked to draw this frame.
+    fn drawn_text(output: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// Whether the PROMPT's own copy — not the shell's — was laid out this frame.
+    ///
+    /// Keyed on the origin line, which only a consent prompt draws. The shell's placeholder never
+    /// contains it, so this cannot read the shell back as a prompt.
+    fn a_prompt_was_drawn(output: &egui::FullOutput) -> bool {
+        drawn_text(output)
+            .iter()
+            .any(|line| line.contains("dapp.example"))
+    }
+
+    /// Whether the SHELL was laid out this frame.
+    ///
+    /// The truthful control for every assertion that a prompt is ABSENT: without it, a frame that
+    /// drew nothing at all would read as a successful dismissal.
+    fn the_shell_was_drawn(output: &egui::FullOutput) -> bool {
+        drawn_text(output).iter().any(|line| line == PANE_BODY)
+    }
+
+    /// Press Escape.
+    fn escape() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    /// Whether the shell asked its OWN window to close this frame.
+    fn asked_to_close(output: &egui::FullOutput) -> bool {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|v| {
+                v.commands
+                    .iter()
+                    .any(|c| matches!(c, egui::ViewportCommand::Close))
+            })
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // A prompt raised while the window is open is DRAWN, not aged out behind it
+    // ---------------------------------------------------------------------------------------------
+
+    /// **A prompt raised while the app window is open is drawn, not parked behind it.**
+    ///
+    /// This is the reason the shell pumps the queue at all. `serve_with` serves one job at a time,
+    /// so a shell that merely occupied that slot would leave every prompt raised over it unread
+    /// until [`Job::over_by`] elapsed, then refused WITHOUT BEING DRAWN — a dapp asks for a
+    /// signature, nothing appears, the request is refused, and no surface explains why.
+    ///
+    /// Asserted against `over_by` semantics rather than a sleep: this caller is still waiting (an
+    /// hour out), so a refusal on this fixture could only mean the shell aged it out. The companion
+    /// test below is the same fixture with the ONE field that decides staleness moved, which is what
+    /// makes the pair able to tell drawing from ageing.
+    #[test]
+    fn a_prompt_raised_over_the_open_shell_is_drawn_rather_than_aged_out() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+
+        assert!(
+            a_prompt_was_drawn(&output),
+            "the prompt was never laid out; a shell that does not pump the queue disables consent \
+             for as long as it is open"
+        );
+        assert_eq!(
+            answers.try_recv().err(),
+            Some(TryRecvError::Empty),
+            "the caller was answered without the prompt ever being drawn — the silent refusal this \
+             design exists to prevent"
+        );
+    }
+
+    /// …and the control: the SAME fixture whose caller has already given up is refused WITHOUT
+    /// being drawn.
+    ///
+    /// Exactly one field differs from the test above — `over_by` — so the pair distinguishes "draws
+    /// everything it is handed" from "draws what is still wanted". Opening a real consent window for
+    /// an operation nobody is waiting on teaches the click-through reflex (dig_ecosystem#2074).
+    #[test]
+    fn a_prompt_whose_caller_gave_up_is_refused_by_the_shell_without_being_drawn() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_prompt(Instant::now() - Duration::from_secs(1));
+
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+
+        assert!(
+            !a_prompt_was_drawn(&output),
+            "a consent window was opened for a caller that had already given up"
+        );
+        assert!(
+            the_shell_was_drawn(&output),
+            "the shell itself must still be on screen — without this the assertion above would \
+             also pass on a frame that drew nothing at all"
+        );
+        assert!(
+            matches!(
+                answers.recv_timeout(Duration::from_secs(1)),
+                Ok(Outcome::Confirm(WindowIntent::Unavailable))
+            ),
+            "a stale prompt is refused fail-closed, never dropped and never approved"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // A panicking shell costs the shell and nothing else
+    // ---------------------------------------------------------------------------------------------
+
+    /// **A panic in the shell refuses the shell and the loop takes the next job.**
+    ///
+    /// The prompt thread cannot be replaced, so a shell that took it down on the way out would be a
+    /// silent, permanent consent lockout for the session — and it would look exactly like an app
+    /// that had simply stopped showing prompts.
+    ///
+    /// Asserted on a prompt served AFTER the panic, because a loop that dies here still answers
+    /// every question asked before it.
+    #[test]
+    fn a_panicking_shell_does_not_take_the_prompt_thread_down_with_it() {
+        let lane = super::super::tests::Lane::serving_work(|work, _queue| match work {
+            Work::Shell(_) => panic!("the app window panicked mid-draw"),
+            Work::Prompt(_) => Some(Outcome::Confirm(WindowIntent::Deny)),
+        });
+
+        lane.open_shell();
+        assert!(
+            matches!(lane.ask(), Ok(Outcome::Confirm(WindowIntent::Deny))),
+            "the prompt thread stopped serving after the app window panicked, which is a consent \
+             lockout for the life of the process"
+        );
+    }
+
+    /// **The shell is not a consent surface.**
+    ///
+    /// The tray disables its foreground claim while a consent surface is up (dig-app#91). Counting
+    /// the shell would disable that claim for the whole life of a window somebody may leave open all
+    /// day — and a disabled claim is indistinguishable from a working one.
+    ///
+    /// Read from INSIDE the draw, which is the only moment a wrongly-scoped `Raised` is observable.
+    #[test]
+    fn the_shell_alone_is_not_a_consent_surface() {
+        use crate::confirm::surface::consent_surface_is_up;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let seen: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(true)));
+        let lane = super::super::tests::Lane::serving_work(move |work, _queue| {
+            if matches!(work, Work::Shell(_)) {
+                seen.store(consent_surface_is_up(), Ordering::SeqCst);
+            }
+            Some(Outcome::Confirm(WindowIntent::Deny))
+        });
+
+        lane.open_shell();
+        // Serialises against the draw above: the loop is strictly ordered, so an answered prompt
+        // proves the shell's draw has already returned.
+        lane.ask().expect("the lane answers");
+
+        assert!(
+            !seen.load(Ordering::SeqCst),
+            "the app window reported itself as a consent surface; the tray's foreground claim \
+             would be disabled for as long as the window stayed open"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // One prompt at a time
+    // ---------------------------------------------------------------------------------------------
+
+    /// **A second prompt is not admitted while one is active.**
+    ///
+    /// One-modal-at-a-time is a security property, not a tidiness one: a second consent window
+    /// stacked over a first can obscure what is actually being authorised. The shell enforces it by
+    /// not polling the queue at all while [`ShellApp::prompt`] is set.
+    ///
+    /// Asserted on the SECOND caller still waiting AND on the job still being on the queue — not on
+    /// a glyph count. A shell that admitted both and drew only one would pass a glyph assertion and
+    /// still have taken the job somewhere nothing will ever answer it.
+    #[test]
+    fn a_second_prompt_is_not_admitted_while_one_is_active() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _first = shelf.queue_live_prompt();
+        let second = shelf.queue_live_prompt();
+
+        for _ in 0..4 {
+            shelf.frame(Vec::new());
+        }
+
+        assert!(shelf.app.prompt.is_some(), "the first prompt is up");
+        assert_eq!(
+            second.try_recv().err(),
+            Some(TryRecvError::Empty),
+            "the second prompt was answered while the first was still up"
+        );
+        assert!(
+            matches!(shelf.queue.try_recv(), Ok(Work::Prompt(_))),
+            "the second prompt must still be ON the queue, waiting its turn — a shell that \
+             consumed and dropped it would strand its caller on recv_timeout"
+        );
+    }
+
+    /// **A second open-the-window request while the window is open is discarded, not left in front
+    /// of the next real prompt.** Nobody is blocked on it, so there is nothing to answer.
+    #[test]
+    fn a_second_open_request_while_the_shell_is_open_is_discarded() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        shelf
+            .jobs
+            .send(Work::Shell(Shell {
+                theme: shelf.store.clone(),
+            }))
+            .expect("the queue is open");
+        let answers = shelf.queue_live_prompt();
+
+        for _ in 0..4 {
+            shelf.frame(Vec::new());
+        }
+
+        assert!(
+            shelf.app.prompt.is_some(),
+            "the duplicate open request blocked the prompt behind it"
+        );
+        assert_eq!(answers.try_recv().err(), Some(TryRecvError::Empty));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Escape
+    // ---------------------------------------------------------------------------------------------
+
+    /// **Escape with a prompt up denies the prompt and leaves the shell open.**
+    ///
+    /// One Escape that both denied the prompt AND closed the shell would be a single keystroke
+    /// tearing down the window that authorises spending. The prompt's claim on Escape is decided by
+    /// [`ShellApp::prompt`], not by which viewport the framework happens to route input to.
+    #[test]
+    fn escape_with_a_prompt_up_denies_the_prompt_and_leaves_the_shell_open() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+        assert!(shelf.app.prompt.is_some(), "the prompt is up before Escape");
+
+        shelf.frame(escape());
+
+        // Asserted on the shell's OWN flag, not on a `Close` in the frame's viewport output.
+        // `PromptApp::record` sends a close command of its own, and on a host that embeds an
+        // immediate viewport rather than giving it a window both land on the same viewport id — so
+        // the command is genuinely ambiguous here while the flag never is. The flag is also the
+        // mechanism under test: it is what decides that the prompt owns Escape.
+        assert!(
+            !shelf.app.closing,
+            "Escape closed the app window while a consent prompt was on top of it"
+        );
+        let after = shelf.frame(Vec::new());
+        assert!(
+            the_shell_was_drawn(&after),
+            "the shell stopped drawing itself after an Escape aimed at the prompt"
+        );
+        assert!(
+            matches!(
+                answers.recv_timeout(Duration::from_secs(1)),
+                Ok(Outcome::Confirm(WindowIntent::Deny))
+            ),
+            "Escape must reach the prompt and deny it"
+        );
+    }
+
+    /// **Escape with no prompt up closes the shell.**
+    ///
+    /// The window is undecorated, so Escape is an escape hatch and never-trap-the-user (HARD) makes
+    /// it mandatory. Paired with the test above, the two pin BOTH sides of the one condition.
+    #[test]
+    fn escape_with_no_prompt_up_closes_the_shell() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+
+        let output = shelf.frame(escape());
+
+        assert!(
+            shelf.app.closing,
+            "Escape did not close the app window; an undecorated window with no working Escape is \
+             a trap"
+        );
+        assert!(
+            asked_to_close(&output),
+            "the shell decided to close and never told its window; a flag nobody acts on is not \
+             an escape hatch"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Closing the shell over a prompt
+    // ---------------------------------------------------------------------------------------------
+
+    /// **Closing the shell over an unanswered prompt answers that prompt fail-closed.**
+    ///
+    /// The caller is blocked on `recv_timeout`. A dropped reply strands it for its whole deadline
+    /// with no explanation; an approval here would be consent nobody gave. `Unavailable` is the only
+    /// honest answer, and it must actually be SENT.
+    #[test]
+    fn closing_the_shell_over_an_unanswered_prompt_answers_fail_closed() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        assert!(
+            shelf.app.prompt.is_some(),
+            "the prompt is up before the close"
+        );
+
+        shelf.close_frame();
+
+        assert!(
+            matches!(
+                answers.recv_timeout(Duration::from_secs(1)),
+                Ok(Outcome::Confirm(WindowIntent::Unavailable))
+            ),
+            "the caller was left waiting, or was told something other than Unavailable"
+        );
+    }
+
+    /// **An answer the person ALREADY gave survives the shell closing over it.**
+    ///
+    /// The fail-closed default above must never overwrite a recorded answer. This is
+    /// dig_ecosystem#2038 at the shell boundary: there, a teardown frame turned every approval into
+    /// a refusal, and the fix was [`PromptApp::record`]'s latch. A shell that authored the outcome
+    /// itself would reach around that latch and reintroduce the same inversion — so this asserts on
+    /// `Approve` specifically, the one value a fail-closed shell can never produce.
+    #[test]
+    fn an_answer_the_person_gave_survives_the_shell_closing_over_it() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+
+        // The human answers, recorded through the prompt's OWN latch exactly as a click does.
+        let ctx = shelf.ctx.clone();
+        let prompt = shelf.app.prompt.as_mut().expect("the prompt is up");
+        prompt
+            .app
+            .record(&ctx, Outcome::Confirm(WindowIntent::Approve));
+
+        shelf.close_frame();
+
+        assert!(
+            matches!(
+                answers.recv_timeout(Duration::from_secs(1)),
+                Ok(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "the shell overwrote an approval the person had already given — dig_ecosystem#2038, \
+             where every affirmative in the app answered Deny"
+        );
+    }
+
+    /// **The fail-closed answer takes the shape the caller is waiting for.**
+    ///
+    /// An input prompt's caller matches on [`InputOutcome`]; handing it a `Confirm` would be an
+    /// unhandled arm, not a refusal.
+    #[test]
+    fn the_fail_closed_answer_for_an_input_prompt_is_an_input_outcome() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let (reply, answers) = sync_channel(1);
+        shelf
+            .jobs
+            .send(Work::Prompt(Job {
+                screen: sign_screen(),
+                wants_text: true,
+                theme: shelf.store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            }))
+            .expect("the queue is open");
+        shelf.frame(Vec::new());
+
+        shelf.close_frame();
+
+        assert!(
+            matches!(
+                answers.recv_timeout(Duration::from_secs(1)),
+                Ok(Outcome::Input(InputOutcome::Unavailable))
+            ),
+            "an input prompt must be refused as an input outcome"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Dismissal — the measured hazard
+    // ---------------------------------------------------------------------------------------------
+
+    /// **A prompt is dismissed by the shell NO LONGER SHOWING IT.**
+    ///
+    /// `ViewportCommand::Close` does not close a viewport. Measured on Windows 11: it raises
+    /// `close_requested()` and the child's window handle afterwards is the SAME handle. A shell that
+    /// waited for the command to take effect would leave an undismissable consent prompt on screen
+    /// while every signal it read said the dismissal had worked (the dig-app#86 class).
+    ///
+    /// So the assertion is placed where the two implementations differ: the frame AFTER the prompt
+    /// records its answer must not lay the prompt out at all. A shell rewired to keep showing the
+    /// viewport until it observes a close event never reaches that state, because nothing delivers
+    /// that event — and this test goes red. Proven by doing exactly that; see the PR body.
+    ///
+    /// `the_shell_was_drawn` is the control: without it, a frame that painted nothing whatsoever
+    /// would satisfy the absence assertion.
+    #[test]
+    fn a_prompt_is_dismissed_by_the_shell_ceasing_to_show_it() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        let up = shelf.frame(Vec::new());
+        assert!(
+            a_prompt_was_drawn(&up),
+            "the prompt is on screen to begin with"
+        );
+
+        let ctx = shelf.ctx.clone();
+        let prompt = shelf.app.prompt.as_mut().expect("the prompt is up");
+        prompt.app.record(&ctx, Outcome::Confirm(WindowIntent::Deny));
+        // The frame that observes the answer still draws the prompt; the NEXT one must not.
+        shelf.frame(Vec::new());
+        let after = shelf.frame(Vec::new());
+
+        assert!(
+            !a_prompt_was_drawn(&after),
+            "the prompt was still being shown after it was answered — a consent surface that \
+             cannot be dismissed"
+        );
+        assert!(
+            the_shell_was_drawn(&after),
+            "the shell must still be on screen, or the assertion above would pass on a frame that \
+             drew nothing"
+        );
+        assert!(
+            shelf.app.prompt.is_none(),
+            "the field IS the dismissal; a prompt left in it is a prompt left on screen"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // The scrimmed shell must not look clickable
+    // ---------------------------------------------------------------------------------------------
+
+    /// **The pointer stays the default arrow over the scrimmed pane.**
+    ///
+    /// A pointing-hand cursor over a dimmed pane says *clickable* louder than any amount of dimming
+    /// says *inert*. The pane allocates [`egui::Sense::hover`] while a prompt is up, which is what
+    /// gets the cursor right; egui's own `disable()` would fight the token palette instead.
+    #[test]
+    fn the_cursor_stays_an_arrow_over_the_pane_while_a_prompt_is_up() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+
+        // Inside the pane and well away from the raise pill.
+        let over_the_pane = egui::Pos2::new(space::S6, SHELL_HEIGHT - space::S6);
+        shelf.frame(vec![egui::Event::PointerMoved(over_the_pane)]);
+        let output = shelf.frame(Vec::new());
+
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "the scrimmed pane offered a clickable cursor over a window that takes no input"
+        );
+    }
+
+    /// **The pane IS interactive when no prompt is up.**
+    ///
+    /// The control for the test above: an implementation that senses nothing at all, ever, would
+    /// satisfy it while being permanently inert.
+    #[test]
+    fn the_pane_is_interactive_when_no_prompt_is_up() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let at = egui::Pos2::new(space::S6, SHELL_HEIGHT - space::S6);
+        shelf.frame(vec![egui::Event::PointerMoved(at)]);
+        shelf.frame(Vec::new());
+
+        let sensed = shelf.ctx.read_response(egui::Id::new("dig-app-shell-pane"));
+        assert!(
+            sensed.is_some_and(|r| r.sense.senses_click()),
+            "the pane takes no clicks even with nothing over it"
+        );
+    }
+
+    /// **The raise pill is offered above the scrim, and its label names its action.**
+    ///
+    /// The prompt is its own OS window and can be dragged behind the shell; without an affordance
+    /// that brings it back, the shell is permanently inert with no visible cause. The label must not
+    /// read as a way to dismiss the prompt.
+    #[test]
+    fn the_scrim_offers_a_way_back_to_the_prompt() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+
+        assert!(
+            drawn_text(&output).iter().any(|line| line == RAISE_LABEL),
+            "no way back to a prompt the person may have buried behind the window"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Window posture and geometry
+    // ---------------------------------------------------------------------------------------------
+
+    /// **The shell is resizable and never always-on-top; the prompt over it is the reverse.**
+    ///
+    /// Both halves are safety properties. A non-topmost prompt is buried outright by one click on
+    /// the shell and keeps repainting into a window nobody can see, while its deadline runs down to
+    /// a refusal the person never saw. A topmost, non-resizable, undecorated shell could be neither
+    /// dismissed nor moved.
+    #[test]
+    fn the_shell_and_the_prompt_have_opposite_window_postures() {
+        let shell = native_options().viewport;
+        assert_eq!(shell.window_level, None, "the shell must never be topmost");
+        assert_eq!(shell.resizable, Some(true), "the shell must be resizable");
+        assert_eq!(
+            shell.decorations,
+            Some(false),
+            "the shell must read as the prompts do"
+        );
+        assert_eq!(
+            shell.min_inner_size,
+            Some(Vec2::splat(SHELL_MIN)),
+            "the shell keeps a floor a person cannot shrink the way out of"
+        );
+
+        let prompt = super::super::native_options("t", super::super::Chrome::Dialog).viewport;
+        assert_eq!(
+            prompt.window_level,
+            Some(egui::WindowLevel::AlwaysOnTop),
+            "the consent prompt must stay unmissable — this is what the shell must NOT copy"
+        );
+    }
+
+    /// **Every window edge is grabbable, and the interior is not.**
+    ///
+    /// An undecorated resizable window has no frame the operating system draws, so this hit test is
+    /// the only resize affordance there is. Pinned from BOTH sides: at the grab distance it must
+    /// answer, half a pixel further in it must not.
+    #[test]
+    fn each_window_edge_resizes_and_the_interior_does_not() {
+        use egui::viewport::ResizeDirection as D;
+        let full = Rect::from_min_size(egui::Pos2::ZERO, shell_size());
+        let inside = RESIZE_GRAB - 0.5;
+        let outside = RESIZE_GRAB + 0.5;
+        let (mid_x, mid_y) = (full.center().x, full.center().y);
+
+        assert_eq!(edge_at(full, egui::Pos2::new(inside, mid_y)), Some(D::West));
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(full.right() - inside, mid_y)),
+            Some(D::East)
+        );
+        assert_eq!(edge_at(full, egui::Pos2::new(mid_x, inside)), Some(D::North));
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(mid_x, full.bottom() - inside)),
+            Some(D::South)
+        );
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(inside, inside)),
+            Some(D::NorthWest)
+        );
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(full.right() - inside, inside)),
+            Some(D::NorthEast)
+        );
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(inside, full.bottom() - inside)),
+            Some(D::SouthWest)
+        );
+        assert_eq!(
+            edge_at(
+                full,
+                egui::Pos2::new(full.right() - inside, full.bottom() - inside)
+            ),
+            Some(D::SouthEast)
+        );
+
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(outside, mid_y)),
+            None,
+            "half a pixel past the grab must be interior, or the whole window would resize"
+        );
+        assert_eq!(edge_at(full, full.center()), None);
+        assert_eq!(
+            edge_at(full, egui::Pos2::new(-1.0, mid_y)),
+            None,
+            "a pointer outside the window grabs nothing"
+        );
+    }
+
+    /// **The scrim dims both themes without blacking either out, and the two alphas differ.**
+    ///
+    /// Dark `surface` under a light-theme alpha is barely distinguishable from `bg`, so one value
+    /// for both reads as inert in one theme and as a smudge in the other.
+    #[test]
+    fn the_scrim_dims_both_themes_without_blacking_them_out() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let a = scrim(&theme.tokens(), theme).a;
+            assert!(
+                (96..=200).contains(&a),
+                "the {theme:?} scrim at alpha {a} either fails to read as inert or hides the \
+                 window entirely"
+            );
+        }
+        assert!(
+            scrim(&Theme::Dark.tokens(), Theme::Dark).a
+                > scrim(&Theme::Light.tokens(), Theme::Light).a,
+            "dark surfaces need the heavier scrim"
+        );
+    }
+}
