@@ -16,7 +16,7 @@
 //! # The invariant this module exists to make machine-checkable
 //!
 //! The window is only safe to build a tray trim on if **no verb becomes unreachable**. Some hosts have
-//! no window at all ([`WindowHost::Unavailable`] — macOS today, and any Linux session with no display
+//! no window at all ([`crate::tray_menu::WindowHost::Unavailable`] — macOS today, and any Linux session with no display
 //! server), so the tray must stay complete there. Every action the tray offers on such a host must
 //! still be reachable on a host that HAS a window, from the trimmed tray spine
 //! ([`TRAY_SPINE`]), this model, or the explicit [`SUBSUMED_BY_TAB`] map. That is
@@ -126,7 +126,7 @@ pub struct Tab {
     /// # The rule for any reason a caller does set
     ///
     /// The field exists because the HOST can know things the model cannot. A reason it supplies must
-    /// come from a TYPED source — [`crate::wallet::overview::menu_reason`] and its kin, one variant per
+    /// come from a TYPED source — `wallet::overview::menu_reason` and its kin, one variant per
     /// REMEDY — never a free-form string built at a call site. A `&'static str` chosen by a match arm
     /// cannot grow unbounded and cannot smuggle in attacker-influenced text (a store name, a peer id, an
     /// upstream error); an interpolated one can do both. Where no existing variant fits, add a variant
@@ -234,7 +234,7 @@ const REMEDY_VERBS: [&str; 9] = [
 ///
 /// The bar a [`Tab::unavailable`] string must clear. "Not available" states a fact and leaves the user
 /// nowhere; "Set up an account to use this." names the act that changes the answer. Checkably: the
-/// sentence must be a complete one and must contain a [remedy verb](REMEDY_VERBS).
+/// sentence must be a complete one and must contain a remedy verb (`REMEDY_VERBS`).
 ///
 /// This is deliberately a rule about the STRING and not a category: a reason is written per remedy, not
 /// per rough class of problem. "Unlock first" is wrong for an account that has no password and
