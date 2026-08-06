@@ -110,10 +110,32 @@ pub struct Tab {
     /// is the dead end dig_ecosystem#1800 removed from the tray. The rule is
     /// [`names_a_remedy`], and it is asserted over every value this module can produce.
     ///
-    /// [`build`] never produces a `Some` today, deliberately: a tab with nothing to offer is not
-    /// emitted at all rather than shown greyed, and every tab that IS emitted degrades to an honest
-    /// explainer row instead of becoming unusable. The field exists because the HOST can have reasons
-    /// the model cannot see, and any reason it supplies must clear the same bar.
+    /// It means *this tab cannot apply to you* — a fact about the account's state. It does NOT mean
+    /// *this tab has not loaded*, which is transient and belongs in the pane's own four async states.
+    ///
+    /// # Why the model never sets it today
+    ///
+    /// [`build`] always produces `None`, and that is a finding rather than an omission. Every tab that
+    /// could plausibly be marked unavailable is the sole route to something: the Wallet tab on a host
+    /// with no credential store still carries [`TrayAction::AboutWallet`], which is the explanation of
+    /// why there is no wallet. Greying the tab would take that explanation away, and
+    /// `every_action_survives_the_trim_on_every_host` fails when it is tried — the invariant catching a
+    /// dead end before it ships is exactly what it is for. So a tab with nothing to offer is not
+    /// emitted at all, and a tab with something to offer stays selectable.
+    ///
+    /// # The rule for any reason a caller does set
+    ///
+    /// The field exists because the HOST can know things the model cannot. A reason it supplies must
+    /// come from a TYPED source — [`crate::wallet::overview::menu_reason`] and its kin, one variant per
+    /// REMEDY — never a free-form string built at a call site. A `&'static str` chosen by a match arm
+    /// cannot grow unbounded and cannot smuggle in attacker-influenced text (a store name, a peer id, an
+    /// upstream error); an interpolated one can do both. Where no existing variant fits, add a variant
+    /// and an arm.
+    ///
+    /// One state has NO remedy and must not be given a false one: a host with no per-application
+    /// credential store cannot hold an account however the user behaves. [`names_a_remedy`] is the bar
+    /// for reasons that HAVE a remedy; a remedy-less state is expressed by not offering the thing at
+    /// all, which is what `management_actions` already does there.
     pub unavailable: Option<String>,
     /// The tab's content, in render order.
     pub sections: Vec<Section>,
@@ -526,11 +548,23 @@ mod tests {
                 .into_iter()
                 .filter(|action| TRAY_SPINE.contains(action)),
         );
-        reachable.extend(names(model.actions()));
+        // A greyed tab is not a route: its rows cannot be clicked and its content cannot be read, so
+        // neither its actions nor anything it claims to subsume counts as reachable.
+        reachable.extend(names(
+            model
+                .tabs
+                .iter()
+                .filter(|tab| tab.unavailable.is_none())
+                .flat_map(Tab::actions),
+        ));
         reachable.extend(names(
             SUBSUMED_BY_TAB
                 .iter()
-                .filter(|(_, tab)| model.tab(*tab).is_some())
+                .filter(|(_, tab)| {
+                    model
+                        .tab(*tab)
+                        .is_some_and(|rendered| rendered.unavailable.is_none())
+                })
                 .map(|(action, _)| *action),
         ));
         reachable
@@ -704,6 +738,23 @@ mod tests {
         }
     }
 
+    /// Subsumption is the one place the invariant takes a human's word for it, so bound what it can
+    /// excuse: a subsuming tab must ACTUALLY render, in every view, or the promise that it carries the
+    /// action's content is void and the invariant has waved through an unreachable verb.
+    #[test]
+    fn a_subsuming_tab_always_renders() {
+        for view in every_view() {
+            let model = build(&view);
+            for (action, tab) in SUBSUMED_BY_TAB {
+                assert!(
+                    model.tab(tab).is_some(),
+                    "{tab:?} claims to render {action:?} but is not shown\n  view: {}",
+                    describe(&view)
+                );
+            }
+        }
+    }
+
     #[test]
     fn every_unavailable_reason_names_a_remedy() {
         for view in every_view() {
@@ -716,6 +767,28 @@ mod tests {
                         describe(&view)
                     );
                 }
+            }
+        }
+    }
+
+    /// The model's current answer, pinned so changing it is deliberate: no tab is ever greyed.
+    ///
+    /// Every tab that renders carries something worth reaching — on a host with no credential store,
+    /// the Wallet tab's `AboutWallet` content is the explanation of why there is no wallet — so greying
+    /// one would remove the only route to it. `every_action_survives_the_trim_on_every_host` fails when
+    /// that is tried. A future host-supplied reason is a change to this test, with the reachability
+    /// invariant as its check.
+    #[test]
+    fn the_model_greys_no_tab_because_every_rendered_tab_leads_somewhere() {
+        for view in every_view() {
+            for tab in &build(&view).tabs {
+                assert_eq!(
+                    tab.unavailable,
+                    None,
+                    "{:?} was greyed; is its content reachable elsewhere?\n  view: {}",
+                    tab.id,
+                    describe(&view)
+                );
             }
         }
     }
