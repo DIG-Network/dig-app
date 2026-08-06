@@ -97,46 +97,53 @@ pub struct Section {
     pub rows: Vec<MenuRow>,
 }
 
-/// One tab of the window: an id, a label, why it cannot be used, and its content.
+/// What a pane says about its own completeness, so every tab answers all four async questions.
+///
+/// # Why this is model data and not a rendering decision
+///
+/// "Loading, error, empty, success" is a `professional-ui` HARD RULE, and a rule enforced only by
+/// looking at screenshots is a rule that rots on the first refactor. Deciding it here means each state
+/// is chosen by a testable function of the same [`TrayView`] the rows come from, and the shell's job
+/// shrinks to painting whichever note it is handed.
+///
+/// Every variant is reachable from a real view, and each is asserted from BOTH sides — a view that
+/// produces it and a view that does not. A variant no view can produce would be a state nobody has
+/// ever seen drawn, which is how an "empty state" ships broken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneNote {
+    /// Everything this tab has to show is present and final. The success state.
+    Ready,
+    /// The figures are still arriving. Names what is being waited for, so the wait is not a mystery.
+    Waiting(&'static str),
+    /// The node could not be asked, so this tab's figures are absent rather than merely late. Names
+    /// the remedy, because an error state with no way forward is the dead end dig_ecosystem#1800
+    /// removed.
+    Unreachable(&'static str),
+    /// The tab renders, and has nothing for this person to act on. Names what would change that.
+    Empty(&'static str),
+}
+
+/// One tab of the window: an id, a label, how complete its content is, and that content.
+///
+/// # There is deliberately no `unavailable` field
+///
+/// An earlier shape carried `unavailable: Option<String>` — a whole-tab reason string. It was deleted
+/// because the model never set it and could not: every tab that looked like a candidate is the sole
+/// route to something (the Wallet tab on a host with no credential store still carries the explanation
+/// of why there is no wallet), so greying one takes that route away. The reachability invariant fails
+/// when it is tried.
+///
+/// Per-row `enabled` is what remains, and it is strictly better: it disables the one thing that cannot
+/// be done while leaving everything around it usable, and its LABEL carries the reason — which is why
+/// [`label_names_a_remedy`] moved onto row labels rather than being deleted with the field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
     /// Which tab this is. Also the source of its sidebar id — see [`tab_element_id`].
     pub id: TabId,
     /// The sidebar label.
     pub label: String,
-    /// Why this tab is not selectable right now, or `None`.
-    ///
-    /// A REASON, not a bool, and the reason must name a REMEDY: a disabled control with no way forward
-    /// is the dead end dig_ecosystem#1800 removed from the tray. The rule is
-    /// [`names_a_remedy`], and it is asserted over every value this module can produce.
-    ///
-    /// It means *this tab cannot apply to you* — a fact about the account's state. It does NOT mean
-    /// *this tab has not loaded*, which is transient and belongs in the pane's own four async states.
-    ///
-    /// # Why the model never sets it today
-    ///
-    /// [`build`] always produces `None`, and that is a finding rather than an omission. Every tab that
-    /// could plausibly be marked unavailable is the sole route to something: the Wallet tab on a host
-    /// with no credential store still carries [`TrayAction::AboutWallet`], which is the explanation of
-    /// why there is no wallet. Greying the tab would take that explanation away, and
-    /// `every_action_survives_the_trim_on_every_host` fails when it is tried — the invariant catching a
-    /// dead end before it ships is exactly what it is for. So a tab with nothing to offer is not
-    /// emitted at all, and a tab with something to offer stays selectable.
-    ///
-    /// # The rule for any reason a caller does set
-    ///
-    /// The field exists because the HOST can know things the model cannot. A reason it supplies must
-    /// come from a TYPED source — [`crate::wallet::overview::menu_reason`] and its kin, one variant per
-    /// REMEDY — never a free-form string built at a call site. A `&'static str` chosen by a match arm
-    /// cannot grow unbounded and cannot smuggle in attacker-influenced text (a store name, a peer id, an
-    /// upstream error); an interpolated one can do both. Where no existing variant fits, add a variant
-    /// and an arm.
-    ///
-    /// One state has NO remedy and must not be given a false one: a host with no per-application
-    /// credential store cannot hold an account however the user behaves. [`names_a_remedy`] is the bar
-    /// for reasons that HAVE a remedy; a remedy-less state is expressed by not offering the thing at
-    /// all, which is what `management_actions` already does there.
-    pub unavailable: Option<String>,
+    /// How complete this tab's content is — see [`PaneNote`].
+    pub note: PaneNote,
     /// The tab's content, in render order.
     pub sections: Vec<Section>,
 }
@@ -210,41 +217,51 @@ fn subsuming_tab(action: TrayAction) -> Option<TabId> {
 /// The first five are `urgent_account_row`'s whole range — the one thing the account needs right now,
 /// which differs by state — plus `LockNow`, which joins them so the row is present in the unlocked
 /// state too. [`TrayAction::Open`] and [`TrayAction::Quit`] stay because reading content and leaving
-/// must never require a window to be open first.
+/// must never require a window to be open first. [`TrayAction::OpenWindow`] is the route to everything
+/// else, so a trimmed tray without it would be a tray with no way in.
 ///
-/// This is what the trim (PR4) keeps. It lives here because the reachability invariant is stated
-/// against it: everything NOT in this set must be reachable from [`build`]'s output, or the trim
-/// strands it.
-pub const TRAY_SPINE: [TrayAction; 7] = [
+/// This is what the trim keeps. It lives here because the reachability invariant is stated against it:
+/// everything NOT in this set must be reachable from [`build`]'s output, or the trim strands it.
+///
+/// Eight actions, **four rows**: the first five share one polymorphic slot (`urgent_account_row` emits
+/// exactly one of them, decided by the account's state), and the remaining three are a row each.
+pub const TRAY_SPINE: [TrayAction; 8] = [
     TrayAction::SetUpAccount,
     TrayAction::Unlock,
     TrayAction::SetAccountPassword,
     TrayAction::ExplainUnopenable,
     TrayAction::LockNow,
     TrayAction::Open,
+    TrayAction::OpenWindow,
     TrayAction::Quit,
 ];
 
-/// Words that turn a statement of fact into a remedy — see [`names_a_remedy`].
-const REMEDY_VERBS: [&str; 9] = [
-    "set up", "unlock", "connect", "install", "restore", "choose", "open", "start", "add",
+/// Words that turn a statement of fact into a remedy — see [`label_names_a_remedy`].
+const REMEDY_VERBS: [&str; 10] = [
+    "set up", "unlock", "connect", "install", "restore", "choose", "open", "start", "add", "set a",
 ];
 
-/// Whether `reason` tells the user what to DO about it, rather than only that something is wrong.
+/// Whether `label` tells the user what to DO, rather than only that something cannot be done.
 ///
-/// The bar a [`Tab::unavailable`] string must clear. "Not available" states a fact and leaves the user
-/// nowhere; "Set up an account to use this." names the act that changes the answer. Checkably: the
-/// sentence must be a complete one and must contain a [remedy verb](REMEDY_VERBS).
+/// # What this is the bar for, and why it moved
 ///
-/// This is deliberately a rule about the STRING and not a category: a reason is written per remedy, not
-/// per rough class of problem. "Unlock first" is wrong for an account that has no password and
-/// actively misleading for one that cannot be opened at all — three situations, three remedies, three
-/// sentences.
-pub fn names_a_remedy(reason: &str) -> bool {
-    let trimmed = reason.trim();
-    let sentence = trimmed.len() > 1 && trimmed.ends_with('.');
-    let lowered = trimmed.to_lowercase();
-    sentence && REMEDY_VERBS.iter().any(|verb| lowered.contains(verb))
+/// It was written for a whole-tab `unavailable` reason string. That field is gone (see [`Tab`]) — but
+/// the rule it enforced is the reason the field could be deleted safely, so it moved down one level
+/// rather than out. **A DISABLED ROW is now what must clear it.** A control a person cannot use, whose
+/// label does not name the act that would make it usable, is the dead end dig_ecosystem#1800 removed
+/// from this menu: "Show my recovery phrase" greyed out says only *no*, while "Show my recovery phrase
+/// (unlock first)" says *no, and here is the door*.
+///
+/// Checkably: the label contains a [remedy verb](REMEDY_VERBS). Unlike the tab-level version this does
+/// NOT require a full sentence, because a menu label is not one — requiring a trailing period would
+/// have rejected every real label in the app and the rule would have been dropped instead of applied.
+///
+/// It is deliberately a rule about the STRING and not a category: a remedy is written per situation,
+/// not per rough class of problem. "Unlock first" is wrong for an account that has never had a password
+/// and actively misleading for one that cannot be opened at all — three situations, three remedies.
+pub fn label_names_a_remedy(label: &str) -> bool {
+    let lowered = label.trim().to_lowercase();
+    !lowered.is_empty() && REMEDY_VERBS.iter().any(|verb| lowered.contains(verb))
 }
 
 /// Build the window from the same snapshot the tray is built from.
@@ -260,6 +277,13 @@ pub fn build(view: &TrayView) -> WindowModel {
         // cannot say what is wrong, which is why it leads the window rather than hiding in Advanced.
         tab(
             TabId::Status,
+            // The agent starts asynchronously, so a window opened during boot shows a Status tab whose
+            // figures are still being gathered. Saying so is the loading state; saying nothing leaves a
+            // person reading stale defaults as though they were the answer.
+            match view.running {
+                true => PaneNote::Ready,
+                false => PaneNote::Waiting("The DIG agent is still starting."),
+            },
             vec![Section {
                 heading: None,
                 rows: vec![
@@ -270,6 +294,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         ),
         tab(
             TabId::Account,
+            PaneNote::Ready,
             vec![
                 Section {
                     heading: Some("What this account is".to_string()),
@@ -283,6 +308,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         ),
         tab(
             TabId::Security,
+            PaneNote::Ready,
             vec![Section {
                 heading: None,
                 rows: security_actions(&account, view.second_factor),
@@ -292,6 +318,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         // a window to show. That is what makes subsuming it honest rather than a quiet deletion.
         tab(
             TabId::Wallet,
+            PaneNote::Ready,
             vec![Section {
                 heading: Some(crate::wallet::overview::menu_balance_label(
                     &crate::wallet::overview::WalletOverview::of_tray(view).balance,
@@ -301,6 +328,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         ),
         tab(
             TabId::Apps,
+            PaneNote::Ready,
             vec![Section {
                 heading: None,
                 rows: apps_actions(),
@@ -310,6 +338,15 @@ pub fn build(view: &TrayView) -> WindowModel {
         // parent label, so the tab that replaces that submenu carries the same figure.
         tab(
             TabId::Cache,
+            // The cap and the usage both come from the node. With no node connected they are not late,
+            // they are absent — so this is the error state, not the loading one, and it names the act
+            // that changes the answer.
+            match view.cache {
+                Some(_) => PaneNote::Ready,
+                None => PaneNote::Unreachable(
+                    "No node is connected, so the size limit cannot be read or changed. Start the                      DIG node and this tab will fill in.",
+                ),
+            },
             vec![Section {
                 heading: Some(cache_label(view.cache.as_ref())),
                 rows: cache_actions(view.cache.as_ref()),
@@ -332,9 +369,31 @@ fn row(action: TrayAction, label: &str) -> MenuRow {
     }
 }
 
+/// The empty-state note for a tab whose sections carry headings but nothing to click.
+///
+/// One sentence per tab rather than one shared sentence, because "nothing here" is only useful when it
+/// says what would put something here — and that differs. This is reached today by the Wallet tab on a
+/// host with no account: subsumption takes both `AboutWallet` rows into the page itself and
+/// `wallet_actions` offers nothing else, so the balance heading stands alone.
+fn nothing_to_do(id: TabId) -> &'static str {
+    match id {
+        TabId::Wallet => "Set up a DIG Account to get a receive address.",
+        TabId::Account => "Set up a DIG Account to manage one here.",
+        TabId::Security => "Set up a DIG Account to choose how it is protected.",
+        TabId::Apps => "Install another DIG app and it will appear here.",
+        TabId::Cache => "Start the DIG node to choose a size limit.",
+        TabId::Status | TabId::Advanced => "There is nothing to do here right now.",
+    }
+}
+
 /// Assemble one tab: drop the rows this tab renders as page content, then tidy the separators.
-fn tab(id: TabId, sections: Vec<Section>) -> Tab {
-    let sections = sections
+///
+/// `note` is the caller's answer for the loading and error states, which only the view can decide. The
+/// EMPTY state is decided here instead, from the assembled result: a tab is empty when it ends up with
+/// no clickable row, and that is a fact about what came out rather than about what went in. Computing
+/// it at the call sites would mean six predicates that each had to stay in step with subsumption.
+fn tab(id: TabId, note: PaneNote, sections: Vec<Section>) -> Tab {
+    let sections: Vec<Section> = sections
         .into_iter()
         .map(|section| Section {
             heading: section.heading,
@@ -348,10 +407,23 @@ fn tab(id: TabId, sections: Vec<Section>) -> Tab {
         .filter(|section| !section.rows.is_empty() || section.heading.is_some())
         .collect();
 
+    let clickable = |section: &Section| {
+        section
+            .rows
+            .iter()
+            .any(|row| matches!(row, MenuRow::Action { .. }))
+    };
+    let note = match (&note, sections.iter().any(clickable)) {
+        // A tab that cannot be filled in at all outranks a tab that merely has nothing to click: the
+        // person needs to know the node is missing, not that the list is short.
+        (PaneNote::Ready, false) => PaneNote::Empty(nothing_to_do(id)),
+        _ => note,
+    };
+
     Tab {
         id,
         label: id.label().to_string(),
-        unavailable: None,
+        note,
         sections,
     }
 }
@@ -423,6 +495,7 @@ mod tests {
             TrayAction::AboutWallet,
             TrayAction::SetCustomCacheCap,
             TrayAction::AboutCache,
+            TrayAction::OpenWindow,
             TrayAction::OpenLogs,
             TrayAction::Quit,
         ];
@@ -463,6 +536,7 @@ mod tests {
             | TrayAction::SetCustomCacheCap
             | TrayAction::AboutCache
             | TrayAction::LaunchApp(_)
+            | TrayAction::OpenWindow
             | TrayAction::OpenLogs
             | TrayAction::Quit => {}
         }
@@ -497,15 +571,18 @@ mod tests {
                     ] {
                         for profile_id in [None, Some("dig1abc".to_string())] {
                             for receive_address in [None, Some("xch1abc".to_string())] {
-                                views.push(TrayView {
-                                    account: Some(account.clone()),
-                                    window_host: host,
-                                    second_factor,
-                                    cache,
-                                    profile_id: profile_id.clone(),
-                                    receive_address: receive_address.clone(),
-                                    ..TrayView::default()
-                                });
+                                for running in [false, true] {
+                                    views.push(TrayView {
+                                        account: Some(account.clone()),
+                                        window_host: host,
+                                        second_factor,
+                                        cache: cache.clone(),
+                                        profile_id: profile_id.clone(),
+                                        receive_address: receive_address.clone(),
+                                        running,
+                                        ..TrayView::default()
+                                    });
+                                }
                             }
                         }
                     }
@@ -518,10 +595,11 @@ mod tests {
     /// A one-line description of a view, so a failure names the case that produced it.
     fn describe(view: &TrayView) -> String {
         format!(
-            "account={:?} host={:?} second_factor={} cache={} profile_id={} address={}",
+            "account={:?} host={:?} second_factor={} running={} cache={} profile_id={} address={}",
             view.account,
             view.window_host,
             view.second_factor,
+            view.running,
             view.cache.is_some(),
             view.profile_id.is_some(),
             view.receive_address.is_some(),
@@ -557,42 +635,89 @@ mod tests {
 
     /// Everything still reachable after the trim: the tray spine, the window, and the tabs that render
     /// an action as page content.
-    fn reachable_after_trim(view: &TrayView) -> BTreeSet<String> {
-        let model = build(view);
+    ///
+    /// Takes the model rather than building it, so a test can hand it a model the builder would never
+    /// produce and check that this rejects it — see `a_subsuming_tab_that_renders_nothing_is_not_a_route`.
+    /// A helper that always built its own input could only ever agree with the builder.
+    ///
+    /// # What replaced the `unavailable.is_none()` filters, and why it is not merely a deletion
+    ///
+    /// Both legs below used to exclude a tab whose `Tab::unavailable` reason was set: a greyed tab is
+    /// not a route, so neither its rows nor anything it claimed to subsume counted. That field is gone,
+    /// and dropping the filters with it would have made this invariant quietly WEAKER while every test
+    /// stayed green — the exact hazard the field's own doc comment warned about.
+    ///
+    /// So they are REPLACED, by the thing the filters were a proxy for: **a tab counts as a route only
+    /// if it actually renders something.** For a tab's own rows that is now true by construction — a
+    /// tab with rows renders them, and `every_rendered_tab_has_content` holds the general case — so the
+    /// discriminating leg is the SUBSUMPTION one. `SUBSUMED_BY_TAB` is the single place this invariant
+    /// takes a human's word that a tab carries an action's content instead of a row, and an empty tab
+    /// making that claim is precisely how a verb goes missing with the suite green.
+    fn reachable_after_trim_of(view: &TrayView, model: &WindowModel) -> BTreeSet<String> {
         let mut reachable = names(
             tray_actions(view)
                 .into_iter()
                 .filter(|action| TRAY_SPINE.contains(action)),
         );
-        // A greyed tab is not a route: its rows cannot be clicked and its content cannot be read, so
-        // neither its actions nor anything it claims to subsume counts as reachable.
-        //
-        // **`Tab.unavailable` is being deleted in PR3** — per-row `enabled` is strictly better than a
-        // tab-level reason string, and `cache_actions(None)` is already the house pattern. Deleting the
-        // field deletes these two `unavailable.is_none()` filters, and this invariant would get quietly
-        // WEAKER while every test stayed green. It does not, because `every_rendered_tab_has_content`
-        // now carries that weight: a tab either shows the user something or is not emitted, so no
-        // present-but-unusable tab remains for these filters to exclude. Whoever removes the field
-        // removes these filters KNOWING that — never merely drops them, and never restores the field
-        // without restoring the filter with it.
         reachable.extend(names(
             model
                 .tabs
                 .iter()
-                .filter(|tab| tab.unavailable.is_none())
+                .filter(|tab| renders_something(tab))
                 .flat_map(Tab::actions),
         ));
         reachable.extend(names(
             SUBSUMED_BY_TAB
                 .iter()
-                .filter(|(_, tab)| {
-                    model
-                        .tab(*tab)
-                        .is_some_and(|rendered| rendered.unavailable.is_none())
-                })
+                .filter(|(_, tab)| model.tab(*tab).is_some_and(renders_something))
                 .map(|(action, _)| *action),
         ));
         reachable
+    }
+
+    /// [`reachable_after_trim_of`] against the model this view really produces.
+    fn reachable_after_trim(view: &TrayView) -> BTreeSet<String> {
+        reachable_after_trim_of(view, &build(view))
+    }
+
+    /// The subsumption leg is load-bearing: a tab claiming to render an action's content, while
+    /// rendering nothing, must not make that action count as reachable.
+    ///
+    /// Hand-built because `build` cannot produce it — which is the point. Without this the replacement
+    /// for the deleted `unavailable` filters would be an assertion nothing could ever fail.
+    #[test]
+    fn a_subsuming_tab_that_renders_nothing_is_not_a_route() {
+        let view = TrayView::default();
+        let (subsumed, tab_id) = SUBSUMED_BY_TAB[0];
+        let hollow = WindowModel {
+            tabs: vec![Tab {
+                id: tab_id,
+                label: "Wallet".to_string(),
+                note: PaneNote::Ready,
+                sections: vec![Section {
+                    heading: None,
+                    rows: Vec::new(),
+                }],
+            }],
+        };
+        assert!(
+            !reachable_after_trim_of(&view, &hollow).contains(&format!("{subsumed:?}")),
+            "an empty tab claiming to carry {subsumed:?} was counted as a route to it"
+        );
+
+        let filled = WindowModel {
+            tabs: vec![Tab {
+                sections: vec![Section {
+                    heading: Some("You have 3 DIG.".to_string()),
+                    rows: Vec::new(),
+                }],
+                ..hollow.tabs[0].clone()
+            }],
+        };
+        assert!(
+            reachable_after_trim_of(&view, &filled).contains(&format!("{subsumed:?}")),
+            "a tab that DOES render {subsumed:?}'s content is a route to it"
+        );
     }
 
     /// **The invariant this PR exists for.** No verb becomes unreachable when the tray is trimmed.
@@ -655,8 +780,11 @@ mod tests {
     /// Security must never demand an unlock to be shown. An `Unopenable` account can never answer a
     /// second-factor challenge, so a Security tab gated on unlock would make that account permanently
     /// unreplaceable and unremovable — the trap `two_factor_row` exists to prevent.
+    ///
+    /// Asserted as "it renders something the person can act on", not as "it is not greyed": greying is
+    /// no longer expressible, so the old form would pass on a tab that had been emptied instead.
     #[test]
-    fn security_is_selectable_without_an_unlocked_account() {
+    fn security_is_usable_without_an_unlocked_account() {
         for view in every_view() {
             let locked_out = matches!(
                 view.account,
@@ -671,10 +799,9 @@ mod tests {
                 .tab(TabId::Security)
                 .cloned()
                 .unwrap_or_else(|| panic!("Security must render\n  view: {}", describe(&view)));
-            assert_eq!(
-                tab.unavailable,
-                None,
-                "Security must stay selectable\n  view: {}",
+            assert!(
+                !tab.actions().is_empty(),
+                "Security must offer something without an unlock\n  view: {}",
                 describe(&view)
             );
         }
@@ -699,8 +826,8 @@ mod tests {
         assert_eq!(
             candidates.len(),
             // five account readings (Unlocked counts twice, recoverable or not) x host x cache
-            // x profile_id x address
-            5 * 2 * 2 * 2 * 2,
+            // x profile_id x address x running
+            5 * 2 * 2 * 2 * 2 * 2,
             "the enrolled-account cases must all be covered"
         );
         for view in candidates {
@@ -812,55 +939,143 @@ mod tests {
         }
     }
 
+    /// **Every disabled row names the act that would enable it.** The rule the deleted
+    /// `Tab::unavailable` field carried, now applied where disabling actually happens.
+    ///
+    /// The count assertion is not decoration: without it this passes vacuously the moment a refactor
+    /// stops producing disabled rows, and it would then be a green test guarding nothing.
     #[test]
-    fn every_unavailable_reason_names_a_remedy() {
+    fn every_disabled_row_in_the_window_names_a_remedy() {
+        let mut disabled = 0usize;
         for view in every_view() {
             for tab in &build(&view).tabs {
-                if let Some(reason) = &tab.unavailable {
-                    assert!(
-                        names_a_remedy(reason),
-                        "{:?} says {reason:?}, which names no remedy\n  view: {}",
-                        tab.id,
-                        describe(&view)
-                    );
+                for section in &tab.sections {
+                    for row in &section.rows {
+                        let MenuRow::Action {
+                            label,
+                            enabled: false,
+                            ..
+                        } = row
+                        else {
+                            continue;
+                        };
+                        disabled += 1;
+                        assert!(
+                            label_names_a_remedy(label),
+                            "{:?} disables {label:?}, which names no remedy\n  view: {}",
+                            tab.id,
+                            describe(&view)
+                        );
+                    }
                 }
             }
         }
+        assert!(
+            disabled > 0,
+            "no disabled row was examined, so this proves nothing"
+        );
     }
 
-    /// The model's current answer, pinned so changing it is deliberate: no tab is ever greyed.
-    ///
-    /// Every tab that renders carries something worth reaching — on a host with no credential store,
-    /// the Wallet tab's `AboutWallet` content is the explanation of why there is no wallet — so greying
-    /// one would remove the only route to it. `every_action_survives_the_trim_on_every_host` fails when
-    /// that is tried. A future host-supplied reason is a change to this test, with the reachability
-    /// invariant as its check.
+    /// The remedy rule must be able to tell an instruction from a refusal, or asserting it proves
+    /// nothing. Pinned from BOTH sides, because a rule tested only on what it accepts can only confirm
+    /// itself.
     #[test]
-    fn the_model_greys_no_tab_because_every_rendered_tab_leads_somewhere() {
+    fn the_remedy_rule_rejects_a_bare_refusal() {
+        // Every shape the app really ships.
+        assert!(label_names_a_remedy(
+            "Show my recovery phrase (unlock first)"
+        ));
+        assert!(label_names_a_remedy(
+            "Copy my receive address (set a password first)"
+        ));
+        assert!(label_names_a_remedy(
+            "Set up my DIG Account (not supported on this system yet)"
+        ));
+        assert!(label_names_a_remedy(
+            "Change the size limit (connect a node first)…"
+        ));
+        // Refusals that name nothing to do.
+        assert!(!label_names_a_remedy("Not available"));
+        assert!(!label_names_a_remedy("Show my recovery phrase"));
+        assert!(!label_names_a_remedy("This cannot be used right now"));
+        assert!(!label_names_a_remedy(""));
+        assert!(!label_names_a_remedy("   "));
+    }
+
+    /// Each of the four async states is produced by a real view, and each is ABSENT from a real view
+    /// that should not have it. A state no view produces is a state nobody has seen drawn.
+    #[test]
+    fn every_pane_state_is_reachable_and_is_not_universal() {
+        let note = |view: &TrayView, id: TabId| build(view).tab(id).map(|tab| tab.note.clone());
+        let booting = TrayView {
+            running: false,
+            ..TrayView::default()
+        };
+        let up = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some("xch1abc".to_string()),
+            cache: Some(CacheSnapshot {
+                cap_bytes: CACHE_PRESETS[2],
+                used_bytes: 1,
+            }),
+            ..TrayView::default()
+        };
+
+        // Loading, and its absence once the agent is up.
+        assert_eq!(
+            note(&booting, TabId::Status),
+            Some(PaneNote::Waiting("The DIG agent is still starting."))
+        );
+        assert_eq!(note(&up, TabId::Status), Some(PaneNote::Ready));
+
+        // Error, and its absence once a node has reported.
+        assert!(matches!(
+            note(&booting, TabId::Cache),
+            Some(PaneNote::Unreachable(_))
+        ));
+        assert_eq!(note(&up, TabId::Cache), Some(PaneNote::Ready));
+
+        // Empty, and its absence once the tab has something to click. With no account the Wallet tab
+        // keeps its balance heading and no row, because subsumption takes both `AboutWallet` rows.
+        assert!(matches!(
+            note(&booting, TabId::Wallet),
+            Some(PaneNote::Empty(_))
+        ));
+        assert_eq!(note(&up, TabId::Wallet), Some(PaneNote::Ready));
+
+        // Success.
+        assert_eq!(note(&up, TabId::Apps), Some(PaneNote::Ready));
+    }
+
+    /// A pane note is a complete sentence, and the two that state a PROBLEM also state the way out.
+    #[test]
+    fn every_pane_note_is_a_sentence_and_the_problems_name_a_remedy() {
+        let mut seen = 0usize;
         for view in every_view() {
             for tab in &build(&view).tabs {
-                assert_eq!(
-                    tab.unavailable,
-                    None,
-                    "{:?} was greyed; is its content reachable elsewhere?\n  view: {}",
+                let sentence = match &tab.note {
+                    PaneNote::Ready => continue,
+                    PaneNote::Waiting(text)
+                    | PaneNote::Unreachable(text)
+                    | PaneNote::Empty(text) => *text,
+                };
+                seen += 1;
+                assert!(
+                    sentence.trim().ends_with('.'),
+                    "{:?} says {sentence:?}, which is not a complete sentence\n  view: {}",
                     tab.id,
                     describe(&view)
                 );
             }
         }
-    }
-
-    /// The remedy rule must be able to tell the two apart, or asserting it proves nothing.
-    #[test]
-    fn the_remedy_rule_rejects_a_statement_of_fact() {
-        assert!(names_a_remedy("Set up an account to use this."));
-        assert!(names_a_remedy("Connect a node to change the size limit."));
-        assert!(!names_a_remedy("Not available"));
-        assert!(!names_a_remedy("Not available."));
-        assert!(!names_a_remedy("This tab cannot be used right now."));
-        assert!(!names_a_remedy(""));
-        // A remedy verb without a complete sentence is a fragment, not an instruction.
-        assert!(!names_a_remedy("unlock"));
+        assert!(
+            seen > 0,
+            "no pane note was examined, so this proves nothing"
+        );
+        // `Waiting` is exempt: waiting has no remedy other than waiting.
+        assert!(label_names_a_remedy(nothing_to_do(TabId::Wallet)));
+        assert!(label_names_a_remedy(nothing_to_do(TabId::Cache)));
     }
 
     /// dig_ecosystem#2257 — the property `action_id`'s doc claims, tested for real at last.

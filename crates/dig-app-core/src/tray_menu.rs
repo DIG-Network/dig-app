@@ -597,6 +597,16 @@ pub enum TrayAction {
     /// off the prompt thread (#78) with no argv identity — never a silent no-op when it is absent
     /// (§6.1), which today is the only reachable case.
     LaunchApp(crate::apps::AppId),
+    /// Open the tabbed app window — the surface that holds every verb the tray no longer shows
+    /// (dig_ecosystem#2253).
+    ///
+    /// Distinct from [`LaunchApp`](Self::LaunchApp), which starts a *separate sibling binary*, and from
+    /// [`ShowStatus`](Self::ShowStatus), which opens a one-shot notice. This opens THIS app's own
+    /// window, in this process, on the one prompt thread.
+    ///
+    /// The handler acks on OPEN, never on close: the window lives for as long as the person wants it,
+    /// and a worker held for that whole time would refuse every later click — including `Quit`.
+    OpenWindow,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.

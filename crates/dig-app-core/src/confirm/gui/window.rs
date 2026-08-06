@@ -27,12 +27,13 @@
 //! [`Answer::Approve`].
 
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use egui::{Key, Rect, Vec2};
 use zeroize::Zeroizing;
 
+mod panes;
 mod shell;
 
 use super::paint;
@@ -212,16 +213,36 @@ enum Work {
     /// A consent prompt, drawn for a caller who is blocked waiting on the answer.
     Prompt(Job),
     /// The app shell, which pumps this same queue for prompts while it is up — see [`shell`].
-    Shell(Shell),
+    Shell(AppWindow),
 }
 
-/// A request to open the app shell.
-struct Shell {
+/// A request to open the app shell, and everything the shell needs from the app around it.
+///
+/// The two callbacks are how the window stays a RENDERER. It reads the live view through one and
+/// hands verbs back through the other, so it never learns what an action does — which is what keeps
+/// [`crate::tray_menu::TrayAction`] a single enum with a single `dispatch`, and keeps the window and
+/// the tray incapable of disagreeing about what a verb means.
+pub struct AppWindow {
     /// Where the shell's theme preference persists.
     ///
     /// The same store every prompt uses, so the window and a prompt raised over it can never be in
     /// different themes.
-    theme: ThemeChoice,
+    pub theme: ThemeChoice,
+    /// The live tray snapshot, read once per frame.
+    ///
+    /// A closure rather than a value because the window outlives any one snapshot: the node poll
+    /// rewrites the view every five seconds, an unlock changes the account state, and a window
+    /// showing the state at the moment it opened would quietly become a lie.
+    ///
+    /// **It must not block.** It runs inside the frame on the one prompt thread.
+    pub view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
+    /// Hand a verb to whatever runs verbs — for dig-app, the single action worker.
+    ///
+    /// **It must not block, and must never call [`ask`] itself.** Doing so would block the prompt
+    /// thread inside its own frame, waiting on the queue that frame owns: a guaranteed deadlock. A
+    /// window row dispatches exactly as a tray click does, on a worker, and this callback is the seam
+    /// that makes that the only expressible option.
+    pub act: Arc<dyn Fn(crate::tray_menu::TrayAction) + Send + Sync>,
 }
 
 /// The long-lived thread every prompt window is drawn on.
@@ -528,7 +549,7 @@ fn serve_with(
 /// consent lockout for the rest of the session. A panic costs the shell and only the shell; the loop
 /// goes back to `recv` and takes the next job.
 fn serve_shell(
-    shell: Shell,
+    shell: AppWindow,
     rx: &Receiver<Work>,
     draw: &impl Fn(Work, &Receiver<Work>) -> Option<Outcome>,
 ) {
@@ -539,6 +560,9 @@ fn serve_shell(
         // A panic inside `run_native` skips the flush at the end of the draw, leaving the window
         // undestroyed on Windows — the same hole the prompt arm plugs here.
         flush_deferred_window_destruction();
+        // An observed failure, not a suspicion: the tray goes back to its full form so the verbs the
+        // trim moved into this window stay reachable (`crate::window_host`).
+        crate::window_host::note_open_failure();
         tracing::error!(
             "the DIG app window panicked; it was closed and the prompt thread kept alive"
         );
@@ -1619,14 +1643,16 @@ impl BrandedWindow {
 ///
 /// A shell produces no [`Outcome`]. It hosts prompts, and each of those keeps and answers its own
 /// reply channel; nothing about the shell itself is a consent decision.
-pub fn open_app_window(theme: ThemeChoice) -> bool {
+pub fn open_app_window(window: AppWindow) -> bool {
     let Some(host) = host() else {
         tracing::debug!("this host cannot draw the DIG app window");
+        crate::window_host::note_open_failure();
         return false;
     };
-    let queued = poisonless(&host.tx).send(Work::Shell(Shell { theme }));
+    let queued = poisonless(&host.tx).send(Work::Shell(window));
     if queued.is_err() {
         tracing::error!("the DIG prompt thread is gone; the DIG app window cannot be opened");
+        crate::window_host::note_open_failure();
         return false;
     }
     true
@@ -4281,8 +4307,10 @@ mod tests {
         /// blocked on a shell, so there is no answer to wait for.
         pub(super) fn open_shell(&self) {
             self.jobs
-                .send(Work::Shell(Shell {
+                .send(Work::Shell(AppWindow {
                     theme: self.store.clone(),
+                    view: Arc::new(crate::tray_menu::TrayView::default),
+                    act: Arc::new(|_| {}),
                 }))
                 .expect("the prompt thread is still accepting jobs");
         }

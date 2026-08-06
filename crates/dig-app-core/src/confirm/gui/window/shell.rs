@@ -40,12 +40,15 @@ use std::time::Instant;
 use egui::{Key, Rect, Vec2};
 
 use super::super::paint;
-use super::super::render::{regular, rgba, semibold, size, space, Weight};
+use super::super::render::{rgba, semibold, size, space, Weight};
 use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
+use super::panes::{self, Click};
 use super::{
-    install_fonts, unavailable, Job, Outcome, PromptApp, Shell, Work, CHROME_HEIGHT, TOGGLE_WIDTH,
-    WIDTH,
+    install_fonts, unavailable, AppWindow, Job, Outcome, PromptApp, Work, CHROME_HEIGHT,
+    TOGGLE_WIDTH, WIDTH,
 };
+use crate::tray_menu::TrayAction;
+use crate::window_model::{self, TabId, WindowModel};
 
 /// The shell's opening size. Wide enough for the content column this window is designed around.
 const SHELL_WIDTH: f32 = 960.0;
@@ -84,9 +87,9 @@ fn prompt_viewport() -> egui::ViewportId {
 ///
 /// Signature matches [`super::draw_watched`] so both are reachable through `serve_with`'s one
 /// injection point, which is what lets a test make either of them misbehave.
-pub(super) fn draw(shell: Shell, queue: &Receiver<Work>) -> Option<Outcome> {
+pub(super) fn draw(shell: AppWindow, queue: &Receiver<Work>) -> Option<Outcome> {
     let theme = shell.theme.read();
-    let app = ShellApp::new(theme, shell.theme);
+    let app = ShellApp::new(theme, shell.theme, shell.view, shell.act);
     let run = eframe::run_native(
         "DIG",
         native_options(),
@@ -101,6 +104,10 @@ pub(super) fn draw(shell: Shell, queue: &Receiver<Work>) -> Option<Outcome> {
     super::flush_deferred_window_destruction();
     if let Err(err) = run {
         tracing::warn!(%err, "the DIG app window could not be opened");
+        // The tray trimmed itself on the promise that this window would open. It did not, so the
+        // promise is withdrawn and the full menu comes back (`crate::window_host`). Without this a
+        // person is left with four rows and no route to the escape hatches.
+        crate::window_host::note_open_failure();
     }
     None
 }
@@ -251,15 +258,33 @@ struct ShellApp {
     /// Explicit rather than read back off the viewport, so the frame that decides to close and the
     /// frame that acts on it cannot disagree.
     closing: bool,
+    /// The live tray snapshot, read once per frame — see [`super::AppWindow::view`].
+    view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
+    /// Where a clicked row's verb goes — see [`super::AppWindow::act`].
+    act: Arc<dyn Fn(TrayAction) + Send + Sync>,
+    /// Which tab is showing.
+    ///
+    /// Held here rather than derived per frame because the model is REBUILT every frame from a view
+    /// the node poll rewrites every five seconds. A selection recomputed from that would jump back
+    /// to the first tab under a person who was reading the fourth.
+    selected: TabId,
 }
 
 impl ShellApp {
-    fn new(theme: Theme, theme_store: ThemeChoice) -> Self {
+    fn new(
+        theme: Theme,
+        theme_store: ThemeChoice,
+        view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
+        act: Arc<dyn Fn(TrayAction) + Send + Sync>,
+    ) -> Self {
         Self {
             theme,
             theme_store,
             prompt: None,
             closing: false,
+            view,
+            act,
+            selected: FIRST_TAB,
         }
     }
 
@@ -419,12 +444,15 @@ impl ShellApp {
         }
     }
 
-    /// Paint the shell itself: chrome, pane, and — while a prompt is up — the scrim and the pill.
+    /// Paint the shell itself: chrome, panes, and — while a prompt is up — the scrim and the pill.
     fn paint_shell(&mut self, ctx: &egui::Context, t: &Tokens, prompt_is_up: bool) {
         let screen = ctx.screen_rect();
+        let model = window_model::build(&(self.view)());
+        self.keep_selection_valid(&model);
         // An `Area` rather than a `CentralPanel` so the shell and the prompt it hosts never contend
         // for the one central-panel id on hosts where egui embeds an immediate viewport instead of
         // giving it a window of its own.
+        let mut clicked = None;
         egui::Area::new(egui::Id::new("dig-app-shell"))
             .fixed_pos(screen.left_top())
             .order(egui::Order::Background)
@@ -432,13 +460,54 @@ impl ShellApp {
                 ui.set_clip_rect(screen);
                 ui.painter().rect_filled(screen, 0, rgba(t.bg));
                 self.chrome(ui, screen, t, prompt_is_up);
-                pane(ui, screen, t, prompt_is_up);
+                let body = Rect::from_min_max(
+                    egui::Pos2::new(screen.left(), screen.top() + CHROME_HEIGHT),
+                    screen.right_bottom(),
+                );
+                clicked = panes::draw(ui, body, t, &model, self.selected, !prompt_is_up);
             });
+        if let Some(click) = clicked {
+            self.handle(click);
+        }
 
         if prompt_is_up {
             self.scrim_and_pill(ctx, screen, t);
         } else {
             self.resize_edges(ctx, screen);
+        }
+    }
+
+    /// Keep the selection on a tab that still exists.
+    ///
+    /// Tabs come and go with the account state — an account being removed can take a tab's whole
+    /// reason to exist with it — and a selection pointing at a tab that is no longer emitted would
+    /// render an empty pane with a sidebar that highlights nothing. Falling back to the first tab is
+    /// the one choice that is always valid, and `Status` leads the sidebar precisely because it is
+    /// the tab that makes sense to land on when the app cannot say what else to show.
+    fn keep_selection_valid(&mut self, model: &WindowModel) {
+        if model.tab(self.selected).is_some() {
+            return;
+        }
+        if let Some(first) = model.tabs.first() {
+            self.selected = first.id;
+        }
+    }
+
+    /// Act on a click in the body.
+    ///
+    /// # Why a verb is handed off rather than run
+    ///
+    /// This runs inside the frame, on the prompt thread. Calling [`super::ask`] here — which is what
+    /// running a verb inline would eventually do — would block that thread inside its own frame,
+    /// waiting on the queue this very frame owns. That is not a slow path, it is a deadlock with no
+    /// timeout. So the verb goes to the same worker a tray click goes to, and this returns.
+    fn handle(&mut self, click: Click) {
+        match click {
+            Click::Tab(tab) => self.selected = tab,
+            Click::Act(action) => {
+                tracing::debug!(?action, "a DIG app window row was clicked");
+                (self.act)(action);
+            }
         }
     }
 
@@ -565,41 +634,6 @@ impl ShellApp {
     }
 }
 
-/// The placeholder content pane.
-///
-/// The sidebar and the six tab panes are a separate change; this is the host, and the host is proven
-/// on its own before anything is rendered into it.
-///
-/// Allocated with [`egui::Sense::hover`] rather than `Sense::click` while a prompt is up. That is
-/// what keeps the pointer the default arrow over the scrimmed surface: a pointing-hand cursor says
-/// *clickable* louder than any amount of dimming says *inert*. `egui`'s own `disable()` is not used
-/// because its grey multipliers would fight the token palette.
-fn pane(ui: &mut egui::Ui, full: Rect, t: &Tokens, prompt_is_up: bool) {
-    let body = Rect::from_min_max(
-        egui::Pos2::new(full.left(), full.top() + CHROME_HEIGHT),
-        full.right_bottom(),
-    );
-    let sense = match prompt_is_up {
-        true => egui::Sense::hover(),
-        false => egui::Sense::click(),
-    };
-    ui.interact(body, egui::Id::new("dig-app-shell-pane"), sense);
-    ui.painter().text(
-        body.left_top() + Vec2::new(space::S6, space::S6),
-        egui::Align2::LEFT_TOP,
-        PANE_HEADING,
-        semibold(size::HEADING),
-        rgba(t.text),
-    );
-    ui.painter().text(
-        body.left_top() + Vec2::new(space::S6, space::S6 + PANE_LINE),
-        egui::Align2::LEFT_TOP,
-        PANE_BODY,
-        regular(size::SM),
-        rgba(t.muted),
-    );
-}
-
 /// The scrim colour: the theme's own shadow at the theme's own alpha.
 ///
 /// Derived rather than added to [`Tokens`] on purpose — a token with no counterpart in hub's
@@ -654,18 +688,18 @@ const PILL_WIDTH: f32 = 220.0;
 const PILL_HEIGHT: f32 = 44.0;
 /// The pill's label. Names the ACTION, so it cannot be read as a way to dismiss the prompt.
 const RAISE_LABEL: &str = "Show the prompt";
-/// The placeholder pane's heading.
-const PANE_HEADING: &str = "DIG";
-/// The placeholder pane's one line of body copy.
-const PANE_BODY: &str = "This window is not finished yet.";
-/// The gap between the placeholder heading and its body line.
-const PANE_LINE: f32 = 34.0;
+/// The tab the window opens on, and the one it falls back to when a selected tab stops existing.
+///
+/// Status, because it is the tab that makes sense when the app cannot yet say what else to show —
+/// and because it holds `Open the log folder`, the escape hatch for when nothing else works.
+const FIRST_TAB: TabId = TabId::Status;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::confirm::gui::window::ANSWER_GRACE;
     use crate::confirm::{InputOutcome, SignPrompt, WindowIntent};
+    use crate::tray_menu::MenuRow;
     use std::sync::mpsc::{self, sync_channel, Receiver, TryRecvError};
     use std::time::Duration;
 
@@ -687,6 +721,27 @@ mod tests {
         super::super::Screen::confirm(&content, "Cancel")
     }
 
+    /// The view every test opens on unless it says otherwise: an unlocked, working, connected app.
+    ///
+    /// Deliberately the RICHEST state rather than the default. A window built from
+    /// `TrayView::default()` has an absent account, so half the rows a person would click are not
+    /// emitted at all — and a layout test on that fixture would be checking a nearly-empty pane
+    /// while claiming to check the window.
+    fn busy_view() -> crate::tray_menu::TrayView {
+        crate::tray_menu::TrayView {
+            running: true,
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            window_host: crate::tray_menu::WindowHost::Available,
+            profile_id: Some("dig1examplepublicidentity".to_string()),
+            receive_address: Some("xch1exampleaddress".to_string()),
+            cache: Some(crate::cache::CacheSnapshot {
+                cap_bytes: crate::cache::CACHE_PRESETS[2],
+                used_bytes: 1_234_567,
+            }),
+            ..crate::tray_menu::TrayView::default()
+        }
+    }
+
     /// A shell driven frame by frame, with a queue a test can put prompts on.
     struct Shelf {
         app: ShellApp,
@@ -694,24 +749,80 @@ mod tests {
         jobs: mpsc::Sender<Work>,
         queue: Receiver<Work>,
         store: ThemeChoice,
+        /// Every verb the window handed to the worker, in order.
+        dispatched: Arc<Mutex<Vec<TrayAction>>>,
+        /// The window's size for the next frame, so a test can narrow it.
+        size: Vec2,
         _dir: tempfile::TempDir,
     }
 
     impl Shelf {
         fn open() -> Self {
+            Self::showing(busy_view())
+        }
+
+        /// A shell built over one fixed view.
+        fn showing(view: crate::tray_menu::TrayView) -> Self {
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (jobs, queue) = mpsc::channel::<Work>();
             let ctx = egui::Context::default();
             install_fonts(&ctx);
+            let dispatched: Arc<Mutex<Vec<TrayAction>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&dispatched);
             Self {
-                app: ShellApp::new(Theme::Light, store.clone()),
+                app: ShellApp::new(
+                    Theme::Light,
+                    store.clone(),
+                    Arc::new(move || view.clone()),
+                    Arc::new(move |action| {
+                        sink.lock().expect("the sink is not poisoned").push(action)
+                    }),
+                ),
                 ctx,
                 jobs,
                 queue,
                 store,
+                dispatched,
+                size: shell_size(),
                 _dir: dir,
             }
+        }
+
+        /// The centre of a control the last frame drew, so a click can be aimed at the real thing
+        /// rather than at a coordinate that only happens to be over it today.
+        fn centre_of(&self, id: egui::Id) -> egui::Pos2 {
+            self.ctx
+                .read_response(id)
+                .unwrap_or_else(|| panic!("{id:?} was not drawn"))
+                .rect
+                .center()
+        }
+
+        /// Click at `at`: press, then release, then one more frame for the click to be observed.
+        fn click(&mut self, at: egui::Pos2) {
+            self.frame(vec![egui::Event::PointerMoved(at)]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }]);
+            self.frame(Vec::new());
+        }
+
+        /// Everything the window has dispatched so far.
+        fn dispatched(&self) -> Vec<TrayAction> {
+            self.dispatched
+                .lock()
+                .expect("the sink is not poisoned")
+                .clone()
         }
 
         /// Queue a prompt whose caller gives up at `over_by`, and hand back its reply channel.
@@ -737,7 +848,7 @@ mod tests {
 
         fn raw_input(&self, events: Vec<egui::Event>) -> egui::RawInput {
             egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, shell_size())),
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, self.size)),
                 events,
                 ..Default::default()
             }
@@ -788,8 +899,8 @@ mod tests {
 
     /// Whether the PROMPT's own copy — not the shell's — was laid out this frame.
     ///
-    /// Keyed on the origin line, which only a consent prompt draws. The shell's placeholder never
-    /// contains it, so this cannot read the shell back as a prompt.
+    /// Keyed on the origin line, which only a consent prompt draws. No window row contains it, so
+    /// this cannot read the shell back as a prompt.
     fn a_prompt_was_drawn(output: &egui::FullOutput) -> bool {
         drawn_text(output)
             .iter()
@@ -801,7 +912,19 @@ mod tests {
     /// The truthful control for every assertion that a prompt is ABSENT: without it, a frame that
     /// drew nothing at all would read as a successful dismissal.
     fn the_shell_was_drawn(output: &egui::FullOutput) -> bool {
-        drawn_text(output).iter().any(|line| line == PANE_BODY)
+        // Keyed on the sidebar's own labels, which only the shell draws. `Status` leads the
+        // sidebar in every state the model can produce, so this stays true for any view.
+        drawn_text(output).iter().any(|line| line == "Status")
+    }
+
+    /// The element id of one sidebar entry.
+    fn sidebar_entry(tab: TabId) -> egui::Id {
+        egui::Id::new(crate::window_model::tab_element_id(tab))
+    }
+
+    /// The element id of one content row, from the pane's own id function rather than a copy of it.
+    fn row_control(label: &str) -> egui::Id {
+        super::super::panes::row_id(label)
     }
 
     /// Press Escape.
@@ -1001,8 +1124,10 @@ mod tests {
         shelf.settle();
         shelf
             .jobs
-            .send(Work::Shell(Shell {
+            .send(Work::Shell(AppWindow {
                 theme: shelf.store.clone(),
+                view: Arc::new(busy_view),
+                act: Arc::new(|_| {}),
             }))
             .expect("the queue is open");
         let answers = shelf.queue_live_prompt();
@@ -1237,49 +1362,364 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // The tabbed body
+    // ---------------------------------------------------------------------------------------------
+
+    /// **Every tab the model emits gets a sidebar entry, and the first one is showing.**
+    #[test]
+    fn the_sidebar_lists_every_tab_and_opens_on_the_first() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let output = shelf.frame(Vec::new());
+        let drawn = drawn_text(&output);
+
+        let model = window_model::build(&busy_view());
+        assert!(
+            model.tabs.len() > 1,
+            "the fixture must have tabs to choose between"
+        );
+        for tab in &model.tabs {
+            assert!(
+                drawn.iter().any(|line| line == &tab.label),
+                "{:?} has no sidebar entry",
+                tab.id
+            );
+        }
+        assert_eq!(shelf.app.selected, FIRST_TAB);
+    }
+
+    /// **Clicking a sidebar entry shows that tab, and the choice survives later frames.**
+    ///
+    /// The survival half is the point. The model is rebuilt every frame from a view the node poll
+    /// rewrites every five seconds, so a selection recomputed per frame would snap back to Status
+    /// under someone reading the Account tab — and would do it on a timer they cannot see
+    /// (dig_ecosystem#2074's shape, in a different surface).
+    #[test]
+    fn choosing_a_tab_shows_it_and_the_choice_survives_a_repaint() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let at = shelf.centre_of(sidebar_entry(TabId::Account));
+        shelf.click(at);
+
+        assert_eq!(
+            shelf.app.selected,
+            TabId::Account,
+            "the click did not change tabs"
+        );
+
+        let account_rows: Vec<String> = window_model::build(&busy_view())
+            .tab(TabId::Account)
+            .expect("the Account tab renders")
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .filter_map(|row| match row {
+                MenuRow::Action { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !account_rows.is_empty(),
+            "the fixture must give Account some rows"
+        );
+
+        for _ in 0..10 {
+            let output = shelf.frame(Vec::new());
+            let drawn = drawn_text(&output);
+            assert_eq!(
+                shelf.app.selected,
+                TabId::Account,
+                "the selection was reset by a repaint"
+            );
+            assert!(
+                account_rows.iter().any(|label| drawn.contains(label)),
+                "the Account tab stopped rendering its own rows"
+            );
+        }
+    }
+
+    /// **A selection whose tab stops existing falls back to a tab that does, rather than to nothing.**
+    ///
+    /// Fixture chosen so the fallback is OBSERVABLE: the shell starts on a tab the second view does
+    /// not emit. An account being removed really does take tabs with it, and a sidebar highlighting
+    /// a tab that is gone would render an empty pane with no way to notice why.
+    #[test]
+    fn a_selection_whose_tab_disappears_falls_back_to_one_that_exists() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+
+        // A tab that exists in one model and not another. `Advanced` is declared and never
+        // constructed, so it is exactly a selection the model cannot honour.
+        shelf.app.selected = TabId::Advanced;
+        shelf.frame(Vec::new());
+
+        let model = window_model::build(&busy_view());
+        assert!(
+            model.tab(TabId::Advanced).is_none(),
+            "the fixture must not emit the tab being selected, or nothing is tested"
+        );
+        assert_eq!(
+            shelf.app.selected, model.tabs[0].id,
+            "a selection pointing at a tab that is not emitted must fall back to one that is"
+        );
+    }
+
+    /// **Clicking a row hands its verb to the worker — and does not run it here.**
+    ///
+    /// The window must never call the blocking `ask` inline: that blocks the prompt thread inside
+    /// its own frame, waiting on the queue the frame owns. A guaranteed deadlock. So the assertion is
+    /// that the verb ARRIVED AT THE SINK, and that the frame returned — a shell that ran the verb
+    /// itself would never reach the next line.
+    #[test]
+    fn clicking_a_row_dispatches_its_verb_to_the_worker() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        assert!(
+            shelf.dispatched().is_empty(),
+            "nothing is dispatched before a click"
+        );
+
+        let at = shelf.centre_of(row_control("Open the log folder"));
+        shelf.click(at);
+
+        assert_eq!(
+            shelf.dispatched(),
+            vec![TrayAction::OpenLogs],
+            "the clicked row's verb did not reach the worker"
+        );
+    }
+
+    /// **A disabled row is drawn, and is not clickable.**
+    ///
+    /// Both halves matter and they pull against each other. A disabled row must still SHOW, because
+    /// its label carries the remedy — "Show my recovery phrase (unlock first)" is the only place a
+    /// locked account is told what to do — and hiding it would take that away (dig_ecosystem#1800).
+    /// It must also not dispatch, or the window offers a control guaranteed to fail.
+    #[test]
+    fn a_disabled_row_is_shown_and_takes_no_click() {
+        let locked = crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Locked),
+            ..busy_view()
+        };
+        let disabled: Vec<String> = window_model::build(&locked)
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.sections)
+            .flat_map(|section| &section.rows)
+            .filter_map(|row| match row {
+                MenuRow::Action {
+                    label,
+                    enabled: false,
+                    ..
+                } => Some(label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !disabled.is_empty(),
+            "the locked fixture must produce a disabled row, or this test proves nothing"
+        );
+
+        let mut shelf = Shelf::showing(locked);
+        shelf.settle();
+        // The disabled rows live on Account; the window opens on Status.
+        let account = shelf.centre_of(sidebar_entry(TabId::Account));
+        shelf.click(account);
+        shelf.dispatched.lock().expect("the sink").clear();
+
+        let output = shelf.frame(Vec::new());
+        let drawn = drawn_text(&output);
+        let shown: Vec<&String> = disabled.iter().filter(|l| drawn.contains(l)).collect();
+        assert!(
+            !shown.is_empty(),
+            "no disabled row was drawn, so its remedy was never shown: {disabled:?}"
+        );
+
+        for label in shown {
+            let sensed = shelf
+                .ctx
+                .read_response(row_control(label))
+                .unwrap_or_else(|| panic!("{label:?} was drawn but allocated no control"));
+            assert!(
+                !sensed.sense.senses_click(),
+                "the disabled row {label:?} still takes clicks"
+            );
+            let at = sensed.rect.center();
+            shelf.click(at);
+            assert!(
+                shelf.dispatched().is_empty(),
+                "clicking the disabled row {label:?} dispatched {:?}",
+                shelf.dispatched()
+            );
+        }
+    }
+
+    /// **Below the narrow threshold the sidebar becomes a strip, and every tab is still reachable.**
+    ///
+    /// The window can legitimately be dragged to [`SHELL_MIN`], and a 208 px sidebar out of 480 px
+    /// leaves a content column narrower than the sidebar. Asserted on the tabs still being drawn AND
+    /// still being clickable, not on a width — a layout that reflowed into an unreachable strip
+    /// would satisfy a width assertion.
+    #[test]
+    fn a_narrow_window_keeps_every_tab_reachable() {
+        let mut shelf = Shelf::open();
+        shelf.size = Vec2::new(SHELL_MIN, SHELL_MIN);
+        shelf.settle();
+        let output = shelf.frame(Vec::new());
+        let drawn = drawn_text(&output);
+
+        for tab in &window_model::build(&busy_view()).tabs {
+            assert!(
+                drawn.iter().any(|line| line == &tab.label),
+                "{:?} vanished when the window was narrowed to {SHELL_MIN}",
+                tab.id
+            );
+        }
+
+        let at = shelf.centre_of(sidebar_entry(TabId::Cache));
+        shelf.click(at);
+        assert_eq!(
+            shelf.app.selected,
+            TabId::Cache,
+            "a tab chip in the narrow strip could not be clicked"
+        );
+    }
+
+    /// **Each of the four pane states is actually painted**, keyed on the sentence the model chose.
+    ///
+    /// Reading the sentence back off the painter rather than off the model: a note the model
+    /// produces and the pane never draws is a state that exists only in the tests.
+    #[test]
+    fn every_pane_state_reaches_the_screen() {
+        let cases = [
+            (
+                "loading",
+                crate::tray_menu::TrayView {
+                    running: false,
+                    ..busy_view()
+                },
+                TabId::Status,
+            ),
+            (
+                "error",
+                crate::tray_menu::TrayView {
+                    cache: None,
+                    ..busy_view()
+                },
+                TabId::Cache,
+            ),
+            (
+                "empty",
+                crate::tray_menu::TrayView {
+                    account: Some(crate::tray_menu::AccountState::Absent),
+                    receive_address: None,
+                    ..busy_view()
+                },
+                TabId::Wallet,
+            ),
+        ];
+
+        for (name, view, tab) in cases {
+            let expected = match window_model::build(&view)
+                .tab(tab)
+                .unwrap_or_else(|| panic!("{name}: {tab:?} must render"))
+                .note
+                .clone()
+            {
+                window_model::PaneNote::Ready => {
+                    panic!("{name}: the fixture produced the success state, so nothing is tested")
+                }
+                window_model::PaneNote::Waiting(text)
+                | window_model::PaneNote::Unreachable(text)
+                | window_model::PaneNote::Empty(text) => text,
+            };
+
+            let mut shelf = Shelf::showing(view);
+            shelf.settle();
+            let at = shelf.centre_of(sidebar_entry(tab));
+            shelf.click(at);
+            let output = shelf.frame(Vec::new());
+            assert!(
+                drawn_text(&output).iter().any(|line| line == expected),
+                "{name}: {tab:?} never painted its note {expected:?}"
+            );
+        }
+
+        // The success state paints no note at all, which is what makes the three above meaningful.
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let at = shelf.centre_of(sidebar_entry(TabId::Cache));
+        shelf.click(at);
+        let output = shelf.frame(Vec::new());
+        assert_eq!(
+            window_model::build(&busy_view())
+                .tab(TabId::Cache)
+                .map(|tab| tab.note.clone()),
+            Some(window_model::PaneNote::Ready)
+        );
+        assert!(
+            !drawn_text(&output)
+                .iter()
+                .any(|line| line.contains("No node is connected")),
+            "a ready tab painted the error note anyway"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // The scrimmed shell must not look clickable
     // ---------------------------------------------------------------------------------------------
 
-    /// **The pointer stays the default arrow over the scrimmed pane.**
+    /// **The pointer stays the default arrow over the scrimmed body.**
     ///
     /// A pointing-hand cursor over a dimmed pane says *clickable* louder than any amount of dimming
-    /// says *inert*. The pane allocates [`egui::Sense::hover`] while a prompt is up, which is what
-    /// gets the cursor right; egui's own `disable()` would fight the token palette instead.
+    /// says *inert*. Every control in the body falls back to [`egui::Sense::hover`] while a prompt is
+    /// up, which is what gets the cursor right; egui's own `disable()` would fight the token palette.
+    ///
+    /// Aimed at a REAL control — the Account sidebar entry — rather than at a bare coordinate. A
+    /// coordinate that happened to land on no control at all would report the arrow cursor whatever
+    /// the code did.
     #[test]
-    fn the_cursor_stays_an_arrow_over_the_pane_while_a_prompt_is_up() {
+    fn the_cursor_stays_an_arrow_over_a_control_while_a_prompt_is_up() {
         let mut shelf = Shelf::open();
         shelf.settle();
+        let over = shelf.centre_of(sidebar_entry(TabId::Account));
+
         let _answers = shelf.queue_live_prompt();
         shelf.frame(Vec::new());
-
-        // Inside the pane and well away from the raise pill.
-        let over_the_pane = egui::Pos2::new(space::S6, SHELL_HEIGHT - space::S6);
-        shelf.frame(vec![egui::Event::PointerMoved(over_the_pane)]);
+        shelf.frame(vec![egui::Event::PointerMoved(over)]);
         let output = shelf.frame(Vec::new());
 
         assert_eq!(
             output.platform_output.cursor_icon,
             egui::CursorIcon::Default,
-            "the scrimmed pane offered a clickable cursor over a window that takes no input"
+            "the scrimmed body offered a clickable cursor over a window that takes no input"
+        );
+        let sensed = shelf
+            .ctx
+            .read_response(sidebar_entry(TabId::Account))
+            .expect("the sidebar entry is still drawn behind the scrim");
+        assert!(
+            !sensed.sense.senses_click(),
+            "a sidebar entry still took clicks with a consent prompt over it"
         );
     }
 
-    /// **The pane IS interactive when no prompt is up.**
+    /// **The body IS interactive when no prompt is up.**
     ///
     /// The control for the test above: an implementation that senses nothing at all, ever, would
     /// satisfy it while being permanently inert.
     #[test]
-    fn the_pane_is_interactive_when_no_prompt_is_up() {
+    fn the_body_is_interactive_when_no_prompt_is_up() {
         let mut shelf = Shelf::open();
         shelf.settle();
-        let at = egui::Pos2::new(space::S6, SHELL_HEIGHT - space::S6);
-        shelf.frame(vec![egui::Event::PointerMoved(at)]);
+        let over = shelf.centre_of(sidebar_entry(TabId::Account));
+        shelf.frame(vec![egui::Event::PointerMoved(over)]);
         shelf.frame(Vec::new());
 
-        let sensed = shelf.ctx.read_response(egui::Id::new("dig-app-shell-pane"));
+        let sensed = shelf.ctx.read_response(sidebar_entry(TabId::Account));
         assert!(
             sensed.is_some_and(|r| r.sense.senses_click()),
-            "the pane takes no clicks even with nothing over it"
+            "the sidebar takes no clicks even with nothing over it"
         );
     }
 
