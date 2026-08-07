@@ -842,10 +842,24 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   host's input stream means a keystroke aimed at the app window arrives at a prompt admitted in the same
   frame, and the first layout pass of a new modal is invisible by construction. The keyboard and the
   self-dismissal deadline MUST therefore be inert until a pass that really put the prompt on screen.
-- **An affirmative MUST require a fresh keystroke (MUST).** A key-repeat — the operating system repeating a
-  key the person is holding — MUST NOT activate the focused control, because prompts are raised in sequence
-  and the pre-focused control of a signing prompt is the affirmative. Refusal keys are unaffected: they
-  cannot manufacture consent.
+- **An affirmative MUST require a gesture begun after the surface could be read (MUST, BOTH hosts).**
+  Prompts are raised in sequence — an unlock, then the operation it unlocked — and the pre-focused control
+  of a signing prompt is the affirmative, so a gesture aimed at one prompt MUST NOT be able to answer the
+  next. The rule binds both hosts and is met differently in each, because the two differ in what their
+  input stream remembers:
+  - **In-window**, where the prompt shares the host's input stream, an operating-system key-repeat — the
+    system repeating a key the person is holding — MUST NOT activate the focused control.
+  - **Standalone**, where each prompt owns its input stream and that stream cannot have observed the key
+    going down, the repeat test alone is not sufficient and MUST NOT be relied on: the first press a new
+    window sees is indistinguishable from a fresh one. The affirmative MUST additionally be withheld until
+    the surface has been continuously readable — focused, and painted — for a bounded interval long enough
+    to contain the operating system's repeat interval. Time during which the windowing system reports the
+    viewport unfocused MUST NOT count. The same interval MUST gate an affirmative POINTER press, because
+    prompts open at the same coordinates and the second press of a double-click otherwise lands on the
+    next prompt's affirmative.
+  Refusal is unaffected on both hosts and MUST stay immediate: Escape, the host close, the deadline and a
+  press on the refusing control MUST all resolve on the first painted frame. Nothing in this rule may
+  author an answer — it may only withhold one, and a withheld gesture is simply made again.
 - **The URN launcher (§3.1c-i) keeps its own presentation in-window (MUST).** It MUST be drawn at the
   launcher's size, placed high rather than centred, and dismissible by clicking away from it — which
   in-window means clicking the scrimmed rest of the window. That gesture MUST NOT dismiss any consent

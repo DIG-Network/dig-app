@@ -72,6 +72,22 @@ const MAX_HEIGHT: f32 = 900.0;
 const SCREEN_SHARE: f32 = 0.9;
 /// The height reserved for the action row — the separator, the buttons and the padding under them.
 const ACTION_ROW: f32 = 72.0;
+/// How long a consent surface must have been readable before its AFFIRMATIVE will take a gesture.
+///
+/// # Where the number comes from
+///
+/// Both ends are bounded by the hardware, not by taste. Below it sits the operating system: once a
+/// key's initial delay has elapsed — which it has, on a key held over from the window before —
+/// Windows repeats it at roughly 31 ms, and the first of those repeats reaches a newly focused
+/// window within a frame or two of it appearing. Above it sits the person: reading a sign prompt
+/// well enough to consent to it is not a simple-reaction-time task, and 400 ms is under half of what
+/// even a bare recognition-and-act response costs. So the interval is long enough to contain the
+/// machine's whole burst and short enough that a person acting on what they read is never inside it.
+///
+/// Being wrong in either direction is one-directional: this can only ever WITHHOLD an affirmative,
+/// never author one. A gesture that lands inside it is not refused, it is simply not taken — the
+/// person presses again, and the second press is one they made after seeing the window.
+const SETTLE_BEFORE_APPROVE: Duration = Duration::from_millis(400);
 /// The height of the window's chrome bar — the brand mark, the title, the theme toggle, and the
 /// strip the window is DRAGGED by ([`PromptApp::drag_region`]).
 const CHROME_HEIGHT: f32 = 44.0;
@@ -894,6 +910,14 @@ struct PromptApp {
     /// and its own input stream, and its first frame is a real one. See
     /// [`PromptApp::frame_in_window`] for the defect this closes.
     presented: bool,
+    /// When this surface last became something the person could be READING — the anchor for
+    /// [`SETTLE_BEFORE_APPROVE`].
+    ///
+    /// `None` until a pass has painted it, and reset to `None` again for as long as the windowing
+    /// system reports the viewport unfocused, because a window behind another one is not being read.
+    /// Maintained by [`PromptApp::note_readability`] and consulted only by
+    /// [`PromptApp::affirmative_is_live`]; see the latter for the defect it closes.
+    readable_since: Option<Instant>,
     /// Whether an answer has already been recorded.
     ///
     /// The window keeps drawing for the frames it takes the windowing system to take the close
@@ -954,6 +978,7 @@ impl PromptApp {
             has_been_focused: false,
             placed: false,
             presented: false,
+            readable_since: None,
             answered: false,
             opened: Instant::now(),
             deadline: job.deadline,
@@ -1066,6 +1091,96 @@ impl PromptApp {
         self.finish(ctx, Answer::Deny);
     }
 
+    /// Note whether this surface is currently something the person could be reading.
+    ///
+    /// Called once per painted pass, before anything can author an answer. Focus arrives as viewport
+    /// INFO rather than as an event, and `None` means the platform did not say — which is what a
+    /// headless pass reports and is not evidence of a hidden window, so only an explicit
+    /// `Some(false)` restarts the clock.
+    ///
+    /// Anchoring on FOCUS rather than on the first paint is the part that matters. A prompt raised by
+    /// the tray can be painted before Windows lets it come forward — that foreground lock is the
+    /// whole subject of [`claim_the_keyboard`](Self::claim_the_keyboard) — and no keystroke reaches a
+    /// window that is not focused. An interval measured from a paint the person could not see would
+    /// therefore be free to expire before the first repeat ever arrived, leaving the guard vacuous in
+    /// exactly the case it exists for.
+    fn note_readability(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.viewport().focused) == Some(false) {
+            self.readable_since = None;
+            return;
+        }
+        self.readable_since.get_or_insert_with(Instant::now);
+    }
+
+    /// Whether the AFFIRMATIVE may be taken from a gesture arriving now.
+    ///
+    /// # An affirmative must require a gesture begun after the surface could be read (dig_ecosystem#2273)
+    ///
+    /// [`pressed_afresh`](Self::pressed_afresh) refuses an operating-system key-repeat, and in-window
+    /// that is the whole rule: both prompts of a chain share the shell's one [`egui::Context`], so its
+    /// `keys_down` carries a held key across the boundary and egui marks the next press a repeat.
+    ///
+    /// **Across a WINDOW boundary the same rule was vacuous.** Each standalone prompt runs its own
+    /// `eframe::run_native` with its own Context, whose `keys_down` starts empty; egui recomputes the
+    /// flag from that set (`input_state/mod.rs`, `*repeat = !first_press`), so the first press a new
+    /// window sees is always a first press. Measured: two consecutive standalone prompts with the key
+    /// never released, and the second answered `Approve` on frame 0. That is the DEFAULT host — every
+    /// tray- and dapp-initiated flow, whenever the app window is closed — and prompts chain there (an
+    /// unlock, then the operation it unlocked). No attacker is involved: a person holding Enter for
+    /// the ~100–500 ms the next window takes to appear is ordinary, and a ~31 ms repeat does the rest.
+    ///
+    /// So the property is stated in the only terms a fresh input stream can honour — a gesture must
+    /// have BEGUN after this surface could be read — and the signal is elapsed readable time, because
+    /// no property of a lone key-down event distinguishes a repeat from a first press when nothing
+    /// upstream remembers the key.
+    ///
+    /// # Why one interval closes it rather than merely delaying it
+    ///
+    /// The window is vulnerable for exactly one press: the first one its Context sees. That press
+    /// enters `keys_down` whether or not this takes it, so every later repeat of the same held key is
+    /// `repeat == true` and [`pressed_afresh`](Self::pressed_afresh) refuses it — for as long as the
+    /// person keeps holding, however long that is. Only a real release-then-press gets through, which
+    /// is the property. The interval is therefore a lock on the one unguarded press, not a countdown
+    /// the same keystroke survives, and the test holds the key PAST it to say so.
+    ///
+    /// # Why it is host-conditional, and why that branch is not decoration
+    ///
+    /// In-window nothing needs it: the shared input stream already carries the release, and imposing
+    /// an interval there would make a prompt ignore the person's first genuine Enter for no defect.
+    /// Both branches are load-bearing and both are driven — the standalone one by the held-key
+    /// sequence, the in-window one by a fresh Enter answering immediately — so neither an always-true
+    /// nor an always-false mutant of this survives.
+    ///
+    /// # It can only withhold
+    ///
+    /// Nothing here can author an answer, and refusal is untouched: Escape, the deadline, the host
+    /// close and a click on the refusing control all resolve on the first painted frame exactly as
+    /// before. The worst this can do is decline to take one affirmative gesture, and the person
+    /// makes it again.
+    fn affirmative_is_live(&self) -> bool {
+        if self.host != PromptHost::Standalone {
+            return true;
+        }
+        self.readable_since
+            .is_some_and(|since| since.elapsed() >= SETTLE_BEFORE_APPROVE)
+    }
+
+    /// Act on `answer` as the person's gesture — Enter on the focused control, or a click on it.
+    ///
+    /// The one place a live gesture becomes an answer, so the readability rule is stated once for the
+    /// keyboard and the pointer together rather than at each site. Dropping an affirmative the
+    /// surface is not yet old enough to have been read also settles the pointer half of the same
+    /// family: chained prompts open at the same centred coordinates, so the second press of a
+    /// double-click aimed at one lands on the next one's affirmative.
+    ///
+    /// A REFUSAL is always taken. Making it harder to decline is the one change this must never make.
+    fn gesture(&mut self, ctx: &egui::Context, answer: Answer) {
+        if answer == Answer::Approve && !self.affirmative_is_live() {
+            return;
+        }
+        self.finish(ctx, answer);
+    }
+
     /// Record `answer` and close.
     fn finish(&mut self, ctx: &egui::Context, answer: Answer) {
         let outcome = match (self.wants_text, answer) {
@@ -1104,6 +1219,15 @@ impl PromptApp {
     /// The pre-focused control of a sign prompt is the AFFIRMATIVE
     /// ([`ConfirmContent::authorize`](crate::confirm::ConfirmContent) sets `refusal_is_default:
     /// false`), so a repeat approves a spend the person never read.
+    ///
+    /// # Necessary on both hosts, sufficient on only one
+    ///
+    /// This runs on both, and on both it can only withhold. But it decides "afresh" from egui's
+    /// `keys_down`, which belongs to ONE [`egui::Context`] — so it carries a held key across a chain
+    /// of in-window prompts and cannot carry one across a WINDOW boundary, where the next prompt gets
+    /// a Context that never saw the key go down. On the standalone host it is therefore necessary and
+    /// not sufficient, and [`affirmative_is_live`](Self::affirmative_is_live) supplies the rest
+    /// (dig_ecosystem#2273). `SPEC.md` §3.1c-0 states the rule per host for the same reason.
     ///
     /// Applied to Enter alone, and to BOTH hosts. Escape and Tab keep counting repeats: a repeated
     /// Escape resolves to a refusal, and a repeated Tab is ordinary keyboard navigation — neither can
@@ -1158,7 +1282,7 @@ impl PromptApp {
         if enter {
             if let Some(button) = self.screen.buttons.get(self.focus) {
                 let answer = button.answer;
-                self.finish(ctx, answer);
+                self.gesture(ctx, answer);
             }
         }
     }
@@ -1200,6 +1324,8 @@ impl PromptApp {
         self.claim_the_keyboard(ctx);
 
         let t = self.theme.tokens();
+        // Before anything can author an answer: how long has the person been able to read this?
+        self.note_readability(ctx);
         self.keys(ctx);
         self.place_bar(ctx);
         self.dismiss_on_blur(ctx);
@@ -1858,7 +1984,7 @@ impl PromptApp {
         let _ = radius::SM;
         if let Some(answer) = clicked {
             let ctx = ui.ctx().clone();
-            self.finish(&ctx, answer);
+            self.gesture(&ctx, answer);
         }
     }
 }
@@ -3347,6 +3473,21 @@ mod tests {
         );
     }
 
+    /// Back-date `app`'s readability so its AFFIRMATIVE is live, with no wall-clock wait.
+    ///
+    /// Fixture time, pinned on purpose. The tests that call this are about other properties — a
+    /// click surviving the closing frame, a drag that must not press a button — and each needs only
+    /// the ordinary precondition that the window has been on screen for a moment. Sleeping in every
+    /// one of them would buy nothing but seconds.
+    ///
+    /// **The settling rule itself never uses this.** Its own tests
+    /// ([`a_held_enter_cannot_answer_the_next_standalone_prompt`],
+    /// [`an_affirmative_click_needs_the_surface_to_have_been_readable`]) drive REAL elapsed time,
+    /// because a rule proven against a fixture that hands it the answer is proven against nothing.
+    fn already_read(app: &mut PromptApp) {
+        app.readable_since = Some(Instant::now() - SETTLE_BEFORE_APPROVE);
+    }
+
     /// Drive one real frame with `key` pressed and return whatever the window recorded.
     fn press(screen: Screen, wants_text: bool, key: Key, typed: &str) -> Option<Outcome> {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -3366,6 +3507,9 @@ mod tests {
             sink.clone(),
         );
         app.typed = Zeroizing::new(typed.to_owned());
+        // A window the person has been looking at: this helper is about what ONE keystroke maps to,
+        // not about how long the surface had been readable. See `already_read`.
+        already_read(&mut app);
 
         let ctx = egui::Context::default();
         install_fonts(&ctx);
@@ -3845,6 +3989,7 @@ mod tests {
         let mut driver = Driver::shown(sign_screen(), false);
         let laid_out = driver.settle();
         let at = centre_of(&laid_out, "Sign");
+        already_read(&mut driver.app);
 
         driver.click(at);
         driver.close_frame();
@@ -3875,6 +4020,7 @@ mod tests {
         let laid_out = driver.settle();
         let at = centre_of(&laid_out, "Unlock");
         driver.app.typed = Zeroizing::new("hunter2".to_owned());
+        already_read(&mut driver.app);
 
         driver.click(at);
         driver.close_frame();
@@ -5358,6 +5504,7 @@ mod tests {
         );
 
         let mut aimed = Driven::new(sign_screen());
+        already_read(&mut aimed.app);
         aimed.click(at);
         assert_eq!(
             aimed.recorded(),
@@ -5504,6 +5651,7 @@ mod tests {
         let on_sign = on_the_affirmative_button();
 
         let mut proof = Driven::new(sign_screen());
+        already_read(&mut proof.app);
         proof.click(on_sign);
         assert_eq!(
             proof.recorded(),
@@ -5991,6 +6139,7 @@ mod tests {
 
         let mut alone = Hosts::on(PromptHost::Standalone);
         alone.frame(Vec::new(), false);
+        already_read(&mut alone.app);
         let output = alone.frame(enter_pressed(), false);
         assert!(
             alone.recorded().is_some(),
@@ -6083,6 +6232,219 @@ mod tests {
             inside.recorded().is_none(),
             "closing the app window made an in-window prompt author an answer of its own; the \
              shell's fail-closed settle cannot correct it, because the latch is one-way"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // A keystroke must have BEGUN after the surface could be read (dig_ecosystem#2273)
+    // ---------------------------------------------------------------------------------------------
+
+    /// Press Enter, and do not release it.
+    ///
+    /// `repeat` is left `false` deliberately: egui overwrites the field on every pass, deriving it
+    /// from its OWN `keys_down` (`input_state/mod.rs`, `*repeat = !first_press`). Whether a press
+    /// counts as a repeat is therefore decided by whether a matching [`enter_up`] was sent, which is
+    /// what makes the sequence below a real held key rather than a claim about a flag.
+    fn enter_down() -> Vec<egui::Event> {
+        enter_key(true)
+    }
+
+    /// Release Enter.
+    fn enter_up() -> Vec<egui::Event> {
+        enter_key(false)
+    }
+
+    fn enter_key(pressed: bool) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    /// Long enough that the surface has been readable, with a margin for a loaded test machine.
+    fn read_it() {
+        std::thread::sleep(SETTLE_BEFORE_APPROVE + Duration::from_millis(60));
+    }
+
+    /// **A held Enter cannot answer the NEXT standalone prompt.**
+    ///
+    /// The other half of dig_ecosystem#2270, on the host where it was still open. In-window the two
+    /// prompts share one [`egui::Context`], so its `keys_down` carries the held key across the chain
+    /// and [`PromptApp::pressed_afresh`] sees a repeat. A standalone prompt runs its own
+    /// `eframe::run_native` with its own Context, whose `keys_down` starts EMPTY — so the first press
+    /// a new window sees is always a first press, `repeat == false`, and the rule was vacuous exactly
+    /// where the default host lives.
+    ///
+    /// # The fixture is two Contexts, because one Context cannot exhibit the defect
+    ///
+    /// Two separate [`Hosts`], not two prompts on one — a single Context would carry `keys_down`
+    /// forward and the second window would be protected by the OLD rule, so the test would pass
+    /// against the defect. The key is never released between them, and no `repeat` flag is
+    /// synthesised anywhere: egui derives it.
+    ///
+    /// # Four assertions, because three of them are each other's control
+    ///
+    /// * the FIRST window answers — otherwise there is no chain, and "the second stayed silent" is
+    ///   just a prompt that ignores Enter;
+    /// * the second does not answer on the frames it opens under the held key — the defect;
+    /// * it still does not answer once the settling period has PASSED with the key still down —
+    ///   otherwise a person who holds the key half a second longer walks straight through the fix,
+    ///   and a settle that merely delays the approval would pass;
+    /// * a genuine release-then-press DOES answer — otherwise "the affirmative never works" passes,
+    ///   which since Escape and the deadline both resolve to `Deny` is a surface that silently
+    ///   refuses everything.
+    #[test]
+    fn a_held_enter_cannot_answer_the_next_standalone_prompt() {
+        // The window the person actually read, answered with a genuine Enter they do not let go of.
+        let mut first = Hosts::on(PromptHost::Standalone);
+        first.present();
+        read_it();
+        first.frame(enter_down(), false);
+        assert!(
+            matches!(
+                first.recorded(),
+                Some(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "the first prompt was not answered, so nothing here is a chain"
+        );
+
+        // The next window opens under that same key, in a Context that has never seen it.
+        let mut second = Hosts::on(PromptHost::Standalone);
+        for _ in 0..4 {
+            second.frame(enter_down(), false);
+        }
+        assert!(
+            second.recorded().is_none(),
+            "a key held over from the previous window approved this one on the frames it opened              in; that is a spend approved from a surface the person saw for one frame"
+        );
+
+        // Still held, now well past the settling period: the window's own `keys_down` has the key
+        // by now, so every further press egui reports for it is a repeat.
+        read_it();
+        second.frame(enter_down(), false);
+        second.frame(enter_down(), false);
+        assert!(
+            second.recorded().is_none(),
+            "holding the key a little longer walked through the settling period; the rule must be              a keystroke BEGUN after the surface could be read, not a delay before the same              keystroke counts"
+        );
+
+        // Released and pressed again. This one is the person's.
+        second.frame(enter_up(), false);
+        second.frame(enter_down(), false);
+        assert!(
+            matches!(
+                second.recorded(),
+                Some(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "a fresh Enter after the key was released did not answer; the rule is withholding              every keystroke rather than only the ones that were never begun here"
+        );
+    }
+
+    /// **An affirmative CLICK needs the surface to have been readable too.**
+    ///
+    /// The pointer half of the same family, and it needs no attacker either: chained prompts open at
+    /// the same centred coordinates, so the second physical press of a double-click aimed at one
+    /// prompt lands on the next one's affirmative — which, on a sign prompt, is a spend.
+    ///
+    /// Driven on real elapsed time rather than by back-dating [`PromptApp::readable_since`], because
+    /// the rule under test IS the elapsed time; a fixture that sets the anchor would be asserting
+    /// that the code agrees with itself.
+    ///
+    /// The two halves vary ONE thing — how long the window had been up — at one identical
+    /// coordinate. Without the second half, "the click did nothing" would also pass on a build where
+    /// the coordinate misses the button entirely, or where clicking never approves at all.
+    #[test]
+    fn an_affirmative_click_needs_the_surface_to_have_been_readable() {
+        let on_sign = on_the_affirmative_button();
+
+        let mut arriving = Driven::new(sign_screen());
+        arriving.click(on_sign);
+        assert_eq!(
+            arriving.recorded(),
+            None,
+            "a click on the frames a consent window opened in approved it; that is the second press              of a double-click, landing on a prompt that replaced the one it was aimed at"
+        );
+
+        let mut read = Driven::new(sign_screen());
+        read.frame(Vec::new());
+        read_it();
+        read.click(on_sign);
+        assert_eq!(
+            read.recorded(),
+            Some(WindowIntent::Approve),
+            "a click on the affirmative of a window that HAS been on screen did not approve; the              settling period has stopped being a settling period and become a refusal"
+        );
+    }
+
+    /// **Refusing is no harder than it was.**
+    ///
+    /// The rule this closes may only ever withhold an approval. Every way out of a consent window
+    /// must still resolve on the frames it opens in, with no waiting: the window is undecorated, so
+    /// Escape is the escape hatch (`professional-ui`, HARD), and a person who wants to decline must
+    /// never be told to try again.
+    ///
+    /// Both refusing gestures, on a window that has been up for no time at all — which is the state
+    /// the affirmative is withheld in, so the pair also says the guard reads the ANSWER rather than
+    /// just the clock.
+    #[test]
+    fn refusing_needs_no_settling_period() {
+        let mut escaped = Driven::new(sign_screen());
+        escaped.press_key(Key::Escape);
+        assert_eq!(
+            escaped.recorded(),
+            Some(WindowIntent::Deny),
+            "Escape stopped resolving a freshly opened window; the way out of an undecorated              consent dialog cannot be made to wait"
+        );
+
+        let mut cancelled = Driver::shown(sign_screen(), false);
+        let laid_out = cancelled.settle();
+        let at = centre_of(&laid_out, "Cancel");
+        cancelled.click(at);
+        assert!(
+            matches!(
+                cancelled.answer(),
+                Some(Outcome::Confirm(WindowIntent::Deny))
+            ),
+            "clicking the refusing control on a freshly opened window no longer refuses"
+        );
+    }
+
+    /// **Time spent behind another window is not time the person spent reading.**
+    ///
+    /// The anchor is FOCUS, not the first paint, and this is the half that says why. A prompt raised
+    /// by the tray can be painted before Windows lets it come forward — the foreground lock is the
+    /// whole subject of [`PromptApp::claim_the_keyboard`] — and no keystroke reaches a window that is
+    /// not focused. An interval measured from a paint nobody could see would be free to expire before
+    /// the first repeat ever arrived, leaving the guard vacuous in exactly the case it exists for.
+    ///
+    /// So the clock is held while the viewport reports itself unfocused and starts when it comes
+    /// forward. Varied one way and then the other on ONE window: the same key, once as it arrives at
+    /// the front and once after it has genuinely been there.
+    #[test]
+    fn time_spent_behind_another_window_is_not_time_spent_reading() {
+        let mut behind = Driven::new(sign_screen());
+        behind.frame_focused(Vec::new(), Some(false));
+        read_it();
+
+        // Brought forward, with a key already in flight.
+        behind.frame_focused(enter_down(), Some(true));
+        assert_eq!(
+            behind.recorded(),
+            None,
+            "a window that spent the settling period BEHIND another one approved on the frame it              came forward; the interval was measuring paints nobody could see"
+        );
+
+        // Now it really has been in front of the person.
+        read_it();
+        behind.frame_focused(enter_up(), Some(true));
+        behind.frame_focused(enter_down(), Some(true));
+        assert_eq!(
+            behind.recorded(),
+            Some(WindowIntent::Approve),
+            "a window that has been at the front for the whole interval still refuses the person's              keystroke; the clock is not restarting, it is stuck"
         );
     }
 }

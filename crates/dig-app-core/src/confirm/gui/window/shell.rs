@@ -2776,6 +2776,66 @@ mod tests {
         );
     }
 
+    /// **A launcher bar keeps its height across frames; only a dialog grows to its content.**
+    ///
+    /// [`ShellApp::show_prompt`] feeds each frame's measured content back into the modal's height for
+    /// the next one, and the bar is exempted from that loop — a launcher is a fixed short strip, and
+    /// the feedback inflates it to [`super::MIN_HEIGHT`] on its second frame (measured: 176 becomes
+    /// 320), turning a Spotlight-style bar into a small dialog.
+    ///
+    /// # Why the size tests below could not see this, and why the control here is not the bar
+    ///
+    /// Its siblings call [`modal_rect`] directly, which is a pure function of a height handed TO it —
+    /// so they measure the mapping and never the loop that supplies its argument. Deleting the
+    /// exemption left every one of them green.
+    ///
+    /// The first control written here was just as blind, and it is worth naming: comparing the bar's
+    /// settled height against the DIALOG's passes on a shell that has stopped feeding anything back
+    /// at all, because the two open at different heights and simply stay there. So each surface is
+    /// held against its OWN opening height instead — the bar must not have moved, the dialog must
+    /// have (measured: 560 opening, 378 settled) — and the pair distinguishes the exemption from the
+    /// loop's absence.
+    #[test]
+    fn only_a_dialog_grows_to_its_content_in_the_window() {
+        use crate::confirm::gui::render::BAR_HEIGHT;
+        use crate::confirm::gui::window::opening_size;
+
+        fn height_after_a_few_frames(raise: impl Fn(&Shelf) -> Receiver<Outcome>) -> f32 {
+            let mut shelf = Shelf::open();
+            shelf.settle();
+            let _held = raise(&shelf);
+            // Enough that a frame runs on what the frame before it measured, which is where the
+            // feedback lives.
+            for _ in 0..4 {
+                shelf.frame(Vec::new());
+            }
+            shelf
+                .app
+                .prompt
+                .as_ref()
+                .expect("the prompt is still up")
+                .height
+        }
+
+        let bar = height_after_a_few_frames(Shelf::queue_live_bar);
+        assert_eq!(
+            bar,
+            opening_size(Chrome::Bar).1,
+            "the launcher bar grew to its content; the URN bar is a fixed strip, and the feedback              turns it into a small dialog on its second frame"
+        );
+        assert_eq!(
+            bar, BAR_HEIGHT,
+            "the bar no longer opens at a bar's height, so holding it to its opening height proves              nothing about what it is"
+        );
+
+        let dialog = height_after_a_few_frames(Shelf::queue_live_prompt);
+        assert_ne!(
+            dialog,
+            opening_size(Chrome::Dialog).1,
+            "a dialog's height never moved off the value it opened at, so the shell is measuring              nothing and 'the bar did not grow' is a statement about a loop that is not running"
+        );
+    }
+
     /// **A launcher bar sits HIGH in the window; a dialog is centred.**
     ///
     /// A launcher is placed above the vertical centre — `SPEC.md` §3.1c-i, and what
