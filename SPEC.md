@@ -811,10 +811,52 @@ so no rule about which rows exist or whether they are enabled is decided twice.
 - **Opening the window MUST return as soon as the request is queued (MUST)**, never when the window
   closes — a handler held for the window's lifetime would refuse every later action, including quit.
   Asking again while it is open MUST bring the existing window forward rather than opening a second.
-- **The window is NOT a consent surface.** It MUST NOT be always-on-top, MUST NOT carry a deadline, and
-  MUST NOT count as a raised consent surface. A consent prompt raised over it is drawn as its own
-  window, keeps its always-on-top posture, and the window behind it MUST become visibly inert — dimmed,
-  taking no clicks, and offering a way to bring the prompt back for a person who has buried it.
+- **The window opens no second window (MUST).** Every surface the app has — confirms, notices, reveals,
+  text inputs, status and the About pages — MUST be drawn INSIDE the app window while it is open, as a
+  modal layer, never as another top-level window. A prompt raised while the app window is CLOSED is the
+  exception and MUST keep its own window (below): a request from a dapp MUST NOT force the whole app open.
+- **The window itself is NOT a consent surface.** It MUST NOT be always-on-top, MUST NOT carry a deadline,
+  and MUST NOT count as a raised consent surface while it is showing no prompt — counting it would suppress
+  the tray's foreground claim for as long as somebody left the window open.
+- **Admitting an in-window prompt MUST bring the window forward (MUST).** A standalone prompt is
+  always-on-top and asks for the keyboard; both are claims against the DESKTOP, and drawing the prompt
+  inside the app window does not inherit either. The window MUST therefore be raised and focused when a
+  prompt is admitted into it — otherwise a request arriving while the window sits behind another
+  application is never seen, and is refused on its deadline. A prompt REFUSED without being drawn MUST
+  NOT raise the window: there is nothing to show.
+- **An in-window prompt IS a consent surface, for as long as it is up (MUST).** It MUST count as raised
+  from the moment it is admitted until it is answered, expired or settled — not merely for the span of a
+  frame — so a tray click cannot take the foreground from a person part-way through reading or typing.
+- **While a prompt is up the rest of the window MUST be inert (MUST).** Dimmed, taking no clicks anywhere
+  in it including the chrome, not resizable, and the modal MUST be the only thing that can be interacted
+  with. Exactly one prompt MAY be up at a time, so a second can never obscure what is being authorised.
+- **An in-window prompt MUST NOT address the host's viewport itself.** It MUST NOT ask to close, focus,
+  move or resize the app window, and closing the app window MUST NOT be read as the person's answer.
+  In particular it MUST offer no drag handle: the viewport a drag moves is the app window, and the shell
+  is resizable, so a header drag would carry the whole application across the desktop or snap it to an
+  edge with a live prompt inside it. Raising the window on admission is the HOST's act, not the prompt's.
+- **The modal MUST be answerable by pointer (MUST).** Its controls MUST sit in a layer strictly above the
+  scrim; a consent surface a person can read and cannot click is one they cannot refuse — and since Escape
+  and the deadline both resolve a confirm to a refusal, one that silently refuses everything.
+- **A prompt MUST NOT author an answer from a pass in which it was not presented (MUST).** Sharing the
+  host's input stream means a keystroke aimed at the app window arrives at a prompt admitted in the same
+  frame, and the first layout pass of a new modal is invisible by construction. The keyboard and the
+  self-dismissal deadline MUST therefore be inert until a pass that really put the prompt on screen.
+- **An affirmative MUST require a fresh keystroke (MUST).** A key-repeat — the operating system repeating a
+  key the person is holding — MUST NOT activate the focused control, because prompts are raised in sequence
+  and the pre-focused control of a signing prompt is the affirmative. Refusal keys are unaffected: they
+  cannot manufacture consent.
+- **The URN launcher (§3.1c-i) keeps its own presentation in-window (MUST).** It MUST be drawn at the
+  launcher's size, placed high rather than centred, and dismissible by clicking away from it — which
+  in-window means clicking the scrimmed rest of the window. That gesture MUST NOT dismiss any consent
+  dialog. Both hosts MUST take the size from one shared mapping, so a launcher cannot be drawn as a dialog
+  in one of them.
+- **Teardown MUST fail closed (MUST).** Closing the window, or dismissing the modal, over a prompt nobody
+  answered MUST answer it unavailable — never an approval, and never a dropped reply that leaves the
+  caller waiting out its timeout. An answer the person DID give MUST survive teardown unchanged.
+- **A prompt raised while the window is CLOSED keeps its own window**, with its always-on-top posture and
+  its deadline unchanged. Both hosts MUST paint the prompt through the same code, so what a person reads
+  before approving something does not depend on which one drew it.
 
 ### 3.1c-i The global shortcut to the URN bar (normative)
 

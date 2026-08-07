@@ -5,12 +5,12 @@
 //! Same reason as [`dialog_gallery`](../dialog_gallery.rs): the things that go wrong on this surface
 //! go wrong in the presentation the operating system draws, where no unit test can see them. The
 //! headless suite pins every RULE the shell host follows — what is admitted, what is dismissed, what
-//! is refused — and none of it can tell you whether the scrim reads as inert or whether the raise
-//! pill is legible over it.
+//! is refused — and none of it can tell you whether the scrim reads as inert, or whether a modal
+//! centred over a scrimmed pane reads as the one thing on screen that wants an answer.
 //!
-//! It also closes the one gap the `show_viewport_immediate` spike left open by name: the spike drove
-//! a *synthetic* child with two labels, so the REAL prompt under the real shell — font install,
-//! per-viewport `glow` surface, a text field — was never exercised together.
+//! Since dig_ecosystem#2270 the prompt is drawn INSIDE this window rather than as a second one, so
+//! this is also the only place the two surfaces can be compared by eye: the modal here and the
+//! standalone window in `dialog_gallery` are painted by the same code and must look it.
 //!
 //! ```text
 //! cargo run -p dig-app-core --example shell_gallery -- light
@@ -20,8 +20,7 @@
 //! The window opens alone, and after [`PROMPT_AFTER`] — overridable by the second argument, in
 //! seconds — a real consent prompt is raised over it, so one run photographs both states. The
 //! override exists because photographing the six tabs takes longer than the default delay, and a
-//! scrimmed tab is a picture of the scrim rather than of the tab. Escape on the prompt denies it; Escape on the shell closes the
-//! window. This example only ever DRAWS — the prompt it raises is a `sign` confirm whose answer is
+//! scrimmed tab is a picture of the scrim rather than of the tab. Escape denies the prompt while it is up, and closes the window once it is gone. This example only ever DRAWS — the prompt it raises is a `sign` confirm whose answer is
 //! printed and discarded, and nothing here reaches a chain, a key or a wallet.
 
 use std::time::Duration;

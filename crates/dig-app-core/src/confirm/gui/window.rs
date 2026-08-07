@@ -607,18 +607,28 @@ fn poisonless<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The size a prompt of this [`Chrome`] opens at: `(width, height, minimum height)`.
+///
+/// A bar is a fixed-size frameless launcher; a dialog is created at [`HEIGHT`] and then sized to its
+/// content ([`PromptApp::fit_to_content`]). Both are frameless — the bar regains the width and
+/// placement the deleted Win32 renderer gave it (dig_ecosystem#2054).
+///
+/// Shared with the IN-WINDOW host ([`shell::ShellApp`]) rather than left inside
+/// [`native_options`], because a second copy is how the modal came to draw a 720×176 launcher as a
+/// 620×320 dialog: one mapping, two hosts, no way for them to disagree.
+pub(super) fn opening_size(chrome: Chrome) -> (f32, f32, f32) {
+    match chrome {
+        Chrome::Bar => (BAR_WIDTH, BAR_HEIGHT, BAR_HEIGHT),
+        Chrome::Dialog => (WIDTH, HEIGHT, MIN_HEIGHT),
+    }
+}
+
 /// How every prompt window is created.
 ///
 /// One function so the screenshot harness photographs the SAME window a user is shown — a gallery
 /// built from a second, slightly-different set of options is a gallery of something else.
 fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
-    // A bar is a fixed-size frameless launcher; a dialog is created at [`HEIGHT`] and then sized to
-    // its content ([`PromptApp::fit_to_content`]). Both are frameless and always-on-top — the bar
-    // regains the width and placement the deleted Win32 renderer gave it (dig_ecosystem#2054).
-    let (width, height, min_height) = match chrome {
-        Chrome::Bar => (BAR_WIDTH, BAR_HEIGHT, BAR_HEIGHT),
-        Chrome::Dialog => (WIDTH, HEIGHT, MIN_HEIGHT),
-    };
+    let (width, height, min_height) = opening_size(chrome);
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
@@ -817,8 +827,33 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Where a prompt is being drawn, which decides what it may say to the windowing system.
+///
+/// FOUR of [`PromptApp`]'s behaviours address a *viewport* — focus it, close it, watch it lose
+/// focus, and DRAG it — and every one of them is either meaningless or actively wrong when the
+/// prompt is painted inside the app window, because the viewport it would address is then the
+/// SHELL's. A prompt that sent `ViewportCommand::Close` from inside the shell would close the shell;
+/// one that sent `StartDrag` would send the whole application across the desktop.
+///
+/// Three of the four are settled by [`PromptApp::frame_in_window`] simply not doing them. The
+/// fourth, the drag, is reached from [`PromptApp::paint_into`] — which BOTH hosts call — so it is
+/// the one that needs a check at the site: [`PromptApp::drag_by_the_header`].
+///
+/// An explicit two-state enum rather than a `bool` or a `cfg!`: the hosting is a runtime fact — the
+/// same prompt content reaches both hosts on the same platform, depending only on whether the person
+/// happened to have the app window open — and the call sites read as the question they are asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PromptHost {
+    /// Its own top-level OS window, drawn by its own `eframe` run. The audited consent surface.
+    Standalone,
+    /// A modal layer inside the app shell, sharing the shell's viewport and its event loop.
+    InWindow,
+}
+
 /// One prompt window.
 struct PromptApp {
+    /// Whether this prompt owns a viewport or is a layer inside the shell's.
+    host: PromptHost,
     /// What to show.
     screen: Screen,
     /// Whether this window returns typed text.
@@ -853,6 +888,12 @@ struct PromptApp {
     /// Repeating it every frame would fight the user for the foreground for the whole life of the
     /// window, which is a different and worse defect than the one it fixes.
     keyboard_claimed: bool,
+    /// Whether this prompt has ever been PRESENTED — painted in a pass a person could see.
+    ///
+    /// Only meaningful in-window ([`PromptHost::InWindow`]); a standalone prompt owns its viewport
+    /// and its own input stream, and its first frame is a real one. See
+    /// [`PromptApp::frame_in_window`] for the defect this closes.
+    presented: bool,
     /// Whether an answer has already been recorded.
     ///
     /// The window keeps drawing for the frames it takes the windowing system to take the close
@@ -869,10 +910,29 @@ struct PromptApp {
 }
 
 impl PromptApp {
+    /// A prompt that owns its own window.
     fn new(
         job: Job,
         theme_store: ThemeChoice,
         sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+    ) -> Self {
+        Self::hosted(job, theme_store, sink, PromptHost::Standalone)
+    }
+
+    /// A prompt drawn as a modal layer inside the app shell.
+    pub(super) fn in_window(
+        job: Job,
+        theme_store: ThemeChoice,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+    ) -> Self {
+        Self::hosted(job, theme_store, sink, PromptHost::InWindow)
+    }
+
+    fn hosted(
+        job: Job,
+        theme_store: ThemeChoice,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        host: PromptHost,
     ) -> Self {
         let focus = job
             .screen
@@ -881,6 +941,7 @@ impl PromptApp {
             .position(|b| b.focused)
             .unwrap_or(0);
         Self {
+            host,
             theme: theme_store.read(),
             screen: job.screen,
             wants_text: job.wants_text,
@@ -892,6 +953,7 @@ impl PromptApp {
             field_focused: false,
             has_been_focused: false,
             placed: false,
+            presented: false,
             answered: false,
             opened: Instant::now(),
             deadline: job.deadline,
@@ -928,6 +990,20 @@ impl PromptApp {
     /// the reason that lock exists. What this guarantees is that DIG ASKS; it does not guarantee
     /// Windows agrees. The window remains answerable by mouse either way, and its own deadline still
     /// refuses on its behalf if it is never answered at all.
+    ///
+    /// # Why only [`PromptApp::frame`] calls this
+    ///
+    /// **Not because an in-window prompt needs no raise — it does.** The app window can perfectly
+    /// well be behind a browser when a dapp asks for a signature, and a modal drawn into a window
+    /// nobody can see is exactly the defect above, one layer in. What differs is WHO asks: the raise
+    /// belongs to the host, so [`shell::ShellApp::raise_for_the_prompt`] sends it once, on
+    /// admission, for the window the person actually looks at. A second request from in here would
+    /// address the same viewport twice and, repeated per frame, would fight the user for the
+    /// foreground for the life of the prompt.
+    ///
+    /// That is settled by [`frame_in_window`](Self::frame_in_window) NOT CALLING this, rather than
+    /// by a host check inside it — an unreachable branch is one no test can hold, and this surface
+    /// has no room for a guard that only looks like one.
     fn claim_the_keyboard(&mut self, ctx: &egui::Context) {
         if self.keyboard_claimed {
             return;
@@ -953,6 +1029,16 @@ impl PromptApp {
     ///
     /// The latch cannot manufacture consent. An unanswered window records nothing, and [`draw`] maps
     /// nothing to a denial.
+    ///
+    /// # Why only a standalone prompt asks to close
+    ///
+    /// In-window there is no window of this prompt's own to close; the only viewport this could
+    /// address is the SHELL's, so sending the command would shut the app window out from under the
+    /// person. Dismissal in that host is the shell dropping its `ActivePrompt` on the frame it sees
+    /// [`PromptApp::answered`] — the same mechanism, one level up.
+    ///
+    /// **The latch itself is host-independent** and runs identically on both paths: the whole point
+    /// of dig_ecosystem#2038 is that no later frame, whatever it is, may change what the human said.
     fn record(&mut self, ctx: &egui::Context, outcome: Outcome) {
         if !self.answered {
             self.answered = true;
@@ -960,7 +1046,24 @@ impl PromptApp {
                 *slot = Some(outcome);
             }
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if self.host == PromptHost::Standalone {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The host asking, on the person's behalf, for this prompt to be refused.
+    ///
+    /// The in-window counterpart of a launcher bar losing focus, and the ONLY answer
+    /// [`shell::ShellApp`] may ask a prompt to record — see
+    /// [`shell::ShellApp::dismiss_a_bar_clicked_away_from`] for the gesture and why no consent dialog
+    /// can reach it.
+    ///
+    /// Routed through [`PromptApp::finish`] rather than writing the sink directly, so the #2038 latch
+    /// still owns the answer: if the person had already said something, what they said stands, and
+    /// this is dropped. And the outcome it asks for is a REFUSAL, so the worst a mistake here can do
+    /// is decline something.
+    pub(super) fn refuse_from_the_host(&mut self, ctx: &egui::Context) {
+        self.finish(ctx, Answer::Deny);
     }
 
     /// Record `answer` and close.
@@ -989,6 +1092,38 @@ impl PromptApp {
         self.record(ctx, outcome);
     }
 
+    /// Whether `key` was pressed ANEW this pass — a real keystroke, not the operating system
+    /// repeating one the person is holding down.
+    ///
+    /// # Why a consent surface must not accept a repeat
+    ///
+    /// [`egui::InputState::key_pressed`] counts key-repeat (`num_presses`, "Includes key-repeat
+    /// events"). Windows repeats at roughly 31 ms against a ~16 ms frame, so a person who answers one
+    /// prompt with Enter and holds the key a moment longer generates presses that land on whatever is
+    /// drawn next — and prompts are chained in this app (an unlock, then the operation it unlocked).
+    /// The pre-focused control of a sign prompt is the AFFIRMATIVE
+    /// ([`ConfirmContent::authorize`](crate::confirm::ConfirmContent) sets `refusal_is_default:
+    /// false`), so a repeat approves a spend the person never read.
+    ///
+    /// Applied to Enter alone, and to BOTH hosts. Escape and Tab keep counting repeats: a repeated
+    /// Escape resolves to a refusal, and a repeated Tab is ordinary keyboard navigation — neither can
+    /// manufacture consent. Restricting Enter can only ever WITHHOLD an answer, never invent one, so
+    /// tightening it on the standalone path too is one-directional: the person releases the key and
+    /// presses it again, and the prompt answers.
+    fn pressed_afresh(i: &egui::InputState, key: Key) -> bool {
+        i.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed_key,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                } if *pressed_key == key
+            )
+        })
+    }
+
     /// Keyboard handling: Escape denies, Tab moves, Enter activates the focused control.
     ///
     /// Escape is wired FIRST and unconditionally. Never trap the user (`professional-ui`, HARD): the
@@ -999,8 +1134,13 @@ impl PromptApp {
                 i.key_pressed(Key::Escape),
                 i.key_pressed(Key::Tab),
                 i.modifiers.shift,
-                i.key_pressed(Key::Enter),
-                i.viewport().close_requested(),
+                // A FRESH press, never a key-repeat. See `pressed_afresh`.
+                Self::pressed_afresh(i, Key::Enter),
+                // Only a standalone prompt owns the viewport whose close this reads. In-window the
+                // flag belongs to the SHELL, and a shell being closed over a live prompt is settled
+                // fail-closed by `ShellApp::close` — reading it here would answer a definite `Deny`
+                // for a person who was closing the app, not refusing the request.
+                self.host == PromptHost::Standalone && i.viewport().close_requested(),
             )
         });
 
@@ -1073,17 +1213,121 @@ impl PromptApp {
             .frame(egui::Frame::NONE.fill(rgba(t.bg)))
             .show(ctx, |ui| {
                 let full = ui.available_rect_before_wrap();
-                paint::card(ui, full, &t);
-                self.chrome(ui, full, &t);
-                let content_bottom = self.body(ui, full, &t);
-                self.actions(ui, full, &t);
-                (full, content_bottom)
+                (full, self.paint_into(ui, full, &t))
             })
             .inner;
         // A bar is a fixed short height; only a dialog grows to its content.
         if !self.screen.chrome.is_bar() {
             self.fit_to_content(ctx, full, content_bottom);
         }
+    }
+
+    /// Paint the whole prompt — card, chrome, body, actions — into `full`, and report the bottom of
+    /// its content.
+    ///
+    /// This is the prompt, entire. Both hosts call it with a rectangle and neither has any other way
+    /// to draw one, so a standalone window and an in-window modal cannot drift apart: what a person
+    /// reads before approving a spend is the same pixels either way. The hosts differ only in where
+    /// the rectangle comes from and in what they do with the returned height.
+    ///
+    /// The return value is the y of the last content pixel — see [`PromptApp::fit_to_content`] for
+    /// the sizing it feeds.
+    fn paint_into(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
+        paint::card(ui, full, t);
+        self.chrome(ui, full, t);
+        let content_bottom = self.body(ui, full, t);
+        self.actions(ui, full, t);
+        content_bottom
+    }
+
+    /// Lay out and paint ONE frame as a layer inside the app shell.
+    ///
+    /// The counterpart of [`PromptApp::frame`] for [`PromptHost::InWindow`], and deliberately
+    /// smaller than it: everything [`frame`](Self::frame) does that this omits is a message to a
+    /// viewport this prompt does not own. It does not repaint-request (the shell already does, every
+    /// frame, so the deadline below can elapse), does not place, size, or focus a window, and does
+    /// not watch one for blur.
+    ///
+    /// What it keeps is everything that decides an ANSWER: the keyboard, the deadline, and the paint
+    /// — but not before the person has been shown what they are answering.
+    ///
+    /// # A prompt may not answer from a pass it was not presented in (dig_ecosystem#2270, F1)
+    ///
+    /// This host shares ONE input stream with the shell, where the standalone window had its own.
+    /// Two consequences met here, and together they were an `Approve` delivered to a blocked caller
+    /// with the consent surface never drawn at all:
+    ///
+    /// * The shell admits a prompt and paints it **in the same frame**, so the prompt's first
+    ///   `keys()` read `RawInput` that egui-winit had filled from the APP WINDOW — a keystroke aimed
+    ///   at something else entirely.
+    /// * An [`egui::Area`] whose state does not yet exist runs a **sizing pass**, which egui marks
+    ///   `.invisible()` and discards (`area.rs`). So the modal's first pass shows nothing BY
+    ///   CONSTRUCTION. The exposure was not a frame a person might miss; it was structurally zero
+    ///   frames.
+    ///
+    /// And the affirmative is the pre-focused control of a sign prompt, so an Enter left over from
+    /// the previous prompt — a held key repeating at ~31 ms against a ~16 ms frame — approved a spend
+    /// nobody had seen. [`PromptApp::pressed_afresh`] closes the repeat half; the
+    /// [`presented`](PromptApp::presented) latch closes this half.
+    ///
+    /// The latch is the smallest thing that states the actual property — *no answer from a pass in
+    /// which the prompt was not presented* — rather than naming any one of the routes into it. It is
+    /// fail-closed in the only direction it can move: an unpresented prompt records nothing, and
+    /// nothing is a denial. Its cost is one frame of latency on the deadline.
+    ///
+    /// # Why blur-dismissal is dropped rather than re-pointed
+    ///
+    /// **Nothing is lost, and that is checkable rather than argued.**
+    /// [`Chrome::dismiss_on_blur`] is `false` for every dialog (`render.rs`), and
+    /// [`PromptApp::dismiss_on_blur`] early-returns on that flag — so the standalone CONSENT surface
+    /// never dismissed on blur in the first place. Omitting the call in-window therefore removes no
+    /// behaviour any consent prompt ever had.
+    ///
+    /// What the flag does serve is the launcher bar, where "away" means the bar's own window lost
+    /// focus. In-window the only focus there is belongs to the SHELL, so the same code would mean
+    /// something else entirely — *the person switched to their browser* — and would cancel whatever
+    /// they had open the moment they looked something up. Clicking off the app window is not an
+    /// answer, so nothing here treats it as one.
+    ///
+    /// # What replaces it for the one surface that DID use it
+    ///
+    /// [`Chrome::Bar`] has a live production producer, and it was worth tracing rather than
+    /// assuming: `dig-app`'s Alt+Space hotkey calls `open_dig_link(.., InputStyle::Bar)`, and
+    /// `Screen::input` maps `InputStyle::Bar` to `Chrome::Bar` (`render.rs`). So the URN launcher
+    /// really can be raised while the app window is open, and dropping blur-dismissal outright would
+    /// have taken away the gesture a launcher is dismissed by.
+    ///
+    /// In-window, "away" has an exact counterpart: the SCRIM. Clicking off the bar and onto the
+    /// dimmed window is the same gesture with the same meaning, and it is wired in
+    /// [`shell::ShellApp::dismiss_a_bar_clicked_away_from`] — gated on the same
+    /// [`Chrome::dismiss_on_blur`] flag, which is `false` for every dialog, so no consent surface can
+    /// reach it.
+    ///
+    /// Either way an in-window prompt stays until it is answered, escaped, or expired, and is never
+    /// trapping: Escape resolves it and the deadline resolves it.
+    pub(super) fn frame_in_window(&mut self, ui: &mut egui::Ui, full: Rect) -> f32 {
+        let t = self.theme.tokens();
+        let ctx = ui.ctx().clone();
+
+        // NOTHING that can author an answer runs until this prompt has been PRESENTED. See below.
+        if self.presented {
+            self.keys(&ctx);
+            // Answer for the human who never came back. The shell keeps the frames coming, so this
+            // elapses on the same schedule a standalone prompt's does — one pass later.
+            if !self.answered && self.opened.elapsed() >= self.deadline {
+                self.expire(&ctx);
+            }
+        }
+
+        let content_bottom = self.paint_into(ui, full, &t);
+
+        // Latched only for a pass that really put this on screen. A sizing pass is
+        // `.invisible()` and calls `request_discard`, so it draws to nobody; `will_discard` catches
+        // any other pass egui is about to throw away for the same reason.
+        if !ui.is_sizing_pass() && !ctx.will_discard() {
+            self.presented = true;
+        }
+        content_bottom
     }
 
     /// Place the launcher bar HIGH on the screen — centred horizontally, `bar_top` from the top.
@@ -1228,11 +1472,28 @@ impl PromptApp {
     ///
     /// # Aero Snap, honestly
     ///
-    /// Snapping to a screen edge is a feature of RESIZABLE windows. These are created
-    /// `.with_resizable(false)` so they can be sized to their content, so edge-snap does not apply —
-    /// stated rather than claimed. Everything else the platform gesture provides (monitor
+    /// Snapping to a screen edge is a feature of RESIZABLE windows. A STANDALONE prompt is created
+    /// `.with_resizable(false)` so it can be sized to its content, so edge-snap does not apply to it
+    /// — stated rather than claimed. Everything else the platform gesture provides (monitor
     /// boundaries, per-display scale, the drag shadow) is unaffected by that.
+    ///
+    /// That reasoning is exactly why this is refused in-window: the SHELL is resizable
+    /// ([`shell::native_options`]), so the paragraph above stops holding the moment the viewport
+    /// being dragged is the shell's.
+    ///
+    /// # Why an in-window modal has no drag handle at all
+    ///
+    /// The viewport a drag would move is the app window, not the modal — so the gesture takes hold of
+    /// the wrong object entirely, and the person grabbing a consent dialog's header would send the
+    /// whole application across the desktop, or snap it to an edge with a live prompt inside it.
+    /// There is also nothing to gain: the modal is centred in its host every frame
+    /// ([`shell::modal_rect`]) and cannot be moved relative to it, so a handle could only ever
+    /// misfire. The strip is therefore not REGISTERED in-window rather than registered and ignored —
+    /// an unregistered widget cannot take a hit, and the chrome underneath stays inert.
     fn drag_by_the_header(&self, ui: &egui::Ui, full: Rect) {
+        if self.host == PromptHost::InWindow {
+            return;
+        }
         // A launcher bar places itself high on the monitor and dismisses itself on blur; whether an
         // OS-driven move keeps it focused is a claim that needs a real desktop to settle, and getting
         // it wrong makes the bar vanish mid-gesture. Dialogs are what the user asked to be able to
@@ -4257,7 +4518,7 @@ mod tests {
         /// once make any assertion about that count read another lane's window. Held for the lane's
         /// whole life, which is exactly the span in which it may draw. See
         /// [`crate::confirm::surface::ONE_SURFACE_AT_A_TIME`].
-        _exclusive: std::sync::MutexGuard<'static, ()>,
+        _exclusive: crate::confirm::surface::ExclusiveSurface,
     }
 
     impl Lane {
@@ -5504,6 +5765,324 @@ mod tests {
             viewport.decorations,
             Some(false),
             "the prompt grew OS decorations; the card is drawn edge to edge"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Hosting: what a prompt may say to a viewport it does not own (dig_ecosystem#2270)
+    //
+    // Three of this window's behaviours address a viewport. In-window that viewport is the SHELL's,
+    // so each is either meaningless or destructive there. Every test below is paired with the
+    // standalone control, because "sends nothing" is also what a broken paint path reports.
+    // ---------------------------------------------------------------------------------------------
+
+    /// One prompt, on whichever host a test names, driven frame by frame with real input.
+    struct Hosts {
+        app: PromptApp,
+        ctx: egui::Context,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Hosts {
+        fn on(host: PromptHost) -> Self {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let store = ThemeChoice::in_brand_dir(dir.path());
+            let (reply, _rx) = sync_channel(1);
+            let sink = std::sync::Arc::new(Mutex::new(None));
+            let job = Job {
+                screen: Screen::confirm(&sign_content(), "Cancel"),
+                wants_text: false,
+                theme: store.clone(),
+                deadline: Duration::from_secs(3600),
+                over_by: Instant::now() + Duration::from_secs(3600),
+                reply,
+            };
+            let app = PromptApp::hosted(job, store, sink.clone(), host);
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            Self {
+                app,
+                ctx,
+                sink,
+                _dir: dir,
+            }
+        }
+
+        /// Frames enough to PRESENT an in-window prompt, so its keyboard is live.
+        ///
+        /// In-window a prompt answers nothing until it has been painted in a pass a person could see
+        /// (`frame_in_window`, F1), and the first pass of a new [`egui::Area`] is a sizing pass egui
+        /// marks invisible. A test that skips this reads "nothing happened" and cannot tell a
+        /// working guard from a broken one — measured: two mutants survived on exactly that.
+        ///
+        /// A no-op for a standalone prompt, whose keyboard is live from its first frame, so both
+        /// halves of a paired test can call it.
+        fn present(&mut self) {
+            self.frame(Vec::new(), false);
+            self.frame(Vec::new(), false);
+        }
+
+        /// One frame carrying `events`, painted the way this prompt's host paints it.
+        ///
+        /// `host_closing` delivers the windowing system's own close on the SHARED viewport, which is
+        /// the event whose meaning differs between the two hosts.
+        fn frame(&mut self, events: Vec<egui::Event>, host_closing: bool) -> egui::FullOutput {
+            let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+            let mut input = egui::RawInput {
+                screen_rect: Some(at),
+                events,
+                ..Default::default()
+            };
+            if host_closing {
+                input
+                    .viewports
+                    .get_mut(&egui::ViewportId::ROOT)
+                    .expect("the root viewport")
+                    .events
+                    .push(egui::ViewportEvent::Close);
+            }
+            let host = self.app.host;
+            let app = &mut self.app;
+            self.ctx.run(input, |ctx| match host {
+                PromptHost::Standalone => app.frame(ctx),
+                PromptHost::InWindow => {
+                    egui::Area::new(egui::Id::new("host")).show(ctx, |ui| {
+                        app.frame_in_window(ui, at);
+                    });
+                }
+            })
+        }
+
+        /// Whether the ROOT viewport was sent `want` this frame.
+        fn sent(output: &egui::FullOutput, want: &egui::ViewportCommand) -> bool {
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|root| root.commands.iter().any(|c| c == want))
+        }
+
+        /// Press on the header strip and move far enough that the gesture can no longer be a click.
+        ///
+        /// Two moves, not one: [`DRAG_HANDLE_SENSE`] deliberately keeps `CLICK` so egui withholds
+        /// the drag until the pointer has travelled past the click threshold — the property that
+        /// stops a finished window move from pressing a consent button. A single-frame press would
+        /// therefore report no drag on EITHER host and the test would pass while proving nothing.
+        fn drag_the_header(&mut self) -> egui::FullOutput {
+            let at = PromptApp::drag_region(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(WIDTH, HEIGHT),
+            ))
+            .center();
+            self.frame(vec![egui::Event::PointerMoved(at)], false);
+            self.frame(
+                vec![egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                false,
+            );
+            self.frame(
+                vec![egui::Event::PointerMoved(at + Vec2::new(60.0, 40.0))],
+                false,
+            )
+        }
+
+        fn recorded(&self) -> Option<Outcome> {
+            self.sink.lock().expect("the answer slot").take()
+        }
+    }
+
+    /// **Only a standalone prompt may be dragged by its header.**
+    ///
+    /// Gate finding A2, and the one viewport behaviour that is NOT settled by
+    /// [`PromptApp::frame_in_window`] omitting it: the drag strip is registered inside
+    /// [`PromptApp::paint_into`], which BOTH hosts call, so it needed a check at the site.
+    ///
+    /// In-window the viewport a drag moves is the app window. Grabbing a consent dialog's header
+    /// would therefore send the whole application across the desktop — and, because the shell is
+    /// resizable where a standalone prompt is not, snap it to a screen edge with a live prompt
+    /// inside it. The `Aero Snap, honestly` paragraph on [`PromptApp::drag_by_the_header`] is
+    /// precisely the reasoning that stops holding on this host.
+    ///
+    /// The standalone control is the other half: dragging a frameless consent window by its header
+    /// is the only way to move it at all, and losing that would trap it wherever it opened.
+    #[test]
+    fn only_a_standalone_prompt_can_be_dragged_by_its_header() {
+        let drag = egui::ViewportCommand::StartDrag;
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        let output = alone.drag_the_header();
+        assert!(
+            Hosts::sent(&output, &drag),
+            "a standalone consent window can no longer be moved; it is frameless, so the header \
+             is the only handle it has"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.frame(Vec::new(), false);
+        let output = inside.drag_the_header();
+        assert!(
+            !Hosts::sent(&output, &drag),
+            "dragging the in-window modal's header moved the app window it lives in"
+        );
+    }
+
+    /// **The in-window modal offers no drag AFFORDANCE either.**
+    ///
+    /// Stronger than "sends no command", and the difference is what a person sees: a strip that is
+    /// registered but ignored still shows the grab cursor, promising a gesture that does nothing —
+    /// or, worse, silently swallowing a press that belongs to the consent surface under it. The
+    /// strip is therefore not registered at all in-window, and the cursor is how that becomes
+    /// observable without guessing at a widget id, which differs between the two hosts' layouts.
+    #[test]
+    fn the_in_window_modal_offers_no_grab_cursor_on_its_header() {
+        let over = PromptApp::drag_region(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(WIDTH, HEIGHT),
+        ))
+        .center();
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        alone.frame(vec![egui::Event::PointerMoved(over)], false);
+        let output = alone.frame(Vec::new(), false);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Grab,
+            "the standalone window stopped offering its header as a handle, so the assertion \
+             below is aimed at a cursor nothing ever sets"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.frame(Vec::new(), false);
+        inside.frame(vec![egui::Event::PointerMoved(over)], false);
+        let output = inside.frame(Vec::new(), false);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "the in-window modal offers a grab cursor on its header, promising a drag that would \
+             move the whole app window"
+        );
+    }
+
+    /// Press Enter, which activates the focused control.
+    fn enter_pressed() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    /// **An answered in-window prompt does not ask the window it lives in to close.**
+    ///
+    /// `ViewportCommand::Close` sent from inside the shell addresses the SHELL, so a prompt that sent
+    /// it would shut the app window the moment anybody answered anything in it. The standalone
+    /// control is the other half: without it, deleting the call outright would pass this test.
+    #[test]
+    fn only_a_standalone_prompt_asks_its_window_to_close() {
+        let close = egui::ViewportCommand::Close;
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        let output = alone.frame(enter_pressed(), false);
+        assert!(
+            alone.recorded().is_some(),
+            "the standalone prompt did not answer, so this frame proves nothing"
+        );
+        assert!(
+            Hosts::sent(&output, &close),
+            "the standalone prompt stopped asking to close; it would stay on screen after the \
+             person had answered it"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.present();
+        let output = inside.frame(enter_pressed(), false);
+        assert!(
+            inside.recorded().is_some(),
+            "the in-window prompt did not answer, so this frame proves nothing"
+        );
+        assert!(
+            !Hosts::sent(&output, &close),
+            "answering a prompt inside the app window asked the app window itself to close"
+        );
+    }
+
+    /// **An in-window prompt does not grab the keyboard.**
+    ///
+    /// The focus request exists because a tray agent's first prompt after a cold start was measured
+    /// opening behind somebody else's window (dig_ecosystem#2079). In-window there is nothing to ask
+    /// for — the shell already holds the foreground — and the request would address the shell's own
+    /// viewport, re-raising a window the person may have just put behind something.
+    #[test]
+    fn only_a_standalone_prompt_claims_the_keyboard() {
+        let focus = egui::ViewportCommand::Focus;
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        let output = alone.frame(Vec::new(), false);
+        assert!(
+            Hosts::sent(&output, &focus),
+            "the standalone prompt stopped asking for the keyboard (#2079)"
+        );
+
+        // SEVERAL frames, not one. The claim is "never", and a request made on any later frame is
+        // just as wrong — measured: a mutant that moved the call inside the F1 presentation gate
+        // survived a single-frame check, because nothing had been presented yet on frame one.
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        for nth in 0..6 {
+            let output = inside.frame(Vec::new(), false);
+            assert!(
+                !Hosts::sent(&output, &focus),
+                "on frame {nth} a prompt inside the app window asked to raise the window it is \
+                 already inside"
+            );
+        }
+    }
+
+    /// **Closing the HOST window is not a refusal an in-window prompt may author.**
+    ///
+    /// `close_requested()` on the shared viewport means *the person is closing the app*, not *the
+    /// person refused this request*. A prompt that read it as a refusal would latch a definite
+    /// `Deny` — and the latch is one-way by design (#2038), so the shell's fail-closed settle would
+    /// then have nothing left to correct: somebody who closed the app window would have signed a
+    /// refusal they never gave.
+    ///
+    /// The standalone control is the other half: there, that event IS the person dismissing this
+    /// prompt, and it must still deny.
+    ///
+    /// # Honest scope: in-window this is defence in depth, not a live path
+    ///
+    /// [`shell::ShellApp::keys`] reads the close first and returns before the modal is painted, so
+    /// in production `close_requested()` is always false by the time an in-window prompt sees it.
+    /// This test drives the frame directly, so it kills its mutant on a path production does not
+    /// currently take. It is kept because the ordering in `ShellApp::frame` is the only thing making
+    /// that true, and the failure if it ever changes is a signed refusal the person never gave.
+    #[test]
+    fn a_host_window_close_is_a_refusal_only_for_a_standalone_prompt() {
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        alone.frame(Vec::new(), true);
+        assert!(
+            matches!(alone.recorded(), Some(Outcome::Confirm(WindowIntent::Deny))),
+            "closing a standalone prompt window stopped being a refusal"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        // PRESENTED first, so its keyboard is genuinely live: otherwise "recorded nothing" is just
+        // the F1 latch talking and says nothing about how the close event is read.
+        inside.present();
+        inside.frame(Vec::new(), true);
+        assert!(
+            inside.recorded().is_none(),
+            "closing the app window made an in-window prompt author an answer of its own; the \
+             shell's fail-closed settle cannot correct it, because the latch is one-way"
         );
     }
 }
