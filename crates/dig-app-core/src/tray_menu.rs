@@ -237,6 +237,80 @@ pub struct TrayView {
 }
 
 impl TrayView {
+    /// Whether `other` would render the same tray menu as `self`.
+    ///
+    /// The shell's tick calls this to decide whether to rebuild and repaint. A field that changes what
+    /// the menu shows, but which this says nothing about, freezes the tray on stale rows until some
+    /// OTHER field happens to move — and if nothing else moves, forever.
+    ///
+    /// # Why it destructures instead of listing fields
+    ///
+    /// This began as a hand-spelled `a.x == b.x && …` chain in the shell binary, and it silently fell
+    /// three fields behind [`TrayView`]: `window_host`, `hotkey` and `address_derivation_failed`. The
+    /// `window_host` omission was the expensive one — when a window fails to open, `window_host`
+    /// degrades to [`WindowHost::Unavailable`] so the tray can re-expand from four rows to the full
+    /// menu, and that is the ONLY thing standing between a failed open and a user with no route to
+    /// `RemoveAccount`, `FixMissingPhrase` or `OpenLogs`. The degrade fired correctly and the repaint
+    /// gate discarded it (dig_ecosystem#2253).
+    ///
+    /// So the field list is not written down twice. Destructuring binds every field by name, and
+    /// `..` is deliberately absent: **adding a field to [`TrayView`] fails to compile here**, which
+    /// forces whoever adds it to decide whether it changes what the menu shows. A comparison that
+    /// cannot fall behind the struct is worth more than one that is merely correct today.
+    pub fn renders_same_as(&self, other: &Self) -> bool {
+        // No `..` — see above. Each binding is compared exactly once, in declaration order.
+        let Self {
+            running,
+            node_connected,
+            node,
+            account,
+            profile_id,
+            receive_address,
+            address_derivation_failed,
+            balance,
+            did,
+            second_factor,
+            cache,
+            hotkey,
+            menu_suppressed,
+            window_host,
+        } = self;
+
+        running == &other.running
+            && node_connected == &other.node_connected
+            && node == &other.node
+            && account == &other.account
+            && profile_id == &other.profile_id
+            // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
+            // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
+            && receive_address == &other.receive_address
+            // A failed derivation changes what the Wallet row SAYS, so it must repaint even though the
+            // address itself is `None` in both snapshots.
+            && address_derivation_failed == &other.address_derivation_failed
+            // The Wallet row RENDERS the balance, so a reading that changed must repaint — without
+            // this the first real figure would never replace "Balance not known" until something
+            // else in the menu happened to move (dig_ecosystem#2206).
+            && balance == &other.balance
+            && did == &other.did
+            // Without this the Security submenu would keep offering "Set up..." after an enrolment
+            // completed, because nothing else in the view changed and the menu would not repaint.
+            && second_factor == &other.second_factor
+            // The Cache submenu shows live usage on its parent label and marks the current cap, so a
+            // changed cap or a moved usage figure must repaint — otherwise a just-applied new cap would
+            // not show as current until something else changed (dig_ecosystem#2002).
+            && cache == &other.cache
+            // The `Open URL…` row's label carries the registered chord, so a hotkey that was taken or
+            // released changes the row's text.
+            && hotkey == &other.hotkey
+            // A menu refused for want of foreground rights explains a click that produced nothing,
+            // so the tooltip must repaint the moment it flips -- in both directions, since the
+            // recovery is what tells the user their next click will work (dig-app#86).
+            && menu_suppressed == &other.menu_suppressed
+            // The trim switch itself. See the module doc above: without this, a degraded host keeps a
+            // four-row tray and the window that was supposed to hold the other 25 verbs never opens.
+            && window_host == &other.window_host
+    }
+
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
     ///
     /// `pub(crate)`: the window model builds from the same snapshot and must read the same default
@@ -1636,6 +1710,94 @@ impl fmt::Display for AccountState {
 mod tests {
     use super::*;
 
+    /// **Every field of [`TrayView`] forces a repaint when it changes.**
+    ///
+    /// [`TrayView::renders_same_as`] is the shell's entire repaint gate: a `true` skips the rebuild
+    /// and the tray keeps drawing the previous menu. A field it fails to compare freezes whatever that
+    /// field controls until something ELSE happens to move — and if nothing else moves, permanently.
+    ///
+    /// This is a table over every field rather than a case for the interesting ones, because the
+    /// failure has now happened three times on three different fields (#2206 balance, #2002 cache,
+    /// dig-app#86 menu_suppressed) and a fourth time on `window_host`, where it made the tray trim
+    /// irreversible: the window failed to open, the host degraded to `Unavailable` so the tray could
+    /// re-expand, and the gate discarded the change — leaving four rows and no way back to
+    /// `RemoveAccount`, `FixMissingPhrase` or `OpenLogs` (dig_ecosystem#2253).
+    ///
+    /// Each case moves ONE field off its default and asserts the two snapshots do not compare equal.
+    /// The exhaustive destructure in `renders_same_as` stops a NEW field being forgotten; this stops a
+    /// listed one being compared wrongly.
+    #[test]
+    fn every_field_of_the_view_forces_a_repaint_when_it_changes() {
+        let base = TrayView::default();
+        /// One field's name and a change to it that the tray must notice.
+        type FieldChange = (&'static str, fn(&mut TrayView));
+
+        let cases: Vec<FieldChange> = vec![
+            ("running", |v| v.running = true),
+            ("node_connected", |v| v.node_connected = true),
+            ("node", |v| v.node = "dig.local".to_string()),
+            ("account", |v| v.account = Some(AccountState::Locked)),
+            ("profile_id", |v| v.profile_id = Some("dig1x".to_string())),
+            ("receive_address", |v| {
+                v.receive_address = Some("xch1x".to_string())
+            }),
+            ("address_derivation_failed", |v| {
+                v.address_derivation_failed = true
+            }),
+            ("balance", |v| {
+                v.balance = crate::wallet::overview::BalanceReading::Known(
+                    crate::wallet::overview::Balances {
+                        xch_mojos: 1,
+                        dig_units: 0,
+                    },
+                )
+            }),
+            ("did", |v| v.did = Some("did:chia:x".to_string())),
+            ("second_factor", |v| v.second_factor = true),
+            ("cache", |v| {
+                v.cache = Some(crate::cache::CacheSnapshot {
+                    cap_bytes: 1,
+                    used_bytes: 0,
+                })
+            }),
+            ("hotkey", |v| {
+                v.hotkey = Some(crate::hotkey::HotkeyState::Unavailable {
+                    hotkey: Default::default(),
+                    reason: "taken".to_string(),
+                })
+            }),
+            ("menu_suppressed", |v| v.menu_suppressed = true),
+            ("window_host", |v| v.window_host = WindowHost::Unavailable),
+        ];
+
+        for (field, mutate) in &cases {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert!(
+                !base.renders_same_as(&changed),
+                "`{field}` changed and the tray would NOT repaint — whatever it controls is frozen \
+                 until some other field happens to move"
+            );
+            // Symmetric, so a comparison that only reads one side is caught too.
+            assert!(
+                !changed.renders_same_as(&base),
+                "`{field}` is compared in one direction only"
+            );
+        }
+
+        // The table is only a guard if it is complete. `renders_same_as` destructures exhaustively, so
+        // the field count is fixed at compile time; this pins the table to it.
+        assert_eq!(
+            14,
+            cases.len(),
+            "TrayView gained or lost a field — add or remove its case above"
+        );
+        assert!(
+            base.renders_same_as(&base.clone()),
+            "an unchanged view must not force a repaint, or the tray rebuilds on every tick"
+        );
+    }
+
     /// **Regression, dig_ecosystem#2128 — the account survived every restart; the tray did not.**
     ///
     /// A fresh process holds no session, because since #1817 the app boots LOCKED and never attempts an
@@ -1992,7 +2154,7 @@ mod tests {
                 assert_eq!(
                     model.offers(action),
                     unlocked,
-                    "{action:?} in {account:?}: pairing seals under the account key, so an unlocked                      account is its real precondition"
+                    "{action:?} in {account:?}: pairing seals under the account key, so an unlocked account is its real precondition"
                 );
                 if model.offers(action) {
                     assert!(

@@ -1762,35 +1762,51 @@ mod tests {
     /// passes on a fixture that never draws two rows with one label.
     #[test]
     fn no_two_rows_on_a_tab_are_given_the_same_element_id() {
-        let repeated: Vec<String> = {
-            let mut labels: Vec<String> = window_model::build(&busy_view())
-                .tab(TabId::Account)
-                .expect("the Account tab renders")
-                .sections
+        // The fixture must actually contain the hazard, or this passes without exercising anything.
+        //
+        // The hazard is two rows on ONE pane sharing an ACTION, because the element id derives from
+        // the action. It used to be spelled as two rows sharing a LABEL, which was true of the Account
+        // tab's repeated `AboutDid`; that repeat is now removed by `drop_repeats` (dig_ecosystem#2253),
+        // so pinning to a label would leave this test guarding nothing.
+        //
+        // A shared ACTION is not a defect and is not removed: the Cache tab with no node connected
+        // deliberately offers "Change the size limit (connect a node first)…" and "About the cache and
+        // your privacy…", both `AboutCache`, because they open the same window. That is exactly the
+        // case the occurrence counter in the id function exists for — so it is the right subject.
+        let hazard_view = crate::tray_menu::TrayView {
+            cache: None,
+            ..busy_view()
+        };
+        let repeated: Vec<TrayAction> = {
+            let mut actions: Vec<TrayAction> = window_model::build(&hazard_view)
+                .tabs
                 .iter()
+                .flat_map(|tab| tab.sections.iter())
                 .flat_map(|section| &section.rows)
                 .filter_map(|row| match row {
-                    MenuRow::Action { label, .. } => Some(label.clone()),
+                    MenuRow::Action { action, .. } => Some(*action),
                     _ => None,
                 })
                 .collect();
-            labels.sort();
             let mut repeats = Vec::new();
-            for pair in labels.windows(2) {
-                if pair[0] == pair[1] && !repeats.contains(&pair[0]) {
-                    repeats.push(pair[0].clone());
+            for (i, action) in actions.iter().enumerate() {
+                if actions[..i].contains(action) && !repeats.contains(action) {
+                    repeats.push(*action);
                 }
             }
+            actions.clear();
             repeats
         };
         assert!(
             !repeated.is_empty(),
-            "the Account tab no longer repeats a label, so this test can no longer see the defect              it exists for — find a tab that does, or delete it deliberately"
+            "no tab draws two rows sharing an action, so this test can no longer see the id collision it exists for — find a view that does, or delete it deliberately"
         );
 
-        let mut shelf = Shelf::open();
+        // Driven over the SAME view the hazard was proven in — walking `busy_view` here would click
+        // through tabs that do not contain the shared action and report clean.
+        let mut shelf = Shelf::showing(hazard_view.clone());
         shelf.settle();
-        for tab in &window_model::build(&busy_view()).tabs {
+        for tab in &window_model::build(&hazard_view).tabs {
             let at = shelf.centre_of(sidebar_entry(tab.id));
             shelf.click(at);
             let output = shelf.frame(Vec::new());
@@ -2009,7 +2025,7 @@ mod tests {
         assert!(clears(700.0), "a 700-tall window has room and must use it");
         assert!(
             !clears(640.0),
-            "640 was measured as too short for the pill to clear the prompt; if that has changed,              the doc comment saying so is now wrong"
+            "640 was measured as too short for the pill to clear the prompt; if that has changed, the doc comment saying so is now wrong"
         );
     }
 

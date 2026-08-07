@@ -1602,7 +1602,7 @@ mod tests {
             let (refusal_is_default, _) = safe_side(&prompt);
             assert!(
                 refusal_is_default,
-                "a bare Enter affirms {what} — which puts the 24 words somewhere in plain text on                  behalf of somebody who only pressed a key"
+                "a bare Enter affirms {what} — which puts the 24 words somewhere in plain text on behalf of somebody who only pressed a key"
             );
         }
     }

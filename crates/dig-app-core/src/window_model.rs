@@ -344,7 +344,7 @@ pub fn build(view: &TrayView) -> WindowModel {
             match view.cache {
                 Some(_) => PaneNote::Ready,
                 None => PaneNote::Unreachable(
-                    "No node is connected, so the size limit cannot be read or changed. Start the                      DIG node and this tab will fill in.",
+                    "No node is connected, so the size limit cannot be read or changed. Start the DIG node and this tab will fill in.",
                 ),
             },
             vec![Section {
@@ -393,11 +393,12 @@ fn nothing_to_do(id: TabId) -> &'static str {
 /// no clickable row, and that is a fact about what came out rather than about what went in. Computing
 /// it at the call sites would mean six predicates that each had to stay in step with subsumption.
 fn tab(id: TabId, note: PaneNote, sections: Vec<Section>) -> Tab {
+    let mut seen: Vec<(TrayAction, String)> = Vec::new();
     let sections: Vec<Section> = sections
         .into_iter()
         .map(|section| Section {
             heading: section.heading,
-            rows: tidy(drop_subsumed(section.rows, id)),
+            rows: tidy(drop_repeats(drop_subsumed(section.rows, id), &mut seen)),
         })
         // A heading-only section SURVIVES. The heading is content, not decoration: the Wallet tab's
         // is the balance reading and the Cache tab's is the live usage. Dropping a section for having
@@ -426,6 +427,58 @@ fn tab(id: TabId, note: PaneNote, sections: Vec<Section>) -> Tab {
         note,
         sections,
     }
+}
+
+/// Remove rows offering an action an earlier section of the SAME tab already offered.
+///
+/// # Why a tab needs this and the tray does not
+///
+/// Two group builders may legitimately both offer a verb: `view_account_actions` and
+/// `management_actions` each end with `AboutDid`, because in the tray they render as two separate
+/// SUBMENUS and a person opening either one needs the way to the explanation from there. One instance
+/// per popup is wayfinding.
+///
+/// A tab flattens both builders onto one scrolling pane, so the same two rows land about 210 px apart
+/// with byte-identical labels, and the second reads as a bug rather than a signpost
+/// (dig_ecosystem#2253).
+///
+/// The de-dupe lives here rather than in the builders on purpose: filtering upstream would fork rules
+/// the tray and the window are required to share, which is the whole reason
+/// [`crate::tray_menu`] owns them. This is one more pass beside [`drop_subsumed`] and [`tidy`] — the
+/// window deciding where a verb is SHOWN, never whether it is offered.
+///
+/// First occurrence wins, so a verb keeps the section whose heading gives it the most context.
+/// Cross-TAB repetition is untouched: `seen` is per-tab, and `ExplainUnopenable` appearing under both
+/// Account and Security is one instance per pane, which is the wayfinding case.
+///
+/// # The key is (action, label), and the action alone is NOT enough
+///
+/// Sharing an action is normal and deliberate here. The Cache tab with no node connected offers
+/// "Change the size limit (connect a node first)…" and "About the cache and your privacy…", both
+/// [`TrayAction::AboutCache`], because they genuinely open the same window and
+/// [`crate::tray_menu`] chose to admit that rather than invent a second action doing the identical
+/// thing. Those are two different sentences a person might want, and de-duping on the action would
+/// silently delete one.
+///
+/// What looks like a bug is a repeated LABEL: the same words twice on one pane. So a row is a repeat
+/// only when it says the same thing AND does the same thing.
+fn drop_repeats(rows: Vec<MenuRow>, seen: &mut Vec<(TrayAction, String)>) -> Vec<MenuRow> {
+    rows.into_iter()
+        .filter(|row| match row {
+            MenuRow::Action { action, label, .. } => {
+                let key = (*action, label.clone());
+                if seen.contains(&key) {
+                    false
+                } else {
+                    seen.push(key);
+                    true
+                }
+            }
+            // A separator carries no verb, so it cannot repeat one. `tidy` collapses any that this
+            // leaves stranded.
+            _ => true,
+        })
+        .collect()
 }
 
 /// Remove the rows whose content `tab` renders as the page itself.
@@ -1144,20 +1197,27 @@ mod tests {
     }
 
     /// A tab composes the shared builders rather than re-deriving them: the rows it shows are exactly
-    /// the rows the tray's own group builder produced, minus anything the tab subsumes.
+    /// the rows the tray's own group builder produced, minus anything the tab subsumes and minus a
+    /// label the pane has already shown ([`drop_repeats`]).
+    ///
+    /// The expectation applies the window's own passes to the builder output rather than hard-coding
+    /// a row list, so this stays a test that the window does not RE-DERIVE rules — not a transcript of
+    /// today's rows, which would have to be edited every time a builder legitimately changed.
     #[test]
     fn each_tab_is_the_shared_group_builder_verbatim() {
         for view in every_view() {
             let account = view.account();
             let model = build(&view);
             let expect = |tab: TabId, rows: Vec<MenuRow>| {
-                let expected: Vec<TrayAction> = tidy(drop_subsumed(rows, tab))
-                    .into_iter()
-                    .filter_map(|row| match row {
-                        MenuRow::Action { action, .. } => Some(action),
-                        _ => None,
-                    })
-                    .collect();
+                let mut seen = Vec::new();
+                let expected: Vec<TrayAction> =
+                    tidy(drop_repeats(drop_subsumed(rows, tab), &mut seen))
+                        .into_iter()
+                        .filter_map(|row| match row {
+                            MenuRow::Action { action, .. } => Some(action),
+                            _ => None,
+                        })
+                        .collect();
                 let actual = model.tab(tab).map(Tab::actions).unwrap_or_default();
                 assert_eq!(
                     actual,
@@ -1173,8 +1233,12 @@ mod tests {
             expect(TabId::Apps, apps_actions());
             expect(TabId::Cache, cache_actions(view.cache.as_ref()));
             expect(TabId::Wallet, wallet_actions(&view, &account));
-            let mut account_rows = view_account_actions(&view, &account);
-            account_rows.extend(management_actions(&account));
+            // The Account tab is the one that composes TWO builders onto a single pane, so it is the
+            // one where a label can repeat across a section boundary — `AboutDid` ends both. The
+            // de-dupe runs across the whole tab, so `seen` is shared here rather than per-section.
+            let mut seen = Vec::new();
+            let mut account_rows = drop_repeats(view_account_actions(&view, &account), &mut seen);
+            account_rows.extend(drop_repeats(management_actions(&account), &mut seen));
             let account_tab: Vec<TrayAction> = account_rows
                 .into_iter()
                 .filter_map(|row| match row {

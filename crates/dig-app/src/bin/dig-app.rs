@@ -1949,33 +1949,15 @@ mod tray {
         }
     }
 
-    /// Whether two snapshots would render the same menu. [`TrayView`] is not `PartialEq` (it is a
-    /// display model whose equality is only ever this question), so the comparison is spelled out.
+    /// Whether two snapshots would render the same menu.
+    ///
+    /// The decision lives on [`TrayView`] itself, in `dig-app-core`, and not here. It used to be a
+    /// hand-spelled field chain in this binary, where nothing could test it — a bin target is a
+    /// test-free zone — and it silently fell three fields behind the struct it compared. The version
+    /// it delegates to destructures exhaustively, so a new field breaks the build rather than being
+    /// quietly ignored (dig_ecosystem#2253).
     fn view_eq(a: &TrayView, b: &TrayView) -> bool {
-        a.running == b.running
-            && a.node_connected == b.node_connected
-            && a.node == b.node
-            && a.account == b.account
-            && a.profile_id == b.profile_id
-            // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
-            // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
-            && a.receive_address == b.receive_address
-            // The Wallet row RENDERS the balance, so a reading that changed must repaint — without
-            // this the first real figure would never replace "Balance not known" until something
-            // else in the menu happened to move (dig_ecosystem#2206).
-            && a.balance == b.balance
-            && a.did == b.did
-            // Without this the Security submenu would keep offering "Set up..." after an enrolment
-            // completed, because nothing else in the view changed and the menu would not repaint.
-            && a.second_factor == b.second_factor
-            // The Cache submenu shows live usage on its parent label and marks the current cap, so a
-            // changed cap or a moved usage figure must repaint — otherwise a just-applied new cap would
-            // not show as current until something else changed (dig_ecosystem#2002).
-            && a.cache == b.cache
-            // A menu refused for want of foreground rights explains a click that produced nothing,
-            // so the tooltip must repaint the moment it flips -- in both directions, since the
-            // recovery is what tells the user their next click will work (dig-app#86).
-            && a.menu_suppressed == b.menu_suppressed
+        a.renders_same_as(b)
     }
 
     /// Run one menu action. Returns `true` when the process should exit.
