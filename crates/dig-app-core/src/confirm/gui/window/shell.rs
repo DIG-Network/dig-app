@@ -869,6 +869,12 @@ mod tests {
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (jobs, queue) = mpsc::channel::<Work>();
             let ctx = egui::Context::default();
+            // Headless egui EMBEDS child viewports into the root, so a `show_viewport_immediate`
+            // leaves no trace in `viewport_output` and every "no second window" assertion is
+            // unfalsifiable by default — measured: the regression that put the prompt back into a
+            // child viewport survived until this line existed. `eframe` clears the same flag on
+            // desktop, so this is the host posture the shipped window actually runs under.
+            ctx.set_embed_viewports(false);
             install_fonts(&ctx);
             let dispatched: Arc<Mutex<Vec<TrayAction>>> = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&dispatched);

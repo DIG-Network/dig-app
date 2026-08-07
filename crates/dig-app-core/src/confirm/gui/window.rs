@@ -969,13 +969,16 @@ impl PromptApp {
     /// Windows agrees. The window remains answerable by mouse either way, and its own deadline still
     /// refuses on its behalf if it is never answered at all.
     ///
-    /// # Why an in-window prompt does not ask
+    /// # Why only [`PromptApp::frame`] calls this
     ///
-    /// There is nothing to ask for. The shell already holds the foreground — the person is looking
-    /// at it — and the only viewport this could address is the shell's own, so the request would at
-    /// best be a no-op and at worst re-raise a window the person had just moved behind something.
+    /// An in-window prompt has nothing to ask for: the shell already holds the foreground, and the
+    /// only viewport this could address is the shell's own, so the request would at best be a no-op
+    /// and at worst re-raise a window the person had just moved behind something. That is settled by
+    /// [`frame_in_window`](Self::frame_in_window) NOT CALLING this, rather than by a host check in
+    /// here — an unreachable branch is one no test can hold, and this surface has no room for a
+    /// guard that only looks like one.
     fn claim_the_keyboard(&mut self, ctx: &egui::Context) {
-        if self.host == PromptHost::InWindow || self.keyboard_claimed {
+        if self.keyboard_claimed {
             return;
         }
         self.keyboard_claimed = true;

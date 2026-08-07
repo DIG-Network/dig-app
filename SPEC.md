@@ -811,10 +811,27 @@ so no rule about which rows exist or whether they are enabled is decided twice.
 - **Opening the window MUST return as soon as the request is queued (MUST)**, never when the window
   closes — a handler held for the window's lifetime would refuse every later action, including quit.
   Asking again while it is open MUST bring the existing window forward rather than opening a second.
-- **The window is NOT a consent surface.** It MUST NOT be always-on-top, MUST NOT carry a deadline, and
-  MUST NOT count as a raised consent surface. A consent prompt raised over it is drawn as its own
-  window, keeps its always-on-top posture, and the window behind it MUST become visibly inert — dimmed,
-  taking no clicks, and offering a way to bring the prompt back for a person who has buried it.
+- **The window opens no second window (MUST).** Every surface the app has — confirms, notices, reveals,
+  text inputs, status and the About pages — MUST be drawn INSIDE the app window while it is open, as a
+  modal layer, never as another top-level window. A prompt raised while the app window is CLOSED is the
+  exception and MUST keep its own window (below): a request from a dapp MUST NOT force the whole app open.
+- **The window itself is NOT a consent surface.** It MUST NOT be always-on-top, MUST NOT carry a deadline,
+  and MUST NOT count as a raised consent surface while it is showing no prompt — counting it would suppress
+  the tray's foreground claim for as long as somebody left the window open.
+- **An in-window prompt IS a consent surface, for as long as it is up (MUST).** It MUST count as raised
+  from the moment it is admitted until it is answered, expired or settled — not merely for the span of a
+  frame — so a tray click cannot take the foreground from a person part-way through reading or typing.
+- **While a prompt is up the rest of the window MUST be inert (MUST).** Dimmed, taking no clicks anywhere
+  in it including the chrome, not resizable, and the modal MUST be the only thing that can be interacted
+  with. Exactly one prompt MAY be up at a time, so a second can never obscure what is being authorised.
+- **An in-window prompt MUST NOT address the host's viewport.** It MUST NOT ask to close, focus, move or
+  resize the app window, and closing the app window MUST NOT be read as the person's answer.
+- **Teardown MUST fail closed (MUST).** Closing the window, or dismissing the modal, over a prompt nobody
+  answered MUST answer it unavailable — never an approval, and never a dropped reply that leaves the
+  caller waiting out its timeout. An answer the person DID give MUST survive teardown unchanged.
+- **A prompt raised while the window is CLOSED keeps its own window**, with its always-on-top posture and
+  its deadline unchanged. Both hosts MUST paint the prompt through the same code, so what a person reads
+  before approving something does not depend on which one drew it.
 
 ### 3.1c-i The global shortcut to the URN bar (normative)
 
