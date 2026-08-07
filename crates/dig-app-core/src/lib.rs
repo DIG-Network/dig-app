@@ -88,6 +88,7 @@ pub mod storage;
 pub mod tray_menu;
 pub mod wallet;
 pub mod whitelist;
+pub mod window_host;
 pub mod window_model;
 
 #[cfg(test)]

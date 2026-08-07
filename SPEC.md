@@ -499,11 +499,37 @@ wrong, and the truth was worse: it was CONDITIONALLY aware. The hand-built conse
 for awareness by reading the monitor's real DPI and scaling themselves, so on a path where the process
 turned out unaware Windows scaled them as well and the two multiplied.
 
-### 3.1c The tray account surface (normative)
+### 3.1c The tray and app-window account surface (normative)
 
-The tray is the only surface a person has on a fresh install, so it MUST expose the whole account
-journey, not merely lock and quit. The menu is built from ONE pure model (`dig_app_core::tray_menu`) so
-these rules are testable independently of any desktop.
+A person MUST be able to reach the whole account journey — not merely lock and quit — from the surfaces
+this app puts in front of them. There are two, and which of them carries the journey depends on one
+capability.
+
+**The window-host capability (MUST).** An implementation MUST determine, at runtime, whether it can open
+the app window on this host, and MUST carry the answer as DATA on the same snapshot the menu is built
+from — never as a compile-time target test, because a host with no display server is in exactly the
+condition macOS is in and both MUST be treated identically. The answer MUST start from a cheap static
+probe and MUST degrade to *unavailable* on an OBSERVED failure to open the window, restoring the full
+menu. A capability that is only probed lets a host promise a window, fail to draw it, and leave a person
+with a short menu and no route to the escape hatches.
+
+- **Where a window can be opened**, the tray menu is TRIMMED to four rows — the one thing this account
+  needs right now, open a URN, open the app window, and quit — and the rest of the journey lives in the
+  window. The trim is permitted ONLY under the reachability rule below.
+- **Where no window can be opened**, the tray MUST carry the WHOLE journey, exactly as enumerated below,
+  because it is then the only surface a person has. It MUST NOT offer to open a window it cannot open.
+
+**Reachability (MUST).** For every account state and every host, every action offered on a host with no
+window MUST be reachable on a host with one — from the trimmed tray, from the window, or as the content
+of a window tab that renders that action's own material in place of a row. This MUST be asserted as a
+test over the whole state space, not argued in prose: it is the only thing standing between the trim and
+a person with no route to *explain an account that cannot be opened*, *the missing-phrase explainer*, or
+*remove the account*.
+
+Both surfaces are built from ONE pure model (`dig_app_core::tray_menu` for the rules and the menu,
+`dig_app_core::window_model` for the window's arrangement of the same rows) so these rules are testable
+independently of any desktop, and so the two surfaces cannot disagree about what a verb means, whether it
+is offered, or what its label says.
 
 **A menu item is an ACTION (MUST).** A native menu offers only clickable items, separators and submenus, so
 read-only text can be rendered ONLY as a disabled item — and a disabled item means *"something you cannot do
@@ -523,12 +549,23 @@ menu so they can never disagree:
 The ICON MUST NOT be the only signal for a state: the tooltip MUST name the same state in words, so a user
 who cannot distinguish the icons — or whose theme flattens them — still has the fact (§6.6).
 
-The menu MUST offer actions to: show the status details, set up an account, restore from a recovery phrase,
-unlock, lock now, reveal the recovery phrase, back up the recovery phrase (copy it to the clipboard, and
-save it to a file — §3.1a Backup, offered only on an unlocked recoverable account), copy the DIG ID, copy
-the receive address, show the wallet,
-replace the account (with a new one, or with one from a recovery phrase), remove the account, explain an
-account that cannot be opened, explain the on-chain DID, open the log folder, and quit.
+The SURFACES TOGETHER MUST offer actions to: show the status details, set up an account, restore from a
+recovery phrase, unlock, lock now, reveal the recovery phrase, back up the recovery phrase (copy it to the
+clipboard, and save it to a file — §3.1a Backup, offered only on an unlocked recoverable account), copy
+the DIG ID, copy the receive address, show the wallet, replace the account (with a new one, or with one
+from a recovery phrase), remove the account, explain an account that cannot be opened, explain the
+on-chain DID, open the log folder, and quit. On a host with no window the TRAY MENU MUST offer all of
+them; on a host with one, the four trimmed rows plus the window MUST, which the reachability rule above
+turns into a machine check.
+
+**The four rows that never move (MUST).** Whatever else is trimmed, the tray MUST keep: the one thing
+this account needs right now, opening a URN, opening the app window, and quitting. Each is there because
+putting it behind the window breaks something specific — first-run setup and every way back into a wedged
+account would be behind a window a new user has no reason to open; reading content is what the product is
+FOR and MUST NOT wait on a window (§6.0); the window row is the route to everything else; and a tray app
+that cannot be quit from the tray is a trap. The first of the four is POLYMORPHIC — its verb is set up,
+unlock, set a password, explain, or lock now, decided by the account's state — so the ROW is fixed while
+the ACTION is not, and it is never empty.
 
 **The Wallet surface (MUST).** The Wallet submenu offers the receive address, the balance reading, and a
 wallet window, and nothing that moves money — no tray action spends, so the absence of `Send` is
@@ -548,11 +585,14 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   zero for an unreadable balance is how a person
   concludes their funds are gone, and is forbidden. This holds on the MENU ROW as well as in the window: a
   glanced-at numeral is where the mistaken conclusion is cheapest to reach.
-- **The balance MUST be on the submenu itself, in every account state, and MUST be enabled.** "What do I
-  hold?" is half of what a wallet is for, so the answer MUST NOT require opening a window first; the row
-  carries the reading (or the short reason) as its LABEL and opens the window holding the full reason. It
-  is the row that makes the no-account case say there is nothing to show rather than presenting a lone
-  explainer. A greyed balance row is forbidden for the reason all greyed rows are (§3.1c).
+- **The balance MUST be READ, never merely linked to, on whichever surface carries the wallet.** "What do
+  I hold?" is half of what a wallet is for, so the answer MUST NOT sit behind a further click from the
+  wallet surface the person has already reached. On a host with no window that surface is the Wallet
+  SUBMENU, and the reading (or the short reason) MUST be the LABEL of an enabled row there, which opens
+  the window holding the full reason. On a host with a window it is the Wallet TAB, and the reading MUST
+  be the tab's own heading — page content, not a row, because "open the wallet window" is meaningless
+  inside the wallet window. Either way the no-account case says there is nothing to show rather than
+  presenting a lone explainer, and a greyed balance is forbidden for the reason all greyed rows are.
 - **A row MUST NOT name a remedy the user's state cannot perform.** "Unlock first" is correct for a locked
   account, meaningless on a host that cannot hold an account, wrong for an account that has never been
   given a password, and actively misleading for one that cannot be opened — where unlocking is precisely
@@ -572,7 +612,8 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
 The account has SIX user-visible states, and an implementation MUST distinguish all of them: this host cannot
 hold an account · no account yet · locked · **cannot be opened** · unlocked · unlocked with no recovery
 phrase. The fourth is the one most easily and most damagingly collapsed into "locked" — see the rule below.
-The top level MUST stay short; rare and destructive verbs belong in a submenu, not beside `Lock now`.
+The tray's top level MUST stay short; rare and destructive verbs belong in a submenu or a window tab,
+never beside `Lock now`.
 
 Minting an on-chain DID is deliberately NOT among them: no implementation exists (§3.1b), so the menu
 offers an EXPLANATION of what a DID is and costs, and there is no tray action that mints — the absence is
@@ -738,6 +779,42 @@ Binding rules:
   decoding is fallible and its failure MUST be logged and then tolerated, leaving a working, fully
   actionable tray without a picture. A user whose agent refused to start over artwork would be far worse
   served than one whose tray is briefly unlabelled.
+
+### 3.1c-0 The app window (normative)
+
+Where the host can open one (§3.1c), the app window carries the twenty-five verbs the tray no longer
+shows. It is arranged by `dig_app_core::window_model` from the SAME group builders the tray menu composes,
+so no rule about which rows exist or whether they are enabled is decided twice.
+
+- **It is a tab surface, not a second product.** Tabs are listed in a sidebar, which becomes a strip of
+  chips when the window is too narrow for a column; the selected tab's sections fill the rest. The window
+  MUST reuse the consent windows' own palette, type and chrome, because a person who has just been shown a
+  DIG consent prompt MUST be able to recognise this as the same application.
+- **A tab is emitted only if it renders something (MUST).** There is no greyed tab: a tab a person cannot
+  open is a route removed, and every tab that could plausibly be greyed is the sole route to something. A
+  tab with nothing to show is not drawn at all.
+- **A row that cannot be used is DISABLED and says why (MUST).** Never hidden, and never re-worded by the
+  window — the label is the same one the tray would show, and it MUST name the remedy that state actually
+  has (§3.1c). A disabled row MUST NOT be clickable.
+- **Every tab answers all four async questions (MUST, §6.4).** Success, still-loading, could-not-be-read,
+  and nothing-to-do MUST each be expressible and MUST be decided in the model rather than by the renderer,
+  so each is testable. The three that are not plain success MUST be complete sentences, and the two that
+  report a PROBLEM MUST name the remedy.
+- **The selection MUST survive a repaint (MUST).** The window rebuilds from a snapshot a poll rewrites on
+  a timer the user cannot see; a selection recomputed per frame would move under someone reading a tab. A
+  selection whose tab stops being emitted MUST fall back to one that is, never to nothing.
+- **A window row MUST dispatch exactly as a tray click does (MUST).** The same action type, the same
+  single worker, the same one-at-a-time refusal — so a window row and a tray click can never open two
+  destroy flows at once. A row MUST NOT run a blocking prompt inline: the window is drawn on the one
+  prompt thread, so doing so would block that thread inside its own frame waiting on the queue that frame
+  owns, which is a deadlock with no timeout.
+- **Opening the window MUST return as soon as the request is queued (MUST)**, never when the window
+  closes — a handler held for the window's lifetime would refuse every later action, including quit.
+  Asking again while it is open MUST bring the existing window forward rather than opening a second.
+- **The window is NOT a consent surface.** It MUST NOT be always-on-top, MUST NOT carry a deadline, and
+  MUST NOT count as a raised consent surface. A consent prompt raised over it is drawn as its own
+  window, keeps its always-on-top posture, and the window behind it MUST become visibly inert — dimmed,
+  taking no clicks, and offering a way to bring the prompt back for a person who has buried it.
 
 ### 3.1c-i The global shortcut to the URN bar (normative)
 

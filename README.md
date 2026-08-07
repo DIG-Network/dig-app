@@ -28,18 +28,24 @@ Those 24 words ARE your account. The account itself is sealed to this machine (i
 in your OS credential store), so the words are the only thing that can bring it back on a different
 computer. Nobody, including DIG, can recover an account without them.
 
-**Everything about your account is in the tray menu** — there is nothing you need a terminal for. The menu
-holds actions only; how DIG is doing is shown by the tray ICON, by its tooltip, and by
-**Status and details…**, which opens a window with the whole picture (including the node's full diagnosis
-when something is wrong).
+**Everything about your account is in the DIG app** — there is nothing you need a terminal for. The tray
+menu keeps the four things you want in one click — whatever your account needs right now, **Open URL…**,
+**Open App**, and **Quit DIG** — and **Open App** opens a window with the rest, arranged in tabs down the
+left: Status, Account, Security, Wallet, Apps and Cache. How DIG is doing is shown by the tray ICON, by
+its tooltip, and by **Status and details…** on the Status tab, which has the whole picture (including the
+node's full diagnosis when something is wrong).
 
-From the menu you can:
+On a computer where DIG cannot open that window — macOS today, and Linux with no desktop session — the
+tray menu keeps everything instead, so nothing is ever out of reach. If the window ever fails to open, the
+full menu comes straight back.
+
+From the app you can:
 
 - **show your recovery phrase again**, behind your Windows Hello / Touch ID / system authentication
 - **copy your DIG ID**, and lock the session
 - **Restore from a recovery phrase** — DIG asks for your 24 words in a real window, hidden as you type with
   a *Show the words while I type* box when you want to check them
-- under **Manage my DIG Account**: replace this account with a new one, replace it with an account from a
+- on the **Account** tab: replace this account with a new one, replace it with an account from a
   recovery phrase, or remove it from this computer
 
 Replacing or removing an account destroys the key it is sealed to, so DIG asks you to authenticate first —
@@ -52,7 +58,8 @@ Reading DIG content needs no account, so it should cost one keystroke. Press **A
 application and a bar floats up in the middle of your screen: paste a `chia://` or `urn:dig:chia:` link,
 press Enter, and it opens in your browser served by your own DIG node. Escape closes it, and so does
 clicking somewhere else. The same thing is in the tray menu as **Open URL…**, which shows the shortcut
-beside it.
+beside it — one of the four rows that never leaves the tray, because reading content should never wait on
+a window.
 
 On Windows, Alt+Space normally opens the current window's Move / Size / Close menu, and while DIG is
 running it opens the DIG bar instead. If you would rather keep the window menu, set your own chord in

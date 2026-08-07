@@ -27,11 +27,14 @@
 //! [`Answer::Approve`].
 
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use egui::{Key, Rect, Vec2};
 use zeroize::Zeroizing;
+
+mod panes;
+mod shell;
 
 use super::paint;
 use super::render::{
@@ -195,10 +198,57 @@ struct Job {
     reply: SyncSender<Outcome>,
 }
 
+/// One piece of work for the prompt thread.
+///
+/// The queue carries two shapes because this thread hosts two kinds of window and there is only one
+/// event loop in the process to host them on (see [`start`]). They are an enum rather than a flag on
+/// [`Job`] because almost nothing [`serve_with`] does to a prompt is right for the shell:
+///
+/// * a [`Job`] is a CONSENT surface — a blocked caller, a deadline, a fail-closed answer, and a
+///   [`Raised`](crate::confirm::surface::Raised) count the tray reads;
+/// * a [`Shell`] is an ordinary application window the person opened, with none of those.
+///
+/// Keeping them apart is what lets the prompt arm of the loop stay exactly as it was.
+enum Work {
+    /// A consent prompt, drawn for a caller who is blocked waiting on the answer.
+    Prompt(Job),
+    /// The app shell, which pumps this same queue for prompts while it is up — see [`shell`].
+    Shell(AppWindow),
+}
+
+/// A request to open the app shell, and everything the shell needs from the app around it.
+///
+/// The two callbacks are how the window stays a RENDERER. It reads the live view through one and
+/// hands verbs back through the other, so it never learns what an action does — which is what keeps
+/// [`crate::tray_menu::TrayAction`] a single enum with a single `dispatch`, and keeps the window and
+/// the tray incapable of disagreeing about what a verb means.
+pub struct AppWindow {
+    /// Where the shell's theme preference persists.
+    ///
+    /// The same store every prompt uses, so the window and a prompt raised over it can never be in
+    /// different themes.
+    pub theme: ThemeChoice,
+    /// The live tray snapshot, read once per frame.
+    ///
+    /// A closure rather than a value because the window outlives any one snapshot: the node poll
+    /// rewrites the view every five seconds, an unlock changes the account state, and a window
+    /// showing the state at the moment it opened would quietly become a lie.
+    ///
+    /// **It must not block.** It runs inside the frame on the one prompt thread.
+    pub view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
+    /// Hand a verb to whatever runs verbs — for dig-app, the single action worker.
+    ///
+    /// **It must not block, and must never call the blocking `ask` itself.** Doing so would block the
+    /// prompt thread inside its own frame, waiting on the queue that frame owns: a guaranteed
+    /// deadlock. A window row dispatches exactly as a tray click does, on a worker, and this
+    /// callback is the seam that makes that the only expressible option.
+    pub act: Arc<dyn Fn(crate::tray_menu::TrayAction) + Send + Sync>,
+}
+
 /// The long-lived thread every prompt window is drawn on.
 struct PromptThread {
     /// Guarded because `Sender` is not `Sync` and the confirmer is shared across connection tasks.
-    tx: Mutex<mpsc::Sender<Job>>,
+    tx: Mutex<mpsc::Sender<Work>>,
 }
 
 /// The process's one prompt thread, started on first use.
@@ -242,7 +292,7 @@ fn start() -> Option<PromptThread> {
     // life of the process, so there is no last owner for an `Arc` to free.
     let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
 
-    let (tx, rx) = mpsc::channel::<Job>();
+    let (tx, rx) = mpsc::channel::<Work>();
     std::thread::Builder::new()
         .name("dig-prompt-window".to_owned())
         // A prompt draws a full GL surface and lays out a page of text; the default 2 MiB is enough
@@ -385,8 +435,11 @@ fn watch(drawing: &'static Mutex<Option<Vigil>>, tick: Duration) {
 /// Hence the panic guard. It is the same shape `session_lock` uses around its own callback: catch
 /// the unwind, put the platform back in a usable state, answer the caller the fail-closed way, say
 /// so in the log, and take the next job.
-fn serve(rx: &Receiver<Job>, drawing: &'static Mutex<Option<Vigil>>) {
-    serve_with(rx, drawing, |job| draw_watched(job, Some(drawing)));
+fn serve(rx: &Receiver<Work>, drawing: &'static Mutex<Option<Vigil>>) {
+    serve_with(rx, drawing, |work, queue| match work {
+        Work::Prompt(job) => draw_watched(job, Some(drawing)),
+        Work::Shell(shell) => shell::draw(shell, queue),
+    });
 }
 
 /// [`serve`]'s loop over an arbitrary way of drawing a window.
@@ -396,11 +449,23 @@ fn serve(rx: &Receiver<Job>, drawing: &'static Mutex<Option<Vigil>>) {
 /// demand. With the drawing injected, the survival rules are exercised on a CI host with no display
 /// and no window, against the same loop production runs.
 fn serve_with(
-    rx: &Receiver<Job>,
+    rx: &Receiver<Work>,
     drawing: &Mutex<Option<Vigil>>,
-    draw: impl Fn(Job) -> Option<Outcome>,
+    draw: impl Fn(Work, &Receiver<Work>) -> Option<Outcome>,
 ) {
-    while let Ok(job) = rx.recv() {
+    while let Ok(work) = rx.recv() {
+        // The shell is served on its own path ([`serve_shell`]) rather than through the arm below.
+        // It raises no consent surface, has no deadline, and has nobody blocked on it, so not one of
+        // the rules that follow applies to it — and keeping it out of them entirely is what leaves
+        // the consent arm exactly as it was.
+        let job = match work {
+            Work::Shell(shell) => {
+                serve_shell(shell, rx, &draw);
+                continue;
+            }
+            Work::Prompt(job) => job,
+        };
+
         let reply = job.reply.clone();
         let wants_text = job.wants_text;
         let title = job.screen.title.clone();
@@ -427,7 +492,7 @@ fn serve_with(
         // counting it would disable the claim over an empty screen.
         let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _on_screen = crate::confirm::surface::Raised::now();
-            draw(job)
+            draw(Work::Prompt(job), rx)
         }));
 
         // Whatever happened in there, this window is over: stop the watchdog nudging a context
@@ -458,6 +523,50 @@ fn serve_with(
     // Only reachable once every `PromptThread` sender has been dropped, which outside a test means
     // the process is going away.
     tracing::debug!("the DIG prompt thread has no senders left and is stopping");
+}
+
+/// Draw the app shell, and survive it.
+///
+/// # What deliberately does NOT apply here
+///
+/// Four of [`serve_with`]'s rules are absent, and each absence is the point rather than an omission:
+///
+/// * **No [`Raised`](crate::confirm::surface::Raised).** The shell is not a consent surface. Counting
+///   it would disable the tray's foreground claim (dig-app#91) for the whole life of a window a
+///   person may leave open all day — and a disabled claim looks exactly like a working one.
+/// * **No [`Vigil`].** A window somebody opened on purpose must never be forced shut by a watchdog.
+///   The shell has no deadline and must never acquire one.
+/// * **No staleness check.** Nobody is blocked on a shell, so there is no caller who can have given
+///   up while it sat in the queue.
+/// * **No reply.** There is no channel to answer, so there is nothing here to fail closed. The
+///   prompts the shell hosts each keep their own reply, and the shell fails those closed itself
+///   (see [`shell::ActivePrompt::settle`]).
+///
+/// # What does apply, and why
+///
+/// The panic guard, for exactly the reason the prompt arm has one. The prompt thread cannot be
+/// replaced ([`start`]), so a shell that took it down on the way out would be a silent, permanent
+/// consent lockout for the rest of the session. A panic costs the shell and only the shell; the loop
+/// goes back to `recv` and takes the next job.
+fn serve_shell(
+    shell: AppWindow,
+    rx: &Receiver<Work>,
+    draw: &impl Fn(Work, &Receiver<Work>) -> Option<Outcome>,
+) {
+    let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        draw(Work::Shell(shell), rx)
+    }));
+    if drawn.is_err() {
+        // A panic inside `run_native` skips the flush at the end of the draw, leaving the window
+        // undestroyed on Windows — the same hole the prompt arm plugs here.
+        flush_deferred_window_destruction();
+        // An observed failure, not a suspicion: the tray goes back to its full form so the verbs the
+        // trim moved into this window stay reachable (`crate::window_host`).
+        crate::window_host::note_open_failure();
+        tracing::error!(
+            "the DIG app window panicked; it was closed and the prompt thread kept alive"
+        );
+    }
 }
 
 /// The fail-closed answer for a window that produced none. Never an approval, never empty text.
@@ -617,6 +726,20 @@ fn draw_watched(job: Job, watched: Option<&Mutex<Option<Vigil>>>) -> Option<Outc
 /// Draining the queue here is exactly what the NEXT `run_native` on this thread would have done —
 /// which is why the *previous* prompt's window always vanished and only the LAST one stayed. Doing
 /// it eagerly is what makes a window disappear when the person answers it.
+///
+/// # The precondition, which is the part a later change can silently break
+///
+/// The defect is **a loop that has stopped pumping**, not a window that will not close. Whenever
+/// this thread's event loop is STILL RUNNING, it dispatches the private destroy message itself
+/// within a frame or two and no drain is needed — measured on Windows 11 at 25–45 ms, 15 of 15
+/// cycles, for a prompt viewport dismissed while [`shell::ShellApp`]'s loop kept running. That is
+/// why the shell needs no call here for the prompts it hosts, and it is the whole difference between
+/// this working and dig_ecosystem#2038.
+///
+/// So: **a refactor that stops the parent loop while a child viewport is still up re-opens #2038**,
+/// and the call sites below — after `run_native` has returned, and after a panic skipped that return
+/// — are the two places where the pump has genuinely stopped. Do not remove them, and do not assume
+/// a new call site is unnecessary without checking whether a loop is still running on this thread.
 #[cfg(target_os = "windows")]
 fn flush_deferred_window_destruction() {
     // Drained, not budgeted: the destroy message is somewhere in the queue and a bound that ran out
@@ -1508,6 +1631,33 @@ impl BrandedWindow {
     }
 }
 
+/// Open the app shell, and return as soon as it has been QUEUED.
+///
+/// `true` means the request reached the prompt thread; `false` means this host cannot draw a window
+/// at all (see `start`) or the thread is gone. The caller is deliberately NOT blocked for the life
+/// of the window: the shell is a window a person leaves open, and a tray click that did not return
+/// until they closed it would hold the dispatching worker — and therefore Quit — for as long as it
+/// was up.
+///
+/// # Why there is no answer to wait for
+///
+/// A shell produces no `Outcome`. It hosts prompts, and each of those keeps and answers its own
+/// reply channel; nothing about the shell itself is a consent decision.
+pub fn open_app_window(window: AppWindow) -> bool {
+    let Some(host) = host() else {
+        tracing::debug!("this host cannot draw the DIG app window");
+        crate::window_host::note_open_failure();
+        return false;
+    };
+    let queued = poisonless(&host.tx).send(Work::Shell(window));
+    if queued.is_err() {
+        tracing::error!("the DIG prompt thread is gone; the DIG app window cannot be opened");
+        crate::window_host::note_open_failure();
+        return false;
+    }
+    true
+}
+
 /// Hand `screen` to the prompt thread and wait for the answer.
 ///
 /// Every failure — no prompt thread, a poisoned lock, a dead thread — returns `None`, which callers
@@ -1545,7 +1695,7 @@ fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> 
     // working used to do so in complete silence — the user found it, not the log
     // (dig_ecosystem#2074) — and silence is what made a five-minute wedge indistinguishable from a
     // permanent one.
-    let queued = poisonless(&host.tx).send(job);
+    let queued = poisonless(&host.tx).send(Work::Prompt(job));
     if queued.is_err() {
         tracing::error!(
             prompt = %title,
@@ -4098,8 +4248,8 @@ mod tests {
     // ---------------------------------------------------------------------------------------
 
     /// A prompt thread running `drawn`, plus a way to put jobs through it and read the answers.
-    struct Lane {
-        jobs: mpsc::Sender<Job>,
+    pub(super) struct Lane {
+        jobs: mpsc::Sender<Work>,
         worker: Option<std::thread::JoinHandle<()>>,
         store: ThemeChoice,
         _dir: tempfile::TempDir,
@@ -4112,13 +4262,24 @@ mod tests {
 
     impl Lane {
         /// Start the REAL [`serve_with`] loop on its own thread, drawing with `drawn`.
+        /// Start a lane whose PROMPTS are drawn by `drawn` and which never opens a shell.
         fn serving(drawn: impl Fn(Job) -> Option<Outcome> + Send + 'static) -> Self {
+            Self::serving_work(move |work, _queue| match work {
+                Work::Prompt(job) => drawn(job),
+                Work::Shell(_) => None,
+            })
+        }
+
+        /// Start a lane over the whole of [`Work`], for the rules that are about the SHELL.
+        pub(super) fn serving_work(
+            drawn: impl Fn(Work, &Receiver<Work>) -> Option<Outcome> + Send + 'static,
+        ) -> Self {
             // Taken BEFORE the thread starts, so no window of this lane's can be drawn while
             // another lane's assertions are running.
             let exclusive = crate::confirm::surface::one_surface_at_a_time();
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
-            let (jobs, rx) = mpsc::channel::<Job>();
+            let (jobs, rx) = mpsc::channel::<Work>();
             // Leaked so the loop can hold it for its whole life without borrowing from this frame.
             let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
             let worker = std::thread::Builder::new()
@@ -4138,8 +4299,20 @@ mod tests {
         ///
         /// The wait is bounded so a loop that died reports as a FAILED ASSERTION rather than hanging
         /// the suite — a hung test says "something is wrong somewhere", a failed one names it.
-        fn ask(&self) -> Result<Outcome, RecvTimeoutError> {
+        pub(super) fn ask(&self) -> Result<Outcome, RecvTimeoutError> {
             self.ask_expiring_at(Instant::now() + PATIENT + ANSWER_GRACE)
+        }
+
+        /// Ask the loop to open the app shell. Returns as soon as it is QUEUED — nothing is
+        /// blocked on a shell, so there is no answer to wait for.
+        pub(super) fn open_shell(&self) {
+            self.jobs
+                .send(Work::Shell(AppWindow {
+                    theme: self.store.clone(),
+                    view: Arc::new(crate::tray_menu::TrayView::default),
+                    act: Arc::new(|_| {}),
+                }))
+                .expect("the prompt thread is still accepting jobs");
         }
 
         /// Queue a confirm whose caller gives up at `over_by`, and wait for the answer.
@@ -4149,14 +4322,14 @@ mod tests {
         fn ask_expiring_at(&self, over_by: Instant) -> Result<Outcome, RecvTimeoutError> {
             let (reply, answers) = sync_channel(1);
             self.jobs
-                .send(Job {
+                .send(Work::Prompt(Job {
                     screen: sign_screen(),
                     wants_text: false,
                     theme: self.store.clone(),
                     deadline: PATIENT,
                     over_by,
                     reply,
-                })
+                }))
                 .expect("the prompt thread is still accepting jobs");
             answers.recv_timeout(Duration::from_secs(10))
         }
@@ -4452,14 +4625,14 @@ mod tests {
         {
             let (reply, answers) = sync_channel(1);
             lane.jobs
-                .send(Job {
+                .send(Work::Prompt(Job {
                     screen: sign_screen(),
                     wants_text: false,
                     theme: lane.store.clone(),
                     deadline: PATIENT,
                     over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                     reply,
-                })
+                }))
                 .expect("the job is queued");
             drop(answers);
         }
@@ -4596,7 +4769,7 @@ mod tests {
         let _exclusive = crate::confirm::surface::one_surface_at_a_time();
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
-        let (jobs, rx) = mpsc::channel::<Job>();
+        let (jobs, rx) = mpsc::channel::<Work>();
         let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
         let worker = std::thread::Builder::new()
             .name("dig-prompt-window".to_owned())
@@ -4606,7 +4779,7 @@ mod tests {
 
         for nth in 1..=3 {
             let (reply, answers) = sync_channel(1);
-            jobs.send(Job {
+            jobs.send(Work::Prompt(Job {
                 screen: sign_screen(),
                 wants_text: false,
                 theme: store.clone(),
@@ -4615,7 +4788,7 @@ mod tests {
                 deadline: Duration::from_millis(900),
                 over_by: Instant::now() + Duration::from_millis(900) + ANSWER_GRACE,
                 reply,
-            })
+            }))
             .expect("the job is queued");
             let answer = answers.recv_timeout(Duration::from_secs(30));
             assert!(

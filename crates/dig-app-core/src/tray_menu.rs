@@ -237,6 +237,80 @@ pub struct TrayView {
 }
 
 impl TrayView {
+    /// Whether `other` would render the same tray menu as `self`.
+    ///
+    /// The shell's tick calls this to decide whether to rebuild and repaint. A field that changes what
+    /// the menu shows, but which this says nothing about, freezes the tray on stale rows until some
+    /// OTHER field happens to move — and if nothing else moves, forever.
+    ///
+    /// # Why it destructures instead of listing fields
+    ///
+    /// This began as a hand-spelled `a.x == b.x && …` chain in the shell binary, and it silently fell
+    /// three fields behind [`TrayView`]: `window_host`, `hotkey` and `address_derivation_failed`. The
+    /// `window_host` omission was the expensive one — when a window fails to open, `window_host`
+    /// degrades to [`WindowHost::Unavailable`] so the tray can re-expand from four rows to the full
+    /// menu, and that is the ONLY thing standing between a failed open and a user with no route to
+    /// `RemoveAccount`, `FixMissingPhrase` or `OpenLogs`. The degrade fired correctly and the repaint
+    /// gate discarded it (dig_ecosystem#2253).
+    ///
+    /// So the field list is not written down twice. Destructuring binds every field by name, and
+    /// `..` is deliberately absent: **adding a field to [`TrayView`] fails to compile here**, which
+    /// forces whoever adds it to decide whether it changes what the menu shows. A comparison that
+    /// cannot fall behind the struct is worth more than one that is merely correct today.
+    pub fn renders_same_as(&self, other: &Self) -> bool {
+        // No `..` — see above. Each binding is compared exactly once, in declaration order.
+        let Self {
+            running,
+            node_connected,
+            node,
+            account,
+            profile_id,
+            receive_address,
+            address_derivation_failed,
+            balance,
+            did,
+            second_factor,
+            cache,
+            hotkey,
+            menu_suppressed,
+            window_host,
+        } = self;
+
+        running == &other.running
+            && node_connected == &other.node_connected
+            && node == &other.node
+            && account == &other.account
+            && profile_id == &other.profile_id
+            // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
+            // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
+            && receive_address == &other.receive_address
+            // A failed derivation changes what the Wallet row SAYS, so it must repaint even though the
+            // address itself is `None` in both snapshots.
+            && address_derivation_failed == &other.address_derivation_failed
+            // The Wallet row RENDERS the balance, so a reading that changed must repaint — without
+            // this the first real figure would never replace "Balance not known" until something
+            // else in the menu happened to move (dig_ecosystem#2206).
+            && balance == &other.balance
+            && did == &other.did
+            // Without this the Security submenu would keep offering "Set up..." after an enrolment
+            // completed, because nothing else in the view changed and the menu would not repaint.
+            && second_factor == &other.second_factor
+            // The Cache submenu shows live usage on its parent label and marks the current cap, so a
+            // changed cap or a moved usage figure must repaint — otherwise a just-applied new cap would
+            // not show as current until something else changed (dig_ecosystem#2002).
+            && cache == &other.cache
+            // The `Open URL…` row's label carries the registered chord, so a hotkey that was taken or
+            // released changes the row's text.
+            && hotkey == &other.hotkey
+            // A menu refused for want of foreground rights explains a click that produced nothing,
+            // so the tooltip must repaint the moment it flips -- in both directions, since the
+            // recovery is what tells the user their next click will work (dig-app#86).
+            && menu_suppressed == &other.menu_suppressed
+            // The trim switch itself. See the module doc above: without this, a degraded host keeps a
+            // four-row tray and the window that was supposed to hold the other 25 verbs never opens.
+            && window_host == &other.window_host
+    }
+
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
     ///
     /// `pub(crate)`: the window model builds from the same snapshot and must read the same default
@@ -597,6 +671,16 @@ pub enum TrayAction {
     /// off the prompt thread (#78) with no argv identity — never a silent no-op when it is absent
     /// (§6.1), which today is the only reachable case.
     LaunchApp(crate::apps::AppId),
+    /// Open the tabbed app window — the surface that holds every verb the tray no longer shows
+    /// (dig_ecosystem#2253).
+    ///
+    /// Distinct from [`LaunchApp`](Self::LaunchApp), which starts a *separate sibling binary*, and from
+    /// [`ShowStatus`](Self::ShowStatus), which opens a one-shot notice. This opens THIS app's own
+    /// window, in this process, on the one prompt thread.
+    ///
+    /// The handler acks on OPEN, never on close: the window lives for as long as the person wants it,
+    /// and a worker held for that whole time would refuse every later click — including `Quit`.
+    OpenWindow,
     /// Open the log folder, the escape hatch when something is wrong and the menu cannot say why.
     OpenLogs,
     /// Stop the agent and exit.
@@ -926,9 +1010,76 @@ pub fn details_text(view: &TrayView) -> String {
 ///   these are not negotiable against menu length.
 /// - **One contextual row, ONLY when the account needs action** — see `urgent_account_row`. Without it a
 ///   brand-new user would have to find "Set up my DIG Account" inside a submenu, which is exactly the
-///   first-run dead end #1800 removed and #1826 exists to prevent. In the ordinary unlocked state it is
-///   absent and the menu is exactly the spine.
+///   first-run dead end #1800 removed and #1826 exists to prevent.
+///
+/// # This shape is what a host with NO WINDOW gets
+///
+/// On a host that can open the app window ([`WindowHost::Available`]) the menu is
+/// `trimmed` to four rows instead, and everything above lives in the window. The full menu
+/// below is not legacy: it is what macOS and a display-less Linux session still render, and what any
+/// host falls back to the moment an attempt to open the window is seen to fail
+/// ([`crate::window_host`]).
 pub fn build(view: &TrayView) -> MenuModel {
+    match view.window_host {
+        WindowHost::Available => trimmed(view),
+        WindowHost::Unavailable => full(view),
+    }
+}
+
+/// The four-row menu a host with a working app window gets (dig_ecosystem#2253).
+///
+/// ```text
+/// <the one thing this account needs right now>
+/// ──
+/// Open URL…
+/// Open App
+/// Quit DIG
+/// ```
+///
+/// # Why exactly these four, and not a shorter or longer list
+///
+/// Each is here because putting it behind the window would break something specific.
+///
+/// - **The account row** ([`urgent_account_row`]) is the whole first-run journey and every way back
+///   into a wedged account. Its verb changes with the state — set up, unlock, set a password, explain,
+///   lock now — so the ROW is fixed while the ACTION is not. Making a new user find "Set up my DIG
+///   Account" inside a window they have no reason to open is the dead end #1800 removed.
+/// - **`Open URL…`** is what the product is FOR, needs no account, and is bound to a global shortcut.
+///   Reading content must never wait on a window (§6.0 — consumption stays frictionless).
+/// - **`Open App`** is the route to the other twenty-five verbs. Without it the trim is a deletion.
+/// - **`Quit DIG`** is the escape. A tray app you cannot leave from the tray is a defect.
+///
+/// `Open the log folder` moves into the window's Status tab, which is only safe because
+/// [`crate::window_host`] degrades on an OBSERVED failure: if the window will not open, this menu is
+/// not what renders, and the log folder is back on the tray where a broken window cannot hide it.
+fn trimmed(view: &TrayView) -> MenuModel {
+    let mut rows = Vec::new();
+    if let Some(row) = urgent_account_row(&view.account()) {
+        rows.push(row);
+        rows.push(MenuRow::Separator);
+    }
+    rows.push(MenuRow::action(
+        TrayAction::Open,
+        open_url_label(view),
+        true,
+    ));
+    rows.push(MenuRow::action(
+        TrayAction::OpenWindow,
+        OPEN_WINDOW_LABEL,
+        true,
+    ));
+    rows.push(MenuRow::action(TrayAction::Quit, "Quit DIG", true));
+    MenuModel { rows }
+}
+
+/// The `Open App` row's label.
+///
+/// "App", not "window": the person opened DIG, and this is DIG. It deliberately does not collide with
+/// the Apps tab's `LaunchApp`, which starts a *different program*.
+const OPEN_WINDOW_LABEL: &str = "Open App";
+
+/// The whole menu, for a host with no app window to move it into.
+fn full(view: &TrayView) -> MenuModel {
     let account = view.account();
     let mut rows = Vec::new();
 
@@ -992,6 +1143,16 @@ pub fn build(view: &TrayView) -> MenuModel {
 /// This is the row that keeps a first run from being a scavenger hunt. `Set up my DIG Account…` living only
 /// inside **Manage Account** would put the single thing a new user must do behind a submenu they have no
 /// reason to open.
+///
+/// # Why `Unlocked` is no longer `None` (dig_ecosystem#2253)
+///
+/// It used to be: an unlocked, working account owes the user nothing, and inventing a row for it was
+/// noise on a menu that had `Lock now` under **Security** anyway. The trim removes Security from the
+/// tray, so `None` here would leave the trimmed menu with an EMPTY first slot in the one state most
+/// people are in — and no way to lock without opening a window first. `Lock now` fills it, which is
+/// also what makes "unlock/lock" literally true of this row.
+///
+/// The row is therefore present in every state, and the trimmed menu is four rows in every state.
 fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
     match account {
         // The one honestly-disabled row left on the top level, and it names its own reason (rule 3).
@@ -1020,8 +1181,11 @@ fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
             "This account cannot be opened — what to do…",
             true,
         )),
-        // Unlocked and working: nothing is owed. Locking lives under Security.
-        AccountState::Unlocked { .. } => None,
+        // Unlocked and working: nothing is owed, so the row offers the one thing a person with a
+        // working account routinely wants — see the note above on why this is no longer `None`.
+        AccountState::Unlocked { .. } => {
+            Some(MenuRow::action(TrayAction::LockNow, "Lock now", true))
+        }
     }
 }
 
@@ -1444,6 +1608,15 @@ pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<
 
 /// One preset row's label, marking the preset that is the node's CURRENT cap so the active choice is
 /// visible at a glance, and tagging the default so a person can find it deliberately.
+///
+/// # Why the mark is a word and not a tick
+///
+/// It was `✓ current`. The tray got that glyph from the operating system's own menu font; the app
+/// window (dig_ecosystem#2253) draws the SAME label in the Space Grotesk stack, which has no U+2713 —
+/// so the gallery photographed a tofu box beside the active cap, and the one row a person is looking
+/// for was the one marked with a rendering error. A word needs no glyph coverage anywhere, and it is
+/// what a screen reader would have had to say regardless: this file's own chrome already prefers "a
+/// word, not a glyph" for exactly that reason.
 fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
     use crate::cache::{format_cap, DEFAULT_CACHE_CAP_BYTES};
     let mut label = format_cap(bytes);
@@ -1451,7 +1624,7 @@ fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
         label.push_str(" (default)");
     }
     if bytes == current_cap {
-        label.push_str("  ✓ current");
+        label.push_str(" — current");
     }
     label
 }
@@ -1536,6 +1709,94 @@ impl fmt::Display for AccountState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every field of [`TrayView`] forces a repaint when it changes.**
+    ///
+    /// [`TrayView::renders_same_as`] is the shell's entire repaint gate: a `true` skips the rebuild
+    /// and the tray keeps drawing the previous menu. A field it fails to compare freezes whatever that
+    /// field controls until something ELSE happens to move — and if nothing else moves, permanently.
+    ///
+    /// This is a table over every field rather than a case for the interesting ones, because the
+    /// failure has now happened three times on three different fields (#2206 balance, #2002 cache,
+    /// dig-app#86 menu_suppressed) and a fourth time on `window_host`, where it made the tray trim
+    /// irreversible: the window failed to open, the host degraded to `Unavailable` so the tray could
+    /// re-expand, and the gate discarded the change — leaving four rows and no way back to
+    /// `RemoveAccount`, `FixMissingPhrase` or `OpenLogs` (dig_ecosystem#2253).
+    ///
+    /// Each case moves ONE field off its default and asserts the two snapshots do not compare equal.
+    /// The exhaustive destructure in `renders_same_as` stops a NEW field being forgotten; this stops a
+    /// listed one being compared wrongly.
+    #[test]
+    fn every_field_of_the_view_forces_a_repaint_when_it_changes() {
+        let base = TrayView::default();
+        /// One field's name and a change to it that the tray must notice.
+        type FieldChange = (&'static str, fn(&mut TrayView));
+
+        let cases: Vec<FieldChange> = vec![
+            ("running", |v| v.running = true),
+            ("node_connected", |v| v.node_connected = true),
+            ("node", |v| v.node = "dig.local".to_string()),
+            ("account", |v| v.account = Some(AccountState::Locked)),
+            ("profile_id", |v| v.profile_id = Some("dig1x".to_string())),
+            ("receive_address", |v| {
+                v.receive_address = Some("xch1x".to_string())
+            }),
+            ("address_derivation_failed", |v| {
+                v.address_derivation_failed = true
+            }),
+            ("balance", |v| {
+                v.balance = crate::wallet::overview::BalanceReading::Known(
+                    crate::wallet::overview::Balances {
+                        xch_mojos: 1,
+                        dig_units: 0,
+                    },
+                )
+            }),
+            ("did", |v| v.did = Some("did:chia:x".to_string())),
+            ("second_factor", |v| v.second_factor = true),
+            ("cache", |v| {
+                v.cache = Some(crate::cache::CacheSnapshot {
+                    cap_bytes: 1,
+                    used_bytes: 0,
+                })
+            }),
+            ("hotkey", |v| {
+                v.hotkey = Some(crate::hotkey::HotkeyState::Unavailable {
+                    hotkey: Default::default(),
+                    reason: "taken".to_string(),
+                })
+            }),
+            ("menu_suppressed", |v| v.menu_suppressed = true),
+            ("window_host", |v| v.window_host = WindowHost::Unavailable),
+        ];
+
+        for (field, mutate) in &cases {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert!(
+                !base.renders_same_as(&changed),
+                "`{field}` changed and the tray would NOT repaint — whatever it controls is frozen \
+                 until some other field happens to move"
+            );
+            // Symmetric, so a comparison that only reads one side is caught too.
+            assert!(
+                !changed.renders_same_as(&base),
+                "`{field}` is compared in one direction only"
+            );
+        }
+
+        // The table is only a guard if it is complete. `renders_same_as` destructures exhaustively, so
+        // the field count is fixed at compile time; this pins the table to it.
+        assert_eq!(
+            14,
+            cases.len(),
+            "TrayView gained or lost a field — add or remove its case above"
+        );
+        assert!(
+            base.renders_same_as(&base.clone()),
+            "an unchanged view must not force a repaint, or the tray rebuilds on every tick"
+        );
+    }
 
     /// **Regression, dig_ecosystem#2128 — the account survived every restart; the tray did not.**
     ///
@@ -1663,9 +1924,13 @@ mod tests {
                 cap_bytes: crate::cache::GIB,
                 used_bytes: 350 * crate::cache::MIB,
             }),
-            // Not the subject of this suite: a window host is assumed available, as it is on every CI
-            // runner. The `Unavailable` fallback is exercised by `tray_menu`'s own tests instead.
-            window_host: WindowHost::Available,
+            // **`Unavailable` on purpose.** This suite describes the FULL menu — every submenu, every
+            // verb — and that is exactly what a host with no app window renders (macOS, and any Linux
+            // session with no display server). It is not a legacy shape: it is what those hosts get,
+            // and what ANY host falls back to when opening the window is seen to fail
+            // (`crate::window_host`). The four-row trim a windowed host gets has its own tests, which
+            // set this to `Available` explicitly.
+            window_host: WindowHost::Unavailable,
         }
     }
 
@@ -1889,7 +2154,7 @@ mod tests {
                 assert_eq!(
                     model.offers(action),
                     unlocked,
-                    "{action:?} in {account:?}: pairing seals under the account key, so an unlocked                      account is its real precondition"
+                    "{action:?} in {account:?}: pairing seals under the account key, so an unlocked account is its real precondition"
                 );
                 if model.offers(action) {
                     assert!(
@@ -2432,13 +2697,17 @@ mod tests {
                 "{action:?} is part of the fixed spine and must stay on the top level: {top_level:?}"
             );
         }
+        // `LockNow` IS on the top level now, and that is the deliberate change dig_ecosystem#2253
+        // made: the trimmed menu's first slot must never be empty, and an unlocked account's one
+        // routine want is to lock. It sits beside the escapes; the DESTRUCTIVE verbs asserted above
+        // still do not, which is the property this test is actually about.
         assert!(
-            !top_level.contains(&TrayAction::LockNow),
-            "locking belongs under Security, not beside the escapes: {top_level:?}"
+            top_level.contains(&TrayAction::LockNow),
+            "the unlocked state's row must be Lock now: {top_level:?}"
         );
         assert!(
             menu.is_enabled(TrayAction::LockNow),
-            "…but it must still be reachable there"
+            "…and it must be usable"
         );
     }
 
@@ -3282,8 +3551,15 @@ mod tests {
     /// address gating.
     #[test]
     fn an_unreported_account_reads_the_same_in_the_wallet_submenu_as_an_absent_one() {
+        // The submenu only exists on a host with no app window; elsewhere this content is the
+        // Wallet TAB. `TrayView::default()` is otherwise exactly the pre-first-report state this
+        // test is about, so only the host is overridden.
+        let startup = TrayView {
+            window_host: WindowHost::Unavailable,
+            ..TrayView::default()
+        };
         let unreported = MenuModel {
-            rows: submenu(&build(&TrayView::default()), "Wallet"),
+            rows: submenu(&build(&startup), "Wallet"),
         };
         let labels: Vec<String> = every_action(&unreported)
             .into_iter()
@@ -3619,34 +3895,186 @@ mod tests {
         }
     }
 
-    /// **Nothing reads `window_host` yet — so `build()` must be byte-identical for both values,
-    /// on every account state (dig_ecosystem#2253).**
+    // ---- The trim (dig_ecosystem#2253). ----
+
+    /// **A host with an app window gets exactly four action rows, in every account state.**
     ///
-    /// This is the test that gives the field-not-`cfg!` decision teeth: the whole reason
-    /// `window_host` is plain data on `TrayView` rather than a `cfg!(target_os = ...)` inside the
-    /// model is that BOTH values must be exercisable by ordinary `cargo test` on every platform.
-    /// A field nothing ever sets to `Unavailable` in a test would make that claim unearned — this
-    /// constructs both and proves today's `build()` cannot tell them apart. PR4 is what teaches it
-    /// to: the moment the trim reads this field, one of these two menus will stop matching the
-    /// other, and THIS test is what will fail and point at the diff.
+    /// Counted from the RENDERED menu rather than from a list this test also writes: a count derived
+    /// from the same constant the builder uses would agree with any bug the builder had. Separators
+    /// are excluded because a separator is not a row a person can click, and the promise is about
+    /// what they can click.
     #[test]
-    fn window_host_is_plumbed_but_unread_build_is_identical_for_both_values() {
+    fn a_windowed_host_gets_four_rows_in_every_account_state() {
         for account_state in EVERY_STATE {
-            let available = TrayView {
+            let view = TrayView {
                 window_host: WindowHost::Available,
                 ..view(account_state.clone())
             };
-            let unavailable = TrayView {
+            let menu = build(&view);
+            let actions: Vec<TrayAction> = menu
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    MenuRow::Action { action, .. } => Some(*action),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                actions.len(),
+                4,
+                "{account_state:?}: the trimmed tray must be four rows, not {actions:?}"
+            );
+            assert!(
+                menu.rows
+                    .iter()
+                    .all(|row| !matches!(row, MenuRow::Submenu { .. })),
+                "{account_state:?}: the trimmed tray has no submenus left to open"
+            );
+            // The last three are fixed. The first is polymorphic — that is the whole point of
+            // `urgent_account_row` — so it is checked by state below rather than pinned here.
+            assert_eq!(
+                &actions[1..],
+                &[TrayAction::Open, TrayAction::OpenWindow, TrayAction::Quit],
+                "{account_state:?}: read, the way in, and the way out are not negotiable"
+            );
+        }
+    }
+
+    /// **The first row always names the one thing THIS account needs**, and the verb differs by state.
+    ///
+    /// Pinned per state, because the row being merely PRESENT is what a `SetUpAccount`-everywhere bug
+    /// would also satisfy — and offering "Set up my DIG Account" to someone whose account is simply
+    /// locked is worse than offering nothing.
+    #[test]
+    fn the_trimmed_trays_first_row_is_the_verb_that_state_actually_needs() {
+        let expected = [
+            (AccountState::Unsupported, TrayAction::SetUpAccount),
+            (AccountState::Absent, TrayAction::SetUpAccount),
+            (AccountState::Locked, TrayAction::Unlock),
+            (AccountState::NeedsPassword, TrayAction::SetAccountPassword),
+            (AccountState::Unopenable, TrayAction::ExplainUnopenable),
+            (
+                AccountState::Unlocked { recoverable: true },
+                TrayAction::LockNow,
+            ),
+            (
+                AccountState::Unlocked { recoverable: false },
+                TrayAction::LockNow,
+            ),
+        ];
+        assert_eq!(
+            expected.len(),
+            EVERY_STATE.len(),
+            "a state was added without deciding what its urgent row says"
+        );
+        for (account_state, action) in expected {
+            let view = TrayView {
+                window_host: WindowHost::Available,
+                ..view(account_state.clone())
+            };
+            let first = build(&view)
+                .rows
+                .into_iter()
+                .find_map(|row| match row {
+                    MenuRow::Action { action, .. } => Some(action),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{account_state:?}: the trimmed tray has no first row"));
+            assert_eq!(first, action, "{account_state:?}: wrong urgent row");
+        }
+    }
+
+    /// **A host with NO app window keeps the whole menu**, because the tray is then the only surface.
+    ///
+    /// The control for the trim tests above: without it, a `build()` that trimmed unconditionally
+    /// would pass every one of them while stranding macOS and every display-less Linux session.
+    #[test]
+    fn a_windowless_host_keeps_the_full_menu() {
+        for account_state in EVERY_STATE {
+            let windowless = TrayView {
                 window_host: WindowHost::Unavailable,
                 ..view(account_state.clone())
             };
+            let windowed = TrayView {
+                window_host: WindowHost::Available,
+                ..view(account_state.clone())
+            };
+            let full = build(&windowless);
+            let trimmed = build(&windowed);
 
-            assert_eq!(
-                build(&available),
-                build(&unavailable),
-                "{account_state:?}: build() must not yet depend on window_host — PR4 is what \
-                 teaches it to, and this assertion is what will then fail"
+            assert_ne!(
+                full, trimmed,
+                "{account_state:?}: the two hosts must render differently, or nothing was trimmed"
             );
+            assert!(
+                full.rows
+                    .iter()
+                    .any(|row| matches!(row, MenuRow::Submenu { .. })),
+                "{account_state:?}: a windowless host lost its submenus and has nowhere left to go"
+            );
+            for escape in [TrayAction::OpenLogs, TrayAction::Quit] {
+                assert!(
+                    full.is_enabled(escape),
+                    "{account_state:?}: {escape:?} must stay on a tray that is the only surface"
+                );
+            }
+            // `OpenWindow` is the one verb that must NOT be offered here: a row that opens a window
+            // this host cannot open is a control guaranteed to do nothing, which is the dead end
+            // dig_ecosystem#1800 removed.
+            assert!(
+                !full.offers(TrayAction::OpenWindow),
+                "{account_state:?}: a host with no window must not offer to open one"
+            );
+        }
+    }
+
+    /// **Every action the full menu offers is either kept on the trimmed tray or reachable in the
+    /// window.** The reachability invariant, asserted from the TRAY's side.
+    ///
+    /// `window_model` states the same property from the window's side over a much wider fixture set;
+    /// this one exists because the trim lives HERE, and a change to `trimmed` that dropped a spine
+    /// row would otherwise only be caught in another module's suite.
+    #[test]
+    fn the_trim_strands_nothing() {
+        use crate::window_model::{build as window, Tab, SUBSUMED_BY_TAB, TRAY_SPINE};
+        for account_state in EVERY_STATE {
+            let view = TrayView {
+                window_host: WindowHost::Available,
+                ..view(account_state.clone())
+            };
+            let windowless = TrayView {
+                window_host: WindowHost::Unavailable,
+                ..view.clone()
+            };
+
+            let mut reachable: Vec<TrayAction> = build(&view)
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    MenuRow::Action { action, .. } => Some(*action),
+                    _ => None,
+                })
+                .collect();
+            reachable.extend(window(&view).tabs.iter().flat_map(Tab::actions));
+            reachable.extend(SUBSUMED_BY_TAB.iter().map(|(action, _)| *action));
+
+            for (_, offered) in action_ids(&build(&windowless).rows) {
+                assert!(
+                    reachable.contains(&offered),
+                    "{account_state:?}: {offered:?} is offered on a windowless host and reachable \
+                     nowhere once the tray is trimmed"
+                );
+            }
+            // Every kept row is a declared spine action, so the spine and the trim cannot drift.
+            for kept in build(&view).rows.iter().filter_map(|row| match row {
+                MenuRow::Action { action, .. } => Some(*action),
+                _ => None,
+            }) {
+                assert!(
+                    TRAY_SPINE.contains(&kept),
+                    "{account_state:?}: {kept:?} was kept on the tray but is not in TRAY_SPINE"
+                );
+            }
         }
     }
 }

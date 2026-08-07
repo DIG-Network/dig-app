@@ -94,6 +94,48 @@ impl<A: Send + 'static> ActionWorker<A> {
     /// `false` means another action is already in flight and this one was DROPPED — deliberately, see
     /// the module docs. Never blocks.
     pub fn submit(&self, action: A) -> bool {
+        self.submitter().submit(action)
+    }
+
+    /// A cheap, cloneable way to submit from somewhere that does not own the worker.
+    ///
+    /// The app window needs one: a row clicked there runs the same verb a tray click does, on this
+    /// same single worker, so one custody action can never overlap another whichever surface started
+    /// it. The window is drawn on the prompt thread and cannot own the worker, so it holds this.
+    pub fn submitter(&self) -> Submitter<A> {
+        Submitter {
+            submit: self.submit.clone(),
+            busy: Arc::clone(&self.busy),
+        }
+    }
+
+    /// Whether an action is in flight right now.
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    /// Whether a handler has asked the app to stop.
+    pub fn stop_requested(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+}
+
+/// A handle that can submit to an [`ActionWorker`] without owning it.
+///
+/// Carries the same one-at-a-time reservation, so a window row and a tray click contend for the one
+/// worker exactly as two tray clicks do — a second custody flow is refused, never queued behind the
+/// first. That refusal is the property; see the module docs for why queueing would be wrong.
+#[derive(Clone)]
+pub struct Submitter<A> {
+    /// Capacity 1, and only ever holding an action `busy` has already reserved the worker for.
+    submit: SyncSender<A>,
+    /// Shared with the worker, so a reservation taken here is seen there.
+    busy: Arc<AtomicBool>,
+}
+
+impl<A> Submitter<A> {
+    /// Hand `action` to the worker. Returns whether it was accepted. Never blocks.
+    pub fn submit(&self, action: A) -> bool {
         if self
             .busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -108,16 +150,6 @@ impl<A: Send + 'static> ActionWorker<A> {
             return false;
         }
         true
-    }
-
-    /// Whether an action is in flight right now.
-    pub fn is_busy(&self) -> bool {
-        self.busy.load(Ordering::SeqCst)
-    }
-
-    /// Whether a handler has asked the app to stop.
-    pub fn stop_requested(&self) -> bool {
-        self.stopping.load(Ordering::SeqCst)
     }
 }
 
@@ -278,5 +310,40 @@ mod tests {
             "the worker refused work after a panic"
         );
         runs.recv().expect("the later action still ran");
+    }
+
+    /// **A [`Submitter`] contends for the SAME worker**, so a window row cannot start a second
+    /// custody flow beside a tray click.
+    ///
+    /// Asserted in both directions. A submitter with its own reservation would pass a one-direction
+    /// test while allowing exactly the two-destroy-flows sequence the single worker exists to
+    /// prevent.
+    #[test]
+    fn a_submitter_shares_the_workers_one_at_a_time_reservation() {
+        let (started, running) = channel::<()>();
+        let (release, wait) = channel::<()>();
+        let worker = ActionWorker::spawn(move |_: u8| {
+            started.send(()).expect("the test is listening");
+            wait.recv().expect("the test releases the handler");
+            false
+        });
+        let submitter = worker.submitter();
+
+        assert!(worker.submit(1), "the first action is accepted");
+        running.recv().expect("the handler started");
+
+        assert!(
+            !submitter.submit(2),
+            "a submitter took work while the worker was already busy"
+        );
+
+        release.send(()).expect("the handler is waiting");
+        while worker.is_busy() {
+            std::thread::yield_now();
+        }
+
+        // The control: with nothing in flight the submitter DOES get through, so the refusal above
+        // is the reservation and not a submitter that never works.
+        assert!(submitter.submit(3), "the submitter never submits anything");
     }
 }

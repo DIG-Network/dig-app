@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(
             refusing_label(Some("Create a new account")),
             "Create a new account",
-            "the backend's generic label overrode the content's — so the control that creates a              brand-new account is drawn as \"Cancel\""
+            "the backend's generic label overrode the content's — so the control that creates a brand-new account is drawn as \"Cancel\""
         );
         assert_eq!(
             refusing_label(None),
