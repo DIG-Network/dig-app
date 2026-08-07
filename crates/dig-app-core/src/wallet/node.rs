@@ -25,7 +25,7 @@
 //! an OPEN read for exactly that reason. Sending (which does involve custody) is #2207's, and this
 //! engine deliberately refuses it.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dig_node_control_interface::error::ControlErrorCode;
@@ -49,6 +49,25 @@ use super::WalletError;
 /// received payment shows up while the user is still looking, and long enough that an idle tray
 /// costs the node six reads a minute.
 pub const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long ONE balance read may take before it is abandoned.
+///
+/// Deliberately not [`control::DEFAULT_PROBE_TIMEOUT`]. That constant answers a different question
+/// — how long a §5.3 tier may take to prove it is alive before the ladder falls through — and it is
+/// sized (1500 ms) so a stalled tier cannot hold the run loop. A balance is not a liveness probe: it
+/// is a chain read the node may serve from a public HTTPS chain source, and dig_ecosystem#2325
+/// measured the live node taking 2534 ms and 6014 ms to answer one. Under the probe budget that read
+/// failed 100% of the time on a healthy machine.
+///
+/// Twenty seconds is a little over three times the slowest reading ever measured — headroom for a
+/// tail this small a sample cannot have seen, rather than a value fitted to it. Past that the read is
+/// abandoned and the surface says the node did not answer in time; because the poller never runs two
+/// reads for one address at once, a run of slow reads cannot pile up, and the next observation simply
+/// starts a fresh one.
+///
+/// Nothing waits on this budget: the read runs on its own thread (see [`NodeBalance`]), so a long
+/// tail costs a late figure, never a frozen tray.
+pub const BALANCE_READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Reads balances from a running dig-node over the loopback control plane.
 ///
@@ -160,6 +179,12 @@ fn classify(failure: ControlFailure) -> WalletError {
         ControlFailure::Transport(ControlCallError::Unreachable(detail)) => {
             WalletError::EngineUnreachable(detail)
         }
+        // The socket connected and the read overran. Kept separate from `Unreachable` all the way to
+        // the sentence a person reads, because only `Unreachable` is evidence about whether a node
+        // exists (dig_ecosystem#2325).
+        ControlFailure::Transport(ControlCallError::TimedOut(detail)) => {
+            WalletError::EngineTimedOut(detail)
+        }
         ControlFailure::Transport(e) => WalletError::Engine(e.to_string()),
         ControlFailure::Rejected(e) if CANNOT_SERVE.contains(&e.data.code.as_str()) => {
             WalletError::EngineUnsupported
@@ -174,16 +199,46 @@ fn classify(failure: ControlFailure) -> WalletError {
 
 /// The account's balance, polled from the node no more often than [`REFRESH_INTERVAL`].
 ///
-/// Lives beside the tray's status handle and is asked for a reading on every repaint; it answers
-/// from its cache until the cache is stale, then does the real read. Holding the cache HERE rather
-/// than in the shell is deliberate: the shell is a binary, and a binary is a test-free zone.
+/// Lives beside the tray's status handle and is asked for a reading on every repaint. It answers
+/// from its cache and does the real read on a WORKER THREAD, so a caller never waits on the node:
+/// the tray repaints twice a second and a chain read takes seconds (dig_ecosystem#2325), so a
+/// blocking read would either freeze the tray or force a budget too small for the read it makes.
+/// While a read is in flight the answer is [`BalanceReading::Pending`] — or, if this address already
+/// has a reading, that reading, so a routine refresh does not flicker the figure away.
+///
+/// Holding all of this HERE rather than in the shell is deliberate: the shell is a binary, and a
+/// binary is a test-free zone.
 pub struct NodeBalance {
-    cached: Mutex<Option<Cached>>,
+    /// Shared with the worker threads, which is why it is an [`Arc`] rather than a plain field.
+    state: Arc<Mutex<PollState>>,
     refresh: Duration,
     timeout: Duration,
     /// Reads the node's control token. Injected so a test presents its own fake node's token
     /// instead of whatever this machine's real install holds.
     read_token: fn() -> Option<String>,
+}
+
+/// What the poller knows between reads.
+#[derive(Default)]
+struct PollState {
+    /// The last reading taken, whichever address it was for.
+    cached: Option<Cached>,
+    /// The address a worker is currently reading for, if any.
+    ///
+    /// This is the de-duplication: without it every repaint during a multi-second read would start
+    /// another pair of chain reads on a node that is already busy answering the first.
+    in_flight: Option<String>,
+}
+
+impl PollState {
+    /// The reading held for `address` and how long ago it was taken — `None` when the last reading
+    /// was for a different account, because that is a different question with a different answer.
+    fn reading_for(&self, address: &str) -> Option<(BalanceReading, Duration)> {
+        self.cached
+            .as_ref()
+            .filter(|c| c.address == address)
+            .map(|c| (c.reading.clone(), c.taken.elapsed()))
+    }
 }
 
 /// A reading and the address + instant it was taken for.
@@ -195,7 +250,7 @@ struct Cached {
 
 impl Default for NodeBalance {
     fn default() -> Self {
-        Self::new(REFRESH_INTERVAL, control::DEFAULT_PROBE_TIMEOUT)
+        Self::new(REFRESH_INTERVAL, BALANCE_READ_TIMEOUT)
     }
 }
 
@@ -203,7 +258,7 @@ impl NodeBalance {
     /// A poller refreshing at most every `refresh`, allowing `timeout` per read.
     pub fn new(refresh: Duration, timeout: Duration) -> Self {
         Self {
-            cached: Mutex::new(None),
+            state: Arc::new(Mutex::new(PollState::default())),
             refresh,
             timeout,
             read_token: control::load_control_token,
@@ -223,56 +278,89 @@ impl NodeBalance {
         }
     }
 
-    /// The freshest reading for `address`, given the current link to the node.
+    /// The freshest reading for `address`, given the current link to the node. **Never blocks.**
     ///
-    /// Re-reads when the cache is stale, when the address changed (a different account's balance is
-    /// a different question), or when nothing has been read yet. With no address there is nothing to
-    /// ask about, so the cache is dropped and the caller — [`WalletOverview::of_tray`] — states the
-    /// address's own reason instead.
+    /// Starts a background read when the cache is stale, when the address changed (a different
+    /// account's balance is a different question), or when nothing has been read yet — and answers
+    /// straight away from what it already has. With no address there is nothing to ask about, so the
+    /// cache is dropped and the caller — [`WalletOverview::of_tray`] — states the address's own
+    /// reason instead.
     pub fn observe(&self, link: &EngineState, address: Option<&str>) -> BalanceReading {
         let Some(address) = address else {
-            *self.lock() = None;
+            self.lock().cached = None;
             return BalanceReading::default();
         };
 
-        let mut cached = self.lock();
-        if let Some(hit) = cached
-            .as_ref()
-            .filter(|c| c.address == address && c.taken.elapsed() < self.refresh)
-        {
-            return hit.reading.clone();
+        let mut state = self.lock();
+        if let Some((fresh, age)) = state.reading_for(address) {
+            if age < self.refresh {
+                return fresh;
+            }
         }
 
-        let reading = self.read(link, address);
-        *cached = Some(Cached {
-            address: address.to_string(),
-            reading: reading.clone(),
-            taken: Instant::now(),
-        });
-        reading
+        self.start_read(&mut state, link, address);
+        // Whatever is there now: the reading a link with no node produced without any I/O, or the
+        // previous figure for this address while its refresh runs — showing that beats blanking a
+        // known balance to "checking" every ten seconds. Only a first read for an address has
+        // genuinely nothing to state.
+        state
+            .reading_for(address)
+            .map(|(reading, _)| reading)
+            .unwrap_or(BalanceReading::Pending)
     }
 
-    /// Ask the node — or, when there is no node, say so without inventing a failure.
-    fn read(&self, link: &EngineState, address: &str) -> BalanceReading {
-        let engine = match link {
-            EngineState::Disconnected { .. } => None,
+    /// Begin a read for `address` unless one is already under way for it.
+    ///
+    /// A disconnected link needs no thread: the answer involves no I/O and is recorded immediately,
+    /// so "DIG could not reach a node" is never left waiting behind a `Pending`.
+    fn start_read(&self, state: &mut PollState, link: &EngineState, address: &str) {
+        let endpoint = match link {
+            EngineState::Disconnected { .. } => {
+                state.cached = Some(Cached {
+                    address: address.to_string(),
+                    reading: WalletOverview::read(
+                        AddressReading::Known(address.to_string()),
+                        &ChainSource::Absent,
+                    )
+                    .balance,
+                    taken: Instant::now(),
+                });
+                return;
+            }
             // The endpoint the status probe ALREADY resolved off the §5.3 ladder, so the balance and
             // the status line can never describe two different nodes.
-            EngineState::Connected { endpoint, .. } => Some(NodeWalletEngine::new(
-                endpoint.clone(),
-                (self.read_token)(),
-                self.timeout,
-            )),
+            EngineState::Connected { endpoint, .. } => endpoint.clone(),
         };
-        let source = match &engine {
-            Some(engine) => ChainSource::Ready(engine),
-            None => ChainSource::Absent,
-        };
-        WalletOverview::read(AddressReading::Known(address.to_string()), &source).balance
+        if state.in_flight.as_deref() == Some(address) {
+            return;
+        }
+        state.in_flight = Some(address.to_string());
+
+        let shared = Arc::clone(&self.state);
+        let address = address.to_string();
+        let engine = NodeWalletEngine::new(endpoint, (self.read_token)(), self.timeout);
+        std::thread::spawn(move || {
+            let reading = WalletOverview::read(
+                AddressReading::Known(address.clone()),
+                &ChainSource::Ready(&engine),
+            )
+            .balance;
+            let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+            state.cached = Some(Cached {
+                address: address.clone(),
+                reading,
+                taken: Instant::now(),
+            });
+            // Cleared only if it is still OUR read: the account may have changed while we waited,
+            // in which case a later worker owns the slot and must not be cancelled by this one.
+            if state.in_flight.as_deref() == Some(address.as_str()) {
+                state.in_flight = None;
+            }
+        });
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Cached>> {
-        self.cached.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, PollState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -481,6 +569,82 @@ mod tests {
         assert_eq!(ask(&engine, Asset::Xch).ok(), Some(XCH_MOJOS));
     }
 
+    /// **The defect dig_ecosystem#2325 reported, at the engine seam.** A node that is up, connected
+    /// and simply slower than the budget must not be classified as an absent one.
+    ///
+    /// The delay is 20× the budget so the outcome cannot turn on scheduling noise, and
+    /// [`a_read_slower_than_a_probe_budget_still_yields_a_balance`] is the control that keeps this
+    /// from passing for a trivial reason: the SAME slow fixture, given a chain-read budget, must
+    /// produce the figure.
+    #[test]
+    fn a_node_that_answers_late_times_out_rather_than_looking_absent() {
+        let node = FakeNode::serving_wallet_slowly(
+            WalletReply::Balance {
+                xch: XCH_MOJOS,
+                dig: DIG_UNITS,
+                synced: true,
+            },
+            Duration::from_secs(4),
+        );
+        let engine =
+            NodeWalletEngine::new(node.endpoint(), fake_token(), Duration::from_millis(200));
+        let error = ask(&engine, Asset::Xch).expect_err("the answer arrives after the budget");
+        assert!(
+            matches!(error, WalletError::EngineTimedOut(_)),
+            "a late node is not an absent one; got {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("no DIG node"),
+            "the error may not claim the node is missing: {error}"
+        );
+    }
+
+    /// **The regression itself**: a read that takes longer than the LADDER PROBE budget, but well
+    /// inside the balance budget, yields a real figure.
+    ///
+    /// The fixture's delay is deliberately chosen from the constants rather than picked: it is past
+    /// [`control::DEFAULT_PROBE_TIMEOUT`] — the budget the shipped app wrongly used — and far inside
+    /// [`BALANCE_READ_TIMEOUT`]. Against the shipped code this fixture produced
+    /// [`WalletError::EngineUnreachable`] and the user was told no node was running.
+    #[test]
+    fn a_read_slower_than_a_probe_budget_still_yields_a_balance() {
+        let node = FakeNode::serving_wallet_slowly(
+            WalletReply::Balance {
+                xch: XCH_MOJOS,
+                dig: DIG_UNITS,
+                synced: true,
+            },
+            control::DEFAULT_PROBE_TIMEOUT + Duration::from_millis(250),
+        );
+        let engine = NodeWalletEngine::new(node.endpoint(), fake_token(), BALANCE_READ_TIMEOUT);
+        assert_eq!(ask(&engine, Asset::Xch).ok(), Some(XCH_MOJOS));
+    }
+
+    /// **The budget is pinned from both sides against the measurement that produced it.**
+    ///
+    /// dig_ecosystem#2325 measured the live node answering an authenticated, valid-address balance
+    /// read in 6014 ms and 2534 ms. A bound asserted only from below could be satisfied by any
+    /// value at all; the lower assertion is what says the SHIPPED budget was provably too small, and
+    /// the upper one keeps this from being "raise it until the test passes".
+    #[test]
+    fn the_balance_budget_covers_the_slowest_read_ever_measured() {
+        const SLOWEST_MEASURED: Duration = Duration::from_millis(6014);
+
+        assert!(
+            control::DEFAULT_PROBE_TIMEOUT < SLOWEST_MEASURED,
+            "the probe budget must remain a probe budget — if it grew past a chain read, the \
+             fall-through this constant exists for has been slowed to fix the wrong problem"
+        );
+        assert!(
+            BALANCE_READ_TIMEOUT >= SLOWEST_MEASURED * 3,
+            "a chain read seen at {SLOWEST_MEASURED:?} needs tail headroom, not a hairline pass"
+        );
+        assert!(
+            BALANCE_READ_TIMEOUT <= Duration::from_secs(30),
+            "a budget this large stops being a budget"
+        );
+    }
+
     /// Nothing listening is "no node is running", not "the read failed" — different remedies.
     #[test]
     fn nothing_listening_reads_as_no_node() {
@@ -518,7 +682,7 @@ mod tests {
         let poller =
             NodeBalance::with_token_reader(REFRESH_INTERVAL, Duration::from_secs(5), fake_token);
         assert_eq!(
-            poller.observe(&connected_to(&node), Some(ADDRESS)),
+            settle(&poller, &connected_to(&node)),
             BalanceReading::Known(Balances {
                 xch_mojos: XCH_MOJOS,
                 dig_units: DIG_UNITS,
@@ -526,7 +690,174 @@ mod tests {
         );
     }
 
-    /// With no node, the poller says "no node is running" without inventing a read failure.
+    /// **A read in flight must not hold the caller** (dig_ecosystem#2325).
+    ///
+    /// `observe` is called from the tray's twice-a-second repaint, so a chain read given a
+    /// chain-sized budget can only be honest if nobody waits on it. The fixture's node is slow but
+    /// perfectly healthy; the assertion is on ELAPSED TIME, which is the one thing a synchronous
+    /// implementation cannot fake — it would return `Known` here, after the full delay.
+    #[test]
+    fn an_unfinished_read_returns_at_once_as_pending_and_lands_later() {
+        const DELAY: Duration = Duration::from_millis(1_500);
+        let node = FakeNode::serving_wallet_slowly(
+            WalletReply::Balance {
+                xch: XCH_MOJOS,
+                dig: DIG_UNITS,
+                synced: true,
+            },
+            DELAY,
+        );
+        let poller =
+            NodeBalance::with_token_reader(REFRESH_INTERVAL, Duration::from_secs(5), fake_token);
+        let link = connected_to(&node);
+
+        let started = Instant::now();
+        let immediate = poller.observe(&link, Some(ADDRESS));
+        let waited = started.elapsed();
+
+        assert_eq!(
+            immediate,
+            BalanceReading::Pending,
+            "an unfinished read is neither a figure nor a fault"
+        );
+        assert!(
+            waited < DELAY / 2,
+            "the repaint waited {waited:?} on a read that takes {DELAY:?}"
+        );
+        assert_eq!(
+            settle(&poller, &link),
+            BalanceReading::Known(Balances {
+                xch_mojos: XCH_MOJOS,
+                dig_units: DIG_UNITS,
+            }),
+            "the figure must arrive once the node answers"
+        );
+    }
+
+    /// **A refresh does not blank the figure it is refreshing** (dig-app#123 review).
+    ///
+    /// `SPEC.md` requires the caller receive the pending state *or the reading already held for
+    /// that address*, and the whole point of the second half is a figure the user is looking at
+    /// surviving its own ten-second re-read. The nearest wrong implementation returns `Pending` the
+    /// moment a reading goes stale, so the balance blinks to "checking…" on every refresh cycle —
+    /// and no other test can see it, because [`settle`] loops until the answer is not pending and is
+    /// therefore blind to an intermediate blank by construction.
+    ///
+    /// The fixture is built to make that blink unavoidable if it exists: a refresh window shorter
+    /// than the read it triggers, so there is a window in which a read IS in flight for an address
+    /// that already has a figure. The final request count is what keeps the test from passing for
+    /// the wrong reason — a poller that never refreshed at all would return the same stale figure.
+    #[test]
+    fn a_refresh_in_flight_keeps_showing_the_figure_it_is_refreshing() {
+        const READ_TAKES: Duration = Duration::from_millis(600);
+        let node = FakeNode::serving_wallet_slowly(
+            WalletReply::Balance {
+                xch: XCH_MOJOS,
+                dig: DIG_UNITS,
+                synced: true,
+            },
+            READ_TAKES,
+        );
+        // Shorter than one read, so the reading is due a refresh before the refresh can finish.
+        let poller = NodeBalance::with_token_reader(
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            fake_token,
+        );
+        let link = connected_to(&node);
+        let held = BalanceReading::Known(Balances {
+            xch_mojos: XCH_MOJOS,
+            dig_units: DIG_UNITS,
+        });
+        assert_eq!(settle(&poller, &link), held, "the first read must land");
+
+        // Now stale. This observation starts the re-read and must answer with the figure on screen.
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(
+            poller.observe(&link, Some(ADDRESS)),
+            held,
+            "a balance the user is looking at must not blink to 'checking' while it is re-read"
+        );
+        // ...and stays that way for the WHOLE of the re-read, not merely on its first instant.
+        //
+        // Waiting on the server's own count rather than on [`settle`] is the load-bearing choice
+        // here: `settle` returns the moment the answer is not pending, which a stale-but-known
+        // reading already is, so it would return instantly and this loop would never observe the
+        // re-read it is supposed to be watching. Two calls per read, so a completed second read is
+        // four — and the assertion inside the loop is what proves the figure never blinked while it
+        // was happening.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while node.request_count() < 4 && Instant::now() < deadline {
+            assert_eq!(
+                poller.observe(&link, Some(ADDRESS)),
+                held,
+                "the figure blinked away mid-refresh"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            node.request_count() >= 4,
+            "no re-read ever completed, so nothing above was actually exercised: {} calls",
+            node.request_count()
+        );
+    }
+
+    /// **A slow node is asked ONCE**, however many repaints happen while it thinks.
+    ///
+    /// Without in-flight de-duplication the twice-a-second repaint would stack a fresh pair of chain
+    /// reads on top of every unfinished one — the pile-up the generous
+    /// [`BALANCE_READ_TIMEOUT`] would otherwise make possible. Counted at the SERVER.
+    #[test]
+    fn repaints_during_a_slow_read_do_not_stack_more_reads_on_the_node() {
+        let node = FakeNode::serving_wallet_slowly(
+            WalletReply::Balance {
+                xch: XCH_MOJOS,
+                dig: DIG_UNITS,
+                synced: true,
+            },
+            Duration::from_millis(800),
+        );
+        let poller =
+            NodeBalance::with_token_reader(REFRESH_INTERVAL, Duration::from_secs(5), fake_token);
+        let link = connected_to(&node);
+
+        for _ in 0..12 {
+            assert_eq!(
+                poller.observe(&link, Some(ADDRESS)),
+                BalanceReading::Pending
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(settle(&poller, &link), BalanceReading::Known(_)));
+        assert_eq!(
+            node.request_count(),
+            2,
+            "one read means two calls — one per asset — no matter how often the tray repainted"
+        );
+    }
+
+    /// Observe until the poller has something other than a pending read, or give up.
+    ///
+    /// The deadline is generous because it only bounds a HANG: a test that is going to pass does so
+    /// as soon as the fake node answers.
+    fn settle(poller: &NodeBalance, link: &EngineState) -> BalanceReading {
+        settle_for(poller, link, ADDRESS)
+    }
+
+    /// [`settle`], for an account other than the fixture's usual one.
+    fn settle_for(poller: &NodeBalance, link: &EngineState, address: &str) -> BalanceReading {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match poller.observe(link, Some(address)) {
+                BalanceReading::Pending if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                settled => return settled,
+            }
+        }
+    }
+
+    /// With no node, the poller says so without inventing a read failure.
     #[test]
     fn the_poller_reports_no_node_when_disconnected() {
         let poller = NodeBalance::default();
@@ -558,7 +889,7 @@ mod tests {
             fake_token,
         );
         let link = connected_to(&node);
-        let first = poller.observe(&link, Some(ADDRESS));
+        let first = settle(&poller, &link);
         let second = poller.observe(&link, Some(ADDRESS));
 
         assert_eq!(first, second);
@@ -586,8 +917,8 @@ mod tests {
             fake_token,
         );
         let link = connected_to(&node);
-        poller.observe(&link, Some(ADDRESS));
-        poller.observe(&link, Some("xch1someoneelse"));
+        settle(&poller, &link);
+        settle_for(&poller, &link, "xch1someoneelse");
         assert_eq!(
             node.request_count(),
             4,
@@ -609,16 +940,14 @@ mod tests {
             fake_token,
         );
         let link = connected_to(&node);
-        assert!(matches!(
-            poller.observe(&link, Some(ADDRESS)),
-            BalanceReading::Known(_)
-        ));
-        assert!(matches!(
+        assert!(matches!(settle(&poller, &link), BalanceReading::Known(_)));
+        assert_eq!(
             poller.observe(&link, None),
-            BalanceReading::Unknown(_)
-        ));
+            BalanceReading::Pending,
+            "with no address nothing is being asked, which is neither a figure nor a fault"
+        );
         // And the dropped cache is genuinely gone: the next observation asks again.
-        poller.observe(&link, Some(ADDRESS));
+        settle(&poller, &link);
         assert_eq!(node.request_count(), 4);
     }
 
@@ -633,7 +962,7 @@ mod tests {
         let poller =
             NodeBalance::with_token_reader(REFRESH_INTERVAL, Duration::from_secs(5), no_token);
         assert!(matches!(
-            poller.observe(&connected_to(&node), Some(ADDRESS)),
+            settle(&poller, &connected_to(&node)),
             BalanceReading::Known(_)
         ));
     }

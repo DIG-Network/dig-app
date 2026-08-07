@@ -106,6 +106,7 @@ pub mod node {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread::JoinHandle;
+    use std::time::Duration;
 
     use crate::control::CONTROL_TOKEN_HEADER;
 
@@ -124,6 +125,20 @@ pub mod node {
         /// serving it as the OPEN read a real node does (dig_ecosystem#1851) while every other
         /// method stays behind the control token.
         Wallet(WalletReply),
+        /// A healthy node that answers exactly like [`Wallet`](Self::Wallet), but only after
+        /// `delay` — the live node's actual behaviour on a real chain read (dig_ecosystem#2325).
+        ///
+        /// The delay is the ONE knob, deliberately: raised past the client's budget it is a node
+        /// that is up, connected, and simply late; kept under the budget it is the ordinary slow
+        /// read that must still yield a figure. A fixture that only ever closed the socket (as
+        /// [`Silent`](Self::Silent) does) could not tell those two apart, because in both cases the
+        /// client would merely see "no answer".
+        SlowWallet {
+            /// The answer eventually given.
+            reply: WalletReply,
+            /// How long the node takes to give it.
+            delay: Duration,
+        },
     }
 
     /// How a [`FakeNode`] should answer `control.wallet.balance`.
@@ -188,6 +203,11 @@ pub mod node {
         /// with `reply`.
         pub fn serving_wallet(reply: WalletReply) -> Self {
             Self::with_behaviour(Behaviour::Wallet(reply))
+        }
+
+        /// A fake that answers `control.wallet.balance` with `reply`, but only after `delay`.
+        pub fn serving_wallet_slowly(reply: WalletReply, delay: Duration) -> Self {
+            Self::with_behaviour(Behaviour::SlowWallet { reply, delay })
         }
 
         /// A fake with an explicit [`Behaviour`], bound to an ephemeral loopback port.
@@ -284,13 +304,25 @@ pub mod node {
                 Behaviour::Wallet(reply) if method_is_open_read => {
                     (200, wallet_result(reply, asset))
                 }
+                Behaviour::SlowWallet { reply, .. } if method_is_open_read => {
+                    (200, wallet_result(reply, asset))
+                }
                 // Every other `control.*` method is gated exactly as the real node gates it,
                 // otherwise a client that forgot the header would still see a green test.
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),
-                Behaviour::Status | Behaviour::Wallet(_) => (200, status_result()),
+                Behaviour::Status | Behaviour::Wallet(_) | Behaviour::SlowWallet { .. } => {
+                    (200, status_result())
+                }
                 Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
                 Behaviour::Http(code, body) => (*code, body.clone()),
             };
+            // Up, authorized, and simply LATE. The sleep happens after the request is read and
+            // before the reply is written, so the client sees a connection that succeeded and a
+            // read that did not finish -- precisely the state dig_ecosystem#2325 mistook for a
+            // missing node.
+            if let Behaviour::SlowWallet { delay, .. } = &behaviour {
+                std::thread::sleep(*delay);
+            }
             let _ = write!(
                 stream,
                 "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\n\

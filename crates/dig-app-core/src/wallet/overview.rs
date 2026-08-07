@@ -96,16 +96,27 @@ pub struct Balances {
 pub enum BalanceReading {
     /// A balance actually read from a chain source. `0` here means genuinely nothing held.
     Known(Balances),
+    /// A read is under way and has not answered yet.
+    ///
+    /// The third state, and the honest one for the several seconds a chain read takes
+    /// (dig_ecosystem#2325): nothing has failed, so naming a *reason* would invent one. It is not an
+    /// [`Unknown`](Self::Unknown) for that reason — every unknown carries a fault, and "still
+    /// fetching" is not a fault.
+    Pending,
     /// No balance could be read, and which thing was missing.
     Unknown(BalanceUnknown),
 }
 
 impl Default for BalanceReading {
-    /// Before anything has been asked, nothing has answered — which is
-    /// [`BalanceUnknown::NoNode`], not a zero. A `Default` of `Known(0)` would hand every
-    /// not-yet-populated snapshot a balance it never read.
+    /// Before anything has been asked, the balance is [`Pending`](Self::Pending) — not a zero, and
+    /// not a fault either.
+    ///
+    /// It used to default to [`BalanceUnknown::NoNode`], which stated a conclusion about the user's
+    /// computer that no read had been made to support (dig_ecosystem#2325). A `Default` of
+    /// `Known(0)` would be worse still: it would hand every not-yet-populated snapshot a balance it
+    /// never read.
     fn default() -> Self {
-        BalanceReading::Unknown(BalanceUnknown::NoNode)
+        BalanceReading::Pending
     }
 }
 
@@ -115,8 +126,19 @@ pub enum BalanceUnknown {
     /// There is no address to read a balance for — the address's own reason applies first, because
     /// "start your node" is useless advice to someone with no account.
     NoAddress(AddressUnavailable),
-    /// Nothing answered the §5.3 endpoint ladder: no local node is running.
+    /// Nothing answered the §5.3 endpoint ladder, so DIG has no node to ask.
+    ///
+    /// Stated as *DIG could not reach one*, never as *none is running*: the ladder's silence is
+    /// evidence about this app's reach, and a node listening somewhere DIG does not look would make
+    /// the stronger claim false (dig_ecosystem#2325).
     NoNode,
+    /// A node accepted the connection and did not finish the read in time.
+    ///
+    /// Deliberately NOT [`NoNode`](Self::NoNode): the socket connected, so a node is demonstrably
+    /// there and the surface must not send its owner off to start one. This is the state a live user
+    /// was shown as "no DIG node is running" while the Status tab, on the same screen, showed the
+    /// node healthy (dig_ecosystem#2325).
+    NodeTimedOut,
     /// A node answered, but this build of it does not serve wallet chain reads.
     NodeCannotRead,
     /// A node answered and DOES serve wallet reads, but has no live view of the chain to read from.
@@ -273,6 +295,7 @@ fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
 fn why_unread(error: WalletError) -> BalanceUnknown {
     match error {
         WalletError::EngineUnreachable(_) => BalanceUnknown::NoNode,
+        WalletError::EngineTimedOut(_) => BalanceUnknown::NodeTimedOut,
         WalletError::EngineUnsupported => BalanceUnknown::NodeCannotRead,
         WalletError::EngineNotSynced => BalanceUnknown::NotSynced,
         WalletError::EngineNoChainSource => BalanceUnknown::NoChainSource,
@@ -331,6 +354,7 @@ pub fn address_line(address: &AddressReading) -> String {
 /// no unknown can be read as "you hold nothing".
 pub fn balance_line(balance: &BalanceReading) -> String {
     match balance {
+        BalanceReading::Pending => "Balance: checking with your node…".to_string(),
         BalanceReading::Known(held) => format!(
             "Balance: {} $DIG and {} XCH.",
             format_amount(Asset::Dig, held.dig_units),
@@ -357,6 +381,7 @@ pub fn balance_line(balance: &BalanceReading) -> String {
 /// row says the read failed; the window says what the source said.
 pub fn menu_balance_label(balance: &BalanceReading) -> String {
     match balance {
+        BalanceReading::Pending => "Balance: checking…".to_string(),
         BalanceReading::Known(held) => format!(
             "Balance: {} $DIG · {} XCH",
             format_amount(Asset::Dig, held.dig_units),
@@ -389,7 +414,8 @@ fn menu_reason(why: &BalanceUnknown) -> &'static str {
         BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => {
             "your address could not be derived"
         }
-        BalanceUnknown::NoNode => "no DIG node is running",
+        BalanceUnknown::NoNode => "DIG could not reach a node",
+        BalanceUnknown::NodeTimedOut => "your node did not answer in time",
         BalanceUnknown::NodeCannotRead => "this node cannot read balances yet",
         BalanceUnknown::NoChainSource => "your node has no chain connection yet",
         BalanceUnknown::NotSynced => "your node is still syncing",
@@ -426,8 +452,14 @@ fn unknown_reason(why: &BalanceUnknown) -> String {
             "your address could not be derived, so there is nothing to read a balance for.".to_string()
         }
         BalanceUnknown::NoNode => {
-            "no DIG node is running on this computer, and reading a balance needs one. Start the DIG \
-             node and check again."
+            "DIG could not reach a node on this computer, and reading a balance needs one. Status \
+             shows where DIG looked; if your node is running somewhere else, name it there."
+                .to_string()
+        }
+        BalanceUnknown::NodeTimedOut => {
+            "your node did not answer in time. Nothing is wrong with your account, and the figure \
+             appears on its own once a read finishes — a balance is a chain lookup, and a busy node \
+             can take longer than DIG waits."
                 .to_string()
         }
         BalanceUnknown::NodeCannotRead => {
@@ -526,7 +558,7 @@ mod tests {
             !unreadable_line.contains('0'),
             "an unknown balance must never render a numeral: {unreadable_line}"
         );
-        assert!(unreadable_line.contains("no DIG node is running"));
+        assert!(unreadable_line.contains("could not reach a node"));
     }
 
     /// A real balance is reported per asset, in whole coins, from the source's base units.
@@ -562,7 +594,7 @@ mod tests {
         let cases = [
             (
                 WalletOverview::read(known(), &ChainSource::Absent).balance,
-                "no DIG node is running",
+                "could not reach a node",
             ),
             (
                 WalletOverview::read(
@@ -625,6 +657,7 @@ mod tests {
             BalanceUnknown::NoAddress(AddressUnavailable::Unopenable),
             BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed),
             BalanceUnknown::NoNode,
+            BalanceUnknown::NodeTimedOut,
             BalanceUnknown::NodeCannotRead,
             BalanceUnknown::NoChainSource,
             BalanceUnknown::NotSynced,
@@ -669,7 +702,8 @@ mod tests {
             "unlock your account first",
             "your account cannot be opened",
             "your address could not be derived",
-            "no DIG node is running",
+            "DIG could not reach a node",
+            "your node did not answer in time",
             "this node cannot read balances yet",
             "your node has no chain connection yet",
             "your node is still syncing",
@@ -741,6 +775,101 @@ mod tests {
         assert!(
             !labels.iter().any(|label| label.contains("xxxx")),
             "the upstream detail belongs in the window, not the menu: {labels:?}"
+        );
+    }
+
+    /// **The three states dig_ecosystem#2325 collapsed into one wrong sentence.**
+    ///
+    /// A read that overran its budget, a node that is behind the chain, and nothing reachable at all
+    /// are three different facts with three different remedies, and the app was stating the third
+    /// for all of them. Asserted on the produced REASON as well as the words (dig_ecosystem#2320),
+    /// so a future reword cannot quietly re-merge them.
+    #[test]
+    fn a_timeout_a_sync_and_an_unreachable_node_are_three_distinguishable_states() {
+        let reason = |error: fn() -> WalletError| {
+            WalletOverview::read(known(), &ChainSource::Ready(&RefusingEngine(error))).balance
+        };
+        let timed_out = reason(|| WalletError::EngineTimedOut("after 20s".to_string()));
+        let syncing = reason(|| WalletError::EngineNotSynced);
+        let unreachable = WalletOverview::read(known(), &ChainSource::Absent).balance;
+
+        assert_eq!(
+            timed_out,
+            BalanceReading::Unknown(BalanceUnknown::NodeTimedOut)
+        );
+        assert_eq!(syncing, BalanceReading::Unknown(BalanceUnknown::NotSynced));
+        assert_eq!(unreachable, BalanceReading::Unknown(BalanceUnknown::NoNode));
+
+        let lines = [&timed_out, &syncing, &unreachable].map(balance_line);
+        let rows = [&timed_out, &syncing, &unreachable].map(menu_balance_label);
+        assert_eq!(
+            std::collections::HashSet::from(lines.clone()).len(),
+            3,
+            "three facts, three sentences: {lines:?}"
+        );
+        assert_eq!(
+            std::collections::HashSet::from(rows.clone()).len(),
+            3,
+            "three facts, three rows: {rows:?}"
+        );
+    }
+
+    /// **A read that ran out of time says nothing about whether a node is running** — the defect a
+    /// live user hit while the Status tab, on the same screen, showed a healthy node.
+    ///
+    /// The claim is checked over the whole surface (window body AND menu row), because the row is
+    /// what the user saw. The forbidden phrases are the ones that assert node presence either way;
+    /// the timeout knows only that OUR call did not finish.
+    #[test]
+    fn a_timed_out_read_never_claims_the_node_is_missing() {
+        let timed_out = BalanceReading::Unknown(BalanceUnknown::NodeTimedOut);
+        let surfaces = [
+            balance_line(&timed_out),
+            menu_balance_label(&timed_out),
+            window_body(&WalletOverview {
+                address: known(),
+                balance: timed_out.clone(),
+            }),
+        ];
+        for text in surfaces {
+            for forbidden in [
+                "no DIG node is running",
+                "no DIG node",
+                "is not running",
+                "Start the DIG node",
+            ] {
+                assert!(
+                    !text.contains(forbidden),
+                    "a call that overran its budget cannot know this: {text}"
+                );
+            }
+            assert!(
+                text.contains("did not answer in time") || text.contains("did not answer"),
+                "the surface must name what actually happened: {text}"
+            );
+        }
+    }
+
+    /// **A read still in flight is a PENDING state, not a failure.** During the 2.5–6 s a real chain
+    /// read takes, the truthful thing to say is "checking" — and, critically, not a numeral and not
+    /// a reason that sends the user after a fault they do not have.
+    #[test]
+    fn a_read_in_flight_reads_as_checking_rather_than_as_a_failure() {
+        let pending = BalanceReading::Pending;
+        for text in [balance_line(&pending), menu_balance_label(&pending)] {
+            assert!(text.to_lowercase().contains("checking"), "{text}");
+            assert!(
+                !text.chars().any(|c| c.is_ascii_digit()),
+                "a balance not yet read must never show a figure: {text}"
+            );
+            assert!(
+                !text.contains("no DIG node"),
+                "nothing has failed yet: {text}"
+            );
+        }
+        assert_ne!(
+            balance_line(&pending),
+            balance_line(&BalanceReading::Unknown(BalanceUnknown::NoNode))
         );
     }
 
@@ -911,7 +1040,8 @@ mod tests {
             }))
         };
         let cases = [
-            (BalanceUnknown::NoNode, "no DIG node is running"),
+            (BalanceUnknown::NoNode, "could not reach a node"),
+            (BalanceUnknown::NodeTimedOut, "did not answer in time"),
             (
                 BalanceUnknown::NodeCannotRead,
                 "does not read wallet balances yet",
