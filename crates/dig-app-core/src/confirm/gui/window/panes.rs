@@ -644,6 +644,15 @@ mod tests {
             lowest
         }
 
+        /// Every chip the body actually placed, in the model's tab order.
+        ///
+        /// Silently skips a tab it never laid out, so a caller counting rows cannot be misled into
+        /// reading a dropped chip as a row that was not needed — the per-tab assertions are what
+        /// catch the drop.
+        fn chips_ordered(&self, tabs: &[Tab]) -> Vec<Rect> {
+            tabs.iter().filter_map(|tab| self.chip(tab.id)).collect()
+        }
+
         /// Where the body put a tab's chip on the last frame, if it put it anywhere.
         fn chip(&self, id: TabId) -> Option<Rect> {
             self.ctx
@@ -781,6 +790,93 @@ mod tests {
                     body.click(chip.center()),
                     Some(Click::Tab(tab.id)),
                     "at {width} px a click on {:?}'s chip did not select it",
+                    tab.id
+                );
+            }
+        }
+    }
+
+    /// **At the smallest window a person can make, every tab the SHIPPING model emits is clickable
+    /// — Settings included.**
+    ///
+    /// The overflow property above is proved on a synthetic strip: seven equal-length
+    /// `"Configuration"` chips, and `Advanced` standing in for the seventh because that fixture
+    /// predates Settings. That fixture answers "does the strip wrap", which is the layout's
+    /// question. It cannot answer "does the tab I added arrive at the layout at all" — a
+    /// [`crate::window_model::build`] that stopped emitting Settings, or a strip keyed on a list of
+    /// ids that was never extended, leaves that test untouched and green while the feature has no
+    /// route to it.
+    ///
+    /// So this one drives the real builder with the real labels, whose widths are unequal and none
+    /// of which the layout test ever sees, and pins the tab by id rather than by position.
+    ///
+    /// It runs that set twice. **As shipped** the seven English labels fit one row at the minimum
+    /// width with a little to spare — measured, not assumed, and the second case exists precisely
+    /// because of it: a test that only ran the shipping labels would never reach the wrap path, so
+    /// restoring the drop-on-overflow bug would leave it green. **Translated** lengthens every label
+    /// and so forces the wrap, with a guard that refuses to pass if it did not.
+    #[test]
+    fn the_shipping_tab_set_reaches_settings_at_the_smallest_window() {
+        let view = crate::tray_menu::TrayView {
+            running: true,
+            update: Some(crate::auto_update::BeaconStatus {
+                paused: false,
+                schedule_opted_out: false,
+                channel: crate::auto_update::UpdateChannel::Stable,
+            }),
+            ..Default::default()
+        };
+        let shipped = crate::window_model::build(&view).tabs;
+
+        // Without this every loop below is satisfied by a model that dropped Settings entirely,
+        // which is the exact regression the test exists to catch.
+        assert!(
+            shipped.iter().any(|tab| tab.id == TabId::Settings),
+            "the shipping model no longer emits a Settings tab, so its reachability is moot"
+        );
+
+        // A label is model data, and German is not a hypothetical: the ids and the count stay the
+        // shipping ones, only the words get longer.
+        let translated: Vec<Tab> = shipped
+            .iter()
+            .map(|tab| Tab {
+                label: format!("{} {}", tab.label, tab.label),
+                ..tab.clone()
+            })
+            .collect();
+
+        let width = super::super::shell::SHELL_MIN;
+        for (case, tabs) in [("as shipped", &shipped), ("translated", &translated)] {
+            let mut body = Body::holding(tabs.clone(), width);
+            if case == "translated" {
+                let rows = body
+                    .chips_ordered(tabs)
+                    .iter()
+                    .map(|chip| chip.top().to_bits())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len();
+                assert!(
+                    rows > 1,
+                    "the translated labels still fit on one row, so this case never reaches the \
+                     wrap path and proves nothing"
+                );
+            }
+            for tab in tabs {
+                let chip = body.chip(tab.id).unwrap_or_else(|| {
+                    panic!(
+                        "{case}, at the minimum width, {:?} was never laid out",
+                        tab.id
+                    )
+                });
+                assert!(
+                    Rect::from_min_size(egui::Pos2::ZERO, body.size).contains_rect(chip),
+                    "{case}, at the minimum width, {:?} was laid out at {chip:?}, off the window",
+                    tab.id
+                );
+                assert_eq!(
+                    body.click(chip.center()),
+                    Some(Click::Tab(tab.id)),
+                    "{case}, at the minimum width, a click on {:?}'s chip did not select it",
                     tab.id
                 );
             }

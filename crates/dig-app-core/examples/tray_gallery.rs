@@ -68,6 +68,13 @@ fn main() {
             hotkey: Some(dig_app_core::hotkey::HotkeyState::Registered(
                 dig_app_core::hotkey::Hotkey::default(),
             )),
+            // A beacon that answered — running, on stable, with its daily schedule intact — so the
+            // gallery shows the populated Auto-update submenu rather than the "could not be asked" row.
+            update: Some(dig_app_core::auto_update::BeaconStatus {
+                paused: false,
+                schedule_opted_out: false,
+                channel: dig_app_core::auto_update::UpdateChannel::Stable,
+            }),
             // A connected node reporting a default 1 GiB cap with a little in use, so the gallery shows
             // the populated Cache submenu.
             cache: Some(dig_app_core::cache::CacheSnapshot {

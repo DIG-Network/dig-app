@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "5.34.0"
+version = "5.35.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -289,6 +289,10 @@ windows = { version = "0.58", features = [
     # `dig-app --version` — which the update beacon health-gates on — must attach to its parent's. Opening
     # `CONOUT$` to re-point the standard handles is a `CreateFileW`, hence the file-system feature.
     "Win32_System_Console",
+    # `CREATE_NO_WINDOW` (dig_ecosystem#2311): this GUI-subsystem process spawns console binaries
+    # (`dig-updater status --json`, the clipboard helpers), and without that flag Windows allocates a
+    # console for each one and paints a window for as long as it lives.
+    "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     # `CreateFileW`'s `SECURITY_ATTRIBUTES` parameter lives here, so the file-system feature needs it.
     "Win32_Security",

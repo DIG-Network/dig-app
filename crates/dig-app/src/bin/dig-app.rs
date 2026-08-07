@@ -1109,10 +1109,15 @@ mod tray {
     fn read_clipboard() -> Option<zeroize::Zeroizing<Vec<u8>>> {
         use std::process::Command;
 
+        // Every branch is a console binary whose OUTPUT we read, so none of them may be allowed to
+        // paint a console window on the way past (dig_ecosystem#2311).
         let output = if cfg!(target_os = "windows") {
-            Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
-                .output()
+            dig_app::console::without_console_window(Command::new("powershell").args([
+                "-NoProfile",
+                "-Command",
+                "Get-Clipboard -Raw",
+            ]))
+            .output()
         } else if cfg!(target_os = "macos") {
             Command::new("pbpaste").output()
         } else {
@@ -1322,7 +1327,62 @@ mod tray {
             // window is seen to fail, which puts the full menu back. Read every tick, so the tray
             // recovers on the very next repaint rather than at the next restart.
             window_host: dig_app_core::window_host::observed(),
+            // What the update beacon says about itself (dig_ecosystem#2293). An UNPRIVILEGED read of
+            // its own status mirror, so this is honest for a user who never grants elevation, and
+            // `None` — the beacon absent, or unwilling to answer — is shown as "could not be asked"
+            // rather than as a confident switch position.
+            update: read_beacon_status(),
         }
+    }
+
+    /// The process-wide beacon-status cache (dig_ecosystem#2311).
+    ///
+    /// A single instance for the same reason [`balance_poller`] is one: [`snapshot`] runs on every
+    /// repaint, about twice a second, and asking the beacon means SPAWNING it. A per-snapshot cache
+    /// would be empty every time and turn the repaint rate into a process-spawn rate.
+    fn beacon_cache() -> &'static dig_app_core::auto_update::BeaconCache {
+        static CACHE: std::sync::OnceLock<dig_app_core::auto_update::BeaconCache> =
+            std::sync::OnceLock::new();
+        CACHE.get_or_init(dig_app_core::auto_update::BeaconCache::default)
+    }
+
+    /// What the beacon last said, asking it again at most once per `BEACON_REFRESH`.
+    ///
+    /// Called from [`snapshot`], which runs on every repaint — so this MUST read a cache rather than
+    /// the beacon. It previously spawned `dig-updater` on each call: roughly 120 subprocesses a minute
+    /// on an idle machine, each one flashing a console window on Windows (dig_ecosystem#2311).
+    fn read_beacon_status() -> Option<dig_app_core::auto_update::BeaconStatus> {
+        beacon_cache().read(std::time::Instant::now(), spawn_beacon_status)
+    }
+
+    /// Ask the beacon right now, and make the answer what later repaints see.
+    ///
+    /// For the two moments a stale reading would be a lie the user can see: deciding which caution a
+    /// channel switch shows (the row was drawn from a view up to `BEACON_REFRESH` old), and the instant
+    /// after a change is applied, when the held reading is known to be wrong.
+    fn refresh_beacon_status() -> Option<dig_app_core::auto_update::BeaconStatus> {
+        beacon_cache().refresh(std::time::Instant::now(), spawn_beacon_status)
+    }
+
+    /// Run `dig-updater status --json` and read its answer, or `None` if it cannot be asked.
+    ///
+    /// An UNPRIVILEGED read of the beacon's own status mirror. Every failure mode — no beacon
+    /// installed, a beacon that will not start, a non-zero exit, an unparseable body — collapses to
+    /// `None`, because they are the same fact to the user: nobody answered.
+    ///
+    /// The spawn goes through [`dig_app::console::without_console_window`] because `dig-updater` is a console binary and
+    /// this is a GUI-subsystem process: without it, Windows paints a console window for the child.
+    fn spawn_beacon_status() -> Option<dig_app_core::auto_update::BeaconStatus> {
+        use dig_app_core::apps::{AppLocator, InstalledApps};
+        use dig_app_core::auto_update::{read_status, BEACON_STEM};
+
+        let beacon = InstalledApps::beside_this_exe()?.locate(BEACON_STEM)?;
+        let output = dig_app::console::without_console_window(
+            std::process::Command::new(beacon).args(["status", "--json"]),
+        )
+        .output()
+        .ok()?;
+        read_status(&output.stdout)
     }
 
     /// Mount the tray over `agent` and run the platform event loop. The tray is built FIRST (that is
@@ -2129,6 +2189,29 @@ mod tray {
             TrayAction::SetCacheCap { bytes } => change_cache_cap(status, confirmer, bytes),
             TrayAction::SetCustomCacheCap => set_custom_cache_cap(status, confirmer),
             TrayAction::AboutCache => about_cache(confirmer),
+            // Re-read the beacon LIVE for the same reason the wallet arms re-snapshot: the row was
+            // drawn from a view up to a tick old, and the channel it is switching AWAY from decides
+            // which caution the user is shown.
+            TrayAction::SetAutoUpdate { enabled } => {
+                apply_update_change(env, confirmer, AutoUpdateChange::Enable(enabled))
+            }
+            // Same sentence on the row, a different command underneath — see
+            // `TrayAction::RearmUpdateSchedule` for why `resume` cannot stand in for this.
+            TrayAction::RearmUpdateSchedule => {
+                apply_update_change(env, confirmer, AutoUpdateChange::RearmSchedule)
+            }
+            TrayAction::SetUpdateChannel(to) => match refresh_beacon_status() {
+                Some(status) => apply_update_change(
+                    env,
+                    confirmer,
+                    AutoUpdateChange::Channel {
+                        from: status.channel,
+                        to,
+                    },
+                ),
+                None => explain_no_beacon(confirmer),
+            },
+            TrayAction::AboutAutoUpdate => about_auto_update(confirmer),
             // The tray row asks in the framed dialog; the Alt+Space chord asks in the bar. Same handler,
             // same validation, same resolution — only the presentation differs.
             TrayAction::Open => open_dig_link(status, confirmer, InputStyle::Dialog),
@@ -2532,7 +2615,10 @@ mod tray {
             c.args(["-selection", "clipboard"]);
             c
         };
-        let Ok(mut child) = command.stdin(Stdio::piped()).spawn() else {
+        let Ok(mut child) = dig_app::console::without_console_window(&mut command)
+            .stdin(Stdio::piped())
+            .spawn()
+        else {
             return false;
         };
         let written = child
@@ -2764,6 +2850,224 @@ mod tray {
             "Your node's content cache",
             &dig_app_core::cache::privacy_notice_body(),
         );
+    }
+
+    /// Explain how auto-update works and what the two channels mean (dig_ecosystem#2293).
+    fn about_auto_update(confirmer: &dyn NativeConfirmer) {
+        notify(
+            confirmer,
+            "DIG — About auto-update",
+            "How DIG keeps itself up to date",
+            &dig_app_core::auto_update::explainer_body(),
+        );
+    }
+
+    /// The notice for a click that needs a beacon on a machine that has none.
+    fn explain_no_beacon(confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::apps::InstalledApps;
+        use dig_app_core::auto_update::{plan_change, Change, ChangePlan};
+
+        // Ask the planner rather than writing the sentence twice: whatever it says when the beacon is
+        // missing is what the user reads, from every entry point.
+        let ChangePlan::NotInstalled { body } = plan_change(
+            &InstalledApps::in_dir(std::path::PathBuf::new()),
+            Change::Enable(true),
+        ) else {
+            unreachable!("an empty bin dir locates nothing");
+        };
+        notify(
+            confirmer,
+            "DIG — Auto-update",
+            "DIG cannot manage updates on this computer.",
+            &body,
+        );
+    }
+
+    /// The change an auto-update row asked for, re-exported so the dispatch arms read plainly.
+    use dig_app_core::auto_update::Change as AutoUpdateChange;
+
+    /// Apply an auto-update change by running the beacon with elevation (dig_ecosystem#2293).
+    ///
+    /// The beacon owns the setting — its `config.json` lives in an Admin/SYSTEM-only directory and it
+    /// consults it before every pass — so this handler does not write a preference and hope. It runs
+    /// `dig-updater pause` / `resume` / `channel set <token>` and reports what happened.
+    ///
+    /// Three things are gated before anything runs, each an honest stop rather than a silent no-op: a
+    /// missing beacon, a channel switch the user has not agreed to (a switch can move the installed
+    /// version BACKWARDS — see [`dig_app_core::auto_update::switch_caution`]), and a platform with no
+    /// elevation route, which names the terminal command instead of failing mutely.
+    ///
+    /// The remembered preference in `agent.json` is updated only AFTER the beacon accepts, so a
+    /// declined elevation prompt leaves both in step rather than recording a wish the machine ignored.
+    fn apply_update_change(
+        env: &AppEnvironment,
+        confirmer: &dyn NativeConfirmer,
+        change: AutoUpdateChange,
+    ) {
+        use dig_app_core::apps::InstalledApps;
+        use dig_app_core::auto_update::{
+            elevated_command, no_elevation_route_body, plan_change, ChangePlan,
+        };
+        use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
+
+        const TITLE: &str = "DIG — Auto-update";
+
+        // 1. Locate the beacon. No beacon ⇒ there is no setting to change; say so.
+        let plan = match InstalledApps::beside_this_exe() {
+            Some(locator) => plan_change(&locator, change),
+            None => {
+                explain_no_beacon(confirmer);
+                return;
+            }
+        };
+        let ChangePlan::Run {
+            program,
+            args,
+            caution,
+        } = plan
+        else {
+            explain_no_beacon(confirmer);
+            return;
+        };
+
+        // 2. A change with a consequence the user cannot see coming is agreed to FIRST.
+        if let Some(caution) = &caution {
+            match confirmer.confirm_claim(&ClaimPrompt {
+                title: TITLE,
+                heading: "Change the update channel?",
+                body: caution,
+                affirm: "Change the channel",
+                decline: None,
+                refusal_is_default: true,
+                scannable: None,
+                identifier: None,
+            }) {
+                ConfirmDecision::Approve => {}
+                // Declined or closed: leave the channel alone and return quietly, exactly as the
+                // cache's eviction gate does — the dialog named the consequence and the user said no.
+                ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
+                ConfirmDecision::Unavailable => {
+                    notify(
+                        confirmer,
+                        TITLE,
+                        "DIG could not ask you to confirm.",
+                        "Changing the channel can move DIG to an older version, and this host has \
+                         no window to confirm that. The channel was left unchanged.",
+                    );
+                    return;
+                }
+            }
+        }
+
+        // 3. Elevate, or explain the way to do it by hand.
+        let Some(elevation) = elevated_command(std::env::consts::OS, &program, &args) else {
+            notify(
+                confirmer,
+                TITLE,
+                "DIG cannot ask for administrator rights here.",
+                &no_elevation_route_body(&program, &args),
+            );
+            return;
+        };
+
+        // 4. Run it, and report what happened — including the ordinary case of a declined prompt,
+        //    which the elevator reports as a failure and which must not read as a DIG fault.
+        //    The env entries are load-bearing on Windows: the command string names the beacon and its
+        //    arguments only as `$env:` variables, precisely so no path can become PowerShell tokens
+        //    (see `elevated_command`). Dropping them would run nothing.
+        let mut elevator = std::process::Command::new(&elevation.program);
+        elevator.args(&elevation.args);
+        for (name, value) in &elevation.env {
+            elevator.env(name, value);
+        }
+        match elevator.status() {
+            Ok(exit) if exit.success() => {
+                // The held reading is wrong the instant the beacon accepts, and the next repaint is
+                // milliseconds away — without this the user watches the switch they just moved sit in
+                // its old position until the refresh interval lapses (dig_ecosystem#2311).
+                refresh_beacon_status();
+                remember_update_preference(env, change);
+                notify(
+                    confirmer,
+                    TITLE,
+                    "Your update setting is saved.",
+                    &update_applied_body(change),
+                );
+            }
+            Ok(_) => notify(
+                confirmer,
+                TITLE,
+                "Nothing was changed.",
+                // Every nonzero exit lands here, and a declined prompt is only the COMMONEST of them —
+                // the beacon itself can fail after elevation was granted. So the sentence leads with
+                // what is certainly true (nothing changed, and why it might not have) rather than
+                // asserting a refusal that may not have happened.
+                "This usually means administrator rights were not granted. Your update \
+                 setting is exactly as it was, and you can try again whenever you like.",
+            ),
+            Err(_) => notify(
+                confirmer,
+                TITLE,
+                "DIG could not run the updater.",
+                "The DIG updater is installed but did not start. Your update setting is unchanged. \
+                 The log folder (in the DIG menu) has the details.",
+            ),
+        }
+    }
+
+    /// What the user is told after the beacon accepted a change.
+    fn update_applied_body(change: AutoUpdateChange) -> String {
+        match change {
+            AutoUpdateChange::Enable(true) => "DIG will keep itself up to date again. It checks \
+                 once a day, and only installs updates that carry a valid DIG signature."
+                .to_string(),
+            AutoUpdateChange::Enable(false) => "DIG will no longer update itself. You can turn \
+                 this back on from Settings at any time, and you will keep getting security fixes \
+                 only once you do."
+                .to_string(),
+            // Named for what was actually restored. The generic "will keep itself up to date" line
+            // would be true here too, but it would hide that the daily check had been REMOVED, which
+            // is the thing an administrator on this machine deliberately did (dig_ecosystem#2324).
+            AutoUpdateChange::RearmSchedule => {
+                "DIG's daily update check is back. It checks once a \
+                 day, and only installs updates that carry a valid DIG signature."
+                    .to_string()
+            }
+            AutoUpdateChange::Channel { to, .. } => format!(
+                "DIG now follows the {} channel — {}. The change applies at the next daily check.",
+                to.display_name(),
+                to.description()
+            ),
+        }
+    }
+
+    /// Record the accepted change in `agent.json`, so Settings still shows a meaningful choice on a
+    /// machine whose beacon later stops answering.
+    ///
+    /// Best-effort and deliberately silent on failure: the beacon has ALREADY accepted the change, so
+    /// the setting is in force whatever happens here, and an error notice would tell the user their
+    /// change failed when it did not. A missing note is a stale preference, never a wrong setting.
+    fn remember_update_preference(env: &AppEnvironment, change: AutoUpdateChange) {
+        use dig_app_core::config::AgentConfig;
+
+        let Some(dir) = super::brand_dir(env) else {
+            return;
+        };
+        let path = AgentConfig::path_in(&dir);
+        let Ok(mut config) = AgentConfig::load(&path) else {
+            return;
+        };
+        match change {
+            // Re-arming the schedule turns updates back on, so the remembered preference must follow
+            // it — a machine left recording "off" would show that stale wish the moment its beacon
+            // stopped answering.
+            AutoUpdateChange::Enable(true) | AutoUpdateChange::RearmSchedule => {
+                config.auto_update.enabled = true
+            }
+            AutoUpdateChange::Enable(false) => config.auto_update.enabled = false,
+            AutoUpdateChange::Channel { to, .. } => config.auto_update.channel = to,
+        }
+        let _ = config.save(&path);
     }
 
     /// Ask for a custom cache size, validate it, and apply it (dig_ecosystem#2002).

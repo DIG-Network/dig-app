@@ -234,6 +234,18 @@ pub struct TrayView {
     /// platform ahead of the trim that will consume it, rather than living behind a `cfg!` that only
     /// one CI runner could ever prove.
     pub window_host: WindowHost,
+    /// What the update beacon reports about itself, or `None` when it could not be asked
+    /// (dig_ecosystem#2293).
+    ///
+    /// Filled from `dig-updater status --json` — an UNPRIVILEGED read, so this is honest even for a
+    /// user who never grants elevation. `None` is the truthful value on a machine with no beacon
+    /// installed, or one whose status could not be parsed; the auto-update group then says the updater
+    /// cannot be asked rather than drawing a switch position nobody reported.
+    ///
+    /// The user's remembered PREFERENCE lives elsewhere ([`crate::auto_update::AutoUpdate`], in
+    /// `agent.json`). This field is the observed state, and the observed state is what the surface
+    /// shows whenever it exists — see [`crate::auto_update`] for why those are different facts.
+    pub update: Option<crate::auto_update::BeaconStatus>,
 }
 
 impl TrayView {
@@ -274,6 +286,7 @@ impl TrayView {
             hotkey,
             menu_suppressed,
             window_host,
+            update,
         } = self;
 
         running == &other.running
@@ -309,6 +322,11 @@ impl TrayView {
             // The trim switch itself. See the module doc above: without this, a degraded host keeps a
             // four-row tray and the window that was supposed to hold the other 25 verbs never opens.
             && window_host == &other.window_host
+            // The auto-update group's heading states whether updates are on and which channel is
+            // followed, and one channel row is marked as current. A switch applied through an
+            // elevation prompt changes nothing else in the view, so without this the group would keep
+            // showing the OLD setting until something unrelated moved (dig_ecosystem#2293).
+            && update == &other.update
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -662,6 +680,36 @@ pub enum TrayAction {
     /// action beyond informing, and is always available because it is about the CONCEPT, not this
     /// node's live state.
     AboutCache,
+    /// Turn auto-update on or off (dig_ecosystem#2293).
+    ///
+    /// Carries the state being MOVED TO rather than "toggle", so a click resolves the same way however
+    /// stale the menu it was drawn from is: a beacon that was paused by an administrator between the
+    /// repaint and the click gets `pause` again, which is a no-op, instead of being silently resumed.
+    ///
+    /// The shell performs this by running the beacon ([`crate::auto_update::plan_change`]), which needs
+    /// elevation — the row's own label says so.
+    SetAutoUpdate {
+        /// `true` to resume auto-updates, `false` to pause them.
+        enabled: bool,
+    },
+    /// Put back a daily update check that was deliberately removed (dig_ecosystem#2324).
+    ///
+    /// A SEPARATE action from `SetAutoUpdate { enabled: true }`, even though the row a person clicks
+    /// says the same thing, because the two run different beacon commands and only one of them works
+    /// here. `resume` clears a pause; on an opted-out host there is no pause to clear, so it succeeds
+    /// while changing nothing and the app reports a saved setting for a machine that still never
+    /// updates. `schedule install` is the command that actually re-arms the daily check.
+    RearmUpdateSchedule,
+    /// Follow a different update feed — stable or nightly (dig_ecosystem#2293).
+    ///
+    /// One variant per channel rather than one per direction: the channel in force is read from the
+    /// beacon at click time, so the row only has to name the destination.
+    SetUpdateChannel(crate::auto_update::UpdateChannel),
+    /// Explain how auto-update works, what the two channels mean, and why changing either asks for
+    /// administrator — the honest "About auto-update…" notice (dig_ecosystem#2293). Like
+    /// [`AboutCache`](Self::AboutCache) it is about the CONCEPT, so it is offered in every state,
+    /// including on a machine with no beacon installed at all.
+    AboutAutoUpdate,
     /// Open another DIG app from the **Apps** group (dig_ecosystem#2101).
     ///
     /// Carries the [`AppId`](crate::apps::AppId) of the registry row clicked, so ONE action serves
@@ -1122,6 +1170,12 @@ fn full(view: &TrayView) -> MenuModel {
     // `crate::apps` registry, so a second app is a data row. Like reading, using another app is not
     // gated on an account, so it sits outside the account block.
     rows.push(MenuRow::submenu("Apps", apps_actions()));
+    // **Auto-update is deliberately NOT here** (dig_ecosystem#2293). It wanted a twelfth top-level row,
+    // and `the_top_level_menu_stays_short_in_every_state` asks which of the eleven a new one replaces —
+    // the answer is none of them, so it lives in the window's Settings tab instead. That costs nothing
+    // real on the hosts this menu is the whole surface for: neither macOS nor a headless Linux session
+    // can raise the elevation prompt the change needs (see `crate::auto_update::elevated_command`), so
+    // the honest interface there is the beacon's own CLI, which those machines already have.
     rows.push(MenuRow::Separator);
     // The two escapes, always clickable: whatever else has gone wrong, a person can read the logs and
     // leave (§6.1 "never trap the user").
@@ -1606,6 +1660,143 @@ pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<
     rows
 }
 
+/// The **Auto-update** group's heading — whether DIG updates itself, and which feed it follows
+/// (dig_ecosystem#2293).
+///
+/// The heading carries the fact, exactly as [`cache_label`] does, so the group answers the question a
+/// person opened it to ask before they read a single row. It reports the beacon's OBSERVED state, never
+/// the remembered preference: an administrator can pause updates without dig-app being involved, and a
+/// heading that echoed dig-app's own wish would then be confidently wrong.
+pub(crate) fn auto_update_label(update: Option<&crate::auto_update::BeaconStatus>) -> String {
+    match update {
+        Some(status) if status.updates_are_live() => format!(
+            "Auto-update — on, following the {} channel",
+            status.channel.display_name()
+        ),
+        // Named apart from an ordinary pause, because the remedy is different and the user is entitled
+        // to know WHICH thing is off. "Off" alone would have them looking for a pause to lift on a
+        // machine whose daily check is simply not there (dig_ecosystem#2324).
+        Some(status) if status.schedule_opted_out => {
+            "Auto-update — off, the daily check was removed from this computer".to_string()
+        }
+        Some(status) => format!(
+            "Auto-update — off, {} channel selected",
+            status.channel.display_name()
+        ),
+        // Just the group's name. The pane note directly above already says the updater could not be
+        // asked and what to do about it, and a heading repeating it made the screenshot state the
+        // same fact three times in four lines — the panel, the heading, and the row's own "(install
+        // the DIG updater first)".
+        None => "Auto-update".to_string(),
+    }
+}
+
+/// The **Auto-update** group — turn updates on or off, and choose which feed to follow
+/// (dig_ecosystem#2293).
+///
+/// # The four async states (§6.4)
+///
+/// The beacon's state is read from a separate program, so this surface has the same shape every async
+/// view does, and it collapses to the same two honest cases [`cache_actions`] uses. With a status
+/// (`Some`), the on/off row and both channel rows are offered and the channel in force is marked.
+/// Without one (`None` — no beacon installed, or one that would not answer), the change rows are
+/// omitted and a single ENABLED row explains what is missing. That row is not a disabled dead end:
+/// clicking it opens the explainer, so the user always learns why (#1800). The explainer is offered in
+/// every state because it is about the concept, not this machine's beacon.
+///
+/// # Why the on/off control is one row and not two
+///
+/// The cache presets are six mutually-exclusive values, so they render as six rows with the active one
+/// marked. On and off are not six values — they are a state and its opposite — and a pair of rows
+/// where one is always a no-op reads as a control that half-works. One row that names the state it
+/// moves TO says what the click does, which is what a menu row is for.
+///
+/// `pub(crate)`: shared with the window model's Settings tab, so the tray and the window cannot
+/// disagree about what auto-update is doing.
+pub(crate) fn auto_update_actions(
+    update: Option<&crate::auto_update::BeaconStatus>,
+) -> Vec<MenuRow> {
+    use crate::auto_update::{Change, UpdateChannel};
+
+    let mut rows = Vec::new();
+    match update {
+        Some(status) => {
+            // What the click must DO is derived from the beacon's own account of what is stopping
+            // updates, not from a single flag: `resume` is the right command for a pause and the wrong
+            // one for a removed schedule (dig_ecosystem#2324).
+            let action = match status.blocking_updates() {
+                None => TrayAction::SetAutoUpdate { enabled: false },
+                Some(Change::Enable(_)) => TrayAction::SetAutoUpdate { enabled: true },
+                Some(Change::RearmSchedule) => TrayAction::RearmUpdateSchedule,
+                // Unreachable: `blocking_updates` answers with a way to turn updates ON, and a channel
+                // switch is not one. Mapped rather than matched exhaustively away so a future variant
+                // is a compile error here instead of a silently wrong row.
+                Some(Change::Channel { .. }) => TrayAction::AboutAutoUpdate,
+            };
+            rows.push(MenuRow::action(
+                action,
+                auto_update_toggle_label(status.updates_are_live()),
+                true,
+            ));
+            rows.push(MenuRow::Separator);
+            for channel in UpdateChannel::ALL {
+                rows.push(MenuRow::action(
+                    TrayAction::SetUpdateChannel(channel),
+                    channel_row_label(channel, status.channel),
+                    true,
+                ));
+            }
+        }
+        // No beacon to read from or change — never a silent no-op. One enabled row states the
+        // precondition and routes to the explainer, so the surface still does something visible.
+        None => rows.push(MenuRow::action(
+            TrayAction::AboutAutoUpdate,
+            "Change auto-update (install the DIG updater first)…",
+            true,
+        )),
+    }
+    rows.push(MenuRow::Separator);
+    rows.push(MenuRow::action(
+        TrayAction::AboutAutoUpdate,
+        "About auto-update and channels…",
+        true,
+    ));
+    rows
+}
+
+/// The on/off row's label, naming the state the click moves TO and the cost of getting there.
+///
+/// The elevation is in the label rather than discovered at the prompt for the same reason a disabled
+/// row must name its remedy: a control whose real cost is only revealed after it is clicked is a
+/// surprise, and a user who would have declined has already been interrupted. Changing machine-wide
+/// update policy needs an administrator on every OS DIG ships on — see [`crate::auto_update`].
+fn auto_update_toggle_label(enabled_now: bool) -> String {
+    match enabled_now {
+        true => "Turn auto-update off (asks for administrator)…".to_string(),
+        false => "Turn auto-update on (asks for administrator)…".to_string(),
+    }
+}
+
+/// One channel row's label: the name, what it means, and — for the one in force — that it is current.
+///
+/// The mark is the WORD "current" rather than a tick, for the reason [`cache_preset_label`] records:
+/// the window draws these labels in a font with no U+2713, so a glyph would photograph as a tofu box
+/// beside the very row a person is looking for.
+fn channel_row_label(
+    channel: crate::auto_update::UpdateChannel,
+    current: crate::auto_update::UpdateChannel,
+) -> String {
+    let mark = match channel == current {
+        true => " — current",
+        false => "",
+    };
+    format!(
+        "{} — {}{mark}",
+        channel.display_name(),
+        channel.description()
+    )
+}
+
 /// One preset row's label, marking the preset that is the node's CURRENT cap so the active choice is
 /// visible at a glance, and tagging the default so a person can find it deliberately.
 ///
@@ -1931,6 +2122,14 @@ mod tests {
             // (`crate::window_host`). The four-row trim a windowed host gets has its own tests, which
             // set this to `Available` explicitly.
             window_host: WindowHost::Unavailable,
+            // A beacon that answered: auto-update on, following stable — the ordinary success case.
+            // The tests that describe the absent beacon and the nightly channel null this out or
+            // replace it explicitly.
+            update: Some(crate::auto_update::BeaconStatus {
+                paused: false,
+                schedule_opted_out: false,
+                channel: crate::auto_update::UpdateChannel::Stable,
+            }),
         }
     }
 
