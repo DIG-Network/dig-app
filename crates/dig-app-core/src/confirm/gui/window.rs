@@ -5614,4 +5614,190 @@ mod tests {
             "the prompt grew OS decorations; the card is drawn edge to edge"
         );
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Hosting: what a prompt may say to a viewport it does not own (dig_ecosystem#2270)
+    //
+    // Three of this window's behaviours address a viewport. In-window that viewport is the SHELL's,
+    // so each is either meaningless or destructive there. Every test below is paired with the
+    // standalone control, because "sends nothing" is also what a broken paint path reports.
+    // ---------------------------------------------------------------------------------------------
+
+    /// One prompt, on whichever host a test names, driven frame by frame with real input.
+    struct Hosts {
+        app: PromptApp,
+        ctx: egui::Context,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Hosts {
+        fn on(host: PromptHost) -> Self {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let store = ThemeChoice::in_brand_dir(dir.path());
+            let (reply, _rx) = sync_channel(1);
+            let sink = std::sync::Arc::new(Mutex::new(None));
+            let job = Job {
+                screen: Screen::confirm(&sign_content(), "Cancel"),
+                wants_text: false,
+                theme: store.clone(),
+                deadline: Duration::from_secs(3600),
+                over_by: Instant::now() + Duration::from_secs(3600),
+                reply,
+            };
+            let app = PromptApp::hosted(job, store, sink.clone(), host);
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            Self {
+                app,
+                ctx,
+                sink,
+                _dir: dir,
+            }
+        }
+
+        /// One frame carrying `events`, painted the way this prompt's host paints it.
+        ///
+        /// `host_closing` delivers the windowing system's own close on the SHARED viewport, which is
+        /// the event whose meaning differs between the two hosts.
+        fn frame(&mut self, events: Vec<egui::Event>, host_closing: bool) -> egui::FullOutput {
+            let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(WIDTH, HEIGHT));
+            let mut input = egui::RawInput {
+                screen_rect: Some(at),
+                events,
+                ..Default::default()
+            };
+            if host_closing {
+                input
+                    .viewports
+                    .get_mut(&egui::ViewportId::ROOT)
+                    .expect("the root viewport")
+                    .events
+                    .push(egui::ViewportEvent::Close);
+            }
+            let host = self.app.host;
+            let app = &mut self.app;
+            self.ctx.run(input, |ctx| match host {
+                PromptHost::Standalone => app.frame(ctx),
+                PromptHost::InWindow => {
+                    egui::Area::new(egui::Id::new("host")).show(ctx, |ui| {
+                        app.frame_in_window(ui, at);
+                    });
+                }
+            })
+        }
+
+        /// Whether the ROOT viewport was sent `want` this frame.
+        fn sent(output: &egui::FullOutput, want: &egui::ViewportCommand) -> bool {
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|root| root.commands.iter().any(|c| c == want))
+        }
+
+        fn recorded(&self) -> Option<Outcome> {
+            self.sink.lock().expect("the answer slot").take()
+        }
+    }
+
+    /// Press Enter, which activates the focused control.
+    fn enter_pressed() -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    /// **An answered in-window prompt does not ask the window it lives in to close.**
+    ///
+    /// `ViewportCommand::Close` sent from inside the shell addresses the SHELL, so a prompt that sent
+    /// it would shut the app window the moment anybody answered anything in it. The standalone
+    /// control is the other half: without it, deleting the call outright would pass this test.
+    #[test]
+    fn only_a_standalone_prompt_asks_its_window_to_close() {
+        let close = egui::ViewportCommand::Close;
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        let output = alone.frame(enter_pressed(), false);
+        assert!(
+            alone.recorded().is_some(),
+            "the standalone prompt did not answer, so this frame proves nothing"
+        );
+        assert!(
+            Hosts::sent(&output, &close),
+            "the standalone prompt stopped asking to close; it would stay on screen after the \
+             person had answered it"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.frame(Vec::new(), false);
+        let output = inside.frame(enter_pressed(), false);
+        assert!(
+            inside.recorded().is_some(),
+            "the in-window prompt did not answer, so this frame proves nothing"
+        );
+        assert!(
+            !Hosts::sent(&output, &close),
+            "answering a prompt inside the app window asked the app window itself to close"
+        );
+    }
+
+    /// **An in-window prompt does not grab the keyboard.**
+    ///
+    /// The focus request exists because a tray agent's first prompt after a cold start was measured
+    /// opening behind somebody else's window (dig_ecosystem#2079). In-window there is nothing to ask
+    /// for — the shell already holds the foreground — and the request would address the shell's own
+    /// viewport, re-raising a window the person may have just put behind something.
+    #[test]
+    fn only_a_standalone_prompt_claims_the_keyboard() {
+        let focus = egui::ViewportCommand::Focus;
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        let output = alone.frame(Vec::new(), false);
+        assert!(
+            Hosts::sent(&output, &focus),
+            "the standalone prompt stopped asking for the keyboard (#2079)"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        let output = inside.frame(Vec::new(), false);
+        assert!(
+            !Hosts::sent(&output, &focus),
+            "a prompt inside the app window asked to raise the window it is already inside"
+        );
+    }
+
+    /// **Closing the HOST window is not a refusal an in-window prompt may author.**
+    ///
+    /// `close_requested()` on the shared viewport means *the person is closing the app*, not *the
+    /// person refused this request*. A prompt that read it as a refusal would latch a definite
+    /// `Deny` — and the latch is one-way by design (#2038), so the shell's fail-closed settle would
+    /// then have nothing left to correct: somebody who closed the app window would have signed a
+    /// refusal they never gave.
+    ///
+    /// The standalone control is the other half: there, that event IS the person dismissing this
+    /// prompt, and it must still deny.
+    #[test]
+    fn a_host_window_close_is_a_refusal_only_for_a_standalone_prompt() {
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        alone.frame(Vec::new(), true);
+        assert!(
+            matches!(alone.recorded(), Some(Outcome::Confirm(WindowIntent::Deny))),
+            "closing a standalone prompt window stopped being a refusal"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.frame(Vec::new(), false);
+        inside.frame(Vec::new(), true);
+        assert!(
+            inside.recorded().is_none(),
+            "closing the app window made an in-window prompt author an answer of its own; the \
+             shell's fail-closed settle cannot correct it, because the latch is one-way"
+        );
+    }
 }
