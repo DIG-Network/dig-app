@@ -818,6 +818,17 @@ so no rule about which rows exist or whether they are enabled is decided twice.
 - **The window itself is NOT a consent surface.** It MUST NOT be always-on-top, MUST NOT carry a deadline,
   and MUST NOT count as a raised consent surface while it is showing no prompt — counting it would suppress
   the tray's foreground claim for as long as somebody left the window open.
+- **The window MUST be watched for a wedged frame loop, and forced closed only for that (MUST).** Having no
+  deadline is not the same as being unwatched. The window is drawn on the one prompt thread, so a frame loop
+  that stops running holds that thread and every later consent prompt in the process is refused unseen for
+  the life of the process. An implementation MUST therefore watch the window from OUTSIDE its frame loop on
+  whether frames are still running, and once no frame has run for a bounded interval it MUST attempt to
+  close it and MUST record that it did so — the interval short enough that a prompt queued just before the
+  wedge is still answerable within its own deadline. The ATTEMPT is what is required, not the outcome: a
+  loop that hangs before it is constructed exposes no handle to nudge, and there the record is the whole of
+  what any implementation can deliver. It MUST NOT force a window that is still drawing, however long it
+  has been open, and MUST require the silence to be observed twice a full interval apart, because a machine
+  resuming from suspend presents one long silence in a process where nothing is wrong.
 - **Admitting an in-window prompt MUST bring the window forward (MUST).** A standalone prompt is
   always-on-top and asks for the keyboard; both are claims against the DESKTOP, and drawing the prompt
   inside the app window does not inherit either. The window MUST therefore be raised and focused when a

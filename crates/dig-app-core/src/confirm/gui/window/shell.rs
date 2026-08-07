@@ -77,8 +77,8 @@ use super::super::render::{rgba, semibold, size, space};
 use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
 use super::panes::{self, Click};
 use super::{
-    install_fonts, unavailable, AppWindow, Chrome, Job, Outcome, PromptApp, Work, CHROME_HEIGHT,
-    TOGGLE_WIDTH,
+    install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, Job, Outcome, Overstay,
+    PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE, TOGGLE_WIDTH,
 };
 use crate::tray_menu::TrayAction;
 use crate::window_model::{self, TabId, WindowModel};
@@ -121,17 +121,50 @@ const MODAL_SHARE: f32 = 0.9;
 ///
 /// Signature matches [`super::draw_watched`] so both are reachable through `serve_with`'s one
 /// injection point, which is what lets a test make either of them misbehave.
-pub(super) fn draw(shell: AppWindow, queue: &Receiver<Work>) -> Option<Outcome> {
+///
+/// # What `watched` buys a window with no deadline
+///
+/// The shell is registered on [`super::Overstay::painting`], never on a deadline: it is forced shut
+/// for having STOPPED PAINTING, and for nothing else. A person can leave it open all day. What it
+/// cannot do is wedge — that would hold the one prompt thread and refuse every later consent prompt
+/// for the life of the process (dig_ecosystem#2074).
+///
+/// Registered BEFORE `run_native` for the same reason [`super::draw_watched`] is: a loop that hangs
+/// in GL context init never reaches the creator below, and a vigil that only began to exist there
+/// would never see the hang at all.
+///
+/// `watched` is not optional — there is no way to ask for an unwatched window. See
+/// [`super::serve_with`], which owns the slot and hands it to whatever draws.
+pub(super) fn draw(
+    shell: AppWindow,
+    queue: &Receiver<Work>,
+    watched: &Mutex<Option<Vigil>>,
+) -> Option<Outcome> {
     let theme = shell.theme.read();
     let app = ShellApp::new(theme, shell.theme, shell.view, shell.act);
-    let run = eframe::run_native(
-        "DIG",
-        native_options(),
-        Box::new(|cc| {
-            install_fonts(&cc.egui_ctx);
-            Ok(Box::new(Host { app, queue }))
-        }),
-    );
+    let run = watched_while_painting(watched, |beat| {
+        let creator_beat = Arc::clone(&beat);
+        eframe::run_native(
+            "DIG",
+            native_options(),
+            Box::new(move |cc| {
+                install_fonts(&cc.egui_ctx);
+                // The SAME window, now with a context the watchdog can nudge — see
+                // [`super::Overstay::is_the_same_window_as`], which is what keeps this from reading
+                // as a fresh problem.
+                set_vigil(
+                    watched,
+                    Some(cc.egui_ctx.clone()),
+                    Overstay::painting(Arc::clone(&creator_beat), FRAME_SILENCE),
+                );
+                Ok(Box::new(Host {
+                    app,
+                    queue,
+                    beat: Arc::clone(&beat),
+                }))
+            }),
+        )
+    });
 
     // The loop on this thread has now stopped, which is the precondition that makes this necessary —
     // see `super::flush_deferred_window_destruction`.
@@ -144,6 +177,41 @@ pub(super) fn draw(shell: AppWindow, queue: &Receiver<Work>) -> Option<Outcome> 
         crate::window_host::note_open_failure();
     }
     None
+}
+
+/// Run `paint` with this window registered for wedge-watching, and hand it the heartbeat to stamp.
+///
+/// # Why the registration is a wrapper rather than two lines in [`draw`]
+///
+/// It keeps creating the heartbeat and registering it in ONE place, so the two cannot drift into a
+/// window that stamps a heartbeat nobody watches.
+///
+/// **It is not what stops the watching being removed, and an earlier version of this comment claimed
+/// it was.** The claim was that [`Host`] cannot be built without a heartbeat, so a deletion would not
+/// compile — but the heartbeat arrives as this function's own closure parameter, minted here however
+/// the caller is written, so deleting the registration compiled cleanly and left the whole suite
+/// green. What actually holds it is upstream in [`super::serve_with`]: the watchdog slot is not
+/// optional and is HANDED to the drawer rather than captured by it, so there is no "unwatched" value
+/// to pass and ignoring the parameter fails the `-D warnings` gate.
+///
+/// Registered BEFORE `paint`, with no context, for [`super::draw_watched`]'s reason: a `run_native`
+/// that hangs in GL context init never reaches the creator, and a vigil created there would never
+/// see it.
+///
+/// **Unregistering is deliberately NOT done here.** [`super::serve_shell`] clears it, from outside
+/// the panic guard, so a window that left by panicking is taken off the watchdog's list exactly as
+/// one that closed normally.
+pub(super) fn watched_while_painting<T>(
+    watched: &Mutex<Option<Vigil>>,
+    paint: impl FnOnce(Arc<Heartbeat>) -> T,
+) -> T {
+    let beat = Arc::new(Heartbeat::new());
+    set_vigil(
+        watched,
+        None,
+        Overstay::painting(Arc::clone(&beat), FRAME_SILENCE),
+    );
+    paint(beat)
 }
 
 /// How the shell window is created.
@@ -206,6 +274,28 @@ fn native_options() -> eframe::NativeOptions {
 struct Host<'a> {
     app: ShellApp,
     queue: &'a Receiver<Work>,
+    /// Stamped at the top of every frame, so a watchdog on another thread can tell a window
+    /// somebody is using from a loop that has died — see [`super::Overstay::Painting`].
+    beat: Arc<Heartbeat>,
+}
+
+impl Host<'_> {
+    /// Stamp the heartbeat, then draw one frame.
+    ///
+    /// Split out of [`eframe::App::update`] for the reason [`ShellApp::frame`] is split out of this
+    /// one: an `eframe::Frame` cannot be built on a host with no window, so a rule stated only
+    /// inside `update` is a rule no test can reach. The rule here is that a frame which ran always
+    /// says so.
+    ///
+    /// The stamp goes FIRST and unconditionally. It is the evidence that this loop is alive, so it
+    /// must not sit behind any part of the frame that could itself be the thing that wedges. Placed
+    /// after the drawing it would report silence for a hang in the drawing — which is honest — and
+    /// equally for a hang in a MODAL the person is reading, which is not the same thing at all.
+    /// Stamped on entry it says exactly one thing: the platform called us.
+    fn paint(&mut self, ctx: &egui::Context) {
+        self.beat.beat();
+        self.app.frame(ctx, self.queue);
+    }
 }
 
 impl eframe::App for Host<'_> {
@@ -220,7 +310,7 @@ impl eframe::App for Host<'_> {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.app.frame(ctx, self.queue);
+        self.paint(ctx);
     }
 }
 
@@ -1403,7 +1493,7 @@ mod tests {
     /// every question asked before it.
     #[test]
     fn a_panicking_shell_does_not_take_the_prompt_thread_down_with_it() {
-        let lane = super::super::tests::Lane::serving_work(|work, _queue| match work {
+        let lane = super::super::tests::Lane::serving_work(|work, _queue, _watching| match work {
             Work::Shell(_) => panic!("the app window panicked mid-draw"),
             Work::Prompt(_) => Some(Outcome::Confirm(WindowIntent::Deny)),
         });
@@ -1429,7 +1519,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let seen: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(true)));
-        let lane = super::super::tests::Lane::serving_work(move |work, _queue| {
+        let lane = super::super::tests::Lane::serving_work(move |work, _queue, _watching| {
             if matches!(work, Work::Shell(_)) {
                 seen.store(consent_surface_is_up(), Ordering::SeqCst);
             }
@@ -2776,6 +2866,131 @@ mod tests {
         );
     }
 
+    /// **Every frame the app window draws stamps its heartbeat.**
+    ///
+    /// The other end of the wedge vigil (dig_ecosystem#2272), and the half that fails DANGEROUSLY.
+    /// The watchdog reads silence as a dead loop, so a frame loop that stopped saying it had run
+    /// would have a perfectly healthy window force-closed under the person about
+    /// [`super::FRAME_SILENCE`] after they opened it. The vigil's own tests stamp the heartbeat
+    /// themselves and so cannot see this at all.
+    ///
+    /// Driven through [`Host`] rather than [`ShellApp`], because [`Host`] is where the stamp lives
+    /// and a test that called `ShellApp::frame` would be measuring the wrong object.
+    ///
+    /// Both sides come off one frame: silent before it, stamped after it. The "before" half is the
+    /// control — without it an implementation that reported itself alive from birth, and therefore
+    /// could never detect a `run_native` that hangs before its first frame, would pass.
+    #[test]
+    fn every_frame_the_app_window_draws_stamps_its_heartbeat() {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        let (_jobs, queue) = mpsc::channel::<Work>();
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+
+        let beat = Arc::new(super::super::Heartbeat::new());
+        // A measurable age BEFORE the first frame, so that "the window went quiet" and "the window
+        // was only just created" are two different readings rather than one near-zero one.
+        std::thread::sleep(Duration::from_millis(80));
+        let silent_before = beat.silence(Instant::now());
+
+        assert!(
+            silent_before >= Duration::from_millis(80),
+            "a window that has drawn nothing was already reporting itself alive; a run_native that \
+             hangs before its first frame would then never be seen at all"
+        );
+
+        let mut host = Host {
+            app: ShellApp::new(
+                Theme::Light,
+                store,
+                Arc::new(crate::tray_menu::TrayView::default),
+                Arc::new(|_| {}),
+            ),
+            queue: &queue,
+            beat: Arc::clone(&beat),
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(SHELL_WIDTH, SHELL_HEIGHT),
+            )),
+            ..Default::default()
+        };
+        let _painted = ctx.run(input, |ctx| host.paint(ctx));
+
+        // Compared against the reading from before the frame rather than against a fixed number:
+        // silence only ever GROWS with time, so the one thing that can make it smaller is a stamp.
+        // Nothing here depends on how long a frame actually takes.
+        assert!(
+            beat.silence(Instant::now()) < silent_before,
+            "a frame ran and the app window never said so; the watchdog would force this perfectly \
+             healthy window closed under the person"
+        );
+    }
+
+    /// **The committed gallery is exactly the set the generator produces — no more, no fewer.**
+    ///
+    /// The gallery is the only record of what this window LOOKS like, and its whole value is that a
+    /// reviewer can trust it to be current. Two ways it stops being current, both observed: a run
+    /// under a second naming scheme leaves the superseded files sitting beside the new ones, so the
+    /// directory shows two generations of the same view and nothing says which is which; and a view
+    /// added to `examples/shell_gallery.rs` is photographed once and then quietly never again.
+    ///
+    /// Pinning the set here makes both a failing test rather than a thing somebody notices. It is a
+    /// list that is MEANT to be edited — adding a view to the generator means adding it here, in the
+    /// same change, which is the point.
+    ///
+    /// This says nothing about what is IN the images. Nothing can: they are photographs of what an
+    /// operating system drew, and looking at them is the job (`professional-ui`).
+    #[test]
+    fn the_committed_gallery_is_exactly_what_the_generator_photographs() {
+        const VIEWS: [&str; 9] = [
+            // One per tab the sidebar offers...
+            "status",
+            "account",
+            "security",
+            "wallet",
+            "apps",
+            "cache",
+            // ...plus the states that are about the WINDOW rather than about a tab.
+            "narrow",
+            "with-prompt",
+            "narrow-with-prompt",
+        ];
+
+        let mut expected: Vec<String> = ["light", "dark"]
+            .iter()
+            .flat_map(|theme| {
+                VIEWS
+                    .iter()
+                    .map(move |view| format!("shell-{theme}-{view}.png"))
+            })
+            .collect();
+        expected.sort();
+
+        let gallery = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/shell-gallery");
+        let mut found: Vec<String> = std::fs::read_dir(&gallery)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "the gallery directory {} is readable: {err}",
+                    gallery.display()
+                )
+            })
+            .map(|entry| entry.expect("a directory entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+
+        assert_eq!(
+            found, expected,
+            "the committed gallery no longer matches the set the generator photographs — either a \
+             view was added or renamed without being regenerated, or a superseded run left files \
+             behind under another naming scheme"
+        );
+    }
+
     /// **A launcher bar keeps its height across frames; only a dialog grows to its content.**
     ///
     /// [`ShellApp::show_prompt`] feeds each frame's measured content back into the modal's height for
@@ -2788,6 +3003,15 @@ mod tests {
     /// Its siblings call [`modal_rect`] directly, which is a pure function of a height handed TO it —
     /// so they measure the mapping and never the loop that supplies its argument. Deleting the
     /// exemption left every one of them green.
+    ///
+    /// # Where this belongs (dig_ecosystem#2292, A3)
+    ///
+    /// It arrived with the fresh-keystroke fix (#118) and has nothing to do with it, so it is worth
+    /// saying once that it is not filed here by accident: it is a SIZING rule, and it already sits
+    /// between the two tests it belongs with — `a_launcher_bar_in_the_window_is_sized_as_a_bar`
+    /// above and `a_launcher_bar_in_the_window_sits_high_and_a_dialog_does_not` below — which is
+    /// exactly where the reasoning below needs it, since those are the siblings it names as blind.
+    /// Moving it would separate the explanation from what it explains.
     ///
     /// The first control written here was just as blind, and it is worth naming: comparing the bar's
     /// settled height against the DIALOG's passes on a shell that has stopped feeding anything back
