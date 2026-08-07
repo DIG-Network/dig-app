@@ -4,7 +4,7 @@
 //! [`super::overview`] describes what the Wallet surface may honestly say; this module is what makes
 //! it say a number. Two pieces:
 //!
-//! - [`NodeWalletEngine`] — a [`WalletEngine`](super::engine::WalletEngine) whose `balance` is one
+//! - [`NodeWalletEngine`] — a [`WalletEngine`] whose `balance` is one
 //!   `control.wallet.balance` call over the loopback control plane ([`crate::control`]).
 //! - [`NodeBalance`] — the throttle that owns *when* that call happens, so the tray's twice-a-second
 //!   repaint does not become twice-a-second chain reads.
