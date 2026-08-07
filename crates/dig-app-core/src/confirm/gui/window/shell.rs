@@ -91,7 +91,7 @@ const SHELL_HEIGHT: f32 = 640.0;
 ///
 /// Square rather than the prompt's wide-and-short minimum: the shell is a browsable window, and a
 /// person who shrinks it to a sliver must still be able to find the way out of it.
-const SHELL_MIN: f32 = 480.0;
+pub(super) const SHELL_MIN: f32 = 480.0;
 
 /// How far in from an edge counts as a grab for a resize.
 ///
@@ -2054,35 +2054,58 @@ mod tests {
         }
     }
 
-    /// **Below the narrow threshold the sidebar becomes a strip, and every tab is still reachable.**
+    /// **Every tab the model emits can be clicked at every width the window can be dragged to.**
     ///
     /// The window can legitimately be dragged to [`SHELL_MIN`], and a 208 px sidebar out of 480 px
-    /// leaves a content column narrower than the sidebar. Asserted on the tabs still being drawn AND
-    /// still being clickable, not on a width — a layout that reflowed into an unreachable strip
-    /// would satisfy a width assertion.
+    /// leaves a content column narrower than the sidebar, so below the threshold the sidebar becomes
+    /// a strip. Whichever it is, a tab that exists must be selectable.
+    ///
+    /// # What this deliberately does NOT assert
+    ///
+    /// Until dig_ecosystem#2309 this read the tab labels back out of the frame's shapes and checked
+    /// each one appeared. That is not reachability, and it was green while the shipping window drew
+    /// six of seven chips. Two reasons, both worth remembering:
+    ///
+    /// - Text is emitted into `FullOutput` before anything is culled, so a chip laid out past the
+    ///   right edge — or under the chip beside it — reads back exactly like one a person can click.
+    /// - It probed ONE width, with whatever tab set the fixture happened to produce, so it could
+    ///   only fail if that set overflowed at exactly that width. Overflow was never exercised.
+    ///
+    /// So this asserts geometry and a real click instead, at several widths on both sides of
+    /// [`panes::NARROW_AT`]. It still cannot MANUFACTURE overflow — the tab set is the model's, not
+    /// the test's — which is why the strip's own behaviour when the chips do not fit is pinned by
+    /// `panes::tests::every_tab_is_reachable_at_every_width_the_window_allows`, whose fixture
+    /// refuses to run unless they genuinely overflow.
     #[test]
     fn a_narrow_window_keeps_every_tab_reachable() {
-        let mut shelf = Shelf::open();
-        shelf.size = Vec2::new(SHELL_MIN, SHELL_MIN);
-        shelf.settle();
-        let output = shelf.frame(Vec::new());
-        let drawn = drawn_text(&output);
+        let tabs = window_model::build(&busy_view()).tabs;
+        assert!(tabs.len() > 1, "one tab cannot show a strip overflowing");
 
-        for tab in &window_model::build(&busy_view()).tabs {
-            assert!(
-                drawn.iter().any(|line| line == &tab.label),
-                "{:?} vanished when the window was narrowed to {SHELL_MIN}",
-                tab.id
-            );
+        for width in [SHELL_MIN, SHELL_MIN + 70.0, 640.0, SHELL_WIDTH] {
+            let mut shelf = Shelf::open();
+            shelf.size = Vec2::new(width, SHELL_MIN);
+            shelf.settle();
+            let screen = Rect::from_min_size(egui::Pos2::ZERO, shelf.size);
+
+            for tab in &tabs {
+                let entry = shelf
+                    .ctx
+                    .read_response(sidebar_entry(tab.id))
+                    .unwrap_or_else(|| panic!("at {width} px {:?} was never laid out", tab.id));
+                assert!(
+                    screen.contains_rect(entry.rect),
+                    "at {width} px {:?} sits at {:?}, off the window",
+                    tab.id,
+                    entry.rect
+                );
+                shelf.click(entry.rect.center());
+                assert_eq!(
+                    shelf.app.selected, tab.id,
+                    "at {width} px a click on {:?} did not select it",
+                    tab.id
+                );
+            }
         }
-
-        let at = shelf.centre_of(sidebar_entry(TabId::Cache));
-        shelf.click(at);
-        assert_eq!(
-            shelf.app.selected,
-            TabId::Cache,
-            "a tab chip in the narrow strip could not be clicked"
-        );
     }
 
     /// **Each of the four pane states is actually painted**, keyed on the sentence the model chose.
