@@ -648,7 +648,9 @@ impl ShellApp {
     /// stayed live under a wash of translucent black could be clicked through the appearance of a
     /// modal, which is a worse version of the burial the always-on-top child window was there to
     /// prevent. The panes are already drawn non-interactive and the chrome draws no controls
-    /// ([`ShellApp::paint_shell`]); this is the backstop that does not depend on either remembering.
+    /// ([`ShellApp::paint_shell`]); this is the backstop that does not depend on either remembering,
+    /// and it is given a NAMED id so a test can assert the backstop is really there rather than only
+    /// that today's controls happen not to need it.
     ///
     /// # Why there is no longer a pill
     ///
@@ -664,7 +666,7 @@ impl ShellApp {
                 ui.set_clip_rect(full);
                 ui.painter()
                     .rect_filled(full, 0, rgba(scrim(t, self.theme)));
-                ui.allocate_rect(full, egui::Sense::click_and_drag());
+                ui.interact(full, scrim_blocker(), egui::Sense::click_and_drag());
             });
     }
 
@@ -768,6 +770,13 @@ fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon
 
 /// The width of the chrome's Close control.
 const CLOSE_WIDTH: f32 = 72.0;
+/// The id of the scrim's input blocker — the widget that eats every click aimed under the modal.
+///
+/// Named rather than auto-generated so [`ShellApp::scrim`]'s guarantee is a thing a test can read
+/// back, instead of an inference from the controls that happen to exist today.
+fn scrim_blocker() -> egui::Id {
+    egui::Id::new("dig-app-shell-scrim-blocker")
+}
 /// The tab the window opens on, and the one it falls back to when a selected tab stops existing.
 ///
 /// Status, because it is the tab that makes sense when the app cannot yet say what else to show —
@@ -834,6 +843,18 @@ mod tests {
         /// The window's size for the next frame, so a test can narrow it.
         size: Vec2,
         _dir: tempfile::TempDir,
+        /// Excludes every other test that raises or reads the process-global consent count.
+        ///
+        /// Held by the HARNESS rather than by the handful of tests that assert on the count,
+        /// because since dig_ecosystem#2270 any shelf showing a prompt RAISES it — so every shelf is
+        /// a raiser, whether or not it looks like one. Scoping the guard to the assertions instead
+        /// would leave the raisers unsynchronised, which is the shape of the flake it fixes: two
+        /// tests failing together, each having read the other's legitimate surface.
+        ///
+        /// The mirror of [`super::super::tests::Lane`]'s own guard. A test must therefore not build
+        /// a `Shelf` and a `Lane` at once — the mutex is not reentrant, and doing so hangs rather
+        /// than fails.
+        _exclusive: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Shelf {
@@ -843,6 +864,7 @@ mod tests {
 
         /// A shell built over one fixed view.
         fn showing(view: crate::tray_menu::TrayView) -> Self {
+            let exclusive = crate::confirm::surface::one_surface_at_a_time();
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (jobs, queue) = mpsc::channel::<Work>();
@@ -866,6 +888,7 @@ mod tests {
                 dispatched,
                 size: shell_size(),
                 _dir: dir,
+                _exclusive: exclusive,
             }
         }
 
@@ -2057,7 +2080,7 @@ mod tests {
     fn the_in_window_prompt_is_a_consent_surface_for_as_long_as_it_is_up() {
         use crate::confirm::surface::consent_surface_is_up;
 
-        let _serialised = crate::confirm::surface::one_surface_at_a_time();
+        // `Shelf` already holds the exclusion — taking it again here would hang, not fail.
         let mut shelf = Shelf::open();
         shelf.settle();
         assert!(
@@ -2127,6 +2150,40 @@ mod tests {
         assert!(
             shelf.app.prompt.is_some(),
             "the click dismissed the prompt, which no click on the shell may do"
+        );
+    }
+
+    /// **The scrim really is an input blocker, over the whole window.**
+    ///
+    /// The behavioural test above passes today without this widget, because every control the shell
+    /// currently draws is ALREADY inert while a prompt is up. That is exactly why the backstop needs
+    /// its own assertion: it is the thing that keeps a control added tomorrow from being clickable
+    /// through a live consent prompt, and no test of today's controls can see it.
+    ///
+    /// Its extent is asserted too. A blocker that covered only the pane would leave the chrome — and
+    /// therefore Close — live under the scrim that is drawn over it.
+    #[test]
+    fn the_scrim_blocks_input_across_the_whole_window() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+
+        let blocker = shelf
+            .ctx
+            .read_response(scrim_blocker())
+            .expect("nothing is swallowing input under the modal");
+        assert!(
+            blocker.sense.senses_click() && blocker.sense.senses_drag(),
+            "the scrim is painted but takes no input, so it stops nothing"
+        );
+        assert!(
+            blocker
+                .rect
+                .contains_rect(Rect::from_min_size(egui::Pos2::ZERO, shell_size())),
+            "the blocker at {:?} leaves part of the window live under the scrim",
+            blocker.rect
         );
     }
 
