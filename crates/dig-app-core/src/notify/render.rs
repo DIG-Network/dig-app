@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 
 use dig_events_protocol::AssetId;
 
+use crate::amount::{format_units, CAT_DECIMALS, XCH_DECIMALS};
+
 use super::{AssetTotal, NativeNotifier, Notification};
 
 /// Format one direction's coalesced totals as a line, or `None` when nothing moved that way.
@@ -68,15 +70,11 @@ fn short_asset(id: &str) -> String {
 /// Format a base-unit amount for an asset: XCH has 12 decimals (mojos), CATs 3 (the Chia CAT
 /// convention), with trailing zeros trimmed for a glanceable value.
 pub(super) fn format_amount(asset: Option<&AssetId>, mojos: u128) -> String {
-    let decimals = if asset.is_none() { 12 } else { 3 };
-    let divisor = 10u128.pow(decimals);
-    let whole = mojos / divisor;
-    let frac = mojos % divisor;
-    if frac == 0 {
-        return whole.to_string();
-    }
-    let frac = format!("{frac:0width$}", width = decimals as usize);
-    format!("{whole}.{}", frac.trim_end_matches('0'))
+    let decimals = match asset {
+        None => XCH_DECIMALS,
+        Some(_) => CAT_DECIMALS,
+    };
+    format_units(mojos, decimals)
 }
 
 /// A fail-safe notifier that logs instead of drawing a toast — the headless / unsupported-target

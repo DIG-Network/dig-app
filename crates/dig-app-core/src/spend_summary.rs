@@ -24,10 +24,8 @@
 //! `<`, `b`, `>`; there is no markup-neutralising step to forget, because there is no markup parser to
 //! neutralise it for (dig_ecosystem#2038). This module never needs to escape.
 
+use crate::amount::{format_units, XCH_DECIMALS};
 use crate::decode::{DecodedOutput, DecodedTx};
-
-/// The number of mojos in one XCH (10¹²) — the denomination the confirm window shows amounts in.
-const MOJOS_PER_XCH: u64 = 1_000_000_000_000;
 
 /// The fail-closed warning shown when the bundle spends a non-XCH asset (a CAT such as $DIG, or an
 /// unrecognized puzzle). We NEVER print a fabricated XCH amount or an `xch1…` recipient for it — a
@@ -79,19 +77,15 @@ fn describe_output(output: &DecodedOutput) -> String {
     )
 }
 
-/// Format an amount in mojos as a human XCH string, trimming trailing zeros from the fractional part
-/// (e.g. `500_000_000_000` → `"0.5"`, `1_000_000_000_000` → `"1"`, `1` → `"0.000000000001"`).
+/// Format an amount in mojos as a human XCH string (e.g. `500_000_000_000` → `"0.5"`).
 ///
-/// The full precision is preserved — an amount is never rounded away — so the summary stays faithful to
-/// the signed bytes.
+/// Named rather than inlined because the XCH-ness is this module's INVARIANT, not a caller's choice:
+/// [`summarize`] fails closed on any bundle that is not wholly native XCH, so every amount reaching
+/// here is mojos by construction. The arithmetic itself belongs to [`crate::amount`] — the confirm
+/// window is a money surface, and a second implementation of a money rendering is a defect even while
+/// it is correct (dig_ecosystem#2295).
 fn format_xch(mojos: u64) -> String {
-    let whole = mojos / MOJOS_PER_XCH;
-    let fraction = mojos % MOJOS_PER_XCH;
-    if fraction == 0 {
-        return whole.to_string();
-    }
-    let fraction = format!("{fraction:012}");
-    format!("{whole}.{}", fraction.trim_end_matches('0'))
+    format_units(u128::from(mojos), XCH_DECIMALS)
 }
 
 #[cfg(test)]
@@ -107,8 +101,9 @@ mod tests {
 
     #[test]
     fn whole_xch_amounts_render_without_a_fractional_part() {
-        assert_eq!(format_xch(MOJOS_PER_XCH), "1");
-        assert_eq!(format_xch(12 * MOJOS_PER_XCH), "12");
+        let one_xch = 10u64.pow(XCH_DECIMALS);
+        assert_eq!(format_xch(one_xch), "1");
+        assert_eq!(format_xch(12 * one_xch), "12");
         assert_eq!(format_xch(0), "0");
     }
 

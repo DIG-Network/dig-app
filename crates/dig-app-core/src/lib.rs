@@ -52,6 +52,7 @@
 
 pub mod account;
 pub mod agent;
+pub mod amount;
 pub mod apps;
 pub mod cache;
 pub mod config;

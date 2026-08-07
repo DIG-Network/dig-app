@@ -170,7 +170,7 @@ fn main() {
             // is being photographed is the WINDOW, not a chain read.
             let funded = FixedBalances(Balances {
                 xch_mojos: 1_250_000_000_000,
-                dig_units: 3_400_000_000_000,
+                dig_units: 3_400,
             });
             // A node that answers "still catching up" — the reason now comes from what the node
             // says, not from a variant the caller picks (dig_ecosystem#2206).

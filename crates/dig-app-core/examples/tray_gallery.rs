@@ -49,7 +49,7 @@ fn main() {
             balance: dig_app_core::wallet::overview::BalanceReading::Known(
                 dig_app_core::wallet::overview::Balances {
                     xch_mojos: 1_250_000_000_000,
-                    dig_units: 3_400_000_000_000,
+                    dig_units: 3_400,
                 },
             ),
             account: Some(account.clone()),

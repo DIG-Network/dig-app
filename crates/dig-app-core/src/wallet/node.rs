@@ -284,9 +284,11 @@ mod tests {
 
     const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
 
-    /// Two whole coins of DIG and one of XCH, in base units — chosen so the rendered figures differ
-    /// from each other, and a swapped-asset implementation cannot pass.
-    const DIG_UNITS: u64 = 2_000_000_000_000;
+    /// Two whole coins of DIG and one of XCH, in each asset's OWN base unit — $DIG carries 3 decimals
+    /// and XCH 12, so the two integers differ by more than their rendered figures do. Chosen so a
+    /// swapped-asset implementation cannot pass, and so a single-divisor formatter renders one of
+    /// them absurdly (dig_ecosystem#2295).
+    const DIG_UNITS: u64 = 2_000;
     const XCH_MOJOS: u64 = 1_000_000_000_000;
 
     fn fake_token() -> Option<String> {

@@ -1486,11 +1486,22 @@ asserting an outcome it did not test:
 - dig-app MUST NOT enable, or require the user to enable, any node-side flag that arms spending in order
   to obtain a read-only balance.
 
+**Rendering an amount MUST be asset-aware (MUST).** Every balance on the wire is an integer in the
+asset's OWN base unit, and the two assets do not agree on scale: native XCH carries **12** decimal
+places (mojos), while $DIG is a CAT and carries **3** — `1 $DIG = 1000 base units`. A surface MUST
+divide by `10^decimals` **of the asset the figure belongs to**, and MUST obtain that figure from the
+asset rather than from a per-surface constant. A single asset-agnostic divisor renders one of the two
+assets wrong by a factor of 10^9 — silently, and with the full confidence of a plain numeral — which is
+the defect [dig_ecosystem#2295] fixed after it shipped in v5.31.0. dig-app satisfies this with ONE
+formatter (`dig_app_core::amount`) that every money surface calls; a second implementation of this
+arithmetic is a defect regardless of whether it is currently correct.
+
 `asset` is the lowercase wire enum `"xch" | "dig"`. dig-app depends only on the `WalletEngine` trait
 seam, so it compiles + tests standalone; the real IPC-session transport (the §5.3 `SessionClient`)
 drops in as the production implementation without touching the wallet logic.
 
 [dig_ecosystem#910]: https://github.com/DIG-Network/dig_ecosystem/issues/910
+[dig_ecosystem#2295]: https://github.com/DIG-Network/dig_ecosystem/issues/2295
 
 ### 3.4 Per-user data at rest (NC-2 / NC-3)
 
