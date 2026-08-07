@@ -26,6 +26,7 @@
 //! [`WindowIntent::Approve`] is a click or an Enter on a control whose `answer` is
 //! [`Answer::Approve`].
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -368,8 +369,8 @@ struct Vigil {
     /// to nudge, and the watchdog cannot free that thread. Registering the vigil before the call
     /// anyway is what lets it at least SAY SO, instead of the renderer disappearing with no record.
     wake: Option<egui::Context>,
-    /// When the window has exceeded its own deadline by [`ANSWER_GRACE`] and must be forced shut.
-    over_by: Instant,
+    /// What makes THIS window overdue — a passed deadline, or a frame loop gone silent.
+    until: Overstay,
     /// When to complain about this window again, once it has been forced and did not go.
     ///
     /// A latch was the first shape and it was wrong in the case that matters: a window that ignores
@@ -379,6 +380,247 @@ struct Vigil {
     /// it worked" and "forced, and the renderer is still gone".
     complain_again_at: Option<Instant>,
 }
+
+/// What makes the window on screen overdue — and therefore what the watchdog is watching FOR.
+///
+/// # Why one watchdog needs two questions
+///
+/// The two windows this thread draws fail in the same way and are diagnosed by opposite evidence.
+///
+/// A **consent prompt** has a deadline of its own ([`Job::over_by`]), so "is it overdue" is a clock
+/// comparison and nothing else. A window still inside its deadline is healthy BY DEFINITION, however
+/// long it has sat there, because sitting there is what a person reading it looks like.
+///
+/// The **shell** has no deadline and must never acquire one: it is a window somebody opened on
+/// purpose, and a watchdog that closed it under them would be a defect, not a safeguard. So a clock
+/// cannot say anything about it. But it can still WEDGE — the dig_ecosystem#2074 class, a GL or
+/// adapter init that never returns, or a panic winit has latched — and a wedged shell is worse than
+/// a wedged prompt: [`serve_with`] never gets back to `recv`, so **every later consent prompt in the
+/// process is refused by caller-side timeout, for the life of the process**, with no recovery and no
+/// forced close. Fail-closed (an unanswered prompt is never an approval), and still a total,
+/// unrecoverable loss of the consent surface.
+///
+/// The rationale that left the shell unwatched conflated *"has a deadline"* with *"is watched for
+/// wedging"*. This enum separates them. The shell keeps no deadline, and is watched on the one signal
+/// that distinguishes a window a person is using from a window whose loop has died: **whether frames
+/// are still running**. A healthy shell is never force-closed, and a genuinely dead one still
+/// releases the consent surface.
+enum Overstay {
+    /// A consent prompt: overdue once the CLOCK passes the deadline it was given.
+    Answering {
+        /// When the window has exceeded its own deadline by [`ANSWER_GRACE`] and must be forced shut.
+        over_by: Instant,
+    },
+    /// The app shell: overdue only once its frame loop has stopped RUNNING.
+    Painting {
+        /// Stamped by every frame the shell draws — see [`Heartbeat`].
+        beat: Arc<Heartbeat>,
+        /// How much silence condemns this window. [`FRAME_SILENCE`] outside a test.
+        silent_for: Duration,
+        /// When the silence was first observed, or `None` if the last look found a live loop.
+        ///
+        /// # Why silence has to be seen TWICE
+        ///
+        /// A deadline is monotonic: once passed it cannot be un-passed, so one observation settles
+        /// it. Frame silence is not, because the watchdog's own clock can jump — a laptop suspended
+        /// with the window open resumes with an arbitrarily long gap since the last frame, in a
+        /// process where nothing whatsoever is wrong. The watchdog thread was asleep across the same
+        /// gap, so its FIRST look after a resume sees hours of silence.
+        ///
+        /// Requiring the silence to survive a second look removes that entire class without
+        /// weakening the guarantee: a resumed shell paints within a frame or two of waking, so its
+        /// second look finds a fresh beat and clears the doubt, while a wedged loop looks exactly as
+        /// dead on the second look as on the first.
+        ///
+        /// # Why the second look is a full `silent_for` later, and not one tick later
+        ///
+        /// One [`WATCHDOG_TICK`] would have been enough only if the resumed shell painted within
+        /// that second — an assumption about a machine that has just woken up, which is exactly the
+        /// moment it is least true. A whole `silent_for` makes it unconditional: the window is
+        /// condemned only after it has been given the entire bound again, from a clock that is
+        /// demonstrably running, to produce one frame. The cost is that a true wedge is caught in up
+        /// to twice the bound rather than the bound plus a tick, which the bound is chosen to
+        /// absorb ([`FRAME_SILENCE`]). Fail-closed either way — nothing here can approve anything —
+        /// so this is a false-positive margin, and the whole feature is worthless if a scheduler
+        /// hiccup reads as a wedge.
+        doubted_at: Option<Instant>,
+    },
+}
+
+impl Overstay {
+    /// Watch a consent prompt against its own deadline.
+    fn answering(over_by: Instant) -> Self {
+        Self::Answering { over_by }
+    }
+
+    /// Watch a window that has no deadline, on whether it is still painting.
+    fn painting(beat: Arc<Heartbeat>, silent_for: Duration) -> Self {
+        Self::Painting {
+            beat,
+            silent_for,
+            doubted_at: None,
+        }
+    }
+
+    /// Whether the window this describes has outstayed its welcome, as of `now`.
+    ///
+    /// Takes `&mut self` for the shell's second look alone (see [`Overstay::Painting::doubted_at`]);
+    /// the prompt arm is a pure comparison and this cannot invent an answer for either — the outcome
+    /// a forced window produces is still whatever [`PromptApp::expire`] records.
+    fn overstayed(&mut self, now: Instant) -> bool {
+        match self {
+            Self::Answering { over_by } => now >= *over_by,
+            Self::Painting {
+                beat,
+                silent_for,
+                doubted_at,
+            } => {
+                if beat.silence(now) < *silent_for {
+                    *doubted_at = None;
+                    return false;
+                }
+                match *doubted_at {
+                    // Condemned on the first look, and still silent a full bound later.
+                    Some(first) => now >= first + *silent_for,
+                    None => {
+                        *doubted_at = Some(now);
+                        false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether two registrations describe the SAME window.
+    ///
+    /// Asked when a window that registered before `run_native` re-registers from inside the creator
+    /// with its context: the same window must keep its complaint backoff rather than re-announcing
+    /// itself as a fresh problem. Identity is the deadline for a prompt and the heartbeat's identity
+    /// for a shell — a second shell would carry a heartbeat of its own.
+    fn is_the_same_window_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Answering { over_by: a }, Self::Answering { over_by: b }) => a == b,
+            (Self::Painting { beat: a, .. }, Self::Painting { beat: b, .. }) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    /// What to say the first time this window is forced.
+    fn forcing_it(&self) -> &'static str {
+        match self {
+            Self::Answering { .. } => {
+                "a DIG prompt window outlived its own deadline without answering; forcing it closed \
+                 so later prompts can be shown"
+            }
+            Self::Painting { .. } => {
+                "the DIG app window has drawn no frame for far longer than it should have; its loop \
+                 is wedged, so it is being forced closed to free the consent surface"
+            }
+        }
+    }
+
+    /// What to say while it is STILL there after being forced.
+    fn still_here(&self) -> &'static str {
+        match self {
+            Self::Answering { .. } => {
+                "a DIG prompt window is STILL open after being forced closed; no further DIG prompt \
+                 can be shown until DIG is restarted"
+            }
+            Self::Painting { .. } => {
+                "the DIG app window is STILL wedged after being forced closed; no further DIG \
+                 prompt can be shown until DIG is restarted"
+            }
+        }
+    }
+}
+
+/// Proof that a frame loop is still running, written by the loop and read from another thread.
+///
+/// # Why elapsed milliseconds and not an `Instant`
+///
+/// This is stamped by EVERY frame of a window that repaints continuously, and read by the watchdog
+/// once a second. An `Instant` is not atomic, so it would need a lock taken on the render thread ~60
+/// times a second to serve one reader — and a lock on the render thread is precisely the resource a
+/// wedge-detector must not be able to contend for. Milliseconds since [`Heartbeat::born`] fit an
+/// atomic, so a beat is one relaxed store and can never block or poison.
+///
+/// Millisecond resolution is far finer than the seconds-scale silence it is compared against, and
+/// `u64` milliseconds overflow after ~584 million years.
+///
+/// # Why this is a second one, and not `dig-app`'s
+///
+/// `dig-app`'s `pump_vigil` watches the tray's two loops with the same instrument and for the same
+/// stated reason — the observer must be able to read the stamp while the watched loop is blocked, so
+/// it cannot be a lock that loop might be holding. This is the THIRD loop of the process and the one
+/// `pump_vigil` cannot reach: it lives in the binary crate, and this is the library it is built on.
+/// The duplication is the dependency direction, not an oversight; the two are deliberately the same
+/// shape so that a person who has read one has read both.
+struct Heartbeat {
+    /// When this window began — the base every stamp is measured from.
+    ///
+    /// Set BEFORE `run_native` rather than on the first frame, so that a loop which hangs before it
+    /// ever draws (GL context init, adapter enumeration, a driver that does not return) is silent
+    /// from the moment it started rather than silent from a frame that never happened.
+    born: Instant,
+    /// Milliseconds after [`Heartbeat::born`] at which the most recent frame ran.
+    last_beat_ms: AtomicU64,
+}
+
+impl Heartbeat {
+    fn new() -> Self {
+        Self {
+            born: Instant::now(),
+            last_beat_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Record that a frame just ran.
+    fn beat(&self) {
+        self.beat_at(Instant::now());
+    }
+
+    /// Record a frame that ran at `at`.
+    ///
+    /// The seam the two-look rule is driven through: a test can lay out a whole suspend-and-resume
+    /// sequence on an explicit fixture clock instead of sleeping through a real silence window.
+    fn beat_at(&self, at: Instant) {
+        let elapsed =
+            u64::try_from(at.saturating_duration_since(self.born).as_millis()).unwrap_or(u64::MAX);
+        self.last_beat_ms.store(elapsed, Ordering::Relaxed);
+    }
+
+    /// How long the loop has been silent, as of `now`.
+    fn silence(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.born)
+            .saturating_sub(Duration::from_millis(
+                self.last_beat_ms.load(Ordering::Relaxed),
+            ))
+    }
+}
+
+/// How long the app window may draw NOTHING before the watchdog treats its loop as dead.
+///
+/// # Why twenty seconds, from both sides
+///
+/// The shell repaints unconditionally — [`shell::ShellApp::frame`] calls `request_repaint` on every
+/// pass, because a hosted prompt's own deadline can only elapse on a frame that actually runs. So a
+/// healthy shell beats roughly every 16 ms, and this is **three orders of magnitude** above that:
+/// nothing a working window does — a font atlas rebuild, a driver stall, a resize, a scheduler that
+/// lost interest in a background process — comes within a thousand frames of it. Combined with the
+/// second look ([`Overstay::Painting::doubted_at`]) a healthy window is never force-closed, which is
+/// the property that must not be traded away for detection speed.
+///
+/// The other side is the one that says why it is not sixty. The point of noticing at all is to free
+/// the consent surface, and a prompt raised in the moments before the wedge is sitting in the queue
+/// with its own clock running: it is answerable only if the shell is released with enough of
+/// [`CONFIRM_DEADLINE`] left to draw it and let a person read it.
+///
+/// The wait is TWICE this, because the silence must survive a second look a full bound after the
+/// first ([`Overstay::Painting::doubted_at`]) — so about forty seconds, plus at most one
+/// [`WATCHDOG_TICK`]. That still leaves a queued prompt around 79 of its 120 seconds, which is a
+/// surface a person can find and read. At a minute the wait would be two, and the prompt would be
+/// refused having never been drawn.
+const FRAME_SILENCE: Duration = Duration::from_secs(20);
 
 /// How often the watchdog looks at the window on screen.
 ///
@@ -405,23 +647,17 @@ fn watch(drawing: &'static Mutex<Option<Vigil>>, tick: Duration) {
         let mut slot = poisonless(drawing);
         let Some(vigil) = slot.as_mut() else { continue };
         let now = Instant::now();
-        if now < vigil.over_by {
+        if !vigil.until.overstayed(now) {
             continue;
         }
         match vigil.complain_again_at {
             None => {
-                tracing::error!(
-                    "a DIG prompt window outlived its own deadline without answering; forcing it \
-                     closed so later prompts can be shown"
-                );
+                tracing::error!("{}", vigil.until.forcing_it());
             }
             Some(due) if now >= due => {
                 // Still here a full backoff after being forced. This is the permanent lockout, and
                 // it must keep saying so rather than going quiet after one line.
-                tracing::error!(
-                    "a DIG prompt window is STILL open after being forced closed; no further DIG \
-                     prompt can be shown until DIG is restarted"
-                );
+                tracing::error!("{}", vigil.until.still_here());
             }
             Some(_) => continue,
         }
@@ -452,9 +688,9 @@ fn watch(drawing: &'static Mutex<Option<Vigil>>, tick: Duration) {
 /// the unwind, put the platform back in a usable state, answer the caller the fail-closed way, say
 /// so in the log, and take the next job.
 fn serve(rx: &Receiver<Work>, drawing: &'static Mutex<Option<Vigil>>) {
-    serve_with(rx, drawing, |work, queue| match work {
-        Work::Prompt(job) => draw_watched(job, Some(drawing)),
-        Work::Shell(shell) => shell::draw(shell, queue),
+    serve_with(rx, drawing, |work, queue, watching| match work {
+        Work::Prompt(job) => draw_watched(job, watching),
+        Work::Shell(shell) => shell::draw(shell, queue, watching),
     });
 }
 
@@ -464,10 +700,37 @@ fn serve(rx: &Receiver<Work>, drawing: &'static Mutex<Option<Vigil>>) {
 /// misbehaves — panics, or refuses to open — and a test cannot make a real GL window do either on
 /// demand. With the drawing injected, the survival rules are exercised on a CI host with no display
 /// and no window, against the same loop production runs.
+///
+/// # Why the watchdog slot is HANDED to `draw` rather than captured by it
+///
+/// Every window drawn on this thread registers with the watchdog, and the interesting question is
+/// not whether that registration is written correctly but whether it can be REMOVED. A window
+/// nobody watches looks exactly like a window nobody needed to watch: the deletion is one token and
+/// the suite stays green — measured, on this very module, where disabling the vigil in production
+/// left 1015 tests passing.
+///
+/// So the slot is not an `Option`, and it is not in scope for the closure to capture. It arrives as
+/// a parameter, from the loop that owns it, and there is no value meaning "draw this one unwatched"
+/// — for the shell OR for the prompt, which had the same shape and inherits the same fix.
+///
+/// # Exactly what that buys, and what it does not
+///
+/// Stated precisely, because the comment this replaces claimed a guarantee the compiler did not
+/// give and a reviewer had to find that out the hard way:
+///
+/// * Passing `None` no longer compiles, on either arm. The one-token deletion is gone. **Verified.**
+/// * Ignoring the parameter on BOTH arms fails the build: `error: unused variable: watching` under
+///   the `-D warnings` gate. **Verified.**
+/// * Ignoring it on ONE arm and minting a second slot nothing reads still compiles, and no type can
+///   prevent it — a wrong VALUE is always writable. What it is not is a deletion: it is a
+///   construction, in a function whose other arm shows what the right value is.
+///
+/// The alternative was a test reaching through this loop, and a branch that can be deleted while the
+/// suite stays green is better made unexpressible than guarded by a test aimed near it.
 fn serve_with(
     rx: &Receiver<Work>,
     drawing: &Mutex<Option<Vigil>>,
-    draw: impl Fn(Work, &Receiver<Work>) -> Option<Outcome>,
+    draw: impl Fn(Work, &Receiver<Work>, &Mutex<Option<Vigil>>) -> Option<Outcome>,
 ) {
     while let Ok(work) = rx.recv() {
         // The shell is served on its own path ([`serve_shell`]) rather than through the arm below.
@@ -476,7 +739,7 @@ fn serve_with(
         // the consent arm exactly as it was.
         let job = match work {
             Work::Shell(shell) => {
-                serve_shell(shell, rx, &draw);
+                serve_shell(shell, rx, drawing, &draw);
                 continue;
             }
             Work::Prompt(job) => job,
@@ -508,7 +771,7 @@ fn serve_with(
         // counting it would disable the claim over an empty screen.
         let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _on_screen = crate::confirm::surface::Raised::now();
-            draw(Work::Prompt(job), rx)
+            draw(Work::Prompt(job), rx, drawing)
         }));
 
         // Whatever happened in there, this window is over: stop the watchdog nudging a context
@@ -550,8 +813,11 @@ fn serve_with(
 /// * **No [`Raised`](crate::confirm::surface::Raised).** The shell is not a consent surface. Counting
 ///   it would disable the tray's foreground claim (dig-app#91) for the whole life of a window a
 ///   person may leave open all day — and a disabled claim looks exactly like a working one.
-/// * **No [`Vigil`].** A window somebody opened on purpose must never be forced shut by a watchdog.
-///   The shell has no deadline and must never acquire one.
+/// * **No DEADLINE.** A window somebody opened on purpose must never be forced shut for having
+///   been open a while, so the shell has no [`Overstay::Answering`] and must never acquire one. It
+///   is still watched — on liveness rather than on the clock ([`Overstay::Painting`]), because a
+///   wedged shell holds this thread and takes the whole consent surface with it. Those are different
+///   properties, and the earlier rationale here conflated them.
 /// * **No staleness check.** Nobody is blocked on a shell, so there is no caller who can have given
 ///   up while it sat in the queue.
 /// * **No reply.** There is no channel to answer, so there is nothing here to fail closed. The
@@ -567,11 +833,15 @@ fn serve_with(
 fn serve_shell(
     shell: AppWindow,
     rx: &Receiver<Work>,
-    draw: &impl Fn(Work, &Receiver<Work>) -> Option<Outcome>,
+    drawing: &Mutex<Option<Vigil>>,
+    draw: &impl Fn(Work, &Receiver<Work>, &Mutex<Option<Vigil>>) -> Option<Outcome>,
 ) {
     let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        draw(Work::Shell(shell), rx)
+        draw(Work::Shell(shell), rx, drawing)
     }));
+    // This window is over however it ended, so the watchdog stops looking at it before anything
+    // else can go wrong — the same ordering, and the same reason, as the prompt arm's.
+    clear_vigil(drawing);
     if drawn.is_err() {
         // A panic inside `run_native` skips the flush at the end of the draw, leaving the window
         // undestroyed on Windows — the same hole the prompt arm plugs here.
@@ -594,17 +864,17 @@ fn unavailable(wants_text: bool) -> Outcome {
 }
 
 /// Put the window now being drawn under the watchdog's eye.
-fn set_vigil(drawing: &Mutex<Option<Vigil>>, wake: Option<egui::Context>, over_by: Instant) {
+fn set_vigil(drawing: &Mutex<Option<Vigil>>, wake: Option<egui::Context>, until: Overstay) {
     let mut slot = poisonless(drawing);
     // Upgrading the same window from "no context yet" to "here is the context" must not restart its
     // backoff, or a wedged window would re-announce itself as a fresh problem.
     let complain_again_at = slot
         .as_ref()
-        .filter(|current| current.over_by == over_by)
+        .filter(|current| current.until.is_the_same_window_as(&until))
         .and_then(|current| current.complain_again_at);
     *slot = Some(Vigil {
         wake,
-        over_by,
+        until,
         complain_again_at,
     });
 }
@@ -681,10 +951,11 @@ fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
 
 /// Run one window to completion. `None` means it could not be drawn at all.
 ///
-/// `watched` is where the window registers itself for the out-of-band deadline (see [`Vigil`]); a
-/// caller that passes `None` — the screenshot harness, a test about one window — simply runs
-/// without a watchdog.
-fn draw_watched(job: Job, watched: Option<&Mutex<Option<Vigil>>>) -> Option<Outcome> {
+/// `watched` is where the window registers itself for the out-of-band deadline (see [`Vigil`]). It
+/// is not optional, deliberately — see [`serve_with`]: there must be no value meaning "draw this
+/// consent window with nobody watching it". A caller outside the prompt thread, with no watchdog to
+/// register with, passes a slot of its own that nothing reads.
+fn draw_watched(job: Job, watched: &Mutex<Option<Vigil>>) -> Option<Outcome> {
     let wants_text = job.wants_text;
     let theme_store = job.theme.clone();
     let title = job.screen.title.clone();
@@ -701,18 +972,18 @@ fn draw_watched(job: Job, watched: Option<&Mutex<Option<Vigil>>>) -> Option<Outc
     // Registered BEFORE the call, with no context yet. `run_native` can hang before it ever reaches
     // the creator below — GL context init, adapter enumeration, a driver that does not return — and
     // a vigil that only started existing inside the creator would never see that at all.
-    if let Some(watched) = watched {
-        set_vigil(watched, None, over_by);
-    }
+    set_vigil(watched, None, Overstay::answering(over_by));
 
     let run = eframe::run_native(
         &title,
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
-            if let Some(watched) = watched {
-                set_vigil(watched, Some(cc.egui_ctx.clone()), over_by);
-            }
+            set_vigil(
+                watched,
+                Some(cc.egui_ctx.clone()),
+                Overstay::answering(over_by),
+            );
             Ok(Box::new(PromptApp::new(job, theme_store, sink)))
         }),
     );
@@ -4617,7 +4888,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
         let (reply, _rx) = sync_channel(1);
-        // Unwatched: this test is about ONE window and has no prompt thread to register with.
+        // A slot of this test's own. There is no prompt thread here to register with and no
+        // watchdog reads this one — but registering into it rather than into nothing is what keeps
+        // "unwatched" from being a value production could be handed by mistake (see `serve_with`).
+        let unread = Mutex::new(None);
         let outcome = draw_watched(
             Job {
                 screen: sign_screen(),
@@ -4629,7 +4903,7 @@ mod tests {
                 over_by: Instant::now() + Duration::from_secs(1) + ANSWER_GRACE,
                 reply,
             },
-            None,
+            &unread,
         );
 
         assert!(
@@ -4671,7 +4945,7 @@ mod tests {
         /// Start the REAL [`serve_with`] loop on its own thread, drawing with `drawn`.
         /// Start a lane whose PROMPTS are drawn by `drawn` and which never opens a shell.
         fn serving(drawn: impl Fn(Job) -> Option<Outcome> + Send + 'static) -> Self {
-            Self::serving_work(move |work, _queue| match work {
+            Self::serving_work(move |work, _queue, _watching| match work {
                 Work::Prompt(job) => drawn(job),
                 Work::Shell(_) => None,
             })
@@ -4679,7 +4953,9 @@ mod tests {
 
         /// Start a lane over the whole of [`Work`], for the rules that are about the SHELL.
         pub(super) fn serving_work(
-            drawn: impl Fn(Work, &Receiver<Work>) -> Option<Outcome> + Send + 'static,
+            drawn: impl Fn(Work, &Receiver<Work>, &Mutex<Option<Vigil>>) -> Option<Outcome>
+                + Send
+                + 'static,
         ) -> Self {
             // Taken BEFORE the thread starts, so no window of this lane's can be drawn while
             // another lane's assertions are running.
@@ -5063,7 +5339,11 @@ mod tests {
     fn the_watchdog_closes_a_window_that_outlived_its_deadline() {
         let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
         let ctx = egui::Context::default();
-        set_vigil(drawing, Some(ctx.clone()), Instant::now());
+        set_vigil(
+            drawing,
+            Some(ctx.clone()),
+            Overstay::answering(Instant::now()),
+        );
         std::thread::spawn(move || watch(drawing, Duration::from_millis(10)));
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -5094,7 +5374,7 @@ mod tests {
         set_vigil(
             drawing,
             Some(ctx.clone()),
-            Instant::now() + Duration::from_secs(3600),
+            Overstay::answering(Instant::now() + Duration::from_secs(3600)),
         );
         std::thread::spawn(move || watch(drawing, Duration::from_millis(10)));
         std::thread::sleep(Duration::from_millis(300));
@@ -5102,6 +5382,185 @@ mod tests {
             !commands_of(&ctx).contains(&egui::ViewportCommand::Close),
             "the watchdog closed a window that was still well inside its deadline"
         );
+    }
+
+    /// **A shell whose frame loop has gone silent is forced closed.**
+    ///
+    /// The consent-lockout half of dig_ecosystem#2272. A wedged shell — a GL or adapter init that
+    /// never returns, a panic winit has latched — holds the one prompt thread there is, so
+    /// [`serve_with`] never gets back to `recv` and every later consent prompt in the process is
+    /// refused by caller-side timeout for the rest of the session. The shell has no deadline and
+    /// must never have one, so the only signal separating that from a window somebody is using is
+    /// whether frames are still running.
+    ///
+    /// Driven against a real [`egui::Context`] with no window, on a heartbeat that is never
+    /// stamped, with the silence bound in milliseconds rather than [`FRAME_SILENCE`]'s twenty
+    /// seconds — the same way the deadline tests hand [`Overstay::answering`] an `Instant` of their
+    /// own choosing.
+    #[test]
+    fn the_watchdog_closes_a_shell_whose_frame_loop_has_gone_silent() {
+        let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+        let ctx = egui::Context::default();
+        let beat = Arc::new(Heartbeat::new());
+        set_vigil(
+            drawing,
+            Some(ctx.clone()),
+            Overstay::painting(beat, Duration::from_millis(50)),
+        );
+        std::thread::spawn(move || watch(drawing, Duration::from_millis(10)));
+
+        let give_up_at = Instant::now() + Duration::from_secs(5);
+        let closed = loop {
+            if commands_of(&ctx).contains(&egui::ViewportCommand::Close) {
+                break true;
+            }
+            if Instant::now() > give_up_at {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(
+            closed,
+            "the watchdog never asked a wedged app window to close; every later consent prompt in \
+             the process would be refused unseen for the life of the process"
+        );
+    }
+
+    /// **A shell that is still painting is NEVER forced closed, however long it has been open.**
+    ///
+    /// The half that matters more, and the reason the shell is watched on liveness rather than on a
+    /// clock: a window the person opened must not vanish under them. The heartbeat here is stamped
+    /// far faster than the silence bound for many times the bound's length, so a watchdog that had
+    /// quietly acquired a DEADLINE — the shape this must not become — closes it and fails here.
+    #[test]
+    fn the_watchdog_leaves_a_shell_that_is_still_painting_alone() {
+        let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
+        let ctx = egui::Context::default();
+        let beat = Arc::new(Heartbeat::new());
+        set_vigil(
+            drawing,
+            Some(ctx.clone()),
+            Overstay::painting(Arc::clone(&beat), Duration::from_millis(500)),
+        );
+        std::thread::spawn(move || watch(drawing, Duration::from_millis(10)));
+
+        // Three times the silence bound, of a window that keeps drawing throughout. The bound is
+        // wide relative to the beat on purpose: a loaded CI host can lose a thread for tens of
+        // milliseconds, and a margin that reads as tight here would report a scheduler hiccup as a
+        // wedge — which is the false positive this whole rule is shaped to avoid.
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until {
+            beat.beat();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !commands_of(&ctx).contains(&egui::ViewportCommand::Close),
+            "the watchdog closed an app window that was painting perfectly well; a window somebody \
+             opened must never be shut under them"
+        );
+    }
+
+    /// **Silence that does not survive a second look is not a wedge.**
+    ///
+    /// The suspend-and-resume case, which is the one way a healthy window can look dead. The whole
+    /// machine stops with the window open, the watchdog thread stops with it, and the first look
+    /// after the resume sees hours of silence in a process where nothing is wrong.
+    ///
+    /// Driven on an explicit fixture clock rather than on wall time — every `now` below is an
+    /// offset from the heartbeat's own origin, so nothing here depends on how long the test takes
+    /// to run. The FOURTH assertion is what gives this its power: a doubt that latched instead of
+    /// clearing would condemn the window there, so it distinguishes "silence must be seen twice in
+    /// a row" from the far weaker "silence must be seen twice, ever".
+    #[test]
+    fn a_shell_silence_that_does_not_survive_a_second_look_is_not_a_wedge() {
+        let beat = Arc::new(Heartbeat::new());
+        let start = beat.born;
+        let mut vigil = Overstay::painting(Arc::clone(&beat), Duration::from_secs(10));
+        let at = |secs| start + Duration::from_secs(secs);
+
+        beat.beat_at(at(5));
+        assert!(
+            !vigil.overstayed(at(5)),
+            "a window that just painted was condemned"
+        );
+
+        assert!(
+            !vigil.overstayed(at(20)),
+            "a window was forced on the FIRST look; a machine resuming from suspend always \
+             presents one of these, and this one was healthy"
+        );
+
+        // The loop is back. This is what a resume looks like.
+        beat.beat_at(at(21));
+        assert!(
+            !vigil.overstayed(at(21)),
+            "a window that had started painting again was still condemned"
+        );
+
+        assert!(
+            !vigil.overstayed(at(40)),
+            "the doubt from the earlier silence was never cleared, so this window was condemned on \
+             the first look of a FRESH silence"
+        );
+        // The second look is a full bound after the first, pinned from BOTH sides: one second
+        // under must not condemn, and at the bound it must.
+        assert!(
+            !vigil.overstayed(at(49)),
+            "a window was condemned before it had been given the whole silence bound a second              time, from a clock that was demonstrably running"
+        );
+        assert!(
+            vigil.overstayed(at(50)),
+            "a window silent across two looks a full bound apart was never forced; that is the              wedge this exists to catch"
+        );
+    }
+
+    /// **The app window is registered for wedge-watching, and given no deadline.**
+    ///
+    /// Both halves of dig_ecosystem#2272 in one assertion. `Painting` is what makes a wedged shell
+    /// recoverable; `Answering` is what must never appear here, because a window the person opened
+    /// must not be forced shut for having been open a while.
+    ///
+    /// # What this test can and cannot see
+    ///
+    /// It sees the SHAPE of the registration — that the app window is watched on liveness against
+    /// [`FRAME_SILENCE`], and never on a deadline. That is the half no type can express.
+    ///
+    /// It does NOT see [`shell::draw`]'s call to the wrapper, which needs a real window. An earlier
+    /// version of this comment claimed the compiler held that call, on the grounds that the frame
+    /// host cannot be built without the heartbeat the wrapper mints. That was wrong — the heartbeat
+    /// is minted whichever way the caller is written, so disabling the vigil in production compiled
+    /// cleanly and left this test green. What holds it now is that there is no way to SAY it: see
+    /// [`serve_with`], where the watchdog slot stopped being an `Option` and started being handed to
+    /// the drawer rather than captured by it.
+    #[test]
+    fn the_app_window_is_watched_for_a_wedged_frame_loop_and_given_no_deadline() {
+        let drawing: Mutex<Option<Vigil>> = Mutex::new(None);
+        let beat = shell::watched_while_painting(&drawing, |beat| beat);
+
+        let slot = poisonless(&drawing);
+        let vigil = slot
+            .as_ref()
+            .expect("the app window registered with the watchdog at all");
+        match &vigil.until {
+            Overstay::Painting {
+                beat: watched,
+                silent_for,
+                ..
+            } => {
+                assert!(
+                    Arc::ptr_eq(watched, &beat),
+                    "the watchdog is reading a heartbeat the frame loop does not stamp"
+                );
+                assert_eq!(
+                    *silent_for, FRAME_SILENCE,
+                    "the app window was watched against some other silence bound"
+                );
+            }
+            Overstay::Answering { .. } => panic!(
+                "the app window was given a DEADLINE; a window the person opened must never be \
+                 forced shut for being open"
+            ),
+        }
     }
 
     /// **A finished window is taken off the watchdog's list.**
@@ -5112,7 +5571,11 @@ mod tests {
     #[test]
     fn a_finished_window_is_no_longer_watched() {
         let drawing = Mutex::new(None);
-        set_vigil(&drawing, Some(egui::Context::default()), Instant::now());
+        set_vigil(
+            &drawing,
+            Some(egui::Context::default()),
+            Overstay::answering(Instant::now()),
+        );
         assert!(
             poisonless(&drawing).is_some(),
             "the window never registered with the watchdog"
@@ -5141,7 +5604,11 @@ mod tests {
             "the poisoning thread should panic"
         );
 
-        set_vigil(drawing, Some(egui::Context::default()), Instant::now());
+        set_vigil(
+            drawing,
+            Some(egui::Context::default()),
+            Overstay::answering(Instant::now()),
+        );
         assert!(
             poisonless(drawing).is_some(),
             "a poisoned slot stopped later windows from being watched at all"
@@ -5564,6 +6031,10 @@ mod tests {
     #[test]
     fn escape_still_refuses_after_a_drag() {
         let mut window = Driven::new(sign_screen());
+        // The prompt is old enough to answer BEFORE the drag: otherwise the intermediate
+        // `recorded() == None` below is satisfied by `SETTLE_BEFORE_APPROVE` alone, and says nothing
+        // about the drag (dig_ecosystem#2292).
+        already_read(&mut window.app);
         window.press_and_drag(on_the_header());
         assert!(window.asked_the_os_to_move_it(), "the window never moved");
         assert_eq!(
@@ -5603,6 +6074,10 @@ mod tests {
             on_the_theme_toggle(),
         ] {
             let mut window = Driven::new(sign_screen());
+            // Without this the assertion is answered by the readable interval rather than by the
+            // drag — a fresh `Driven` cannot approve anything for its first 400 ms whatever it does
+            // (dig_ecosystem#2292).
+            already_read(&mut window.app);
             window.press_and_drag(at);
             assert_eq!(
                 window.recorded(),
@@ -5661,6 +6136,10 @@ mod tests {
         );
 
         let mut dragged = Driven::new(sign_screen());
+        // The affirmative must be LIVE while the drag is released on it. The control half above
+        // proves a click here approves; without the same fixture this half would be refused by the
+        // readable interval, not by the drag (dig_ecosystem#2292).
+        already_read(&mut dragged.app);
         dragged.drag_from_to(on_the_header(), on_sign);
         assert!(
             dragged.asked_the_os_to_move_it(),

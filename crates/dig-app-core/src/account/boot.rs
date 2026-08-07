@@ -19,13 +19,15 @@
 //! [`AuthCeremony`] it enrols-or-unlocks the account (through
 //! [`open_or_enroll`]) and houses the result in an
 //! [`AccountResidency`]. The cfg-gated wrappers wire the host's real
-//! [`PromptedCeremony`](crate::account::ceremony::PromptedCeremony) + a per-user
+//! [`PromptedCeremony`] + a per-user
 //! [`FileBackend`](dig_session::FileBackend), and defer on Linux, which has no window stack for the
 //! prompt yet.
 //!
 //! This is the ONE place the app turns "a brand directory" into "a live, lockable unlocked account",
 //! so the tray shell stays a thin caller and every piece underneath (lifecycle, ceremony, residency)
 //! is unit-tested on its own.
+//!
+//! [`PromptedCeremony`]: crate::account::ceremony::PromptedCeremony
 
 use std::sync::Arc;
 
@@ -63,11 +65,13 @@ pub const DEFAULT_ACCOUNT_ID: &str = "default";
 /// Enrol-or-unlock `account` over `backend`, collecting the password through `ceremony`.
 ///
 /// The ceremony is the whole custody question: in production it is a
-/// [`PromptedCeremony`](crate::account::ceremony::PromptedCeremony), so the password comes from the
+/// [`PromptedCeremony`], so the password comes from the
 /// USER (dig_ecosystem#1817) and this call cannot succeed without them. A first run settles its custody
 /// root from `seeding` (a shown-and-confirmed new recovery phrase, or one the user is restoring from)
 /// and seals it under that password; a later unlock reproduces it. Fail-closed: any ceremony/keystore
 /// error — or a recovery phrase the user did not confirm — yields no account at all.
+///
+/// [`PromptedCeremony`]: crate::account::ceremony::PromptedCeremony
 pub fn unlock_account<A>(
     backend: Arc<dyn KeychainBackend>,
     ceremony: A,
