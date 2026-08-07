@@ -111,11 +111,63 @@ pub(crate) static ONE_SURFACE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex
 
 /// Take [`ONE_SURFACE_AT_A_TIME`], recovering rather than propagating a poisoning — a test that
 /// panicked while holding it must not red every later test as well.
+///
+/// # Why this is not a bare `lock()`
+///
+/// [`ONE_SURFACE_AT_A_TIME`] is not reentrant, and the harnesses that take it — `Lane` and `Shelf` —
+/// hold it for their whole LIFE. So a test that builds two of them deadlocks against itself, and
+/// `cargo test` reports that as a suite which never finishes and never says which test is at fault.
+/// That has cost real time here twice.
+///
+/// The check is EXACT rather than a timeout. A timeout cannot tell a re-entrant acquisition from a
+/// peer legitimately queued behind a slow holder, and getting that wrong is worse than the hang it
+/// replaces: a 30-second spin was measured turning one real failure into ten, because every waiting
+/// test in turn burned the same budget and reported the same wrong diagnosis.
 #[cfg(test)]
-pub(crate) fn one_surface_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-    ONE_SURFACE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+pub(crate) fn one_surface_at_a_time() -> ExclusiveSurface {
+    ExclusiveSurface::take()
+}
+
+/// Holds [`ONE_SURFACE_AT_A_TIME`], and knows whether this thread already did.
+///
+/// The flag is thread-local because that is exactly the question: two harnesses on DIFFERENT threads
+/// are the ordinary case the mutex exists to serialise, and two on the SAME thread can never make
+/// progress. Kept beside the mutex, rather than in either harness, so every acquirer is covered and
+/// a `Lane` followed by a `Shelf` is caught as readily as two `Shelf`s.
+#[cfg(test)]
+pub(crate) struct ExclusiveSurface(Option<std::sync::MutexGuard<'static, ()>>);
+
+#[cfg(test)]
+thread_local! {
+    /// Whether THIS thread is already holding the exclusion.
+    static HOLDS_THE_SURFACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+impl ExclusiveSurface {
+    fn take() -> Self {
+        assert!(
+            !HOLDS_THE_SURFACE.with(std::cell::Cell::get),
+            "this thread already holds the consent-surface exclusion. `Lane` and `Shelf` each take \
+             it for their whole life and the mutex is not reentrant, so building two of them at \
+             once can never make progress — scope the first so it is dropped before the second, or \
+             split the test in two."
+        );
+        let guard = ONE_SURFACE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        HOLDS_THE_SURFACE.with(|holds| holds.set(true));
+        Self(Some(guard))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExclusiveSurface {
+    fn drop(&mut self) {
+        // The mutex is released FIRST, so the flag can never say "free" while the lock is still held.
+        drop(self.0.take());
+        HOLDS_THE_SURFACE.with(|holds| holds.set(false));
+    }
 }
 
 #[cfg(test)]

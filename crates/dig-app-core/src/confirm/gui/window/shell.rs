@@ -77,8 +77,8 @@ use super::super::render::{rgba, semibold, size, space};
 use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
 use super::panes::{self, Click};
 use super::{
-    install_fonts, unavailable, AppWindow, Job, Outcome, PromptApp, Work, CHROME_HEIGHT,
-    TOGGLE_WIDTH, WIDTH,
+    install_fonts, unavailable, AppWindow, Chrome, Job, Outcome, PromptApp, Work, CHROME_HEIGHT,
+    TOGGLE_WIDTH,
 };
 use crate::tray_menu::TrayAction;
 use crate::window_model::{self, TabId, WindowModel};
@@ -245,6 +245,13 @@ struct ActivePrompt {
     /// surface is raised by the same value that makes the prompt exist and lowered by the same drop
     /// that dismisses it, on every path out — answered, escaped, expired, or the shell closing.
     _on_screen: crate::confirm::surface::Raised,
+    /// How this prompt is FRAMED — a consent dialog, or the Alt+Space URN launcher.
+    ///
+    /// Decides three things a bar and a dialog do not share: its size, where in the window it sits,
+    /// and whether clicking away from it dismisses it. Copied off the [`Job`] rather than reached
+    /// through [`ActivePrompt::app`] so the shell never has to reach into the prompt's own state to
+    /// lay it out.
+    chrome: Chrome,
     /// The height the modal is drawn at, remembered between frames.
     ///
     /// Sized from the content the way [`super::PromptApp::fit_to_content`] sizes a real window, and
@@ -373,6 +380,7 @@ impl ShellApp {
         let prompt_is_up = self.prompt.is_some();
         self.paint_shell(ctx, &t, prompt_is_up);
         self.show_prompt(ctx, ctx.screen_rect());
+        self.dismiss_a_bar_clicked_away_from(ctx);
     }
 
     /// Escape, and the window manager's own close.
@@ -473,11 +481,13 @@ impl ShellApp {
         let wants_text = job.wants_text;
         let title = job.screen.title.clone();
         let theme_store = job.theme.clone();
+        let chrome = job.screen.chrome;
         tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt inside the app window");
         self.prompt = Some(ActivePrompt {
             app: PromptApp::in_window(job, theme_store, Arc::clone(&sink)),
             _on_screen: crate::confirm::surface::Raised::now(),
-            height: super::HEIGHT,
+            chrome,
+            height: super::opening_size(chrome).1,
             sink,
             reply,
             wants_text,
@@ -532,7 +542,7 @@ impl ShellApp {
         let Some(active) = self.prompt.as_mut() else {
             return;
         };
-        let at = modal_rect(full, active.height);
+        let at = modal_rect(full, active.chrome, active.height);
 
         // Strictly above the scrim's layer, so the modal is the one thing under the pointer that
         // still answers to it. Two named orders rather than two areas at the same order, whose
@@ -546,10 +556,54 @@ impl ShellApp {
                 active.app.frame_in_window(ui, at)
             })
             .inner;
-        active.height = modal_height(full, at, content_bottom);
+        // Only a dialog grows to its content; a bar is a fixed short height, exactly as
+        // `PromptApp::frame` treats it.
+        if !active.chrome.is_bar() {
+            active.height = modal_height(full, at, content_bottom);
+        }
 
         if active.app.answered {
             // Taken out of the field FIRST: this is the dismissal.
+            if let Some(answered) = self.prompt.take() {
+                answered.settle();
+            }
+        }
+    }
+
+    /// Clicking off the URN launcher, onto the dimmed window, closes it — and closes NOTHING else.
+    ///
+    /// # Why the scrim is what "away" means here
+    ///
+    /// A Spotlight-style launcher is dismissed by clicking away from it, which standalone means its
+    /// own window lost focus ([`super::PromptApp::dismiss_on_blur`]). In-window the only focus there
+    /// is belongs to the shell, so blur would mean *the person switched to their browser* — a
+    /// different gesture with a different meaning. The scrim is the exact counterpart: it IS the rest
+    /// of the window, and clicking it is clicking away.
+    ///
+    /// # Why no consent surface can reach this
+    ///
+    /// Gated on [`super::Chrome::dismiss_on_blur`], which is `false` for every dialog — the same flag
+    /// that has always kept a consent window from vanishing because somebody clicked elsewhere. The
+    /// answer it produces is [`super::PromptApp::finish`]'s refusal, so even if that flag were ever
+    /// wrong the outcome would be a denial, never an approval.
+    ///
+    /// Read from the scrim's own blocker rather than from a bare coordinate, so this cannot fire on a
+    /// click that landed on the modal itself.
+    fn dismiss_a_bar_clicked_away_from(&mut self, ctx: &egui::Context) {
+        let Some(active) = self.prompt.as_mut() else {
+            return;
+        };
+        if !active.chrome.dismiss_on_blur() {
+            return;
+        }
+        let clicked_away = ctx
+            .read_response(scrim_blocker())
+            .is_some_and(|scrim| scrim.clicked());
+        if !clicked_away {
+            return;
+        }
+        active.app.refuse_from_the_host(ctx);
+        if active.app.answered {
             if let Some(answered) = self.prompt.take() {
                 answered.settle();
             }
@@ -762,12 +816,24 @@ impl ShellApp {
 /// full width, so a margin of scrim always shows: a modal drawn edge to edge is indistinguishable
 /// from the window having simply become the prompt, which loses the one cue that says the app is
 /// still there, waiting behind this.
-fn modal_rect(full: Rect, height: f32) -> Rect {
+fn modal_rect(full: Rect, chrome: Chrome, height: f32) -> Rect {
+    let (natural_width, ..) = super::opening_size(chrome);
     let size = Vec2::new(
-        WIDTH.min(full.width() * MODAL_SHARE),
+        natural_width.min(full.width() * MODAL_SHARE),
         height.min(full.height() * MODAL_SHARE),
     );
-    Rect::from_center_size(full.center(), size)
+    // A launcher sits HIGH, where the standalone bar places itself on its monitor
+    // (`PromptApp::place_bar`); a dialog is centred. Same arithmetic, against the window instead of
+    // the display, so the two hosts put the bar in the same place relative to what it is inside of.
+    let centre = match chrome.is_bar() {
+        true => egui::Pos2::new(
+            full.center().x,
+            (full.top() + super::bar_top(full.height()) + size.y / 2.0)
+                .min(full.bottom() - size.y / 2.0),
+        ),
+        false => full.center(),
+    };
+    Rect::from_center_size(centre, size)
 }
 
 /// How tall the modal should be NEXT frame, given the content this one produced.
@@ -916,10 +982,11 @@ mod tests {
         /// would leave the raisers unsynchronised, which is the shape of the flake it fixes: two
         /// tests failing together, each having read the other's legitimate surface.
         ///
-        /// The mirror of [`super::super::tests::Lane`]'s own guard. A test must therefore not build
-        /// a `Shelf` and a `Lane` at once — the mutex is not reentrant, and doing so hangs rather
-        /// than fails.
-        _exclusive: std::sync::MutexGuard<'static, ()>,
+        /// The mirror of [`super::super::tests::Lane`]'s own guard. A test must not build a `Shelf`
+        /// and a `Lane` at once — the mutex is not reentrant — and
+        /// [`ExclusiveSurface`](crate::confirm::surface::ExclusiveSurface) turns that mistake into a
+        /// named panic on the spot rather than a suite that hangs with no output.
+        _exclusive: crate::confirm::surface::ExclusiveSurface,
     }
 
     impl Shelf {
@@ -1017,6 +1084,39 @@ mod tests {
                     theme: self.store.clone(),
                     deadline: PATIENT,
                     over_by,
+                    reply,
+                }))
+                .expect("the shell queue is open");
+            answers
+        }
+
+        /// Queue the Alt+Space URN launcher — a `Chrome::Bar` prompt the caller is waiting on.
+        fn queue_live_bar(&self) -> Receiver<Outcome> {
+            let (reply, answers) = sync_channel(1);
+            let content = crate::confirm::InputContent {
+                title: "DIG — Open".to_owned(),
+                heading: "Open a DIG link".to_owned(),
+                body: "Paste a chia:// or urn:dig:chia: link and press Enter. Esc closes this."
+                    .to_owned(),
+                field_label: "DIG link:".to_owned(),
+                submit: "Open",
+                masked: false,
+                revealable: false,
+                style: crate::confirm::InputStyle::Bar,
+            };
+            let screen = super::super::Screen::input(&content);
+            assert_eq!(
+                screen.chrome,
+                Chrome::Bar,
+                "the fixture is not a bar, so every bar rule it is used for is vacuous"
+            );
+            self.jobs
+                .send(Work::Prompt(Job {
+                    screen,
+                    wants_text: true,
+                    theme: self.store.clone(),
+                    deadline: PATIENT,
+                    over_by: Instant::now() + PATIENT + ANSWER_GRACE,
                     reply,
                 }))
                 .expect("the shell queue is open");
@@ -1187,6 +1287,13 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }]
+    }
+
+    /// A point inside the window but outside any modal: the scrim, and nothing else.
+    ///
+    /// A corner, so it cannot land on a centred dialog or on a launcher placed high.
+    fn clicked_away() -> egui::Pos2 {
+        egui::Pos2::new(4.0, SHELL_HEIGHT - 4.0)
     }
 
     /// Press Escape.
@@ -1552,7 +1659,12 @@ mod tests {
         let answers = shelf.queue_live_prompt();
         shelf.frame(Vec::new());
 
-        // The human answers, recorded through the prompt's OWN latch exactly as a click does.
+        // The human answers, recorded through the prompt's OWN latch. Note what this does NOT
+        // exercise: it calls `record` directly, so it skips hit-testing entirely — which is the part
+        // a click actually risks. The pointer path has its own tests
+        // (`the_modal_answers_a_real_pointer_click_on_its_action_button` and its refusal twin); this
+        // one is about what SURVIVES the shell closing over an answer, and reaching the latch by the
+        // shortest route is what keeps it aimed at that.
         let ctx = shelf.ctx.clone();
         let prompt = shelf.app.prompt.as_mut().expect("the prompt is up");
         prompt
@@ -2192,10 +2304,15 @@ mod tests {
     ///
     /// # What "the shell-open path" actually means here
     ///
-    /// All THREE files that can run while the window is up, not just this one: the shell, the panes
-    /// it draws, and [`super::PromptApp`], which the modal drives every frame. Scoping the scan to
-    /// this module would have left two thirds of the path unchecked, and the modal's own painter is
-    /// the likeliest place for a viewport call to reappear.
+    /// The WHOLE `confirm::gui` subtree — every file that can run while the window is up, which is
+    /// all of them: the shell, the panes it draws, [`super::PromptApp`] which the modal drives every
+    /// frame, and the painter, renderer and theme those call into. Scoping the scan to this module
+    /// left most of the path unchecked, and the modal's own painter is the likeliest place for a
+    /// viewport call to reappear.
+    ///
+    /// Listed by name rather than walked, because `include_str!` needs a literal path: a file added
+    /// to this directory is NOT covered until it is added here, which the count assertion below is
+    /// there to make somebody notice.
     ///
     /// Both viewport-opening APIs are covered, and the needle is `show_viewport` rather than a full
     /// method name so the deferred form and a UFCS call
@@ -2207,10 +2324,21 @@ mod tests {
         // Assembled from halves so this test's own source does not match the needle it looks for.
         let needle = format!("show_{}", "viewport");
         let path = [
-            ("shell.rs", include_str!("shell.rs")),
-            ("panes.rs", include_str!("panes.rs")),
+            ("window/shell.rs", include_str!("shell.rs")),
+            ("window/panes.rs", include_str!("panes.rs")),
             ("window.rs", include_str!("../window.rs")),
+            ("mod.rs", include_str!("../mod.rs")),
+            ("paint.rs", include_str!("../paint.rs")),
+            ("render.rs", include_str!("../render.rs")),
+            ("theme.rs", include_str!("../theme.rs")),
         ];
+
+        // The `gui` subtree is seven files. A new one is not scanned until it is listed above.
+        assert_eq!(
+            path.len(),
+            7,
+            "the file list changed; make sure every file in `confirm/gui` is still covered"
+        );
 
         let mut calls: Vec<String> = Vec::new();
         for (file, source) in path {
@@ -2600,6 +2728,156 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // The URN launcher, in-window (dig_ecosystem#2270, correctness finding 3)
+    // ---------------------------------------------------------------------------------------------
+
+    /// **A launcher bar gets a launcher's geometry, not a dialog's.**
+    ///
+    /// `Chrome::Bar` HAS a live production producer, which is worth stating because it was disputed:
+    /// `dig-app`'s Alt+Space hotkey calls `open_dig_link(.., InputStyle::Bar)`, and `Screen::input`
+    /// maps that to `Chrome::Bar`. So the URN launcher really can be raised over the app window.
+    ///
+    /// Sized from [`super::opening_size`], which is the SAME mapping the standalone window layer
+    /// uses — the point of the shared function. Asserted against the raw constants rather than
+    /// against that function, so a test written from the contract cannot be satisfied by a mapping
+    /// that has quietly changed to agree with itself.
+    #[test]
+    fn a_launcher_bar_in_the_window_is_sized_as_a_bar() {
+        use crate::confirm::gui::render::{BAR_HEIGHT, BAR_WIDTH};
+
+        // A window with room for the bar at its natural size, so the clamp is not what is measured.
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 1000.0));
+
+        let bar = modal_rect(window, Chrome::Bar, BAR_HEIGHT);
+        assert_eq!(
+            bar.size(),
+            Vec2::new(BAR_WIDTH, BAR_HEIGHT),
+            "the launcher was drawn at a dialog's size; 720x176 became something else"
+        );
+
+        let dialog = modal_rect(window, Chrome::Dialog, crate::confirm::gui::window::HEIGHT);
+        assert_ne!(
+            dialog.size(),
+            bar.size(),
+            "a bar and a dialog are drawn at the same size, so this test cannot tell them apart"
+        );
+    }
+
+    /// **A launcher bar sits HIGH in the window; a dialog is centred.**
+    ///
+    /// A launcher is placed above the vertical centre — `SPEC.md` §3.1c-i, and what
+    /// [`super::PromptApp::place_bar`] does against the monitor. In-window the same arithmetic runs
+    /// against the window, via the same [`super::bar_top`], so the bar lands in the same place
+    /// relative to whatever it is inside of.
+    ///
+    /// Pinned to the shared function rather than to a number, and paired with the dialog control:
+    /// "above the centre" is also true of a bar pinned to the top edge, which would read as a
+    /// notification bar rather than a launcher.
+    #[test]
+    fn a_launcher_bar_in_the_window_sits_high_and_a_dialog_does_not() {
+        use crate::confirm::gui::render::BAR_HEIGHT;
+
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1400.0, 1000.0));
+        let bar = modal_rect(window, Chrome::Bar, BAR_HEIGHT);
+
+        assert!(
+            bar.center().y < window.center().y,
+            "the launcher at {bar:?} is at or below the middle of the window"
+        );
+        assert_eq!(
+            bar.center().y,
+            window.top() + crate::confirm::gui::render::bar_top(window.height()) + BAR_HEIGHT / 2.0,
+            "the in-window launcher is not placed by the same `bar_top` the standalone one uses"
+        );
+        assert!(
+            window.contains_rect(bar),
+            "the launcher at {bar:?} left the window"
+        );
+
+        let dialog = modal_rect(window, Chrome::Dialog, crate::confirm::gui::window::HEIGHT);
+        assert_eq!(
+            dialog.center(),
+            window.center(),
+            "a dialog stopped being centred, so the bar's placement is not distinguishable"
+        );
+    }
+
+    /// **A bar shorter than the window still fits when the window is tiny.**
+    ///
+    /// The clamp, from the side that can actually go wrong: at [`SHELL_MIN`] the window is 480 tall
+    /// and `bar_top` plus the bar's own height can put its bottom edge past the frame, which is a
+    /// launcher whose field is off-screen.
+    #[test]
+    fn a_launcher_bar_stays_inside_a_window_at_its_minimum() {
+        use crate::confirm::gui::render::BAR_HEIGHT;
+
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::splat(SHELL_MIN));
+        let bar = modal_rect(window, Chrome::Bar, BAR_HEIGHT);
+        assert!(
+            window.contains_rect(bar),
+            "the launcher at {bar:?} left a {SHELL_MIN}-square window"
+        );
+    }
+
+    /// **Clicking the dimmed window closes the launcher — and never a consent dialog.**
+    ///
+    /// A launcher is dismissed by clicking away from it. Standalone that means its own window lost
+    /// focus; in-window the exact counterpart is the SCRIM, which IS the rest of the window. Without
+    /// this the Alt+Space bar could only be closed with Escape, silently losing the gesture it is
+    /// built around.
+    ///
+    /// The dialog half is the one that matters for safety and is asserted in the same test, on the
+    /// same gesture: a consent surface must NOT vanish because somebody clicked elsewhere, and the
+    /// flag that separates them ([`Chrome::dismiss_on_blur`]) is false for every dialog.
+    #[test]
+    fn clicking_away_closes_a_launcher_bar_but_never_a_consent_dialog() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let bar = shelf.queue_live_bar();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+        assert!(shelf.app.prompt.is_some(), "the launcher is up");
+
+        shelf.click(clicked_away());
+        assert!(
+            shelf.app.prompt.is_none(),
+            "clicking away from the launcher did not close it"
+        );
+        assert!(
+            matches!(bar.try_recv(), Ok(Outcome::Input(InputOutcome::Cancelled))),
+            "the dismissed launcher did not report a cancellation to its caller"
+        );
+    }
+
+    /// **…and the same click never dismisses a consent dialog.**
+    ///
+    /// The half that matters for safety, and a SEPARATE test rather than a second act of the one
+    /// above: a `Shelf` holds the consent-surface exclusion for its whole life, so two of them in one
+    /// test can never make progress. (Measured — the exclusion says so by name now.)
+    ///
+    /// A consent surface must not vanish because somebody clicked elsewhere.
+    /// [`Chrome::dismiss_on_blur`] is what separates the two, and it is `false` for every dialog.
+    #[test]
+    fn clicking_away_never_dismisses_a_consent_dialog() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let dialog = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+
+        shelf.click(clicked_away());
+        assert!(
+            shelf.app.prompt.is_some(),
+            "a click on the dimmed window dismissed a CONSENT prompt; a spend request must not \
+             vanish because somebody clicked elsewhere"
+        );
+        assert!(
+            matches!(dialog.try_recv(), Err(TryRecvError::Empty)),
+            "the click answered the consent prompt on the person's behalf"
+        );
+    }
+
     /// **The scrim really is an input blocker, over the whole window.**
     ///
     /// The behavioural test above passes today without this widget, because every control the shell
@@ -2744,7 +3022,7 @@ mod tests {
                 crate::confirm::gui::window::HEIGHT,
                 crate::confirm::gui::window::MAX_HEIGHT,
             ] {
-                let at = modal_rect(window, height);
+                let at = modal_rect(window, Chrome::Dialog, height);
                 assert!(
                     window.contains_rect(at),
                     "a {height}-tall modal at {at:?} left a {size:?} window"
@@ -2773,7 +3051,7 @@ mod tests {
         use crate::confirm::gui::window::{HEIGHT, MAX_HEIGHT, MIN_HEIGHT};
 
         let window = Rect::from_min_size(egui::Pos2::ZERO, shell_size());
-        let at = modal_rect(window, HEIGHT);
+        let at = modal_rect(window, Chrome::Dialog, HEIGHT);
         // The constant the arithmetic has to invert, so the expectations below are derived from the
         // contract rather than transcribed from a run.
         let chrome = space::S6 + crate::confirm::gui::window::ACTION_ROW;
@@ -2808,7 +3086,11 @@ mod tests {
     #[test]
     fn a_modal_in_a_window_shorter_than_the_minimum_still_fits() {
         let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, 300.0));
-        let at = modal_rect(window, crate::confirm::gui::window::HEIGHT);
+        let at = modal_rect(
+            window,
+            super::Chrome::Dialog,
+            crate::confirm::gui::window::HEIGHT,
+        );
         assert!(
             window.contains_rect(at),
             "the modal at {at:?} left the window"

@@ -607,18 +607,28 @@ fn poisonless<T>(slot: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The size a prompt of this [`Chrome`] opens at: `(width, height, minimum height)`.
+///
+/// A bar is a fixed-size frameless launcher; a dialog is created at [`HEIGHT`] and then sized to its
+/// content ([`PromptApp::fit_to_content`]). Both are frameless — the bar regains the width and
+/// placement the deleted Win32 renderer gave it (dig_ecosystem#2054).
+///
+/// Shared with the IN-WINDOW host ([`shell::ShellApp`]) rather than left inside
+/// [`native_options`], because a second copy is how the modal came to draw a 720×176 launcher as a
+/// 620×320 dialog: one mapping, two hosts, no way for them to disagree.
+pub(super) fn opening_size(chrome: Chrome) -> (f32, f32, f32) {
+    match chrome {
+        Chrome::Bar => (BAR_WIDTH, BAR_HEIGHT, BAR_HEIGHT),
+        Chrome::Dialog => (WIDTH, HEIGHT, MIN_HEIGHT),
+    }
+}
+
 /// How every prompt window is created.
 ///
 /// One function so the screenshot harness photographs the SAME window a user is shown — a gallery
 /// built from a second, slightly-different set of options is a gallery of something else.
 fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
-    // A bar is a fixed-size frameless launcher; a dialog is created at [`HEIGHT`] and then sized to
-    // its content ([`PromptApp::fit_to_content`]). Both are frameless and always-on-top — the bar
-    // regains the width and placement the deleted Win32 renderer gave it (dig_ecosystem#2054).
-    let (width, height, min_height) = match chrome {
-        Chrome::Bar => (BAR_WIDTH, BAR_HEIGHT, BAR_HEIGHT),
-        Chrome::Dialog => (WIDTH, HEIGHT, MIN_HEIGHT),
-    };
+    let (width, height, min_height) = opening_size(chrome);
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
@@ -1041,6 +1051,21 @@ impl PromptApp {
         }
     }
 
+    /// The host asking, on the person's behalf, for this prompt to be refused.
+    ///
+    /// The in-window counterpart of a launcher bar losing focus, and the ONLY answer
+    /// [`shell::ShellApp`] may ask a prompt to record — see
+    /// [`shell::ShellApp::dismiss_a_bar_clicked_away_from`] for the gesture and why no consent dialog
+    /// can reach it.
+    ///
+    /// Routed through [`PromptApp::finish`] rather than writing the sink directly, so the #2038 latch
+    /// still owns the answer: if the person had already said something, what they said stands, and
+    /// this is dropped. And the outcome it asks for is a REFUSAL, so the worst a mistake here can do
+    /// is decline something.
+    pub(super) fn refuse_from_the_host(&mut self, ctx: &egui::Context) {
+        self.finish(ctx, Answer::Deny);
+    }
+
     /// Record `answer` and close.
     fn finish(&mut self, ctx: &egui::Context, answer: Answer) {
         let outcome = match (self.wants_text, answer) {
@@ -1264,13 +1289,19 @@ impl PromptApp {
     /// they had open the moment they looked something up. Clicking off the app window is not an
     /// answer, so nothing here treats it as one.
     ///
-    /// # The one thing this leaves open, recorded rather than fixed
+    /// # What replaces it for the one surface that DID use it
     ///
-    /// [`Chrome::Bar`] has no production producer today, so no bar can currently reach this host.
-    /// The first real `InputStyle::Bar` raised while the app window is open would lose its
-    /// dismiss-on-blur gesture here, silently, with no test to catch it — Escape and the deadline
-    /// still resolve it, so it is a missing convenience rather than a trap. Whoever adds that
-    /// producer owns deciding what "away" means for a bar inside a window.
+    /// [`Chrome::Bar`] has a live production producer, and it was worth tracing rather than
+    /// assuming: `dig-app`'s Alt+Space hotkey calls `open_dig_link(.., InputStyle::Bar)`, and
+    /// `Screen::input` maps `InputStyle::Bar` to `Chrome::Bar` (`render.rs`). So the URN launcher
+    /// really can be raised while the app window is open, and dropping blur-dismissal outright would
+    /// have taken away the gesture a launcher is dismissed by.
+    ///
+    /// In-window, "away" has an exact counterpart: the SCRIM. Clicking off the bar and onto the
+    /// dimmed window is the same gesture with the same meaning, and it is wired in
+    /// [`shell::ShellApp::dismiss_a_bar_clicked_away_from`] — gated on the same
+    /// [`Chrome::dismiss_on_blur`] flag, which is `false` for every dialog, so no consent surface can
+    /// reach it.
     ///
     /// Either way an in-window prompt stays until it is answered, escaped, or expired, and is never
     /// trapping: Escape resolves it and the deadline resolves it.
@@ -4487,7 +4518,7 @@ mod tests {
         /// once make any assertion about that count read another lane's window. Held for the lane's
         /// whole life, which is exactly the span in which it may draw. See
         /// [`crate::confirm::surface::ONE_SURFACE_AT_A_TIME`].
-        _exclusive: std::sync::MutexGuard<'static, ()>,
+        _exclusive: crate::confirm::surface::ExclusiveSurface,
     }
 
     impl Lane {
