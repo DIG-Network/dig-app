@@ -2008,6 +2008,128 @@ mod tests {
         );
     }
 
+    /// **A prompt over the open shell opens no second window.**
+    ///
+    /// This is dig_ecosystem#2270 itself: clicking *Show my recovery phrase…* inside the app window
+    /// used to put a second OS window in front of the one the person was already looking at.
+    ///
+    /// Asserted on `viewport_output`, which is the record of every viewport egui was asked to
+    /// realise this frame — and on the prompt's own copy being drawn ANYWAY, in the same frame. Both
+    /// halves are needed: "no second viewport" is also what a frame that failed to draw the prompt at
+    /// all would report, and that would be a consent lockout rather than a fix.
+    #[test]
+    fn a_prompt_over_the_open_shell_opens_no_second_window() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+
+        assert!(
+            a_prompt_was_drawn(&output),
+            "the prompt was not drawn at all, so nothing here is evidence of anything"
+        );
+        let extra: Vec<_> = output
+            .viewport_output
+            .keys()
+            .filter(|id| **id != egui::ViewportId::ROOT)
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "the app window asked for {} more window(s) ({extra:?}) to show a prompt it is              already showing",
+            extra.len()
+        );
+    }
+
+    /// **The modal is a consent surface for as long as it is up — and the shell alone is not.**
+    ///
+    /// The tray suppresses its foreground claim while `consent_surface_is_up()` (dig-app#91). Without
+    /// this, a tray click yanks the foreground off somebody part-way through typing a seed phrase.
+    /// The #2253 audit found the shell-hosted path missing the guard entirely (N1).
+    ///
+    /// Read BETWEEN frames, never inside one, and that is the whole point: a guard scoped to a draw
+    /// would read true from inside `frame` and false in every gap — and the gaps are when a tray
+    /// click actually arrives. A test that sampled inside the draw would pass over that defect.
+    ///
+    /// Three samples, so the assertion is about the PROMPT and not about the process: before (the
+    /// shell alone, the truthful control), during, and after it is answered.
+    #[test]
+    fn the_in_window_prompt_is_a_consent_surface_for_as_long_as_it_is_up() {
+        use crate::confirm::surface::consent_surface_is_up;
+
+        let _serialised = crate::confirm::surface::one_surface_at_a_time();
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        assert!(
+            !consent_surface_is_up(),
+            "the app window alone reported itself as a consent surface; the tray's foreground              claim would be suppressed for as long as somebody left the window open"
+        );
+
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        assert!(
+            shelf.app.prompt.is_some(),
+            "the prompt is not up, so the next assertion would prove nothing"
+        );
+        assert!(
+            consent_surface_is_up(),
+            "a consent prompt is on screen and the tray still believes it may take the foreground"
+        );
+
+        shelf.frame(escape());
+        shelf.frame(Vec::new());
+        assert!(shelf.app.prompt.is_none(), "Escape dismissed the prompt");
+        let _ = answers.try_recv();
+        assert!(
+            !consent_surface_is_up(),
+            "the surface stayed raised after the prompt was answered; the tray's claim would be              suppressed for the rest of the process"
+        );
+    }
+
+    /// **A click on the shell beneath the modal does nothing at all.**
+    ///
+    /// The occlusion question, re-answered for a modal that shares its host's window. The prompt used
+    /// to be `always_on_top` because a non-topmost one was buried by a single click on the shell
+    /// while it went on repainting invisibly with its deadline running down. A modal inside the shell
+    /// cannot be buried — but it can be clicked THROUGH, which fails the same way.
+    ///
+    /// The fixture is chosen to make a through-click OBSERVABLE rather than merely harmless: the
+    /// pointer is aimed at a sidebar tab that is not the selected one, so the defect has a visible
+    /// consequence (the pane changes under a live consent prompt) instead of being absorbed by a
+    /// no-op. The first two assertions are the control — without them a target that was never
+    /// clickable in the first place would satisfy the third.
+    #[test]
+    fn a_click_on_the_shell_beneath_the_modal_changes_nothing() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let at = shelf.centre_of(sidebar_entry(TabId::Account));
+        assert_ne!(
+            shelf.app.selected,
+            TabId::Account,
+            "the target tab is already selected, so a through-click would be invisible"
+        );
+
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        assert!(shelf.app.prompt.is_some(), "the prompt is up");
+
+        shelf.click(at);
+
+        assert_eq!(
+            shelf.app.selected, FIRST_TAB,
+            "a click landed on the sidebar through a live consent prompt and changed the pane"
+        );
+        assert!(
+            shelf.dispatched().is_empty(),
+            "a click through a live consent prompt reached the worker: {:?}",
+            shelf.dispatched()
+        );
+        assert!(
+            shelf.app.prompt.is_some(),
+            "the click dismissed the prompt, which no click on the shell may do"
+        );
+    }
+
     /// **The modal stays inside the window, at every size the window can be.**
     ///
     /// Asserted against the placement function rather than a control read back off the context:
