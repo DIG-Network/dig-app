@@ -819,10 +819,15 @@ fn install_fonts(ctx: &egui::Context) {
 
 /// Where a prompt is being drawn, which decides what it may say to the windowing system.
 ///
-/// Three of [`PromptApp`]'s behaviours address a *viewport* — focus it, close it, watch it lose
-/// focus — and every one of them is either meaningless or actively wrong when the prompt is painted
-/// inside the app window, because the viewport it would address is then the SHELL's. A prompt that
-/// sent `ViewportCommand::Close` from inside the shell would close the shell.
+/// FOUR of [`PromptApp`]'s behaviours address a *viewport* — focus it, close it, watch it lose
+/// focus, and DRAG it — and every one of them is either meaningless or actively wrong when the
+/// prompt is painted inside the app window, because the viewport it would address is then the
+/// SHELL's. A prompt that sent `ViewportCommand::Close` from inside the shell would close the shell;
+/// one that sent `StartDrag` would send the whole application across the desktop.
+///
+/// Three of the four are settled by [`PromptApp::frame_in_window`] simply not doing them. The
+/// fourth, the drag, is reached from [`PromptApp::paint_into`] — which BOTH hosts call — so it is
+/// the one that needs a check at the site: [`PromptApp::drag_by_the_header`].
 ///
 /// An explicit two-state enum rather than a `bool` or a `cfg!`: the hosting is a runtime fact — the
 /// same prompt content reaches both hosts on the same platform, depending only on whether the person
@@ -971,12 +976,17 @@ impl PromptApp {
     ///
     /// # Why only [`PromptApp::frame`] calls this
     ///
-    /// An in-window prompt has nothing to ask for: the shell already holds the foreground, and the
-    /// only viewport this could address is the shell's own, so the request would at best be a no-op
-    /// and at worst re-raise a window the person had just moved behind something. That is settled by
-    /// [`frame_in_window`](Self::frame_in_window) NOT CALLING this, rather than by a host check in
-    /// here — an unreachable branch is one no test can hold, and this surface has no room for a
-    /// guard that only looks like one.
+    /// **Not because an in-window prompt needs no raise — it does.** The app window can perfectly
+    /// well be behind a browser when a dapp asks for a signature, and a modal drawn into a window
+    /// nobody can see is exactly the defect above, one layer in. What differs is WHO asks: the raise
+    /// belongs to the host, so [`shell::ShellApp::raise_for_the_prompt`] sends it once, on
+    /// admission, for the window the person actually looks at. A second request from in here would
+    /// address the same viewport twice and, repeated per frame, would fight the user for the
+    /// foreground for the life of the prompt.
+    ///
+    /// That is settled by [`frame_in_window`](Self::frame_in_window) NOT CALLING this, rather than
+    /// by a host check inside it — an unreachable branch is one no test can hold, and this surface
+    /// has no room for a guard that only looks like one.
     fn claim_the_keyboard(&mut self, ctx: &egui::Context) {
         if self.keyboard_claimed {
             return;
@@ -1177,14 +1187,28 @@ impl PromptApp {
     ///
     /// # Why blur-dismissal is dropped rather than re-pointed
     ///
-    /// [`PromptApp::dismiss_on_blur`] exists for the launcher bar: a Spotlight-style bar is dismissed
-    /// by clicking away from it, and "away" means the bar's own window lost focus. In-window the only
-    /// focus there is belongs to the SHELL, so the same code would mean something else entirely —
-    /// *the person switched to their browser* — and would silently cancel whatever they had opened
-    /// the moment they looked something up. Clicking off the app window is not an answer, so nothing
-    /// here treats it as one. Every in-window prompt therefore stays until it is answered, escaped,
-    /// or expired, exactly as every dialog already does ([`Chrome::dismiss_on_blur`] is false for all
-    /// of them), and it is never trapping: Escape resolves it and the deadline resolves it.
+    /// **Nothing is lost, and that is checkable rather than argued.**
+    /// [`Chrome::dismiss_on_blur`] is `false` for every dialog (`render.rs`), and
+    /// [`PromptApp::dismiss_on_blur`] early-returns on that flag — so the standalone CONSENT surface
+    /// never dismissed on blur in the first place. Omitting the call in-window therefore removes no
+    /// behaviour any consent prompt ever had.
+    ///
+    /// What the flag does serve is the launcher bar, where "away" means the bar's own window lost
+    /// focus. In-window the only focus there is belongs to the SHELL, so the same code would mean
+    /// something else entirely — *the person switched to their browser* — and would cancel whatever
+    /// they had open the moment they looked something up. Clicking off the app window is not an
+    /// answer, so nothing here treats it as one.
+    ///
+    /// # The one thing this leaves open, recorded rather than fixed
+    ///
+    /// [`Chrome::Bar`] has no production producer today, so no bar can currently reach this host.
+    /// The first real `InputStyle::Bar` raised while the app window is open would lose its
+    /// dismiss-on-blur gesture here, silently, with no test to catch it — Escape and the deadline
+    /// still resolve it, so it is a missing convenience rather than a trap. Whoever adds that
+    /// producer owns deciding what "away" means for a bar inside a window.
+    ///
+    /// Either way an in-window prompt stays until it is answered, escaped, or expired, and is never
+    /// trapping: Escape resolves it and the deadline resolves it.
     pub(super) fn frame_in_window(&mut self, ui: &mut egui::Ui, full: Rect) -> f32 {
         let t = self.theme.tokens();
         let ctx = ui.ctx().clone();
@@ -1339,11 +1363,28 @@ impl PromptApp {
     ///
     /// # Aero Snap, honestly
     ///
-    /// Snapping to a screen edge is a feature of RESIZABLE windows. These are created
-    /// `.with_resizable(false)` so they can be sized to their content, so edge-snap does not apply —
-    /// stated rather than claimed. Everything else the platform gesture provides (monitor
+    /// Snapping to a screen edge is a feature of RESIZABLE windows. A STANDALONE prompt is created
+    /// `.with_resizable(false)` so it can be sized to its content, so edge-snap does not apply to it
+    /// — stated rather than claimed. Everything else the platform gesture provides (monitor
     /// boundaries, per-display scale, the drag shadow) is unaffected by that.
+    ///
+    /// That reasoning is exactly why this is refused in-window: the SHELL is resizable
+    /// ([`shell::native_options`]), so the paragraph above stops holding the moment the viewport
+    /// being dragged is the shell's.
+    ///
+    /// # Why an in-window modal has no drag handle at all
+    ///
+    /// The viewport a drag would move is the app window, not the modal — so the gesture takes hold of
+    /// the wrong object entirely, and the person grabbing a consent dialog's header would send the
+    /// whole application across the desktop, or snap it to an edge with a live prompt inside it.
+    /// There is also nothing to gain: the modal is centred in its host every frame
+    /// ([`shell::modal_rect`]) and cannot be moved relative to it, so a handle could only ever
+    /// misfire. The strip is therefore not REGISTERED in-window rather than registered and ignored —
+    /// an unregistered widget cannot take a hit, and the chrome underneath stays inert.
     fn drag_by_the_header(&self, ui: &egui::Ui, full: Rect) {
+        if self.host == PromptHost::InWindow {
+            return;
+        }
         // A launcher bar places itself high on the monitor and dismisses itself on blur; whether an
         // OS-driven move keeps it focused is a claim that needs a real desktop to settle, and getting
         // it wrong makes the bar vanish mid-gesture. Dialogs are what the user asked to be able to
@@ -5698,9 +5739,111 @@ mod tests {
                 .is_some_and(|root| root.commands.iter().any(|c| c == want))
         }
 
+        /// Press on the header strip and move far enough that the gesture can no longer be a click.
+        ///
+        /// Two moves, not one: [`DRAG_HANDLE_SENSE`] deliberately keeps `CLICK` so egui withholds
+        /// the drag until the pointer has travelled past the click threshold — the property that
+        /// stops a finished window move from pressing a consent button. A single-frame press would
+        /// therefore report no drag on EITHER host and the test would pass while proving nothing.
+        fn drag_the_header(&mut self) -> egui::FullOutput {
+            let at = PromptApp::drag_region(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                Vec2::new(WIDTH, HEIGHT),
+            ))
+            .center();
+            self.frame(vec![egui::Event::PointerMoved(at)], false);
+            self.frame(
+                vec![egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                }],
+                false,
+            );
+            self.frame(
+                vec![egui::Event::PointerMoved(at + Vec2::new(60.0, 40.0))],
+                false,
+            )
+        }
+
         fn recorded(&self) -> Option<Outcome> {
             self.sink.lock().expect("the answer slot").take()
         }
+    }
+
+    /// **Only a standalone prompt may be dragged by its header.**
+    ///
+    /// Gate finding A2, and the one viewport behaviour that is NOT settled by
+    /// [`PromptApp::frame_in_window`] omitting it: the drag strip is registered inside
+    /// [`PromptApp::paint_into`], which BOTH hosts call, so it needed a check at the site.
+    ///
+    /// In-window the viewport a drag moves is the app window. Grabbing a consent dialog's header
+    /// would therefore send the whole application across the desktop — and, because the shell is
+    /// resizable where a standalone prompt is not, snap it to a screen edge with a live prompt
+    /// inside it. The `Aero Snap, honestly` paragraph on [`PromptApp::drag_by_the_header`] is
+    /// precisely the reasoning that stops holding on this host.
+    ///
+    /// The standalone control is the other half: dragging a frameless consent window by its header
+    /// is the only way to move it at all, and losing that would trap it wherever it opened.
+    #[test]
+    fn only_a_standalone_prompt_can_be_dragged_by_its_header() {
+        let drag = egui::ViewportCommand::StartDrag;
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        let output = alone.drag_the_header();
+        assert!(
+            Hosts::sent(&output, &drag),
+            "a standalone consent window can no longer be moved; it is frameless, so the header \
+             is the only handle it has"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.frame(Vec::new(), false);
+        let output = inside.drag_the_header();
+        assert!(
+            !Hosts::sent(&output, &drag),
+            "dragging the in-window modal's header moved the app window it lives in"
+        );
+    }
+
+    /// **The in-window modal offers no drag AFFORDANCE either.**
+    ///
+    /// Stronger than "sends no command", and the difference is what a person sees: a strip that is
+    /// registered but ignored still shows the grab cursor, promising a gesture that does nothing —
+    /// or, worse, silently swallowing a press that belongs to the consent surface under it. The
+    /// strip is therefore not registered at all in-window, and the cursor is how that becomes
+    /// observable without guessing at a widget id, which differs between the two hosts' layouts.
+    #[test]
+    fn the_in_window_modal_offers_no_grab_cursor_on_its_header() {
+        let over = PromptApp::drag_region(Rect::from_min_size(
+            egui::Pos2::ZERO,
+            Vec2::new(WIDTH, HEIGHT),
+        ))
+        .center();
+
+        let mut alone = Hosts::on(PromptHost::Standalone);
+        alone.frame(Vec::new(), false);
+        alone.frame(vec![egui::Event::PointerMoved(over)], false);
+        let output = alone.frame(Vec::new(), false);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Grab,
+            "the standalone window stopped offering its header as a handle, so the assertion \
+             below is aimed at a cursor nothing ever sets"
+        );
+
+        let mut inside = Hosts::on(PromptHost::InWindow);
+        inside.frame(Vec::new(), false);
+        inside.frame(vec![egui::Event::PointerMoved(over)], false);
+        let output = inside.frame(Vec::new(), false);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::Default,
+            "the in-window modal offers a grab cursor on its header, promising a drag that would \
+             move the whole app window"
+        );
     }
 
     /// Press Enter, which activates the focused control.
@@ -5784,6 +5927,14 @@ mod tests {
     ///
     /// The standalone control is the other half: there, that event IS the person dismissing this
     /// prompt, and it must still deny.
+    ///
+    /// # Honest scope: in-window this is defence in depth, not a live path
+    ///
+    /// [`shell::ShellApp::keys`] reads the close first and returns before the modal is painted, so
+    /// in production `close_requested()` is always false by the time an in-window prompt sees it.
+    /// This test drives the frame directly, so it kills its mutant on a path production does not
+    /// currently take. It is kept because the ordering in `ShellApp::frame` is the only thing making
+    /// that true, and the failure if it ever changes is a signed refusal the person never gave.
     #[test]
     fn a_host_window_close_is_a_refusal_only_for_a_standalone_prompt() {
         let mut alone = Hosts::on(PromptHost::Standalone);

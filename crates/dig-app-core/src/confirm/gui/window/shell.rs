@@ -29,19 +29,32 @@
 //! A dapp asking for a signature does not get to force the whole app open, and that standalone path
 //! is the audited consent surface; nothing here changes it.
 //!
-//! # Why the modal is the only thing on screen that responds
+//! # Being SEEN, and being the only thing that responds — two rules, not one
 //!
-//! The old child window was `always_on_top` because a non-topmost prompt was buried outright by one
-//! click on the shell, while it went on repainting invisibly with [`super::Job::over_by`] counting
-//! down. An in-window modal cannot be buried by the shell — it *is* the shell — but it can be
-//! clicked *through*, which is the same defect wearing different clothes. Three things prevent it,
+//! The old child window was `always_on_top` and asked for the keyboard on its first frame, and those
+//! were claims against the **desktop**: a non-topmost prompt was buried outright, and one raised by a
+//! background agent opened behind whatever the person was actually using (dig_ecosystem#2079). An
+//! in-window modal cannot be buried by the shell — it *is* the shell — but the shell can be behind a
+//! browser, so **[`ShellApp::raise_for_the_prompt`] brings the window forward on admission**. Without
+//! it a dapp's signature request drew into a window nobody could see and refused itself on the
+//! deadline.
+//!
+//! Being visible is not the same as being the only thing that answers. The modal can still be
+//! clicked *through*, which is the burial defect wearing different clothes. Three things prevent it,
 //! and each is asserted:
 //!
 //! * The panes are drawn non-interactive while a prompt is up, and the chrome draws no controls at
 //!   all ([`ShellApp::paint_shell`]).
 //! * The scrim is a full-window widget that SENSES clicks and drags, so anything under it that was
 //!   still listening gets nothing ([`ShellApp::scrim`]).
-//! * The modal is painted in a layer strictly above the scrim, so it — and only it — is reachable.
+//! * The modal is painted in a layer strictly above the scrim, so it — and only it — is reachable,
+//!   which is asserted by CLICKING its action button rather than by reading a layer back: egui's
+//!   `read_response` is layer-blind and cannot tell a blocker above the panes from one below them.
+//!
+//! The modal also has no drag handle ([`super::PromptApp::drag_by_the_header`]): the viewport a drag
+//! would move is the app window, so grabbing a consent dialog's header would send the whole
+//! application across the desktop — or snap it to an edge, since unlike a standalone prompt the shell
+//! IS resizable.
 //!
 //! Resizing is suppressed for the same reason, so the window cannot be dragged out from under a
 //! consent prompt.
@@ -413,7 +426,14 @@ impl ShellApp {
             return;
         }
         match queue.try_recv() {
-            Ok(Work::Prompt(job)) => self.open(job),
+            // A prompt that was really opened brings the window forward with it. See
+            // [`ShellApp::raise_for`] — this is the consent surface's only claim on the desktop, and
+            // it is why a stale job, which opens nothing, must not reach it.
+            Ok(Work::Prompt(job)) => {
+                if self.open(job) {
+                    self.raise_for_the_prompt(ctx);
+                }
+            }
             // A second open-the-window request while the window is open. Nobody is blocked on it and
             // there is nothing to answer, so it is not queued behind anything — but it is not
             // discarded either: the person asked for this window, so the window comes forward.
@@ -434,7 +454,10 @@ impl ShellApp {
     /// real consent window — a real origin, a real payload — for an operation nobody is waiting on
     /// any more teaches precisely the click-through reflex the prompts are shaped to prevent
     /// (dig_ecosystem#2074).
-    fn open(&mut self, job: Job) {
+    ///
+    /// Reports whether a prompt was actually opened, because a refused job raised no surface and
+    /// must not bring the window forward for one ([`ShellApp::raise_for_the_prompt`]).
+    fn open(&mut self, job: Job) -> bool {
         if Instant::now() >= job.over_by {
             tracing::warn!(
                 prompt = %job.screen.title,
@@ -442,7 +465,7 @@ impl ShellApp {
                  without opening a window"
             );
             let _ = job.reply.send(unavailable(job.wants_text));
-            return;
+            return false;
         }
 
         let sink = Arc::new(Mutex::new(None));
@@ -460,6 +483,42 @@ impl ShellApp {
             wants_text,
             title,
         });
+        true
+    }
+
+    /// Bring the app window forward, because a consent prompt has just appeared inside it.
+    ///
+    /// # The defect this closes (dig_ecosystem#2270, gate finding A1)
+    ///
+    /// A standalone prompt is `always_on_top` and asks for the keyboard on its first frame
+    /// ([`super::PromptApp::claim_the_keyboard`]) — both of which are claims against the DESKTOP,
+    /// not against the shell. Moving the prompt inside the app window keeps it from being buried BY
+    /// the shell and silently drops every guarantee about being seen at all: with the window open
+    /// but behind a browser, a dapp's signature request drew into a window nobody could see, held
+    /// the consent surface up for two minutes, and refused on the timeout. That is dig_ecosystem#2079
+    /// re-created one layer in.
+    ///
+    /// # Why every admitted prompt raises, rather than only an externally-originated one
+    ///
+    /// Keying this on the request's ORIGIN was considered and is the weaker rule. It cannot be read
+    /// where it would be needed — a row clicked in this window and a tray click go to the SAME
+    /// worker (`dig-app`'s `WindowSeam`), which is what reaches [`super::ask`], so the two are
+    /// indistinguishable at the point a [`Job`] is built without threading a new field across both
+    /// crates. And it would buy a WORSE guarantee: a person who clicks *Show my recovery phrase…*
+    /// and then switches to another window would get exactly the invisible prompt described above,
+    /// with the reasoning saying that was fine.
+    ///
+    /// Raising unconditionally is also the honest parity with the surface this replaces: a
+    /// standalone prompt asks for focus once, on its first frame, whoever asked for it. This asks
+    /// once, on admission — never per frame, which would fight the user for the foreground for the
+    /// life of the prompt.
+    ///
+    /// `Focus` rather than a `WindowLevel` re-assert: the latter was measured to lift z-order while
+    /// leaving the keyboard behind, which is a consent surface the person can read and cannot answer.
+    /// Like every focus request this is a REQUEST — Windows' foreground lock may refuse it — and the
+    /// prompt's own deadline still answers for the absent human either way.
+    fn raise_for_the_prompt(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     /// Draw the active prompt as a modal layer inside this window, and dismiss it once answered.
@@ -1018,6 +1077,53 @@ mod tests {
             walk(&clipped.shape, &mut out);
         }
         out
+    }
+
+    /// Whether THIS frame asked the windowing system to bring the app window forward.
+    ///
+    /// The free-function counterpart of [`Shelf::asked_for_focus`], which runs frames of its own. A
+    /// raise that happens on admission has to be read from the admitting frame itself, and a helper
+    /// that advances the clock would step straight past it.
+    fn focus_requested(output: &egui::FullOutput) -> bool {
+        output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|root| {
+                root.commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::Focus))
+            })
+    }
+
+    /// Where a painted line of text ended up, so a test can aim a real pointer at it.
+    ///
+    /// Read back from the SHAPES rather than from a widget id: `paint::button` derives its id from
+    /// the layout, so a test that guessed the id would find nothing and skip its assertions —
+    /// passing while proving nothing (the trap `the_raise_pill…` was written to avoid, applied to a
+    /// control this time). Panics rather than returning an `Option`: every caller needs the control
+    /// to exist, and a `None` silently satisfying a `?` is how a click test stops clicking.
+    fn where_text_landed(output: &egui::FullOutput, needle: &str) -> Rect {
+        fn walk(shape: &egui::Shape, needle: &str, out: &mut Vec<Rect>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == needle => {
+                    out.push(Rect::from_min_size(text.pos, text.galley.size()));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, needle, out)),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, needle, &mut found);
+        }
+        match found.as_slice() {
+            [one] => *one,
+            [] => panic!("`{needle}` was never painted, so there is nothing to click"),
+            many => panic!(
+                "`{needle}` was painted {} times; the target is ambiguous",
+                many.len()
+            ),
+        }
     }
 
     /// Whether the PROMPT's own copy — not the shell's — was laid out this frame.
@@ -2052,26 +2158,46 @@ mod tests {
     /// restored. An assertion on either would pass over the regression it names, which is worse than
     /// no assertion at all.
     ///
-    /// So the claim is made where it is checkable: this module is the whole shell-open path — the
-    /// shell's frame, the prompt admission, and the modal — and it may not contain the call. Paired
-    /// below with the runtime half, which proves the prompt is really drawn in the shell's own frame
-    /// rather than not drawn at all.
+    /// # What "the shell-open path" actually means here
+    ///
+    /// All THREE files that can run while the window is up, not just this one: the shell, the panes
+    /// it draws, and [`super::PromptApp`], which the modal drives every frame. Scoping the scan to
+    /// this module would have left two thirds of the path unchecked, and the modal's own painter is
+    /// the likeliest place for a viewport call to reappear.
+    ///
+    /// Both viewport-opening APIs are covered, and the needle is `show_viewport` rather than a full
+    /// method name so the deferred form and a UFCS call
+    /// (`egui::Context::show_viewport_immediate(ctx, …)`) are caught by the same rule. Line
+    /// comments are excluded so the prose above does not match itself; the doc comments elsewhere in
+    /// these files that DISCUSS the call are excluded for the same reason.
     #[test]
     fn nothing_on_the_shell_open_path_opens_a_second_window() {
         // Assembled from halves so this test's own source does not match the needle it looks for.
-        let needle = format!(".show_viewport{}(", "_immediate");
-        let source = include_str!("shell.rs");
-        let calls: Vec<_> = source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| {
+        let needle = format!("show_{}", "viewport");
+        let path = [
+            ("shell.rs", include_str!("shell.rs")),
+            ("panes.rs", include_str!("panes.rs")),
+            ("window.rs", include_str!("../window.rs")),
+        ];
+
+        let mut calls: Vec<String> = Vec::new();
+        for (file, source) in path {
+            for (n, line) in source.lines().enumerate() {
                 let code = line.trim_start();
-                !code.starts_with("//") && code.contains(&needle)
-            })
-            .collect();
+                if !code.starts_with("//") && code.contains(&needle) {
+                    calls.push(format!("{file}:{}: {code}", n + 1));
+                }
+            }
+        }
+
         assert!(
             calls.is_empty(),
-            "the shell-open path opens a child window again: {calls:?}"
+            "the shell-open path opens a child window again:
+{}",
+            calls.join(
+                "
+"
+            )
         );
     }
 
@@ -2184,6 +2310,121 @@ mod tests {
         assert!(
             shelf.app.prompt.is_some(),
             "the click dismissed the prompt, which no click on the shell may do"
+        );
+    }
+
+    /// **The modal answers a real pointer click on its action button.**
+    ///
+    /// The positive control the scrim tests had no counterpart for, and the highest-value assertion
+    /// in this module. Everything else about the in-window prompt is answered by the KEYBOARD —
+    /// Escape, Enter — so without this the modal could be completely unreachable by mouse and the
+    /// whole suite would stay green. `read_response` cannot see the difference either: it is
+    /// layer-blind, so it reports a blocker that sits UNDER the panes exactly as it reports one over
+    /// them.
+    ///
+    /// Concretely: this is the test that dies when the modal's layer stops being strictly above the
+    /// scrim's, which is a consent surface a person can read and cannot approve.
+    ///
+    /// Asserted on the OUTCOME the caller received, not on a field of the app — an approval that
+    /// never reaches the blocked caller is not an approval.
+    #[test]
+    fn the_modal_answers_a_real_pointer_click_on_its_action_button() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+
+        let sign = where_text_landed(&output, "Sign");
+        shelf.click(sign.center());
+
+        assert!(
+            shelf.app.prompt.is_none(),
+            "the click on Sign did not dismiss the modal, so it never landed"
+        );
+        assert!(
+            matches!(
+                answers.try_recv(),
+                Ok(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "a click on the modal's Sign button did not reach the caller as an approval; the \
+             consent surface is unanswerable by pointer"
+        );
+    }
+
+    /// **A pointer click on the modal's REFUSAL reaches the caller too.**
+    ///
+    /// Both controls, because a modal wired so that every click resolves to the same answer would
+    /// satisfy the test above perfectly. This is a consent surface: being able to refuse it by the
+    /// obvious gesture is the half that matters most.
+    #[test]
+    fn the_modal_answers_a_real_pointer_click_on_its_refusal() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+
+        let cancel = where_text_landed(&output, "Cancel");
+        shelf.click(cancel.center());
+
+        assert!(
+            matches!(answers.try_recv(), Ok(Outcome::Confirm(WindowIntent::Deny))),
+            "a click on the modal's Cancel button did not reach the caller as a refusal"
+        );
+    }
+
+    /// **Admitting a prompt brings the app window forward.**
+    ///
+    /// Gate finding A1. A standalone prompt is always-on-top and claims the keyboard, and BOTH are
+    /// claims against the desktop. Drawing the prompt inside the app window keeps it from being
+    /// buried by the shell and, on its own, drops every guarantee that it is seen at all: with the
+    /// window open behind a browser, a dapp's signature request drew where nobody could see it, held
+    /// the consent surface up for its full deadline, and refused itself.
+    ///
+    /// Asserted alongside the prompt actually being up, so a shell that raised itself while failing
+    /// to draw anything cannot pass.
+    #[test]
+    fn admitting_a_prompt_brings_the_window_forward() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        let output = shelf.frame(Vec::new());
+
+        assert!(
+            shelf.app.prompt.is_some(),
+            "no prompt was admitted, so this frame says nothing about raising"
+        );
+        assert!(
+            focus_requested(&output),
+            "a consent prompt appeared inside the app window and the window was not brought \
+             forward; behind another application it is invisible for its whole deadline (#2079)"
+        );
+    }
+
+    /// **A prompt refused without being drawn does NOT bring the window forward.**
+    ///
+    /// The other side of the rule above, and not a nicety: a stale job raises no surface, so pulling
+    /// the person's foreground for it is a bare interruption with nothing to show them. It is also
+    /// what stops the raise from being unconditional-and-therefore-untested — a shell that always
+    /// raised would pass the test above whatever it did with the job.
+    #[test]
+    fn a_stale_prompt_does_not_bring_the_window_forward() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_prompt(Instant::now() - Duration::from_secs(1));
+        let output = shelf.frame(Vec::new());
+
+        assert!(
+            matches!(
+                answers.try_recv(),
+                Ok(Outcome::Confirm(WindowIntent::Unavailable))
+            ),
+            "the stale job was not refused, so it is not the case under test"
+        );
+        assert!(
+            !focus_requested(&output),
+            "the app window took the foreground for a prompt it refused without drawing"
         );
     }
 
