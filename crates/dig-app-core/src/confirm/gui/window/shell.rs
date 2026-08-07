@@ -869,12 +869,6 @@ mod tests {
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (jobs, queue) = mpsc::channel::<Work>();
             let ctx = egui::Context::default();
-            // Headless egui EMBEDS child viewports into the root, so a `show_viewport_immediate`
-            // leaves no trace in `viewport_output` and every "no second window" assertion is
-            // unfalsifiable by default — measured: the regression that put the prompt back into a
-            // child viewport survived until this line existed. `eframe` clears the same flag on
-            // desktop, so this is the host posture the shipped window actually runs under.
-            ctx.set_embed_viewports(false);
             install_fonts(&ctx);
             let dispatched: Arc<Mutex<Vec<TrayAction>>> = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&dispatched);
@@ -2037,17 +2031,51 @@ mod tests {
         );
     }
 
-    /// **A prompt over the open shell opens no second window.**
+    /// **No code path reachable while the app window is open opens a second window.**
     ///
     /// This is dig_ecosystem#2270 itself: clicking *Show my recovery phrase…* inside the app window
     /// used to put a second OS window in front of the one the person was already looking at.
     ///
-    /// Asserted on `viewport_output`, which is the record of every viewport egui was asked to
-    /// realise this frame — and on the prompt's own copy being drawn ANYWAY, in the same frame. Both
-    /// halves are needed: "no second viewport" is also what a frame that failed to draw the prompt at
-    /// all would report, and that would be a consent lockout rather than a fix.
+    /// # Why this reads the source instead of the frame
+    ///
+    /// Because every runtime instrument here is blind, and that was MEASURED rather than assumed.
+    /// `egui::Context::default()` sets `embed_viewports`, so a headless `show_viewport_immediate`
+    /// runs its child inline and leaves the root's own shapes and `viewport_output` exactly as they
+    /// were; clearing the flag does not help either — a bare `Context::run` has no integration to
+    /// realise a viewport, so `viewport_output` came back holding ROOT alone with the child call
+    /// restored. An assertion on either would pass over the regression it names, which is worse than
+    /// no assertion at all.
+    ///
+    /// So the claim is made where it is checkable: this module is the whole shell-open path — the
+    /// shell's frame, the prompt admission, and the modal — and it may not contain the call. Paired
+    /// below with the runtime half, which proves the prompt is really drawn in the shell's own frame
+    /// rather than not drawn at all.
     #[test]
-    fn a_prompt_over_the_open_shell_opens_no_second_window() {
+    fn nothing_on_the_shell_open_path_opens_a_second_window() {
+        // Assembled from halves so this test's own source does not match the needle it looks for.
+        let needle = format!(".show_viewport{}(", "_immediate");
+        let source = include_str!("shell.rs");
+        let calls: Vec<_> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let code = line.trim_start();
+                !code.starts_with("//") && code.contains(&needle)
+            })
+            .collect();
+        assert!(
+            calls.is_empty(),
+            "the shell-open path opens a child window again: {calls:?}"
+        );
+    }
+
+    /// **A prompt raised over the open shell is drawn in the shell's own frame.**
+    ///
+    /// The runtime half of the rule above, and the reason that one is not vacuous: a shell that drew
+    /// no prompt at all would also contain no viewport call, and would be a consent lockout rather
+    /// than a fix.
+    #[test]
+    fn a_prompt_over_the_open_shell_is_drawn_in_the_shell_itself() {
         let mut shelf = Shelf::open();
         shelf.settle();
         let _answers = shelf.queue_live_prompt();
@@ -2056,17 +2084,11 @@ mod tests {
 
         assert!(
             a_prompt_was_drawn(&output),
-            "the prompt was not drawn at all, so nothing here is evidence of anything"
+            "the prompt reached the app window and nothing was drawn for it"
         );
-        let extra: Vec<_> = output
-            .viewport_output
-            .keys()
-            .filter(|id| **id != egui::ViewportId::ROOT)
-            .collect();
         assert!(
-            extra.is_empty(),
-            "the app window asked for {} more window(s) ({extra:?}) to show a prompt it is              already showing",
-            extra.len()
+            the_shell_was_drawn(&output),
+            "the shell stopped drawing itself, so the prompt is not IN it"
         );
     }
 
@@ -2276,7 +2298,10 @@ mod tests {
     fn a_modal_in_a_window_shorter_than_the_minimum_still_fits() {
         let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, 300.0));
         let at = modal_rect(window, crate::confirm::gui::window::HEIGHT);
-        assert!(window.contains_rect(at), "the modal at {at:?} left the window");
+        assert!(
+            window.contains_rect(at),
+            "the modal at {at:?} left the window"
+        );
 
         let height = modal_height(window, at, at.top() + 1_000.0);
         assert!(
