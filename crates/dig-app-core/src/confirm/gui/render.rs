@@ -109,12 +109,16 @@ pub mod size {
     pub const BASE: f32 = 15.0;
     /// Button labels. Between `--text-sm` and `--text-base`, as hub's `.btn` is.
     pub const BUTTON: f32 = 14.5;
+    /// hub's `--text-lg` — a card's own title, one step under the pane heading.
+    pub const LG: f32 = 18.0;
     /// hub's `--text-xl` — the origin-bound heading.
     pub const HEADING: f32 = 22.0;
 }
 
 /// hub's `--space-*` scale, in logical pixels.
 pub mod space {
+    /// `--space-1` — the smallest step: a label to the value it names, a gap inside one control.
+    pub const S1: f32 = 4.0;
     /// `--space-2`.
     pub const S2: f32 = 8.0;
     /// `--space-3`.

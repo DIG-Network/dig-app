@@ -175,28 +175,136 @@ pub fn brand_mark(ui: &Ui, rect: Rect, t: &Tokens) {
 /// subtle tint, because on the destroy window the focused control is the thing standing between a
 /// stray Enter and a destroyed master seed — the user has to be able to SEE which one it is.
 pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Tokens) -> Response {
-    let fill = match weight {
-        Weight::Primary => Some((t.dig_purple, t.dig_purple_hover)),
-        Weight::Danger => Some((t.danger, t.danger)),
-        Weight::Ghost => None,
+    let height = BUTTON_HEIGHT;
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(button_width(ui, label), height), Sense::click());
+    button_face(
+        ui,
+        rect,
+        label,
+        weight,
+        Enablement::Live {
+            hovered: response.hovered(),
+            focused,
+        },
+        t,
+    );
+    response
+}
+
+/// A pill button's fixed height, and the number every pane control is sized against.
+pub const BUTTON_HEIGHT: f32 = 40.0;
+
+/// The same button, placed in a rectangle the CALLER chose and identified by an id it controls.
+///
+/// # Why this exists beside [`button`]
+///
+/// [`button`] allocates through egui's layout, which also derives the widget's id from that layout.
+/// A content pane positions absolutely and needs ids that survive a rebuild — its rows are addressed
+/// by `(label, occurrence)` precisely so a click cannot resolve to nothing after the surface
+/// regenerates (dig_ecosystem#2074). Those two requirements are incompatible with `button`'s
+/// signature and with nothing else about it, so the FACE is shared ([`button_face`]) and only the
+/// allocation differs. A second button-drawing function would be a second button style.
+pub fn button_at(
+    ui: &mut Ui,
+    rect: Rect,
+    id: egui::Id,
+    label: &str,
+    weight: Weight,
+    enabled: bool,
+    t: &Tokens,
+) -> Response {
+    // A disabled control still senses HOVER, so it can carry an explanation, but never a click: it
+    // is not clickable, rather than clickable-and-ignored.
+    let sense = match enabled {
+        true => Sense::click(),
+        false => Sense::hover(),
     };
-    let text_colour = match weight {
-        Weight::Primary | Weight::Danger => Color32::WHITE,
-        Weight::Ghost => rgba(t.muted),
+    let response = ui.interact(rect, id, sense);
+    let state = match enabled {
+        true => Enablement::Live {
+            hovered: response.hovered(),
+            focused: response.has_focus(),
+        },
+        false => Enablement::Disabled,
+    };
+    button_face(ui, rect, label, weight, state, t);
+    response
+}
+
+/// How wide a pill button has to be for `label`.
+///
+/// Exposed so a caller laying buttons out itself — a content pane places them absolutely rather than
+/// through egui's layout — can wrap a row before it runs off the edge instead of after.
+pub fn button_width(ui: &Ui, label: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), semibold(size::BUTTON), Color32::WHITE)
+        .size()
+        .x
+        + space_x()
+}
+
+/// Whether a button can be pressed right now, and what the pointer and keyboard are doing to it.
+///
+/// One enum rather than three booleans because the states are not independent: a control that cannot
+/// be pressed cannot be hovered or focused either, and a `hovered: true, enabled: false` combination
+/// would be a look nobody designed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Enablement {
+    /// Pressable.
+    Live {
+        /// The pointer is over it.
+        hovered: bool,
+        /// It holds keyboard focus, and takes the accent ring.
+        focused: bool,
+    },
+    /// Not pressable. Drawn dimmed and flat — never hidden, because the label carries the remedy.
+    Disabled,
+}
+
+/// Paint a pill button's face into `rect`, in hub's language.
+///
+/// Split out of [`button`] so the window's absolutely-positioned pane buttons and the prompt's
+/// allocated ones are the SAME control. Two functions each drawing "a DIG button" is how a product
+/// ends up with two button styles, which is precisely the failure dig_ecosystem#2326 exists to fix.
+pub fn button_face(
+    ui: &Ui,
+    rect: Rect,
+    label: &str,
+    weight: Weight,
+    state: Enablement,
+    t: &Tokens,
+) {
+    let disabled = state == Enablement::Disabled;
+    let (hovered, focused) = match state {
+        Enablement::Live { hovered, focused } => (hovered, focused),
+        Enablement::Disabled => (false, false),
     };
 
+    let fill = match (weight, disabled) {
+        // A dimmed accent, not a grey slab: the control keeps its shape so the eye still reads it as
+        // the primary action of the pane, and only its availability changed.
+        (_, true) => Some((t.surface_2, t.surface_2)),
+        (Weight::Primary, false) => Some((t.dig_purple, t.dig_purple_hover)),
+        (Weight::Danger, false) => Some((t.danger, t.danger)),
+        (Weight::Ghost, false) => None,
+    };
+    let text_colour = match (weight, disabled) {
+        (_, true) => rgba(t.faint),
+        (Weight::Primary | Weight::Danger, false) => Color32::WHITE,
+        (Weight::Ghost, false) => rgba(t.muted),
+    };
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), semibold(size::BUTTON), text_colour);
-    let height = 40.0;
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(galley.size().x + space_x(), height),
-        Sense::click(),
-    );
-    let corner = radius::PILL.min((height / 2.0) as u8);
-    let hovered = response.hovered();
+    let corner = radius::PILL.min((rect.height() / 2.0) as u8);
 
     match fill {
+        Some((base, hover)) if disabled => {
+            let _ = hover;
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(corner), rgba(base));
+        }
         Some((base, hover)) => {
             // The glow follows the control's OWN colour. An accent glow behind a destructive button
             // reads as the focus ring — which is drawn in the accent — so a destroy window appeared
@@ -253,7 +361,6 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    response
 }
 
 /// Horizontal padding inside a pill — hub's `.btn { padding: 12px 26px }`, doubled for both sides.
