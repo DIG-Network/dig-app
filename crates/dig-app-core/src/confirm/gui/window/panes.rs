@@ -114,7 +114,7 @@ fn sidebar(
     ui.painter().vline(
         at.right(),
         at.top()..=at.bottom(),
-        egui::Stroke::new(1.0, rgba(t.border)),
+        egui::Stroke::new(1.0_f32, rgba(t.border)),
     );
 
     let mut clicked = None;
