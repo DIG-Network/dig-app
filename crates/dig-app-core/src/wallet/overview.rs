@@ -27,12 +27,11 @@
 //! translated where the read happens. A constant in this file claiming to know them is exactly the
 //! defect dig_ecosystem#2206 removed.
 
+use crate::amount::format_asset_amount;
+
 use super::engine::{BalanceRequest, WalletEngine};
 use super::state::Asset;
 use super::WalletError;
-
-/// Mojos in one XCH, and base units in one $DIG — both assets carry 12 decimal places on Chia.
-const UNITS_PER_COIN: u64 = 1_000_000_000_000;
 
 /// The account's receive address, or the reason there is not one to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,17 +280,10 @@ fn why_unread(error: WalletError) -> BalanceUnknown {
     }
 }
 
-/// Render a base-unit amount as a whole-coin decimal with its trailing zeros trimmed (`1.5`, `0`,
-/// `0.000000000001`) — the form a person reads, without pretending to a precision the number does not
-/// have.
-pub fn format_amount(base_units: u64) -> String {
-    let whole = base_units / UNITS_PER_COIN;
-    let fraction = base_units % UNITS_PER_COIN;
-    if fraction == 0 {
-        return whole.to_string();
-    }
-    let digits = format!("{fraction:012}");
-    format!("{whole}.{}", digits.trim_end_matches('0'))
+/// Render a held amount the way a person reads it — see [`format_asset_amount`], which this delegates
+/// to so that the Wallet surface cannot acquire a divisor of its own (dig_ecosystem#2295).
+pub fn format_amount(asset: Asset, base_units: u64) -> String {
+    format_asset_amount(asset, base_units)
 }
 
 /// The address line for the Wallet window.
@@ -341,8 +333,8 @@ pub fn balance_line(balance: &BalanceReading) -> String {
     match balance {
         BalanceReading::Known(held) => format!(
             "Balance: {} $DIG and {} XCH.",
-            format_amount(held.dig_units),
-            format_amount(held.xch_mojos)
+            format_amount(Asset::Dig, held.dig_units),
+            format_amount(Asset::Xch, held.xch_mojos)
         ),
         BalanceReading::Unknown(why) => format!("Balance: not known — {}", unknown_reason(why)),
     }
@@ -367,8 +359,8 @@ pub fn menu_balance_label(balance: &BalanceReading) -> String {
     match balance {
         BalanceReading::Known(held) => format!(
             "Balance: {} $DIG · {} XCH",
-            format_amount(held.dig_units),
-            format_amount(held.xch_mojos)
+            format_amount(Asset::Dig, held.dig_units),
+            format_amount(Asset::Xch, held.xch_mojos)
         ),
         BalanceReading::Unknown(why) => format!("Balance not known — {}…", menu_reason(why)),
     }
@@ -542,7 +534,7 @@ mod tests {
     fn a_real_balance_is_read_per_asset_and_shown_in_whole_coins() {
         let engine = FakeWalletEngine {
             coins: vec![
-                coin(Asset::Dig, 2_500_000_000_000),
+                coin(Asset::Dig, 2_500),
                 coin(Asset::Xch, 1_000_000_000_000),
                 coin(Asset::Xch, 250_000_000_000),
             ],
@@ -554,7 +546,7 @@ mod tests {
             overview.balance,
             BalanceReading::Known(Balances {
                 xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500_000_000_000,
+                dig_units: 2_500,
             })
         );
         assert_eq!(
@@ -697,7 +689,7 @@ mod tests {
     fn a_known_balance_shows_both_assets_on_the_menu_row() {
         let held = menu_balance_label(&BalanceReading::Known(Balances {
             xch_mojos: 1_250_000_000_000,
-            dig_units: 2_500_000_000_000,
+            dig_units: 2_500,
         }));
         assert!(held.contains("2.5 $DIG"), "{held}");
         assert!(held.contains("1.25 XCH"), "{held}");
@@ -851,15 +843,32 @@ mod tests {
         assert_ne!(locked, broken);
     }
 
-    /// Amounts round-trip the way a person reads them — and a sub-unit amount is never rounded away to
-    /// a zero that would read as "nothing".
+    /// **The Wallet surface renders each asset at ITS OWN scale** (dig_ecosystem#2295).
+    ///
+    /// One whole coin is `10^decimals` base units, so each expectation is derived from the asset's
+    /// declared decimals rather than typed as a magic number — the test this replaces asserted a
+    /// single asset-agnostic divisor and was therefore perfectly self-consistent with rendering a
+    /// whole $DIG as `0.000000001`.
     #[test]
-    fn amounts_render_as_trimmed_whole_coins() {
-        assert_eq!(format_amount(0), "0");
-        assert_eq!(format_amount(UNITS_PER_COIN), "1");
-        assert_eq!(format_amount(UNITS_PER_COIN * 3 / 2), "1.5");
-        assert_eq!(format_amount(1), "0.000000000001");
-        assert_eq!(format_amount(u64::MAX), "18446744.073709551615");
+    fn amounts_render_at_each_assets_own_scale() {
+        let one_dig = 10u64.pow(Asset::Dig.decimals());
+        let one_xch = 10u64.pow(Asset::Xch.decimals());
+
+        assert_eq!(format_amount(Asset::Dig, one_dig), "1");
+        assert_eq!(format_amount(Asset::Xch, one_xch), "1");
+        assert_eq!(format_amount(Asset::Dig, one_dig * 3 / 2), "1.5");
+        assert_eq!(format_amount(Asset::Xch, one_xch * 3 / 2), "1.5");
+        assert_eq!(format_amount(Asset::Dig, 0), "0");
+        assert_eq!(format_amount(Asset::Xch, 0), "0");
+    }
+
+    /// A sub-unit holding is never rounded away to a zero that would read as "nothing".
+    #[test]
+    fn a_sub_coin_holding_is_never_rendered_as_nothing() {
+        assert_ne!(format_amount(Asset::Dig, 1), "0");
+        assert_ne!(format_amount(Asset::Xch, 1), "0");
+        assert_eq!(format_amount(Asset::Dig, 1), "0.001");
+        assert_eq!(format_amount(Asset::Xch, 1), "0.000000000001");
     }
 
     /// **A real user with a real reading sees the number.** This is the whole of dig_ecosystem#2206
@@ -876,7 +885,7 @@ mod tests {
             node_connected: true,
             balance: BalanceReading::Known(Balances {
                 xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500_000_000_000,
+                dig_units: 2_500,
             }),
             ..Default::default()
         }));
@@ -935,13 +944,20 @@ mod tests {
             node_connected: true,
             balance: BalanceReading::Known(Balances {
                 xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500_000_000_000,
+                dig_units: 2_500,
             }),
             ..Default::default()
         }));
         assert!(body.contains("account is locked"), "{body}");
+        // Both figures are named, because a negative assertion only discriminates while the string it
+        // looks for is the one the fixture would actually render. A rescaled fixture silently vacated
+        // the $DIG half of this test once already (dig_ecosystem#2295).
         assert!(
             !body.contains("2.5 $DIG"),
+            "a locked account must not still show its last figure: {body}"
+        );
+        assert!(
+            !body.contains("1.25 XCH"),
             "a locked account must not still show its last figure: {body}"
         );
     }

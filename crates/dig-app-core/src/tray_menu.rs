@@ -3499,7 +3499,7 @@ mod tests {
             AccountState::Unlocked { recoverable: true },
             BalanceReading::Known(Balances {
                 xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500_000_000_000,
+                dig_units: 2_500,
             }),
         ));
         assert!(held.contains("2.5 $DIG"), "{held}");
