@@ -70,6 +70,15 @@ pub enum WalletError {
     #[error("no DIG node answered: {0}")]
     EngineUnreachable(String),
 
+    /// A node accepted the connection and did not finish the read inside its budget.
+    ///
+    /// Distinct from [`EngineUnreachable`](Self::EngineUnreachable) because the two are different
+    /// facts, not two shades of one: the socket CONNECTED, so a node is demonstrably present and the
+    /// only thing that failed is this call. Collapsing them is what told a user with a perfectly
+    /// healthy node that no node was running (dig_ecosystem#2325).
+    #[error("the DIG node did not answer the balance read in time: {0}")]
+    EngineTimedOut(String),
+
     /// A node answered, but this build of it does not serve the requested wallet read.
     ///
     /// The honest end of a capability probe: the app asked, and the running node said it cannot.

@@ -81,7 +81,18 @@ pub enum ControlCallError {
     /// The endpoint could not be parsed into a host and port.
     BadEndpoint(String),
     /// Nothing answered at the endpoint — the usual "no node is running" case.
+    ///
+    /// Strictly *nothing accepted the connection*. A node that accepted and then took too long is
+    /// [`TimedOut`](Self::TimedOut), never this: only a refused connection is evidence about
+    /// whether a node exists (dig_ecosystem#2325).
     Unreachable(String),
+    /// A node accepted the connection and did not finish answering inside the caller's budget.
+    ///
+    /// The node is demonstrably THERE — the socket connected — so nothing downstream may conclude
+    /// anything about whether one is running. The only honest statement is that this call did not
+    /// finish, which is why the budget belongs to the CALLER: a liveness probe and a chain read
+    /// wait for very different things.
+    TimedOut(String),
     /// Something answered, but not with a JSON-RPC response we could read.
     BadResponse(String),
     /// The node answered with a refusal — most often an absent or unrecognized control token.
@@ -93,6 +104,7 @@ impl std::fmt::Display for ControlCallError {
         match self {
             ControlCallError::BadEndpoint(m) => write!(f, "unusable node endpoint: {m}"),
             ControlCallError::Unreachable(m) => write!(f, "{m}"),
+            ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
         }
@@ -404,9 +416,27 @@ fn post_json(
         .write_all(head.as_bytes())
         .and_then(|()| writer.write_all(body))
         .and_then(|()| writer.flush())
-        .map_err(|e| ControlCallError::Unreachable(format!("could not send the request: {e}")))?;
+        .map_err(|e| stalled_or(&e, format!("could not send the request: {e}")))?;
 
     read_http_body(stream)
+}
+
+/// Classify a socket error on an ALREADY-CONNECTED stream.
+///
+/// The connection succeeded, so a node is demonstrably there and the only thing in doubt is whether
+/// it answered in time. An expired socket timeout is therefore
+/// [`TimedOut`](ControlCallError::TimedOut); anything else (a reset, a broken pipe) genuinely lost
+/// the link and stays [`Unreachable`](ControlCallError::Unreachable).
+///
+/// Windows reports an expired read timeout as `TimedOut` and Unix as `WouldBlock`, so both kinds
+/// mean the same thing here (dig_ecosystem#2325).
+fn stalled_or(error: &std::io::Error, detail: String) -> ControlCallError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+            ControlCallError::TimedOut(detail)
+        }
+        _ => ControlCallError::Unreachable(detail),
+    }
 }
 
 /// Dial `host:port`, preferring IPv6 (§5.2) among the resolved addresses.
@@ -446,7 +476,7 @@ fn read_http_body(stream: TcpStream) -> Result<Vec<u8>, ControlCallError> {
     let mut status_line = String::new();
     reader
         .read_line(&mut status_line)
-        .map_err(|e| ControlCallError::Unreachable(format!("no reply from the node: {e}")))?;
+        .map_err(|e| stalled_or(&e, format!("no reply from the node: {e}")))?;
     let code = http_status_code(&status_line)?;
 
     let mut line = String::new();
@@ -635,6 +665,58 @@ mod tests {
             ),
             "expected a failure, got {err:?}"
         );
+    }
+
+    /// **A node that connects and answers LATE is not a node that is absent** (dig_ecosystem#2325).
+    ///
+    /// Two actors vary by exactly one thing — whether anything is listening — and the transport must
+    /// report them differently, because only one of them says anything at all about whether a node
+    /// exists. Before this, both produced [`ControlCallError::Unreachable`], and a chain read that
+    /// merely overran its budget reached the user as "no DIG node is running".
+    ///
+    /// The dead-port control is what makes this a placement test rather than an outcome test: an
+    /// implementation that renamed every failure to `TimedOut` would pass the first half and fail
+    /// the second.
+    #[test]
+    fn a_late_answer_is_a_timeout_while_a_dead_port_stays_unreachable() {
+        let slow = FakeNode::with_behaviour(Behaviour::SlowWallet {
+            reply: crate::test_support::node::WalletReply::Balance {
+                xch: 1,
+                dig: 1,
+                synced: true,
+            },
+            // Comfortably past the budget below, so the outcome cannot depend on scheduling noise.
+            delay: Duration::from_secs(3),
+        });
+        let late = fetch_status(
+            &slow.endpoint(),
+            Some(slow.token()),
+            Duration::from_millis(200),
+        )
+        .expect_err("the reply arrives after the budget");
+        assert!(
+            matches!(late, ControlCallError::TimedOut(_)),
+            "a node that answered late must not be reported as absent; got {late:?}"
+        );
+
+        let dead = fetch_status(&dead_endpoint(), Some("t"), Duration::from_millis(200))
+            .expect_err("nothing is listening");
+        assert!(
+            matches!(dead, ControlCallError::Unreachable(_)),
+            "a dead port is genuinely unreachable; got {dead:?}"
+        );
+    }
+
+    /// The timeout's own words describe OUR call, never the node's existence — the wording defect
+    /// behind dig_ecosystem#2325 was as damaging as the budget that triggered it.
+    #[test]
+    fn a_timeout_describes_the_call_not_the_node() {
+        let message = ControlCallError::TimedOut("after 200ms".to_string()).to_string();
+        assert!(
+            !message.contains("no DIG node"),
+            "a timeout cannot know whether a node is running: {message}"
+        );
+        assert!(message.contains("did not answer"), "{message}");
     }
 
     #[test]

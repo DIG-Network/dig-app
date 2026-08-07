@@ -164,6 +164,15 @@ fn disconnected_reason(failures: &[(String, ControlCallError)], had_token: bool)
             )
         };
     }
+    // A tier that CONNECTED and then ran out of time is evidence that something is listening, so
+    // the same sentence cannot be used: "no DIG node is running" would contradict the socket that
+    // just opened (dig_ecosystem#2325).
+    if let Some((endpoint, _)) = failures
+        .iter()
+        .find(|(_, e)| matches!(e, ControlCallError::TimedOut(_)))
+    {
+        return format!("the node at {endpoint} did not answer in time");
+    }
     if failures.is_empty() {
         return "no node endpoint to try".to_string();
     }
@@ -265,6 +274,31 @@ mod tests {
         assert!(
             !reason.contains("no DIG node is running"),
             "a node that ANSWERED must not be reported as absent; got {reason:?}"
+        );
+    }
+
+    /// **A tier that connected and then timed out is not an absent node** (dig_ecosystem#2325).
+    ///
+    /// The second tier is genuinely unreachable, so a reason derived from "the last thing that
+    /// happened" would still say no node is running — the timeout must win, because it is the tier
+    /// that proved something is there.
+    #[test]
+    fn a_tier_that_answered_too_slowly_is_not_reported_as_an_absent_node() {
+        let failures = vec![
+            (
+                "http://dig.local".to_string(),
+                ControlCallError::TimedOut("no reply".to_string()),
+            ),
+            (
+                "http://localhost:9778".to_string(),
+                ControlCallError::Unreachable("nothing there".to_string()),
+            ),
+        ];
+        let reason = disconnected_reason(&failures, true);
+        assert!(reason.contains("did not answer in time"), "{reason}");
+        assert!(
+            !reason.contains("no DIG node is running"),
+            "a socket that opened contradicts this: {reason}"
         );
     }
 

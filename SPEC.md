@@ -580,8 +580,10 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   the wallet window MUST explain the situation.
 - **A balance that could not be read MUST NOT be rendered as a zero.** The surface MUST distinguish a
   balance READ from a chain source (where `0` means nothing is held) from one that is UNKNOWN, and every
-  unknown MUST name which thing is missing — no address, no node, a node that does not serve wallet reads,
-  a node with no live chain source to read from, a source still syncing, or a read that failed. Showing a
+  unknown MUST name which thing is missing — no address, no node DIG could reach, a node that did not
+  answer in time, a node that does not serve wallet reads, a node with no live chain source to read from,
+  a source still syncing, or a read that failed. A read still IN FLIGHT is none of those: it MUST be
+  carried as its own PENDING state, because nothing has failed and naming a reason would invent one. Showing a
   zero for an unreadable balance is how a person
   concludes their funds are gone, and is forbidden. This holds on the MENU ROW as well as in the window: a
   glanced-at numeral is where the mistaken conclusion is cheapest to reach.
@@ -1499,6 +1501,19 @@ asserting an outcome it did not test:
   be collapsed into one another — they call for an upgrade, a wait, and a node connection respectively.
 - The read MUST be throttled independently of the repaint rate, because the tray snapshot is taken on
   every repaint and a balance is a rate-limited chain read.
+- **The read's timeout MUST be sized for a chain round-trip and MUST NOT be the §5.3 ladder's probe
+  budget.** Those budgets answer different questions: a probe budget bounds how long one tier may take to
+  prove it is alive before the ladder falls through, while a balance may be served from a public chain
+  source and has been measured at 2.5–6 s against a healthy node. An implementation that reuses the probe
+  budget fails every read on such a machine.
+- **The read MUST NOT block the surface that asks for it.** A repaint-driven caller MUST receive an
+  answer immediately — the PENDING state, or the reading already held for that address — while at most
+  ONE read per address is in flight.
+- **A read that overran its budget MUST NOT be reported as an absent node.** The connection succeeded, so
+  the only supportable statement is that this call did not finish; a timeout, a node still syncing, and a
+  ladder that reached nothing are three distinct states with three distinct sentences. Where nothing was
+  reached at all, the surface MUST describe the app's failure to REACH a node rather than assert that
+  none is running.
 - dig-app MUST NOT enable, or require the user to enable, any node-side flag that arms spending in order
   to obtain a read-only balance.
 

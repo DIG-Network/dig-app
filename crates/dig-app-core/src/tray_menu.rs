@@ -1299,7 +1299,7 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
 /// click into a window. It is ALWAYS present and ALWAYS enabled: it renders the reading
 /// [`crate::wallet::node::NodeBalance`] polled from the node — a figure when the node answered with
 /// one, and otherwise the node's OWN reason (`Balance not known — your node has no chain connection
-/// yet…`, `…no DIG node is running…`, `…this node cannot read balances yet…`). Whichever it is, the
+/// yet…`, `…DIG could not reach a node…`, `…this node cannot read balances yet…`). Whichever it is, the
 /// sentence is honest content rather than a placeholder. Its label carries the short reason and
 /// clicking it opens the window
 /// with the full one, which is how the **Cache** submenu's disconnected row behaves for the same
@@ -3466,15 +3466,10 @@ mod tests {
             ),
             (AccountState::Unopenable, "your account cannot be opened"),
             // The unlocked states DO have an address, so their row carries the reading the poller
-            // took — here the fixture's not-yet-polled default, which is honestly "no node yet".
-            (
-                AccountState::Unlocked { recoverable: true },
-                "no DIG node is running",
-            ),
-            (
-                AccountState::Unlocked { recoverable: false },
-                "no DIG node is running",
-            ),
+            // took — here the fixture's not-yet-polled default, which is honestly "still checking"
+            // rather than a verdict on the user's node (dig_ecosystem#2325).
+            (AccountState::Unlocked { recoverable: true }, "checking"),
+            (AccountState::Unlocked { recoverable: false }, "checking"),
         ];
         for (account, clause) in expected {
             let label = balance_row(wallet_labels(account.clone()));
