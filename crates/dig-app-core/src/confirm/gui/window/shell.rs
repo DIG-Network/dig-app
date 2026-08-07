@@ -821,6 +821,20 @@ mod tests {
             self.frame(Vec::new());
         }
 
+        /// Whether the SHELL asked to be brought forward within the next `frames` frames.
+        fn asked_for_focus(&mut self, frames: usize) -> bool {
+            (0..frames).any(|_| {
+                self.frame(Vec::new())
+                    .viewport_output
+                    .get(&egui::ViewportId::ROOT)
+                    .is_some_and(|root| {
+                        root.commands
+                            .iter()
+                            .any(|command| matches!(command, egui::ViewportCommand::Focus))
+                    })
+            })
+        }
+
         /// Everything the window has dispatched so far.
         fn dispatched(&self) -> Vec<TrayAction> {
             self.dispatched
@@ -1120,14 +1134,46 @@ mod tests {
         );
     }
 
-    /// **A second open-the-window request RAISES the window it already opened**, and does not queue a
-    /// second one in front of the next real prompt.
+    /// **A second open-the-window request RAISES the window it already opened.**
     ///
-    /// Both halves are asserted. A shell that merely dropped the request would satisfy the queueing
-    /// half while leaving a person clicking `Open App` at a window buried behind their editor, with
-    /// nothing happening — the shape of dig_ecosystem#2074's silent click.
+    /// Split from the queueing claim below on purpose. A prompt raised over the shell also asks for
+    /// focus, and on a headless host egui EMBEDS the child viewport into the root — so its request
+    /// is recorded against the root and a test that queued a prompt alongside the duplicate would
+    /// read the prompt's focus as the shell's. Measured: with the raise removed, that version still
+    /// passed. So this queues nothing but the duplicate, and carries its own control.
     #[test]
-    fn a_second_open_request_raises_the_window_rather_than_queueing_another() {
+    fn a_second_open_request_raises_the_window_rather_than_doing_nothing() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+
+        // The control, FIRST: an idle shell asks for focus on no frame of its own accord. Without
+        // this the assertion below would pass on any implementation that focused constantly.
+        assert!(
+            !shelf.asked_for_focus(4),
+            "the shell asks for focus without being asked to, so raising cannot be observed"
+        );
+
+        shelf
+            .jobs
+            .send(Work::Shell(AppWindow {
+                theme: shelf.store.clone(),
+                view: Arc::new(busy_view),
+                act: Arc::new(|_| {}),
+            }))
+            .expect("the queue is open");
+
+        assert!(
+            shelf.asked_for_focus(4),
+            "the window was not brought forward, so a second Open App does nothing visible"
+        );
+    }
+
+    /// **A second open-the-window request is not left in front of the next real prompt.**
+    ///
+    /// Nobody is blocked on it and there is nothing to answer, so it must be consumed rather than
+    /// queued — a duplicate sitting in the queue would delay the next consent prompt behind it.
+    #[test]
+    fn a_second_open_request_does_not_delay_the_next_prompt() {
         let mut shelf = Shelf::open();
         shelf.settle();
         shelf
@@ -1140,23 +1186,10 @@ mod tests {
             .expect("the queue is open");
         let answers = shelf.queue_live_prompt();
 
-        let mut raised = false;
         for _ in 0..4 {
-            let output = shelf.frame(Vec::new());
-            raised |= output
-                .viewport_output
-                .get(&egui::ViewportId::ROOT)
-                .is_some_and(|root| {
-                    root.commands
-                        .iter()
-                        .any(|command| matches!(command, egui::ViewportCommand::Focus))
-                });
+            shelf.frame(Vec::new());
         }
 
-        assert!(
-            raised,
-            "the window was not brought forward, so a second Open App does nothing visible"
-        );
         assert!(
             shelf.app.prompt.is_some(),
             "the duplicate open request blocked the prompt behind it"

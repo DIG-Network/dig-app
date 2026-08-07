@@ -648,11 +648,18 @@ mod tests {
     /// stayed green — the exact hazard the field's own doc comment warned about.
     ///
     /// So they are REPLACED, by the thing the filters were a proxy for: **a tab counts as a route only
-    /// if it actually renders something.** For a tab's own rows that is now true by construction — a
-    /// tab with rows renders them, and `every_rendered_tab_has_content` holds the general case — so the
-    /// discriminating leg is the SUBSUMPTION one. `SUBSUMED_BY_TAB` is the single place this invariant
-    /// takes a human's word that a tab carries an action's content instead of a row, and an empty tab
-    /// making that claim is precisely how a verb goes missing with the suite green.
+    /// if it actually renders something.** `SUBSUMED_BY_TAB` is the single place this invariant takes a
+    /// human's word that a tab carries an action's content instead of a row, and an empty tab making
+    /// that claim is precisely how a verb goes missing with the suite green.
+    ///
+    /// **Measured, so the claim is not an assumption.** Deleting the SUBSUMPTION filter is killed by
+    /// `a_subsuming_tab_that_renders_nothing_is_not_a_route`. Deleting the ROW filter above it
+    /// SURVIVES, and that is expected rather than a hole: a tab with rows renders them by
+    /// construction, so the filter cannot currently discriminate. It is kept because it states the
+    /// rule the leg is subject to, and a future tab that carries actions without drawing them would
+    /// otherwise be counted as a route silently. Whoever finds it non-load-bearing should reach for a
+    /// fixture that makes it bite, not for a deletion — that is exactly the reasoning the deleted
+    /// field's own comment asked for.
     fn reachable_after_trim_of(view: &TrayView, model: &WindowModel) -> BTreeSet<String> {
         let mut reachable = names(
             tray_actions(view)
