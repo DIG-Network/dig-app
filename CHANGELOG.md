@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.31.0] - 2026-08-07
+
+### Features
+- **window:** Model the tabbed app window from the shared menu rules (#113)- **window:** The tabbed app window, the tray row that opens it, and the four-row trim (#115)- **window:** Draw every prompt inside the app window (#2270) (#117)
+
+### Refactor
+- **tray:** Share the menu group builders and add a window-host capability field (#112)
+
+### Documentation
+- **window:** Resolve the four rustdoc links that broke the doc gate (#116)
+
 ## [5.27.0] - 2026-08-06
 
 ### Features
