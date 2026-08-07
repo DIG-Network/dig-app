@@ -643,7 +643,7 @@ impl ShellApp {
     ///
     /// # Why the scrim is a widget and not a rectangle of paint
     ///
-    /// Dimming says the window is inert; `allocate_rect` with a click-and-drag sense MAKES it inert.
+    /// Dimming says the window is inert; a full-window widget that senses clicks and drags MAKES it so.
     /// Both halves are needed, and only the second is a security property: a pane control that
     /// stayed live under a wash of translucent black could be clicked through the appearance of a
     /// modal, which is a worse version of the burial the always-on-top child window was there to
@@ -688,7 +688,7 @@ impl ShellApp {
     }
 }
 
-/// Where the modal is drawn: horizontally centred, and vertically centred within what is left.
+/// Where the modal is drawn: centred in the window, clamped to it on both axes.
 ///
 /// # Why a function and not two lines inside the painter
 ///
@@ -697,11 +697,17 @@ impl ShellApp {
 /// window to reach past — is a claim about a rectangle, and a pure function is the only form of it a
 /// headless test can hold. Nothing here reads the [`egui::Context`] for that reason.
 ///
-/// Clamped to the window on both axes. On a shell dragged to [`SHELL_MIN`] the prompt's natural
-/// [`super::WIDTH`] is wider than the window itself, and a card whose action row runs off the right
-/// edge is a consent surface that cannot be refused.
+/// Clamped to [`MODAL_SHARE`] of the window on both axes. On a shell dragged to [`SHELL_MIN`] the
+/// prompt's natural [`super::WIDTH`] is wider than the window itself, and a card whose action row
+/// runs off the right edge is a consent surface that cannot be refused. The share rather than the
+/// full width, so a margin of scrim always shows: a modal drawn edge to edge is indistinguishable
+/// from the window having simply become the prompt, which loses the one cue that says the app is
+/// still there, waiting behind this.
 fn modal_rect(full: Rect, height: f32) -> Rect {
-    let size = Vec2::new(WIDTH.min(full.width()), height.min(full.height()));
+    let size = Vec2::new(
+        WIDTH.min(full.width() * MODAL_SHARE),
+        height.min(full.height() * MODAL_SHARE),
+    );
     Rect::from_center_size(full.center(), size)
 }
 
@@ -2241,6 +2247,10 @@ mod tests {
                 assert!(
                     window.contains_rect(at),
                     "a {height}-tall modal at {at:?} left a {size:?} window"
+                );
+                assert!(
+                    at.width() < window.width() && at.height() < window.height(),
+                    "a {height}-tall modal at {at:?} fills a {size:?} window edge to edge, so no                      scrim is visible around it"
                 );
                 assert_eq!(
                     at.center(),
