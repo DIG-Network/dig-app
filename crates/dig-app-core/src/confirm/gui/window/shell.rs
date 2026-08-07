@@ -1157,6 +1157,38 @@ mod tests {
         super::super::panes::row_id(label, 0)
     }
 
+    /// Press Enter, and do not release it.
+    ///
+    /// The `repeat` field is left `false` because egui does not read it: it recomputes the flag from
+    /// its own `keys_down` set on every pass (`input_state/mod.rs`). Whether a press counts as a
+    /// repeat is therefore decided by whether a matching [`enter_up`] was sent, which is what makes
+    /// `a_held_enter_cannot_answer_the_next_prompt` a real sequence rather than a claim about a flag.
+    fn enter_down() -> Vec<egui::Event> {
+        enter_key(true)
+    }
+
+    /// Release Enter.
+    fn enter_up() -> Vec<egui::Event> {
+        enter_key(false)
+    }
+
+    /// Press Enter and release it — one complete keystroke.
+    fn enter() -> Vec<egui::Event> {
+        let mut events = enter_down();
+        events.extend(enter_up());
+        events
+    }
+
+    fn enter_key(pressed: bool) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
     /// Press Escape.
     fn escape() -> Vec<egui::Event> {
         vec![egui::Event::Key {
@@ -2250,6 +2282,10 @@ mod tests {
 
         let answers = shelf.queue_live_prompt();
         shelf.frame(Vec::new());
+        // A second frame because the FIRST is the modal's sizing pass, which egui marks invisible:
+        // the prompt cannot be answered until it has been presented (`frame_in_window`, F1). The
+        // surface is raised from admission either way, which is what this test is about.
+        shelf.frame(Vec::new());
         assert!(
             shelf.app.prompt.is_some(),
             "the prompt is not up, so the next assertion would prove nothing"
@@ -2428,6 +2464,142 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // No answer from a pass the person was not shown (dig_ecosystem#2270, F1)
+    // ---------------------------------------------------------------------------------------------
+
+    /// **A prompt cannot be answered on the frame it first appears.**
+    ///
+    /// The regression test for the highest-severity defect this change introduced: a sign request
+    /// answered `Approve`, delivered to a blocked caller, with the consent surface **never drawn**.
+    ///
+    /// Two facts met. The shell admits a prompt and paints it in the SAME frame, and in-window it
+    /// shares the shell's input stream — so the prompt's first `keys()` read a keystroke aimed at the
+    /// app window. And an [`egui::Area`] whose state does not exist yet runs a sizing pass that egui
+    /// marks invisible and discards, so that first pass showed nothing by construction. The
+    /// pre-focused control of a sign prompt is the AFFIRMATIVE, so the leftover Enter approved a
+    /// spend nobody had seen.
+    ///
+    /// # Why this shape, and not the suite's usual one
+    ///
+    /// Every other in-window answer test runs `settle(); queue; frame(); frame(); frame(key)` — by
+    /// which point the Area's state exists and the modal has been painted, so **none of them can
+    /// observe this**. This is deliberately the ONE-frame case: the keystroke rides the very frame
+    /// that admits the prompt.
+    ///
+    /// Asserted on what the CALLER received, never on what was drawn. "Nothing was painted" is a
+    /// symptom; "the caller was told Approve" is the defect.
+    #[test]
+    fn a_prompt_cannot_be_answered_on_the_frame_it_first_appears() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+
+        // One frame that admits the prompt AND carries an Enter left over from the app window.
+        shelf.frame(enter());
+
+        assert!(
+            shelf.app.prompt.is_some(),
+            "the prompt was answered on the frame it was admitted, before anything of it had been \
+             drawn"
+        );
+        assert!(
+            matches!(answers.try_recv(), Err(TryRecvError::Empty)),
+            "an answer reached the caller from a frame in which the consent surface was never \
+             presented; for a sign prompt the pre-focused control is the AFFIRMATIVE, so this is an \
+             approval the person never saw"
+        );
+    }
+
+    /// **…and it CAN be answered once it has been presented.**
+    ///
+    /// The control. A prompt that simply never accepted Enter would satisfy the test above perfectly
+    /// and would be a consent surface nobody can approve — which, since Escape and the deadline both
+    /// resolve a confirm to `Deny`, silently refuses everything.
+    #[test]
+    fn a_presented_prompt_answers_a_fresh_enter() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+
+        shelf.frame(enter());
+
+        assert!(
+            matches!(
+                answers.try_recv(),
+                Ok(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "a presented prompt did not answer a real Enter on its focused affirmative"
+        );
+    }
+
+    /// **A held Enter cannot answer the NEXT prompt.**
+    ///
+    /// The other half of F1, and the one that needs no attacker timing. Prompts chain in this app —
+    /// an unlock, then the operation it unlocked — and Windows repeats a held key at roughly 31 ms
+    /// against a ~16 ms frame. So a person who answers one prompt with Enter and holds the key a beat
+    /// longer generates presses that land on whatever is drawn next, and the pre-focused control of a
+    /// sign prompt is the AFFIRMATIVE. [`egui::InputState::key_pressed`] counts those repeats;
+    /// [`super::PromptApp::pressed_afresh`] does not.
+    ///
+    /// # The fixture is the real chain, because a synthesised flag is not the thing under test
+    ///
+    /// Measured, and it invalidated the obvious fixture: egui **overwrites** the `repeat` field of
+    /// every incoming key event, deriving it from its own `keys_down` set
+    /// (`input_state/mod.rs`, `*repeat = !first_press`). A test that simply passed `repeat: true`
+    /// would have that rewritten to `false` and would exercise a fresh press while claiming to
+    /// exercise a repeat — passing whatever the production code did. So this drives the actual
+    /// sequence: answer one prompt, never send the key-up, and let egui decide what the next press is.
+    ///
+    /// Both sides are kept truthful: the repeat must NOT answer, and the fresh press after a real
+    /// key-up MUST — otherwise "the prompt ignores Enter entirely" would pass, which since Escape and
+    /// the deadline both resolve to `Deny` is a surface that silently refuses everything.
+    #[test]
+    fn a_held_enter_cannot_answer_the_next_prompt() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+
+        // The first prompt, answered with a genuine Enter — and the key is never released.
+        let first = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+        shelf.frame(enter_down());
+        assert!(
+            matches!(
+                first.try_recv(),
+                Ok(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "the first prompt was not answered, so nothing here is a chain"
+        );
+
+        // The second arrives while the key is still down, and every press egui reports for it is a
+        // repeat of the one aimed at the first.
+        let second = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+        shelf.frame(enter_down());
+        shelf.frame(enter_down());
+
+        assert!(
+            shelf.app.prompt.is_some(),
+            "a key held over from the previous prompt answered this one; that is an approval for a              surface the person never read"
+        );
+        assert!(
+            matches!(second.try_recv(), Err(TryRecvError::Empty)),
+            "a key-repeat reached the caller as an answer"
+        );
+
+        // Released, then pressed again: this one is the person's.
+        shelf.frame(enter_up());
+        shelf.frame(enter_down());
+        assert!(
+            matches!(second.try_recv(), Ok(Outcome::Confirm(WindowIntent::Approve))),
+            "a fresh Enter after the key was released did not answer; the rule is refusing every              keystroke rather than only the repeats"
+        );
+    }
+
     /// **The scrim really is an input blocker, over the whole window.**
     ///
     /// The behavioural test above passes today without this widget, because every control the shell
@@ -2459,6 +2631,94 @@ mod tests {
                 .contains_rect(Rect::from_min_size(egui::Pos2::ZERO, shell_size())),
             "the blocker at {:?} leaves part of the window live under the scrim",
             blocker.rect
+        );
+    }
+
+    /// **The three layers are stacked shell < scrim < modal, and that is asserted as DATA.**
+    ///
+    /// # Why data and not a consequence
+    ///
+    /// Because the consequence is not currently observable, which was MEASURED. Demoting the scrim
+    /// to `Order::Background`, or the modal to `Order::Foreground`, changes no behaviour any other
+    /// test in this module can see: within one `Order`, egui stacks areas by creation, and
+    /// `paint_shell` runs before `show_prompt`, so the intended stacking survives the mutation by
+    /// accident. `read_response` cannot help either — it is layer-blind and reports a blocker under
+    /// the panes exactly as it reports one over them.
+    ///
+    /// Relying on creation order is not a guarantee worth resting a consent surface on: it is
+    /// invisible at the call sites, one reordered statement from being wrong, and — see the test
+    /// below — egui promotes an area within its own `Order` when it is interacted with. So the
+    /// separation is declared in distinct `Order`s and pinned here, as the two values, plus the
+    /// relation between them so a future pair that happened to compare equal cannot pass.
+    #[test]
+    fn the_modal_sits_in_a_layer_strictly_above_the_scrim() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let _answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        shelf.frame(Vec::new());
+
+        // egui has no "which order is this area in?" query, so each expected (order, id) PAIR is
+        // asked for by name: a demoted area is simply not visible under the pair named here.
+        let drawn = |order, id: &str| {
+            shelf.ctx.memory(|m| {
+                m.areas()
+                    .is_visible(&egui::LayerId::new(order, egui::Id::new(id)))
+            })
+        };
+
+        assert!(
+            drawn(egui::Order::Background, "dig-app-shell"),
+            "the shell is not in Background, so the two assertions below are measured against              something other than the shipped stack"
+        );
+        assert!(
+            drawn(egui::Order::Foreground, "dig-app-shell-scrim"),
+            "the scrim left Order::Foreground; it no longer sits above the shell it makes inert"
+        );
+        assert!(
+            drawn(egui::Order::Tooltip, "dig-app-shell-modal"),
+            "the modal left Order::Tooltip — it and the scrim would then be separated only by the              order the two are painted in, which is one reordered statement, or one click on the              scrim, from leaving the consent surface unanswerable"
+        );
+        assert!(
+            egui::Order::Background < egui::Order::Foreground
+                && egui::Order::Foreground < egui::Order::Tooltip,
+            "the three orders named above no longer stack shell < scrim < modal"
+        );
+    }
+
+    /// **A click on the scrim does not make the modal unclickable.**
+    ///
+    /// The behavioural consequence of the rule above, and the reason it is not merely tidy. egui
+    /// promotes an area to the front OF ITS OWN `Order` when the pointer interacts with it — so if
+    /// the scrim and the modal shared an `Order`, one click on the dimmed area would lift the
+    /// full-window blocker over the modal and the consent surface would stop answering the mouse
+    /// entirely, with every other test in this file still green.
+    ///
+    /// The gesture is an ordinary one: a person clicks the greyed-out window, nothing happens
+    /// (correctly), and then they go to the button.
+    #[test]
+    fn clicking_the_scrim_first_leaves_the_modal_answerable() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        let answers = shelf.queue_live_prompt();
+        shelf.frame(Vec::new());
+        let output = shelf.frame(Vec::new());
+        let sign = where_text_landed(&output, "Sign");
+
+        // A corner: inside the window, outside the modal, so it lands on the scrim and nothing else.
+        shelf.click(egui::Pos2::new(4.0, SHELL_HEIGHT - 4.0));
+        assert!(
+            shelf.app.prompt.is_some(),
+            "the click on the scrim answered or dismissed the prompt, which no click outside the              modal may do"
+        );
+
+        shelf.click(sign.center());
+        assert!(
+            matches!(
+                answers.try_recv(),
+                Ok(Outcome::Confirm(WindowIntent::Approve))
+            ),
+            "after one click on the scrim, the modal's Sign button no longer answers; the consent              surface is unanswerable by pointer"
         );
     }
 

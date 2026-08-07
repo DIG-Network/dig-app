@@ -878,6 +878,12 @@ struct PromptApp {
     /// Repeating it every frame would fight the user for the foreground for the whole life of the
     /// window, which is a different and worse defect than the one it fixes.
     keyboard_claimed: bool,
+    /// Whether this prompt has ever been PRESENTED — painted in a pass a person could see.
+    ///
+    /// Only meaningful in-window ([`PromptHost::InWindow`]); a standalone prompt owns its viewport
+    /// and its own input stream, and its first frame is a real one. See
+    /// [`PromptApp::frame_in_window`] for the defect this closes.
+    presented: bool,
     /// Whether an answer has already been recorded.
     ///
     /// The window keeps drawing for the frames it takes the windowing system to take the close
@@ -937,6 +943,7 @@ impl PromptApp {
             field_focused: false,
             has_been_focused: false,
             placed: false,
+            presented: false,
             answered: false,
             opened: Instant::now(),
             deadline: job.deadline,
@@ -1060,6 +1067,38 @@ impl PromptApp {
         self.record(ctx, outcome);
     }
 
+    /// Whether `key` was pressed ANEW this pass — a real keystroke, not the operating system
+    /// repeating one the person is holding down.
+    ///
+    /// # Why a consent surface must not accept a repeat
+    ///
+    /// [`egui::InputState::key_pressed`] counts key-repeat (`num_presses`, "Includes key-repeat
+    /// events"). Windows repeats at roughly 31 ms against a ~16 ms frame, so a person who answers one
+    /// prompt with Enter and holds the key a moment longer generates presses that land on whatever is
+    /// drawn next — and prompts are chained in this app (an unlock, then the operation it unlocked).
+    /// The pre-focused control of a sign prompt is the AFFIRMATIVE
+    /// ([`ConfirmContent::authorize`](crate::confirm::ConfirmContent) sets `refusal_is_default:
+    /// false`), so a repeat approves a spend the person never read.
+    ///
+    /// Applied to Enter alone, and to BOTH hosts. Escape and Tab keep counting repeats: a repeated
+    /// Escape resolves to a refusal, and a repeated Tab is ordinary keyboard navigation — neither can
+    /// manufacture consent. Restricting Enter can only ever WITHHOLD an answer, never invent one, so
+    /// tightening it on the standalone path too is one-directional: the person releases the key and
+    /// presses it again, and the prompt answers.
+    fn pressed_afresh(i: &egui::InputState, key: Key) -> bool {
+        i.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed_key,
+                    pressed: true,
+                    repeat: false,
+                    ..
+                } if *pressed_key == key
+            )
+        })
+    }
+
     /// Keyboard handling: Escape denies, Tab moves, Enter activates the focused control.
     ///
     /// Escape is wired FIRST and unconditionally. Never trap the user (`professional-ui`, HARD): the
@@ -1070,7 +1109,8 @@ impl PromptApp {
                 i.key_pressed(Key::Escape),
                 i.key_pressed(Key::Tab),
                 i.modifiers.shift,
-                i.key_pressed(Key::Enter),
+                // A FRESH press, never a key-repeat. See `pressed_afresh`.
+                Self::pressed_afresh(i, Key::Enter),
                 // Only a standalone prompt owns the viewport whose close this reads. In-window the
                 // flag belongs to the SHELL, and a shell being closed over a live prompt is settled
                 // fail-closed by `ShellApp::close` — reading it here would answer a definite `Deny`
@@ -1183,7 +1223,32 @@ impl PromptApp {
     /// frame, so the deadline below can elapse), does not place, size, or focus a window, and does
     /// not watch one for blur.
     ///
-    /// What it keeps is everything that decides an ANSWER: the keyboard, the deadline, and the paint.
+    /// What it keeps is everything that decides an ANSWER: the keyboard, the deadline, and the paint
+    /// — but not before the person has been shown what they are answering.
+    ///
+    /// # A prompt may not answer from a pass it was not presented in (dig_ecosystem#2270, F1)
+    ///
+    /// This host shares ONE input stream with the shell, where the standalone window had its own.
+    /// Two consequences met here, and together they were an `Approve` delivered to a blocked caller
+    /// with the consent surface never drawn at all:
+    ///
+    /// * The shell admits a prompt and paints it **in the same frame**, so the prompt's first
+    ///   `keys()` read `RawInput` that egui-winit had filled from the APP WINDOW — a keystroke aimed
+    ///   at something else entirely.
+    /// * An [`egui::Area`] whose state does not yet exist runs a **sizing pass**, which egui marks
+    ///   `.invisible()` and discards (`area.rs`). So the modal's first pass shows nothing BY
+    ///   CONSTRUCTION. The exposure was not a frame a person might miss; it was structurally zero
+    ///   frames.
+    ///
+    /// And the affirmative is the pre-focused control of a sign prompt, so an Enter left over from
+    /// the previous prompt — a held key repeating at ~31 ms against a ~16 ms frame — approved a spend
+    /// nobody had seen. [`PromptApp::pressed_afresh`] closes the repeat half; the
+    /// [`presented`](PromptApp::presented) latch closes this half.
+    ///
+    /// The latch is the smallest thing that states the actual property — *no answer from a pass in
+    /// which the prompt was not presented* — rather than naming any one of the routes into it. It is
+    /// fail-closed in the only direction it can move: an unpresented prompt records nothing, and
+    /// nothing is a denial. Its cost is one frame of latency on the deadline.
     ///
     /// # Why blur-dismissal is dropped rather than re-pointed
     ///
@@ -1212,13 +1277,26 @@ impl PromptApp {
     pub(super) fn frame_in_window(&mut self, ui: &mut egui::Ui, full: Rect) -> f32 {
         let t = self.theme.tokens();
         let ctx = ui.ctx().clone();
-        self.keys(&ctx);
-        // Answer for the human who never came back. The shell keeps the frames coming, so this
-        // elapses on the same schedule a standalone prompt's does.
-        if !self.answered && self.opened.elapsed() >= self.deadline {
-            self.expire(&ctx);
+
+        // NOTHING that can author an answer runs until this prompt has been PRESENTED. See below.
+        if self.presented {
+            self.keys(&ctx);
+            // Answer for the human who never came back. The shell keeps the frames coming, so this
+            // elapses on the same schedule a standalone prompt's does — one pass later.
+            if !self.answered && self.opened.elapsed() >= self.deadline {
+                self.expire(&ctx);
+            }
         }
-        self.paint_into(ui, full, &t)
+
+        let content_bottom = self.paint_into(ui, full, &t);
+
+        // Latched only for a pass that really put this on screen. A sizing pass is
+        // `.invisible()` and calls `request_discard`, so it draws to nobody; `will_discard` catches
+        // any other pass egui is about to throw away for the same reason.
+        if !ui.is_sizing_pass() && !ctx.will_discard() {
+            self.presented = true;
+        }
+        content_bottom
     }
 
     /// Place the launcher bar HIGH on the screen — centred horizontally, `bar_top` from the top.
@@ -5880,6 +5958,9 @@ mod tests {
         );
 
         let mut inside = Hosts::on(PromptHost::InWindow);
+        // Two quiet frames: in-window the first pass presents nothing, so the keyboard is not live
+        // until the second (`frame_in_window`, F1).
+        inside.frame(Vec::new(), false);
         inside.frame(Vec::new(), false);
         let output = inside.frame(enter_pressed(), false);
         assert!(
