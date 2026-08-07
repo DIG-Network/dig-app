@@ -790,6 +790,11 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   chips when the window is too narrow for a column; the selected tab's sections fill the rest. The window
   MUST reuse the consent windows' own palette, type and chrome, because a person who has just been shown a
   DIG consent prompt MUST be able to recognise this as the same application.
+- **Every emitted tab MUST be clickable at every width the window allows (MUST).** The chip strip WRAPS
+  onto as many rows as the tabs need and the content pane begins below the last row; the strip MUST NOT
+  omit, clip out of the window, or overlap a chip, at any width down to the window's own minimum. A label
+  too wide for one row is truncated with an ellipsis and stays clickable. An undrawn tab is not a degraded
+  tab — the strip is that tab's only route, so dropping it removes the feature.
 - **A tab is emitted only if it renders something (MUST).** There is no greyed tab: a tab a person cannot
   open is a route removed, and every tab that could plausibly be greyed is the sole route to something. A
   tab with nothing to show is not drawn at all.

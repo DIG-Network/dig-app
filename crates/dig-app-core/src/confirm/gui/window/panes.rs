@@ -13,6 +13,11 @@
 //! Below [`NARROW_AT`] the sidebar becomes a strip of tab chips across the top. A 208 px column out
 //! of a 480 px window leaves 272 px of content, which is not a content pane, it is a margin — and the
 //! window can legitimately be dragged that small ([`super::shell::SHELL_MIN`]).
+//!
+//! The strip WRAPS onto as many rows as the tabs need, and the content pane starts below whatever
+//! that came to. A tab that exists must be clickable at every width, so the one thing the strip may
+//! never do is leave a chip out — an undrawn tab is not a degraded tab, it is a missing feature with
+//! no route to it (dig_ecosystem#2309, where a seventh tab took `Settings` out of reach).
 
 use std::collections::HashMap;
 
@@ -31,8 +36,10 @@ const SIDEBAR_WIDTH: f32 = 208.0;
 /// Chosen from the layout rather than by taste: the sidebar plus two content gutters plus a readable
 /// content column is about this wide, and under it the content column is the thing that loses.
 const NARROW_AT: f32 = 760.0;
-/// The height of the tab strip in narrow mode.
+/// The height of a single-row tab strip in narrow mode.
 const STRIP_HEIGHT: f32 = 44.0;
+/// The gap between chip rows once the strip needs more than one.
+const STRIP_ROW_GAP: f32 = 4.0;
 /// The smallest a row may be. A row with a wrapped label grows past it.
 const ROW_HEIGHT: f32 = 38.0;
 /// A sidebar entry's height.
@@ -70,11 +77,14 @@ pub(super) fn draw(
         return no_tabs(ui, body, t);
     }
 
+    // The strip is laid out BEFORE the split because its height is a result of that layout, not an
+    // input to it: how many rows the chips need is what decides where the content pane starts.
     let narrow = body.width() < NARROW_AT;
-    let (nav, content) = split(body, narrow);
-    let clicked = match narrow {
-        true => strip(ui, nav, t, model, selected, live),
-        false => sidebar(ui, nav, t, model, selected, live),
+    let plan = narrow.then(|| strip_layout(ui, body, &model.tabs));
+    let (nav, content) = split(body, plan.as_ref().map(|plan| plan.height));
+    let clicked = match plan {
+        Some(plan) => strip(ui, nav, t, model, selected, live, &plan),
+        None => sidebar(ui, nav, t, model, selected, live),
     };
     let tab = model.tab(selected).or_else(|| model.tabs.first());
     let in_content = tab.and_then(|tab| pane(ui, content, t, tab, live));
@@ -82,16 +92,18 @@ pub(super) fn draw(
 }
 
 /// Where the navigation goes and where the content goes.
-fn split(body: Rect, narrow: bool) -> (Rect, Rect) {
-    match narrow {
-        true => (
-            Rect::from_min_size(body.left_top(), Vec2::new(body.width(), STRIP_HEIGHT)),
+///
+/// `strip` is the height the wrapped tab strip came to, or `None` when there is room for a sidebar.
+fn split(body: Rect, strip: Option<f32>) -> (Rect, Rect) {
+    match strip {
+        Some(height) => (
+            Rect::from_min_size(body.left_top(), Vec2::new(body.width(), height)),
             Rect::from_min_max(
-                egui::Pos2::new(body.left(), body.top() + STRIP_HEIGHT),
+                egui::Pos2::new(body.left(), body.top() + height),
                 body.right_bottom(),
             ),
         ),
-        false => (
+        None => (
             Rect::from_min_size(body.left_top(), Vec2::new(SIDEBAR_WIDTH, body.height())),
             Rect::from_min_max(
                 egui::Pos2::new(body.left() + SIDEBAR_WIDTH, body.top()),
@@ -132,6 +144,61 @@ fn sidebar(
     clicked
 }
 
+/// Where every chip goes, and how tall the strip that holds them came out.
+struct StripLayout {
+    /// Each tab's chip, in the model's tab order, so the caller can pair them up without searching.
+    chips: Vec<Rect>,
+    /// The height the strip needs for the rows it used.
+    height: f32,
+}
+
+/// The padding above the first chip row and below the last, so one row is exactly [`STRIP_HEIGHT`].
+const STRIP_PAD: f32 = (STRIP_HEIGHT - TAB_HEIGHT) / 2.0;
+
+/// How tall a strip of `rows` rows of chips is.
+fn strip_height(rows: usize) -> f32 {
+    let gaps = rows.saturating_sub(1) as f32 * STRIP_ROW_GAP;
+    rows as f32 * TAB_HEIGHT + gaps + STRIP_PAD * 2.0
+}
+
+/// Lay the chips out left to right, wrapping onto a new row whenever the next one will not fit.
+///
+/// # Why wrapping, and not scrolling or an overflow menu
+///
+/// A tab strip's whole promise is that the choices are visible at a glance. A horizontal scroller
+/// keeps that promise only for whoever notices the scrollbar, and a 44 px strip has nowhere to put
+/// an affordance that says so — nor should the window ask for a second scroll axis when the content
+/// pane already owns one. An overflow menu costs an extra click and a second mental model for the
+/// same six words. Wrapping costs one more row of a window with vertical room to spare, and hides,
+/// nests and gestures for nothing.
+///
+/// The row count is deliberately unbounded: a strip tall enough to look silly is still a strip
+/// every tab can be clicked in, and capping it would put us back where dig_ecosystem#2309 started.
+fn strip_layout(ui: &Ui, at: Rect, tabs: &[Tab]) -> StripLayout {
+    let usable = (at.width() - space::S2 * 2.0).max(1.0);
+    let mut chips = Vec::with_capacity(tabs.len());
+    let (mut x, mut row) = (0.0_f32, 0_usize);
+    for tab in tabs {
+        // Clamped to the row: a label wider than the whole window — a translation, or a name nobody
+        // has written yet — is drawn truncated by `tab_entry` rather than made unclickable.
+        let width = chip_width(ui, &tab.label).min(usable);
+        if x > 0.0 && x + width > usable {
+            row += 1;
+            x = 0.0;
+        }
+        let top = at.top() + STRIP_PAD + row as f32 * (TAB_HEIGHT + STRIP_ROW_GAP);
+        chips.push(Rect::from_min_size(
+            egui::Pos2::new(at.left() + space::S2 + x, top),
+            Vec2::new(width, TAB_HEIGHT),
+        ));
+        x += width + space::S2 / 2.0;
+    }
+    StripLayout {
+        chips,
+        height: strip_height(row + 1),
+    }
+}
+
 /// The horizontal tab strip used when the window is too narrow for a sidebar.
 fn strip(
     ui: &mut Ui,
@@ -140,27 +207,16 @@ fn strip(
     model: &WindowModel,
     selected: TabId,
     live: bool,
+    plan: &StripLayout,
 ) -> Option<Click> {
     ui.painter().rect_filled(at, 0, rgba(t.surface));
     paint::rule(ui, at, at.bottom(), t);
 
     let mut clicked = None;
-    let mut x = at.left() + space::S2;
-    for tab in &model.tabs {
-        let width = chip_width(ui, &tab.label);
-        let entry = Rect::from_min_size(
-            egui::Pos2::new(x, at.top() + (at.height() - TAB_HEIGHT) / 2.0),
-            Vec2::new(width, TAB_HEIGHT),
-        );
-        // A chip that would run off the edge is not drawn rather than drawn half off it. The tabs
-        // that fit still work, and the alternative — a control clipped mid-word — looks like damage.
-        if entry.right() > at.right() - space::S2 {
-            break;
-        }
-        if tab_entry(ui, entry, t, tab, tab.id == selected, live) {
+    for (tab, entry) in model.tabs.iter().zip(&plan.chips) {
+        if tab_entry(ui, *entry, t, tab, tab.id == selected, live) {
             clicked = Some(Click::Tab(tab.id));
         }
-        x += width + space::S2 / 2.0;
     }
     clicked
 }
@@ -171,6 +227,31 @@ fn chip_width(ui: &Ui, label: &str) -> f32 {
         ui.painter()
             .layout_no_wrap(label.to_owned(), semibold(size::SM), egui::Color32::WHITE);
     galley.size().x + space::S4
+}
+
+/// A single line of `label`, cut short with an ellipsis when it is wider than `max_width`.
+fn truncated(
+    ui: &Ui,
+    label: &str,
+    font: egui::FontId,
+    colour: egui::Color32,
+    max_width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(
+        label.to_owned(),
+        egui::TextFormat {
+            font_id: font,
+            color: colour,
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_width.max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('\u{2026}'),
+    };
+    ui.fonts(|fonts| fonts.layout_job(job))
 }
 
 /// One navigation entry, in either orientation. Returns whether it was clicked.
@@ -197,12 +278,13 @@ fn tab_entry(ui: &mut Ui, at: Rect, t: &Tokens, tab: &Tab, current: bool, live: 
         true => semibold(size::SM),
         false => regular(size::SM),
     };
-    ui.painter().text(
-        egui::Pos2::new(at.left() + space::S3, at.center().y),
-        egui::Align2::LEFT_CENTER,
-        &tab.label,
-        font,
-        rgba(colour),
+    // Truncated to its own entry rather than allowed to run past it: a chip narrowed to fit the
+    // window must still read as one control, and a word spilling over the next chip reads as damage.
+    let galley = truncated(ui, &tab.label, font, rgba(colour), at.width() - space::S4);
+    ui.painter().galley(
+        egui::Pos2::new(at.left() + space::S3, at.center().y - galley.size().y / 2.0),
+        galley,
+        egui::Color32::PLACEHOLDER,
     );
     response.clicked()
 }
@@ -452,5 +534,256 @@ fn sense(live: bool) -> Sense {
     match live {
         true => Sense::click(),
         false => Sense::hover(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::window_model::PaneNote;
+    use std::cell::Cell;
+
+    /// A body drawn by the real [`draw`], frame by frame, so a test can click what it drew.
+    ///
+    /// Deliberately the same entry point the shell calls rather than [`strip`] directly: a strip
+    /// that lays chips out perfectly is worth nothing if the body never reaches it, and a test that
+    /// called the layout helper itself could not tell the two apart.
+    struct Body {
+        ctx: egui::Context,
+        model: WindowModel,
+        selected: TabId,
+        size: Vec2,
+        /// What the last frame painted, for the assertions that read text rather than controls.
+        painted: egui::FullOutput,
+    }
+
+    impl Body {
+        fn holding(tabs: Vec<Tab>, width: f32) -> Self {
+            let ctx = egui::Context::default();
+            super::super::install_fonts(&ctx);
+            let selected = tabs.first().expect("a tab").id;
+            let body = Self {
+                ctx,
+                model: WindowModel { tabs },
+                selected,
+                size: Vec2::new(width, super::super::shell::SHELL_MIN),
+                painted: egui::FullOutput::default(),
+            };
+            body.settled()
+        }
+
+        /// Two quiet frames: the first builds the font atlas, the second lays out against it.
+        fn settled(mut self) -> Self {
+            self.frame(Vec::new());
+            self.frame(Vec::new());
+            self
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> Option<Click> {
+            let screen = Rect::from_min_size(egui::Pos2::ZERO, self.size);
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let tokens = crate::confirm::gui::theme::Theme::Light.tokens();
+            let clicked = Cell::new(None);
+            let (model, selected) = (&self.model, self.selected);
+            self.painted = self.ctx.run(input, |ctx| {
+                egui::Area::new(egui::Id::new("dig-app-test-body"))
+                    .fixed_pos(screen.left_top())
+                    .order(egui::Order::Background)
+                    .show(ctx, |ui| {
+                        ui.set_clip_rect(screen);
+                        clicked.set(draw(ui, screen, &tokens, model, selected, true));
+                    });
+            });
+            clicked.get()
+        }
+
+        /// Press and release over `at`, reporting what the body said was clicked.
+        fn click(&mut self, at: egui::Pos2) -> Option<Click> {
+            self.frame(vec![egui::Event::PointerMoved(at)]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }]);
+            self.frame(vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }])
+        }
+
+        /// The top of the LOWEST piece of text reading `text` that a fresh frame paints.
+        ///
+        /// The selected tab's label is painted twice — once on its chip, once as the pane's own
+        /// heading — and the lower of the two is the heading, which is where the content pane
+        /// visibly begins. Read off the painted shapes because a heading is text, not a control.
+        fn lowest_text_top(&mut self, text: &str) -> Option<f32> {
+            fn walk(shape: &egui::Shape, text: &str, lowest: &mut Option<f32>) {
+                match shape {
+                    egui::Shape::Text(painted) if painted.galley.text() == text => {
+                        let top = painted.pos.y;
+                        *lowest = Some(lowest.map_or(top, |seen: f32| seen.max(top)));
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        shapes.iter().for_each(|shape| walk(shape, text, lowest));
+                    }
+                    _ => {}
+                }
+            }
+            self.frame(Vec::new());
+            let mut lowest = None;
+            for clipped in &self.painted.shapes {
+                walk(&clipped.shape, text, &mut lowest);
+            }
+            lowest
+        }
+
+        /// Where the body put a tab's chip on the last frame, if it put it anywhere.
+        fn chip(&self, id: TabId) -> Option<Rect> {
+            self.ctx
+                .read_response(egui::Id::new(tab_element_id(id)))
+                .map(|response| response.rect)
+        }
+    }
+
+    /// One tab with a label of a chosen length, so a test can decide how much the strip must hold.
+    ///
+    /// It carries one row, which is what gives the content pane something a test can find.
+    fn tab_labelled(id: TabId, label: &str) -> Tab {
+        Tab {
+            id,
+            label: label.to_owned(),
+            note: PaneNote::Ready,
+            sections: vec![Section {
+                heading: Some(format!("{label} section")),
+                rows: vec![MenuRow::Action {
+                    action: TrayAction::OpenLogs,
+                    label: THE_ROW.to_owned(),
+                    enabled: true,
+                }],
+            }],
+        }
+    }
+
+    /// The one row every synthetic tab carries, so a test can ask where the content pane begins.
+    const THE_ROW: &str = "The only row";
+
+    /// Every [`TabId`] there is, labelled long enough that one row cannot hold them.
+    ///
+    /// Seven is not a hypothetical count — dig_ecosystem#2293 adds the seventh — and the labels are
+    /// long because a label is model data: a longer word, or a translation of the same word, must
+    /// not be able to delete a tab.
+    fn a_strip_that_cannot_fit_on_one_row() -> Vec<Tab> {
+        [
+            TabId::Status,
+            TabId::Account,
+            TabId::Security,
+            TabId::Wallet,
+            TabId::Apps,
+            TabId::Cache,
+            TabId::Advanced,
+        ]
+        .into_iter()
+        .map(|id| tab_labelled(id, "Configuration"))
+        .collect()
+    }
+
+    /// **A strip that wrapped onto a second row pushes the content pane down, rather than over it.**
+    ///
+    /// The strip's height is an OUTPUT of its layout, and a split that kept assuming one row would
+    /// hand the pane a rectangle the second row of chips is already sitting in — every tab
+    /// reachable, and the first thing under them unreadable. Asserted on the real rects of both, so
+    /// a strip that grows and a pane that does not is a failure rather than a fresh screenshot.
+    #[test]
+    fn a_wrapped_strip_moves_the_content_pane_down_instead_of_overlapping_it() {
+        let tabs = a_strip_that_cannot_fit_on_one_row();
+        let mut body = Body::holding(tabs.clone(), super::super::shell::SHELL_MIN);
+        body.frame(Vec::new());
+
+        let lowest_chip = tabs
+            .iter()
+            .filter_map(|tab| body.chip(tab.id))
+            .map(|chip| chip.bottom())
+            .fold(f32::MIN, f32::max);
+        let heading = body
+            .lowest_text_top(&tabs[0].label)
+            .expect("the selected tab's pane heading is painted");
+
+        assert!(
+            lowest_chip > STRIP_HEIGHT,
+            "the fixture did not wrap, so this proves nothing: the lowest chip ends at \
+             {lowest_chip}, inside a single {STRIP_HEIGHT} px row"
+        );
+        assert!(
+            heading >= lowest_chip,
+            "the pane's heading starts at {heading}, above the last chip row which ends at \
+             {lowest_chip} — the strip grew and the content pane did not move"
+        );
+    }
+
+    /// **A tab the model emits is reachable at every width the window can be dragged to.**
+    ///
+    /// The property, said once: a tab that exists can be clicked. It is asserted on the chip's own
+    /// geometry and on a real click landing on it — not on its label appearing somewhere in the
+    /// frame, which is what the shell's own reachability test used to do and which a chip laid out
+    /// past the right edge, or under another chip, satisfies just as well.
+    ///
+    /// The vacuity guard is the point of the fixture: a strip whose chips all fit says nothing about
+    /// overflow, so the test refuses to pass unless the labels genuinely overflow one row.
+    #[test]
+    fn every_tab_is_reachable_at_every_width_the_window_allows() {
+        let widths = [
+            super::super::shell::SHELL_MIN,
+            NARROW_AT - 1.0,
+            (super::super::shell::SHELL_MIN + NARROW_AT) / 2.0,
+        ];
+        for width in widths {
+            let tabs = a_strip_that_cannot_fit_on_one_row();
+            let mut body = Body::holding(tabs.clone(), width);
+
+            let natural: f32 = tabs
+                .iter()
+                .map(|tab| {
+                    body.ctx.fonts(|f| {
+                        f.layout_no_wrap(
+                            tab.label.clone(),
+                            semibold(size::SM),
+                            egui::Color32::WHITE,
+                        )
+                        .size()
+                        .x
+                    }) + space::S4
+                        + space::S2 / 2.0
+                })
+                .sum();
+            assert!(
+                natural > width,
+                "at {width} px the chips need only {natural} px, so nothing overflows and this \
+                 test proves nothing"
+            );
+
+            for tab in &tabs {
+                let chip = body
+                    .chip(tab.id)
+                    .unwrap_or_else(|| panic!("at {width} px {:?} was never laid out", tab.id));
+                assert!(
+                    Rect::from_min_size(egui::Pos2::ZERO, body.size).contains_rect(chip),
+                    "at {width} px {:?} was laid out at {chip:?}, off the window",
+                    tab.id
+                );
+                assert_eq!(
+                    body.click(chip.center()),
+                    Some(Click::Tab(tab.id)),
+                    "at {width} px a click on {:?}'s chip did not select it",
+                    tab.id
+                );
+            }
+        }
     }
 }
