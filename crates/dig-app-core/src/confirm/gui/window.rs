@@ -817,8 +817,28 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Where a prompt is being drawn, which decides what it may say to the windowing system.
+///
+/// Three of [`PromptApp`]'s behaviours address a *viewport* — focus it, close it, watch it lose
+/// focus — and every one of them is either meaningless or actively wrong when the prompt is painted
+/// inside the app window, because the viewport it would address is then the SHELL's. A prompt that
+/// sent `ViewportCommand::Close` from inside the shell would close the shell.
+///
+/// An explicit two-state enum rather than a `bool` or a `cfg!`: the hosting is a runtime fact — the
+/// same prompt content reaches both hosts on the same platform, depending only on whether the person
+/// happened to have the app window open — and the call sites read as the question they are asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PromptHost {
+    /// Its own top-level OS window, drawn by its own `eframe` run. The audited consent surface.
+    Standalone,
+    /// A modal layer inside the app shell, sharing the shell's viewport and its event loop.
+    InWindow,
+}
+
 /// One prompt window.
 struct PromptApp {
+    /// Whether this prompt owns a viewport or is a layer inside the shell's.
+    host: PromptHost,
     /// What to show.
     screen: Screen,
     /// Whether this window returns typed text.
@@ -869,10 +889,29 @@ struct PromptApp {
 }
 
 impl PromptApp {
+    /// A prompt that owns its own window.
     fn new(
         job: Job,
         theme_store: ThemeChoice,
         sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+    ) -> Self {
+        Self::hosted(job, theme_store, sink, PromptHost::Standalone)
+    }
+
+    /// A prompt drawn as a modal layer inside the app shell.
+    pub(super) fn in_window(
+        job: Job,
+        theme_store: ThemeChoice,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+    ) -> Self {
+        Self::hosted(job, theme_store, sink, PromptHost::InWindow)
+    }
+
+    fn hosted(
+        job: Job,
+        theme_store: ThemeChoice,
+        sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        host: PromptHost,
     ) -> Self {
         let focus = job
             .screen
@@ -881,6 +920,7 @@ impl PromptApp {
             .position(|b| b.focused)
             .unwrap_or(0);
         Self {
+            host,
             theme: theme_store.read(),
             screen: job.screen,
             wants_text: job.wants_text,
@@ -928,8 +968,14 @@ impl PromptApp {
     /// the reason that lock exists. What this guarantees is that DIG ASKS; it does not guarantee
     /// Windows agrees. The window remains answerable by mouse either way, and its own deadline still
     /// refuses on its behalf if it is never answered at all.
+    ///
+    /// # Why an in-window prompt does not ask
+    ///
+    /// There is nothing to ask for. The shell already holds the foreground — the person is looking
+    /// at it — and the only viewport this could address is the shell's own, so the request would at
+    /// best be a no-op and at worst re-raise a window the person had just moved behind something.
     fn claim_the_keyboard(&mut self, ctx: &egui::Context) {
-        if self.keyboard_claimed {
+        if self.host == PromptHost::InWindow || self.keyboard_claimed {
             return;
         }
         self.keyboard_claimed = true;
@@ -953,6 +999,16 @@ impl PromptApp {
     ///
     /// The latch cannot manufacture consent. An unanswered window records nothing, and [`draw`] maps
     /// nothing to a denial.
+    ///
+    /// # Why only a standalone prompt asks to close
+    ///
+    /// In-window there is no window of this prompt's own to close; the only viewport this could
+    /// address is the SHELL's, so sending the command would shut the app window out from under the
+    /// person. Dismissal in that host is the shell dropping its `ActivePrompt` on the frame it sees
+    /// [`PromptApp::answered`] — the same mechanism, one level up.
+    ///
+    /// **The latch itself is host-independent** and runs identically on both paths: the whole point
+    /// of dig_ecosystem#2038 is that no later frame, whatever it is, may change what the human said.
     fn record(&mut self, ctx: &egui::Context, outcome: Outcome) {
         if !self.answered {
             self.answered = true;
@@ -960,7 +1016,9 @@ impl PromptApp {
                 *slot = Some(outcome);
             }
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if self.host == PromptHost::Standalone {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     /// Record `answer` and close.
@@ -1000,7 +1058,11 @@ impl PromptApp {
                 i.key_pressed(Key::Tab),
                 i.modifiers.shift,
                 i.key_pressed(Key::Enter),
-                i.viewport().close_requested(),
+                // Only a standalone prompt owns the viewport whose close this reads. In-window the
+                // flag belongs to the SHELL, and a shell being closed over a live prompt is settled
+                // fail-closed by `ShellApp::close` — reading it here would answer a definite `Deny`
+                // for a person who was closing the app, not refusing the request.
+                self.host == PromptHost::Standalone && i.viewport().close_requested(),
             )
         });
 
@@ -1073,17 +1135,63 @@ impl PromptApp {
             .frame(egui::Frame::NONE.fill(rgba(t.bg)))
             .show(ctx, |ui| {
                 let full = ui.available_rect_before_wrap();
-                paint::card(ui, full, &t);
-                self.chrome(ui, full, &t);
-                let content_bottom = self.body(ui, full, &t);
-                self.actions(ui, full, &t);
-                (full, content_bottom)
+                (full, self.paint_into(ui, full, &t))
             })
             .inner;
         // A bar is a fixed short height; only a dialog grows to its content.
         if !self.screen.chrome.is_bar() {
             self.fit_to_content(ctx, full, content_bottom);
         }
+    }
+
+    /// Paint the whole prompt — card, chrome, body, actions — into `full`, and report the bottom of
+    /// its content.
+    ///
+    /// This is the prompt, entire. Both hosts call it with a rectangle and neither has any other way
+    /// to draw one, so a standalone window and an in-window modal cannot drift apart: what a person
+    /// reads before approving a spend is the same pixels either way. The hosts differ only in where
+    /// the rectangle comes from and in what they do with the returned height.
+    ///
+    /// The return value is the y of the last content pixel — see [`PromptApp::fit_to_content`] for
+    /// the sizing it feeds.
+    fn paint_into(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
+        paint::card(ui, full, t);
+        self.chrome(ui, full, t);
+        let content_bottom = self.body(ui, full, t);
+        self.actions(ui, full, t);
+        content_bottom
+    }
+
+    /// Lay out and paint ONE frame as a layer inside the app shell.
+    ///
+    /// The counterpart of [`PromptApp::frame`] for [`PromptHost::InWindow`], and deliberately
+    /// smaller than it: everything [`frame`](Self::frame) does that this omits is a message to a
+    /// viewport this prompt does not own. It does not repaint-request (the shell already does, every
+    /// frame, so the deadline below can elapse), does not place, size, or focus a window, and does
+    /// not watch one for blur.
+    ///
+    /// What it keeps is everything that decides an ANSWER: the keyboard, the deadline, and the paint.
+    ///
+    /// # Why blur-dismissal is dropped rather than re-pointed
+    ///
+    /// [`PromptApp::dismiss_on_blur`] exists for the launcher bar: a Spotlight-style bar is dismissed
+    /// by clicking away from it, and "away" means the bar's own window lost focus. In-window the only
+    /// focus there is belongs to the SHELL, so the same code would mean something else entirely —
+    /// *the person switched to their browser* — and would silently cancel whatever they had opened
+    /// the moment they looked something up. Clicking off the app window is not an answer, so nothing
+    /// here treats it as one. Every in-window prompt therefore stays until it is answered, escaped,
+    /// or expired, exactly as every dialog already does ([`Chrome::dismiss_on_blur`] is false for all
+    /// of them), and it is never trapping: Escape resolves it and the deadline resolves it.
+    pub(super) fn frame_in_window(&mut self, ui: &mut egui::Ui, full: Rect) -> f32 {
+        let t = self.theme.tokens();
+        let ctx = ui.ctx().clone();
+        self.keys(&ctx);
+        // Answer for the human who never came back. The shell keeps the frames coming, so this
+        // elapses on the same schedule a standalone prompt's does.
+        if !self.answered && self.opened.elapsed() >= self.deadline {
+            self.expire(&ctx);
+        }
+        self.paint_into(ui, full, &t)
     }
 
     /// Place the launcher bar HIGH on the screen — centred horizontally, `bar_top` from the top.

@@ -13,18 +13,38 @@
 //! Opening the app window would silently disable consent for as long as it was up.
 //!
 //! So the shell is a job AND it owns the receiver for its lifetime. Every frame it draws itself,
-//! takes at most one waiting prompt off the queue, and draws that prompt as an immediate child
-//! viewport — a real, separate OS window on the same loop. When it closes, `serve_with` resumes
-//! `recv` and nothing else has changed.
+//! takes at most one waiting prompt off the queue, and draws that prompt **inside itself**, as a
+//! modal layer over a scrimmed pane. When it closes, `serve_with` resumes `recv` and nothing else
+//! has changed.
 //!
-//! # The one way to get this wrong
+//! # One window (dig_ecosystem#2270)
 //!
-//! **`ViewportCommand::Close` does not close a viewport.** It raises `close_requested()` on it and
-//! nothing else; measured on Windows 11, the child's window handle after the command is the *same*
-//! handle. Dismissal here therefore runs through [`ShellApp::prompt`] — the shell stops showing the
-//! viewport, and ceasing to show it is what destroys it (25–45 ms, 15 of 15 cycles, with or without
-//! the command). Wiring dismissal to the command alone would leave an undismissable consent prompt
-//! on screen while `close_requested` reported success — the dig-app#86 class, on the consent path.
+//! A prompt raised while this window is open used to be a second, real OS window stacked on top of
+//! it: clicking *Show my recovery phrase…* in the app opened another window in front of the one you
+//! were already looking at. It is now painted into this one, through the same
+//! [`super::PromptApp::paint_into`] the standalone window uses, so the surface a person reads before
+//! approving anything is pixel-identical between the two hosts.
+//!
+//! **A prompt raised while this window is CLOSED still gets its own window** ([`super::draw_watched`]).
+//! A dapp asking for a signature does not get to force the whole app open, and that standalone path
+//! is the audited consent surface; nothing here changes it.
+//!
+//! # Why the modal is the only thing on screen that responds
+//!
+//! The old child window was `always_on_top` because a non-topmost prompt was buried outright by one
+//! click on the shell, while it went on repainting invisibly with [`super::Job::over_by`] counting
+//! down. An in-window modal cannot be buried by the shell — it *is* the shell — but it can be
+//! clicked *through*, which is the same defect wearing different clothes. Three things prevent it,
+//! and each is asserted:
+//!
+//! * The panes are drawn non-interactive while a prompt is up, and the chrome draws no controls at
+//!   all ([`ShellApp::paint_shell`]).
+//! * The scrim is a full-window widget that SENSES clicks and drags, so anything under it that was
+//!   still listening gets nothing ([`ShellApp::scrim`]).
+//! * The modal is painted in a layer strictly above the scrim, so it — and only it — is reachable.
+//!
+//! Resizing is suppressed for the same reason, so the window cannot be dragged out from under a
+//! consent prompt.
 //!
 //! # The shell never authors an answer
 //!
@@ -40,7 +60,7 @@ use std::time::Instant;
 use egui::{Key, Rect, Vec2};
 
 use super::super::paint;
-use super::super::render::{rgba, semibold, size, space, Weight};
+use super::super::render::{rgba, semibold, size, space};
 use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
 use super::panes::{self, Click};
 use super::{
@@ -76,12 +96,13 @@ const SCRIM_ALPHA_LIGHT: u8 = 128;
 /// See [`SCRIM_ALPHA_LIGHT`].
 const SCRIM_ALPHA_DARK: u8 = 168;
 
-/// The child viewport every prompt raised over the shell is drawn in.
+/// How much of the shell's height the modal may take before it stops growing and scrolls.
 ///
-/// One id, reused, because only one prompt may be up at a time ([`ShellApp::prompt`]).
-fn prompt_viewport() -> egui::ViewportId {
-    egui::ViewportId::from_hash_of("dig-prompt-over-the-app-window")
-}
+/// The prompt's own [`super::MAX_HEIGHT`] is a bound against the MONITOR; this is the bound against
+/// the window, and it is the tighter one whenever the shell is not full-screen. A modal taller than
+/// its host would put the buttons past the bottom edge, which is a consent surface that cannot be
+/// answered — the failure [`super::SCREEN_SHARE`] exists to prevent, one level in.
+const MODAL_SHARE: f32 = 0.9;
 
 /// Draw the app shell to completion. Always `None` — a shell produces no [`Outcome`].
 ///
@@ -190,10 +211,35 @@ impl eframe::App for Host<'_> {
     }
 }
 
-/// A prompt being drawn as a child viewport over the shell.
+/// A prompt being drawn as a modal layer inside the shell.
 struct ActivePrompt {
-    /// The real prompt, driven through the real paint path — [`super::PromptApp::frame`], unmodified.
+    /// The real prompt, driven through the real paint path — [`super::PromptApp::paint_into`], the
+    /// same one the standalone window paints through.
     app: PromptApp,
+    /// A consent surface is on screen for exactly as long as this prompt is.
+    ///
+    /// # Why the guard lives on the prompt and not around the draw
+    ///
+    /// The tray disables its foreground claim while a consent surface is up (dig-app#91), and an
+    /// in-window prompt is a consent surface for its whole LIFE, not for the microseconds of one
+    /// frame. Scoping this to a draw would leave `consent_surface_is_up()` false in the gaps between
+    /// frames — which is every moment a tray click actually arrives — and a tray click that yanks the
+    /// foreground away from somebody typing a recovery phrase is exactly the defect that rule exists
+    /// to stop. The #2253 audit found the shell-hosted path missing this guard entirely (its N1
+    /// finding); this is where it is fixed.
+    ///
+    /// Held by [`ActivePrompt`] rather than by [`ShellApp`] so the two can never disagree: the
+    /// surface is raised by the same value that makes the prompt exist and lowered by the same drop
+    /// that dismisses it, on every path out — answered, escaped, expired, or the shell closing.
+    _on_screen: crate::confirm::surface::Raised,
+    /// The height the modal is drawn at, remembered between frames.
+    ///
+    /// Sized from the content the way [`super::PromptApp::fit_to_content`] sizes a real window, and
+    /// for the same reason: a two-line notice in a 560 px card is 400 px of empty space between what
+    /// is being asked and the button that answers it. It settles in two frames — the first lays out
+    /// against a freshly built font atlas — and cannot oscillate, because the blocks wrap on a width
+    /// that never changes.
+    height: f32,
     /// Where the prompt records its answer. Read by the shell, written only by the prompt.
     sink: Arc<Mutex<Option<Outcome>>>,
     /// The caller blocked on this prompt.
@@ -313,7 +359,7 @@ impl ShellApp {
         let t = self.theme.tokens();
         let prompt_is_up = self.prompt.is_some();
         self.paint_shell(ctx, &t, prompt_is_up);
-        self.show_prompt(ctx);
+        self.show_prompt(ctx, ctx.screen_rect());
     }
 
     /// Escape, and the window manager's own close.
@@ -404,9 +450,11 @@ impl ShellApp {
         let wants_text = job.wants_text;
         let title = job.screen.title.clone();
         let theme_store = job.theme.clone();
-        tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt over the app window");
+        tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt inside the app window");
         self.prompt = Some(ActivePrompt {
-            app: PromptApp::new(job, theme_store, Arc::clone(&sink)),
+            app: PromptApp::in_window(job, theme_store, Arc::clone(&sink)),
+            _on_screen: crate::confirm::surface::Raised::now(),
+            height: super::HEIGHT,
             sink,
             reply,
             wants_text,
@@ -414,31 +462,32 @@ impl ShellApp {
         });
     }
 
-    /// Draw the active prompt as a child viewport, and stop showing it once it has been answered.
+    /// Draw the active prompt as a modal layer inside this window, and dismiss it once answered.
     ///
-    /// **Dropping [`ShellApp::prompt`] is what dismisses the window.** Nothing here sends
-    /// `ViewportCommand::Close`, because that command does not close a viewport — see the module
-    /// docs. The prompt's own `record` still sends one, harmlessly; the destruction is caused by the
-    /// next frame not showing the viewport.
-    fn show_prompt(&mut self, ctx: &egui::Context) {
+    /// **Dropping [`ShellApp::prompt`] is what dismisses the modal** — the next frame simply does not
+    /// paint it. That was already true when the prompt was a child viewport (a
+    /// `ViewportCommand::Close` never destroyed one; ceasing to show it did), and it is trivially
+    /// true now. Nothing here authors an answer: the prompt's own latch owns that, and
+    /// [`ActivePrompt::settle`] only reads it.
+    fn show_prompt(&mut self, ctx: &egui::Context, full: Rect) {
         let Some(active) = self.prompt.as_mut() else {
             return;
         };
-        let builder = egui::ViewportBuilder::default()
-            .with_title(active.title.clone())
-            .with_inner_size([WIDTH, super::HEIGHT])
-            .with_min_inner_size([WIDTH, super::MIN_HEIGHT])
-            .with_resizable(false)
-            // A consent window must be SEEN. Measured: a non-topmost prompt is buried outright by
-            // one click on the shell — see `native_options` above.
-            .with_always_on_top()
-            .with_active(true)
-            .with_decorations(false);
+        let at = modal_rect(full, active.height);
 
-        let prompt = &mut active.app;
-        ctx.show_viewport_immediate(prompt_viewport(), builder, |child, _class| {
-            prompt.frame(child);
-        });
+        // Strictly above the scrim's layer, so the modal is the one thing under the pointer that
+        // still answers to it. Two named orders rather than two areas at the same order, whose
+        // relative z-order egui decides from interaction history — not something a consent surface
+        // should depend on.
+        let content_bottom = egui::Area::new(egui::Id::new("dig-app-shell-modal"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(at.left_top())
+            .show(ctx, |ui| {
+                ui.set_clip_rect(at);
+                active.app.frame_in_window(ui, at)
+            })
+            .inner;
+        active.height = modal_height(full, at, content_bottom);
 
         if active.app.answered {
             // Taken out of the field FIRST: this is the dismissal.
@@ -475,7 +524,7 @@ impl ShellApp {
         }
 
         if prompt_is_up {
-            self.scrim_and_pill(ctx, screen, t);
+            self.scrim(ctx, screen, t);
         } else {
             self.resize_edges(ctx, screen);
         }
@@ -590,19 +639,24 @@ impl ShellApp {
         }
     }
 
-    /// Dim the whole window and offer the one way back to the prompt.
+    /// Dim the whole window, and swallow every click that lands on it.
     ///
-    /// # Why the pill is a safety item and not decoration
+    /// # Why the scrim is a widget and not a rectangle of paint
     ///
-    /// The prompt is its own OS window with its own focus, so it can be dragged behind the shell or
-    /// onto another display. Without an affordance that brings it back, the shell is permanently
-    /// inert with no visible cause — a trap. The pill sends `ViewportCommand::Focus`, which is the
-    /// only mechanism that works: re-asserting `WindowLevel::AlwaysOnTop` was measured to lift
-    /// z-order while leaving keyboard focus on the shell, so the person would read the prompt and
-    /// type into the window behind it. That is worse than not raising it at all.
+    /// Dimming says the window is inert; `allocate_rect` with a click-and-drag sense MAKES it inert.
+    /// Both halves are needed, and only the second is a security property: a pane control that
+    /// stayed live under a wash of translucent black could be clicked through the appearance of a
+    /// modal, which is a worse version of the burial the always-on-top child window was there to
+    /// prevent. The panes are already drawn non-interactive and the chrome draws no controls
+    /// ([`ShellApp::paint_shell`]); this is the backstop that does not depend on either remembering.
     ///
-    /// The label names what it does, so it cannot be misread as a way to dismiss the prompt.
-    fn scrim_and_pill(&self, ctx: &egui::Context, full: Rect, t: &Tokens) {
+    /// # Why there is no longer a pill
+    ///
+    /// A *Show the prompt* affordance existed because the prompt was a separate OS window that could
+    /// be dragged behind the shell or onto another display, leaving the shell inert with no visible
+    /// cause. An in-window modal cannot go anywhere: it is drawn in this window, centred, above the
+    /// scrim, every frame. There is nothing to find, so there is nothing to offer.
+    fn scrim(&self, ctx: &egui::Context, full: Rect, t: &Tokens) {
         egui::Area::new(egui::Id::new("dig-app-shell-scrim"))
             .fixed_pos(full.left_top())
             .order(egui::Order::Foreground)
@@ -610,12 +664,7 @@ impl ShellApp {
                 ui.set_clip_rect(full);
                 ui.painter()
                     .rect_filled(full, 0, rgba(scrim(t, self.theme)));
-
-                let at = raise_pill(full);
-                let mut pill_ui = ui.new_child(egui::UiBuilder::new().max_rect(at));
-                if paint::button(&mut pill_ui, RAISE_LABEL, Weight::Primary, false, t).clicked() {
-                    ctx.send_viewport_cmd_to(prompt_viewport(), egui::ViewportCommand::Focus);
-                }
+                ui.allocate_rect(full, egui::Sense::click_and_drag());
             });
     }
 
@@ -637,34 +686,38 @@ impl ShellApp {
     }
 }
 
-/// Where the raise pill goes: below the band a centred prompt occupies, never at the shell's centre.
+/// Where the modal is drawn: horizontally centred, and vertically centred within what is left.
 ///
-/// # Why this is a function and not two lines inside the painter
+/// # Why a function and not two lines inside the painter
 ///
-/// So it can be ASSERTED. Centred, the one affordance for finding a lost prompt sat underneath the
-/// prompt itself — invisible in the ordinary case, appearing only once the prompt had been dragged
-/// away, which is the case a person is least likely to go hunting in. The gallery showed it; no
-/// headless test could, because the two windows are drawn to their own rectangles and neither knows
-/// the other exists. A pure function is the only form of that fact a test can hold.
+/// So it can be ASSERTED. Every placement claim this surface makes — that the modal is inside the
+/// window, that it is centred, that it never overhangs an edge a person would have to resize the
+/// window to reach past — is a claim about a rectangle, and a pure function is the only form of it a
+/// headless test can hold. Nothing here reads the [`egui::Context`] for that reason.
 ///
-/// # What this can and cannot achieve, measured
+/// Clamped to the window on both axes. On a shell dragged to [`SHELL_MIN`] the prompt's natural
+/// [`super::WIDTH`] is wider than the window itself, and a card whose action row runs off the right
+/// edge is a consent surface that cannot be refused.
+fn modal_rect(full: Rect, height: f32) -> Rect {
+    let size = Vec2::new(WIDTH.min(full.width()), height.min(full.height()));
+    Rect::from_center_size(full.center(), size)
+}
+
+/// How tall the modal should be NEXT frame, given the content this one produced.
 ///
-/// A centred prompt is [`super::HEIGHT`] tall, so the pill clears it only once the window is about
-/// 690 logical pixels tall — and the shipped opening height is [`SHELL_HEIGHT`], below that. At the
-/// default size the pill therefore still sits behind a centred prompt, and **that is acceptable**:
-/// the pill exists for a prompt the person has MOVED, and a prompt still in the middle of the screen
-/// needs no affordance to find it. What matters is that once the prompt is elsewhere — or the window
-/// has been made taller — the pill is somewhere a person can see it, and that it never leaves the
-/// window. Both are asserted; the threshold is asserted from both sides so the claim is not a guess.
+/// The in-window twin of [`super::PromptApp::fit_to_content`], which cannot be used directly because
+/// it resizes a window and there is no window here to resize. The arithmetic is the same, and so is
+/// the reason for it: a prompt is as tall as what it has to say — a two-line notice must not open a
+/// 560 px card, and 24 recovery words must not be cut off at word 14 (dig_ecosystem#2038).
 ///
-/// Clamped for the same reason: on a shell dragged to its minimum the prompt band is taller than the
-/// whole window, and a pill placed below it would be off-screen entirely, which is worse than
-/// overlapping.
-fn raise_pill(full: Rect) -> Rect {
-    let size = Vec2::new(PILL_WIDTH, PILL_HEIGHT);
-    let below = full.center().y + super::HEIGHT / 2.0 + space::S5 + PILL_HEIGHT / 2.0;
-    let floor = full.bottom() - space::S5 - PILL_HEIGHT / 2.0;
-    Rect::from_center_size(egui::Pos2::new(full.center().x, below.min(floor)), size)
+/// The ceiling is the tighter of the prompt's own [`super::MAX_HEIGHT`] and [`MODAL_SHARE`] of the
+/// host window, so the modal cannot grow past the frame it lives in; past that the body scrolls.
+fn modal_height(full: Rect, at: Rect, content_bottom: f32) -> f32 {
+    let needed = (content_bottom - at.top()) + space::S6 + super::ACTION_ROW;
+    let ceiling = super::MAX_HEIGHT
+        .min(full.height() * MODAL_SHARE)
+        .max(super::MIN_HEIGHT.min(full.height()));
+    needed.clamp(super::MIN_HEIGHT.min(ceiling), ceiling)
 }
 
 /// The scrim colour: the theme's own shadow at the theme's own alpha.
@@ -715,12 +768,6 @@ fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon
 
 /// The width of the chrome's Close control.
 const CLOSE_WIDTH: f32 = 72.0;
-/// The raise pill's size.
-const PILL_WIDTH: f32 = 220.0;
-/// See [`PILL_WIDTH`].
-const PILL_HEIGHT: f32 = 44.0;
-/// The pill's label. Names the ACTION, so it cannot be read as a way to dismiss the prompt.
-const RAISE_LABEL: &str = "Show the prompt";
 /// The tab the window opens on, and the one it falls back to when a selected tab stops existing.
 ///
 /// Status, because it is the tab that makes sense when the app cannot yet say what else to show —
@@ -1961,71 +2008,95 @@ mod tests {
         );
     }
 
-    /// **The raise pill is offered above the scrim, and its label names its action.**
+    /// **The modal stays inside the window, at every size the window can be.**
     ///
-    /// The prompt is its own OS window and can be dragged behind the shell; without an affordance
-    /// that brings it back, the shell is permanently inert with no visible cause. The label must not
-    /// read as a way to dismiss the prompt.
+    /// Asserted against the placement function rather than a control read back off the context:
+    /// `paint::button` generates its own id from the layout, so a test that guessed that id would
+    /// find nothing and skip its assertions — passing while proving nothing. Both bounds are
+    /// checked, because a modal pinned to the top-left would be "inside the window" too.
+    ///
+    /// [`SHELL_MIN`] is in the list on purpose: it is NARROWER than the prompt's natural
+    /// [`super::WIDTH`], which is the one size where an unclamped rectangle escapes.
     #[test]
-    fn the_scrim_offers_a_way_back_to_the_prompt() {
-        let mut shelf = Shelf::open();
-        shelf.settle();
-        let _answers = shelf.queue_live_prompt();
-        shelf.frame(Vec::new());
-        let output = shelf.frame(Vec::new());
+    fn the_modal_is_centred_and_never_leaves_the_window() {
+        for size in [
+            Vec2::new(SHELL_MIN, SHELL_MIN),
+            shell_size(),
+            Vec2::new(1400.0, 1000.0),
+        ] {
+            let window = Rect::from_min_size(egui::Pos2::new(0.0, 0.0), size);
+            for height in [
+                crate::confirm::gui::window::MIN_HEIGHT,
+                crate::confirm::gui::window::HEIGHT,
+                crate::confirm::gui::window::MAX_HEIGHT,
+            ] {
+                let at = modal_rect(window, height);
+                assert!(
+                    window.contains_rect(at),
+                    "a {height}-tall modal at {at:?} left a {size:?} window"
+                );
+                assert_eq!(
+                    at.center(),
+                    window.center(),
+                    "a {height}-tall modal in a {size:?} window is not centred"
+                );
+            }
+        }
+    }
 
+    /// **The modal is sized to its content, and stops at the window.**
+    ///
+    /// Three points, because a clamp is only proved by the values on either side of it: a short
+    /// notice must SHRINK (a fixed size would fail this), a tall one must GROW (a shrink-only rule
+    /// would fail this — it is dig_ecosystem#2038, where 24 recovery words showed 14), and an
+    /// enormous one must be held to the window rather than to the prompt's own monitor-scale ceiling.
+    #[test]
+    fn the_modal_grows_and_shrinks_to_its_content_within_the_window() {
+        use crate::confirm::gui::window::{HEIGHT, MAX_HEIGHT, MIN_HEIGHT};
+
+        let window = Rect::from_min_size(egui::Pos2::ZERO, shell_size());
+        let at = modal_rect(window, HEIGHT);
+        // The constant the arithmetic has to invert, so the expectations below are derived from the
+        // contract rather than transcribed from a run.
+        let chrome = space::S6 + crate::confirm::gui::window::ACTION_ROW;
+
+        let short = modal_height(window, at, at.top() + 120.0);
+        assert_eq!(
+            short,
+            (120.0 + chrome).max(MIN_HEIGHT),
+            "a two-line notice is not shrinking to its content"
+        );
+
+        let tall = modal_height(window, at, at.top() + 715.0);
         assert!(
-            drawn_text(&output).iter().any(|line| line == RAISE_LABEL),
-            "no way back to a prompt the person may have buried behind the window"
+            tall > HEIGHT,
+            "a 715 px screen — the recovery phrase — got {tall}, no more than the opening height;              the words below the fold are the #2038 defect"
+        );
+
+        let enormous = modal_height(window, at, at.top() + 5_000.0);
+        assert!(
+            enormous <= window.height() * MODAL_SHARE && enormous < MAX_HEIGHT,
+            "a {enormous}-tall modal in a {}-tall window puts its buttons past the bottom edge",
+            window.height()
         );
     }
 
-    /// **The raise pill is not UNDER the prompt it points at**, at the shipped size.
+    /// **A window too short for even the minimum still gets a modal that fits.**
     ///
-    /// Asserted against the placement function rather than against a control read back off the
-    /// context: `paint::button` generates its own id from the layout, so a test that guessed that id
-    /// would find nothing and skip both assertions — passing while proving nothing at all. Both
-    /// bounds are checked, because a placement that escaped the window would satisfy the first one
-    /// perfectly.
+    /// The lower clamp and the upper one can contradict each other: `clamp(MIN, ceiling)` panics
+    /// outright when a window is shorter than [`super::MIN_HEIGHT`], which a person can produce by
+    /// dragging the shell down — [`SHELL_MIN`] is 480 and the prompt minimum is 320, so the margin is
+    /// small and a monitor-scaled `MODAL_SHARE` eats it.
     #[test]
-    fn the_raise_pill_does_not_hide_behind_the_prompt() {
-        let screen = Rect::from_min_size(egui::Pos2::ZERO, shell_size());
-        let prompt = Rect::from_center_size(
-            screen.center(),
-            Vec2::new(WIDTH, crate::confirm::gui::window::HEIGHT),
-        );
-        let _ = prompt;
+    fn a_modal_in_a_window_shorter_than_the_minimum_still_fits() {
+        let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, 300.0));
+        let at = modal_rect(window, crate::confirm::gui::window::HEIGHT);
+        assert!(window.contains_rect(at), "the modal at {at:?} left the window");
 
-        // 1. It is BELOW the middle, at every size. Dead-centre is the one placement guaranteed to be
-        //    behind a centred prompt whatever the window's height.
-        for height in [SHELL_MIN, SHELL_HEIGHT, 900.0, 1400.0] {
-            let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_WIDTH, height));
-            let pill = raise_pill(window);
-            assert!(
-                pill.center().y > window.center().y,
-                "at {height} tall the pill sits at or above the centre, where a prompt will cover it"
-            );
-            assert!(
-                window.contains_rect(pill),
-                "at {height} tall the raise pill at {pill:?} left the window"
-            );
-        }
-
-        // 2. Once the window is tall enough it CLEARS a centred prompt outright — pinned from both
-        //    sides, so the threshold is measured rather than assumed. The shipped opening height is
-        //    below it, which is why the doc comment says so instead of claiming otherwise.
-        let clears = |height: f32| {
-            let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_WIDTH, height));
-            let band = Rect::from_center_size(
-                window.center(),
-                Vec2::new(WIDTH, crate::confirm::gui::window::HEIGHT),
-            );
-            !raise_pill(window).intersects(band)
-        };
-        assert!(clears(700.0), "a 700-tall window has room and must use it");
+        let height = modal_height(window, at, at.top() + 1_000.0);
         assert!(
-            !clears(640.0),
-            "640 was measured as too short for the pill to clear the prompt; if that has changed, the doc comment saying so is now wrong"
+            height <= window.height(),
+            "a {height}-tall modal in a 300-tall window cannot be answered"
         );
     }
 
