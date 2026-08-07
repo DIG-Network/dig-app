@@ -16,7 +16,7 @@
 //! # The invariant this module exists to make machine-checkable
 //!
 //! The window is only safe to build a tray trim on if **no verb becomes unreachable**. Some hosts have
-//! no window at all ([`WindowHost::Unavailable`] — macOS today, and any Linux session with no display
+//! no window at all (`WindowHost::Unavailable` — macOS today, and any Linux session with no display
 //! server), so the tray must stay complete there. Every action the tray offers on such a host must
 //! still be reachable on a host that HAS a window, from the trimmed tray spine
 //! ([`TRAY_SPINE`]), this model, or the explicit [`SUBSUMED_BY_TAB`] map. That is
@@ -252,7 +252,7 @@ const REMEDY_VERBS: [&str; 10] = [
 /// from this menu: "Show my recovery phrase" greyed out says only *no*, while "Show my recovery phrase
 /// (unlock first)" says *no, and here is the door*.
 ///
-/// Checkably: the label contains a [remedy verb](REMEDY_VERBS). Unlike the tab-level version this does
+/// Checkably: the label contains a remedy verb (`REMEDY_VERBS`). Unlike the tab-level version this does
 /// NOT require a full sentence, because a menu label is not one — requiring a trailing period would
 /// have rejected every real label in the app and the rule would have been dropped instead of applied.
 ///

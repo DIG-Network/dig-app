@@ -941,7 +941,7 @@ pub fn details_text(view: &TrayView) -> String {
 /// # This shape is what a host with NO WINDOW gets
 ///
 /// On a host that can open the app window ([`WindowHost::Available`]) the menu is
-/// [`trimmed`](trimmed) to four rows instead, and everything above lives in the window. The full menu
+/// `trimmed` to four rows instead, and everything above lives in the window. The full menu
 /// below is not legacy: it is what macOS and a display-less Linux session still render, and what any
 /// host falls back to the moment an attempt to open the window is seen to fail
 /// ([`crate::window_host`]).

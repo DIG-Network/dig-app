@@ -238,10 +238,10 @@ pub struct AppWindow {
     pub view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
     /// Hand a verb to whatever runs verbs — for dig-app, the single action worker.
     ///
-    /// **It must not block, and must never call [`ask`] itself.** Doing so would block the prompt
-    /// thread inside its own frame, waiting on the queue that frame owns: a guaranteed deadlock. A
-    /// window row dispatches exactly as a tray click does, on a worker, and this callback is the seam
-    /// that makes that the only expressible option.
+    /// **It must not block, and must never call the blocking `ask` itself.** Doing so would block the
+    /// prompt thread inside its own frame, waiting on the queue that frame owns: a guaranteed
+    /// deadlock. A window row dispatches exactly as a tray click does, on a worker, and this
+    /// callback is the seam that makes that the only expressible option.
     pub act: Arc<dyn Fn(crate::tray_menu::TrayAction) + Send + Sync>,
 }
 
@@ -1634,14 +1634,14 @@ impl BrandedWindow {
 /// Open the app shell, and return as soon as it has been QUEUED.
 ///
 /// `true` means the request reached the prompt thread; `false` means this host cannot draw a window
-/// at all (see [`start`]) or the thread is gone. The caller is deliberately NOT blocked for the life
+/// at all (see `start`) or the thread is gone. The caller is deliberately NOT blocked for the life
 /// of the window: the shell is a window a person leaves open, and a tray click that did not return
 /// until they closed it would hold the dispatching worker — and therefore Quit — for as long as it
 /// was up.
 ///
 /// # Why there is no answer to wait for
 ///
-/// A shell produces no [`Outcome`]. It hosts prompts, and each of those keeps and answers its own
+/// A shell produces no `Outcome`. It hosts prompts, and each of those keeps and answers its own
 /// reply channel; nothing about the shell itself is a consent decision.
 pub fn open_app_window(window: AppWindow) -> bool {
     let Some(host) = host() else {
