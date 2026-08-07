@@ -14,6 +14,8 @@
 //! of a 480 px window leaves 272 px of content, which is not a content pane, it is a margin — and the
 //! window can legitimately be dragged that small ([`super::shell::SHELL_MIN`]).
 
+use std::collections::HashMap;
+
 use egui::{Rect, Sense, Ui, Vec2};
 
 use super::super::paint;
@@ -217,6 +219,9 @@ fn pane(ui: &mut Ui, at: Rect, t: &Tokens, tab: &Tab, live: bool) -> Option<Clic
 
     let mut clicked = None;
     let mut y = inner.top();
+    // Counted across the WHOLE tab, not per section: the Account tab's two `About on-chain DIDs…`
+    // rows sit in different sections, and a per-section count would give both occurrence zero.
+    let mut seen: HashMap<String, usize> = HashMap::new();
 
     ui.painter().text(
         egui::Pos2::new(inner.left(), y),
@@ -232,7 +237,7 @@ fn pane(ui: &mut Ui, at: Rect, t: &Tokens, tab: &Tab, live: bool) -> Option<Clic
     }
 
     for section in &tab.sections {
-        let (height, hit) = draw_section(ui, inner, y, t, section, live);
+        let (height, hit) = draw_section(ui, inner, y, t, section, live, &mut seen);
         clicked = clicked.or(hit);
         y += height + space::S4;
         // Everything below the fold is not drawn. The window is resizable and the sections are
@@ -292,6 +297,7 @@ fn draw_section(
     t: &Tokens,
     section: &Section,
     live: bool,
+    seen: &mut HashMap<String, usize>,
 ) -> (f32, Option<Click>) {
     let mut y = top;
     if let Some(heading) = &section.heading {
@@ -324,7 +330,10 @@ fn draw_section(
                 label,
                 enabled,
             } => {
-                let (height, hit) = action_row(ui, inner, y, t, label, *enabled, live);
+                let occurrence = seen.entry(label.clone()).or_insert(0);
+                let at = *occurrence;
+                *occurrence += 1;
+                let (height, hit) = action_row(ui, inner, y, t, label, at, *enabled, live);
                 if hit {
                     clicked = Some(Click::Act(*action));
                 }
@@ -339,31 +348,40 @@ fn draw_section(
     (y - top, clicked)
 }
 
-/// A row's element id.
+/// A row's element id: its label, plus which occurrence of that label this is on the tab.
 ///
-/// Derived from the LABEL, not generated and **not from its position**, for the reason
-/// dig_ecosystem#2074 records: a rebuilt surface must name its controls exactly as the previous one
-/// did, or a click that crosses a rebuild resolves to nothing. The pane rebuilds every frame and rows
-/// above this one can change height as text rewraps, so an id carrying `y` would be a generated id
-/// wearing a stable name.
+/// # Why the label, and not the action or the position
 ///
-/// From the label rather than the action because eight actions render two rows each
-/// (dig_ecosystem#2257), so an action alone cannot address one row. Only one tab's rows are drawn at
-/// a time and no tab repeats a label, so the label is unique among the controls that coexist.
-pub(super) fn row_id(label: &str) -> egui::Id {
-    egui::Id::new(("dig-window-row", label))
+/// Not the ACTION, because eight actions render two rows each (dig_ecosystem#2257) — an action alone
+/// cannot address one row. Not the pixel POSITION, for the reason dig_ecosystem#2074 records: a
+/// rebuilt surface must name its controls exactly as the previous one did, and this pane rebuilds
+/// every frame while rows above can change height as text rewraps, so a `y` in the id would be a
+/// generated id wearing a stable name.
+///
+/// # Why `occurrence` exists
+///
+/// An earlier version used the label alone, on the reasoning that no tab repeats one. **The gallery
+/// disproved it on the first screenshot:** the Account tab draws `About on-chain DIDs…` twice, once
+/// from `view_account_actions` and once from `management_actions`, and egui painted its duplicate-id
+/// warning across the pane. No headless test caught it, because none of them looked for an id clash.
+/// The count of PRECEDING rows with the same label is stable for a given model — it is a position in
+/// a list, not a position on screen — so it separates the two without reintroducing the #2074 hazard.
+pub(super) fn row_id(label: &str, occurrence: usize) -> egui::Id {
+    egui::Id::new(("dig-window-row", label, occurrence))
 }
 
 /// Paint one row and return the height it took and whether it was clicked.
 ///
 /// One `interact` call, not two: a hover test and a click test over the same rectangle would be two
 /// controls stacked on one another, and only the topmost would see the pointer.
+#[allow(clippy::too_many_arguments)]
 fn action_row(
     ui: &mut Ui,
     inner: Rect,
     y: f32,
     t: &Tokens,
     label: &str,
+    occurrence: usize,
     enabled: bool,
     live: bool,
 ) -> (f32, bool) {
@@ -391,7 +409,7 @@ fn action_row(
     let clickable = enabled && live;
     let response = ui.interact(
         at,
-        row_id(label),
+        row_id(label, occurrence),
         match clickable {
             true => Sense::click(),
             false => Sense::hover(),

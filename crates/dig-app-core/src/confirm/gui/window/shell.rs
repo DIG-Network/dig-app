@@ -611,8 +611,7 @@ impl ShellApp {
                 ui.painter()
                     .rect_filled(full, 0, rgba(scrim(t, self.theme)));
 
-                let size = Vec2::new(PILL_WIDTH, PILL_HEIGHT);
-                let at = Rect::from_center_size(full.center(), size);
+                let at = raise_pill(full);
                 let mut pill_ui = ui.new_child(egui::UiBuilder::new().max_rect(at));
                 if paint::button(&mut pill_ui, RAISE_LABEL, Weight::Primary, false, t).clicked() {
                     ctx.send_viewport_cmd_to(prompt_viewport(), egui::ViewportCommand::Focus);
@@ -636,6 +635,36 @@ impl ShellApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
         }
     }
+}
+
+/// Where the raise pill goes: below the band a centred prompt occupies, never at the shell's centre.
+///
+/// # Why this is a function and not two lines inside the painter
+///
+/// So it can be ASSERTED. Centred, the one affordance for finding a lost prompt sat underneath the
+/// prompt itself — invisible in the ordinary case, appearing only once the prompt had been dragged
+/// away, which is the case a person is least likely to go hunting in. The gallery showed it; no
+/// headless test could, because the two windows are drawn to their own rectangles and neither knows
+/// the other exists. A pure function is the only form of that fact a test can hold.
+///
+/// # What this can and cannot achieve, measured
+///
+/// A centred prompt is [`super::HEIGHT`] tall, so the pill clears it only once the window is about
+/// 690 logical pixels tall — and the shipped opening height is [`SHELL_HEIGHT`], below that. At the
+/// default size the pill therefore still sits behind a centred prompt, and **that is acceptable**:
+/// the pill exists for a prompt the person has MOVED, and a prompt still in the middle of the screen
+/// needs no affordance to find it. What matters is that once the prompt is elsewhere — or the window
+/// has been made taller — the pill is somewhere a person can see it, and that it never leaves the
+/// window. Both are asserted; the threshold is asserted from both sides so the claim is not a guess.
+///
+/// Clamped for the same reason: on a shell dragged to its minimum the prompt band is taller than the
+/// whole window, and a pill placed below it would be off-screen entirely, which is worse than
+/// overlapping.
+fn raise_pill(full: Rect) -> Rect {
+    let size = Vec2::new(PILL_WIDTH, PILL_HEIGHT);
+    let below = full.center().y + super::HEIGHT / 2.0 + space::S5 + PILL_HEIGHT / 2.0;
+    let floor = full.bottom() - space::S5 - PILL_HEIGHT / 2.0;
+    Rect::from_center_size(egui::Pos2::new(full.center().x, below.min(floor)), size)
 }
 
 /// The scrim colour: the theme's own shadow at the theme's own alpha.
@@ -940,9 +969,10 @@ mod tests {
         egui::Id::new(crate::window_model::tab_element_id(tab))
     }
 
-    /// The element id of one content row, from the pane's own id function rather than a copy of it.
+    /// The element id of the FIRST row carrying `label`, from the pane's own id function rather than
+    /// a copy of it.
     fn row_control(label: &str) -> egui::Id {
-        super::super::panes::row_id(label)
+        super::super::panes::row_id(label, 0)
     }
 
     /// Press Escape.
@@ -1719,6 +1749,144 @@ mod tests {
         );
     }
 
+    /// **No two controls on a tab share an element id** — the defect the gallery found and no
+    /// headless test was looking for.
+    ///
+    /// The Account tab draws `About on-chain DIDs…` twice, from two different group builders, and a
+    /// label-only id gave both the same name. egui painted its duplicate-id warning across the pane
+    /// and the second row could not be addressed at all. Every assertion in this file passed.
+    ///
+    /// Asserted by reading egui's OWN id-clash report rather than by re-deriving the ids here: a test
+    /// that recomputed them would agree with any id function, including a broken one. The tab with
+    /// the repeat is visited explicitly, and its repeat is proven present first — otherwise this
+    /// passes on a fixture that never draws two rows with one label.
+    #[test]
+    fn no_two_rows_on_a_tab_are_given_the_same_element_id() {
+        let repeated: Vec<String> = {
+            let mut labels: Vec<String> = window_model::build(&busy_view())
+                .tab(TabId::Account)
+                .expect("the Account tab renders")
+                .sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .filter_map(|row| match row {
+                    MenuRow::Action { label, .. } => Some(label.clone()),
+                    _ => None,
+                })
+                .collect();
+            labels.sort();
+            let mut repeats = Vec::new();
+            for pair in labels.windows(2) {
+                if pair[0] == pair[1] && !repeats.contains(&pair[0]) {
+                    repeats.push(pair[0].clone());
+                }
+            }
+            repeats
+        };
+        assert!(
+            !repeated.is_empty(),
+            "the Account tab no longer repeats a label, so this test can no longer see the defect              it exists for — find a tab that does, or delete it deliberately"
+        );
+
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        for tab in &window_model::build(&busy_view()).tabs {
+            let at = shelf.centre_of(sidebar_entry(tab.id));
+            shelf.click(at);
+            let output = shelf.frame(Vec::new());
+            let clashes: Vec<String> = drawn_text(&output)
+                .into_iter()
+                .filter(|line| line.contains("widget ID") || line.contains("First use of"))
+                .collect();
+            assert!(
+                clashes.is_empty(),
+                "{:?} drew two controls under one id: {clashes:?}",
+                tab.id
+            );
+        }
+    }
+
+    /// **Every label the window can draw is covered by the fonts the window installs.**
+    ///
+    /// The other defect the gallery found. The cache label marked the active cap with a TICK, which
+    /// the tray got from the operating system's own menu font — the window draws it in Space Grotesk
+    /// with egui's stack behind, and neither carries it, so the one row a person is hunting for was
+    /// marked with a tofu box. Nothing headless was looking, because a missing glyph still lays out
+    /// and still reports the right text.
+    ///
+    /// Asked of egui's own font set rather than of a list of characters this test also writes: a
+    /// hand-kept allowlist would go stale the first time a label gained a character nobody thought
+    /// of, which is precisely what happened.
+    #[test]
+    fn every_label_the_window_can_draw_has_the_glyphs_to_draw_it() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        // One frame, so the font set is built before it is asked anything.
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+
+        let mut checked = 0usize;
+        for view in gallery_views() {
+            for tab in &window_model::build(&view).tabs {
+                let mut strings = vec![tab.label.clone()];
+                if let window_model::PaneNote::Waiting(text)
+                | window_model::PaneNote::Unreachable(text)
+                | window_model::PaneNote::Empty(text) = &tab.note
+                {
+                    strings.push((*text).to_string());
+                }
+                for section in &tab.sections {
+                    strings.extend(section.heading.clone());
+                    strings.extend(section.rows.iter().filter_map(|row| match row {
+                        MenuRow::Action { label, .. } => Some(label.clone()),
+                        _ => None,
+                    }));
+                }
+                for text in strings {
+                    checked += 1;
+                    // Both faces the pane uses: rows and notes are regular, headings semibold.
+                    let covered = ctx.fonts(|fonts| {
+                        fonts.has_glyphs(&crate::confirm::gui::render::regular(size::BASE), &text)
+                            && fonts.has_glyphs(&semibold(size::SM), &text)
+                    });
+                    assert!(
+                        covered,
+                        "{:?} draws {text:?}, which this window has no glyph for — it will paint a \
+                         tofu box",
+                        tab.id
+                    );
+                }
+            }
+        }
+        assert!(checked > 20, "only {checked} strings were checked");
+    }
+
+    /// The views the glyph sweep walks: every account state, with and without a node.
+    ///
+    /// Wider than `busy_view` alone because a label a person only sees in an unusual state is exactly
+    /// the one nobody has looked at.
+    fn gallery_views() -> Vec<crate::tray_menu::TrayView> {
+        use crate::tray_menu::AccountState;
+        let mut views = Vec::new();
+        for account in [
+            AccountState::Unsupported,
+            AccountState::Absent,
+            AccountState::Locked,
+            AccountState::Unopenable,
+            AccountState::NeedsPassword,
+            AccountState::Unlocked { recoverable: true },
+            AccountState::Unlocked { recoverable: false },
+        ] {
+            for cache in [None, busy_view().cache] {
+                views.push(crate::tray_menu::TrayView {
+                    account: Some(account.clone()),
+                    cache,
+                    ..busy_view()
+                });
+            }
+        }
+        views
+    }
+
     // ---------------------------------------------------------------------------------------------
     // The scrimmed shell must not look clickable
     // ---------------------------------------------------------------------------------------------
@@ -1793,6 +1961,55 @@ mod tests {
         assert!(
             drawn_text(&output).iter().any(|line| line == RAISE_LABEL),
             "no way back to a prompt the person may have buried behind the window"
+        );
+    }
+
+    /// **The raise pill is not UNDER the prompt it points at**, at the shipped size.
+    ///
+    /// Asserted against the placement function rather than against a control read back off the
+    /// context: `paint::button` generates its own id from the layout, so a test that guessed that id
+    /// would find nothing and skip both assertions — passing while proving nothing at all. Both
+    /// bounds are checked, because a placement that escaped the window would satisfy the first one
+    /// perfectly.
+    #[test]
+    fn the_raise_pill_does_not_hide_behind_the_prompt() {
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, shell_size());
+        let prompt = Rect::from_center_size(
+            screen.center(),
+            Vec2::new(WIDTH, crate::confirm::gui::window::HEIGHT),
+        );
+        let _ = prompt;
+
+        // 1. It is BELOW the middle, at every size. Dead-centre is the one placement guaranteed to be
+        //    behind a centred prompt whatever the window's height.
+        for height in [SHELL_MIN, SHELL_HEIGHT, 900.0, 1400.0] {
+            let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_WIDTH, height));
+            let pill = raise_pill(window);
+            assert!(
+                pill.center().y > window.center().y,
+                "at {height} tall the pill sits at or above the centre, where a prompt will cover it"
+            );
+            assert!(
+                window.contains_rect(pill),
+                "at {height} tall the raise pill at {pill:?} left the window"
+            );
+        }
+
+        // 2. Once the window is tall enough it CLEARS a centred prompt outright — pinned from both
+        //    sides, so the threshold is measured rather than assumed. The shipped opening height is
+        //    below it, which is why the doc comment says so instead of claiming otherwise.
+        let clears = |height: f32| {
+            let window = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_WIDTH, height));
+            let band = Rect::from_center_size(
+                window.center(),
+                Vec2::new(WIDTH, crate::confirm::gui::window::HEIGHT),
+            );
+            !raise_pill(window).intersects(band)
+        };
+        assert!(clears(700.0), "a 700-tall window has room and must use it");
+        assert!(
+            !clears(640.0),
+            "640 was measured as too short for the pill to clear the prompt; if that has changed,              the doc comment saying so is now wrong"
         );
     }
 

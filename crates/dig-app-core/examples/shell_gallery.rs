@@ -14,11 +14,13 @@
 //!
 //! ```text
 //! cargo run -p dig-app-core --example shell_gallery -- light
-//! cargo run -p dig-app-core --example shell_gallery -- dark
+//! cargo run -p dig-app-core --example shell_gallery -- dark 90   # raise the prompt after 90s
 //! ```
 //!
-//! The window opens alone, and after [`PROMPT_AFTER`] a real consent prompt is raised over it, so
-//! one run photographs both states. Escape on the prompt denies it; Escape on the shell closes the
+//! The window opens alone, and after [`PROMPT_AFTER`] — overridable by the second argument, in
+//! seconds — a real consent prompt is raised over it, so one run photographs both states. The
+//! override exists because photographing the six tabs takes longer than the default delay, and a
+//! scrimmed tab is a picture of the scrim rather than of the tab. Escape on the prompt denies it; Escape on the shell closes the
 //! window. This example only ever DRAWS — the prompt it raises is a `sign` confirm whose answer is
 //! printed and discarded, and nothing here reaches a chain, a key or a wallet.
 
@@ -34,6 +36,18 @@ use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 /// How long the shell is left alone before a prompt is raised over it — long enough to photograph
 /// the unscrimmed window first.
 const PROMPT_AFTER: Duration = Duration::from_secs(6);
+
+/// How long to wait before raising the prompt, honouring the optional second argument.
+fn prompt_after() -> Duration {
+    match std::env::args().nth(2).map(|raw| raw.parse::<u64>()) {
+        Some(Ok(seconds)) => Duration::from_secs(seconds),
+        Some(Err(_)) => {
+            eprintln!("the second argument is a delay in whole seconds");
+            std::process::exit(2);
+        }
+        None => PROMPT_AFTER,
+    }
+}
 
 /// How long the process stays alive after that, so the scrimmed state can be photographed too.
 const THEN_WAIT: Duration = Duration::from_secs(120);
@@ -114,9 +128,10 @@ fn main() {
         eprintln!("this host cannot draw the DIG app window");
         std::process::exit(1);
     }
-    println!("the app window is open ({theme:?}); a prompt follows in {PROMPT_AFTER:?}");
+    let delay = prompt_after();
+    println!("the app window is open ({theme:?}); a prompt follows in {delay:?}");
 
-    std::thread::sleep(PROMPT_AFTER);
+    std::thread::sleep(delay);
 
     // Raised from a worker exactly as a real request is: `show` blocks until the person answers, so
     // calling it on the thread that drew the window would be the deadlock the host design forbids.

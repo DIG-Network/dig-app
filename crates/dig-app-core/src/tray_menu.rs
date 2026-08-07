@@ -1534,6 +1534,15 @@ pub(crate) fn cache_actions(cache: Option<&crate::cache::CacheSnapshot>) -> Vec<
 
 /// One preset row's label, marking the preset that is the node's CURRENT cap so the active choice is
 /// visible at a glance, and tagging the default so a person can find it deliberately.
+///
+/// # Why the mark is a word and not a tick
+///
+/// It was `✓ current`. The tray got that glyph from the operating system's own menu font; the app
+/// window (dig_ecosystem#2253) draws the SAME label in the Space Grotesk stack, which has no U+2713 —
+/// so the gallery photographed a tofu box beside the active cap, and the one row a person is looking
+/// for was the one marked with a rendering error. A word needs no glyph coverage anywhere, and it is
+/// what a screen reader would have had to say regardless: this file's own chrome already prefers "a
+/// word, not a glyph" for exactly that reason.
 fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
     use crate::cache::{format_cap, DEFAULT_CACHE_CAP_BYTES};
     let mut label = format_cap(bytes);
@@ -1541,7 +1550,7 @@ fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
         label.push_str(" (default)");
     }
     if bytes == current_cap {
-        label.push_str("  ✓ current");
+        label.push_str(" — current");
     }
     label
 }
