@@ -836,7 +836,21 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   is resizable, so a header drag would carry the whole application across the desktop or snap it to an
   edge with a live prompt inside it. Raising the window on admission is the HOST's act, not the prompt's.
 - **The modal MUST be answerable by pointer (MUST).** Its controls MUST sit in a layer strictly above the
-  scrim; a consent surface a person can read and cannot click is one they cannot refuse.
+  scrim; a consent surface a person can read and cannot click is one they cannot refuse — and since Escape
+  and the deadline both resolve a confirm to a refusal, one that silently refuses everything.
+- **A prompt MUST NOT author an answer from a pass in which it was not presented (MUST).** Sharing the
+  host's input stream means a keystroke aimed at the app window arrives at a prompt admitted in the same
+  frame, and the first layout pass of a new modal is invisible by construction. The keyboard and the
+  self-dismissal deadline MUST therefore be inert until a pass that really put the prompt on screen.
+- **An affirmative MUST require a fresh keystroke (MUST).** A key-repeat — the operating system repeating a
+  key the person is holding — MUST NOT activate the focused control, because prompts are raised in sequence
+  and the pre-focused control of a signing prompt is the affirmative. Refusal keys are unaffected: they
+  cannot manufacture consent.
+- **The URN launcher (§3.1c-i) keeps its own presentation in-window (MUST).** It MUST be drawn at the
+  launcher's size, placed high rather than centred, and dismissible by clicking away from it — which
+  in-window means clicking the scrimmed rest of the window. That gesture MUST NOT dismiss any consent
+  dialog. Both hosts MUST take the size from one shared mapping, so a launcher cannot be drawn as a dialog
+  in one of them.
 - **Teardown MUST fail closed (MUST).** Closing the window, or dismissing the modal, over a prompt nobody
   answered MUST answer it unavailable — never an approval, and never a dropped reply that leaves the
   caller waiting out its timeout. An answer the person DID give MUST survive teardown unchanged.

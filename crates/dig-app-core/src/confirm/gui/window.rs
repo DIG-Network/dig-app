@@ -5809,6 +5809,20 @@ mod tests {
             }
         }
 
+        /// Frames enough to PRESENT an in-window prompt, so its keyboard is live.
+        ///
+        /// In-window a prompt answers nothing until it has been painted in a pass a person could see
+        /// (`frame_in_window`, F1), and the first pass of a new [`egui::Area`] is a sizing pass egui
+        /// marks invisible. A test that skips this reads "nothing happened" and cannot tell a
+        /// working guard from a broken one — measured: two mutants survived on exactly that.
+        ///
+        /// A no-op for a standalone prompt, whose keyboard is live from its first frame, so both
+        /// halves of a paired test can call it.
+        fn present(&mut self) {
+            self.frame(Vec::new(), false);
+            self.frame(Vec::new(), false);
+        }
+
         /// One frame carrying `events`, painted the way this prompt's host paints it.
         ///
         /// `host_closing` delivers the windowing system's own close on the SHARED viewport, which is
@@ -5989,10 +6003,7 @@ mod tests {
         );
 
         let mut inside = Hosts::on(PromptHost::InWindow);
-        // Two quiet frames: in-window the first pass presents nothing, so the keyboard is not live
-        // until the second (`frame_in_window`, F1).
-        inside.frame(Vec::new(), false);
-        inside.frame(Vec::new(), false);
+        inside.present();
         let output = inside.frame(enter_pressed(), false);
         assert!(
             inside.recorded().is_some(),
@@ -6021,12 +6032,18 @@ mod tests {
             "the standalone prompt stopped asking for the keyboard (#2079)"
         );
 
+        // SEVERAL frames, not one. The claim is "never", and a request made on any later frame is
+        // just as wrong — measured: a mutant that moved the call inside the F1 presentation gate
+        // survived a single-frame check, because nothing had been presented yet on frame one.
         let mut inside = Hosts::on(PromptHost::InWindow);
-        let output = inside.frame(Vec::new(), false);
-        assert!(
-            !Hosts::sent(&output, &focus),
-            "a prompt inside the app window asked to raise the window it is already inside"
-        );
+        for nth in 0..6 {
+            let output = inside.frame(Vec::new(), false);
+            assert!(
+                !Hosts::sent(&output, &focus),
+                "on frame {nth} a prompt inside the app window asked to raise the window it is \
+                 already inside"
+            );
+        }
     }
 
     /// **Closing the HOST window is not a refusal an in-window prompt may author.**
@@ -6058,7 +6075,9 @@ mod tests {
         );
 
         let mut inside = Hosts::on(PromptHost::InWindow);
-        inside.frame(Vec::new(), false);
+        // PRESENTED first, so its keyboard is genuinely live: otherwise "recorded nothing" is just
+        // the F1 latch talking and says nothing about how the close event is read.
+        inside.present();
         inside.frame(Vec::new(), true);
         assert!(
             inside.recorded().is_none(),

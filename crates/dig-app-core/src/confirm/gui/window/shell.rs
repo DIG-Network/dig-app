@@ -2637,6 +2637,18 @@ mod tests {
              presented; for a sign prompt the pre-focused control is the AFFIRMATIVE, so this is an \
              approval the person never saw"
         );
+
+        // And not on the NEXT frame either, which is the only frame the two halves of the guard
+        // disagree about. That frame follows the invisible sizing pass, so a latch that counted the
+        // sizing pass as a presentation would have the keyboard live here — while the person still
+        // has not been shown anything. Measured: without this the sizing-pass check was
+        // unfalsifiable and a mutant removing it survived.
+        shelf.frame(enter());
+        assert!(
+            matches!(answers.try_recv(), Err(TryRecvError::Empty)),
+            "an answer was taken on the frame after the modal's INVISIBLE sizing pass; nothing had \
+             been drawn for the person to answer"
+        );
     }
 
     /// **…and it CAN be answered once it has been presented.**
