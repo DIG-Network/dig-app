@@ -2224,6 +2224,11 @@ mod tests {
     #[test]
     fn clicking_a_row_dispatches_its_verb_to_the_worker() {
         let mut shelf = Shelf::open();
+        // Tall enough that the row under test is on screen without scrolling. The pane scrolls
+        // (`panes.rs`), so a row below the fold is reachable in the product — but a synthetic click
+        // aimed at a rect outside the clip lands on nothing, and this test is about DISPATCH, not
+        // about what fits at one particular height.
+        shelf.size = Vec2::new(shelf.size.x, 1_400.0);
         shelf.settle();
         assert!(
             shelf.dispatched().is_empty(),

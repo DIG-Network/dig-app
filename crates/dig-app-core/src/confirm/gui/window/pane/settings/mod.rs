@@ -83,9 +83,6 @@ pub(crate) fn draw(
     tab: &Tab,
     facts: &PaneFacts,
 ) -> Option<TrayAction> {
-    flow.place(|ui, at| (text::body(ui, at, t, copy::settings::LEAD), ()));
-    flow.gap(space::S4);
-
     let pressed = updates_card(flow, t, tab, facts);
     flow.gap(space::S4);
 

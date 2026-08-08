@@ -191,8 +191,10 @@ fn line_card(
 
 /// The verb this pane promotes on `tab`, as it will be drawn.
 ///
-/// The single-source answer to "which control on this window is the primary", for the guard that
-/// checks nothing else is (dig_ecosystem#2354).
+/// The single-source answer to "which control on this window is the primary", for the guard in
+/// [`super`] that checks nothing else is (dig_ecosystem#2354). Test-only, because production code
+/// gets the same answer from [`Parts::of`] on its way to drawing it.
+#[cfg(test)]
 pub(crate) fn promoted_lead(tab: &Tab) -> Option<Action<TrayAction>> {
     Parts::of(tab).lead_action().cloned()
 }
@@ -263,6 +265,7 @@ impl Parts {
     /// The verb this pane leads with, already weighted — the window's one promotion.
     ///
     /// Exposed so the cross-pane guard in [`super`] can name it without rebuilding the sort.
+    #[cfg(test)]
     pub(crate) fn lead_action(&self) -> Option<&Action<TrayAction>> {
         self.lead.first()
     }

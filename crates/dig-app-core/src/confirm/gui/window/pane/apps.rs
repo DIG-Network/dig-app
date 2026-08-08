@@ -33,9 +33,6 @@ use crate::window_model::Tab;
 
 /// Draw the Apps pane's content into `flow`, and report the action pressed.
 pub(crate) fn draw(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    flow.place(|ui, at| (text::body(ui, at, t, copy::apps::LEAD), ()));
-    flow.gap(space::S4);
-
     let mut pressed = None;
     let verbs = split_by_app(super::actions_of(tab));
 
@@ -272,7 +269,7 @@ mod tests {
     fn no_copy_on_this_tab_claims_an_app_is_installed_or_missing() {
         let said = format!(
             "{} {} {}",
-            copy::apps::LEAD,
+            copy::lead(TabId::Apps),
             copy::apps::INSTALL_NOTE,
             crate::apps::APPS[0].tagline
         )

@@ -7,9 +7,11 @@
 //! action should be offered. It reads `MenuRow::Action { action, label, enabled }` and draws it.
 //!
 //! What this module adds is WEIGHT. The tray can only render a verb as a row; a window can render
-//! the same decided verb as a prominent primary button with the rest as quieter siblings. Choosing
-//! the weight is a presentation decision about emphasis, and it is made from the row's POSITION in
-//! the group the model already ordered — never from a fact about the account.
+//! the same decided verb as a prominent primary button with the rest as quieter siblings.
+//!
+//! Emphasis follows what a control DOES, never where it sits. A destroy is drawn as danger wherever
+//! the model put it; everything else is a peer unless a PANE names it as that pane's one lead
+//! ([`promote`]). See [`weigh`] for the three defects the older positional rule shipped.
 //!
 //! # Keyboard
 //!

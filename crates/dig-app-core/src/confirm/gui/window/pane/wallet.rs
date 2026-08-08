@@ -57,10 +57,10 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     holdings_card(flow, t, &facts.balance);
     flow.gap(space::S4);
-    let pressed = actions_card(flow, t, tab);
-    flow.gap(space::S4);
     sending_card(flow, t);
-    pressed
+    // The tab's own verbs, LAST and in a card of their own — but only where the model offers one
+    // this pane has not already drawn. See [`spare_verbs`].
+    spare_verbs_card(flow, t, tab, drew_copy_control(facts))
 }
 
 /// The address money arrives at: the code, the value, and the way to lift it off the screen.
@@ -228,9 +228,26 @@ fn sending_card(flow: &mut Flow, t: &Tokens) {
     });
 }
 
-/// The tab's own verbs, as a weighted button group. Omitted when the model offers none.
-fn actions_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let actions = super::actions_of(tab);
+/// Whatever the model puts on this tab that the pane has not already drawn as a control.
+///
+/// # Why the copy-address row is filtered out (dig_ecosystem#2357)
+///
+/// This card used to render EVERY row, and the Wallet tab's one row is `Copy my receive address` —
+/// which the receive card above already offers, beside the address it copies. So the tab showed the
+/// address twice and offered two ways to copy it, and the second lived in a card titled "Wallet
+/// actions" that existed for no other reason than to hold it.
+///
+/// The row is not dropped from the product: it is the SAME verb, in the place it belongs, next to
+/// the value it acts on. What is dropped is the second rendering of it. Anything else the model puts
+/// here is still drawn, because a pane may not decide that a verb the model offered is not worth
+/// showing.
+fn spare_verbs_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    tab: &Tab,
+    drew_copy_control: bool,
+) -> Option<TrayAction> {
+    let actions = spare_verbs(super::actions_of(tab), drew_copy_control);
     if actions.is_empty() {
         return None;
     }
@@ -242,6 +259,37 @@ fn actions_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
             });
         (height, pressed.flatten())
     })
+}
+
+/// The tab's verbs minus the ones this pane has already drawn as part of a value.
+///
+/// # Why this is conditional, which is the whole difficulty
+///
+/// A duplicate may only be removed where the ORIGINAL exists. `Copy my receive address` is offered
+/// in every account state, but the receive card only draws a copy control when there IS an address —
+/// a sealed account gets the sentence explaining the lock instead. Filtering unconditionally
+/// therefore deleted the sole rendering of a verb the model offers, on exactly the states that
+/// cannot reach it any other way. The pane guard in [`super::super::panes`] caught that, which is
+/// what it is for.
+///
+/// Matched on the ACTION, never on the label: the label is a sentence the tray is free to reword,
+/// and a filter that read its words would let the duplicate back in the first time it changed.
+fn spare_verbs(
+    actions: Vec<action::Action<TrayAction>>,
+    drew_copy_control: bool,
+) -> Vec<action::Action<TrayAction>> {
+    actions
+        .into_iter()
+        .filter(|action| !(drew_copy_control && action.id == TrayAction::CopyReceiveAddress))
+        .collect()
+}
+
+/// Whether the receive card drew a copy control this frame — the condition [`spare_verbs`] turns on.
+///
+/// Derived from the same [`address_of`] the card itself renders from, so the two cannot come to
+/// disagree about whether the control is on screen.
+fn drew_copy_control(facts: &PaneFacts) -> bool {
+    matches!(address_of(facts), AddressReading::Known(_))
 }
 
 /// The address reading this pane renders.
@@ -561,6 +609,78 @@ mod tests {
                 ..TrayView::default()
             })),
             AddressReading::Known(ADDRESS.to_string())
+        );
+    }
+
+    /// **Copy-address is offered ONCE — beside the address, and only where that control exists.**
+    ///
+    /// dig_ecosystem#2357's wallet half, and the trap inside it. Two actors that differ only in
+    /// whether the account is open:
+    ///
+    /// - an OPEN account draws the copy control next to the address, so the model's row must not be
+    ///   drawn a second time in a card of its own;
+    /// - a SEALED account draws no copy control at all, so the row is the only rendering there is
+    ///   and removing it would take a verb the model offers off the screen entirely.
+    ///
+    /// A single-actor test — either one — passes on an unconditional filter, which is the wrong
+    /// implementation nearest to this one, and which the pane-level reachability guard caught.
+    #[test]
+    fn copy_address_is_drawn_once_and_never_removed_from_a_pane_that_has_no_other_copy() {
+        let open = facts_with(TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        });
+        let sealed = facts_with(TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        assert!(
+            drew_copy_control(&open) && !drew_copy_control(&sealed),
+            "the fixtures do not differ in whether the receive card draws a copy control, so this \
+             test cannot tell a conditional filter from an unconditional one"
+        );
+
+        let offered = |view: TrayView| {
+            let model = crate::window_model::build(&view);
+            super::super::actions_of(
+                model
+                    .tab(crate::window_model::TabId::Wallet)
+                    .expect("the Wallet tab exists"),
+            )
+        };
+        let open_rows = offered(TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        });
+        let sealed_rows = offered(TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        for rows in [&open_rows, &sealed_rows] {
+            assert!(
+                rows.iter().any(|a| a.id == TrayAction::CopyReceiveAddress),
+                "the model stopped offering the row this test is about"
+            );
+        }
+
+        assert!(
+            !spare_verbs(open_rows, true)
+                .iter()
+                .any(|a| a.id == TrayAction::CopyReceiveAddress),
+            "an open account is offered two ways to copy one address, and the second lives in a \
+             card that exists only to hold it"
+        );
+        assert!(
+            spare_verbs(sealed_rows, false)
+                .iter()
+                .any(|a| a.id == TrayAction::CopyReceiveAddress),
+            "a sealed account lost the only copy control on the tab"
         );
     }
 

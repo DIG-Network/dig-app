@@ -109,34 +109,45 @@ fn node_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
                 // says what the node is doing is the label saying it twice.
                 inner.place(|ui, at| (text::body(ui, at, t, &summary), ()));
                 inner.gap(space::S4);
+                // A one-line READOUT of what the cache holds, not the meter — the meter lives on
+                // the Cache tab and is drawn once (dig_ecosystem#2357). This card used to redraw it
+                // byte-identically, so the same bar appeared on two tabs and either could be edited
+                // without the other. A figure repeated is a figure that will eventually disagree
+                // with itself.
                 inner.place(|ui, at| {
-                    let height = match &cache {
-                        Some(snapshot) => data::meter(
+                    (
+                        data::readout(
                             ui,
                             at,
                             t,
-                            copy::status::CACHE_METER_LABEL,
-                            snapshot.used_bytes,
-                            snapshot.cap_bytes,
+                            &Readout::new(copy::status::CACHE_CARD, cache_reading(cache)),
                         ),
-                        // No node has reported a cache, so there is no meter to draw — and a meter
-                        // at zero would say the cache is empty, which is a different claim.
-                        None => data::readout(
-                            ui,
-                            at,
-                            t,
-                            &Readout::new(
-                                copy::status::CACHE_CARD,
-                                Value::Unknown(copy::status::CACHE_UNKNOWN.to_string()),
-                            ),
-                        ),
-                    };
-                    (height, ())
+                        (),
+                    )
                 });
             }),
             (),
         )
     });
+}
+
+/// What the cache holds, as one line — or the reason there is no figure.
+///
+/// A summary, deliberately, and not the meter. The Cache tab owns the meter and the limit; Status
+/// says only how much is in use, which is what a person scanning this tab is asking. Both figures
+/// come from the same [`crate::cache::CacheSnapshot`], so the two tabs cannot disagree.
+///
+/// With no snapshot this is an `Unknown` carrying its reason, never a zero: nobody has reported a
+/// cache, and "0 B" is the claim that the cache is empty.
+fn cache_reading(cache: Option<crate::cache::CacheSnapshot>) -> Value {
+    match cache {
+        Some(snapshot) => Value::Word(format!(
+            "{} of {}",
+            crate::cache::format_cap(snapshot.used_bytes),
+            crate::cache::format_cap(snapshot.cap_bytes)
+        )),
+        None => Value::Unknown(copy::status::CACHE_UNKNOWN.to_string()),
+    }
 }
 
 /// What this computer is sharing with the network — DESIGNED, and not yet wired to the node.
@@ -346,6 +357,52 @@ mod tests {
             actions[1].weight,
             Weight::Ghost,
             "the second verb was promoted to primary because the first was disabled"
+        );
+    }
+
+    /// **Status summarises the cache; it does not redraw the Cache tab's meter.**
+    ///
+    /// dig_ecosystem#2357's first duplication: the same meter was drawn byte-identically on two
+    /// tabs, so either could be changed without the other and one screen would eventually contradict
+    /// the other about one number.
+    ///
+    /// The absence half is asserted with a snapshot PRESENT, which is the only state in which a
+    /// meter could be drawn — with none there is nothing to draw either way, and a test run against
+    /// that would pass on any implementation. The unknown case is asserted separately, because the
+    /// summary must not become a zero when nobody has reported: `0 B of 0 B` is the claim that this
+    /// computer has a cache and it is empty.
+    #[test]
+    fn the_cache_is_summarised_here_and_metered_only_on_its_own_tab() {
+        let snapshot = crate::cache::CacheSnapshot {
+            cap_bytes: 10 * crate::cache::GIB,
+            used_bytes: 407 * crate::cache::MIB,
+        };
+        let reading = cache_reading(Some(snapshot));
+        assert!(
+            reading.is_known(),
+            "a reported cache came back as an absence: {reading:?}"
+        );
+        let shown = reading.shown().to_string();
+        for figure in [
+            crate::cache::format_cap(snapshot.used_bytes),
+            crate::cache::format_cap(snapshot.cap_bytes),
+        ] {
+            assert!(
+                shown.contains(&figure),
+                "the summary does not carry {figure}, so it is not reporting the same disk the \
+                 Cache tab meters: {shown}"
+            );
+        }
+
+        let unread = cache_reading(None);
+        assert!(
+            !unread.is_known(),
+            "an unreported cache was drawn as a figure, which claims a cache that is empty"
+        );
+        assert!(
+            !unread.shown().chars().any(|c| c.is_ascii_digit()),
+            "the unreported sentence carries a numeral where a person reads a size: {}",
+            unread.shown()
         );
     }
 

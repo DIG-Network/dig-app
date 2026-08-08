@@ -118,6 +118,14 @@ pub(crate) fn row_element_id(label: &str, occurrence: usize) -> egui::Id {
 /// Status has a bespoke pane; every other tab renders through the generic one, which is itself
 /// written in this vocabulary — so a tab that has not been designed yet still looks like the rest of
 /// the application rather than like a menu.
+///
+/// # Every pane opens the same way (dig_ecosystem#2356)
+///
+/// The title, the lead sentence and the state banner are drawn HERE, by the frame, for every tab.
+/// The lead used to be optional and two of the seven panes remembered to add one, so five of them
+/// opened with a bare word floating above a card and a person arriving at a tab got no orientation.
+/// Making it structural is what stops that being a thing a pane can forget: [`copy::lead`] is an
+/// exhaustive match, so a new tab has to write its sentence in order to compile.
 pub(crate) fn draw_tab(
     ui: &mut Ui,
     at: Rect,
@@ -129,6 +137,8 @@ pub(crate) fn draw_tab(
     let mut flow = Flow::new(ui, at, live);
 
     flow.place(|ui, at| (text::title(ui, at, t, &tab.label), ()));
+    flow.gap(space::S2);
+    flow.place(|ui, at| (text::body(ui, at, t, copy::lead(tab.id)), ()));
     flow.gap(space::S4);
 
     let state = PaneState::of_note(&tab.note);
