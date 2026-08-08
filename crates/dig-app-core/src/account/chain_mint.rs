@@ -20,15 +20,23 @@
 //! keeps them apart: the canonical read trait deliberately cannot broadcast. This module takes one of
 //! each, so a host can supply a reader with no way to spend.
 //!
-//! # What this module still cannot do, and it is not dig-account's fault any more
+//! # What this module still cannot do, and exactly which method is missing
 //!
-//! dig-app has no production transport for EITHER seam. `dig-node-control-interface` 0.3.0 exposes
-//! exactly one wallet method — `control.wallet.balance` — so there is no coin read, no peak height and
-//! no push, and [`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) refuses both
-//! `coins` and `broadcast` for that reason. So the code below is complete and proven against a chain,
-//! and the binary wires [`MintAvailability::NoChainTransport`] until the node grows those methods
-//! (dig_ecosystem#2376). That is why the startup gate asks whether a mint is POSSIBLE before it shows
-//! anybody a wizard: see [`crate::account::journey::startup_wizard`].
+//! `dig-node-control-interface` 0.6.0 gave dig-app three of the four reads a mint needs:
+//! `control.wallet.coins` selects the funding coin, `control.wallet.peak` bounds a claimed
+//! confirmation, and `control.wallet.broadcast` pushes the signed bundle
+//! ([`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) speaks all three).
+//!
+//! The fourth is **a coin read BY COIN ID**, and it does not exist. `mint_status` asks the chain for
+//! the DID coin's record — that is the confirmation — and for the funding coin's, to tell a mint that
+//! is merely slow from one that can never confirm because its input was spent elsewhere. The coins
+//! method answers for an ADDRESS and reports only UNSPENT coins, so it can see neither.
+//!
+//! A mint on that transport could be pushed — real XCH, gone — and then never observed, and a DID is
+//! recorded only from evidence of a confirmation. So the binary supplies
+//! [`MintSeams::NoChainTransport`] until the node grows that read (dig_ecosystem#2376), and the
+//! startup gate asks whether a mint is POSSIBLE before it shows anybody a wizard: see
+//! [`crate::account::journey::startup_wizard`].
 
 use std::sync::Mutex;
 
@@ -40,7 +48,7 @@ use dig_chainsource_interface::ChainSource;
 
 use crate::account::active_profile::ActiveProfile;
 use crate::account::did::MintEvidence;
-use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission};
+use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission, UnavailableMinter};
 use crate::account::residency::AccountResidency;
 
 /// Mojos in one XCH. Used only to render a shortfall a person can read.
@@ -58,6 +66,72 @@ pub enum MintAvailability {
     /// This build has no way to read coins or push a bundle, so no mint can be attempted on any
     /// account. Distinct from a wallet that merely has no funds — that one the user can fix.
     NoChainTransport,
+}
+
+/// The DID-minting seams a build actually has — and the ONLY source of a [`MintAvailability`].
+///
+/// # Why this type exists (dig_ecosystem#2377)
+///
+/// The gate and the minter used to be separate expressions: a free-standing `mint_availability()`
+/// returned a constant, while the wizard was handed its minter somewhere else entirely. Flipping
+/// that constant to [`MintAvailability::Possible`] in ONE line therefore opened an undismissible
+/// wizard whose only forward control answered "not available in this version" — the dead end
+/// dig_ecosystem#1800 removed — and, on the same line, made the app ask for a password at start-up.
+/// Neither was catchable by a test, because both lived in the binary.
+///
+/// Here the two cannot disagree, because they are the same value: the availability is READ OFF the
+/// seams, and obtaining a `Possible` means having constructed a real minter to read it from. A build
+/// with no chain transport has no `Wired` variant to name.
+pub enum MintSeams<'a> {
+    /// A real minter and the observer that can see what it pushed.
+    Wired {
+        /// Builds, signs and pushes the mint spend.
+        minter: &'a dyn DidMinter,
+        /// Watches the chain for the pushed spend's confirmation.
+        observer: &'a dyn MintObserver,
+    },
+    /// This build has no way to read coins or push a bundle, so nothing on this machine can mint.
+    NoChainTransport,
+}
+
+impl MintSeams<'_> {
+    /// Whether a mint can be attempted at all — derived from the seams, never asserted beside them.
+    pub fn availability(&self) -> MintAvailability {
+        match self {
+            MintSeams::Wired { .. } => MintAvailability::Possible,
+            MintSeams::NoChainTransport => MintAvailability::NoChainTransport,
+        }
+    }
+
+    /// The minter the wizard should use. Without a transport this is the one that refuses honestly,
+    /// so a wizard reached by any other route still cannot fabricate a spend.
+    pub fn minter(&self) -> &dyn DidMinter {
+        match self {
+            MintSeams::Wired { minter, .. } => *minter,
+            MintSeams::NoChainTransport => &UnavailableMinter,
+        }
+    }
+
+    /// The observer the wizard should watch with, paired with [`minter`](Self::minter).
+    pub fn observer(&self) -> &dyn MintObserver {
+        match self {
+            MintSeams::Wired { observer, .. } => *observer,
+            MintSeams::NoChainTransport => &UnreachableChain,
+        }
+    }
+}
+
+/// The observer a build with no transport gets: it can never look, and says so.
+///
+/// Lives beside [`MintSeams`] rather than in the binary so the transport-less pairing is one value
+/// a test can hold, rather than two constants a shell assembles by hand.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnreachableChain;
+
+impl MintObserver for UnreachableChain {
+    fn look(&self, _spend_id: &str) -> Sighting {
+        Sighting::Unreachable
+    }
 }
 
 /// Mints a DID through dig-account, against an injected chain reader and publisher.
@@ -525,6 +599,43 @@ mod tests {
             minter.look(&spend_id),
             Sighting::Pending,
             "the control: its OWN spend is still answerable"
+        );
+    }
+
+    /// **An availability and the minter it describes cannot disagree** (dig_ecosystem#2377).
+    ///
+    /// The defect this replaces was a PLACEMENT: the gate lived in one expression and the minter in
+    /// another, so a one-line edit to the gate produced a wizard that opened unbidden and could not
+    /// be completed. A test asserting only "the gate says no" would have been satisfied by that
+    /// arrangement identically.
+    ///
+    /// So this asserts the PAIRING, from both sides — the transport-less seams yield both
+    /// `NoChainTransport` AND a minter that refuses, and a wired seam yields both `Possible` AND a
+    /// minter that pushes. The second half is what keeps the first from passing trivially: with
+    /// only the transport-less case, a `minter()` hardcoded to `UnavailableMinter` would pass.
+    #[test]
+    fn the_availability_and_the_minter_are_read_off_the_same_value() {
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let publisher = RecordingPublisher::default();
+        let real = bench.mint(&chain, &publisher);
+
+        let absent = MintSeams::NoChainTransport;
+        assert_eq!(absent.availability(), MintAvailability::NoChainTransport);
+        assert_eq!(
+            absent.minter().submit(),
+            Submission::NotAvailable,
+            "a build reported as having no transport must also be unable to spend"
+        );
+
+        let wired = MintSeams::Wired {
+            minter: &real,
+            observer: &real,
+        };
+        assert_eq!(wired.availability(), MintAvailability::Possible);
+        assert!(
+            matches!(wired.minter().submit(), Submission::Submitted { .. }),
+            "a build reported as able to mint must have a minter that really can"
         );
     }
 

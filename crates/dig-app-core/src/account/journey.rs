@@ -15,7 +15,7 @@
 //!   are dropped; the functions return an outcome, never a phrase.
 
 use crate::account::boot::DiscardOutcome;
-use crate::account::chain_mint::MintAvailability;
+use crate::account::chain_mint::{MintAvailability, MintSeams};
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::mint::{
@@ -942,8 +942,8 @@ pub enum StartupWizard {
 ///   to read must reach the app; setting up an account stays the deliberate choice it is today, from
 ///   the DIG menu. "No DID was minted" is true of that machine too, and answering it with an
 ///   unrequested account-creation flow at every launch would break a promise the app makes elsewhere.
-pub fn startup_wizard(account: StartupAccount, mint: MintAvailability) -> StartupWizard {
-    match (account, mint) {
+pub fn startup_wizard(account: StartupAccount, mint: &MintSeams<'_>) -> StartupWizard {
+    match (account, mint.availability()) {
         (StartupAccount::Enrolled(AccountCompleteness::WalletOnly), MintAvailability::Possible) => {
             StartupWizard::AtTheDidStep
         }
@@ -1007,9 +1007,10 @@ pub struct DidMinting<'a> {
 ///   window toolkit and adding one to a custody-holding binary is a security surface, not a crate pick —
 ///   and a modal cannot poll a chain or update itself. So the user is given their address and told to
 ///   fund it when they are ready, instead of a "waiting for funds…" screen that could never be waiting.
-/// - **The DID step cannot mint, and says so.** Nothing in this build can mint (see
-///   [`crate::account::mint`]) and no [`TrayAction`](crate::tray_menu::TrayAction) can either — that is
-///   structural, not an oversight. #1820
+/// - **The DID step cannot mint, and says so.** The mint itself is real and proven against a Chia
+///   consensus validator ([`crate::account::chain_mint`]); what this build lacks is a TRANSPORT that
+///   can watch one confirm, so [`MintSeams::NoChainTransport`] is what the shell supplies and every
+///   entry point refuses honestly (dig_ecosystem#2376). #1820
 ///   requires a DID be presented as REQUIRED rather than optional, so the step names it as the remaining,
 ///   required step and states plainly that it is not available in this version, rather than presenting a
 ///   button that silently does nothing or claiming the account "fully works without a DID".
@@ -1803,6 +1804,29 @@ mod tests {
         fn copy(&self, address: &str) -> bool {
             self.copied.lock().unwrap().push(address.to_owned());
             self.succeeds
+        }
+    }
+
+    /// Seams that CAN mint, as the shell would build them once a chain transport exists.
+    ///
+    /// Built from a real minter rather than named as an availability, which is the whole point of
+    /// [`MintSeams`]: there is no way to write "a mint is possible here" without one.
+    fn wired() -> MintSeams<'static> {
+        /// A minter that pushes the fixture spend. `'static` so the seams can be, too.
+        struct AlwaysSubmits;
+
+        impl DidMinter for AlwaysSubmits {
+            fn submit(&self) -> Submission {
+                Submission::Submitted {
+                    spend_id: MINTED_SPEND.to_owned(),
+                    did: MINTED_DID.to_owned(),
+                }
+            }
+        }
+
+        MintSeams::Wired {
+            minter: &AlwaysSubmits,
+            observer: &crate::account::chain_mint::UnreachableChain,
         }
     }
 
@@ -3026,11 +3050,11 @@ mod tests {
     /// of the four false ones, which is exactly what the enumeration is for.
     #[test]
     fn the_startup_wizard_opens_only_for_an_enrolled_account_that_can_still_mint() {
-        use MintAvailability::{NoChainTransport, Possible};
         use StartupAccount::{Enrolled, NotEnrolled};
+        let (possible, no_transport) = (wired(), MintSeams::NoChainTransport);
 
         assert_eq!(
-            startup_wizard(Enrolled(AccountCompleteness::WalletOnly), Possible),
+            startup_wizard(Enrolled(AccountCompleteness::WalletOnly), &possible),
             StartupWizard::AtTheDidStep,
             "an account with a wallet and no DID is precisely what dig_ecosystem#2359 describes"
         );
@@ -3038,22 +3062,22 @@ mod tests {
         for (account, mint, why) in [
             (
                 Enrolled(AccountCompleteness::DidBound),
-                Possible,
+                &possible,
                 "an account that already holds a DID must never see the wizard again",
             ),
             (
                 Enrolled(AccountCompleteness::WalletOnly),
-                NoChainTransport,
+                &no_transport,
                 "a host that cannot mint must not show a window with no control that could clear it",
             ),
             (
                 NotEnrolled,
-                Possible,
+                &possible,
                 "reading DIG content needs no account, so a reader is never made to create one",
             ),
             (
                 NotEnrolled,
-                NoChainTransport,
+                &no_transport,
                 "neither condition holds, so neither reason to open it does",
             ),
         ] {
@@ -3081,7 +3105,7 @@ mod tests {
                 StartupAccount::Enrolled(AccountCompleteness::of(
                     before.as_ref().map(DidRecord::did)
                 )),
-                MintAvailability::Possible
+                &wired()
             ),
             StartupWizard::AtTheDidStep,
             "before any mint, the wizard opens"
@@ -3098,7 +3122,7 @@ mod tests {
                 StartupAccount::Enrolled(AccountCompleteness::of(
                     after.as_ref().map(DidRecord::did)
                 )),
-                MintAvailability::Possible
+                &wired()
             ),
             StartupWizard::NotNeeded,
             "once a mint is recorded with its evidence, the wizard stays shut"

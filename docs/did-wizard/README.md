@@ -4,7 +4,9 @@ Every screen of the first-run DID wizard, in both themes. Light is the default; 
 opt-in.
 
 The wizard opens from the DIG menu's **Set up** row, and — since dig_ecosystem#2359 — **when the app
-starts and this computer has an account with no minted DID**. It is one journey read as a sequence: the
+starts and this computer has an account with no minted DID, on a build that can actually mint one**.
+This build cannot (it has no chain transport), so the start-up opening does not happen here; `SPEC.md`
+§3.1b states the same condition. It is one journey read as a sequence: the
 funding claim, the offer that spends, a wait, then exactly one of five endings.
 
 | screen | light | dark |

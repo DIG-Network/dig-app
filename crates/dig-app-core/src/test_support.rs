@@ -661,9 +661,7 @@ pub mod node {
                 "transaction_id": serde_json::Value::Null,
                 "rejection": reason,
             }),
-            BroadcastReply::Rejected { code, symbol } => {
-                return rejection(*code, symbol, "push")
-            }
+            BroadcastReply::Rejected { code, symbol } => return rejection(*code, symbol, "push"),
         };
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
     }

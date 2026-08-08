@@ -4,10 +4,11 @@
 //! [`super::overview`] describes what the Wallet surface may honestly say; this module is what makes
 //! it say a number. Two pieces:
 //!
-//! - [`NodeWalletEngine`] — a [`WalletEngine`] whose `balance` is one
-//!   `control.wallet.balance` call over the loopback control plane ([`crate::control`]).
-//! - [`NodeBalance`] — the throttle that owns *when* that call happens, so the tray's twice-a-second
-//!   repaint does not become twice-a-second chain reads.
+//! - [`NodeWalletEngine`] — a [`WalletEngine`] over the loopback control plane
+//!   ([`crate::control`]): `control.wallet.balance` and `control.wallet.coins` are OPEN reads, and
+//!   `control.wallet.broadcast` pushes an already-signed bundle behind the control token.
+//! - [`NodeBalance`] — the throttle that owns *when* the balance call happens, so the tray's
+//!   twice-a-second repaint does not become twice-a-second chain reads.
 //!
 //! # The capability is asked, never assumed
 //!
@@ -20,10 +21,14 @@
 //!
 //! # The custody boundary
 //!
-//! Reading a balance is a chain read of a PUBLIC address. No key material crosses into the node —
-//! the request carries only a bech32m address and an asset name, and dig-node serves the method as
-//! an OPEN read for exactly that reason. Sending (which does involve custody) is #2207's, and this
-//! engine deliberately refuses it.
+//! Reading a balance or a coin list is a chain read of a PUBLIC address. No key material crosses
+//! into the node — the request carries only a bech32m address and an asset name, and dig-node serves
+//! both as OPEN reads for exactly that reason.
+//!
+//! The push carries SIGNED BYTES and nothing else (§908). dig-app builds and signs locally and hands
+//! the node a finished bundle; there is deliberately no parameter through which the node could come
+//! to hold, derive or use a key. What this engine transports is therefore never custody — it is a
+//! chain read and a relay.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -250,9 +255,7 @@ fn classify(method: ControlMethod, failure: ControlFailure) -> WalletError {
         ControlFailure::Transport(ControlCallError::HttpRefused { code: 401, .. }) => {
             unauthorized(method)
         }
-        ControlFailure::Rejected(ref e)
-            if e.data.code == ControlErrorCode::Unauthorized.name() =>
-        {
+        ControlFailure::Rejected(ref e) if e.data.code == ControlErrorCode::Unauthorized.name() => {
             unauthorized(method)
         }
         other => classify_read_failure(other),
@@ -795,7 +798,10 @@ mod tests {
             [1_500, 2_500]
         );
         assert_eq!(
-            read.coins.iter().map(|c| c.coin_id.as_str()).collect::<Vec<_>>(),
+            read.coins
+                .iter()
+                .map(|c| c.coin_id.as_str())
+                .collect::<Vec<_>>(),
             [format!("{:064x}", 1_500), format!("{:064x}", 2_500)]
         );
         assert!(read.coins.iter().all(|c| c.asset == Asset::Dig));
@@ -843,7 +849,10 @@ mod tests {
         let node = FakeNode::serving_coins(CoinsReply::Coins(vec![FakeCoin::confirmed("xch", 42)]));
         let engine = NodeWalletEngine::new(node.endpoint(), None, Duration::from_secs(5));
         assert_eq!(
-            read_coins(&engine, Asset::Xch).expect("an open read needs no token").coins.len(),
+            read_coins(&engine, Asset::Xch)
+                .expect("an open read needs no token")
+                .coins
+                .len(),
             1
         );
     }
@@ -865,7 +874,9 @@ mod tests {
         let node = FakeNode::serving_broadcast(BroadcastReply::Accepted {
             transaction_id: "abc123".to_string(),
         });
-        let outcome = engine_for(&node).broadcast(push()).expect("the node answered");
+        let outcome = engine_for(&node)
+            .broadcast(push())
+            .expect("the node answered");
 
         assert!(outcome.accepted);
         assert_eq!(outcome.transaction_id.as_deref(), Some("abc123"));
@@ -931,7 +942,8 @@ mod tests {
     /// token case above.
     #[test]
     fn an_older_node_that_cannot_push_reads_as_an_older_node() {
-        let node = FakeNode::serving_broadcast(BroadcastReply::rejected(-32601, "METHOD_NOT_FOUND"));
+        let node =
+            FakeNode::serving_broadcast(BroadcastReply::rejected(-32601, "METHOD_NOT_FOUND"));
         assert!(matches!(
             engine_for(&node).broadcast(push()),
             Err(WalletError::EngineUnsupported)
