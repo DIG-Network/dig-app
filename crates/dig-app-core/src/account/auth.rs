@@ -2,16 +2,18 @@
 //!
 //! dig-account is headless: to unlock an account or confirm a spend it calls BACK through the
 //! [`dig_account::AuthProvider`] the harness injects. This module supplies that injection and keeps
-//! the OS-native UX behind a testable [`AuthCeremony`] seam:
+//! the OS-native UX behind a testable [`AuthCeremony`] seam.
 //!
-//! - [`HarnessAuthProvider`] implements [`dig_account::AuthProvider`] by delegating to an injected
-//!   [`AuthCeremony`] — the thing that actually renders the OS-native password/TOTP/passkey prompt
-//!   (#950 signing modal). Keeping the ceremony behind a trait means the provider is unit-testable
-//!   with a fake, and the per-OS renderer is swapped in without touching the dig-account boundary.
-//! - [`AlwaysConfirmAuthorizer`] is the fail-closed default [`dig_account::SpendAuthorizer`]: it adds
-//!   no programmatic auto-approval, so EVERY spend rests on the user's explicit
-//!   [`confirm_spend`](dig_account::AuthProvider::confirm_spend) ceremony (a decline blocks the sign).
-//!   The two-tier vault/hot brain (#1504/#1505/#1398) replaces it later by implementing the same seam.
+//! [`HarnessAuthProvider`] implements [`dig_account::AuthProvider`] by delegating to an injected
+//! [`AuthCeremony`] — the thing that actually renders the OS-native password/TOTP/passkey prompt
+//! (#950 signing modal). Keeping the ceremony behind a trait means the provider is unit-testable
+//! with a fake, and the per-OS renderer is swapped in without touching the dig-account boundary.
+//!
+//! There is deliberately no authorizer here. dig-app used to supply one — `AlwaysConfirmAuthorizer`,
+//! whose whole body was `Ok(())` — and `dig-account` 0.5.0 removed the trait it implemented for
+//! exactly that reason. The custody gate is now the concrete
+//! [`PolicyAuthorizer`](dig_account::PolicyAuthorizer), owned by
+//! [`MoneyPath`](crate::account::money::MoneyPath); this module supplies only the ceremony.
 //!
 //! The private key never crosses this boundary: the harness collects factors + a yes/no ruling; the
 //! seed and every signature stay owned by dig-account.
@@ -99,25 +101,9 @@ impl<C: AuthCeremony> AuthProvider for HarnessAuthProvider<C> {
     }
 }
 
-/// The fail-closed default [`dig_account::SpendAuthorizer`]: it imposes NO programmatic spend policy,
-/// so authorization rests entirely on the user's explicit
-/// [`confirm_spend`](dig_account::AuthProvider::confirm_spend) ceremony. It never auto-declines a
-/// user-confirmed spend and never auto-approves without that confirmation — the confirm ceremony is
-/// the gate. The two-tier vault/hot custody brain (#1504/#1505/#1398) replaces this by implementing
-/// the same seam with real spend limits/allowlists.
-pub struct AlwaysConfirmAuthorizer;
-
-impl dig_account::SpendAuthorizer for AlwaysConfirmAuthorizer {
-    fn authorize(&self, _summary: &SpendSummary) -> AccountResult<()> {
-        // No extra programmatic restriction — the async confirm_spend ceremony is the real gate.
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dig_account::SpendAuthorizer;
     use dig_session::Password;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -259,11 +245,5 @@ mod tests {
             declining.confirm_spend(request).await.unwrap(),
             SpendDecision::Decline(Some("not me".into()))
         );
-    }
-
-    #[test]
-    fn always_confirm_authorizer_defers_to_the_confirm_ceremony() {
-        // It imposes no programmatic block; the real gate is the async confirm_spend ceremony.
-        assert!(AlwaysConfirmAuthorizer.authorize(&sample_summary()).is_ok());
     }
 }

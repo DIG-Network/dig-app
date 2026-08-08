@@ -1655,17 +1655,37 @@ the wallet does not hold is skipped, so an incomplete bundle fails closed at the
 being silently forged.
 
 **Authorize before sign (the live money path, master-HD / Model A).** A spend MUST pass a fail-closed
-gate, in this fixed order, before any signature is produced: (1) **summarize** — the recipients + fee
-are independently re-derived from the coin spends (never a caller's claim) and classified into a
-`SpendTier` (`AutoSend` | `Confirm` | `Vault`) under the profile's `CustodyPolicy`; (2) **authorize** —
-the injected `SpendAuthorizer` rules on the summary (programmatic limits/allowlists); (3) **confirm
-ceremony** — for every tier ABOVE `AutoSend` (i.e. `Confirm` and the clawback `Vault` — the
-`RequireAuth` class) the injected `AuthProvider::confirm_spend` MUST run and return `Approve`. An
-authorizer `Ok` is NOT sufficient on its own: a `RequireAuth`-class spend that skips or is declined at
-the confirm ceremony is REFUSED, and the money signer is never even built. The signer is drawn from the
-shared, lockable account residency and re-read at sign time, so a lock (lock-now / idle timeout / OS
-screen lock) that lands during the confirm dialog fails the sign closed. The residency is the SAME
-lockable seed home the identity signer reads — a locked account refuses to sign money AND identity.
+gate before any signature is produced, and the gate is `dig-account`'s concrete `PolicyAuthorizer` —
+NOT an interface the host supplies. dig-app MUST NOT define its own authorizer; the crate's
+`SpendApproval` constructor is `pub(crate)`, so that gate is mechanically the only thing that can
+permit a spend. The order is fixed: (1) **rule** — `PolicyAuthorizer::authorize_op` re-parses and
+summarizes the coin spends ITSELF (the caller supplies bytes, never a description), classifies them
+into a `SpendTier` (`AutoSend` | `Confirm` | `Vault`) under the profile's `CustodyPolicy`, and returns
+a `SpendRuling`. A structural refusal — a vault outflow to anyone but the profile's own hot wallet, a
+value no configured limit can bound — is terminal and no ceremony may overturn it. (2) **confirm
+ceremony** — `SpendRuling::RequiresConfirmation` carries a `PendingApproval`, and
+`PendingApproval::confirm_with` is the ONLY route from it to a signable approval; it runs
+`AuthProvider::confirm_spend` and a decline is terminal. Every tier above `AutoSend`, and every spend
+whose intent is `SpendOpClass::Undeclared`, reaches this ceremony. (3) **sign** —
+`MoneySigner::sign_approved` takes the `SpendApproval` BY VALUE. The approval owns the exact coin
+spends the gate judged and the summary the user was shown, so what is displayed and what is signed are
+two borrows of one value; the approval is neither `Clone` nor `Copy`, so re-use is a compile error
+rather than a runtime replay check.
+
+The custody policy MUST be fixed when the gate is constructed, from the host's persisted user
+configuration — never accepted alongside a spend, or a caller could raise its own limit on the way
+through. The host MUST hold exactly ONE `PolicyAuthorizer` per profile for the unlock's lifetime: the
+rolling period cap's ledger lives inside it, so a gate built per request would start each call with an
+empty ledger and silently turn a period cap into N per-transaction limits.
+
+A caller declares a spend's intent as a `SpendOpClass`. Only an in-process caller that BUILT the spend
+may declare one truthfully; anything arriving from outside the process (a dapp, an IPC peer) MUST pass
+`Undeclared`, which can never auto-approve and is routed to the human instead.
+
+The signer is drawn from the shared, lockable account residency and built AFTER the ceremony, so a lock
+(lock-now / idle timeout / OS screen lock) that lands while the confirm window is open fails the sign
+closed. The residency is the SAME lockable seed home the identity signer reads — a locked account
+refuses to sign money AND identity.
 
 **No user key on the wire (#908).** The seed and every money/identity secret derived from it stay owned
 by the account crate; the money signer holds the key inside its vetted core and exposes signing only.

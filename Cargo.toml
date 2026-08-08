@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "6.0.0"
+version = "7.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -91,7 +91,7 @@ dig-session = "0.5"
 # (`UnlockedAccount::profile_sealing_key`/`profile_sealing_public_key`) the `identity.*` capability
 # class (SPEC §5.6, #1931) seals DIGCHAT1 messages with — so dig-app pins the crates.io version, never
 # a git source (§3.6 all-crates rule).
-dig-account = "0.3.0"
+dig-account = "0.5.0"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account 0.3

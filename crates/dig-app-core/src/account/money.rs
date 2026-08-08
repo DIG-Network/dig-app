@@ -1,31 +1,48 @@
-//! The LIVE money path — authorize-BEFORE-sign, over the master-HD [`AccountResidency`] (#1548,
-//! custody switchover slice C — **SECURITY-CRITICAL, money goes live**).
+//! The LIVE money path — a REAL custody gate before every signature (#1548, dig_ecosystem#2359).
 //!
-//! # The one custody flow money moves through
+//! # What this module is, in one sentence
 //!
-//! A spend is a set of unsigned [`CoinSpend`]s the app has built (via the canonical chip35 spend
-//! builders). This module turns those into a signed [`SpendBundle`] through a
-//! FAIL-CLOSED gate that runs, in order:
+//! It turns a set of unsigned [`CoinSpend`]s into a signed [`SpendBundle`], and the only route from
+//! one to the other runs through `dig-account`'s [`PolicyAuthorizer`] — the concrete custody gate.
 //!
-//! 1. **summarize** — [`AccountResidency::summarize`] independently re-derives the recipients + fee
-//!    from the coin spends (never a caller's claim) and classifies the [`SpendTier`] under the
-//!    profile's [`CustodyPolicy`]. A locked residency summarizes nothing → refused.
-//! 2. **authorize** — the injected [`SpendAuthorizer`] rules on the [`SpendSummary`](dig_account::SpendSummary) (spend limits /
-//!    allowlists / programmatic policy). An `Err` refuses the spend.
-//! 3. **confirm ceremony (where the tier requires it)** — for any tier that
-//!    [`requires_confirmation`] (everything except a within-allowance [`SpendTier::AutoSend`]), the
-//!    injected [`AuthProvider::confirm_spend`] MUST run and return [`SpendDecision::Approve`] before
-//!    a signature is ever produced. **`authorize() == Ok` is NOT sufficient on its own** (the #1522
-//!    gate note): a `RequireAuth`-class spend (Vault / over-allowance Confirm) that skips the confirm
-//!    ceremony is REFUSED — the signer is never even built.
-//! 4. **sign** — ONLY after the gate passes, [`AccountResidency::money_signer`] builds the live
-//!    dig-account money signer and signs the coin spends. The residency is re-read here, so a lock
-//!    that lands DURING the confirm dialog fails the sign closed rather than signing a spend the user
-//!    meant to relock.
+//! # Why there is no authorizer SEAM here any more
+//!
+//! Until `dig-account` 0.5.0 this module was generic over an injectable `SpendAuthorizer`, and dig-app
+//! injected `AlwaysConfirmAuthorizer`, whose entire body was `Ok(())`. Every bound the custody model
+//! advertised — per-transaction limits, the rolling period cap, the vault's hot-wallet-only outflow
+//! rule — was therefore absent from the running application, while the code read as though a gate were
+//! present. dig-account removed the trait for exactly that reason, and `SpendApproval`'s constructor is
+//! `pub(crate)`, so [`PolicyAuthorizer`] is now mechanically the only thing that can permit a spend.
+//!
+//! The policy is no longer a per-call argument either. It is fixed when the gate is built, from the
+//! host's persisted configuration, because a caller that could hand the gate a policy alongside the
+//! spend could raise its own limit on the way through.
+//!
+//! # The gate, in order
+//!
+//! 1. **rule** — [`PolicyAuthorizer::authorize_op`] re-parses and summarizes the coin spends ITSELF
+//!    (the caller supplies bytes, never a description) and returns a [`SpendRuling`]. A structural
+//!    refusal — a vault outflow to anyone but this profile's own hot wallet, a spend no configured
+//!    limit can bound — never reaches step 2.
+//! 2. **confirm** — [`SpendRuling::RequiresConfirmation`] carries a `PendingApproval`, and
+//!    `PendingApproval::confirm_with` is the ONLY route from it to a signable approval. It runs the
+//!    injected [`AuthProvider`]'s ceremony; a decline is terminal.
+//! 3. **sign** — [`MoneySigner::sign_approved`] takes the `SpendApproval` **by value**. The approval
+//!    owns the exact coin spends the gate judged and the summary the user was shown, so what is
+//!    displayed and what is signed are two borrows of one value; there is nothing to compare and
+//!    therefore nothing that can compare wrongly. It is neither `Clone` nor `Copy`, so re-using one is
+//!    a use-after-move compile error rather than a replay to defend against at runtime.
+//!
+//! # One gate per account, held for the unlock's lifetime
+//!
+//! The rolling period cap's ledger lives inside the [`PolicyAuthorizer`] and nowhere else, so a host
+//! that built a gate per request would start each one with an empty ledger and turn a period cap into
+//! N per-transaction limits. [`MoneyPath`] therefore OWNS its authorizer and is itself the long-lived
+//! per-account handle.
 //!
 //! # The custody boundary (#908, Model A)
 //!
-//! The seed + every derived money secret stay owned by dig-account: the signer holds the key inside
+//! The seed and every derived money secret stay owned by dig-account; the signer holds the key inside
 //! its vetted core and exposes signing only. What leaves this module is the signed [`SpendBundle`] —
 //! the same bytes that cross the dig-app→dig-node IPC wire (`control.wallet.broadcast`,
 //! [`crate::wallet::engine`]). No key material ever crosses that wire (asserted at the wire level by
@@ -34,10 +51,11 @@
 use crate::account::active_profile::ActiveProfile;
 use chia_protocol::{CoinSpend, SpendBundle};
 use dig_account::{
-    AccountId, AuthProvider, CustodyPolicy, MoneySigner, SpendAuthorizer, SpendConfirmRequest,
-    SpendDecision, SpendTier,
+    AccountError, AccountId, AuthProvider, AutoSendPolicy, Clock, CustodyPolicy, MoneySigner,
+    PolicyAuthorizer, SpendOpClass, SpendRuling,
 };
 use dig_wallet_backend::types::Network;
+use std::sync::Arc;
 
 use crate::account::residency::AccountResidency;
 
@@ -46,132 +64,156 @@ use crate::account::residency::AccountResidency;
 /// successful, unsigned no-op.
 #[derive(Debug, thiserror::Error)]
 pub enum MoneyPathError {
-    /// The account residency is locked (at summarize or at sign) — nothing is signed. Fail-closed.
+    /// The account residency is locked (at construction or at sign) — nothing is signed. Fail-closed.
     #[error("the account is locked — the spend was not signed")]
     Locked,
 
-    /// The spend summary could not be re-derived from the coin spends (an undecodable / unaccountable
-    /// spend). Fail-closed: the same gate the money signer enforces before signing.
+    /// The spend could not be re-derived from its coin spends (an undecodable, unaccountable spend).
+    /// Fail-closed, and decided by the gate rather than by anything the caller said about the spend.
     #[error("could not summarize the spend: {0}")]
     Summary(String),
 
-    /// The programmatic [`SpendAuthorizer`] refused the spend (a policy limit / allowlist).
+    /// The custody gate refused the spend outright — a policy limit, the vault's hot-wallet-only
+    /// outflow rule, or a value no configured bound can judge. No ceremony can permit it.
     #[error("the spend was not authorized: {0}")]
     Unauthorized(String),
 
     /// The user DECLINED the confirm ceremony (or the ceremony failed to complete) — nothing is
-    /// signed. Distinct from [`Unauthorized`](Self::Unauthorized): the programmatic policy allowed it,
-    /// but the required human confirmation did not approve it.
+    /// signed. Distinct from [`Unauthorized`](Self::Unauthorized): the custody policy would have
+    /// permitted this spend with the user's agreement, and the user did not give it.
     #[error("the spend was declined at the confirm ceremony{}", .0.as_ref().map(|w| format!(": {w}")).unwrap_or_default())]
     Declined(Option<String>),
 
-    /// Signing the (authorized + confirmed) spend failed inside dig-account's money signer.
+    /// Signing the approved spend failed inside dig-account's money signer.
     #[error("spend signing failed: {0}")]
     Sign(String),
 }
 
-/// Whether a spend of this [`SpendTier`] MUST pass the human confirm ceremony before it may be
-/// signed. Only a within-allowance [`SpendTier::AutoSend`] skips it; [`SpendTier::Confirm`] and the
-/// clawback-protected [`SpendTier::Vault`] both require the ceremony (the `RequireAuth` class).
-pub fn requires_confirmation(tier: SpendTier) -> bool {
-    !matches!(tier, SpendTier::AutoSend)
+impl MoneyPathError {
+    /// Classify a `dig-account` error by WHICH gate produced it.
+    ///
+    /// The distinction that matters to a caller is refused-outright versus the-user-said-no, because
+    /// only the second is a decision a person could revisit. Everything the gate refuses structurally
+    /// — [`PolicyDenied`](AccountError::PolicyDenied) and the "no bound can judge this"
+    /// [`PolicyIndeterminate`](AccountError::PolicyIndeterminate) — becomes
+    /// [`Unauthorized`](Self::Unauthorized), and an undecodable spend becomes
+    /// [`Summary`](Self::Summary), which is a defect in the spend rather than a ruling on it.
+    fn from_gate(error: AccountError) -> Self {
+        match error {
+            AccountError::UserDeclined(why) => Self::Declined(Some(why)),
+            AccountError::Spend(why) => Self::Summary(why),
+            other => Self::Unauthorized(other.to_string()),
+        }
+    }
 }
 
-/// The live money path for one account: the fail-closed authorize-before-sign gate over the shared
-/// [`AccountResidency`] (the SAME lockable seed home the identity signer reads, so a lock relocks
-/// BOTH). Generic over the injected [`SpendAuthorizer`] + [`AuthProvider`] so production wires the
-/// real two-tier custody brain + the OS-native ceremony, while tests drive fakes.
-pub struct MoneyPath<A, P>
+/// The live money path for one account: `dig-account`'s custody gate, the confirm ceremony, and the
+/// signer, over the shared [`AccountResidency`] (the SAME lockable seed home the identity signer
+/// reads, so a lock relocks BOTH).
+///
+/// Generic over the injected [`AuthProvider`] only — production wires the OS-native ceremony and tests
+/// drive a fake. The gate itself is NOT injectable; see the [module docs](self).
+pub struct MoneyPath<P>
 where
-    A: SpendAuthorizer,
     P: AuthProvider,
 {
     residency: AccountResidency,
-    authorizer: A,
+    /// The one gate for this account, held for the handle's whole lifetime so the rolling period cap
+    /// measures a window rather than a single request.
+    authorizer: PolicyAuthorizer,
     auth_provider: P,
     account_id: AccountId,
     network: Network,
 }
 
-impl<A, P> MoneyPath<A, P>
+impl<P> MoneyPath<P>
 where
-    A: SpendAuthorizer,
     P: AuthProvider,
 {
-    /// Assemble the money path over `residency`, gating every spend on `authorizer` then
-    /// `auth_provider`, drawing from `account_id` on `network`.
+    /// Assemble the money path over `residency`, gating every spend on a [`PolicyAuthorizer`] built
+    /// from the host's persisted `custody` and `auto_send` configuration.
+    ///
+    /// The gate needs the profile's own hot-wallet receive address — it is what the vault's outflow
+    /// rule compares against — so this reads it live from the residency and fails with
+    /// [`MoneyPathError::Locked`] if the account is not unlocked. Decoding it at construction means an
+    /// unusable address is a construction error rather than a comparison that silently never matches
+    /// at authorization time.
     pub fn new(
         residency: AccountResidency,
-        authorizer: A,
         auth_provider: P,
         account_id: AccountId,
         network: Network,
-    ) -> Self {
-        Self {
+        custody: CustodyPolicy,
+        auto_send: AutoSendPolicy,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, MoneyPathError> {
+        let address = residency
+            .receiving_address()
+            .ok_or(MoneyPathError::Locked)?
+            .map_err(|e| MoneyPathError::Unauthorized(e.to_string()))?;
+        let authorizer = PolicyAuthorizer::new(
+            ActiveProfile::SOLE.ix(),
+            custody,
+            auto_send,
+            &address,
+            clock,
+        )
+        .map_err(MoneyPathError::from_gate)?;
+        Ok(Self {
             residency,
             authorizer,
             auth_provider,
             account_id,
             network,
-        }
+        })
     }
 
-    /// Run the full authorize-before-sign gate over `coin_spends` under `policy`, returning the
-    /// broadcast-ready signed [`SpendBundle`] ONLY when every gate passes.
+    /// Rule on `coin_spends`, obtain the user's agreement where the ruling requires it, and sign —
+    /// returning the broadcast-ready [`SpendBundle`] only when every gate passes.
     ///
-    /// See the [module docs](self) for the ordered gate. Fail-closed at each step; a signature is
-    /// produced only after summarize + authorize + (where required) an approving confirm ceremony all
-    /// pass, and only if the residency is still unlocked at the moment of signing.
+    /// `op_class` declares what the spend is FOR. Only an in-process caller that built the spend can
+    /// make that statement truthfully, so anything arriving from outside the process (a dapp, an IPC
+    /// peer) passes [`SpendOpClass::Undeclared`], which can never auto-approve — it routes to the
+    /// human instead, which is what keeps an undeclared request spendable-with-consent rather than
+    /// unspendable.
     pub async fn authorize_and_sign(
         &self,
         coin_spends: Vec<CoinSpend>,
-        policy: &CustodyPolicy,
+        op_class: SpendOpClass,
     ) -> Result<SpendBundle, MoneyPathError> {
-        // 1. Re-derive + tier the spend from the coin spends themselves (fail-closed when locked).
-        let summary = self
-            .residency
-            .summarize(&coin_spends, policy)
-            .ok_or(MoneyPathError::Locked)?
-            .map_err(|e| MoneyPathError::Summary(e.to_string()))?;
-
-        // 2. Programmatic authorization. An Ok here is necessary but NOT sufficient (see step 3).
-        self.authorizer
-            .authorize(&summary)
-            .map_err(|e| MoneyPathError::Unauthorized(e.to_string()))?;
-
-        // 3. The human confirm ceremony, REQUIRED for every tier above auto-send. This is the #1522
-        //    gate: a RequireAuth-class spend cannot complete on authorize()==Ok alone.
-        if requires_confirmation(summary.tier) {
-            // The wallet signs at exactly one derivation index (dig_ecosystem#2236), so the profile
-            // the user is shown in the confirm dialog is that same sole active one.
-            let request = SpendConfirmRequest::new(
-                self.account_id.clone(),
-                ActiveProfile::SOLE.ix(),
-                summary.clone(),
-            );
-            match self
-                .auth_provider
-                .confirm_spend(request)
+        // 1. The gate re-derives the spend from these very bytes and rules on it. A structural
+        //    refusal returns here and no ceremony can overturn it.
+        let approval = match self
+            .authorizer
+            .authorize_op(&coin_spends, op_class)
+            .map_err(MoneyPathError::from_gate)?
+        {
+            SpendRuling::Approved(approval) => approval,
+            // 2. The gate will permit this only with the user's agreement. `confirm_with` runs the
+            //    ceremony and is the ONLY route from a pending approval to a signable one — a host
+            //    cannot assert consent it did not obtain.
+            SpendRuling::RequiresConfirmation(pending) => pending
+                .confirm_with(
+                    &self.auth_provider,
+                    self.account_id.clone(),
+                    // The wallet signs at exactly one derivation index (dig_ecosystem#2236), so the
+                    // profile named in the confirm dialog is that same sole active one.
+                    ActiveProfile::SOLE.ix(),
+                )
                 .await
-                .map_err(|e| MoneyPathError::Declined(Some(e.to_string())))?
-            {
-                SpendDecision::Approve => {}
-                SpendDecision::Decline(why) => return Err(MoneyPathError::Declined(why)),
-            }
-        }
+                .map_err(MoneyPathError::from_gate)?,
+        };
 
-        // 4. Only now build the signer + sign. Re-reading the residency means a lock that landed
-        //    during the confirm dialog fails the sign closed (no snapshot escape).
+        // 3. Build the signer LAST. Reading the residency here rather than at construction means a
+        //    lock that landed during the confirm ceremony fails the sign closed, instead of signing a
+        //    spend under an unlock the user has since revoked.
         let signer = self
             .residency
             .money_signer(self.network)
-            .ok_or(MoneyPathError::Locked)?
-            .map_err(|e| MoneyPathError::Sign(e.to_string()))?;
-        let signature = signer
-            .sign_coin_spends(&coin_spends)
-            .map_err(|e| MoneyPathError::Sign(e.to_string()))?;
-
-        Ok(SpendBundle::new(coin_spends, signature))
+            .ok_or(MoneyPathError::Locked)?;
+        signer
+            .sign_approved(approval)
+            .map_err(|e| MoneyPathError::Sign(e.to_string()))
     }
 }
 
@@ -186,26 +228,43 @@ mod tests {
     use chia_sdk_driver::{SpendContext, StandardLayer};
     use chia_sdk_types::Conditions;
     use dig_account::{
-        AccountSession, AccountStore, AuthFactors, HotWallet, ProfileIx, Result as AccountResult,
-        SpendSummary, UnlockRequest, Vault, WalletKey,
+        AccountSession, AccountStore, AuthFactors, FixedClock, HotWallet, OpClassLimits, ProfileIx,
+        Result as AccountResult, SpendConfirmRequest, SpendDecision, UnlockRequest, Vault,
+        WalletKey, DEFAULT_PERIOD_SECONDS,
     };
     use dig_keystore::MemoryBackend;
     use dig_session::{Password, ENTROPY_LEN};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
 
     /// A fixed 32-byte entropy that gets BIP-39-expanded before key derivation so the test's
     /// independently-built coin spend (via dig-account's [`WalletKey`]) and the residency's
     /// dig-account money signer derive the SAME canonical wallet key at [`ProfileIx::ROOT`].
-    /// This matches dig-account 0.3's seed expansion via the `bip39` crate.
     const SEED: [u8; ENTROPY_LEN] = [0x7c; ENTROPY_LEN];
+
+    /// An explicit fixture "now", pinned rather than read from the wall clock.
+    ///
+    /// The rolling period cap is measured over a window ending at the clock's answer, so a fixture
+    /// that passed a small number through a real clock would place every recorded spend billions of
+    /// seconds in the past — the window would always be empty and the cap tests would assert nothing.
+    /// 2026-01-01T00:00:00Z, comfortably larger than any window these tests use.
+    const NOW: u64 = 1_767_225_600;
+
+    /// A clock frozen at [`NOW`], so nothing in these tests depends on how long they take to run.
+    fn frozen_clock() -> Arc<dyn Clock> {
+        Arc::new(FixedClock::new(NOW))
+    }
+
+    /// The account id every fixture here uses.
+    fn account_id() -> AccountId {
+        AccountId::new("money-path-test")
+    }
 
     /// A residency over a fresh account enrolled at [`SEED`].
     fn residency_at_seed() -> AccountResidency {
         let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
         let unlocked = AccountSession::enroll(
             store,
-            AccountId::new("money-path-test"),
+            account_id(),
             Password::new("pw"),
             &SEED,
             ProfileIx::ROOT,
@@ -214,25 +273,29 @@ mod tests {
         AccountResidency::new(unlocked)
     }
 
-    /// A real standard-layer XCH send OUT of the wallet's own coin — the same shape a genuine spend
-    /// takes, so dig-account's money signer can actually verify + sign it. `native_out` mojos leave to
-    /// a recipient; the remainder (minus `fee`) returns as change to the wallet.
-    fn real_send(native_out: u64, fee: u64) -> Vec<CoinSpend> {
+    /// The wallet key these fixtures build spends against — the same one the residency's money signer
+    /// derives, so a spend built here is a spend that account can actually sign.
+    fn wallet_key() -> WalletKey {
         let expanded = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &SEED)
             .expect("32 bytes is valid 24-word BIP-39 entropy")
             .to_seed("");
-        let key = WalletKey::from_seed(&expanded);
+        WalletKey::from_seed(&expanded)
+    }
+
+    /// A real standard-layer XCH send out of the wallet's own coin, paying `destination`.
+    ///
+    /// `native_out` mojos go to `destination` as a HINTED output (the money signer's exfiltration
+    /// guard refuses a bare unhinted output, reading it as a possible drain); the remainder, less
+    /// `fee`, returns to the wallet as change.
+    fn send_to(destination: Bytes32, native_out: u64, fee: u64) -> Vec<CoinSpend> {
+        let key = wallet_key();
         let wallet_ph = key.puzzle_hash();
         let mut ctx = SpendContext::new();
         let coin = Coin::new(Bytes32::new([1u8; 32]), wallet_ph, 1_000_000);
-        let recipient = Bytes32::new([9u8; 32]);
-        // The money signer's exfiltration guard requires every non-change output to be a HINTED
-        // recipient (a bare unhinted output reads as a possible drain and is refused). Hint the
-        // recipient; the change coin returns to the wallet's own puzzle hash.
-        let hint = ctx.hint(recipient).unwrap();
+        let hint = ctx.hint(destination).unwrap();
         let change = 1_000_000 - native_out - fee;
         let conditions = Conditions::new()
-            .create_coin(recipient, native_out, hint)
+            .create_coin(destination, native_out, hint)
             .create_coin(wallet_ph, change, Memos::None)
             .reserve_fee(fee);
         StandardLayer::new(key.public_key())
@@ -241,201 +304,371 @@ mod tests {
         ctx.take()
     }
 
-    /// A [`SpendAuthorizer`] that always permits (the fail-closed default's programmatic half —
-    /// authorization then rests entirely on the confirm ceremony).
-    struct AllowAll;
-    impl SpendAuthorizer for AllowAll {
-        fn authorize(&self, _summary: &SpendSummary) -> AccountResult<()> {
-            Ok(())
-        }
+    /// Somebody who is NOT this wallet. A spend paying here genuinely leaves the user's control.
+    const A_STRANGER: Bytes32 = Bytes32::new([9u8; 32]);
+
+    /// A spend paying a third party — the shape a vault outflow must never take without first
+    /// passing through the hot wallet's clawback window.
+    fn send_to_a_stranger(native_out: u64, fee: u64) -> Vec<CoinSpend> {
+        send_to(A_STRANGER, native_out, fee)
     }
 
-    /// A [`SpendAuthorizer`] that always refuses.
-    struct DenyAll;
-    impl SpendAuthorizer for DenyAll {
-        fn authorize(&self, _summary: &SpendSummary) -> AccountResult<()> {
-            Err(dig_account::AccountError::Auth("policy refused".into()))
+    /// A spend paying nobody but this wallet itself, so the vault's outflow rule has nothing to
+    /// refuse. `native_out` still leaves the spent coin, so the spend is a real one with a real total.
+    fn send_to_ourselves(native_out: u64, fee: u64) -> Vec<CoinSpend> {
+        send_to(wallet_key().puzzle_hash(), native_out, fee)
+    }
+
+    /// What [`send_to_a_stranger`] / [`send_to_ourselves`] with these arguments totals to under the
+    /// gate's accounting: the native amounts that leave, plus the fee.
+    const SPEND_TOTAL: u64 = 610;
+
+    /// A hot-wallet custody policy whose allowance is far above [`SPEND_TOTAL`], so a fixture spend
+    /// classifies as [`SpendTier::AutoSend`](dig_account::SpendTier) and the AUTO-SEND policy — not
+    /// the tier — is what the test is varying.
+    fn hot_wallet_that_tiers_our_fixture_as_auto_send() -> CustodyPolicy {
+        CustodyPolicy::Hot(HotWallet {
+            auto_send_limit: 1_000_000,
+        })
+    }
+
+    /// An auto-send policy that permits small sends up to `per_tx` and no more than `period_cap`
+    /// mojos across the whole rolling window.
+    fn small_sends_up_to(per_tx: u64, period_cap: u64) -> AutoSendPolicy {
+        AutoSendPolicy {
+            enabled: true,
+            small_send: OpClassLimits::enabled_up_to(per_tx),
+            period_seconds: DEFAULT_PERIOD_SECONDS,
+            period_cap_mojos: period_cap,
+            ..AutoSendPolicy::default()
         }
     }
 
     /// A recording [`AuthProvider`] that returns a canned [`SpendDecision`] and counts how many times
-    /// the confirm ceremony ran — so a test can prove the ceremony DID (or did not) run.
+    /// the confirm ceremony ran — so a test can prove the ceremony DID or did NOT run, rather than
+    /// only checking where the spend ended up.
     struct RecordingProvider {
         decision: SpendDecision,
         confirms: AtomicUsize,
+        /// Locked from INSIDE the ceremony when set, to reproduce a user locking their account while
+        /// the confirm window is open.
+        lock_during_the_ceremony: Option<AccountResidency>,
     }
+
     impl RecordingProvider {
         fn new(decision: SpendDecision) -> Self {
             Self {
                 decision,
                 confirms: AtomicUsize::new(0),
+                lock_during_the_ceremony: None,
+            }
+        }
+
+        /// A ceremony that approves the spend and locks `residency` before returning.
+        fn approving_but_locks(residency: AccountResidency) -> Self {
+            Self {
+                lock_during_the_ceremony: Some(residency),
+                ..Self::new(SpendDecision::Approve)
             }
         }
     }
+
     #[async_trait]
     impl AuthProvider for RecordingProvider {
         async fn collect_factors(&self, _request: UnlockRequest) -> AccountResult<AuthFactors> {
             unreachable!("the money path never collects unlock factors")
         }
+
         async fn confirm_spend(
             &self,
             _request: SpendConfirmRequest,
         ) -> AccountResult<SpendDecision> {
             self.confirms.fetch_add(1, Ordering::SeqCst);
+            if let Some(residency) = &self.lock_during_the_ceremony {
+                residency.lock_all();
+            }
             Ok(self.decision.clone())
         }
     }
 
-    /// An [`AuthProvider`] that PANICS if the confirm ceremony is ever invoked — used to prove that an
-    /// auto-send spend signs WITHOUT any confirmation.
+    /// An [`AuthProvider`] that PANICS if the confirm ceremony is ever invoked — used to prove a spend
+    /// signed WITHOUT any confirmation, rather than merely that it signed.
     struct NeverConfirm;
+
     #[async_trait]
     impl AuthProvider for NeverConfirm {
         async fn collect_factors(&self, _request: UnlockRequest) -> AccountResult<AuthFactors> {
             unreachable!("no unlock factors on the money path")
         }
+
         async fn confirm_spend(
             &self,
             _request: SpendConfirmRequest,
         ) -> AccountResult<SpendDecision> {
-            panic!("confirm_spend must NOT run for an auto-send spend");
+            panic!("confirm_spend must NOT run for an auto-approved spend");
         }
     }
 
-    #[tokio::test]
-    async fn a_vault_spend_signs_after_an_approving_confirm_ceremony() {
-        let provider = RecordingProvider::new(SpendDecision::Approve);
-        let path = MoneyPath::new(
+    /// Build a money path over a fresh residency, with the given policies and a frozen clock.
+    fn money_path<P: AuthProvider>(
+        provider: P,
+        custody: CustodyPolicy,
+        auto_send: AutoSendPolicy,
+    ) -> MoneyPath<P> {
+        MoneyPath::new(
             residency_at_seed(),
-            AllowAll,
             provider,
-            AccountId::new("money-path-test"),
+            account_id(),
             Network::Mainnet,
-        );
-        let bundle = path
-            .authorize_and_sign(real_send(600, 10), &CustodyPolicy::Vault(Vault::default()))
-            .await
-            .expect("an approved vault spend signs");
-        assert_ne!(
-            bundle.aggregated_signature,
-            chia_bls::Signature::default(),
-            "a signed vault spend carries a real aggregate signature"
-        );
-        assert_eq!(
-            path.auth_provider.confirms.load(Ordering::SeqCst),
-            1,
-            "the vault spend passed through EXACTLY one confirm ceremony before signing"
-        );
+            custody,
+            auto_send,
+            frozen_clock(),
+        )
+        .expect("an unlocked residency yields a money path")
     }
 
+    /// How many ceremonies this path has raised.
+    fn ceremonies(path: &MoneyPath<RecordingProvider>) -> usize {
+        path.auth_provider.confirms.load(Ordering::SeqCst)
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The gate is REAL — the property the dig-account 0.5.0 adoption exists to establish.
+    // -----------------------------------------------------------------------------------------
+
+    /// **A vault outflow to a third party is refused by the gate, before any ceremony — while the
+    /// same spend to nobody but ourselves reaches one.**
+    ///
+    /// The two halves differ in exactly ONE thing: who is paid. That pairing is what makes the test
+    /// load-bearing, and it is aimed at a specific wrong implementation — the one dig-app actually
+    /// shipped. Under the old injectable seam, `AlwaysConfirmAuthorizer::authorize` returned `Ok(())`
+    /// for every summary, so BOTH halves reached the ceremony and BOTH signed on approval. Asserting
+    /// only the refusal would not have distinguished the real gate from a gate that refuses every
+    /// vault spend, which is why the second half is here and why it must genuinely get through.
+    ///
+    /// A note so the second half is not read as more than it is: dig-app's wallet is pinned to one
+    /// derivation index, so a payment to its own puzzle hash is classified as CHANGE and never enters
+    /// `summary.recipients` at all. The hot-wallet half therefore passes the outflow rule vacuously,
+    /// over an empty recipient list. It is an honest control for "the gate does not refuse all vault
+    /// spends"; the address COMPARISON itself is dig-account's own property and is tested there.
     #[tokio::test]
-    async fn a_vault_spend_without_the_confirm_ceremony_is_refused_and_never_signs() {
-        // THE #1522 gate: authorize()==Ok is not enough — a Vault (RequireAuth) spend the user
-        // DECLINES at the confirm ceremony must be refused, and no signature is ever produced.
-        let provider = RecordingProvider::new(SpendDecision::Decline(Some("not me".into())));
-        let path = MoneyPath::new(
-            residency_at_seed(),
-            AllowAll, // programmatic policy ALLOWS it …
-            provider,
-            AccountId::new("money-path-test"),
-            Network::Mainnet,
+    async fn a_vault_spend_to_a_stranger_is_refused_outright_but_one_to_ourselves_is_not() {
+        let to_a_stranger = money_path(
+            RecordingProvider::new(SpendDecision::Approve),
+            CustodyPolicy::Vault(Vault::default()),
+            AutoSendPolicy::default(),
         );
-        let result = path
-            .authorize_and_sign(real_send(600, 10), &CustodyPolicy::Vault(Vault::default()))
+        let refused = to_a_stranger
+            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::Undeclared)
             .await;
+
         assert!(
-            matches!(result, Err(MoneyPathError::Declined(Some(ref w)) ) if w == "not me"),
-            "… yet a declined confirm ceremony REFUSES the spend (never signs): {result:?}"
+            matches!(refused, Err(MoneyPathError::Unauthorized(_))),
+            "a vault spend leaving to a third party must be refused by the gate: {refused:?}"
         );
         assert_eq!(
-            path.auth_provider.confirms.load(Ordering::SeqCst),
-            1,
-            "the confirm ceremony ran and its decline was honoured — the signer was never reached"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_within_allowance_auto_send_signs_without_any_confirmation() {
-        // A hot wallet with a generous allowance classifies a small send as AutoSend; it must NOT
-        // invoke the confirm ceremony (NeverConfirm panics if it does).
-        let path = MoneyPath::new(
-            residency_at_seed(),
-            AllowAll,
-            NeverConfirm,
-            AccountId::new("money-path-test"),
-            Network::Mainnet,
-        );
-        let policy = CustodyPolicy::Hot(HotWallet {
-            auto_send_limit: 1_000_000,
-        });
-        let bundle = path
-            .authorize_and_sign(real_send(600, 10), &policy)
-            .await
-            .expect("a within-allowance auto-send signs with no ceremony");
-        assert_ne!(bundle.aggregated_signature, chia_bls::Signature::default());
-    }
-
-    #[tokio::test]
-    async fn a_programmatically_unauthorized_spend_is_refused_before_any_confirmation() {
-        let provider = RecordingProvider::new(SpendDecision::Approve);
-        let path = MoneyPath::new(
-            residency_at_seed(),
-            DenyAll,
-            provider,
-            AccountId::new("money-path-test"),
-            Network::Mainnet,
-        );
-        let result = path
-            .authorize_and_sign(real_send(600, 10), &CustodyPolicy::Vault(Vault::default()))
-            .await;
-        assert!(matches!(result, Err(MoneyPathError::Unauthorized(_))));
-        assert_eq!(
-            path.auth_provider.confirms.load(Ordering::SeqCst),
+            ceremonies(&to_a_stranger),
             0,
-            "a programmatic refusal short-circuits BEFORE the confirm ceremony"
+            "the refusal is structural, so the user is never asked to approve it"
+        );
+
+        let to_ourselves = money_path(
+            RecordingProvider::new(SpendDecision::Approve),
+            CustodyPolicy::Vault(Vault::default()),
+            AutoSendPolicy::default(),
+        );
+        to_ourselves
+            .authorize_and_sign(send_to_ourselves(600, 10), SpendOpClass::Undeclared)
+            .await
+            .expect("a vault spend that leaves nothing to a third party still signs, with consent");
+
+        assert_eq!(
+            ceremonies(&to_ourselves),
+            1,
+            "the control spend reached the ceremony — the gate is not refusing every vault spend"
         );
     }
 
+    /// **The rolling period cap binds ACROSS calls**, which is only true of a gate the host holds for
+    /// its lifetime.
+    ///
+    /// The cap sits between one fixture spend and two, so the first auto-approves with no ceremony
+    /// and the second — identical in every respect — is escalated to the human. The wrong
+    /// implementation this is aimed at is the one dig-account's own docs warn about: building a
+    /// `PolicyAuthorizer` per request. That gate starts each call with an empty ledger, auto-approves
+    /// both spends and raises zero ceremonies, so a test that drove a single spend could not tell the
+    /// two apart. The first spend is a truthful control: auto-approval genuinely happens here.
     #[tokio::test]
-    async fn a_locked_residency_refuses_the_spend_fail_closed() {
+    async fn the_rolling_period_cap_is_measured_across_calls_not_reset_by_each_one() {
+        let path = money_path(
+            RecordingProvider::new(SpendDecision::Approve),
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            small_sends_up_to(SPEND_TOTAL, SPEND_TOTAL + 1),
+        );
+
+        path.authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
+            .await
+            .expect("the first spend fits inside the period cap");
+        assert_eq!(
+            ceremonies(&path),
+            0,
+            "the first spend was inside the cap, so it auto-approved with no ceremony"
+        );
+
+        path.authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
+            .await
+            .expect("the second spend signs, but only because the user approved it");
+        assert_eq!(
+            ceremonies(&path),
+            1,
+            "the second identical spend exceeded the cumulative cap and was escalated to the human"
+        );
+    }
+
+    /// **An UNDECLARED spend can never auto-approve**, even when a declared one of the very same
+    /// value, under the very same policy, does.
+    ///
+    /// This is the boundary between an in-process caller that built the spend and can truthfully say
+    /// what it is for, and anything arriving from outside the process — a dapp, an IPC peer — which
+    /// cannot. Varying only `op_class` is what distinguishes the real rule from an implementation
+    /// where nothing auto-approves at all, and the declared half proves auto-approval is reachable.
+    #[tokio::test]
+    async fn an_undeclared_spend_goes_to_the_human_where_a_declared_one_auto_approves() {
+        let policy = small_sends_up_to(SPEND_TOTAL, SPEND_TOTAL * 10);
+
+        let declared = money_path(
+            NeverConfirm,
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            policy,
+        );
+        declared
+            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
+            .await
+            .expect(
+                "a declared small send inside its limits auto-approves — NeverConfirm proves it",
+            );
+
+        let undeclared = money_path(
+            RecordingProvider::new(SpendDecision::Approve),
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            policy,
+        );
+        undeclared
+            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::Undeclared)
+            .await
+            .expect("an undeclared spend still signs once the user approves it");
+        assert_eq!(
+            ceremonies(&undeclared),
+            1,
+            "the same spend, undeclared, was routed to the human instead of auto-approved"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Consent, and the fail-closed edges.
+    // -----------------------------------------------------------------------------------------
+
+    /// A declined ceremony refuses the spend, and no signature is ever produced. The custody policy
+    /// would have permitted it; the user did not.
+    #[tokio::test]
+    async fn a_declined_ceremony_refuses_the_spend_and_never_signs() {
+        let path = money_path(
+            RecordingProvider::new(SpendDecision::Decline(Some("not me".into()))),
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            AutoSendPolicy::default(),
+        );
+
+        let result = path
+            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
+            .await;
+
+        assert!(
+            matches!(&result, Err(MoneyPathError::Declined(Some(why))) if why.contains("not me")),
+            "a declined ceremony must refuse the spend: {result:?}"
+        );
+        assert_eq!(
+            ceremonies(&path),
+            1,
+            "the ceremony ran and its decline was honoured — the signer was never reached"
+        );
+    }
+
+    /// **A lock that lands DURING the confirm ceremony fails the sign closed.**
+    ///
+    /// This is a placement test, not an outcome test: the money path builds its signer after the
+    /// ceremony rather than before it, and an implementation that captured the signer up front would
+    /// sign this spend under an unlock the user has since revoked. Locking from inside the ceremony
+    /// is what makes the two placements observably different — with the lock taken before the call
+    /// instead, both implementations refuse and the ordering would be pinned by nothing.
+    #[tokio::test]
+    async fn a_lock_during_the_confirm_ceremony_fails_the_sign_closed() {
         let residency = residency_at_seed();
         let path = MoneyPath::new(
             residency.clone(),
-            AllowAll,
-            RecordingProvider::new(SpendDecision::Approve),
-            AccountId::new("money-path-test"),
+            RecordingProvider::approving_but_locks(residency.clone()),
+            account_id(),
             Network::Mainnet,
-        );
-        residency.lock_all();
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            AutoSendPolicy::default(),
+            frozen_clock(),
+        )
+        .expect("the residency is unlocked when the path is built");
+
         let result = path
-            .authorize_and_sign(real_send(600, 10), &CustodyPolicy::Vault(Vault::default()))
+            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
             .await;
+
         assert!(
             matches!(result, Err(MoneyPathError::Locked)),
-            "a locked residency summarizes nothing and never signs: {result:?}"
+            "the user locked their account while the confirm window was open: {result:?}"
+        );
+        assert_eq!(
+            ceremonies(&path),
+            1,
+            "the ceremony did run and did approve — the refusal came from the lock, not the user"
         );
     }
 
-    #[tokio::test]
-    async fn an_undecodable_spend_fails_closed_at_summarize() {
-        let path = MoneyPath::new(
-            residency_at_seed(),
-            AllowAll,
-            RecordingProvider::new(SpendDecision::Approve),
-            AccountId::new("money-path-test"),
-            Network::Mainnet,
-        );
-        // An empty coin-spend set is not a decodable spend.
-        let result = path
-            .authorize_and_sign(vec![], &CustodyPolicy::Hot(HotWallet::default()))
-            .await;
-        assert!(matches!(result, Err(MoneyPathError::Summary(_))));
-    }
-
+    /// A money path cannot even be BUILT over a locked residency: the gate needs the profile's own
+    /// hot-wallet address, and a locked account has none to give.
     #[test]
-    fn requires_confirmation_is_true_for_every_tier_above_auto_send() {
-        assert!(!requires_confirmation(SpendTier::AutoSend));
-        assert!(requires_confirmation(SpendTier::Confirm));
-        assert!(requires_confirmation(SpendTier::Vault));
+    fn a_locked_residency_yields_no_money_path_at_all() {
+        let residency = residency_at_seed();
+        residency.lock_all();
+
+        let built = MoneyPath::new(
+            residency,
+            NeverConfirm,
+            account_id(),
+            Network::Mainnet,
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            AutoSendPolicy::default(),
+            frozen_clock(),
+        );
+
+        assert!(
+            matches!(built, Err(MoneyPathError::Locked)),
+            "a locked account has no hot-wallet address, so there is no gate to build"
+        );
+    }
+
+    /// An undecodable spend fails closed at the gate's own derivation, before any ruling is made.
+    #[tokio::test]
+    async fn an_undecodable_spend_fails_closed_before_any_ruling() {
+        let path = money_path(
+            RecordingProvider::new(SpendDecision::Approve),
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            AutoSendPolicy::default(),
+        );
+
+        let result = path
+            .authorize_and_sign(vec![], SpendOpClass::SmallSend)
+            .await;
+
+        assert!(
+            matches!(result, Err(MoneyPathError::Summary(_))),
+            "an empty coin-spend set is not a spend the gate can account for: {result:?}"
+        );
+        assert_eq!(ceremonies(&path), 0, "nothing was put to the user");
     }
 }

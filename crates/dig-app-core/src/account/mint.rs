@@ -24,9 +24,24 @@ use crate::account::second_factor::journey::Clock;
 
 /// Submits the DID mint spend.
 ///
-/// A seam because nothing can mint today: `dig-account`'s `profile_mint` is a Phase-2 stub with final
-/// signatures and no implementation, so the production implementation is [`UnavailableMinter`], which
-/// says so. When the real minter lands it implements this trait and the wizard is unchanged.
+/// A seam because nothing in dig-app can mint today — and the reason is worth stating precisely,
+/// because it is no longer the obvious one.
+///
+/// `dig-account` 0.5.0 **does** implement the mint: `ProfileMinter::begin_did_mint` builds, signs and
+/// pushes a real spend, and `ProfileMinter::mint_status` turns a buried confirmation into evidence. The
+/// gap is reachability. `ProfileMinter::new` takes an `Arc<UnlockedMasterSeed>`, and nothing in
+/// dig-account's public API produces one: `UnlockedAccount` holds the seed privately and hands out an
+/// identity signer, wallet ops, a DEK, a sealing key and the recovery phrase — but no minter.
+/// dig_ecosystem#2371 adds the accessor.
+///
+/// The one workaround available to dig-app would be to re-unlock the master seed through `dig-session`
+/// and hold a second `Arc<UnlockedMasterSeed>` outside dig-account. That copy would not observe the
+/// account's [`Residency`](dig_account::Residency), so lock-now, the idle timeout and the OS screen
+/// lock would all leave it live and able to spend. In a binary whose whole custody model is one
+/// lockable seed home, that is the wrong trade, and it is not made here.
+///
+/// So the production implementation stays [`UnavailableMinter`], which refuses honestly. When the
+/// accessor lands, the real minter implements this trait and the wizard is unchanged.
 pub trait DidMinter {
     /// Build, authorize, sign and push the mint spend.
     ///

@@ -823,12 +823,27 @@ pub fn replace_account<S: ProfileSealer>(
 /// app must stop telling people their account "fully works without a DID".
 ///
 /// It is modelled here, beside the journey that produces it, rather than as another
-/// [`AccountState`](crate::tray_menu::AccountState) variant. The reason is arithmetic: `dig-account`'s
-/// minter is a Phase-2 stub and no code path can mint, so an `AccountState` for "no DID yet" would be the
-/// state EVERY account on every machine sits in permanently — a tray that tells every user, for ever,
-/// that they are half-finished, with no control that could ever finish it. Completeness is a real fact
-/// about an account and is reported as one; it is not a lock state, and pretending otherwise would make
-/// the lock states lie.
+/// [`AccountState`](crate::tray_menu::AccountState) variant. The reason is that completeness is a real
+/// fact about an account and is reported as one; it is not a lock state, and pretending otherwise would
+/// make the lock states lie.
+///
+/// # Why nothing yet GATES on this, and what has to be true before anything does
+///
+/// A startup gate that showed the wizard whenever an account is [`WalletOnly`](Self::WalletOnly) is the
+/// user's stated intent (dig_ecosystem#2359: *"the DiD wizard should appear when the program starts and
+/// it detects no DiD was minted"*), and it is not wired yet, deliberately.
+///
+/// **dig-app still cannot mint a DID.** `dig-account` 0.5.0 does implement one —
+/// `ProfileMinter::begin_did_mint` builds, signs and pushes a real spend, and `mint_status` turns a
+/// buried confirmation into evidence — but no host can reach it: `ProfileMinter::new` needs an
+/// `Arc<UnlockedMasterSeed>`, and `UnlockedAccount` hands out a signer, wallet ops, a DEK and a sealing
+/// key while keeping the seed itself private. dig_ecosystem#2371 is the accessor that closes that.
+///
+/// Until it does, gating on DID absence would make EVERY existing account, on every machine, meet the
+/// gate on every launch — with no control that could clear it. That is the dead end
+/// dig_ecosystem#1800 removed from this app once already, and moving it from the menu to the startup
+/// path would make it unavoidable rather than merely present. So the fact is reported, and the gate
+/// waits for the mint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountCompleteness {
     /// A wallet exists — a seed, a recovery phrase, an address, a working signer — but no on-chain DID
@@ -946,8 +961,9 @@ pub struct DidMinting<'a> {
 ///   window toolkit and adding one to a custody-holding binary is a security surface, not a crate pick —
 ///   and a modal cannot poll a chain or update itself. So the user is given their address and told to
 ///   fund it when they are ready, instead of a "waiting for funds…" screen that could never be waiting.
-/// - **The DID step cannot mint, and says so.** `dig-account`'s minter is a Phase-2 stub and no
-///   [`TrayAction`](crate::tray_menu::TrayAction) can mint — that is structural, not an oversight. #1820
+/// - **The DID step cannot mint, and says so.** Nothing in this build can mint (see
+///   [`crate::account::mint`]) and no [`TrayAction`](crate::tray_menu::TrayAction) can either — that is
+///   structural, not an oversight. #1820
 ///   requires a DID be presented as REQUIRED rather than optional, so the step names it as the remaining,
 ///   required step and states plainly that it is not available in this version, rather than presenting a
 ///   button that silently does nothing or claiming the account "fully works without a DID".
