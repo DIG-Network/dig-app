@@ -111,6 +111,8 @@ hex.workspace = true
 chip35-dl-coin.workspace = true
 chia-bls.workspace = true
 chia-protocol.workspace = true
+# The canonical chain-read trait the DID mint is generic over (`account::chain_mint`).
+dig-chainsource-interface.workspace = true
 chia-puzzle-types.workspace = true
 chia-sdk-driver.workspace = true
 chia-sdk-signer.workspace = true
@@ -180,3 +182,9 @@ zeroize.workspace = true
 # writing into an in-memory buffer so a test can assert emitted records never contain secret values
 # (a passphrase, a raw identity key). Pinned to the same 0.3 line `dig-logging` builds on.
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+# `MockChainSource` — the in-memory chain the DID-mint tests drive a REAL `begin_did_mint` against,
+# so the mint is proven end to end (select a coin, build, sign, push, confirm) without a network.
+dig-chainsource-interface = { workspace = true, features = ["testing"] }
+# The in-process consensus validator the DID-mint end-to-end test runs its real bundle through.
+chia-sdk-test.workspace = true
+chia-wallet-sdk.workspace = true

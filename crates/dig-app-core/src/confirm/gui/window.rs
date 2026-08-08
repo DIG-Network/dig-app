@@ -3163,7 +3163,8 @@ mod tests {
     /// gallery that agrees with itself and drifts from the product — a picture of a screen nobody is
     /// shown.
     ///
-    /// Ignored by default: it opens real windows. `DIG_WIZARD_SHOTS` sets the output directory.
+    /// Ignored by default: it opens real windows. `DIG_WIZARD_SHOTS` sets the output directory; the
+    /// committed gallery is `docs/did-wizard/` (see its README for the regeneration command).
     #[test]
     #[ignore = "opens real windows; run deliberately to produce the DID-wizard gallery"]
     fn did_wizard_gallery() {

@@ -24,24 +24,12 @@ use crate::account::second_factor::journey::Clock;
 
 /// Submits the DID mint spend.
 ///
-/// A seam because nothing in dig-app can mint today — and the reason is worth stating precisely,
-/// because it is no longer the obvious one.
+/// A seam so the wizard's flow is testable without a chain, and so the host decides what a mint talks
+/// to. The real implementation is [`ChainMint`](crate::account::chain_mint::ChainMint), which drives
+/// `dig-account` 0.6.0's `ProfileMinter` — build, sign, push, then poll for a buried confirmation.
 ///
-/// `dig-account` 0.5.0 **does** implement the mint: `ProfileMinter::begin_did_mint` builds, signs and
-/// pushes a real spend, and `ProfileMinter::mint_status` turns a buried confirmation into evidence. The
-/// gap is reachability. `ProfileMinter::new` takes an `Arc<UnlockedMasterSeed>`, and nothing in
-/// dig-account's public API produces one: `UnlockedAccount` holds the seed privately and hands out an
-/// identity signer, wallet ops, a DEK, a sealing key and the recovery phrase — but no minter.
-/// dig_ecosystem#2371 adds the accessor.
-///
-/// The one workaround available to dig-app would be to re-unlock the master seed through `dig-session`
-/// and hold a second `Arc<UnlockedMasterSeed>` outside dig-account. That copy would not observe the
-/// account's [`Residency`](dig_account::Residency), so lock-now, the idle timeout and the OS screen
-/// lock would all leave it live and able to spend. In a binary whose whole custody model is one
-/// lockable seed home, that is the wrong trade, and it is not made here.
-///
-/// So the production implementation stays [`UnavailableMinter`], which refuses honestly. When the
-/// accessor lands, the real minter implements this trait and the wizard is unchanged.
+/// [`UnavailableMinter`] remains for the one honest case: a build with no way to reach a chain. It
+/// refuses rather than fabricating a spend for the wait to watch.
 pub trait DidMinter {
     /// Build, authorize, sign and push the mint spend.
     ///
@@ -101,7 +89,16 @@ pub enum Sighting {
     /// Not confirmed yet, and nothing is wrong. Keep waiting.
     Pending,
     /// Confirmed in a block. The ONLY thing that can produce a [`MintOutcome::Confirmed`].
-    Confirmed(MintEvidence),
+    ///
+    /// It carries the DID as well as the evidence, so the identity that gets RECORDED is the one the
+    /// chain attested to. A submission also names a DID — the one the bundle was built to create —
+    /// and reporting THAT would be a claim about the chain sourced from before the chain answered.
+    Confirmed {
+        /// The `did:chia:…` the confirmed coin proves exists.
+        did: String,
+        /// How we know.
+        evidence: MintEvidence,
+    },
     /// The chain rejected the spend. It will never confirm; waiting longer changes nothing.
     Rejected {
         /// Why, in the user's words.
@@ -218,7 +215,9 @@ pub enum MintOutcome {
 /// # What each ending means, and why none of them is a guess
 ///
 /// * A [`Sighting::Confirmed`] — and nothing else — produces [`MintOutcome::Confirmed`], carrying the
-///   evidence that sighting reported. There is no path from a submission to a success.
+///   DID **and** the evidence that sighting reported. There is no path from a submission to a
+///   success, and no path from a submission to the DID that gets recorded: the submitted DID is
+///   deliberately not an argument here, so it cannot leak into the outcome.
 /// * A [`Sighting::Rejected`] ends the wait immediately: waiting longer cannot change a rejection, and
 ///   a person watching a spinner for a spend the chain already refused is being lied to.
 /// * Repeated [`Sighting::Unreachable`] ends it as [`MintOutcome::ConnectionLost`], which is reported
@@ -226,7 +225,6 @@ pub enum MintOutcome {
 /// * Running past [`GIVE_UP_AFTER_SECS`], or a [`KeepWaiting::No`], ends it as
 ///   [`MintOutcome::StillPending`] with the spend id — a way forward, not a dead end.
 pub fn await_confirmation(
-    did: &str,
     spend_id: &str,
     observer: &dyn MintObserver,
     surface: &dyn WaitSurface,
@@ -238,11 +236,10 @@ pub fn await_confirmation(
 
     loop {
         match observer.look(spend_id) {
-            Sighting::Confirmed(evidence) => {
-                return MintOutcome::Confirmed {
-                    did: did.to_owned(),
-                    evidence,
-                }
+            // The DID comes from the SIGHTING, not from `did` — see [`Sighting::Confirmed`]. The
+            // argument names what was submitted; only the chain can say what exists.
+            Sighting::Confirmed { did, evidence } => {
+                return MintOutcome::Confirmed { did, evidence }
             }
             Sighting::Rejected { reason } => return MintOutcome::Rejected { reason },
             Sighting::Unreachable => unreachable_looks += 1,
@@ -415,10 +412,13 @@ mod tests {
         let chain = ScriptedChain::seeing(vec![
             Sighting::Pending,
             Sighting::Pending,
-            Sighting::Confirmed(evidence()),
+            Sighting::Confirmed {
+                did: DID.to_owned(),
+                evidence: evidence(),
+            },
         ]);
 
-        let outcome = await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        let outcome = await_confirmation(SPEND, &chain, &surface, &clock);
 
         assert_eq!(
             outcome,
@@ -442,7 +442,7 @@ mod tests {
         let surface = ScriptedWait::patient(&clock);
         let chain = ScriptedChain::seeing(vec![Sighting::Pending]);
 
-        let outcome = await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        let outcome = await_confirmation(SPEND, &chain, &surface, &clock);
 
         let MintOutcome::StillPending {
             spend_id,
@@ -468,7 +468,7 @@ mod tests {
         let surface = ScriptedWait::patient(&clock);
         let chain = ScriptedChain::seeing(vec![Sighting::Pending]);
 
-        await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        await_confirmation(SPEND, &chain, &surface, &clock);
 
         let check_ins = surface.check_ins();
         assert!(
@@ -496,7 +496,7 @@ mod tests {
         let surface = ScriptedWait::giving_up_at_the_first_check_in(&clock);
         let chain = ScriptedChain::seeing(vec![Sighting::Pending]);
 
-        let outcome = await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        let outcome = await_confirmation(SPEND, &chain, &surface, &clock);
 
         let MintOutcome::StillPending { waited_secs, .. } = outcome else {
             panic!("stopping the watch must not be reported as a failure: {outcome:?}");
@@ -521,7 +521,7 @@ mod tests {
             },
         ]);
 
-        let outcome = await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        let outcome = await_confirmation(SPEND, &chain, &surface, &clock);
 
         assert_eq!(
             outcome,
@@ -542,7 +542,7 @@ mod tests {
         let surface = ScriptedWait::patient(&clock);
         let chain = ScriptedChain::seeing(vec![Sighting::Unreachable]);
 
-        let outcome = await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        let outcome = await_confirmation(SPEND, &chain, &surface, &clock);
 
         assert_eq!(
             outcome,
@@ -567,10 +567,13 @@ mod tests {
             script.push(Sighting::Unreachable);
             script.push(Sighting::Pending);
         }
-        script.push(Sighting::Confirmed(evidence()));
+        script.push(Sighting::Confirmed {
+            did: DID.to_owned(),
+            evidence: evidence(),
+        });
         let chain = ScriptedChain::seeing(script);
 
-        let outcome = await_confirmation(DID, SPEND, &chain, &surface, &clock);
+        let outcome = await_confirmation(SPEND, &chain, &surface, &clock);
 
         assert!(
             matches!(outcome, MintOutcome::Confirmed { .. }),
