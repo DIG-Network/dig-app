@@ -377,9 +377,181 @@ pub(crate) mod qr {
         "Scan this with a Chia wallet to send $DIG or XCH to this account.";
 }
 
+/// The Wallet pane.
+pub(crate) mod wallet {
+    /// The card carrying the address and its code. First on the tab, because receiving is the one
+    /// thing this wallet can do today.
+    pub(crate) const RECEIVE_CARD: &str = "Receive";
+    /// The card carrying the balances.
+    pub(crate) const HOLDINGS_CARD: &str = "What you hold";
+    /// The card that reserves the place sending will take (dig_ecosystem#2207).
+    pub(crate) const SENDING_CARD: &str = "Sending";
+    /// The card holding the tab's own verbs.
+    pub(crate) const ACTIONS_CARD: &str = "Wallet actions";
+
+    /// The readout naming the receive address.
+    pub(crate) const ADDRESS_LABEL: &str = "Receive address";
+    /// The readout naming the native-coin balance. The ticker is in the value's unit, so the label
+    /// is the thing a person who does not know the ticker can still read.
+    pub(crate) const XCH_LABEL: &str = "Chia";
+    /// The readout naming the DIG CAT balance.
+    pub(crate) const DIG_LABEL: &str = "DIG token";
+    /// The one readout shown in place of both figures when there is no reading.
+    pub(crate) const BALANCE_LABEL: &str = "Balance";
+
+    /// The words a not-known balance's reason completes.
+    ///
+    /// `wallet::overview`'s reasons are written as CLAUSES — "your account is locked, so DIG cannot
+    /// tell which address to read" — because the tray window puts "Balance: not known — " in front
+    /// of them. Reusing the clauses keeps one set of sentences for both surfaces; this const is what
+    /// makes a clause read as a sentence under a bare `Balance` label instead of starting
+    /// mid-thought in lower case.
+    pub(crate) const BALANCE_NOT_KNOWN: &str = "Not known —";
+
+    /// The unit shown beside the native-coin figure.
+    pub(crate) const XCH_UNIT: &str = "XCH";
+    /// The unit shown beside the DIG CAT figure.
+    pub(crate) const DIG_UNIT: &str = "$DIG";
+
+    /// Said while a balance read is in flight.
+    ///
+    /// Names the duration because the read genuinely takes 2.5–6 seconds (dig_ecosystem#2325), and a
+    /// wait a person has not been warned about is a wait they read as a hang. It states no figure —
+    /// this sentence stands where the numbers will be.
+    pub(crate) const BALANCE_PENDING: &str =
+        "Reading your balance from your node. A balance is a blockchain lookup, so this usually \
+         takes a few seconds.";
+
+    /// The glance-level word on the sending card.
+    pub(crate) const SENDING_BADGE: &str = "Not available yet";
+    /// Why there is no send button, and what still works without one.
+    ///
+    /// Deliberately no control at all, not a disabled one: a greyed **Send** is a promise the app
+    /// cannot keep, and a person who finds it will look for the condition that enables it.
+    pub(crate) const SENDING_BODY: &str =
+        "DIG will not show a button that moves money until the path behind it is finished, so there \
+         is nothing to press here yet. Receiving works now — anything sent to the address above \
+         arrives in this account, and your recovery phrase restores it.";
+    /// The aside under the sending copy.
+    pub(crate) const SENDING_HINT: &str =
+        "Reading DIG content never needs an account or a wallet at all.";
+    /// The caption under the receive address.
+    pub(crate) const RECEIVE_HINT: &str =
+        "Only ever share this address. It receives money; it cannot spend it.";
+}
+
+/// The Cache pane.
+pub(crate) mod cache {
+    /// The card carrying the usage meter.
+    pub(crate) const USAGE_CARD: &str = "Disk used by cached content";
+    /// The card carrying the size-limit choices.
+    pub(crate) const LIMIT_CARD: &str = "Size limit";
+    /// The card listing what this computer is mirroring.
+    pub(crate) const CAPSULES_CARD: &str = "Capsules mirrored here";
+    /// The card holding the add-by-store-id form.
+    pub(crate) const ADD_CARD: &str = "Mirror another store";
+
+    /// The label above the usage bar.
+    pub(crate) const METER_LABEL: &str = "Used against the limit";
+    /// Said in place of the meter when no node has reported a cache.
+    ///
+    /// A meter at zero is not available as a fallback: it would say the cache is empty, which is a
+    /// different claim from not having been told.
+    pub(crate) const USAGE_UNKNOWN: &str =
+        "No node has reported its cache yet, so how much disk DIG is using is not known. Start the \
+         DIG node and this fills in.";
+    /// The aside under the size-limit buttons.
+    pub(crate) const LIMIT_HINT: &str =
+        "Choosing a limit below what is already used makes the node delete cached content to fit. \
+         DIG asks before it does that.";
+
+    /// The word marking a capsule the node keeps regardless of the cache's limit.
+    pub(crate) const PINNED_BADGE: &str = "Pinned";
+
+    /// Said when the cache holds bytes but no capsule is listed.
+    ///
+    /// This is the state that reads as a fault and is not one: content arrives as blocks and is only
+    /// a *capsule* once a store has finished syncing, so a large figure above an empty list is
+    /// ordinary. Without this sentence a person concludes the list is broken and goes looking.
+    pub(crate) const CAPSULES_EMPTY_WITH_BYTES: &str =
+        "Nothing is mirrored in full yet. The disk figure above is real — content is fetched in \
+         pieces, and a store only becomes a capsule here once it has finished syncing, so a cache \
+         with content in it can still list nothing.";
+    /// Said when the cache is listing nothing and holding nothing.
+    pub(crate) const CAPSULES_EMPTY: &str =
+        "This computer is not mirroring anything yet. Open a DIG link, or add a store below, and \
+         what it caches appears here.";
+
+    /// The label on the add-a-store field.
+    pub(crate) const ADD_FIELD_LABEL: &str = "Store id";
+    /// The placeholder shape, shown as help text rather than inside the field.
+    pub(crate) const ADD_FIELD_HINT: &str =
+        "A store id is 64 hexadecimal characters, from a DIG link or from whoever published the \
+         store.";
+    /// The label on the control that would begin mirroring.
+    pub(crate) const ADD_BUTTON: &str = "Mirror this store";
+
+    /// The aside under that control, saying why it cannot be pressed.
+    ///
+    /// A caption rather than a second unwired banner: the card above already carries one, and the
+    /// same amber paragraph twice on one screen teaches a reader to skip both.
+    pub(crate) const ADD_NOT_WIRED: &str = concat!(
+        "This form is the finished layout. DIG cannot ask the node to mirror a store yet, so the ",
+        "control above does nothing — the id you type is still checked, so you can tell a good one ",
+        "from a typo."
+    );
+
+    /// The inline error under a store id that is not 64 hex characters.
+    ///
+    /// Attached to the field, and it says what was typed rather than only what was wanted: "64
+    /// characters" beside a value the reader has to count themselves is a slower correction.
+    pub(crate) fn add_field_error(typed: usize) -> String {
+        format!(
+            "A store id is 64 hexadecimal characters. This one has {typed} — check you copied the \
+             whole id."
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **No sentence carries a run of spaces from the way its literal was wrapped.**
+    ///
+    /// Found on screen, not in review: a continued literal lost its `\` and rendered *"so the
+    /// ␣␣␣␣␣␣␣␣␣ control above does nothing"* in the middle of a card. The reader sees a typographic
+    /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
+    /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
+    /// it.
+    #[test]
+    fn no_sentence_carries_its_own_indentation() {
+        let sentences = [
+            NOTHING_HERE,
+            unwired::HEADING,
+            unwired::CAVEAT,
+            status::CACHE_UNKNOWN,
+            status::DIAGNOSTICS_HINT,
+            qr::RECEIVE_CAPTION,
+            wallet::BALANCE_PENDING,
+            wallet::SENDING_BODY,
+            wallet::SENDING_HINT,
+            wallet::RECEIVE_HINT,
+            cache::USAGE_UNKNOWN,
+            cache::LIMIT_HINT,
+            cache::CAPSULES_EMPTY,
+            cache::CAPSULES_EMPTY_WITH_BYTES,
+            cache::ADD_FIELD_HINT,
+            cache::ADD_NOT_WIRED,
+        ];
+        for sentence in sentences {
+            assert!(
+                !sentence.contains("  "),
+                "a sentence carries a run of spaces from its source indentation: {sentence}"
+            );
+        }
+        assert!(!cache::add_field_error(63).contains("  "));
+    }
 
     /// **Every state's copy is distinct, so a match arm cannot silently share another's sentence.**
     ///
