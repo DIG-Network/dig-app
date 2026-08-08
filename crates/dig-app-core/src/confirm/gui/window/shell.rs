@@ -703,7 +703,12 @@ impl ShellApp {
     /// Paint the shell itself: chrome, panes, and — while a prompt is up — the scrim and the pill.
     fn paint_shell(&mut self, ctx: &egui::Context, t: &Tokens, prompt_is_up: bool) {
         let screen = ctx.screen_rect();
-        let model = window_model::build(&(self.view)());
+        let view = (self.view)();
+        let model = window_model::build(&view);
+        // The same snapshot, projected twice: the model decides which verbs exist, and the facts are
+        // the readings a pane displays beside them. One call, so the two cannot describe different
+        // instants.
+        let facts = super::pane::facts::PaneFacts::of_tray(&view);
         self.keep_selection_valid(&model);
         // An `Area` rather than a `CentralPanel` so the shell and the prompt it hosts never contend
         // for the one central-panel id on hosts where egui embeds an immediate viewport instead of
@@ -720,7 +725,7 @@ impl ShellApp {
                     egui::Pos2::new(screen.left(), screen.top() + CHROME_HEIGHT),
                     screen.right_bottom(),
                 );
-                clicked = panes::draw(ui, body, t, &model, self.selected, !prompt_is_up);
+                clicked = panes::draw(ui, body, t, &model, &facts, self.selected, !prompt_is_up);
             });
         if let Some(click) = clicked {
             self.handle(click);
@@ -1344,7 +1349,7 @@ mod tests {
     /// The element id of the FIRST row carrying `label`, from the pane's own id function rather than
     /// a copy of it.
     fn row_control(label: &str) -> egui::Id {
-        super::super::panes::row_id(label, 0)
+        super::super::pane::row_element_id(label, 0)
     }
 
     /// Press Enter, and do not release it.
