@@ -4,6 +4,9 @@ The vocabulary a tab's content is written in, and the rules for using it. Code:
 `crates/dig-app-core/src/confirm/gui/window/pane/`. Reference implementation: the **Status** tab,
 `pane/status.rs`. Pictures: `crates/dig-app-core/docs/content-panes/`.
 
+Panes built on it so far: **Status** (`pane/status.rs`), **Wallet** (`pane/wallet.rs`) and **Cache**
+(`pane/cache.rs`) — the last two photographed in `crates/dig-app-core/docs/wallet-cache/`.
+
 Read this before building a tab. It says what each component is *for* and, more usefully, when not
 to reach for it.
 
