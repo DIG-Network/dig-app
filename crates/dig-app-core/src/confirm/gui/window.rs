@@ -1086,7 +1086,7 @@ fn forget_the_undo_history(ctx: &egui::Context, field: egui::Id) {
 }
 
 /// Register the brand's typeface so every prompt is set in it.
-fn install_fonts(ctx: &egui::Context) {
+pub(super) fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "dig-regular".into(),

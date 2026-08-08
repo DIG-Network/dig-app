@@ -57,10 +57,10 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     holdings_card(flow, t, &facts.balance);
     flow.gap(space::S4);
-    let pressed = actions_card(flow, t, tab);
-    flow.gap(space::S4);
     sending_card(flow, t);
-    pressed
+    // The tab's own verbs, LAST and in a card of their own — but only where the model offers one
+    // this pane has not already drawn. See [`spare_verbs`].
+    spare_verbs_card(flow, t, tab, drew_copy_control(facts))
 }
 
 /// The address money arrives at: the code, the value, and the way to lift it off the screen.
@@ -228,9 +228,26 @@ fn sending_card(flow: &mut Flow, t: &Tokens) {
     });
 }
 
-/// The tab's own verbs, as a weighted button group. Omitted when the model offers none.
-fn actions_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let actions = super::actions_of(tab);
+/// Whatever the model puts on this tab that the pane has not already drawn as a control.
+///
+/// # Why the copy-address row is filtered out (dig_ecosystem#2357)
+///
+/// This card used to render EVERY row, and the Wallet tab's one row is `Copy my receive address` —
+/// which the receive card above already offers, beside the address it copies. So the tab showed the
+/// address twice and offered two ways to copy it, and the second lived in a card titled "Wallet
+/// actions" that existed for no other reason than to hold it.
+///
+/// The row is not dropped from the product: it is the SAME verb, in the place it belongs, next to
+/// the value it acts on. What is dropped is the second rendering of it. Anything else the model puts
+/// here is still drawn, because a pane may not decide that a verb the model offered is not worth
+/// showing.
+fn spare_verbs_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    tab: &Tab,
+    drew_copy_control: bool,
+) -> Option<TrayAction> {
+    let actions = spare_verbs(super::actions_of(tab), drew_copy_control);
     if actions.is_empty() {
         return None;
     }
@@ -242,6 +259,28 @@ fn actions_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
             });
         (height, pressed.flatten())
     })
+}
+
+/// The tab's verbs minus the ones this pane has already drawn as part of a value.
+///
+/// The rule itself is [`action::without_the_one_already_drawn`], shared with the Account tab; this
+/// names WHICH verb the receive card renders, and only when it actually rendered it.
+fn spare_verbs(
+    actions: Vec<action::Action<TrayAction>>,
+    drew_copy_control: bool,
+) -> Vec<action::Action<TrayAction>> {
+    action::without_the_one_already_drawn(
+        actions,
+        drew_copy_control.then_some(TrayAction::CopyReceiveAddress),
+    )
+}
+
+/// Whether the receive card drew a copy control this frame — the condition [`spare_verbs`] turns on.
+///
+/// Derived from the same [`address_of`] the card itself renders from, so the two cannot come to
+/// disagree about whether the control is on screen.
+fn drew_copy_control(facts: &PaneFacts) -> bool {
+    matches!(address_of(facts), AddressReading::Known(_))
 }
 
 /// The address reading this pane renders.
@@ -280,6 +319,89 @@ mod tests {
 
     fn facts_with(view: TrayView) -> PaneFacts {
         PaneFacts::of_tray(&view)
+    }
+
+    /// Every word the whole Wallet pane paints for `view`, at `width`.
+    ///
+    /// The assembled pane rather than one block, because the defect this exists to catch is not
+    /// inside any single block: each of the code and the readout is right on its own, and the fault
+    /// is that a card draws both.
+    fn painted_pane(view: &TrayView, width: f32) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let model = crate::window_model::build(view);
+        let tab = model
+            .tab(crate::window_model::TabId::Wallet)
+            .expect("Wallet renders in every state")
+            .clone();
+        let facts = PaneFacts::of_tray(view);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(width, 4_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("wallet-pane-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = super::super::flow::Flow::new(ui, column, true);
+                            draw(&mut flow, &t, &tab, &facts);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// **An address the pane can show is written on the tab exactly ONCE (dig_ecosystem#2357).**
+    ///
+    /// The receive card offers the same value three ways — a code to scan, a readout to read, and a
+    /// control to copy — and only ONE of those is text. The code used to print the address beneath
+    /// itself as well, so the tab carried it twice in two faces a few lines apart, which asks a
+    /// reader to compare two identifiers before trusting either.
+    ///
+    /// Counted over the WHOLE pane rather than one block, because a count taken inside the code
+    /// block would still read 1 if the printing merely moved to the card around it — the property
+    /// is about the tab, so the fixture has to be the tab. Asserted at two widths because the
+    /// readout reflows below its control on a narrow column, which is a second layout path.
+    #[test]
+    fn the_receive_address_is_written_on_the_tab_exactly_once() {
+        let view = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        };
+        for width in [480.0, 900.0] {
+            let said = painted_pane(&view, width);
+            let times = said.iter().filter(|word| word.contains(ADDRESS)).count();
+            assert_eq!(
+                times, 1,
+                "at {width} px the Wallet tab writes the address {times} times, not once: {said:?}"
+            );
+        }
     }
 
     /// **Every** [`BalanceUnknown`] state, so a guard asserted "over all of them" is.
@@ -561,6 +683,78 @@ mod tests {
                 ..TrayView::default()
             })),
             AddressReading::Known(ADDRESS.to_string())
+        );
+    }
+
+    /// **Copy-address is offered ONCE — beside the address, and only where that control exists.**
+    ///
+    /// dig_ecosystem#2357's wallet half, and the trap inside it. Two actors that differ only in
+    /// whether the account is open:
+    ///
+    /// - an OPEN account draws the copy control next to the address, so the model's row must not be
+    ///   drawn a second time in a card of its own;
+    /// - a SEALED account draws no copy control at all, so the row is the only rendering there is
+    ///   and removing it would take a verb the model offers off the screen entirely.
+    ///
+    /// A single-actor test — either one — passes on an unconditional filter, which is the wrong
+    /// implementation nearest to this one, and which the pane-level reachability guard caught.
+    #[test]
+    fn copy_address_is_drawn_once_and_never_removed_from_a_pane_that_has_no_other_copy() {
+        let open = facts_with(TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        });
+        let sealed = facts_with(TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        assert!(
+            drew_copy_control(&open) && !drew_copy_control(&sealed),
+            "the fixtures do not differ in whether the receive card draws a copy control, so this \
+             test cannot tell a conditional filter from an unconditional one"
+        );
+
+        let offered = |view: TrayView| {
+            let model = crate::window_model::build(&view);
+            super::super::actions_of(
+                model
+                    .tab(crate::window_model::TabId::Wallet)
+                    .expect("the Wallet tab exists"),
+            )
+        };
+        let open_rows = offered(TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        });
+        let sealed_rows = offered(TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        for rows in [&open_rows, &sealed_rows] {
+            assert!(
+                rows.iter().any(|a| a.id == TrayAction::CopyReceiveAddress),
+                "the model stopped offering the row this test is about"
+            );
+        }
+
+        assert!(
+            !spare_verbs(open_rows, true)
+                .iter()
+                .any(|a| a.id == TrayAction::CopyReceiveAddress),
+            "an open account is offered two ways to copy one address, and the second lives in a \
+             card that exists only to hold it"
+        );
+        assert!(
+            spare_verbs(sealed_rows, false)
+                .iter()
+                .any(|a| a.id == TrayAction::CopyReceiveAddress),
+            "a sealed account lost the only copy control on the tab"
         );
     }
 

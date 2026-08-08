@@ -16,6 +16,14 @@
 //! written here rather than dispatched — see [`prefs`] for that boundary and for the read-back that
 //! keeps a failed write from being drawn as a success.
 //!
+//! # This pane has no primary control, deliberately (dig_ecosystem#2354)
+//!
+//! A settings page is a set of independent groups, and there is no one act a person came here to
+//! perform — so every control on it is drawn as a peer. When emphasis was assigned by position, this
+//! tab's loudest, brightest control was *"Turn auto-update off (asks for administrator)…"*: the most
+//! prominent thing on the screen disabled a safety feature, and nobody chose that. It was simply
+//! where the row happened to sit. A pane with no primary is a correct outcome, and this is one.
+//!
 //! # Every group states its cost above its controls
 //!
 //! PR #120's rule, generalised: a control whose real price is only revealed after it is clicked is a
@@ -75,9 +83,6 @@ pub(crate) fn draw(
     tab: &Tab,
     facts: &PaneFacts,
 ) -> Option<TrayAction> {
-    flow.place(|ui, at| (text::body(ui, at, t, copy::settings::LEAD), ()));
-    flow.gap(space::S4);
-
     let pressed = updates_card(flow, t, tab, facts);
     flow.gap(space::S4);
 
@@ -333,13 +338,9 @@ fn connection_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
             id: egui::Id::new("dig-settings-node-url"),
         },
         &[
-            (Local::SaveNode, copy::settings::NODE_SAVE, Weight::Primary),
-            (Local::TestNode, copy::settings::NODE_TEST, Weight::Ghost),
-            (
-                Local::AutomaticNode,
-                copy::settings::NODE_AUTOMATIC,
-                Weight::Ghost,
-            ),
+            (Local::SaveNode, copy::settings::NODE_SAVE),
+            (Local::TestNode, copy::settings::NODE_TEST),
+            (Local::AutomaticNode, copy::settings::NODE_AUTOMATIC),
         ],
         live,
         true,
@@ -366,16 +367,8 @@ fn shortcut_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
             id: egui::Id::new("dig-settings-shortcut"),
         },
         &[
-            (
-                Local::SaveShortcut,
-                copy::settings::SHORTCUT_SAVE,
-                Weight::Primary,
-            ),
-            (
-                Local::DefaultShortcut,
-                copy::settings::SHORTCUT_DEFAULT,
-                Weight::Ghost,
-            ),
+            (Local::SaveShortcut, copy::settings::SHORTCUT_SAVE),
+            (Local::DefaultShortcut, copy::settings::SHORTCUT_DEFAULT),
         ],
         live,
         false,
@@ -398,7 +391,7 @@ fn setting_card(
     effective_label: &str,
     cost: &str,
     field: Field<'_>,
-    controls: &[(Local, &str, Weight)],
+    controls: &[(Local, &str)],
     live: bool,
     testable: bool,
 ) {
@@ -458,9 +451,9 @@ fn setting_card(
 
             let actions: Vec<Action<Local>> = controls
                 .iter()
-                .map(|(id, label, weight)| Action {
+                .map(|(id, label)| Action {
                     label: (*label).to_string(),
-                    weight: *weight,
+                    weight: Weight::Ghost,
                     enabled: true,
                     id: *id,
                     element: egui::Id::new(("dig-settings-control", *label)),

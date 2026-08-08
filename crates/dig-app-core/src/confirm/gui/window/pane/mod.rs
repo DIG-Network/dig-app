@@ -118,6 +118,14 @@ pub(crate) fn row_element_id(label: &str, occurrence: usize) -> egui::Id {
 /// Status has a bespoke pane; every other tab renders through the generic one, which is itself
 /// written in this vocabulary — so a tab that has not been designed yet still looks like the rest of
 /// the application rather than like a menu.
+///
+/// # Every pane opens the same way (dig_ecosystem#2356)
+///
+/// The title, the lead sentence and the state banner are drawn HERE, by the frame, for every tab.
+/// The lead used to be optional and two of the seven panes remembered to add one, so five of them
+/// opened with a bare word floating above a card and a person arriving at a tab got no orientation.
+/// Making it structural is what stops that being a thing a pane can forget: [`copy::lead`] is an
+/// exhaustive match, so a new tab has to write its sentence in order to compile.
 pub(crate) fn draw_tab(
     ui: &mut Ui,
     at: Rect,
@@ -129,6 +137,8 @@ pub(crate) fn draw_tab(
     let mut flow = Flow::new(ui, at, live);
 
     flow.place(|ui, at| (text::title(ui, at, t, &tab.label), ()));
+    flow.gap(space::S2);
+    flow.place(|ui, at| (text::body(ui, at, t, copy::lead(tab.id)), ()));
     flow.gap(space::S4);
 
     let state = PaneState::of_note(&tab.note);
@@ -222,13 +232,12 @@ pub(crate) fn actions_in(
             // Separators divide a LIST; a group of buttons is not one.
             MenuRow::Separator | MenuRow::Submenu { .. } => None,
         })
-        .enumerate()
-        .map(|(index, (act, label, enabled))| {
+        .map(|(act, label, enabled)| {
             let occurrence = seen.entry(label.clone()).or_insert(0);
             let element = row_element_id(&label, *occurrence);
             *occurrence += 1;
             action::Action {
-                weight: action::weigh(index, enabled, is_destructive(act)),
+                weight: action::weigh(is_destructive(act)),
                 element,
                 label,
                 enabled,
@@ -353,6 +362,203 @@ mod tests {
                 .any(|a| a.weight != super::super::super::render::Weight::Danger),
             "every verb on the tab came out destructive, so the registry is not discriminating"
         );
+    }
+
+    /// **The shared derivation promotes nothing, on any tab, in any account state.**
+    ///
+    /// The structural half of dig_ecosystem#2354. Every pane builds its buttons from
+    /// [`actions_in`] — so once this cannot produce a `Primary`, the only way one exists anywhere in
+    /// the window is a pane naming it through [`action::promote`], and "at most one primary per
+    /// pane" stops being a convention anyone can forget and becomes a property of the code.
+    ///
+    /// Swept over every tab in every account state rather than one, because the tab set and its rows
+    /// both change with the state — and the two defects the gallery caught lived in states a single
+    /// fixture would not have visited: an `Unsupported` host whose only verb is a documentation
+    /// link, and a Settings tab whose beacon could not be asked.
+    #[test]
+    fn no_tab_in_any_account_state_promotes_a_verb_by_where_it_sits() {
+        use crate::tray_menu::{AccountState, TrayView};
+
+        let mut swept = 0;
+        for account in [
+            AccountState::Unsupported,
+            AccountState::Absent,
+            AccountState::Locked,
+            AccountState::Unopenable,
+            AccountState::NeedsPassword,
+            AccountState::Unlocked { recoverable: true },
+        ] {
+            let model = crate::window_model::build(&TrayView {
+                running: true,
+                node_connected: true,
+                account: Some(account.clone()),
+                cache: Some(crate::cache::CacheSnapshot {
+                    cap_bytes: 10 * crate::cache::GIB,
+                    used_bytes: 407 * crate::cache::MIB,
+                }),
+                ..TrayView::default()
+            });
+            for tab in &model.tabs {
+                for drawn in actions_of(tab) {
+                    swept += 1;
+                    assert_ne!(
+                        drawn.weight,
+                        crate::confirm::gui::render::Weight::Primary,
+                        "“{}” on the {:?} tab ({account:?}) was promoted by the derivation itself",
+                        drawn.label,
+                        tab.id
+                    );
+                }
+            }
+        }
+        assert!(
+            swept > 20,
+            "only {swept} verbs were examined, which is too few to have visited the tabs this \
+             guard is about"
+        );
+    }
+
+    /// **…and exactly one pane still names a lead, so the window has not simply lost emphasis.**
+    ///
+    /// The control for the sweep above, which deleting `Weight::Primary` outright would satisfy.
+    /// Security is the pane the MODEL designates a lead for — the one thing this account needs from
+    /// the user right now — and it must still be the pane's loudest control.
+    #[test]
+    fn the_security_pane_still_leads_with_the_verb_the_model_designates() {
+        use crate::tray_menu::{AccountState, TrayView};
+
+        let model = crate::window_model::build(&TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        let tab = model.tab(TabId::Security).expect("Security is emitted");
+        let promoted = security::promoted_lead(tab).expect("a locked account leads with Unlock…");
+        assert_eq!(
+            promoted.id,
+            tab.actions()[0],
+            "the promoted verb is not the model's own leading row"
+        );
+        assert_eq!(
+            promoted.weight,
+            crate::confirm::gui::render::Weight::Primary
+        );
+    }
+
+    /// Every string a tab painted at `width`, with `note` forced onto it.
+    fn painted_with_note(id: TabId, note: crate::window_model::PaneNote) -> Vec<String> {
+        use crate::tray_menu::TrayView;
+
+        let view = TrayView {
+            running: true,
+            node_connected: true,
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            ..TrayView::default()
+        };
+        let model = crate::window_model::build(&view);
+        let mut tab = model
+            .tab(id)
+            .unwrap_or_else(|| panic!("{id:?} is not emitted by the fixture"))
+            .clone();
+        tab.note = note;
+        let facts = PaneFacts::of_tray(&view);
+
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 4_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("pane-state-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            draw_tab(ui, column, &t, &tab, &facts, true);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// **Every pane presents every state, in the same words, drawn by the frame (dig_ecosystem#2356).**
+    ///
+    /// The property: one cause produces one presentation, whichever tab a person is looking at. When
+    /// the node is unreachable, all seven tabs must say the unreachable thing the same way — the
+    /// failure this guards against is four presentations of one cause on one screen.
+    ///
+    /// The sweep is every tab × every note, and the assertion is on the note's own SENTENCE reaching
+    /// the screen verbatim. That is what catches the drift the ticket describes: a pane that took
+    /// over its own banner, softened the wording, or swallowed a state it did not expect would fail
+    /// here for that tab alone, while the other six stayed green — which is precisely how the panes
+    /// came to disagree in the first place.
+    ///
+    /// `Ready` is asserted from the other side, because it is the one state that draws NOTHING: a
+    /// pane that painted a "loaded successfully" banner would satisfy any it-says-something check.
+    #[test]
+    fn every_tab_presents_every_state_in_the_same_words() {
+        use crate::window_model::PaneNote;
+
+        let sentences = [
+            ("waiting", "The DIG agent is still starting."),
+            (
+                "unreachable",
+                "No node is connected, so nothing here is live.",
+            ),
+            ("empty", "There is nothing on this tab yet."),
+        ];
+        let notes = |which: usize, text: &'static str| match which {
+            0 => PaneNote::Waiting(text),
+            1 => PaneNote::Unreachable(text),
+            _ => PaneNote::Empty(text),
+        };
+
+        for tab in TabId::ALL {
+            // `Advanced` is declared and never constructed, so there is no pane to drive.
+            if tab == TabId::Advanced {
+                continue;
+            }
+            for (which, (name, sentence)) in sentences.iter().enumerate() {
+                let said = painted_with_note(tab, notes(which, sentence));
+                assert!(
+                    said.iter().any(|line| line == sentence),
+                    "the {tab:?} pane did not present its {name} state in the model's own words. \
+                     One cause must read the same on every tab; it painted: {said:?}"
+                );
+            }
+
+            let ready = painted_with_note(tab, PaneNote::Ready);
+            for (_, sentence) in sentences {
+                assert!(
+                    !ready.iter().any(|line| line == sentence),
+                    "the {tab:?} pane painted a state banner while ready — success shows itself, \
+                     and a banner over a working pane teaches people to skip banners"
+                );
+            }
+        }
     }
 
     /// An id is derived from the label and occurrence only — never from a position on screen.

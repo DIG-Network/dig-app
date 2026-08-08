@@ -15,6 +15,45 @@
 //! unavailable also says what would change that (`window_model::label_names_a_remedy` is the same
 //! rule one level down, on row labels).
 
+use crate::window_model::TabId;
+
+/// The sentence under a tab's title, saying what the tab is for.
+///
+/// # Why this is one exhaustive match and not a field each pane may set (dig_ecosystem#2356)
+///
+/// It was optional, and two of seven panes used it — so five tabs opened with a bare word above a
+/// card. A lead a pane can forget is a lead most panes forget. Here, a new [`TabId`] cannot compile
+/// without writing its sentence, and every tab opens identically because the frame draws it.
+///
+/// # The voice
+///
+/// A lead says what the TAB IS FOR, addressed to the person reading it. It never explains the app's
+/// own design conventions back to them: Settings used to close with *"Each group says what a change
+/// costs before you make it"*, which is a sentence about how the tab was built, and the Cache tab
+/// carried *"This form is the finished layout"*, which is a sentence about the project. Both are
+/// true and neither is the reader's business.
+pub(crate) fn lead(tab: TabId) -> &'static str {
+    match tab {
+        TabId::Status => {
+            "What DIG is doing on this computer right now, and where to look when it is not."
+        }
+        TabId::Account => {
+            "The DIG Account this computer holds — the identity everything else here belongs to."
+        }
+        TabId::Security => "How this account is protected, and what you can change about that.",
+        TabId::Wallet => "Where money arrives, and what this account is holding.",
+        TabId::Apps => {
+            "The other DIG apps this computer can open. They share your DIG Account, so there is \
+             nothing to sign in to."
+        }
+        TabId::Cache => {
+            "The disk DIG uses to keep content close by, and how much of it you want to give up."
+        }
+        TabId::Settings => "How DIG looks after itself on this computer.",
+        TabId::Advanced => "Settings most people never need to change.",
+    }
+}
+
 /// The Status pane.
 pub(crate) mod status {
     /// The card grouping the facts about the running agent.
@@ -45,8 +84,6 @@ pub(crate) mod status {
     ];
     /// Said in place of every figure on the sharing card, because none of them is a reading.
     pub(crate) const SHARING_UNKNOWN: &str = "Not read from the node yet.";
-    /// The meter above the cache bar.
-    pub(crate) const CACHE_METER_LABEL: &str = "Cache used against its limit";
 
     /// Said in place of a cache reading when no node has reported one.
     pub(crate) const CACHE_UNKNOWN: &str =
@@ -58,10 +95,6 @@ pub(crate) mod status {
 
 /// The Apps pane.
 pub(crate) mod apps {
-    /// The sentence under the tab's title, saying what the tab is for.
-    pub(crate) const LEAD: &str =
-        "The other DIG apps this computer can open. They share your DIG Account, so there is \
-         nothing to sign in to.";
     /// The card holding any verb on the tab that is not an app's own.
     pub(crate) const OTHER_CARD: &str = "Also on this tab";
     /// The closing line, which is the tab's answer to "where do I install these?".
@@ -79,11 +112,6 @@ pub(crate) mod apps {
 /// The order the groups are declared in is the order they are drawn in, and it is deliberate:
 /// updates first because it is the one a person comes here for, then the node, then the shortcut.
 pub(crate) mod settings {
-    /// The sentence under the tab's title.
-    pub(crate) const LEAD: &str =
-        "How DIG looks after itself on this computer. Each group says what a change costs before \
-         you make it.";
-
     /// The updates group.
     pub(crate) const UPDATES_CARD: &str = "Automatic updates";
     /// What the updates group controls.
@@ -357,9 +385,14 @@ pub(crate) mod unwired {
     /// Deliberately says what a reader must NOT conclude, not merely that work is pending: the
     /// failure this state exists to prevent is a person reading a designed-but-unwired pane as a
     /// report on their own machine.
+    ///
+    /// It also says so without describing the project (dig_ecosystem#2356). It used to close *"It
+    /// is the finished layout, waiting for the node to be wired up to it"* — a sentence about
+    /// dig-app's own build order, addressed to a reader who has no node, no layout and no wiring.
+    /// What they need is what to do with the figures, which is nothing.
     pub(crate) const CAVEAT: &str =
-        "Nothing on this card is a reading from your computer. It is the finished layout, waiting \
-         for the node to be wired up to it.";
+        "Nothing on this card is a reading from your computer. Treat every figure here as a \
+         placeholder until DIG can show you your own.";
 }
 
 /// The copy-to-clipboard affordance.
@@ -460,7 +493,23 @@ pub(crate) mod cache {
     pub(crate) const USAGE_UNKNOWN: &str =
         "No node has reported its cache yet, so how much disk DIG is using is not known. Start the \
          DIG node and this fills in.";
-    /// The aside under the size-limit buttons.
+    /// The label above the size-limit chooser.
+    pub(crate) const LIMIT_FIELD: &str = "Limit";
+    /// Said in the closed chooser when no node has reported a cap at all.
+    ///
+    /// Never the first preset: a chooser resting on `256 MiB` is indistinguishable from one
+    /// reporting that 256 MiB is the limit, which is a setting nobody has told this window about.
+    pub(crate) const LIMIT_UNKNOWN: &str = "Not reported";
+    /// Said in the closed chooser when the node's cap is real but is not one of the presets.
+    ///
+    /// A cap set through `Custom size…` matches no option in the list, and the honest answer is the
+    /// figure itself — saying "not reported" about a limit the node has plainly reported would deny
+    /// a setting that exists.
+    pub(crate) fn limit_custom(size: &str) -> String {
+        format!("{size} (a custom size)")
+    }
+
+    /// The aside under the size-limit chooser.
     pub(crate) const LIMIT_HINT: &str =
         "Choosing a limit below what is already used makes the node delete cached content to fit. \
          DIG asks before it does that.";
@@ -496,9 +545,8 @@ pub(crate) mod cache {
     /// A caption rather than a second unwired banner: the card above already carries one, and the
     /// same amber paragraph twice on one screen teaches a reader to skip both.
     pub(crate) const ADD_NOT_WIRED: &str = concat!(
-        "This form is the finished layout. DIG cannot ask the node to mirror a store yet, so the ",
-        "control above does nothing — the id you type is still checked, so you can tell a good one ",
-        "from a typo."
+        "DIG cannot ask the node to mirror a store yet, so the control above does nothing. The id ",
+        "you type is still checked, so you can tell a good one from a typo."
     );
 
     /// The inline error under a store id that is not 64 hex characters.
@@ -524,11 +572,16 @@ mod tests {
     /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
     /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
     /// it.
-    #[test]
-    fn no_sentence_carries_its_own_indentation() {
-        let sentences = [
+    /// Every sentence this module hands a paint call, so a guard asserted "over all the copy" is.
+    ///
+    /// Written out because these are `const`s in nested modules and nothing enumerates them; the
+    /// tab LEADS are appended from [`TabId::ALL`], whose own docs record what that list does and
+    /// does not guarantee.
+    fn every_sentence() -> Vec<&'static str> {
+        let mut all = vec![
             NOTHING_HERE,
             unwired::HEADING,
+            unwired::BADGE,
             unwired::CAVEAT,
             status::CACHE_UNKNOWN,
             status::DIAGNOSTICS_HINT,
@@ -544,13 +597,102 @@ mod tests {
             cache::ADD_FIELD_HINT,
             cache::ADD_NOT_WIRED,
         ];
-        for sentence in sentences {
+        all.extend(TabId::ALL.iter().map(|tab| lead(*tab)));
+        all
+    }
+
+    /// The phrasings that describe how dig-app was BUILT rather than what the reader is looking at.
+    ///
+    /// Each was found on screen, not in review: two in tab leads (dig_ecosystem#2356) and one in the
+    /// unwired caveat, which is why the check below is asserted over every sentence rather than over
+    /// the leads alone — the voice rule is about the copy, and it leaked into the copy that is not a
+    /// lead the moment it was enforced only on leads.
+    const DEVELOPER_VOICE: [&str; 6] = [
+        "Each group",
+        "finished layout",
+        "this form",
+        "This form",
+        "this tab was",
+        "wired up to it",
+    ];
+
+    #[test]
+    fn no_sentence_carries_its_own_indentation() {
+        for sentence in every_sentence() {
             assert!(
                 !sentence.contains("  "),
                 "a sentence carries a run of spaces from its source indentation: {sentence}"
             );
         }
         assert!(!cache::add_field_error(63).contains("  "));
+    }
+
+    /// **Every tab has its own lead, and no lead explains the app's design back to the reader.**
+    ///
+    /// The two halves are the two defects dig_ecosystem#2356 names. Distinctness is what makes the
+    /// lead worth drawing — a shared sentence across seven tabs is seven tabs with no orientation,
+    /// which is the state five of them were already in. The VOICE half is asserted over every
+    /// sentence, not only the leads, by
+    /// [`no_sentence_explains_the_app_to_the_reader`](tests::no_sentence_explains_the_app_to_the_reader).
+    #[test]
+    fn every_tab_leads_with_its_own_sentence_about_what_the_tab_is_for() {
+        let leads: Vec<&str> = TabId::ALL.iter().map(|tab| lead(*tab)).collect();
+        assert_eq!(
+            leads.len(),
+            TabId::ALL.len(),
+            "the tab set changed and this guard did not"
+        );
+
+        let mut unique = leads.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            leads.len(),
+            "two tabs open with the same sentence, so at least one of them says nothing about \
+             where the reader is: {leads:?}"
+        );
+
+        for (tab, said) in TabId::ALL.iter().zip(&leads) {
+            assert!(
+                !said.is_empty() && said.ends_with('.'),
+                "the {tab:?} lead is not a sentence: {said}"
+            );
+            assert!(
+                !said.contains("  "),
+                "the {tab:?} lead carries a run of spaces from its source indentation: {said}"
+            );
+        }
+    }
+
+    /// **No sentence anywhere in this module explains dig-app's construction to its reader.**
+    ///
+    /// The guard this replaces ran over the tab LEADS only, and the same voice was live on two panes
+    /// at the time in the unwired caveat — *"It is the finished layout, waiting for the node to be
+    /// wired up to it"* — because a caveat is not a lead. A voice rule enforced on one kind of
+    /// sentence is a voice rule for one kind of sentence.
+    ///
+    /// The fixture is [`every_sentence`], the leads INCLUDED, so a phrasing moving from a lead into
+    /// a caption is caught where moving it used to launder it.
+    #[test]
+    fn no_sentence_explains_the_app_to_the_reader() {
+        let sentences = every_sentence();
+        // Without this the sweep is over a list someone could empty, which would pass loudest of
+        // all. The leads alone are eight, so anything near that means the consts stopped arriving.
+        assert!(
+            sentences.len() > TabId::ALL.len(),
+            "the sentence list no longer carries the copy that is not a lead, so this sweep is \
+             back to being the leads-only guard it replaced"
+        );
+        for said in sentences {
+            for leak in DEVELOPER_VOICE {
+                assert!(
+                    !said.contains(leak),
+                    "a sentence says {leak:?}, which describes how dig-app was BUILT rather than \
+                     what the reader is looking at: {said}"
+                );
+            }
+        }
     }
 
     /// **Every state's copy is distinct, so a match arm cannot silently share another's sentence.**

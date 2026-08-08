@@ -54,7 +54,32 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     identity_card(flow, t, facts);
     flow.gap(space::S4);
-    verb_cards(flow, t, tab)
+    // The identity card above draws `Copy` beside the DIG ID whenever there IS one, so the model's
+    // own `Copy my DIG ID` row would be the same verb a second time. See [`spare_verbs`].
+    verb_cards(flow, t, tab, drew_copy_control(facts))
+}
+
+/// Whether the identity card drew a copy control this frame — the condition [`spare_verbs`] turns on.
+///
+/// Derived from the same field [`identity_card`] renders from, so the two cannot come to disagree
+/// about whether the control is on screen.
+fn drew_copy_control(facts: &PaneFacts) -> bool {
+    facts.profile_id.is_some()
+}
+
+/// The tab's verbs minus the one the identity card has already drawn beside the DIG ID.
+///
+/// The rule itself is [`action::without_the_one_already_drawn`], shared with the Wallet tab, so the
+/// two tabs cannot come to disagree about whether a copy control beside a value retires the model's
+/// separate copy verb.
+fn spare_verbs(
+    actions: Vec<Action<TrayAction>>,
+    drew_copy_control: bool,
+) -> Vec<Action<TrayAction>> {
+    action::without_the_one_already_drawn(
+        actions,
+        drew_copy_control.then_some(TrayAction::CopyDigId),
+    )
 }
 
 /// What state this account is in, and what that means — the header the rest of the pane hangs from.
@@ -156,8 +181,13 @@ fn dig_id_element() -> egui::Id {
 /// The model's sections as cards of verbs, with every destroying card last.
 ///
 /// Returns the action pressed.
-fn verb_cards(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let (safe, destroying) = grouped(tab);
+fn verb_cards(
+    flow: &mut Flow,
+    t: &Tokens,
+    tab: &Tab,
+    drew_copy_control: bool,
+) -> Option<TrayAction> {
+    let (safe, destroying) = grouped(tab, drew_copy_control);
     let mut pressed = None;
     for group in safe.iter().chain(destroying.iter()) {
         pressed = pressed.or(verb_card(flow, t, group));
@@ -215,13 +245,19 @@ struct Group {
 /// that gives each row its element id is a position in the model's list, and rebuilding it from a
 /// re-sorted list would hand the same row a different id depending on how the pane chose to lay it
 /// out.
-fn grouped(tab: &Tab) -> (Vec<Group>, Vec<Group>) {
+fn grouped(tab: &Tab, drew_copy_control: bool) -> (Vec<Group>, Vec<Group>) {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let groups: Vec<Group> = tab
         .sections
         .iter()
         .map(|section| {
-            let actions = super::actions_in(section.rows.iter().cloned(), &mut seen);
+            // Filtered AFTER the ids are assigned: the occurrence count that gives each row its
+            // element id is a position in the MODEL's list, so removing a row first would hand the
+            // rows after it different ids depending on what this pane chose to redraw.
+            let actions = spare_verbs(
+                super::actions_in(section.rows.iter().cloned(), &mut seen),
+                drew_copy_control,
+            );
             Group {
                 heading: section.heading.clone(),
                 destroys: actions
@@ -414,7 +450,7 @@ mod tests {
             AccountState::Unlocked { recoverable: false },
         ] {
             let tab = tab_for(account.clone());
-            let (safe, destroying) = grouped(&tab);
+            let (safe, destroying) = grouped(&tab, false);
             let mut rendered: Vec<TrayAction> = safe
                 .iter()
                 .chain(destroying.iter())
@@ -432,6 +468,62 @@ mod tests {
                 "the {account:?} pane's buttons are not the model's actions"
             );
         }
+    }
+
+    /// **`Copy my DIG ID` is dropped from the verb cards only where the identity card drew a copy
+    /// control of its own — and kept where it did not.**
+    ///
+    /// Both halves, because they are the two ways to get this wrong and only one of them is visible
+    /// in a screenshot. Filtering unconditionally deletes the SOLE way to copy a DIG ID on an
+    /// account that has none to show yet; not filtering at all is the duplication the Wallet tab
+    /// already removed, which is what made the two tabs disagree about the rule.
+    ///
+    /// The fixtures are a real account with an id and the same state without one, and the guard
+    /// below refuses to run unless they genuinely differ in whether the identity card draws a
+    /// control — a pair that did not could not tell a conditional filter from an unconditional one.
+    #[test]
+    fn the_dig_id_copy_verb_is_dropped_only_where_the_identity_card_drew_one() {
+        let with_id = PaneFacts::of_tray(&TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            profile_id: Some("a".repeat(64)),
+            ..TrayView::default()
+        });
+        let without_id = PaneFacts::of_tray(&TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            profile_id: None,
+            ..TrayView::default()
+        });
+        assert!(
+            drew_copy_control(&with_id) && !drew_copy_control(&without_id),
+            "the fixtures do not differ in whether the identity card draws a copy control, so this \
+             test cannot tell a conditional filter from an unconditional one"
+        );
+
+        let tab = tab_for(AccountState::Unlocked { recoverable: true });
+        let offered: Vec<TrayAction> = tab.actions();
+        assert!(
+            offered.contains(&TrayAction::CopyDigId),
+            "the model stopped offering the row this test is about"
+        );
+
+        let rendered = |drew: bool| -> Vec<TrayAction> {
+            let (safe, destroying) = grouped(&tab, drew);
+            safe.iter()
+                .chain(destroying.iter())
+                .flat_map(|group| group.actions.iter().map(|a| a.id))
+                .collect()
+        };
+        assert!(
+            !rendered(true).contains(&TrayAction::CopyDigId),
+            "an account showing its DIG ID is offered two ways to copy it, one of them in a card \
+             that exists only to hold the duplicate"
+        );
+        assert!(
+            rendered(false).contains(&TrayAction::CopyDigId),
+            "an account with no id on screen lost the only way to copy it"
+        );
     }
 
     /// **A card that can destroy custody is drawn after every card that cannot.**
@@ -466,7 +558,7 @@ mod tests {
             ],
         };
 
-        let (safe, destroying) = grouped(&tab);
+        let (safe, destroying) = grouped(&tab, false);
         assert_eq!(safe.len(), 1, "the harmless section was not kept apart");
         assert_eq!(destroying.len(), 1, "the destroying section was not found");
         assert_eq!(safe[0].actions[0].id, TrayAction::CopyDigId);
@@ -485,7 +577,7 @@ mod tests {
     #[test]
     fn reordering_the_cards_does_not_renumber_the_rows() {
         let tab = tab_for(AccountState::Unlocked { recoverable: true });
-        let (safe, destroying) = grouped(&tab);
+        let (safe, destroying) = grouped(&tab, false);
         for group in safe.iter().chain(destroying.iter()) {
             for action in &group.actions {
                 assert_eq!(
@@ -502,7 +594,7 @@ mod tests {
     #[test]
     fn a_destroying_verb_is_drawn_as_danger() {
         let tab = tab_for(AccountState::Unlocked { recoverable: true });
-        let (_, destroying) = grouped(&tab);
+        let (_, destroying) = grouped(&tab, false);
         let card = destroying
             .first()
             .expect("an unlocked account can be replaced");

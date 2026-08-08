@@ -33,9 +33,6 @@ use crate::window_model::Tab;
 
 /// Draw the Apps pane's content into `flow`, and report the action pressed.
 pub(crate) fn draw(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    flow.place(|ui, at| (text::body(ui, at, t, copy::apps::LEAD), ()));
-    flow.gap(space::S4);
-
     let mut pressed = None;
     let verbs = split_by_app(super::actions_of(tab));
 
@@ -254,10 +251,12 @@ mod tests {
             .expect("the model offers a launch row for the first registry app");
         assert_eq!(action.label, label, "the pane re-worded the model's label");
         assert!(action.enabled, "the pane greyed an app the model offered");
-        assert_eq!(
+        assert_ne!(
             action.weight,
             Weight::Primary,
-            "the leading enabled verb on the tab is not the pane's primary control"
+            "an app is drawn as the pane's primary. The apps on this tab are peers — there is no \
+             one of them a person came here to open — and promoting whichever the registry lists \
+             first is the positional emphasis dig_ecosystem#2354 removed"
         );
     }
 
@@ -270,7 +269,7 @@ mod tests {
     fn no_copy_on_this_tab_claims_an_app_is_installed_or_missing() {
         let said = format!(
             "{} {} {}",
-            copy::apps::LEAD,
+            copy::lead(TabId::Apps),
             copy::apps::INSTALL_NOTE,
             crate::apps::APPS[0].tagline
         )
