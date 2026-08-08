@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [5.41.0] - 2026-08-08
+
+### Features
+- **confirm:** Watch the app window for a wedged frame loop, and restore three vacuous drag guards (#119)- **settings:** Add a Settings tab with an auto-update group (#120)- **window:** A content-pane design system, with Status as its reference implementation (#124)- **window:** The Apps and Settings content panes (#127)- **window:** Account and Security content panes (#129)- **window:** Wallet and Cache content panes (#2326 Phase 2) (#128)- **account:** First-run DID wizard — DID-existence gate, QR fund step, confirmation wait (#130)- **window:** The DIG mark, a gallery-openable tab, and an honest account note (#134)
+
+### Bug Fixes
+- **confirm:** Require an affirmative gesture begun after the surface could be read (#118)- **wallet:** Render $DIG at its real 3 CAT decimals, not XCH's 12 (#121)- **window:** Wrap the narrow tab strip instead of dropping the tabs that do not fit (#122)- **wallet:** A balance read that runs out of time is not a missing node (#123)
+
 ## [5.31.0] - 2026-08-07
 
 ### Features
