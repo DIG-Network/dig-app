@@ -287,10 +287,23 @@ neither may be relaxed:
 per call and never retained, so a mint observes lock-now, the idle timeout and the OS screen lock
 exactly as the money signer does.
 
-What is missing is the TRANSPORT. `dig-node-control-interface` 0.3.0 exposes one wallet method,
-`control.wallet.balance`: there is no coin read, no peak height and no push, which is why
-`wallet::node::NodeWalletEngine` refuses `coins` and `broadcast`. So `MintAvailability` is
-`NoChainTransport` on this build, the startup gate correctly draws nothing, and no `TrayAction` mints.
+What is missing is one READ. `dig-node-control-interface` 0.6.0 gave dig-app three of the four the
+mint needs, and `wallet::node::NodeWalletEngine` speaks all three: `control.wallet.coins` selects the
+funding coin, `control.wallet.peak` bounds a claimed confirmation, and `control.wallet.broadcast`
+pushes the signed bundle.
+
+The fourth is a coin read **by coin id**, and no control method provides it. `mint_status` asks the
+chain for the DID coin's record — that IS the confirmation — and for the funding coin's, to tell a slow
+mint from one that can never confirm because its input was spent elsewhere. `control.wallet.coins`
+answers for an ADDRESS and reports only UNSPENT coins, so it can see neither. A mint on that transport
+could be pushed — real XCH, gone — and never observed, and §3.1b's evidence rule permits recording a
+DID only from a confirmation. So the shell supplies `account::chain_mint::MintSeams::NoChainTransport`
+on this build, the startup gate correctly draws nothing, and no `TrayAction` mints.
+
+**The gate and the minter MUST be one value (MUST).** Availability is READ OFF `MintSeams`
+(`MintSeams::availability`), never asserted beside it. A build that reports a mint as possible
+therefore holds a real minter by construction, and no single edit can open the wizard while leaving it
+uncompletable.
 
 Because that is still the state for every account on this version, "no DID yet" MUST NOT be modelled as
 an `AccountState` (§3.1c): every account on every host would sit in it, with no control that could leave
@@ -1609,9 +1622,16 @@ down:
    is SHOWN, not awaited: the flow is a chain of OS-owned modal windows (§3.1d) and a modal cannot poll
    a chain, so an implementation MUST NOT present a "waiting for funds" screen it cannot be waiting on.
 4. **DID** — offer the mint, naming what it costs, with the refusal PRE-SELECTED (affirming spends real
-   XCH). On a build that cannot mint (§3.1b), name the on-chain DID as the remaining REQUIRED step and
-   state plainly that minting is not available in this version; it MUST NOT present a control that
-   appears to mint.
+   XCH). The offer IS the approval: affirming it pushes the spend with nothing further shown, so the
+   offer and every screen before it MUST NOT promise a later cost screen or a second approval. On a
+   build that cannot mint (§3.1b), name the on-chain DID as the remaining REQUIRED step and state
+   plainly that minting is not available in this version; it MUST NOT present a control that appears to
+   mint.
+   - **One paid mint per minter (MUST).** A `DidMinter` that has already pushed MUST refuse a second
+     `submit` rather than paying a second fee: the second push would also overwrite the pending mint,
+     making the FIRST unobservable — money spent and no DID ever recorded.
+   - **An observer answers only about the spend it is asked about (MUST).** `look(spend_id)` MUST
+     report `Unreachable` unless `spend_id` names the mint that observer itself pushed.
 5. **Wait** — where a mint WAS submitted, watch the chain (`account::mint::await_confirmation`). The
    wait MUST report what is being waited for and HOW LONG it has been waiting, and MUST offer a way to
    stop that does not cancel the spend. It MUST end in one of four distinct, honest outcomes —
@@ -1756,10 +1776,19 @@ session as a small, **byte-identical cross-repo method set the engine implements
 contract-first pattern as the §5.3 session methods). The engine's chain access is chia-query-backed
 (the canonical coinset layer):
 
-- `control.wallet.broadcast` — `{ signed_bundle_hex }` → `{ accepted, transaction_id? }`. The engine
-  forwards the signed bundle to the network and reports mempool acceptance; it sees only signed bytes.
+- `control.wallet.broadcast` — `{ signed_bundle_hex }` → `{ accepted, transaction_id?, rejection? }`.
+  The engine forwards the signed bundle to the network and reports mempool acceptance; it sees only
+  signed bytes. A mempool that LOOKED at the bundle and refused it is a successful call carrying
+  `accepted: false` and a `rejection` reason — failing to REACH a mempool is an error instead, because
+  the remedies are opposite. The method is TOKEN-GATED, so an authorization refusal on it means the
+  control token is missing and MUST NOT be reported as an out-of-date node (which is what the same
+  refusal means on the two open reads).
 - `control.wallet.coins` — `{ address, asset }` → `{ coins: [{ coin_id, asset, amount }] }`. The
-  address's spendable coins for the asset.
+  address's spendable coins for the asset. The node's reply is a strict SUPERSET (it also carries the
+  parent, the puzzle hash and the created/spent heights) and dig-app keeps the three fields above. An
+  EMPTY list is an ANSWER — the address holds nothing — and every failure to consult a chain MUST be an
+  error instead; returning an empty list for an unreachable chain would tell somebody who holds funds
+  that they hold none. Served as an OPEN read.
 - `control.wallet.balance` — `{ address, asset }` → `{ balance }`. The address's spendable balance in
   the asset's base unit. The node's reply is a strict SUPERSET of that shape; dig-app reads `balance`
   plus `synced`, and MUST treat a reply carrying `synced: false` as UNKNOWN rather than rendering the
