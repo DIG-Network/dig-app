@@ -1,6 +1,6 @@
 //! Drawing the brand — the primitives every prompt window is built from.
 //!
-//! hub.dig.net's look is CSS: gradients, pill radii, soft accent glows, a hairline card. egui has
+//! hub.dig.net's look is CSS: gradients, quiet radii, a hairline card. egui has
 //! rounded rects, strokes and meshes. This module is the translation layer, written ONCE so that no
 //! widget anywhere re-derives a gradient or invents a corner radius, and so the whole visual
 //! language can be re-tuned in one file when hub's changes.
@@ -13,7 +13,7 @@ use egui::{
 };
 
 use super::render::{radius, regular, rgba, semibold, size, Weight};
-use super::theme::{Rgba, Tokens};
+use super::theme::Tokens;
 
 /// Blend two colours by `t` in `0.0..=1.0`.
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -68,21 +68,6 @@ pub fn gradient_fill(ui: &Ui, rect: Rect, radius: f32, from: Color32, to: Color3
         mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
     }
     ui.painter().add(Shape::mesh(mesh));
-}
-
-/// The accent glow behind a primary control — hub's `--glow-color` under a `box-shadow`.
-///
-/// Four widening translucent copies rather than a real blur: egui has no blur pass, and at these
-/// radii the stack is indistinguishable from one while costing four rects instead of a render target.
-fn glow(ui: &Ui, rect: Rect, corner: u8, colour: Rgba) {
-    for (grow, scale) in [(2.0_f32, 0.9), (5.0, 0.55), (9.0, 0.32), (14.0, 0.18)] {
-        let alpha = (f32::from(colour.a) * scale) as u8;
-        ui.painter().rect_filled(
-            rect.expand(grow).translate(Vec2::new(0.0, grow * 0.25)),
-            CornerRadius::same(corner.saturating_add(grow as u8)),
-            Color32::from_rgba_unmultiplied(colour.r, colour.g, colour.b, alpha),
-        );
-    }
 }
 
 /// The window card: hub's `--surface` with `--border`, `--radius-lg` and `--shadow-pop`.
@@ -169,7 +154,7 @@ pub fn brand_mark(ui: &Ui, rect: Rect, t: &Tokens) {
     gradient_fill(ui, rect, 6.0, rgba(t.dig_purple), rgba(t.dig_magenta));
 }
 
-/// A pill button in hub's language, returning its click [`Response`].
+/// A button in hub's language, returning its click [`Response`].
 ///
 /// `focused` draws the keyboard focus ring. The ring is a visible 2 px accent outline rather than a
 /// subtle tint, because on the destroy window the focused control is the thing standing between a
@@ -192,7 +177,7 @@ pub fn button(ui: &mut Ui, label: &str, weight: Weight, focused: bool, t: &Token
     response
 }
 
-/// A pill button's fixed height, and the number every pane control is sized against.
+/// A button's fixed height, and the number every pane control is sized against.
 pub const BUTTON_HEIGHT: f32 = 40.0;
 
 /// The same button, placed in a rectangle the CALLER chose and identified by an id it controls.
@@ -232,7 +217,7 @@ pub fn button_at(
     response
 }
 
-/// How wide a pill button has to be for `label`.
+/// How wide a button has to be for `label`.
 ///
 /// Exposed so a caller laying buttons out itself — a content pane places them absolutely rather than
 /// through egui's layout — can wrap a row before it runs off the edge instead of after.
@@ -262,11 +247,29 @@ pub enum Enablement {
     Disabled,
 }
 
-/// Paint a pill button's face into `rect`, in hub's language.
+/// Paint a button's face into `rect`, in hub's language.
 ///
 /// Split out of [`button`] so the window's absolutely-positioned pane buttons and the prompt's
 /// allocated ones are the SAME control. Two functions each drawing "a DIG button" is how a product
 /// ends up with two button styles, which is precisely the failure dig_ecosystem#2326 exists to fix.
+///
+/// # The register: a product surface, not a front door (dig_ecosystem#2354)
+///
+/// A button is a flat fill at [`radius::SM`], with **no glow and no gradient**. It used to carry
+/// both, which is dig.net's register — the dark cosmic neon where a bloom marks the one hero call to
+/// action on a landing page. dig-app is a local utility, and every one of its panes had a glowing
+/// pill, so the bloom stopped meaning *this is the important one* and became background texture. It
+/// was also actively harmful twice over: the halo painted OUTSIDE the control's own rect and visibly
+/// overlapped the button beneath it at 480 px, and the destructive weight carried the same bloom as
+/// the affirmative, so a destroy shone exactly as invitingly as a save.
+///
+/// What still separates the weights is what always should have: hue and fill. Purple affirms, red
+/// destroys, a bordered ghost recedes. The accent GRADIENT survives in exactly one place —
+/// [`brand_mark`] — because a brand flourish belongs on the mark and nowhere else.
+///
+/// Focus is unaffected and is now the only thing that paints outside `rect`: the 2 px accent ring.
+/// That is a strengthening rather than a loss. #2038 removed an accent halo from the destroy prompt
+/// precisely because it read as the focus ring; with no halo at all, the ring is unambiguous.
 pub fn button_face(
     ui: &Ui,
     rect: Rect,
@@ -297,7 +300,10 @@ pub fn button_face(
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_owned(), semibold(size::BUTTON), text_colour);
-    let corner = radius::PILL.min((rect.height() / 2.0) as u8);
+    // The same radius the inputs and the chooser take, so a control group holding a button beside a
+    // dropdown is one shape rather than two. Clamped to the height for the degenerate rects layout
+    // produces transiently.
+    let corner = radius::SM.min((rect.height() / 2.0) as u8);
 
     match fill {
         Some((base, hover)) if disabled => {
@@ -306,32 +312,9 @@ pub fn button_face(
                 .rect_filled(rect, CornerRadius::same(corner), rgba(base));
         }
         Some((base, hover)) => {
-            // The glow follows the control's OWN colour. An accent glow behind a destructive button
-            // reads as the focus ring — which is drawn in the accent — so a destroy window appeared
-            // to have both controls focused at once, and the one that looked brightest was the one
-            // that destroys the account (#2038, found in the screenshot gallery). The pre-focused
-            // refusal (dig_ecosystem#1799) is only a safeguard if the user can SEE which control
-            // Enter will press.
-            let halo = match weight {
-                Weight::Danger => Rgba {
-                    a: t.glow.a,
-                    ..t.danger
-                },
-                _ => t.glow,
-            };
-            glow(ui, rect, corner, halo);
             let from = if hovered { hover } else { base };
-            // The affirmative carries hub's accent GRADIENT; the destructive is a flat `--danger`,
-            // so the two are told apart by more than hue at a glance.
-            match weight {
-                Weight::Primary => {
-                    gradient_fill(ui, rect, f32::from(corner), rgba(from), rgba(t.dig_magenta))
-                }
-                _ => {
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::same(corner), rgba(from));
-                }
-            }
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(corner), rgba(from));
         }
         None => {
             let edge = if hovered { t.border_strong } else { t.border };
@@ -363,7 +346,7 @@ pub fn button_face(
     }
 }
 
-/// Horizontal padding inside a pill — hub's `.btn { padding: 12px 26px }`, doubled for both sides.
+/// Horizontal padding inside a button — hub's `.btn { padding: 12px 26px }`, doubled for both sides.
 fn space_x() -> f32 {
     52.0
 }
@@ -436,6 +419,150 @@ pub fn rule(ui: &Ui, rect: Rect, y: f32, t: &Tokens) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every shape a closure paints, flattened out of the frame it painted them into.
+    ///
+    /// Two frames, as everywhere else in this crate's paint tests: the first builds the font atlas
+    /// and the second lays out against it, so a measurement is never taken against a missing glyph.
+    fn painted(draw: impl Fn(&Ui, &Tokens)) -> Vec<Shape> {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::splat(400.0));
+
+        let mut output = egui::FullOutput::default();
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("paint-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| draw(ui, &t));
+                },
+            );
+        }
+
+        fn walk(shape: &Shape, out: &mut Vec<Shape>) {
+            match shape {
+                Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                other => out.push(other.clone()),
+            }
+        }
+        let mut shapes = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut shapes);
+        }
+        shapes
+    }
+
+    /// The rect a shape covers, ignoring text (whose galley is centred inside the control anyway).
+    fn covered(shape: &Shape) -> Option<Rect> {
+        match shape {
+            Shape::Rect(r) => Some(r.rect),
+            Shape::Mesh(mesh) => Some(mesh.calc_bounds()),
+            _ => None,
+        }
+    }
+
+    /// **A button paints inside its own rect: no bloom, and no gradient (dig_ecosystem#2354).**
+    ///
+    /// The property is that the control occupies the space it was given. The glow this replaces
+    /// painted four widening copies OUTSIDE `rect`, which at 480 px visibly overlapped the button
+    /// beneath it in `settings-dark-480.png` — so geometry, not colour, is what is asserted, because
+    /// geometry is what the defect actually was.
+    ///
+    /// Run over BOTH filled weights. `Danger` is not incidental: the halo followed the control's own
+    /// colour, so a fix that removed only the accent bloom would leave a destroy glowing red and
+    /// would pass a Primary-only test. `Ghost` is excluded and covered by the focus case below —
+    /// it never had a fill to bloom, so it cannot tell a fixed implementation from a broken one.
+    #[test]
+    fn a_button_paints_no_bloom_and_no_gradient_outside_its_own_rect() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(180.0, BUTTON_HEIGHT));
+        for weight in [Weight::Primary, Weight::Danger] {
+            let shapes = painted(|ui, t| {
+                button_face(
+                    ui,
+                    rect,
+                    "Turn auto-update off",
+                    weight,
+                    Enablement::Live {
+                        hovered: false,
+                        focused: false,
+                    },
+                    t,
+                );
+            });
+            assert!(
+                shapes.iter().any(|s| matches!(s, Shape::Rect(_))),
+                "{weight:?} painted no fill at all, so this test is looking at an empty frame"
+            );
+            for shape in &shapes {
+                assert!(
+                    !matches!(shape, Shape::Mesh(_)),
+                    "{weight:?} still paints a gradient mesh; the accent gradient belongs to the \
+                     DIG mark alone"
+                );
+                if let Some(area) = covered(shape) {
+                    assert!(
+                        rect.expand(0.5).contains_rect(area),
+                        "{weight:?} painted {area:?}, outside its own {rect:?} — a bloom that \
+                         overlaps whatever is drawn beneath it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Focus still paints its ring outside the control — the one thing that may.**
+    ///
+    /// The control for the test above, and the property #2038 depends on: a person has to be able to
+    /// SEE which button Enter will press. A "fix" that clipped every button to its rect would pass
+    /// the bloom test and silently delete the focus ring.
+    #[test]
+    fn a_focused_button_still_draws_its_ring_beyond_its_rect() {
+        let rect = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(180.0, BUTTON_HEIGHT));
+        let shapes = painted(|ui, t| {
+            button_face(
+                ui,
+                rect,
+                "Unlock…",
+                Weight::Ghost,
+                Enablement::Live {
+                    hovered: false,
+                    focused: true,
+                },
+                t,
+            );
+        });
+        assert!(
+            shapes
+                .iter()
+                .filter_map(covered)
+                .any(|area| !rect.expand(0.5).contains_rect(area)),
+            "a focused control drew nothing beyond its own edge, so its ring is gone"
+        );
+    }
+
+    /// **The accent gradient survives on the DIG mark, and only there.**
+    ///
+    /// Without this, the no-mesh assertion above is satisfied by deleting [`gradient_fill`] outright.
+    #[test]
+    fn the_brand_mark_keeps_the_accent_gradient() {
+        let shapes = painted(|ui, t| {
+            brand_mark(
+                ui,
+                Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::splat(24.0)),
+                t,
+            );
+        });
+        assert!(
+            shapes.iter().any(|s| matches!(s, Shape::Mesh(_))),
+            "the DIG mark lost its gradient, which is the one place a brand flourish belongs"
+        );
+    }
 
     /// The outline closes and stays inside its rect — a corner that bulged past the edge would show
     /// as a notch against the card behind it.

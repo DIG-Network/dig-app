@@ -139,10 +139,6 @@ pub mod radius {
     pub const BASE: u8 = 10;
     /// `--radius-lg` — the window card.
     pub const LG: u8 = 16;
-    /// A pill. Not one of hub's tokens: hub writes `999px`, which is "half the height", and egui
-    /// takes an absolute corner radius — so it is derived from the control height at the call site
-    /// and this is only the cap.
-    pub const PILL: u8 = 24;
 }
 
 /// One thing a prompt window shows, in the role it shows it as.
