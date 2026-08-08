@@ -385,9 +385,14 @@ pub(crate) mod unwired {
     /// Deliberately says what a reader must NOT conclude, not merely that work is pending: the
     /// failure this state exists to prevent is a person reading a designed-but-unwired pane as a
     /// report on their own machine.
+    ///
+    /// It also says so without describing the project (dig_ecosystem#2356). It used to close *"It
+    /// is the finished layout, waiting for the node to be wired up to it"* — a sentence about
+    /// dig-app's own build order, addressed to a reader who has no node, no layout and no wiring.
+    /// What they need is what to do with the figures, which is nothing.
     pub(crate) const CAVEAT: &str =
-        "Nothing on this card is a reading from your computer. It is the finished layout, waiting \
-         for the node to be wired up to it.";
+        "Nothing on this card is a reading from your computer. Treat every figure here as a \
+         placeholder until DIG can show you your own.";
 }
 
 /// The copy-to-clipboard affordance.
@@ -567,11 +572,16 @@ mod tests {
     /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
     /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
     /// it.
-    #[test]
-    fn no_sentence_carries_its_own_indentation() {
-        let sentences = [
+    /// Every sentence this module hands a paint call, so a guard asserted "over all the copy" is.
+    ///
+    /// Written out because these are `const`s in nested modules and nothing enumerates them; the
+    /// tab LEADS are appended from [`TabId::ALL`], whose own docs record what that list does and
+    /// does not guarantee.
+    fn every_sentence() -> Vec<&'static str> {
+        let mut all = vec![
             NOTHING_HERE,
             unwired::HEADING,
+            unwired::BADGE,
             unwired::CAVEAT,
             status::CACHE_UNKNOWN,
             status::DIAGNOSTICS_HINT,
@@ -587,7 +597,28 @@ mod tests {
             cache::ADD_FIELD_HINT,
             cache::ADD_NOT_WIRED,
         ];
-        for sentence in sentences {
+        all.extend(TabId::ALL.iter().map(|tab| lead(*tab)));
+        all
+    }
+
+    /// The phrasings that describe how dig-app was BUILT rather than what the reader is looking at.
+    ///
+    /// Each was found on screen, not in review: two in tab leads (dig_ecosystem#2356) and one in the
+    /// unwired caveat, which is why the check below is asserted over every sentence rather than over
+    /// the leads alone — the voice rule is about the copy, and it leaked into the copy that is not a
+    /// lead the moment it was enforced only on leads.
+    const DEVELOPER_VOICE: [&str; 6] = [
+        "Each group",
+        "finished layout",
+        "this form",
+        "This form",
+        "this tab was",
+        "wired up to it",
+    ];
+
+    #[test]
+    fn no_sentence_carries_its_own_indentation() {
+        for sentence in every_sentence() {
             assert!(
                 !sentence.contains("  "),
                 "a sentence carries a run of spaces from its source indentation: {sentence}"
@@ -600,13 +631,17 @@ mod tests {
     ///
     /// The two halves are the two defects dig_ecosystem#2356 names. Distinctness is what makes the
     /// lead worth drawing — a shared sentence across seven tabs is seven tabs with no orientation,
-    /// which is the state five of them were already in. The voice check is asserted as an ABSENCE of
-    /// the two phrasings that leaked, plus the class they belong to: a lead that talks about groups,
-    /// layouts or forms is talking about the tab's construction rather than its purpose.
+    /// which is the state five of them were already in. The VOICE half is asserted over every
+    /// sentence, not only the leads, by
+    /// [`no_sentence_explains_the_app_to_the_reader`](tests::no_sentence_explains_the_app_to_the_reader).
     #[test]
     fn every_tab_leads_with_its_own_sentence_about_what_the_tab_is_for() {
         let leads: Vec<&str> = TabId::ALL.iter().map(|tab| lead(*tab)).collect();
-        assert_eq!(leads.len(), 8, "the tab set changed and this guard did not");
+        assert_eq!(
+            leads.len(),
+            TabId::ALL.len(),
+            "the tab set changed and this guard did not"
+        );
 
         let mut unique = leads.clone();
         unique.sort_unstable();
@@ -627,17 +662,34 @@ mod tests {
                 !said.contains("  "),
                 "the {tab:?} lead carries a run of spaces from its source indentation: {said}"
             );
-            for leak in [
-                "Each group",
-                "finished layout",
-                "this form",
-                "This form",
-                "this tab was",
-            ] {
+        }
+    }
+
+    /// **No sentence anywhere in this module explains dig-app's construction to its reader.**
+    ///
+    /// The guard this replaces ran over the tab LEADS only, and the same voice was live on two panes
+    /// at the time in the unwired caveat — *"It is the finished layout, waiting for the node to be
+    /// wired up to it"* — because a caveat is not a lead. A voice rule enforced on one kind of
+    /// sentence is a voice rule for one kind of sentence.
+    ///
+    /// The fixture is [`every_sentence`], the leads INCLUDED, so a phrasing moving from a lead into
+    /// a caption is caught where moving it used to launder it.
+    #[test]
+    fn no_sentence_explains_the_app_to_the_reader() {
+        let sentences = every_sentence();
+        // Without this the sweep is over a list someone could empty, which would pass loudest of
+        // all. The leads alone are eight, so anything near that means the consts stopped arriving.
+        assert!(
+            sentences.len() > TabId::ALL.len(),
+            "the sentence list no longer carries the copy that is not a lead, so this sweep is \
+             back to being the leads-only guard it replaced"
+        );
+        for said in sentences {
+            for leak in DEVELOPER_VOICE {
                 assert!(
                     !said.contains(leak),
-                    "the {tab:?} lead says {leak:?}, which describes how the tab was BUILT rather \
-                     than what it is for: {said}"
+                    "a sentence says {leak:?}, which describes how dig-app was BUILT rather than \
+                     what the reader is looking at: {said}"
                 );
             }
         }

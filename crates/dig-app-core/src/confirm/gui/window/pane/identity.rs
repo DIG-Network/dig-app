@@ -9,7 +9,7 @@ use super::copy;
 use super::data::{self, Value};
 use super::text;
 use crate::confirm::gui::paint;
-use crate::confirm::gui::render::{rgba, space, Weight};
+use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 
 /// How long the control reads "Copied" before returning to "Copy", in seconds.

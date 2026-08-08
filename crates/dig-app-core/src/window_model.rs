@@ -74,8 +74,18 @@ pub enum TabId {
 impl TabId {
     /// Every tab this window can emit, in the order a person meets them.
     ///
-    /// Written out rather than derived, and kept exhaustive by `TabId::label`'s own match — a new
-    /// variant has to be given a label there, which is the same edit that brings someone here.
+    /// # This list is NOT proved exhaustive, and the sweeps that use it depend on it being so
+    ///
+    /// It used to claim `TabId::label`'s match kept it complete. It does not: `label` forces a new
+    /// variant to be given a LABEL, and nothing forces it to be added here. A ninth tab would
+    /// compile, be absent from this array, and so escape every sweep written over it — the copy
+    /// voice guard, the lead guard and the state guard all iterate this list.
+    ///
+    /// Stable Rust has no way to make an array literal exhaustive over an enum without a derive, so
+    /// the honest thing is to say so rather than to assert a guarantee that is not there. What IS
+    /// held: nothing reads a hardcoded count — the sweeps compare against `ALL.len()` — so the list
+    /// and its guards cannot come to disagree about how many tabs there are, only about which.
+    /// dig_ecosystem#2358 carries deriving this.
     pub const ALL: [Self; 8] = [
         Self::Status,
         Self::Account,
