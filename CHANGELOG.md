@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [8.0.0] - 2026-08-08
+
+### Features
+- **window:** Carry the node's real facts into TrayView and the pane layer (#135)- **window:** The product register, a cache chooser, one pane header, one state vocabulary (#137)- **window:** Five semantic tabs, one account narrative, and a window-wide status strip (#138)- **custody:** Adopt dig-account 0.5.0 — a real gate replaces the always-approve authorizer (#139)- **account:** The DID wizard opens at startup when no DID is minted (#141)
+
+### Bug Fixes
+- **custody:** A lock revokes the money signer it already handed out (#140)
+
+### Documentation
+- **gallery:** The complete app gallery, and a capture that cannot lie (#136)
+
 ## [5.41.0] - 2026-08-08
 
 ### Features
