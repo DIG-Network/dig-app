@@ -32,7 +32,7 @@ computer. Nobody, including DIG, can recover an account without them.
 menu keeps the four things you want in one click — whatever your account needs right now, **Open URL…**,
 **Open App**, and **Quit DIG** — and **Open App** opens a window with the rest, arranged in tabs down the
 left: Status, Account, Security, Wallet, Apps and Cache. How DIG is doing is shown by the tray ICON, by
-its tooltip, and by **Status and details…** on the Status tab, which has the whole picture (including the
+its tooltip, and by **Status and details…** on the Home tab, which has the whole picture (including the
 node's full diagnosis when something is wrong).
 
 On a computer where DIG cannot open that window — macOS today, and Linux with no desktop session — the

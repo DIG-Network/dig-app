@@ -36,78 +36,84 @@ use crate::tray_menu::{
     TrayAction, TrayView,
 };
 
-/// One tab of the app window.
+/// One tab of the app window — five destinations, in the order a person meets them.
 ///
-/// # Why [`Settings`](Self::Settings) joined [`Advanced`](Self::Advanced) instead of replacing it
+/// # Why five, and why these five (dig_ecosystem#2358)
 ///
-/// The two are different promises. **Settings** is where a person expects ordinary preferences about
-/// how DIG behaves — auto-update is the first, and it is an ordinary preference, not an expert knob.
-/// **Advanced** is for the settings that can break an install if they are got wrong: the node endpoint
-/// override and the global-shortcut chord, both of which already exist in
-/// [`AgentConfig`](crate::config::AgentConfig) with no user-facing control. Filing auto-update under
-/// "Advanced" would tell every ordinary user that keeping DIG up to date is not for them.
+/// Seven tabs held three duplications and one dead pane. Each merge below removes a reason for two
+/// surfaces to disagree about one fact, which is the only kind of tidying worth a breaking change to
+/// a navigation set.
 ///
-/// [`Advanced`](Self::Advanced) therefore still holds nothing and still never renders — [`build`]
-/// emits only non-empty tabs — but it is now room for a NAMED set rather than for anything at all.
-/// dig_ecosystem#2310 tracks either filling it with those two controls or deleting the variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// * **Security folded into [`Account`](Self::Account).** "Is my account safe" and "I want a
+///   different account" is a real distinction between CARDS, not between destinations — and the
+///   split cost a genuine defect: two hand-maintained six-arm sentence sets over one account state
+///   machine, each tested only against itself, free to drift indefinitely while both suites stayed
+///   green. One pane draws the lead once and reads as one narrative: who you are, whether it is
+///   protected, whether you can get it back, and the destroying verbs last.
+/// * **Status became [`Home`](Self::Home).** Its account rows and its second copy of the cache meter
+///   are gone, and the facts a person needs wherever they are standing — the agent and the node —
+///   moved into a header strip the whole window carries. A person on Wallet should not have to
+///   change tabs to learn the node is down, especially when a down node is frequently WHY the
+///   balance reads "Not known".
+/// * **Apps became a launcher strip on [`Home`](Self::Home).** One card and half a pane of void; a
+///   dedicated tab advertised emptiness.
+/// * **Cache became [`Content`](Self::Content).** "Cache" is implementation jargon, and with the
+///   reshare flywheel this is where a person sees they are CONTRIBUTING — a better reason for a tab
+///   to exist than a disk quota.
+/// * **Advanced was deleted.** It declared room for the node-endpoint override and the global
+///   shortcut; both shipped inside the Settings pane instead, so the variant held nothing, rendered
+///   never, and only widened every sweep written over the tab set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum TabId {
-    /// What the app is doing right now, and the way to the logs when it cannot say.
-    Status,
-    /// The account: what it is, and how to create, restore, replace or remove it.
+    /// What DIG is doing on this computer, the way to the logs, and the other DIG apps it can open.
+    ///
+    /// In that order, which is the order [`build`] emits: the diagnostics first because a person
+    /// who opens this tab because something is wrong came for them, the launcher under them because
+    /// that is what they browse when nothing is.
+    Home,
+    /// The account: what it is, how it is protected, and how to create, restore, replace or remove
+    /// it.
     Account,
-    /// Is my account safe right now — locking, the second factor, and paired apps.
-    Security,
     /// What the account can do with money, which today is receive and understand.
     Wallet,
-    /// The other DIG apps this install can open.
-    Apps,
-    /// The node's content-cache size limit.
-    Cache,
-    /// How DIG behaves: today, whether it keeps itself up to date and which feed it follows.
+    /// What this computer keeps on disk for the network, and how much of it to give up.
+    Content,
+    /// How DIG behaves: whether it keeps itself up to date, which node it reads through, and the
+    /// chord that opens it.
     Settings,
-    /// Declared room for the expert-only controls named in the enum's docs. Holds nothing today, so it
-    /// is never rendered.
-    Advanced,
 }
 
 impl TabId {
     /// Every tab this window can emit, in the order a person meets them.
     ///
-    /// # This list is NOT proved exhaustive, and the sweeps that use it depend on it being so
+    /// # Generated, because the hand-written version was not exhaustive and three sweeps relied on it
     ///
-    /// It used to claim `TabId::label`'s match kept it complete. It does not: `label` forces a new
-    /// variant to be given a LABEL, and nothing forces it to be added here. A ninth tab would
-    /// compile, be absent from this array, and so escape every sweep written over it — the copy
-    /// voice guard, the lead guard and the state guard all iterate this list.
+    /// This used to be a `[Self; N]` array literal whose own docs admitted the gap: adding a variant
+    /// forced it to be given a LABEL and nothing forced it to be added HERE, so a new tab would
+    /// compile, be absent from the list, and escape every guard written over it — the copy-voice
+    /// sweep, the lead sweep and the pane-state sweep all iterate this. Stable Rust has no way to
+    /// make an array literal exhaustive over an enum, so the list is now derived
+    /// ([`strum::EnumIter`]) and a new variant arrives in every sweep without anyone remembering.
     ///
-    /// Stable Rust has no way to make an array literal exhaustive over an enum without a derive, so
-    /// the honest thing is to say so rather than to assert a guarantee that is not there. What IS
-    /// held: nothing reads a hardcoded count — the sweeps compare against `ALL.len()` — so the list
-    /// and its guards cannot come to disagree about how many tabs there are, only about which.
-    /// dig_ecosystem#2358 carries deriving this.
-    pub const ALL: [Self; 8] = [
-        Self::Status,
-        Self::Account,
-        Self::Security,
-        Self::Wallet,
-        Self::Apps,
-        Self::Cache,
-        Self::Settings,
-        Self::Advanced,
-    ];
+    /// The order is the enum's declaration order, which is also the sidebar's order, so there is one
+    /// place to change a tab's position rather than two that can disagree.
+    pub fn all() -> Vec<Self> {
+        use strum::IntoEnumIterator;
+        Self::iter().collect()
+    }
 
     /// The tab's user-facing label.
-    fn label(self) -> &'static str {
+    ///
+    /// Visible to the crate because it is also the vocabulary the COPY may use: a sentence that
+    /// sends a reader to a named tab is only true while that name is one of these, so the copy
+    /// sweep checks itself against this function rather than against a second hand-kept list.
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Status => "Status",
+            Self::Home => "Home",
             Self::Account => "Account",
-            Self::Security => "Security",
             Self::Wallet => "Wallet",
-            Self::Apps => "Apps",
-            Self::Cache => "Cache",
+            Self::Content => "Content",
             Self::Settings => "Settings",
-            Self::Advanced => "Advanced",
         }
     }
 }
@@ -275,6 +281,22 @@ pub const TRAY_SPINE: [TrayAction; 8] = [
     TrayAction::Quit,
 ];
 
+/// The heading over the Account tab's protection rows.
+///
+/// # Why the model and the pane share the literal rather than each writing one
+///
+/// The merged Account pane draws its protection rows differently from its other rows: they carry the
+/// window's ONE promoted verb, and its second-factor and paired-app machinery hangs off them. So the
+/// pane has to find that section — and finding it by POSITION would make the pane's layout depend on
+/// the order this function happens to list sections in, which is the coupling
+/// the merged Account pane exists to avoid. Naming the section once, here,
+/// means the two cannot drift: there is one string, not two that must stay equal.
+pub const PROTECTION_HEADING: &str = "How this account is protected";
+
+/// The heading over the Home tab's app launcher, shared for the same reason as
+/// [`PROTECTION_HEADING`].
+pub const APPS_HEADING: &str = "Other DIG apps";
+
 /// The note for a tab whose whole content is a statement about the account.
 ///
 /// `view.account` is `None` until the first boot report arrives — NOT "there is no account". The
@@ -328,20 +350,29 @@ pub fn build(view: &TrayView) -> WindowModel {
     let account = view.account();
 
     let tabs = vec![
-        // The two rows that are not any group builder's: both are unconditional and always enabled on
-        // the tray, so there is no rule to share. `OpenLogs` is the escape hatch for when the app
-        // cannot say what is wrong, which is why it leads the window rather than hiding in Advanced.
+        // The launcher sits under the diagnostics rather than above them: a person who opens this
+        // tab because something is wrong came for the log folder, and the apps are what they browse
+        // when nothing is. `OpenLogs` is the escape hatch for when the app cannot say what is wrong.
         tab(
-            TabId::Status,
-            status_note(view),
-            vec![Section {
-                heading: None,
-                rows: vec![
-                    row(TrayAction::ShowStatus, "Status and details"),
-                    row(TrayAction::OpenLogs, "Open the log folder"),
-                ],
-            }],
+            TabId::Home,
+            home_note(view),
+            vec![
+                Section {
+                    heading: None,
+                    rows: vec![
+                        row(TrayAction::ShowStatus, "Status and details"),
+                        row(TrayAction::OpenLogs, "Open the log folder"),
+                    ],
+                },
+                Section {
+                    heading: Some(APPS_HEADING.to_string()),
+                    rows: apps_actions(),
+                },
+            ],
         ),
+        // One pane, in the order the two panes already read in when they were two: what this account
+        // IS, then whether it is protected, then the verbs that change which account this computer
+        // has — destroying last. See [`TabId::Account`] for why they merged.
         tab(
             TabId::Account,
             account_note(view),
@@ -351,18 +382,14 @@ pub fn build(view: &TrayView) -> WindowModel {
                     rows: view_account_actions(view, &account),
                 },
                 Section {
+                    heading: Some(PROTECTION_HEADING.to_string()),
+                    rows: security_actions(&account, view.second_factor),
+                },
+                Section {
                     heading: Some("Manage this account".to_string()),
                     rows: management_actions(&account),
                 },
             ],
-        ),
-        tab(
-            TabId::Security,
-            account_note(view),
-            vec![Section {
-                heading: None,
-                rows: security_actions(&account, view.second_factor),
-            }],
         ),
         // The heading IS the balance sentence — the content `AboutWallet` would otherwise have opened
         // a window to show. That is what makes subsuming it honest rather than a quiet deletion.
@@ -376,18 +403,10 @@ pub fn build(view: &TrayView) -> WindowModel {
                 rows: wallet_actions(view, &account),
             }],
         ),
-        tab(
-            TabId::Apps,
-            PaneNote::Ready,
-            vec![Section {
-                heading: None,
-                rows: apps_actions(),
-            }],
-        ),
         // Same reasoning as Wallet's heading: the tray puts the live usage-against-cap on the submenu's
         // parent label, so the tab that replaces that submenu carries the same figure.
         tab(
-            TabId::Cache,
+            TabId::Content,
             // The cap and the usage both come from the node. With no node connected they are not late,
             // they are absent — so this is the error state, not the loading one, and it names the act
             // that changes the answer.
@@ -428,7 +447,7 @@ pub fn build(view: &TrayView) -> WindowModel {
     }
 }
 
-/// How complete the **Status** tab is (dig_ecosystem#2330).
+/// How complete the **Home** tab is (dig_ecosystem#2330).
 ///
 /// Three honest cases, in the order a launch passes through them. The agent starts asynchronously,
 /// so a window opened during boot has no figures yet — saying so is the loading state, and saying
@@ -436,7 +455,7 @@ pub fn build(view: &TrayView) -> WindowModel {
 /// running, a node that did not answer means the tab's figures are ABSENT rather than late, so it
 /// names the act that changes the answer — the same shape the Cache tab already uses, for the same
 /// reason.
-fn status_note(view: &TrayView) -> PaneNote {
+fn home_note(view: &TrayView) -> PaneNote {
     match (view.running, view.node_connected) {
         (false, _) => PaneNote::Waiting("The DIG agent is still starting."),
         (true, false) => PaneNote::Unreachable(
@@ -467,14 +486,14 @@ fn nothing_to_do(id: TabId) -> &'static str {
     match id {
         TabId::Wallet => "Set up a DIG Account to get a receive address.",
         TabId::Account => "Set up a DIG Account to manage one here.",
-        TabId::Security => "Set up a DIG Account to choose how it is protected.",
-        TabId::Apps => "Install another DIG app and it will appear here.",
-        TabId::Cache => "Start the DIG node to choose a size limit.",
+        TabId::Content => "Start the DIG node to choose a size limit.",
         // Unreachable by construction: the explainer row is offered in every state, so this tab always
         // has something to click. Written honestly anyway rather than left to a catch-all, because the
         // day a refactor makes it reachable is the day a wrong sentence would ship unnoticed.
         TabId::Settings => "Install the DIG updater to choose how DIG updates itself.",
-        TabId::Status | TabId::Advanced => "There is nothing to do here right now.",
+        // Also unreachable: the two diagnostic rows are unconditional, so this tab always has
+        // something to click whatever the account or the node is doing.
+        TabId::Home => "Open the log folder to find out what DIG is doing.",
     }
 }
 
@@ -890,16 +909,17 @@ mod tests {
             account: None,
             ..TrayView::default()
         };
-        for id in [TabId::Account, TabId::Security] {
-            let note = build(&unreported)
-                .tab(id)
-                .map(|t| t.note.clone())
-                .expect("the tab is emitted");
-            assert!(
-                matches!(note, PaneNote::Waiting(_)),
-                "{id:?} claimed {note:?} about an account nothing has reported yet"
-            );
-        }
+        // One tab, since dig_ecosystem#2358 merged Security into Account: there is now a single
+        // destination that speaks about the account, which is the whole reason the two panes could
+        // no longer disagree about how to describe a state nothing had reported.
+        let note = build(&unreported)
+            .tab(TabId::Account)
+            .map(|t| t.note.clone())
+            .expect("the Account tab is emitted");
+        assert!(
+            matches!(note, PaneNote::Waiting(_)),
+            "Account claimed {note:?} about an account nothing has reported yet"
+        );
     }
 
     /// The control the test above needs: a machine that genuinely HAS no account must still be told
@@ -910,16 +930,14 @@ mod tests {
             account: Some(AccountState::Absent),
             ..TrayView::default()
         };
-        for id in [TabId::Account, TabId::Security] {
-            let note = build(&absent)
-                .tab(id)
-                .map(|t| t.note.clone())
-                .expect("the tab is emitted");
-            assert!(
-                !matches!(note, PaneNote::Waiting(_)),
-                "{id:?} said it was still reading about a machine that reported no account"
-            );
-        }
+        let note = build(&absent)
+            .tab(TabId::Account)
+            .map(|t| t.note.clone())
+            .expect("the Account tab is emitted");
+        assert!(
+            !matches!(note, PaneNote::Waiting(_)),
+            "Account said it was still reading about a machine that reported no account"
+        );
     }
 
     #[test]
@@ -1021,7 +1039,7 @@ mod tests {
     /// Asserted as "it renders something the person can act on", not as "it is not greyed": greying is
     /// no longer expressible, so the old form would pass on a tab that had been emptied instead.
     #[test]
-    fn security_is_usable_without_an_unlocked_account() {
+    fn the_protections_are_usable_without_an_unlocked_account() {
         for view in every_view() {
             let locked_out = matches!(
                 view.account,
@@ -1033,12 +1051,12 @@ mod tests {
                 continue;
             }
             let tab = build(&view)
-                .tab(TabId::Security)
+                .tab(TabId::Account)
                 .cloned()
-                .unwrap_or_else(|| panic!("Security must render\n  view: {}", describe(&view)));
+                .unwrap_or_else(|| panic!("Account must render\n  view: {}", describe(&view)));
             assert!(
                 !tab.actions().is_empty(),
-                "Security must offer something without an unlock\n  view: {}",
+                "Account must offer something without an unlock\n  view: {}",
                 describe(&view)
             );
         }
@@ -1297,12 +1315,33 @@ mod tests {
         }
     }
 
+    /// **Every declared tab is actually emitted, in every view.**
+    ///
+    /// The inverse of the guard it replaces. `Advanced` was declared and never constructed, and the
+    /// old test pinned that absence; the five-tab reshape deleted it, and what is worth pinning now
+    /// is the opposite property — a tab a person can see in the sidebar is a tab the model always
+    /// has content for. Swept over [`TabId::all`], which is derived from the enum, so a sixth tab
+    /// that nobody wired into [`build`] fails here rather than shipping as a name with no pane
+    /// (dig_ecosystem#2358).
     #[test]
-    fn advanced_never_renders_because_it_holds_nothing() {
+    fn every_declared_tab_is_emitted_in_every_view() {
         for view in every_view() {
-            for tab in &build(&view).tabs {
-                assert_ne!(tab.id, TabId::Advanced, "Advanced holds nothing yet");
+            let model = build(&view);
+            for id in TabId::all() {
+                assert!(
+                    model.tab(id).is_some(),
+                    "{id:?} is declared but was not emitted
+  view: {}",
+                    describe(&view)
+                );
             }
+            assert_eq!(
+                model.tabs.len(),
+                TabId::all().len(),
+                "the model emitted a different number of tabs than are declared
+  view: {}",
+                describe(&view)
+            );
         }
     }
 
@@ -1470,7 +1509,7 @@ mod tests {
         };
         let up = TrayView {
             running: true,
-            // A node that ANSWERED — the Status tab reports on the node, so a healthy fixture must
+            // A node that ANSWERED — the Home tab reports on the node, so a healthy fixture must
             // have one (dig_ecosystem#2330).
             node_connected: true,
             account: Some(AccountState::Unlocked { recoverable: true }),
@@ -1484,17 +1523,17 @@ mod tests {
 
         // Loading, and its absence once the agent is up.
         assert_eq!(
-            note(&booting, TabId::Status),
+            note(&booting, TabId::Home),
             Some(PaneNote::Waiting("The DIG agent is still starting."))
         );
-        assert_eq!(note(&up, TabId::Status), Some(PaneNote::Ready));
+        assert_eq!(note(&up, TabId::Home), Some(PaneNote::Ready));
 
         // Error, and its absence once a node has reported.
         assert!(matches!(
-            note(&booting, TabId::Cache),
+            note(&booting, TabId::Content),
             Some(PaneNote::Unreachable(_))
         ));
-        assert_eq!(note(&up, TabId::Cache), Some(PaneNote::Ready));
+        assert_eq!(note(&up, TabId::Content), Some(PaneNote::Ready));
 
         // Empty, and its absence once the tab has something to click. With no account the Wallet tab
         // keeps its balance heading and no row, because subsumption takes both `AboutWallet` rows.
@@ -1504,19 +1543,21 @@ mod tests {
         ));
         assert_eq!(note(&up, TabId::Wallet), Some(PaneNote::Ready));
 
-        // Success.
-        assert_eq!(note(&up, TabId::Apps), Some(PaneNote::Ready));
+        // Success. The Account tab, because it is `Ready` the moment an account has been REPORTED
+        // — Settings would need a beacon in the fixture and would otherwise be `Unreachable`, which
+        // is a different state wearing this assertion's name.
+        assert_eq!(note(&up, TabId::Account), Some(PaneNote::Ready));
     }
 
     /// **A running agent with no node reports an unreachable node, not a ready one**
     /// (dig_ecosystem#2330).
     ///
-    /// The Status tab reports on the node, so `Ready` with nothing connected is the same shape of
-    /// false claim the Cache tab already avoids. The two controls either side keep the assertion
+    /// The Home tab reports on the node, so `Ready` with nothing connected is the same shape of
+    /// false claim the Content tab already avoids. The two controls either side keep the assertion
     /// from being satisfied by a note that is always `Unreachable` or always `Waiting`.
     #[test]
-    fn the_status_tab_names_the_missing_node_rather_than_reporting_ready() {
-        let note = |view: &TrayView| build(view).tab(TabId::Status).map(|tab| tab.note.clone());
+    fn the_home_tab_names_the_missing_node_rather_than_reporting_ready() {
+        let note = |view: &TrayView| build(view).tab(TabId::Home).map(|tab| tab.note.clone());
         let booting = TrayView {
             running: false,
             node_connected: false,
@@ -1569,7 +1610,7 @@ mod tests {
         );
         // `Waiting` is exempt: waiting has no remedy other than waiting.
         assert!(label_names_a_remedy(nothing_to_do(TabId::Wallet)));
-        assert!(label_names_a_remedy(nothing_to_do(TabId::Cache)));
+        assert!(label_names_a_remedy(nothing_to_do(TabId::Content)));
     }
 
     /// dig_ecosystem#2257 — the property `action_id`'s doc claims, tested for real at last.
@@ -1605,29 +1646,34 @@ mod tests {
 
     #[test]
     fn a_sidebar_id_is_derived_from_the_variant_and_is_unique() {
-        let tabs = [
-            TabId::Status,
-            TabId::Account,
-            TabId::Security,
-            TabId::Wallet,
-            TabId::Apps,
-            TabId::Cache,
-            TabId::Settings,
-            TabId::Advanced,
-        ];
+        let tabs = TabId::all();
         let ids: BTreeSet<String> = tabs.iter().map(|tab| tab_element_id(*tab)).collect();
         assert_eq!(ids.len(), tabs.len());
         assert_eq!(tab_element_id(TabId::Wallet), "dig-window-tab:Wallet");
     }
 
-    /// The Apps tab is the registry, whatever the registry becomes.
+    /// **The Home tab's launcher is the registry, whatever the registry becomes.**
+    ///
+    /// Asserted on the LAUNCHER SECTION rather than on the tab's whole action list, because Home
+    /// also carries the two diagnostic verbs: counting every action would pass on a build whose
+    /// registry had emptied and whose diagnostics had grown by one.
     #[test]
-    fn the_apps_tab_renders_one_row_per_registry_entry() {
+    fn the_home_launcher_renders_one_row_per_registry_entry() {
         let model = build(&TrayView::default());
-        let apps = model.tab(TabId::Apps).expect("Apps renders");
-        assert_eq!(apps.actions().len(), APPS.len());
+        let home = model.tab(TabId::Home).expect("Home renders");
+        let launched: Vec<TrayAction> = home
+            .sections
+            .iter()
+            .filter(|section| section.heading.as_deref() == Some(APPS_HEADING))
+            .flat_map(|section| &section.rows)
+            .filter_map(|row| match row {
+                MenuRow::Action { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(launched.len(), APPS.len());
         for app in APPS {
-            assert!(apps.actions().contains(&TrayAction::LaunchApp(app.id)));
+            assert!(launched.contains(&TrayAction::LaunchApp(app.id)));
         }
     }
 
@@ -1661,19 +1707,18 @@ mod tests {
                     describe(&view)
                 );
             };
-            expect(
-                TabId::Security,
-                security_actions(&account, view.second_factor),
-            );
-            expect(TabId::Apps, apps_actions());
-            expect(TabId::Cache, cache_actions(view.cache.as_ref()));
+            expect(TabId::Content, cache_actions(view.cache.as_ref()));
             expect(TabId::Wallet, wallet_actions(&view, &account));
             expect(TabId::Settings, auto_update_actions(view.update.as_ref()));
-            // The Account tab is the one that composes TWO builders onto a single pane, so it is the
-            // one where a label can repeat across a section boundary — `AboutDid` ends both. The
-            // de-dupe runs across the whole tab, so `seen` is shared here rather than per-section.
+            // The Account tab composes THREE builders onto a single pane, so it is the one where a
+            // label can repeat across a section boundary — `AboutDid` ends two of them. The de-dupe
+            // runs across the whole tab, so `seen` is shared here rather than per-section.
             let mut seen = Vec::new();
             let mut account_rows = drop_repeats(view_account_actions(&view, &account), &mut seen);
+            account_rows.extend(drop_repeats(
+                security_actions(&account, view.second_factor),
+                &mut seen,
+            ));
             account_rows.extend(drop_repeats(management_actions(&account), &mut seen));
             let account_tab: Vec<TrayAction> = account_rows
                 .into_iter()

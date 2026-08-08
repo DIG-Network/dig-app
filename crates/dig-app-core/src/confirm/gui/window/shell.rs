@@ -964,9 +964,17 @@ impl ShellApp {
                 ui.set_clip_rect(screen);
                 ui.painter().rect_filled(screen, 0, rgba(t.bg));
                 self.chrome(ui, screen, t, prompt_is_up);
-                let body = Rect::from_min_max(
+                // The strip is drawn BEFORE the body and its height is subtracted from it, rather
+                // than painted over the top: a band laid across a pane that still believes it owns
+                // the full rectangle hides the pane's first card at every width.
+                let under_chrome = Rect::from_min_max(
                     egui::Pos2::new(screen.left(), screen.top() + CHROME_HEIGHT),
                     screen.right_bottom(),
+                );
+                let strip = super::header::draw(ui, under_chrome, t, &facts);
+                let body = Rect::from_min_max(
+                    egui::Pos2::new(under_chrome.left(), under_chrome.top() + strip),
+                    under_chrome.right_bottom(),
                 );
                 clicked = panes::draw(ui, body, t, &model, &facts, self.selected, !prompt_is_up);
             });
@@ -1248,9 +1256,9 @@ fn scrim_blocker() -> egui::Id {
 }
 /// The tab the window opens on, and the one it falls back to when a selected tab stops existing.
 ///
-/// Status, because it is the tab that makes sense when the app cannot yet say what else to show —
+/// Home, because it is the tab that makes sense when the app cannot yet say what else to show —
 /// and because it holds `Open the log folder`, the escape hatch for when nothing else works.
-const FIRST_TAB: TabId = TabId::Status;
+const FIRST_TAB: TabId = TabId::Home;
 
 #[cfg(test)]
 mod tests {
@@ -1580,9 +1588,9 @@ mod tests {
     /// The truthful control for every assertion that a prompt is ABSENT: without it, a frame that
     /// drew nothing at all would read as a successful dismissal.
     fn the_shell_was_drawn(output: &egui::FullOutput) -> bool {
-        // Keyed on the sidebar's own labels, which only the shell draws. `Status` leads the
-        // sidebar in every state the model can produce, so this stays true for any view.
-        drawn_text(output).iter().any(|line| line == "Status")
+        // Keyed on the sidebar's own labels, which only the shell draws. `Home` leads the sidebar
+        // in every state the model can produce, so this stays true for any view.
+        drawn_text(output).iter().any(|line| line == "Home")
     }
 
     /// The element id of one sidebar entry.
@@ -2191,27 +2199,51 @@ mod tests {
 
     /// **A selection whose tab stops existing falls back to a tab that does, rather than to nothing.**
     ///
-    /// Fixture chosen so the fallback is OBSERVABLE: the shell starts on a tab the second view does
-    /// not emit. An account being removed really does take tabs with it, and a sidebar highlighting
-    /// a tab that is gone would render an empty pane with no way to notice why.
+    /// # Why this drives the function and not the shell (dig_ecosystem#2358)
+    ///
+    /// It used to select `TabId::Advanced` — a variant that was declared and never constructed, so
+    /// it was exactly a selection the model could not honour. Advanced is gone with the five-tab
+    /// reshape, and every remaining tab is emitted in every state, so no VIEW can now produce the
+    /// condition: a shell-level fixture for it would have to be a tab that does not exist.
+    ///
+    /// The guard is still worth keeping — `build` filters empty tabs, and a future tab whose content
+    /// is conditional would bring the state straight back, at which point a sidebar highlighting a
+    /// tab that is gone renders an empty pane with no way to notice why. So the model is built by
+    /// hand with the selection deliberately absent, which is the smallest fixture that exhibits the
+    /// property, and the control asserts the selection is left ALONE when the tab does exist — a
+    /// fallback that fired unconditionally would move a person off the tab they chose.
     #[test]
     fn a_selection_whose_tab_disappears_falls_back_to_one_that_exists() {
         let mut shelf = Shelf::open();
         shelf.settle();
 
-        // A tab that exists in one model and not another. `Advanced` is declared and never
-        // constructed, so it is exactly a selection the model cannot honour.
-        shelf.app.selected = TabId::Advanced;
-        shelf.frame(Vec::new());
-
-        let model = window_model::build(&busy_view());
+        let full = window_model::build(&busy_view());
+        let missing = WindowModel {
+            tabs: full
+                .tabs
+                .iter()
+                .filter(|tab| tab.id != TabId::Content)
+                .cloned()
+                .collect(),
+        };
         assert!(
-            model.tab(TabId::Advanced).is_none(),
-            "the fixture must not emit the tab being selected, or nothing is tested"
+            missing.tab(TabId::Content).is_none() && !missing.tabs.is_empty(),
+            "the fixture must drop the tab being selected and keep others, or nothing is tested"
         );
+
+        shelf.app.selected = TabId::Content;
+        shelf.app.keep_selection_valid(&missing);
         assert_eq!(
-            shelf.app.selected, model.tabs[0].id,
+            shelf.app.selected, missing.tabs[0].id,
             "a selection pointing at a tab that is not emitted must fall back to one that is"
+        );
+
+        shelf.app.selected = TabId::Wallet;
+        shelf.app.keep_selection_valid(&missing);
+        assert_eq!(
+            shelf.app.selected,
+            TabId::Wallet,
+            "a selection pointing at a tab that IS emitted was moved anyway"
         );
     }
 
@@ -2400,7 +2432,7 @@ mod tests {
                     running: false,
                     ..busy_view()
                 },
-                TabId::Status,
+                TabId::Home,
             ),
             (
                 "error",
@@ -2408,7 +2440,7 @@ mod tests {
                     cache: None,
                     ..busy_view()
                 },
-                TabId::Cache,
+                TabId::Content,
             ),
             (
                 "empty",
@@ -2450,12 +2482,12 @@ mod tests {
         // The success state paints no note at all, which is what makes the three above meaningful.
         let mut shelf = Shelf::open();
         shelf.settle();
-        let at = shelf.centre_of(sidebar_entry(TabId::Cache));
+        let at = shelf.centre_of(sidebar_entry(TabId::Content));
         shelf.click(at);
         let output = shelf.frame(Vec::new());
         assert_eq!(
             window_model::build(&busy_view())
-                .tab(TabId::Cache)
+                .tab(TabId::Content)
                 .map(|tab| tab.note.clone()),
             Some(window_model::PaneNote::Ready)
         );

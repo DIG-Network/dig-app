@@ -1,4 +1,4 @@
-//! The Cache tab: how much disk DIG is using, the limit on it, and what is mirrored here.
+//! The Content tab: how much disk DIG is using, the limit on it, and what is mirrored here.
 //!
 //! # The trap this pane is designed around
 //!
@@ -6,8 +6,8 @@
 //! a store is only a *capsule* here once it has finished syncing — so "407 MB used" above an empty
 //! list is an ordinary state, not a fault. It does not read like one: a person sees a real figure
 //! over an empty table and concludes the table is broken. So the empty state is written twice —
-//! [`copy::cache::CAPSULES_EMPTY_WITH_BYTES`] when the cache holds something, and
-//! [`copy::cache::CAPSULES_EMPTY`] when it does not — and which one appears is decided from the
+//! [`copy::content::CAPSULES_EMPTY_WITH_BYTES`] when the cache holds something, and
+//! [`copy::content::CAPSULES_EMPTY`] when it does not — and which one appears is decided from the
 //! usage figure rather than from the list alone.
 //!
 //! # What is wired, and what is not
@@ -74,14 +74,14 @@ pub(crate) fn draw(
 fn usage_card(flow: &mut Flow, t: &Tokens, cache: Option<CacheSnapshot>) {
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::cache::USAGE_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::content::USAGE_CARD), |inner| {
                 inner.place(|ui, at| {
                     let height = match cache {
                         Some(snapshot) => data::meter(
                             ui,
                             at,
                             t,
-                            copy::cache::METER_LABEL,
+                            copy::content::METER_LABEL,
                             snapshot.used_bytes,
                             snapshot.cap_bytes,
                         ),
@@ -92,8 +92,8 @@ fn usage_card(flow: &mut Flow, t: &Tokens, cache: Option<CacheSnapshot>) {
                             at,
                             t,
                             &Readout::new(
-                                copy::cache::METER_LABEL,
-                                Value::Unknown(copy::cache::USAGE_UNKNOWN.to_string()),
+                                copy::content::METER_LABEL,
+                                Value::Unknown(copy::content::USAGE_UNKNOWN.to_string()),
                             ),
                         ),
                     };
@@ -136,7 +136,7 @@ fn limit_card(
 
     flow.place(|ui, at| {
         let (height, pressed) =
-            card::interactive_card(ui, at, t, live, Some(copy::cache::LIMIT_CARD), |inner| {
+            card::interactive_card(ui, at, t, live, Some(copy::content::LIMIT_CARD), |inner| {
                 let mut hit = None;
                 if !options.is_empty() {
                     hit = inner.place(|ui, at| {
@@ -146,7 +146,7 @@ fn limit_card(
                             t,
                             live,
                             &select::Select {
-                                label: copy::cache::LIMIT_FIELD,
+                                label: copy::content::LIMIT_FIELD,
                                 options: &options,
                                 selected,
                                 unknown: &unknown,
@@ -161,7 +161,7 @@ fn limit_card(
                         .or(inner.place(|ui, at| action::buttons(ui, at, t, live, &parts.verbs)));
                     inner.gap(space::S3);
                 }
-                inner.place(|ui, at| (text::caption(ui, at, t, copy::cache::LIMIT_HINT), ()));
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::content::LIMIT_HINT), ()));
                 if !parts.about.is_empty() {
                     inner.gap(space::S3);
                     hit = hit
@@ -248,9 +248,9 @@ impl LimitRows {
     fn unknown_label(&self, cache: Option<CacheSnapshot>) -> String {
         match cache {
             Some(snapshot) => {
-                copy::cache::limit_custom(&crate::cache::format_cap(snapshot.cap_bytes))
+                copy::content::limit_custom(&crate::cache::format_cap(snapshot.cap_bytes))
             }
-            None => copy::cache::LIMIT_UNKNOWN.to_string(),
+            None => copy::content::LIMIT_UNKNOWN.to_string(),
         }
     }
 }
@@ -269,7 +269,7 @@ fn capsules_card(
                 ui,
                 at,
                 t,
-                Some(copy::cache::CAPSULES_CARD),
+                Some(copy::content::CAPSULES_CARD),
                 |inner| match &listing {
                     Some(mirrors) => capsules(inner, t, mirrors, cache),
                     None => unwired(inner, t),
@@ -302,8 +302,8 @@ fn capsules(inner: &mut Flow, t: &Tokens, mirrors: &[Mirror], cache: Option<Cach
 /// reads as a fault, and it is the only one that needs explaining away.
 fn empty_reason(cache: Option<CacheSnapshot>) -> &'static str {
     match cache {
-        Some(snapshot) if snapshot.used_bytes > 0 => copy::cache::CAPSULES_EMPTY_WITH_BYTES,
-        _ => copy::cache::CAPSULES_EMPTY,
+        Some(snapshot) if snapshot.used_bytes > 0 => copy::content::CAPSULES_EMPTY_WITH_BYTES,
+        _ => copy::content::CAPSULES_EMPTY,
     }
 }
 
@@ -335,7 +335,7 @@ fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, mirror: &Mirror) -
             ui,
             egui::Pos2::new(x, second_line),
             t,
-            copy::cache::PINNED_BADGE,
+            copy::content::PINNED_BADGE,
             Tone::Neutral,
         );
         x = drawn.right() + space::S2;
@@ -380,11 +380,11 @@ fn unwired(inner: &mut Flow, t: &Tokens) {
 fn add_card(flow: &mut Flow, t: &Tokens) {
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::cache::ADD_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::content::ADD_CARD), |inner| {
                 let live = inner.live();
                 inner.place(|ui, at| (field(ui, at, t, live), ()));
                 inner.gap(space::S2);
-                inner.place(|ui, at| (text::caption(ui, at, t, copy::cache::ADD_NOT_WIRED), ()));
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::content::ADD_NOT_WIRED), ()));
             }),
             (),
         )
@@ -408,9 +408,9 @@ fn field(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, live: bool) -> f32 {
         t,
         live,
         &field::Field {
-            label: copy::cache::ADD_FIELD_LABEL,
+            label: copy::content::ADD_FIELD_LABEL,
             placeholder: "",
-            help: copy::cache::ADD_FIELD_HINT,
+            help: copy::content::ADD_FIELD_HINT,
             error: problem(&typed),
             id: element.with("edit"),
         },
@@ -426,12 +426,12 @@ fn field(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, live: bool) -> f32 {
         egui::Rect::from_min_size(
             egui::Pos2::new(at.left(), y),
             egui::Vec2::new(
-                paint::button_width(ui, copy::cache::ADD_BUTTON),
+                paint::button_width(ui, copy::content::ADD_BUTTON),
                 paint::BUTTON_HEIGHT,
             ),
         ),
         element.with("submit"),
-        copy::cache::ADD_BUTTON,
+        copy::content::ADD_BUTTON,
         Weight::Ghost,
         false,
         t,
@@ -448,7 +448,7 @@ fn problem(typed: &str) -> Option<String> {
     let typed = typed.trim();
     match typed.is_empty() || crate::link::is_64_hex(typed) {
         true => None,
-        false => Some(copy::cache::add_field_error(typed.chars().count())),
+        false => Some(copy::content::add_field_error(typed.chars().count())),
     }
 }
 
@@ -487,11 +487,11 @@ mod tests {
             "the same sentence is shown whether or not the cache holds anything, so one of the two \
              readers is being told something untrue"
         );
-        assert_eq!(with_bytes, copy::cache::CAPSULES_EMPTY_WITH_BYTES);
-        assert_eq!(with_nothing, copy::cache::CAPSULES_EMPTY);
+        assert_eq!(with_bytes, copy::content::CAPSULES_EMPTY_WITH_BYTES);
+        assert_eq!(with_nothing, copy::content::CAPSULES_EMPTY);
         // And with no snapshot at all: nothing is known about the disk, so the sentence must not
         // claim there are bytes behind the empty list.
-        assert_eq!(empty_reason(None), copy::cache::CAPSULES_EMPTY);
+        assert_eq!(empty_reason(None), copy::content::CAPSULES_EMPTY);
     }
 
     /// **The bytes-explaining sentence actually accounts for the figure rather than merely differing
@@ -502,7 +502,7 @@ mod tests {
     /// reads a real number over an empty table and goes looking for a fault they do not have.
     #[test]
     fn the_bytes_sentence_affirms_the_figure_and_names_the_reason() {
-        let sentence = copy::cache::CAPSULES_EMPTY_WITH_BYTES.to_lowercase();
+        let sentence = copy::content::CAPSULES_EMPTY_WITH_BYTES.to_lowercase();
         assert!(
             sentence.contains("real") || sentence.contains("is not wrong"),
             "the sentence never affirms the figure above it: {sentence}"
@@ -569,7 +569,7 @@ mod tests {
         let tab = model
             .tabs
             .iter()
-            .find(|tab| tab.id == crate::window_model::TabId::Cache)
+            .find(|tab| tab.id == crate::window_model::TabId::Content)
             .expect("the Cache tab exists with a node connected");
 
         let expected: Vec<(String, bool)> = tab
@@ -606,7 +606,7 @@ mod tests {
             ..crate::tray_menu::TrayView::default()
         };
         crate::window_model::build(&view)
-            .tab(crate::window_model::TabId::Cache)
+            .tab(crate::window_model::TabId::Content)
             .cloned()
             .expect("the Cache tab exists with a node connected")
     }
@@ -690,7 +690,7 @@ mod tests {
             "a reported custom limit and an unreported one are shown the same words, so one of the \
              two readers is being told something untrue"
         );
-        assert_eq!(rows.unknown_label(None), copy::cache::LIMIT_UNKNOWN);
+        assert_eq!(rows.unknown_label(None), copy::content::LIMIT_UNKNOWN);
 
         // The control: a real preset still resolves, so `None` above is a finding rather than a
         // lookup that never matches anything.
@@ -755,7 +755,7 @@ mod tests {
             cache: None,
             ..crate::tray_menu::TrayView::default()
         })
-        .tab(crate::window_model::TabId::Cache)
+        .tab(crate::window_model::TabId::Content)
         .cloned()
         .expect("the Cache tab is emitted with no node");
 
@@ -775,8 +775,8 @@ mod tests {
     /// so this pins that the second statement is DIFFERENT, not that it is gone.
     #[test]
     fn the_add_form_says_it_is_unwired_in_its_own_words() {
-        assert_ne!(copy::cache::ADD_NOT_WIRED, copy::unwired::CAVEAT);
-        let sentence = copy::cache::ADD_NOT_WIRED.to_lowercase();
+        assert_ne!(copy::content::ADD_NOT_WIRED, copy::unwired::CAVEAT);
+        let sentence = copy::content::ADD_NOT_WIRED.to_lowercase();
         assert!(
             sentence.contains("does nothing") || sentence.contains("cannot"),
             "the form never says the control will not act: {sentence}"

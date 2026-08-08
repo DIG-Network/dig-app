@@ -40,9 +40,10 @@
 //! and one arm in [`draw_tab`]'s match. That is deliberate: tab lanes run in parallel, and this way
 //! two of them never write the same file. The one shared line each lane adds is its match arm.
 //!
-//! A tab with no module of its own falls to [`generic`], which renders its sections as cards of
-//! weighted buttons. That is a floor, not a target — but it means an undesigned tab still looks
-//! like this application rather than like a menu, so tabs can be converted one at a time.
+//! Every tab now has one, and [`draw_tab`]'s match is EXHAUSTIVE — there is no catch-all falling
+//! back to a generic renderer. That is deliberate: a generic pane was the right floor while tabs
+//! were being converted one at a time, and once none are left it is a way for a new tab to ship
+//! looking like a menu without anybody deciding it should.
 //!
 //! # The scales
 //!
@@ -71,19 +72,18 @@
 pub(crate) mod account;
 pub(crate) mod action;
 pub(crate) mod apps;
-pub(crate) mod cache;
 pub(crate) mod card;
+pub(crate) mod content;
 pub(crate) mod copy;
 pub(crate) mod data;
 pub(crate) mod facts;
 pub(crate) mod field;
 pub(crate) mod flow;
+pub(crate) mod home;
 pub(crate) mod identity;
-pub(crate) mod security;
 pub(crate) mod select;
 pub(crate) mod settings;
 pub(crate) mod state;
-pub(crate) mod status;
 pub(crate) mod text;
 pub(crate) mod wallet;
 
@@ -147,58 +147,17 @@ pub(crate) fn draw_tab(
         flow.gap(space::S4);
     }
 
+    // Exhaustive, with no catch-all: every tab has a pane written for its own content, so a new
+    // tab must be given one rather than falling silently to [`generic`] — which is a floor for a
+    // tab under construction, not a destination a shipping tab should reach by omission.
     let pressed = match tab.id {
-        TabId::Status => status::draw(&mut flow, t, tab, facts),
-        TabId::Apps => apps::draw(&mut flow, t, tab),
-        TabId::Settings => settings::draw(&mut flow, t, tab, facts),
+        TabId::Home => home::draw(&mut flow, t, tab, facts),
         TabId::Account => account::draw(&mut flow, t, tab, facts),
-        TabId::Security => security::draw(&mut flow, t, tab, facts),
         TabId::Wallet => wallet::draw(&mut flow, t, tab, facts),
-        TabId::Cache => cache::draw(&mut flow, t, tab, facts),
-        _ => generic(&mut flow, t, tab),
+        TabId::Content => content::draw(&mut flow, t, tab, facts),
+        TabId::Settings => settings::draw(&mut flow, t, tab, facts),
     };
     (flow.cursor() - at.top(), pressed)
-}
-
-/// Every tab that has not been individually designed yet: one card per section, its heading as the
-/// card's title, and its rows as a weighted button group.
-///
-/// This is a floor, not a target. Phase 2 replaces each of these with a pane written for its own
-/// content — but until then a tab renders as cards of grouped verbs rather than as a list of rows,
-/// which is the difference between an application and a menu.
-fn generic(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let mut pressed = None;
-    let mut drew_anything = false;
-
-    // Counted across the WHOLE tab, not per section: the Account tab's two `About on-chain DIDs…`
-    // rows sit in different sections, and a per-section count would give both occurrence zero.
-    let mut seen = std::collections::HashMap::<String, usize>::new();
-
-    for section in &tab.sections {
-        let actions = actions_in(section.rows.iter().cloned(), &mut seen);
-        if actions.is_empty() && section.heading.is_none() {
-            continue;
-        }
-        drew_anything = true;
-        let live = flow.live();
-        let title = section.heading.clone();
-        let hit = flow.place(|ui, at| {
-            let (height, hit) =
-                card::interactive_card(ui, at, t, live, title.as_deref(), |inner| {
-                    inner.place(|ui, at| action::buttons(ui, at, t, live, &actions))
-                });
-            (height, hit.flatten())
-        });
-        pressed = pressed.or(hit);
-        flow.gap(space::S4);
-    }
-
-    if !drew_anything {
-        // Never a blank region: an empty list rendering as void is a bug, and on a window whose tabs
-        // come and go with the account's state it is a bug a person will hit.
-        flow.place(|ui, at| (state::nothing_here(ui, at, t), ()));
-    }
-    pressed
 }
 
 /// The verbs in a run of rows, as weighted actions, in the model's order.
@@ -421,10 +380,11 @@ mod tests {
     /// **…and exactly one pane still names a lead, so the window has not simply lost emphasis.**
     ///
     /// The control for the sweep above, which deleting `Weight::Primary` outright would satisfy.
-    /// Security is the pane the MODEL designates a lead for — the one thing this account needs from
-    /// the user right now — and it must still be the pane's loudest control.
+    /// Account is the pane the MODEL designates a lead for — the one thing this account needs from
+    /// the user right now, which `security_actions` puts at the top of its protection section in
+    /// every state — and it must still be the pane's loudest control.
     #[test]
-    fn the_security_pane_still_leads_with_the_verb_the_model_designates() {
+    fn the_account_pane_still_leads_with_the_verb_the_model_designates() {
         use crate::tray_menu::{AccountState, TrayView};
 
         let model = crate::window_model::build(&TrayView {
@@ -432,12 +392,12 @@ mod tests {
             account: Some(AccountState::Locked),
             ..TrayView::default()
         });
-        let tab = model.tab(TabId::Security).expect("Security is emitted");
-        let promoted = security::promoted_lead(tab).expect("a locked account leads with Unlock…");
+        let tab = model.tab(TabId::Account).expect("Account is emitted");
+        let promoted = account::promoted_lead(tab).expect("a locked account leads with Unlock…");
         assert_eq!(
             promoted.id,
-            tab.actions()[0],
-            "the promoted verb is not the model's own leading row"
+            TrayAction::Unlock,
+            "the promoted verb is not the model's own leading protection row"
         );
         assert_eq!(
             promoted.weight,
@@ -507,7 +467,7 @@ mod tests {
     /// **Every pane presents every state, in the same words, drawn by the frame (dig_ecosystem#2356).**
     ///
     /// The property: one cause produces one presentation, whichever tab a person is looking at. When
-    /// the node is unreachable, all seven tabs must say the unreachable thing the same way — the
+    /// the node is unreachable, all five tabs must say the unreachable thing the same way — the
     /// failure this guards against is four presentations of one cause on one screen.
     ///
     /// The sweep is every tab × every note, and the assertion is on the note's own SENTENCE reaching
@@ -536,11 +496,7 @@ mod tests {
             _ => PaneNote::Empty(text),
         };
 
-        for tab in TabId::ALL {
-            // `Advanced` is declared and never constructed, so there is no pane to drive.
-            if tab == TabId::Advanced {
-                continue;
-            }
+        for tab in TabId::all() {
             for (which, (name, sentence)) in sentences.iter().enumerate() {
                 let said = painted_with_note(tab, notes(which, sentence));
                 assert!(
@@ -559,6 +515,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Every unwired surface in the window says so in the same three ways, or in none of them.**
+    ///
+    /// # Why this sweep exists (dig_ecosystem#2358, hazard 2)
+    ///
+    /// The four async states got a sweep of their own the day they were centralised
+    /// ([`every_tab_presents_every_state_in_the_same_words`]). The FIFTH state did not: its
+    /// uniformity held only by CONSTRUCTION — both panes that use it happen to call
+    /// [`state::banner`], which happens to draw all three parts. Nothing asserted it. A pane that
+    /// grew its own amber paragraph, or kept the glance-level badge and softened the sentence under
+    /// it, would have been the exact drift #2356 removed from the other four states, on the one
+    /// state whose whole job is to stop a reader mistaking a placeholder for a reading.
+    ///
+    /// The property is all-or-nothing per tab: the heading, the badge and the caveat travel
+    /// together. Asserted in both directions, because each catches a different way to get it wrong —
+    /// a badge with no caveat is a surface marked "not wired up" without saying what that means for
+    /// the figures beside it, and a caveat with no badge is a paragraph a skimming reader never sees.
+    ///
+    /// The vacuity guard is the important half. If no pane drew the state at all — the day the last
+    /// skeleton is plumbed in — every tab would trivially satisfy "none of them" and this would pass
+    /// while proving nothing. So it insists that at least two tabs genuinely carry it: one alone
+    /// cannot show that two surfaces AGREE, which is the whole property.
+    #[test]
+    fn every_unwired_surface_says_so_in_the_same_words() {
+        use crate::window_model::PaneNote;
+
+        let parts = [
+            ("heading", copy::unwired::HEADING),
+            ("badge", copy::unwired::BADGE),
+            ("caveat", copy::unwired::CAVEAT),
+        ];
+
+        let mut carrying = 0;
+        for tab in TabId::all() {
+            let said = painted_with_note(tab, PaneNote::Ready);
+            let present: Vec<&str> = parts
+                .iter()
+                .filter(|(_, text)| said.iter().any(|line| line == text))
+                .map(|(name, _)| *name)
+                .collect();
+
+            assert!(
+                present.is_empty() || present.len() == parts.len(),
+                "the {tab:?} pane draws {present:?} of the unwired state but not all of it. The \
+                 three parts are one presentation: a badge with no caveat marks a card as unwired \
+                 without saying what that means for the figures on it, and a caveat with no badge \
+                 is a paragraph a skimming reader never sees"
+            );
+            if !present.is_empty() {
+                carrying += 1;
+            }
+        }
+
+        assert!(
+            carrying >= 2,
+            "only {carrying} pane(s) draw the unwired state, so this sweep cannot show that two \
+             surfaces present it the same way — which is the only thing it is for. If the last \
+             skeleton has genuinely been plumbed in, delete this guard rather than letting it pass \
+             vacuously"
+        );
     }
 
     /// An id is derived from the label and occurrence only — never from a position on screen.

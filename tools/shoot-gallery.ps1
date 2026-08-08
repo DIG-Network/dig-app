@@ -4,8 +4,8 @@ Re-shoot the complete DIG app gallery into `docs/gallery/`.
 
 .DESCRIPTION
 The one command that produces a true picture of this application: every tab in both themes at both
-widths, every account state the Account and Security panes can be in, and every screen of the
-first-run DID wizard.
+widths, every account state the Account pane can be in, and every screen of the first-run DID
+wizard.
 
 Two harnesses, one discipline. `window_gallery` draws the shipping shell at a tab, theme, size and
 account state given as ARGUMENTS, and the `did_wizard_gallery` test draws each wizard screen from
@@ -41,7 +41,7 @@ $TALL = 900
 $shots = @()
 
 # Every tab, both themes, both widths: the app as it stands.
-foreach ($tab in @('status', 'account', 'security', 'wallet', 'apps', 'cache', 'settings')) {
+foreach ($tab in @('home', 'account', 'wallet', 'content', 'settings')) {
     foreach ($theme in @('light', 'dark')) {
         foreach ($width in @($WIDE, $NARROW)) {
             $shots += @{
@@ -61,12 +61,12 @@ foreach ($state in @('unsupported', 'absent', 'locked', 'unopenable', 'needs-pas
     }
 }
 
-# Security answers the account state too, and its second-factor row is the one control that appears
-# and disappears -- so both sides of that are photographed rather than described.
-$shots += @{ file = 'security-locked.png'; args = @('security', 'light', "$WIDE", "$TALL", 'locked') }
+# The second-factor row is the one control on the Account tab that appears and disappears with a
+# setting rather than with the account's state, so both sides of it are photographed rather than
+# described. It lives on Account since dig_ecosystem#2358 merged the Security tab into it.
 $shots += @{
-    file = 'security-second-factor-on.png'
-    args = @('security', 'light', "$WIDE", "$TALL", 'unlocked', '--second-factor')
+    file = 'account-second-factor-on.png'
+    args = @('account', 'light', "$WIDE", "$TALL", 'unlocked', '--second-factor')
 }
 
 cargo build -p dig-app-core --features gui --example window_gallery | Out-Null

@@ -1,4 +1,22 @@
-//! The Account tab: what this account IS, and the verbs that change which account this computer has.
+//! The Account tab: what this account IS, whether it is protected, and the verbs that change which
+//! account this computer has.
+//!
+//! # One pane, three beats, in the order they already read in (dig_ecosystem#2358)
+//!
+//! Account and Security used to be two tabs. The stated distinction — "is my account safe" versus
+//! "I want a different account" — is real, but it is a distinction between CARDS, not between
+//! destinations, and splitting it cost a genuine defect: two hand-maintained six-arm sentence sets
+//! over one account state machine, each tested only against itself, free to drift apart while both
+//! suites stayed green (dig_ecosystem#2357). Merged, the lead is drawn once and the pane reads as
+//! one narrative:
+//!
+//! 1. **Who you are** — the state badge, its one sentence, and the verb the model says this account
+//!    needs right now, promoted. Then the DIG ID, with a way to take it elsewhere.
+//! 2. **Whether it is protected** — the second factor and the apps that have been let in.
+//! 3. **How to change which account this is** — and the destroying verbs LAST, behind a paragraph
+//!    saying what is lost.
+//!
+//! That ordering already existed; it was just split across two panes.
 //!
 //! # The state machine is the whole job
 //!
@@ -50,13 +68,19 @@ pub(crate) fn draw(
     tab: &Tab,
     facts: &PaneFacts,
 ) -> Option<TrayAction> {
-    state_card(flow, t, facts);
+    let protection = Protection::of(tab);
+
+    let mut pressed = state_card(flow, t, facts, &protection);
     flow.gap(space::S4);
     identity_card(flow, t, facts);
     flow.gap(space::S4);
+    pressed = pressed.or(second_factor_card(flow, t, facts, &protection));
+    flow.gap(space::S4);
+    pressed = pressed.or(paired_apps_card(flow, t, &protection));
+    flow.gap(space::S4);
     // The identity card above draws `Copy` beside the DIG ID whenever there IS one, so the model's
     // own `Copy my DIG ID` row would be the same verb a second time. See [`spare_verbs`].
-    verb_cards(flow, t, tab, drew_copy_control(facts))
+    pressed.or(verb_cards(flow, t, tab, drew_copy_control(facts)))
 }
 
 /// Whether the identity card drew a copy control this frame — the condition [`spare_verbs`] turns on.
@@ -82,10 +106,13 @@ fn spare_verbs(
     )
 }
 
-/// What state this account is in, and what that means — the header the rest of the pane hangs from.
+/// What state this account is in, what that means, and the one act that changes it.
 ///
-/// A badge and a sentence, and no verb of its own: the acts available in each state are the model's
-/// rows below, so a promoted button here would be either a duplicate or a second opinion.
+/// The promoted control is the model's LEADING protection row, verbatim — the row `security_actions`
+/// puts first in every state, which is the same verb `urgent_account_row` promotes on the tray. The
+/// pane chooses that it is drawn large and first; it does not choose which verb it is, and
+/// [`action::promote`] is the only producer of a primary anywhere in the window
+/// (dig_ecosystem#2354).
 ///
 /// # The loading state, and why it has to be drawn HERE
 ///
@@ -99,11 +126,24 @@ fn spare_verbs(
 /// `view.account` DIRECTLY rather than through that default: `None` means nothing has reported yet.
 /// So this card leads with the wait instead of the claim, and says the rows below are not settled
 /// either — which is the honest thing a pane can do without reaching into `window_model`.
-fn state_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
+fn state_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    facts: &PaneFacts,
+    protection: &Protection,
+) -> Option<TrayAction> {
+    let live = flow.live();
     let account = facts.account;
+    let lead = protection.lead.clone();
+
     flow.place(|ui, at| {
-        (
-            card::card(ui, at, t, None, |inner| {
+        let (height, hit) = card::interactive_card(
+            ui,
+            at,
+            t,
+            live,
+            Some(copy::protection::PROTECTION_CARD),
+            |inner| {
                 let (word, tone) = match account {
                     Some(kind) => (kind.word(), kind.tone()),
                     None => (copy::account::UNREAD_BADGE, data::Tone::Neutral),
@@ -132,10 +172,192 @@ fn state_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
                         });
                     }
                 }
-            }),
-            (),
-        )
-    });
+                inner.gap(space::S4);
+                inner.place(|ui, at| action::buttons(ui, at, t, live, &lead))
+            },
+        );
+        (height, hit.flatten())
+    })
+}
+
+/// The second factor: its control when there is one to offer, and its reason when there is not.
+fn second_factor_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    facts: &PaneFacts,
+    protection: &Protection,
+) -> Option<TrayAction> {
+    if !protection.has_account {
+        return None;
+    }
+    let hint = match protection.second_factor.first() {
+        Some(_) if facts.second_factor => copy::protection::SECOND_FACTOR_ON.to_string(),
+        Some(_) => copy::protection::SECOND_FACTOR_OFF.to_string(),
+        // The absence the model decided, rendered as an absence: no control at all, and the way
+        // forward quoted from the row above rather than written here, where it would eventually
+        // name the wrong one.
+        None => copy::protection::second_factor_needs(&protection.lead_label()),
+    };
+    line_card(
+        flow,
+        t,
+        copy::protection::SECOND_FACTOR_CARD,
+        &hint,
+        &protection.second_factor,
+    )
+}
+
+/// The apps this computer has let in.
+fn paired_apps_card(flow: &mut Flow, t: &Tokens, protection: &Protection) -> Option<TrayAction> {
+    if !protection.has_account {
+        return None;
+    }
+    let hint = match protection.paired_apps.is_empty() {
+        false => copy::protection::PAIRED_APPS_HINT.to_string(),
+        true => copy::protection::pairing_needs(&protection.lead_label()),
+    };
+    line_card(
+        flow,
+        t,
+        copy::protection::PAIRED_APPS_CARD,
+        &hint,
+        &protection.paired_apps,
+    )
+}
+
+/// One titled card: a sentence, then whatever controls the model supplied — possibly none.
+///
+/// The sentence comes FIRST so a card with no controls is still a card that explains itself, rather
+/// than a heading over empty space.
+fn line_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    title: &str,
+    hint: &str,
+    actions: &[Action<TrayAction>],
+) -> Option<TrayAction> {
+    let live = flow.live();
+    let hint = hint.to_string();
+    let actions = actions.to_vec();
+    flow.place(|ui, at| {
+        let (height, hit) = card::interactive_card(ui, at, t, live, Some(title), |inner| {
+            inner.place(|ui, at| (text::body(ui, at, t, &hint), ()));
+            if actions.is_empty() {
+                return None;
+            }
+            inner.gap(space::S4);
+            inner.place(|ui, at| action::buttons(ui, at, t, live, &actions))
+        });
+        (height, hit.flatten())
+    })
+}
+
+/// The protection section's rows, sorted into the three things those cards are about.
+///
+/// # Found by the model's own heading, not by position
+///
+/// The pane must tell the protection rows from the identity and management rows, and which rows
+/// `security_actions` emits differs by state — an unlocked account gets four, a locked one two, a
+/// computer with no account one — so no index into the tab means the same thing twice. Matching the
+/// section on [`crate::window_model::PROTECTION_HEADING`] asks the model which section this IS, from
+/// the one string both sides read, so reordering the sections upstream cannot silently reclassify a
+/// row. Within the section the sort is by [`TrayAction`], which asks what a row IS rather than where
+/// it sits.
+struct Protection {
+    /// The leading row: the one thing this account needs from the user right now, promoted.
+    lead: Vec<Action<TrayAction>>,
+    /// The second-factor row, or empty where the model offered none.
+    second_factor: Vec<Action<TrayAction>>,
+    /// The paired-app rows, or empty where the model offered none.
+    paired_apps: Vec<Action<TrayAction>>,
+    /// Whether there is an account here for the lower cards to be about.
+    has_account: bool,
+}
+
+impl Protection {
+    /// Sort the protection section's rows, keeping the model's order and its element ids.
+    fn of(tab: &Tab) -> Self {
+        let actions = protection_actions(tab);
+
+        let mut parts = Self {
+            lead: Vec::new(),
+            second_factor: Vec::new(),
+            paired_apps: Vec::new(),
+            // `ShowStatus` is the row `security_actions` emits for a computer with NO account, and
+            // it is the only row it emits there. Its presence is the model saying there is nothing
+            // to protect yet — so the cards about protecting it are omitted rather than filled with
+            // sentences about an account that does not exist.
+            has_account: !actions
+                .iter()
+                .any(|action| action.id == TrayAction::ShowStatus),
+        };
+        for action in actions {
+            match action.id {
+                TrayAction::SetUpTwoFactor | TrayAction::TurnOffTwoFactor => {
+                    parts.second_factor.push(action)
+                }
+                TrayAction::PairAnApp | TrayAction::ManagePairedApps => {
+                    parts.paired_apps.push(action)
+                }
+                _ => parts.lead.push(action),
+            }
+        }
+
+        // The one promotion in the whole window (dig_ecosystem#2354). The MODEL designates this
+        // lead: `security_actions` puts the thing this account needs from the user right now at the
+        // top in every state, and `urgent_account_row` promotes the same verb on the tray. So this
+        // pane is naming a decision made upstream, not making one from a position — which is
+        // precisely the distinction the positional rule could not draw.
+        if let Some(lead) = parts.lead.first().map(|action| action.id) {
+            parts.lead = action::promote(std::mem::take(&mut parts.lead), &lead);
+        }
+        parts
+    }
+
+    /// The verb this pane promotes, already weighted — the window's one promotion.
+    ///
+    /// Exposed so the cross-pane guard in [`super`] can name it without rebuilding the sort.
+    #[cfg(test)]
+    pub(crate) fn lead_action(&self) -> Option<&Action<TrayAction>> {
+        self.lead.first()
+    }
+
+    /// The leading row's label, for a sentence that must name the way forward exactly.
+    fn lead_label(&self) -> String {
+        self.lead
+            .first()
+            .map(|action| action.label.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// The rows of the model's protection section, weighted through the ONE shared derivation.
+///
+/// Ids are assigned over the WHOLE tab before the narrowing, for the reason [`grouped`] records: the
+/// occurrence count is a position in the model's complete list, and deriving it from a filtered one
+/// would address these rows differently from the rest of the app.
+fn protection_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
+    let mut seen = HashMap::new();
+    tab.sections
+        .iter()
+        .flat_map(|section| {
+            let drawn = super::actions_in(section.rows.iter().cloned(), &mut seen);
+            match section.heading.as_deref() == Some(crate::window_model::PROTECTION_HEADING) {
+                true => drawn,
+                false => Vec::new(),
+            }
+        })
+        .collect()
+}
+
+/// The verb this pane promotes on `tab`, as it will be drawn.
+///
+/// The single-source answer to "which control on this window is the primary", for the guard in
+/// [`super`] that checks nothing else is (dig_ecosystem#2354). Test-only, because production code
+/// gets the same answer from [`Protection::of`] on its way to drawing it.
+#[cfg(test)]
+pub(crate) fn promoted_lead(tab: &Tab) -> Option<Action<TrayAction>> {
+    Protection::of(tab).lead_action().cloned()
 }
 
 /// The id this account is known by, with a way to take it elsewhere.
@@ -250,21 +472,27 @@ fn grouped(tab: &Tab, drew_copy_control: bool) -> (Vec<Group>, Vec<Group>) {
     let groups: Vec<Group> = tab
         .sections
         .iter()
-        .map(|section| {
-            // Filtered AFTER the ids are assigned: the occurrence count that gives each row its
-            // element id is a position in the MODEL's list, so removing a row first would hand the
-            // rows after it different ids depending on what this pane chose to redraw.
+        .filter_map(|section| {
+            // Ids are assigned for EVERY section, including the one this pane goes on to skip: the
+            // occurrence count that gives each row its element id is a position in the model's
+            // complete list, so passing over a section before `actions_in` sees it would renumber
+            // every row after it. Filtering the row list happens after, for the same reason.
             let actions = spare_verbs(
                 super::actions_in(section.rows.iter().cloned(), &mut seen),
                 drew_copy_control,
             );
-            Group {
+            // The protection section is already drawn — as the state card and the two cards under
+            // it — so a group for it here would put every one of its verbs on the pane twice.
+            if section.heading.as_deref() == Some(crate::window_model::PROTECTION_HEADING) {
+                return None;
+            }
+            Some(Group {
                 heading: section.heading.clone(),
                 destroys: actions
                     .iter()
                     .any(|action| super::is_destructive(action.id)),
                 actions,
-            }
+            })
         })
         .collect();
     groups.into_iter().partition(|group| !group.destroys)
@@ -433,11 +661,17 @@ mod tests {
         }
     }
 
-    /// **The pane offers exactly the model's verbs, in the model's order, in every state.**
+    /// **The pane offers exactly the model's verbs, in every state — protection rows included.**
     ///
     /// Run over every state rather than one, because the tab's rows differ per state and a pane that
-    /// dropped a verb would do it in only some of them. Order is asserted too: the occurrence count
-    /// that gives each row its element id is a position in this list.
+    /// dropped a verb would do it in only some of them.
+    ///
+    /// The two halves are summed deliberately. Merging Security into this pane
+    /// (dig_ecosystem#2358) split its rendering in two — [`Protection`] draws the protection
+    /// section, [`grouped`] draws the rest and SKIPS that section so nothing is drawn twice — and
+    /// the risk that split introduces is a row falling down the gap between them. Asserting either
+    /// half alone would miss it in the direction that matters: `grouped` on its own is happily
+    /// short by exactly the rows it was told to skip.
     #[test]
     fn the_pane_offers_the_models_verbs_and_nothing_else_in_every_state() {
         for account in [
@@ -451,10 +685,14 @@ mod tests {
         ] {
             let tab = tab_for(account.clone());
             let (safe, destroying) = grouped(&tab, false);
+            let protection = Protection::of(&tab);
             let mut rendered: Vec<TrayAction> = safe
                 .iter()
                 .chain(destroying.iter())
                 .flat_map(|group| group.actions.iter().map(|a| a.id))
+                .chain(protection.lead.iter().map(|a| a.id))
+                .chain(protection.second_factor.iter().map(|a| a.id))
+                .chain(protection.paired_apps.iter().map(|a| a.id))
                 .collect();
             let mut expected = tab.actions();
             assert!(
@@ -634,5 +872,250 @@ mod tests {
                 "the destructive caveat never mentions “{expected}”: {caveat}"
             );
         }
+    }
+
+    /// The single character the fixture's 64-character DIG ID is built from.
+    const FIXTURE_DIG_ID: &str = "a";
+
+    /// Every string the drawn Account pane paints for `account`, at the shipping width.
+    ///
+    /// The REAL pane through the REAL model, because the property below is about what reaches a
+    /// reader's eye — a sentence that exists in a `match` and is never drawn is not a second
+    /// presentation of anything, and one drawn from a constant this test never names is exactly what
+    /// it has to be able to see.
+    fn painted_for(account: AccountState) -> Vec<String> {
+        let view = TrayView {
+            running: true,
+            account: Some(account),
+            profile_id: Some(FIXTURE_DIG_ID.repeat(64)),
+            ..TrayView::default()
+        };
+        let tab = crate::window_model::build(&view)
+            .tab(TabId::Account)
+            .cloned()
+            .expect("the Account tab is emitted in every account state");
+        let facts = PaneFacts::of_tray(&view);
+
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 8_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("account-copy-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            super::super::draw_tab(ui, column, &t, &tab, &facts, true);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// Every fixed word this pane can paint, named one by one.
+    ///
+    /// # Why an explicit list is the point rather than a weakness
+    ///
+    /// The guard below asks whether anything on screen is UNACCOUNTED for, so it needs to know what
+    /// is accounted for. Everything here is a `const` — one string, the same in all six states — so
+    /// no entry can be a per-state sentence set hiding in the list. A second six-arm match over
+    /// `AccountKind` returns a DIFFERENT string per state, so laundering one through this list would
+    /// mean adding six entries by hand, in the diff, on purpose. That is not the failure
+    /// dig_ecosystem#2357 was: two sets drifting silently, each green against itself, with nothing
+    /// in the repository comparing them.
+    const FIXED_WORDS: &[&str] = &[
+        copy::protection::PROTECTION_CARD,
+        copy::protection::SECOND_FACTOR_CARD,
+        copy::protection::SECOND_FACTOR_ON,
+        copy::protection::SECOND_FACTOR_OFF,
+        copy::protection::PAIRED_APPS_CARD,
+        copy::protection::PAIRED_APPS_HINT,
+        copy::account::UNREAD,
+        copy::account::UNREAD_BADGE,
+        copy::account::IDENTITY_CARD,
+        copy::account::DIG_ID_LABEL,
+        copy::account::DIG_ID_UNKNOWN,
+        copy::account::DESTRUCTIVE_CAVEAT,
+        copy::clipboard::COPY,
+        copy::clipboard::COPIED,
+    ];
+
+    /// Every string the pane is accounted for painting in `account`'s state.
+    ///
+    /// Four sources, and none of them is a parallel sentence set: the fixed words above, the ONE
+    /// summary, the badge word, and everything the MODEL supplies — the tab's own title and lead,
+    /// its section headings and its row labels, which differ by state because the VERBS do. The two
+    /// "way forward" sentences are included because they are `format!`ed FROM the model's own lead
+    /// label, which makes them derived from a single source rather than a second one.
+    fn accounted_for(account: &AccountState) -> Vec<String> {
+        let kind = super::super::facts::AccountKind::of(account);
+        let tab = tab_for(account.clone());
+        let lead = Protection::of(&tab).lead_label();
+
+        let mut allowed: Vec<String> = FIXED_WORDS.iter().map(|word| word.to_string()).collect();
+        allowed.push(copy::account::summary(kind).to_string());
+        allowed.push(kind.word().to_string());
+        allowed.push(copy::protection::second_factor_needs(&lead));
+        allowed.push(copy::protection::pairing_needs(&lead));
+        allowed.push(tab.label.clone());
+        allowed.push(copy::lead(TabId::Account).to_string());
+        // The identity card's VALUE, which is a reading and not prose. It is the same in every
+        // state here because the fixture holds it fixed — which is the point: what varies between
+        // two captures must be the account's state and nothing else.
+        allowed.push(FIXTURE_DIG_ID.repeat(64));
+        allowed.extend(tab.sections.iter().filter_map(|s| s.heading.clone()));
+        allowed.extend(tab.sections.iter().flat_map(|section| {
+            section.rows.iter().filter_map(|row| match row {
+                MenuRow::Action { label, .. } => Some(label.clone()),
+                _ => None,
+            })
+        }));
+        allowed
+    }
+
+    /// **There is exactly ONE per-state sentence set on this pane** (dig_ecosystem#2357).
+    ///
+    /// # Why this shape, and not "both sets are internally consistent"
+    ///
+    /// The defect was two hand-maintained six-arm matches over one `AccountKind` —
+    /// `account::summary` and `security::protection` — each with a test asserting only its OWN
+    /// distinctness. Nothing compared them, so they were free to drift apart indefinitely while both
+    /// suites stayed green, and a reader who visited both tabs would eventually be told two
+    /// different things about one state. A THIRD such set would have passed both suites too. So the
+    /// property asserted here is not "each set is tidy" but "there is one".
+    ///
+    /// It is asserted on what the pane PAINTS, in every state, and it is a CLOSURE check: every
+    /// string on screen must be the one summary, the badge word, one of the fixed words named above,
+    /// or something the model supplied. A second per-state set produces, in each of the six states,
+    /// a sentence that is none of those — and fails here six times over.
+    ///
+    /// Drawn rather than read off the `match`, deliberately: a sentence that exists in code and
+    /// never reaches a reader is not a second presentation of anything, and one drawn from a
+    /// constant this test never names is exactly the case it has to be able to see.
+    ///
+    /// The vacuity guard is load-bearing. If the pane painted nothing, or `accounted_for` grew to
+    /// allow everything, the unexplained set would be empty in every state and this would pass
+    /// loudest of all. So each state is first asserted to genuinely PAINT its summary, and the
+    /// distinctness of those summaries is the separate control below.
+    #[test]
+    fn the_account_pane_has_exactly_one_per_state_sentence() {
+        for account in [
+            AccountState::Unsupported,
+            AccountState::Absent,
+            AccountState::Locked,
+            AccountState::Unopenable,
+            AccountState::NeedsPassword,
+            AccountState::Unlocked { recoverable: true },
+        ] {
+            let said = painted_for(account.clone());
+            let kind = super::super::facts::AccountKind::of(&account);
+            assert!(
+                said.iter().any(|line| line == copy::account::summary(kind)),
+                "{account:?}: the one summary never reached the screen, so the check below is \
+                 examining a pane that says nothing about its state: {said:?}"
+            );
+
+            let allowed = accounted_for(&account);
+            let unexplained: Vec<&String> =
+                said.iter().filter(|line| !allowed.contains(line)).collect();
+            assert!(
+                unexplained.is_empty(),
+                "the {account:?} pane paints prose that is neither the one summary, the badge \
+                 word, a named fixed word, nor anything the model supplied. A string chosen by the \
+                 account's state and sourced from somewhere else is a SECOND per-state sentence \
+                 set — the drift dig_ecosystem#2357 removed: {unexplained:?}"
+            );
+        }
+    }
+
+    /// **The control: the one summary really does differ between every pair of states.**
+    ///
+    /// Without it the sweep above is satisfied by a pane whose copy does not vary at all, which is
+    /// the failure mode a "there is only one set" assertion cannot see on its own — one set and no
+    /// sets look identical to a difference check.
+    #[test]
+    fn the_one_summary_differs_between_every_pair_of_states() {
+        let said: Vec<&str> = super::super::facts::AccountKind::ALL
+            .iter()
+            .map(|kind| copy::account::summary(*kind))
+            .collect();
+        for (i, left) in said.iter().enumerate() {
+            for right in &said[i + 1..] {
+                assert_ne!(left, right, "two account states share one summary");
+            }
+        }
+    }
+
+    /// **The merged sentence still does BOTH jobs the two sets did.**
+    ///
+    /// Collapsing two sentence sets into one is only honest if nothing the reader needed was dropped
+    /// in the merge, and the half at risk is the protection half — the summaries were this pane's own
+    /// copy, while the protection sentences were the ones that refused to flatter. So the three
+    /// claims that were load-bearing on the deleted `security::protection` are asserted here, on the
+    /// surviving source: the two states that read calmly at a glance say plainly that they are not
+    /// safe, and the open one says it is open rather than that it is safe.
+    #[test]
+    fn a_weakly_protected_account_is_never_described_as_protected() {
+        use super::super::facts::AccountKind;
+
+        let machine_password = copy::account::summary(AccountKind::NeedsPassword);
+        assert!(
+            machine_password.contains("Anyone who can use this computer can open it"),
+            "the machine-password state does not say who else can open the account: \
+             {machine_password}"
+        );
+        assert_ne!(
+            AccountKind::NeedsPassword.tone(),
+            data::Tone::Good,
+            "an account anyone at this keyboard can open was coloured as though it were fine"
+        );
+
+        let unopenable = copy::account::summary(AccountKind::Unopenable);
+        assert!(
+            unopenable.contains("not protection"),
+            "the unopenable state is allowed to read as though the account were locked safely: \
+             {unopenable}"
+        );
+        assert_ne!(
+            AccountKind::Unopenable.tone(),
+            data::Tone::Good,
+            "an account nobody can open was coloured as though it were fine"
+        );
+
+        let open = copy::account::summary(AccountKind::Unlocked);
+        assert!(
+            open.contains("open right now"),
+            "the unlocked state does not say the account is currently open: {open}"
+        );
+
+        // The control: the two ordinary working states are NOT painted as problems, so the two above
+        // are a real distinction rather than a pane that alarms about everything.
+        assert_eq!(AccountKind::Locked.tone(), data::Tone::Good);
+        assert_eq!(AccountKind::Unlocked.tone(), data::Tone::Good);
     }
 }

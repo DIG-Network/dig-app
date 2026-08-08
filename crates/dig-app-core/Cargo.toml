@@ -42,6 +42,9 @@ eframe = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+# `EnumIter` on `window_model::TabId` — see the workspace manifest for why a derive rather than a
+# hand-written array.
+strum.workspace = true
 # The logging FACADE (#934) every module below emits lifecycle/diagnostic events through. This crate
 # never depends on `dig-logging` itself — installing a subscriber is a process-wide decision that
 # belongs to the `dig-app`/`dign` binary shells (see the workspace manifest for why).

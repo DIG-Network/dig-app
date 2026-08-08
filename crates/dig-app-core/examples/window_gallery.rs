@@ -45,16 +45,17 @@ use dig_app_core::window_model::TabId;
 
 /// The tab named by `argument`, or `None` when it names nothing.
 fn tab(argument: &str) -> Option<TabId> {
-    match argument {
-        "status" => Some(TabId::Status),
-        "account" => Some(TabId::Account),
-        "security" => Some(TabId::Security),
-        "wallet" => Some(TabId::Wallet),
-        "apps" => Some(TabId::Apps),
-        "cache" => Some(TabId::Cache),
-        "settings" => Some(TabId::Settings),
-        _ => None,
-    }
+    TabId::all().into_iter().find(|tab| name(*tab) == argument)
+}
+
+/// The command-line name of a tab — its label, lowercased.
+///
+/// Derived rather than listed, so the gallery cannot come to disagree with the window about which
+/// tabs exist: the old hand-written match still accepted `status`, `security`, `apps` and `cache`
+/// long after those tabs were merged away (dig_ecosystem#2358), which is how a file lands under a
+/// name that describes a picture nobody can take.
+fn name(tab: TabId) -> String {
+    format!("{tab:?}").to_lowercase()
 }
 
 /// The account state named by `argument`, or `None` when it names nothing.

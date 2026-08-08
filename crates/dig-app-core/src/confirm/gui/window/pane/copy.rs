@@ -34,34 +34,45 @@ use crate::window_model::TabId;
 /// true and neither is the reader's business.
 pub(crate) fn lead(tab: TabId) -> &'static str {
     match tab {
-        TabId::Status => {
-            "What DIG is doing on this computer right now, and where to look when it is not."
+        TabId::Home => {
+            "What DIG is doing on this computer, the other DIG apps it can open, and where to look \
+             when something is wrong."
         }
         TabId::Account => {
-            "The DIG Account this computer holds — the identity everything else here belongs to."
+            "The DIG Account this computer holds: what it is, how it is protected, and how to \
+             change which account this is."
         }
-        TabId::Security => "How this account is protected, and what you can change about that.",
         TabId::Wallet => "Where money arrives, and what this account is holding.",
-        TabId::Apps => {
-            "The other DIG apps this computer can open. They share your DIG Account, so there is \
-             nothing to sign in to."
-        }
-        TabId::Cache => {
-            "The disk DIG uses to keep content close by, and how much of it you want to give up."
+        TabId::Content => {
+            "What this computer keeps on disk for the network, and how much room to give it."
         }
         TabId::Settings => "How DIG looks after itself on this computer.",
-        TabId::Advanced => "Settings most people never need to change.",
     }
 }
 
-/// The Status pane.
-pub(crate) mod status {
+/// The persistent header strip the whole window carries, under the chrome and above every tab.
+///
+/// # Why these two facts, on every tab (dig_ecosystem#2358)
+///
+/// They used to live on the Status tab, which meant a person on Wallet had to change tabs to learn
+/// the node was down — and a down node is frequently WHY the balance beside them reads "Not known".
+/// The agent and the node are the two facts that explain the rest of the window, so the window
+/// carries them wherever the reader is standing.
+pub(crate) mod header {
+    /// The label before the agent's state.
+    pub(crate) const AGENT_LABEL: &str = "DIG";
+    /// The label before the node's state.
+    pub(crate) const NODE_LABEL: &str = "Node";
+}
+
+/// The Home pane.
+pub(crate) mod home {
     /// The card grouping the facts about the running agent.
     pub(crate) const AGENT_CARD: &str = "This computer";
     /// The card grouping what the node is doing.
     pub(crate) const NODE_CARD: &str = "Node connection";
     /// The card grouping the content cache.
-    pub(crate) const CACHE_CARD: &str = "Content cache";
+    pub(crate) const CACHE_CARD: &str = "Content cached";
     /// The card holding the pane's actions.
     pub(crate) const ACTIONS_CARD: &str = "Diagnostics";
 
@@ -69,10 +80,6 @@ pub(crate) mod status {
     pub(crate) const AGENT_LABEL: &str = "DIG agent";
     /// The readout naming the installed version.
     pub(crate) const VERSION_LABEL: &str = "Version";
-    /// The readout naming the account's state in one word.
-    pub(crate) const ACCOUNT_LABEL: &str = "Account";
-    /// The readout naming whether a second factor is enrolled.
-    pub(crate) const SECOND_FACTOR_LABEL: &str = "Second factor";
     /// The card holding the figures about what this computer shares.
     pub(crate) const SHARING_CARD: &str = "What this computer is sharing";
     /// The four figures that card is designed around, in render order.
@@ -95,8 +102,8 @@ pub(crate) mod status {
 
 /// The Apps pane.
 pub(crate) mod apps {
-    /// The card holding any verb on the tab that is not an app's own.
-    pub(crate) const OTHER_CARD: &str = "Also on this tab";
+    /// The card holding any verb the model put beside the launchers that is not an app's own.
+    pub(crate) const OTHER_CARD: &str = "Also in the launcher";
     /// The closing line, which is the tab's answer to "where do I install these?".
     ///
     /// The honest form of the presence question while dig-app cannot READ presence
@@ -190,7 +197,7 @@ pub(crate) mod settings {
     /// established for the beacon: a switch that cannot move is a switch that will be tried.
     pub(crate) const NO_CONFIG: &str =
         "DIG cannot read its settings file on this computer, so these cannot be changed here. Open \
-         the log folder from the Status tab to find out why.";
+         the log folder from the Home tab to find out why.";
 
     /// What the connection test says while it is running.
     pub(crate) const TESTING: &str = "Asking the node…";
@@ -232,49 +239,79 @@ pub(crate) mod account {
          receive address, and anything held at that address go with it, and only its recovery \
          phrase can bring them back. Each of these asks you to confirm before anything happens.";
 
-    /// What the account's state means, in the reader's terms.
+    /// What the account's state means, and how protected it is — in the reader's terms.
     ///
-    /// # Why every sentence here is written per state
+    /// # This is the ONE per-state sentence set, and it used to be two (dig_ecosystem#2357)
     ///
-    /// dig_ecosystem#2059: three different states were all told to "unlock", which is a remedy two of
-    /// them cannot perform — an account sealed under a machine-generated password has no password to
-    /// type, and one whose seal will not open has already failed at unlocking. An exhaustive match is
-    /// what makes a seventh state ask for its own sentence instead of quietly inheriting one.
+    /// The Account tab and the Security tab each carried a hand-maintained six-arm match over one
+    /// [`AccountKind`]: `account::summary` said what the state MEANT, `security::protection` said
+    /// whether the account was SAFE. They said mostly the same thing in different words — the locked
+    /// arms were near-paraphrases — and each had a test asserting only its OWN internal consistency.
+    /// Nothing compared them, so they could drift apart indefinitely while both suites stayed green,
+    /// and a reader who visited both tabs would eventually be told two different things about one
+    /// state. Merging the panes (dig_ecosystem#2358) removed the reason for the split, and this is
+    /// the merge: one sentence per state, doing both jobs.
+    ///
+    /// [`the_account_pane_has_exactly_one_per_state_sentence`](super::super::account::tests::the_account_pane_has_exactly_one_per_state_sentence)
+    /// is what keeps it one. It asserts the property directly — a second parallel set would put a
+    /// second state-varying sentence on the pane — rather than checking that each set is internally
+    /// consistent, which is the shape that let the drift persist.
+    ///
+    /// # Why every sentence is written per state, and why none of them flatters
+    ///
+    /// dig_ecosystem#2059: three different states were all told to "unlock", a remedy two of them
+    /// cannot perform — an account sealed under a machine-generated password has no password to
+    /// type, and one whose seal will not open has already failed at unlocking. An exhaustive match
+    /// makes a seventh state ask for its own sentence instead of quietly inheriting one.
+    ///
+    /// And the two states that read calmly at a glance say plainly what they are, because the one
+    /// failure a custody surface cannot have is implying an account is safer than it is:
+    /// [`AccountKind::NeedsPassword`] is a lock anyone at this keyboard can open, and
+    /// [`AccountKind::Unopenable`] is not protection at all — it is an account nobody can use.
     pub(crate) fn summary(kind: AccountKind) -> &'static str {
         match kind {
             AccountKind::Unsupported => {
                 "This system cannot hold a DIG Account yet — it has no per-application credential \
-                 store for DIG to seal one with. Nothing here can be set up until that changes."
+                 store for DIG to seal one with, so there is nothing here to set up or to protect \
+                 until that changes."
             }
             AccountKind::Absent => {
-                "There is no DIG Account on this computer. Setting one up creates your identity and \
-                 your wallet, and gives you a recovery phrase to write down and keep."
+                "There is no DIG Account on this computer, so there is nothing here to protect yet. \
+                 Setting one up creates your identity and your wallet, and gives you a recovery \
+                 phrase to write down and keep."
             }
             AccountKind::Locked => {
-                "Your account is here and sealed. Its identity and its funds are safe; nothing can \
-                 be signed or revealed with it until you open it again from the Security tab."
+                "Your account is here and sealed. Its identity and its funds are safe: nothing on \
+                 this computer can sign with it or reveal its recovery phrase until you open it."
             }
             AccountKind::Unopenable => {
-                "Your account is here, but its seal will not open, so it can no longer sign or \
-                 reveal anything. There is no repair for this. Replacing the account below is the \
-                 way forward, and its recovery phrase is what brings the same account back."
+                "Your account's seal will not open, so nothing can sign with it or reveal anything. \
+                 That is not protection — the account is unusable, and there is no repair. \
+                 Replacing it below is the way forward, and its recovery phrase brings the same \
+                 account back."
             }
             AccountKind::NeedsPassword => {
-                "Your account is sealed under a password this computer made up, so anyone who can \
-                 use this computer can open it. Choose a password of your own from the Security \
-                 tab — your identity, your address and your funds all survive the change."
+                "Your account is sealed with a password this computer made up, not one you chose. \
+                 Anyone who can use this computer can open it. Choosing your own password is the \
+                 single biggest thing you can do here, and your identity, your address and your \
+                 funds all survive the change."
             }
             AccountKind::Unlocked => {
-                "Your account is open and working. Everything on this tab acts on this account."
+                "Your account is open right now, so anything on this computer that asks DIG to sign \
+                 will be answered until you seal it again. Everything on this tab acts on this \
+                 account."
             }
         }
     }
 }
 
-/// The Security pane.
-pub(crate) mod security {
-    use super::super::facts::AccountKind;
-
+/// The protection half of the Account pane — the cards that answer "is my account safe right now".
+///
+/// A module of its own inside one pane's copy, because it is one of the pane's three narrative beats
+/// (who you are, whether it is protected, how to change which account this is) and grouping it keeps
+/// that structure legible. What it no longer holds is a second per-state sentence set: see
+/// [`account::summary`].
+pub(crate) mod protection {
     /// The card answering "is my account safe right now".
     pub(crate) const PROTECTION_CARD: &str = "How this account is protected";
     /// The card holding the second factor.
@@ -314,43 +351,6 @@ pub(crate) mod security {
     pub(crate) fn pairing_needs(lead: &str) -> String {
         format!("Pairing an app needs your account open. Use “{lead}” above.")
     }
-
-    /// Whether the account is as safe as it can be, in the reader's terms.
-    ///
-    /// # These sentences never flatter the state
-    ///
-    /// The one failure a custody surface cannot have is implying an account is safer than it is, so
-    /// the two states that read reassuringly at a glance say plainly what they are:
-    /// [`AccountKind::NeedsPassword`] is a lock anyone at this keyboard can open, and
-    /// [`AccountKind::Unopenable`] is not protection at all, it is an account nobody can use.
-    pub(crate) fn protection(kind: AccountKind) -> &'static str {
-        match kind {
-            AccountKind::Unsupported => {
-                "This system cannot hold a DIG Account yet, so there is nothing here to protect."
-            }
-            AccountKind::Absent => {
-                "There is no account on this computer, so there is nothing here to protect yet."
-            }
-            AccountKind::Locked => {
-                "Your account is sealed. Nothing on this computer can sign with it or reveal its \
-                 recovery phrase until you open it."
-            }
-            AccountKind::Unopenable => {
-                "Your account's seal will not open, so nothing can sign with it. That is not \
-                 protection — the account is unusable, and replacing it from the Account tab is the \
-                 only way forward."
-            }
-            AccountKind::NeedsPassword => {
-                "Your account is sealed with a password this computer made up, not one you chose. \
-                 Anyone who can use this computer can open it. Choosing your own password is the \
-                 single biggest thing you can do here."
-            }
-            AccountKind::Unlocked => {
-                "Your account is open right now, so anything on this computer that asks DIG to sign \
-                 will be answered until you seal it again."
-            }
-        }
-    }
 }
 
 /// The words for the agent's two states, chosen by an exhaustive match rather than a boolean.
@@ -360,19 +360,6 @@ pub(crate) fn agent_state(running: bool) -> &'static str {
         false => "Starting",
     }
 }
-
-/// The words for whether a second factor is enrolled.
-pub(crate) fn second_factor_state(enrolled: bool) -> &'static str {
-    match enrolled {
-        true => "On",
-        false => "Off",
-    }
-}
-
-/// What a pane says when it renders nothing a person can act on.
-pub(crate) const NOTHING_HERE: &str =
-    "There is nothing to show on this tab yet. Try another tab, or open the log folder from the \
-     Status tab.";
 
 /// The not-wired-up state — the fifth state, and the one the epic exists to keep honest.
 pub(crate) mod unwired {
@@ -473,8 +460,8 @@ pub(crate) mod wallet {
         "Only ever share this address. It receives money; it cannot spend it.";
 }
 
-/// The Cache pane.
-pub(crate) mod cache {
+/// The Content pane — what this computer keeps on disk for the network.
+pub(crate) mod content {
     /// The card carrying the usage meter.
     pub(crate) const USAGE_CARD: &str = "Disk used by cached content";
     /// The card carrying the size-limit choices.
@@ -574,30 +561,53 @@ mod tests {
     /// it.
     /// Every sentence this module hands a paint call, so a guard asserted "over all the copy" is.
     ///
-    /// Written out because these are `const`s in nested modules and nothing enumerates them; the
-    /// tab LEADS are appended from [`TabId::ALL`], whose own docs record what that list does and
-    /// does not guarantee.
+    /// Written out because these are `const`s in nested modules and nothing enumerates them. The
+    /// tab LEADS are appended from [`TabId::all`], which IS exhaustive — it is derived from the enum
+    /// rather than hand-listed (dig_ecosystem#2358), so a new tab's lead arrives here on its own.
     fn every_sentence() -> Vec<&'static str> {
         let mut all = vec![
-            NOTHING_HERE,
             unwired::HEADING,
             unwired::BADGE,
             unwired::CAVEAT,
-            status::CACHE_UNKNOWN,
-            status::DIAGNOSTICS_HINT,
+            home::CACHE_UNKNOWN,
+            home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
             wallet::BALANCE_PENDING,
             wallet::SENDING_BODY,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
-            cache::USAGE_UNKNOWN,
-            cache::LIMIT_HINT,
-            cache::CAPSULES_EMPTY,
-            cache::CAPSULES_EMPTY_WITH_BYTES,
-            cache::ADD_FIELD_HINT,
-            cache::ADD_NOT_WIRED,
+            content::USAGE_UNKNOWN,
+            content::LIMIT_HINT,
+            content::CAPSULES_EMPTY,
+            content::CAPSULES_EMPTY_WITH_BYTES,
+            content::ADD_FIELD_HINT,
+            content::ADD_NOT_WIRED,
+            protection::SECOND_FACTOR_ON,
+            protection::SECOND_FACTOR_OFF,
+            protection::PAIRED_APPS_HINT,
+            settings::UPDATES_ABOUT,
+            settings::UPDATES_COST,
+            settings::CHANNEL_UNKNOWN,
+            settings::NODE_ABOUT,
+            settings::NODE_HELP,
+            settings::NODE_COST,
+            settings::SHORTCUT_ABOUT,
+            settings::SHORTCUT_HELP,
+            settings::SHORTCUT_COST,
+            settings::SAVED,
+            settings::NO_CONFIG,
+            settings::TESTING,
+            account::UNREAD,
+            account::DESTRUCTIVE_CAVEAT,
+            account::DIG_ID_UNKNOWN,
+            apps::INSTALL_NOTE,
         ];
-        all.extend(TabId::ALL.iter().map(|tab| lead(*tab)));
+        all.extend(TabId::all().into_iter().map(lead));
+        all.extend(
+            super::super::facts::AccountKind::ALL
+                .iter()
+                .map(|kind| account::summary(*kind)),
+        );
         all
     }
 
@@ -624,7 +634,7 @@ mod tests {
                 "a sentence carries a run of spaces from its source indentation: {sentence}"
             );
         }
-        assert!(!cache::add_field_error(63).contains("  "));
+        assert!(!content::add_field_error(63).contains("  "));
     }
 
     /// **Every tab has its own lead, and no lead explains the app's design back to the reader.**
@@ -636,10 +646,10 @@ mod tests {
     /// [`no_sentence_explains_the_app_to_the_reader`](tests::no_sentence_explains_the_app_to_the_reader).
     #[test]
     fn every_tab_leads_with_its_own_sentence_about_what_the_tab_is_for() {
-        let leads: Vec<&str> = TabId::ALL.iter().map(|tab| lead(*tab)).collect();
+        let leads: Vec<&str> = TabId::all().into_iter().map(lead).collect();
         assert_eq!(
             leads.len(),
-            TabId::ALL.len(),
+            TabId::all().len(),
             "the tab set changed and this guard did not"
         );
 
@@ -653,7 +663,7 @@ mod tests {
              where the reader is: {leads:?}"
         );
 
-        for (tab, said) in TabId::ALL.iter().zip(&leads) {
+        for (tab, said) in TabId::all().iter().zip(&leads) {
             assert!(
                 !said.is_empty() && said.ends_with('.'),
                 "the {tab:?} lead is not a sentence: {said}"
@@ -678,9 +688,9 @@ mod tests {
     fn no_sentence_explains_the_app_to_the_reader() {
         let sentences = every_sentence();
         // Without this the sweep is over a list someone could empty, which would pass loudest of
-        // all. The leads alone are eight, so anything near that means the consts stopped arriving.
+        // all. The leads alone are five, so anything near that means the consts stopped arriving.
         assert!(
-            sentences.len() > TabId::ALL.len(),
+            sentences.len() > TabId::all().len(),
             "the sentence list no longer carries the copy that is not a lead, so this sweep is \
              back to being the leads-only guard it replaced"
         );
@@ -695,6 +705,49 @@ mod tests {
         }
     }
 
+    /// **No sentence sends the reader to a tab that does not exist.**
+    ///
+    /// The Settings pane's error state — the one state where the reader is already lost — told them
+    /// to *"open the log folder from the Status tab"* for a whole review cycle after
+    /// dig_ecosystem#2358 deleted the Status tab. Nothing caught it: `every_sentence` did not
+    /// enumerate `copy::settings` at all, which is the dig_ecosystem#2356 shape again — a sweep
+    /// scoped to one KIND of sentence is a sweep for one kind of sentence.
+    ///
+    /// So the vocabulary is taken from [`TabId::label`] itself rather than a second hand-kept list,
+    /// and deleting a tab now fails this test until the copy that names it is rewritten.
+    #[test]
+    fn no_sentence_names_a_tab_the_window_does_not_have() {
+        let real: Vec<&str> = TabId::all().into_iter().map(TabId::label).collect();
+        assert!(
+            !real.contains(&"Status"),
+            "the Status tab is back, so this guard's own example no longer discriminates"
+        );
+
+        for said in every_sentence() {
+            for named in tabs_named(said) {
+                assert!(
+                    real.contains(&named.as_str()),
+                    "a sentence sends the reader to the {named:?} tab, which this window does not \
+                     have — the tabs are {real:?}: {said}"
+                );
+            }
+        }
+    }
+
+    /// Every capitalised name used as `<Name> tab` in `sentence`.
+    ///
+    /// Capitalisation is what separates a NAME from a reference to the tab the reader is already on
+    /// (*"everything on this tab"*), which is always true and never needs checking.
+    fn tabs_named(sentence: &str) -> Vec<String> {
+        let words: Vec<&str> = sentence.split_whitespace().collect();
+        words
+            .windows(2)
+            .filter(|pair| pair[1].trim_end_matches(['.', ',', ';', ':']) == "tab")
+            .map(|pair| pair[0].to_owned())
+            .filter(|name| name.starts_with(|c: char| c.is_uppercase()))
+            .collect()
+    }
+
     /// **Every state's copy is distinct, so a match arm cannot silently share another's sentence.**
     ///
     /// A copy-by-state helper whose arms return the same string is a state the reader cannot tell
@@ -702,7 +755,7 @@ mod tests {
     #[test]
     fn each_state_says_something_different_from_its_opposite() {
         assert_ne!(agent_state(true), agent_state(false));
-        assert_ne!(second_factor_state(true), second_factor_state(false));
+
         assert_ne!(clipboard::COPY, clipboard::COPIED);
     }
 

@@ -1,18 +1,29 @@
-//! The Status tab, built on the pane vocabulary — the reference every other tab is written against.
+//! The Home tab: what DIG is doing on this computer, the other DIG apps it can open, and the way to
+//! the logs when it cannot say.
 //!
-//! # Why Status is the exemplar
+//! # Why Home is the exemplar
 //!
 //! It is the tab a person lands on, it is the most data-rich one that needs no new plumbing, and it
 //! exercises the parts of the vocabulary a Phase-2 tab will reach for first: cards grouping facts,
-//! readouts with units, a meter against a cap, a badge, an action group with a hierarchy, and both
-//! honest absences — a figure the node has not reported, and a card whose data is not wired up.
+//! readouts with units, a badge, an action group with a hierarchy, a launcher, and both honest
+//! absences — a figure the node has not reported, and a card whose data is not wired up.
+//!
+//! # What it deliberately no longer holds (dig_ecosystem#2358)
+//!
+//! **The account rows.** `Account`, `Second factor` and the receive-address code all described the
+//! account, which now has a whole tab of its own — and the receive card was a byte-identical second
+//! copy of the Wallet tab's. A figure repeated is a figure that will eventually disagree with
+//! itself, and a QR code repeated is that plus a person wondering which one is the real address.
+//!
+//! **The cache METER.** The Content tab owns it; this tab carries the one-line reading, from the
+//! same [`crate::cache::CacheSnapshot`], so the two cannot report different disks.
 //!
 //! # What it does NOT do
 //!
 //! It does not decide which actions exist. `tab.sections` arrives already decided by
 //! [`crate::window_model`], and this module renders those rows as buttons — same verbs, same
-//! enablement, same labels, different weight. Delete this file and the Status tab falls back to the
-//! generic pane with exactly the same capabilities.
+//! enablement, same labels, different weight. If you find yourself asking here whether a verb
+//! should be shown, the model already answered.
 
 use super::action::{self, Action};
 use super::card;
@@ -20,7 +31,6 @@ use super::copy;
 use super::data::{self, Readout, Value};
 use super::facts::PaneFacts;
 use super::flow::Flow;
-use super::identity;
 use super::state::{self, PaneState};
 use super::text;
 use crate::confirm::gui::render::space;
@@ -28,7 +38,7 @@ use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 
-/// Draw the Status pane's content into `flow`, and report the action pressed.
+/// Draw the Home pane's content into `flow`, and report the action pressed.
 pub(crate) fn draw(
     flow: &mut Flow,
     t: &Tokens,
@@ -42,46 +52,35 @@ pub(crate) fn draw(
     // Verbs before figures-with-no-figures. The sharing card is the least urgent thing on the tab
     // and the diagnostics are what a person on a broken machine came here for, so an unwired card
     // must not push the log-folder button below the fold at the default window size.
-    let pressed = diagnostics_card(flow, t, tab);
+    let mut pressed = diagnostics_card(flow, t, tab);
+    flow.gap(space::S4);
+    // The launcher LAST, because it is what a person browses when nothing is wrong.
+    pressed = pressed.or(super::apps::launcher(flow, t, tab));
     flow.gap(space::S4);
     sharing_card(flow, t);
-    flow.gap(space::S4);
-    receiving_card(flow, t, facts);
     pressed
 }
 
-/// What this computer is running: the agent, the version, the account, the second factor.
+/// What this computer is running: the agent, and the version of it.
+///
+/// The agent's state also sits in the window's header strip, one word wide. That is not the
+/// duplication dig_ecosystem#2357 removed: both come from [`copy::agent_state`] applied to the same
+/// [`PaneFacts::agent_running`], so there is one derivation and two presentations of it — where the
+/// cache meter was one FIGURE laid out twice, in two files, either editable without the other.
 fn machine_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
     let items = vec![
         Readout::new(
-            copy::status::AGENT_LABEL,
+            copy::home::AGENT_LABEL,
             Value::Word(copy::agent_state(facts.agent_running).to_string()),
         ),
         Readout::new(
-            copy::status::VERSION_LABEL,
+            copy::home::VERSION_LABEL,
             Value::Word(facts.version.to_string()),
-        ),
-        Readout::new(
-            copy::status::ACCOUNT_LABEL,
-            match facts.account_word {
-                Some(word) => Value::Word(word.to_string()),
-                // The honest absence: a host that cannot hold an account has no account state, and
-                // showing "None" would claim one was merely missing.
-                None => Value::Unknown(
-                    "This computer cannot hold a DIG Account. Install DIG on a supported system to \
-                     set one up."
-                        .to_string(),
-                ),
-            },
-        ),
-        Readout::new(
-            copy::status::SECOND_FACTOR_LABEL,
-            Value::Word(copy::second_factor_state(facts.second_factor).to_string()),
         ),
     ];
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::status::AGENT_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::home::AGENT_CARD), |inner| {
                 inner.place(|ui, at| (data::readouts(ui, at, t, &items), ()));
             }),
             (),
@@ -97,7 +96,7 @@ fn node_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
 
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::status::NODE_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::home::NODE_CARD), |inner| {
                 // The badge sits on its own line above the summary rather than beside the card's
                 // title: at 480 px a title plus a badge is two things competing for one row, and the
                 // badge is the one that loses its padding first.
@@ -110,7 +109,7 @@ fn node_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
                 inner.place(|ui, at| (text::body(ui, at, t, &summary), ()));
                 inner.gap(space::S4);
                 // A one-line READOUT of what the cache holds, not the meter — the meter lives on
-                // the Cache tab and is drawn once (dig_ecosystem#2357). This card used to redraw it
+                // the Content tab and is drawn once (dig_ecosystem#2357). This card used to redraw it
                 // byte-identically, so the same bar appeared on two tabs and either could be edited
                 // without the other. A figure repeated is a figure that will eventually disagree
                 // with itself.
@@ -120,7 +119,7 @@ fn node_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
                             ui,
                             at,
                             t,
-                            &Readout::new(copy::status::CACHE_CARD, cache_reading(cache)),
+                            &Readout::new(copy::home::CACHE_CARD, cache_reading(cache)),
                         ),
                         (),
                     )
@@ -133,7 +132,7 @@ fn node_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
 
 /// What the cache holds, as one line — or the reason there is no figure.
 ///
-/// A summary, deliberately, and not the meter. The Cache tab owns the meter and the limit; Status
+/// A summary, deliberately, and not the meter. The Content tab owns the meter and the limit; Home
 /// says only how much is in use, which is what a person scanning this tab is asking. Both figures
 /// come from the same [`crate::cache::CacheSnapshot`], so the two tabs cannot disagree.
 ///
@@ -146,7 +145,7 @@ fn cache_reading(cache: Option<crate::cache::CacheSnapshot>) -> Value {
             crate::cache::format_cap(snapshot.used_bytes),
             crate::cache::format_cap(snapshot.cap_bytes)
         )),
-        None => Value::Unknown(copy::status::CACHE_UNKNOWN.to_string()),
+        None => Value::Unknown(copy::home::CACHE_UNKNOWN.to_string()),
     }
 }
 
@@ -163,19 +162,19 @@ fn sharing_card(flow: &mut Flow, t: &Tokens) {
     // Every value is `Unknown` — not because the type forces it (it does not, see `data`), but
     // because none of these four figures has been read from anything. The card is the worked
     // example: a finished layout whose every figure names its own absence.
-    let items: Vec<Readout> = copy::status::SHARING_LABELS
+    let items: Vec<Readout> = copy::home::SHARING_LABELS
         .iter()
         .map(|label| {
             Readout::new(
                 *label,
-                Value::Unknown(copy::status::SHARING_UNKNOWN.to_string()),
+                Value::Unknown(copy::home::SHARING_UNKNOWN.to_string()),
             )
         })
         .collect();
 
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::status::SHARING_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::home::SHARING_CARD), |inner| {
                 // The glance-level half of what the banner spells out. A reader skimming the pane
                 // must not have to read a paragraph to learn that this card is not reporting on
                 // their machine.
@@ -209,7 +208,12 @@ fn sharing_card(flow: &mut Flow, t: &Tokens) {
     });
 }
 
-/// The tab's own verbs, as a weighted button group.
+/// The tab's diagnostic verbs, as a weighted button group.
+///
+/// The launcher's rows are excluded: they are drawn as cards by [`super::apps::launcher`], and a
+/// verb rendered twice on one tab is two controls a person has to tell apart before pressing either.
+/// The split reads the model's own [`crate::window_model::APPS_HEADING`] rather than a position, so
+/// reordering the sections upstream cannot silently move a launch row into this card.
 fn diagnostics_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
     let actions = actions_of(tab);
     if actions.is_empty() {
@@ -218,69 +222,32 @@ fn diagnostics_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction
     let live = flow.live();
     flow.place(|ui, at| {
         let (height, pressed) =
-            card::interactive_card(ui, at, t, live, Some(copy::status::ACTIONS_CARD), |inner| {
+            card::interactive_card(ui, at, t, live, Some(copy::home::ACTIONS_CARD), |inner| {
                 let hit = inner.place(|ui, at| action::buttons(ui, at, t, live, &actions));
                 inner.gap(space::S3);
-                inner
-                    .place(|ui, at| (text::caption(ui, at, t, copy::status::DIAGNOSTICS_HINT), ()));
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::home::DIAGNOSTICS_HINT), ()));
                 hit
             });
         (height, pressed.flatten())
     })
 }
 
-/// The account's receive address, as a scannable code — the vocabulary's QR block, demonstrated on
-/// the one value in this snapshot a person genuinely takes to another device.
+/// The tab's diagnostic rows as weighted actions, in the model's order.
 ///
-/// Drawn only when there IS an address. Without one the card is omitted rather than showing an empty
-/// plate: a code nobody can scan is a broken image with extra steps.
-fn receiving_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
-    let Some(address) = facts.receive_address.clone() else {
-        return;
-    };
-    flow.place(|ui, at| {
-        (
-            card::card(ui, at, t, Some("Receive"), |inner| {
-                inner.place(|ui, at| {
-                    (
-                        identity::scannable(ui, at, t, &address, copy::qr::RECEIVE_CAPTION),
-                        (),
-                    )
-                });
-                inner.gap(space::S3);
-                inner.place(|ui, at| {
-                    (
-                        identity::copyable(
-                            ui,
-                            at,
-                            t,
-                            "Receive address",
-                            &Value::Identifier(address.clone()),
-                            egui::Id::new("dig-window-copy-receive-address"),
-                            true,
-                        ),
-                        (),
-                    )
-                });
-            }),
-            (),
-        )
-    });
-}
-
-/// The tab's rows as weighted actions, in the model's order.
-///
-/// Every section's rows, through the ONE derivation in [`super::actions_in`] — including the
-/// occurrence counting that gives each row its stable element id. A second copy of that derivation
-/// here is what previously addressed `Open the log folder` by its index and made it unclickable.
+/// Built from the WHOLE tab through the ONE derivation in [`super::actions_in`] — including the
+/// occurrence counting that gives each row its stable element id — and only then filtered. A second
+/// copy of that derivation here is what previously addressed `Open the log folder` by its index and
+/// made it unclickable, and filtering FIRST would renumber every row after a dropped one.
 fn actions_of(tab: &Tab) -> Vec<Action<TrayAction>> {
-    let mut seen = std::collections::HashMap::new();
-    super::actions_in(
-        tab.sections
-            .iter()
-            .flat_map(|section| section.rows.iter().cloned()),
-        &mut seen,
-    )
+    let launchers = super::apps::launch_actions(tab);
+    super::actions_of(tab)
+        .into_iter()
+        .filter(|action| {
+            !launchers
+                .iter()
+                .any(|launch| launch.element == action.element)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -289,32 +256,52 @@ mod tests {
     use crate::confirm::gui::render::Weight;
     use crate::tray_menu::{MenuRow, TrayView};
 
-    /// **The pane renders exactly the verbs the model put on the tab — no more, no fewer.**
+    /// **Between the diagnostics card and the launcher, every verb the model offers is drawn — each
+    /// exactly once.**
     ///
-    /// This is the single-source rule, made checkable. A pane that filtered a verb out, or added one
-    /// of its own, fails; and it is asserted against the REAL `window_model::build` output rather
-    /// than a hand-written fixture, so a change to the Status tab upstream is reflected here without
-    /// this test being edited.
+    /// This is the single-source rule, made checkable, in the shape the merge requires
+    /// (dig_ecosystem#2358). Home draws its verbs in two places now, so there are two ways to get
+    /// it wrong and each has its own assertion: a row in NEITHER is a verb the tab claims to offer
+    /// and does not, and a row in BOTH is two controls a person has to tell apart before pressing
+    /// either. Checking only that the diagnostics card is a subset of the model would pass on both.
+    ///
+    /// Asserted against the REAL `window_model::build` output rather than a hand-written fixture,
+    /// so a change to the Home tab upstream is reflected here without this test being edited.
     #[test]
-    fn the_pane_offers_the_models_verbs_and_nothing_else() {
+    fn every_verb_is_drawn_once_across_the_diagnostics_card_and_the_launcher() {
         let view = TrayView {
             running: true,
             ..TrayView::default()
         };
         let model = crate::window_model::build(&view);
         let tab = model
-            .tab(crate::window_model::TabId::Status)
-            .expect("the Status tab is always emitted");
+            .tab(crate::window_model::TabId::Home)
+            .expect("the Home tab is always emitted");
 
-        let rendered: Vec<TrayAction> = actions_of(tab).into_iter().map(|a| a.id).collect();
-        assert_eq!(
-            rendered,
-            tab.actions(),
-            "the pane's buttons are not the model's actions, in the model's order"
-        );
+        let diagnostics: Vec<TrayAction> = actions_of(tab).into_iter().map(|a| a.id).collect();
+        let launched: Vec<TrayAction> = super::super::apps::launch_actions(tab)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+
         assert!(
-            !rendered.is_empty(),
-            "the fixture has no actions, so this proves nothing"
+            !diagnostics.is_empty() && !launched.is_empty(),
+            "one of the two groups is empty, so this cannot see a row moving between them:              {diagnostics:?} / {launched:?}"
+        );
+        for action in &diagnostics {
+            assert!(
+                !launched.contains(action),
+                "{action:?} is drawn by the diagnostics card AND by the launcher"
+            );
+        }
+
+        let mut drawn: Vec<TrayAction> = diagnostics.into_iter().chain(launched).collect();
+        let mut offered = tab.actions();
+        drawn.sort_by_key(|a| format!("{a:?}"));
+        offered.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(
+            drawn, offered,
+            "the pane's buttons are not the model's actions"
         );
     }
 
@@ -325,8 +312,8 @@ mod tests {
     #[test]
     fn enablement_passes_through_untouched_and_never_promotes_a_disabled_verb() {
         let tab = Tab {
-            id: crate::window_model::TabId::Status,
-            label: "Status".to_string(),
+            id: crate::window_model::TabId::Home,
+            label: "Home".to_string(),
             note: crate::window_model::PaneNote::Ready,
             sections: vec![crate::window_model::Section {
                 heading: None,
@@ -410,8 +397,8 @@ mod tests {
     #[test]
     fn a_separator_is_not_rendered_as_a_verb() {
         let tab = Tab {
-            id: crate::window_model::TabId::Status,
-            label: "Status".to_string(),
+            id: crate::window_model::TabId::Home,
+            label: "Home".to_string(),
             note: crate::window_model::PaneNote::Ready,
             sections: vec![crate::window_model::Section {
                 heading: None,
