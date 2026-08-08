@@ -997,9 +997,7 @@ pub fn first_run_wizard(
     // act, and where the usual "a claim defaults to its refusal" rule is therefore inverted. A host
     // that cannot ask creates nothing rather than guessing.
     match confirmer.confirm_claim(&route_fork()) {
-        ConfirmDecision::Approve => {
-            import_existing_account(confirmer, import, copier, minting)
-        }
+        ConfirmDecision::Approve => import_existing_account(confirmer, import, copier, minting),
         ConfirmDecision::Deny => create_new_account(confirmer, create, copier, minting),
         // No confirm surface at all: create nothing, exactly as the orient screen does on such a host.
         ConfirmDecision::Timeout | ConfirmDecision::Unavailable => FirstRunOutcome::Declined,
@@ -1193,7 +1191,11 @@ fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &DidMinting<'_>) -> Op
                 confirmer,
                 copy::did::UNAFFORDABLE_TITLE,
                 copy::did::UNAFFORDABLE_HEADING,
-                &format!("{}{needed}{}", copy::did::UNAFFORDABLE_BEFORE_COST, copy::did::UNAFFORDABLE_AFTER_COST),
+                &format!(
+                    "{}{needed}{}",
+                    copy::did::UNAFFORDABLE_BEFORE_COST,
+                    copy::did::UNAFFORDABLE_AFTER_COST
+                ),
             );
             return None;
         }
@@ -1241,11 +1243,7 @@ fn mint_offer() -> ClaimPrompt<'static> {
 ///
 /// The write and the congratulation live on the same arm deliberately: they are the same claim, so
 /// they cannot drift into a screen that says "your DID is ready" over a ledger that holds nothing.
-fn report_the_mint(
-    confirmer: &dyn NativeConfirmer,
-    ledger: &dyn DidLedger,
-    outcome: &MintOutcome,
-) {
+fn report_the_mint(confirmer: &dyn NativeConfirmer, ledger: &dyn DidLedger, outcome: &MintOutcome) {
     match outcome {
         MintOutcome::Confirmed { did, evidence } => {
             let stored = ledger.record(&DidRecord::from_mint(did, evidence.clone()));
@@ -1591,7 +1589,7 @@ mod tests {
 
         fn wait_a_moment(&self) {
             self.0
-                .0
+                 .0
                 .fetch_add(POLL_EVERY_SECS, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -1945,7 +1943,10 @@ mod tests {
             "the user's own address must be what reaches the clipboard"
         );
         assert!(
-            confirmer.drawn().to_lowercase().contains("on the clipboard"),
+            confirmer
+                .drawn()
+                .to_lowercase()
+                .contains("on the clipboard"),
             "a copy the user cannot see happen is not an affordance"
         );
     }
@@ -2073,7 +2074,9 @@ mod tests {
             "a pending mint must give the user the spend to look up: {drawn}"
         );
         assert!(
-            !drawn.to_lowercase().contains("your did is on the blockchain"),
+            !drawn
+                .to_lowercase()
+                .contains("your did is on the blockchain"),
             "nothing may claim the DID is live: {drawn}"
         );
     }
@@ -2843,8 +2846,10 @@ mod tests {
     /// showing no address at all.
     fn with_identifier(body: &str, identifier: Option<&str>) -> String {
         match identifier {
-            Some(value) => format!("{body}
-{value}"),
+            Some(value) => format!(
+                "{body}
+{value}"
+            ),
             None => body.to_owned(),
         }
     }

@@ -567,10 +567,10 @@ mod tests {
     /// thresholds are ordered, not simultaneous.
     #[test]
     fn the_connection_is_reported_as_lost_before_the_watch_gives_up() {
-        assert!(
-            UNREACHABLE_LOOKS_BEFORE_SAYING_SO < UNREACHABLE_LOOKS_BEFORE_GIVING_UP,
-            "the user must be told before the watch stops"
-        );
+        // A compile-time assertion, so an edit that reordered the two thresholds fails the BUILD
+        // rather than one test — the ordering is what makes the "connection lost" message arrive
+        // while the watch is still trying.
+        const _: () = assert!(UNREACHABLE_LOOKS_BEFORE_SAYING_SO < UNREACHABLE_LOOKS_BEFORE_GIVING_UP);
         let healthy = WaitProgress {
             elapsed_secs: 60,
             give_up_after_secs: GIVE_UP_AFTER_SECS,

@@ -35,18 +35,24 @@ use dig_app_core::account::boot::{
     unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome, UnlockFailure,
 };
 #[cfg(feature = "tray")]
+use dig_app_core::account::did::DidFile;
 use dig_app_core::account::journey::{
-    ask_for_phrase, first_run_wizard, AccountCustodian, FirstRunOutcome, Replacement,
-    WindowedPresenter,
+    ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier, DidMinting,
+    FirstRunOutcome, Replacement, WindowedPresenter,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
 #[cfg(feature = "tray")]
 use dig_app_core::account::migration;
+use dig_app_core::account::mint::{
+    KeepWaiting, MintObserver, Sighting, UnavailableMinter, WaitProgress, WaitSurface,
+    POLL_EVERY_SECS,
+};
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::ResidencySealer;
+use dig_app_core::account::second_factor::journey::SystemClock as WallClock;
 #[cfg(feature = "tray")]
 use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
@@ -493,8 +499,23 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
     // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
+    // Nothing can mint a DID on this build — `dig-account`'s minter is a Phase-2 stub
+    // (dig_ecosystem#2342) — so the wizard is handed the stub, which refuses honestly rather than
+    // fabricating a spend for the wait to watch. Everything else the DID step needs is real, so the
+    // day the minter lands this wiring is the only thing that changes.
+    let minting = DidMinting {
+        minter: &UnavailableMinter,
+        observer: &UnreachableChain,
+        surface: &SleepingWait,
+        clock: &WallClock,
+        ledger: &DidFile::new(&dir),
+    };
     let outcome = first_run_wizard(
         confirmer,
+        // The wizard is gated on the DID, not on the account, but this entry point is reached only
+        // when there is no account at all — a wallet that exists but has no DID enters through the
+        // tray's own DID row.
+        AccountPresence::Absent,
         || {
             let presenter = WindowedPresenter::new(confirmer);
             let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
@@ -507,12 +528,14 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
             let booted = open_account(&dir, Seeding::Restore(phrase))?;
             first_run_address(booted)
         },
+        &SystemClipboard,
+        &minting,
     );
 
     match outcome {
         // Re-open through the normal unlock path so the session, signer, sealer and screen-lock guard
         // are assembled exactly as on every other unlock — one code path, no special-cased first run.
-        FirstRunOutcome::WalletCreated => start_sign_service(env),
+        FirstRunOutcome::WalletCreated | FirstRunOutcome::IdentityReady => start_sign_service(env),
         // A person who chose to stop must not be shown an error; only a genuine failure gets one.
         FirstRunOutcome::Declined => None,
         FirstRunOutcome::Failed => {
@@ -525,6 +548,56 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
             );
             None
         }
+    }
+}
+
+/// The wizard's clipboard: the SAME platform utility the tray's "copy my DIG ID" already drives.
+///
+/// A receiving address is public, so this carries none of the recovery phrase's ceremony — but it is
+/// the same one code path, so the two can never disagree about how this computer copies.
+#[cfg(feature = "tray")]
+struct SystemClipboard;
+
+#[cfg(feature = "tray")]
+impl AddressCopier for SystemClipboard {
+    fn copy(&self, address: &str) -> bool {
+        tray::write_clipboard(address)
+    }
+}
+
+/// The chain watcher this build does not have (dig_ecosystem#2342).
+///
+/// Nothing can mint here, so nothing is ever submitted and nothing is ever watched. It reports
+/// UNREACHABLE rather than PENDING deliberately: if a future wiring ever reached it with a real spend,
+/// the wait would end in "DIG cannot reach the blockchain" — which would be true — instead of waiting
+/// out its full bound on a watcher that was never connected to anything.
+#[cfg(feature = "tray")]
+struct UnreachableChain;
+
+#[cfg(feature = "tray")]
+impl MintObserver for UnreachableChain {
+    fn look(&self, _spend_id: &str) -> Sighting {
+        Sighting::Unreachable
+    }
+}
+
+/// The wait surface for a build that cannot mint.
+///
+/// It STOPS at the first check-in, for the same fail-safe reason [`UnreachableChain`] reports a lost
+/// connection: a surface that silently answered "keep waiting" would be a window a person could not
+/// leave, which is exactly what a real one must never be. Sleeping between polls is the honest
+/// production pace; the real surface replaces this whole type when the minter lands.
+#[cfg(feature = "tray")]
+struct SleepingWait;
+
+#[cfg(feature = "tray")]
+impl WaitSurface for SleepingWait {
+    fn checking_in(&self, _progress: &WaitProgress) -> KeepWaiting {
+        KeepWaiting::No
+    }
+
+    fn wait_a_moment(&self) {
+        std::thread::sleep(std::time::Duration::from_secs(POLL_EVERY_SECS));
     }
 }
 
@@ -2600,7 +2673,10 @@ mod tray {
     }
 
     /// Write `text` to the OS clipboard via the platform utility. Returns whether it succeeded.
-    fn write_clipboard(text: &str) -> bool {
+    ///
+    /// Visible to the crate because the first-run wizard's clipboard affordance drives this SAME
+    /// helper (`SystemClipboard`), rather than a second copy of the per-platform command list.
+    pub(crate) fn write_clipboard(text: &str) -> bool {
         use std::io::Write;
         use std::process::{Command, Stdio};
 

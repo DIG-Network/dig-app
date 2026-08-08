@@ -102,10 +102,21 @@ pub trait DidLedger {
     fn record(&self, record: &DidRecord) -> bool;
 }
 
-/// The production [`DidLedger`] — one JSON file per profile, beside the profile's other at-rest state.
+/// The name of the ledger file inside the brand directory.
+const LEDGER_FILE: &str = "did.json";
+
+/// The production [`DidLedger`] — one JSON file beside the account's other at-rest state.
 ///
 /// It holds no secret (a DID and a spend id are public facts), so it is not sealed; what it must do is
 /// refuse to answer with anything it cannot back up, which is [`DidFile::recorded`]'s whole job.
+///
+/// # Why it is scoped to the ACCOUNT and not to a profile
+///
+/// The wallet is pinned to one derivation index ([`ActiveProfile::SOLE`](crate::account::active_profile),
+/// dig_ecosystem#2236), so an account has one identity and one DID. It is also written at a moment when
+/// no profile id exists yet — the wizard runs before the account is unlocked. Widening this to
+/// per-profile is part of making the app multi-address again, and belongs with that change rather than
+/// ahead of it.
 #[derive(Debug, Clone)]
 pub struct DidFile {
     /// The file the record lives in.
@@ -113,10 +124,10 @@ pub struct DidFile {
 }
 
 impl DidFile {
-    /// The ledger for `profile_id` inside `brand_dir`.
-    pub fn new(brand_dir: &Path, profile_id: &str) -> Self {
+    /// The ledger for the account housed in `brand_dir`.
+    pub fn new(brand_dir: &Path) -> Self {
         Self {
-            path: brand_dir.join(profile_id).join("did.json"),
+            path: brand_dir.join(LEDGER_FILE),
         }
     }
 }
@@ -224,13 +235,8 @@ mod tests {
     #[test]
     fn a_recorded_did_without_evidence_is_not_a_did() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = DidFile::new(dir.path(), "profile");
-        std::fs::create_dir_all(dir.path().join("profile")).unwrap();
-        std::fs::write(
-            dir.path().join("profile").join("did.json"),
-            format!(r#"{{"did":"{DID}"}}"#),
-        )
-        .unwrap();
+        let ledger = DidFile::new(dir.path());
+        std::fs::write(dir.path().join("did.json"), format!(r#"{{"did":"{DID}"}}"#)).unwrap();
 
         assert_eq!(
             ledger.recorded(),
@@ -244,7 +250,7 @@ mod tests {
     #[test]
     fn a_did_minted_with_evidence_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = DidFile::new(dir.path(), "profile");
+        let ledger = DidFile::new(dir.path());
 
         assert!(ledger.record(&a_record()), "the record must be written");
         let read = ledger.recorded().expect("the record must be read back");
@@ -257,7 +263,7 @@ mod tests {
     #[test]
     fn an_account_that_never_minted_has_no_did() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(DidFile::new(dir.path(), "profile").recorded(), None);
+        assert_eq!(DidFile::new(dir.path()).recorded(), None);
     }
 
     /// **Reading content is never gated.** dig-app tells users that reading needs no account and no
