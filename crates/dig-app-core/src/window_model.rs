@@ -31,15 +31,25 @@
 //! CI.
 
 use crate::tray_menu::{
-    apps_actions, cache_actions, cache_label, management_actions, security_actions,
-    view_account_actions, wallet_actions, MenuRow, TrayAction, TrayView,
+    apps_actions, auto_update_actions, auto_update_label, cache_actions, cache_label,
+    management_actions, security_actions, view_account_actions, wallet_actions, MenuRow,
+    TrayAction, TrayView,
 };
 
 /// One tab of the app window.
 ///
-/// [`Advanced`](Self::Advanced) currently holds nothing: every candidate for it has a better home, and
-/// a one-row tab is a `professional-ui` failure. It stays in the enum as declared room for later, and
-/// [`build`] emits only non-empty tabs, so it does not render today.
+/// # Why [`Settings`](Self::Settings) joined [`Advanced`](Self::Advanced) instead of replacing it
+///
+/// The two are different promises. **Settings** is where a person expects ordinary preferences about
+/// how DIG behaves — auto-update is the first, and it is an ordinary preference, not an expert knob.
+/// **Advanced** is for the settings that can break an install if they are got wrong: the node endpoint
+/// override and the global-shortcut chord, both of which already exist in
+/// [`AgentConfig`](crate::config::AgentConfig) with no user-facing control. Filing auto-update under
+/// "Advanced" would tell every ordinary user that keeping DIG up to date is not for them.
+///
+/// [`Advanced`](Self::Advanced) therefore still holds nothing and still never renders — [`build`]
+/// emits only non-empty tabs — but it is now room for a NAMED set rather than for anything at all.
+/// dig_ecosystem#2310 tracks either filling it with those two controls or deleting the variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TabId {
     /// What the app is doing right now, and the way to the logs when it cannot say.
@@ -54,7 +64,10 @@ pub enum TabId {
     Apps,
     /// The node's content-cache size limit.
     Cache,
-    /// Declared room for later. Holds nothing today, so it is never rendered.
+    /// How DIG behaves: today, whether it keeps itself up to date and which feed it follows.
+    Settings,
+    /// Declared room for the expert-only controls named in the enum's docs. Holds nothing today, so it
+    /// is never rendered.
     Advanced,
 }
 
@@ -68,6 +81,7 @@ impl TabId {
             Self::Wallet => "Wallet",
             Self::Apps => "Apps",
             Self::Cache => "Cache",
+            Self::Settings => "Settings",
             Self::Advanced => "Advanced",
         }
     }
@@ -352,6 +366,25 @@ pub fn build(view: &TrayView) -> WindowModel {
                 rows: cache_actions(view.cache.as_ref()),
             }],
         ),
+        // Same reasoning as the Cache and Wallet headings: the group's parent label carries the live
+        // fact — updates on or off, and which channel — so the answer is read, not hunted for.
+        tab(
+            TabId::Settings,
+            // Three honest cases. Before the agent has ticked, the beacon has not been asked yet, so
+            // the figures are LATE. Once it has, a missing status means the beacon is absent or would
+            // not answer, so they are ABSENT — the error state, naming the act that changes it.
+            match (view.running, &view.update) {
+                (false, _) => PaneNote::Waiting("The auto-update settings are still being read."),
+                (true, None) => PaneNote::Unreachable(
+                    "The DIG updater could not be asked, so auto-update cannot be changed here. Install DIG with the DIG installer and this tab will fill in.",
+                ),
+                (true, Some(_)) => PaneNote::Ready,
+            },
+            vec![Section {
+                heading: Some(auto_update_label(view.update.as_ref())),
+                rows: auto_update_actions(view.update.as_ref()),
+            }],
+        ),
     ];
 
     WindowModel {
@@ -382,6 +415,10 @@ fn nothing_to_do(id: TabId) -> &'static str {
         TabId::Security => "Set up a DIG Account to choose how it is protected.",
         TabId::Apps => "Install another DIG app and it will appear here.",
         TabId::Cache => "Start the DIG node to choose a size limit.",
+        // Unreachable by construction: the explainer row is offered in every state, so this tab always
+        // has something to click. Written honestly anyway rather than left to a catch-all, because the
+        // day a refactor makes it reachable is the day a wrong sentence would ship unnoticed.
+        TabId::Settings => "Install the DIG updater to choose how DIG updates itself.",
         TabId::Status | TabId::Advanced => "There is nothing to do here right now.",
     }
 }
@@ -511,6 +548,7 @@ fn tidy(rows: Vec<MenuRow>) -> Vec<MenuRow> {
 mod tests {
     use super::*;
     use crate::apps::APPS;
+    use crate::auto_update::{BeaconStatus, UpdateChannel};
     use crate::cache::{CacheSnapshot, CACHE_PRESETS};
     use crate::tray_menu::{AccountState, WindowHost};
     use std::collections::BTreeSet;
@@ -548,12 +586,16 @@ mod tests {
             TrayAction::AboutWallet,
             TrayAction::SetCustomCacheCap,
             TrayAction::AboutCache,
+            TrayAction::AboutAutoUpdate,
             TrayAction::OpenWindow,
             TrayAction::OpenLogs,
             TrayAction::Quit,
         ];
         all.extend(CACHE_PRESETS.map(|bytes| TrayAction::SetCacheCap { bytes }));
         all.extend(APPS.iter().map(|app| TrayAction::LaunchApp(app.id)));
+        all.extend([true, false].map(|enabled| TrayAction::SetAutoUpdate { enabled }));
+        all.push(TrayAction::RearmUpdateSchedule);
+        all.extend(UpdateChannel::ALL.map(TrayAction::SetUpdateChannel));
         all
     }
 
@@ -588,6 +630,10 @@ mod tests {
             | TrayAction::SetCacheCap { .. }
             | TrayAction::SetCustomCacheCap
             | TrayAction::AboutCache
+            | TrayAction::SetAutoUpdate { .. }
+            | TrayAction::RearmUpdateSchedule
+            | TrayAction::SetUpdateChannel(_)
+            | TrayAction::AboutAutoUpdate
             | TrayAction::LaunchApp(_)
             | TrayAction::OpenWindow
             | TrayAction::OpenLogs
@@ -608,6 +654,36 @@ mod tests {
         ]
     }
 
+    /// Every answer the beacon can give: absent, running, paused, and opted out of the schedule.
+    ///
+    /// More than two on purpose. `None` alone would exercise only the error state, and a single `Some`
+    /// would leave the on/off row and the "current channel" mark stuck on one value across every view
+    /// — so a group builder that ignored its input would look identical to one that read it.
+    ///
+    /// The FOURTH reading is the one that matters most, and it is the case a two-value fixture cannot
+    /// express: **not paused, yet not updating**. Everything derived from `paused` alone reports that
+    /// host as "auto-update — on" and offers it a `resume` that succeeds while changing nothing
+    /// (dig_ecosystem#2324). It is deliberately `paused: false`, because a fixture that set both flags
+    /// would be satisfied by code still reading only the pause.
+    const EVERY_BEACON_READING: [Option<BeaconStatus>; 4] = [
+        None,
+        Some(BeaconStatus {
+            paused: false,
+            schedule_opted_out: false,
+            channel: UpdateChannel::Stable,
+        }),
+        Some(BeaconStatus {
+            paused: true,
+            schedule_opted_out: false,
+            channel: UpdateChannel::Nightly,
+        }),
+        Some(BeaconStatus {
+            paused: false,
+            schedule_opted_out: true,
+            channel: UpdateChannel::Stable,
+        }),
+    ];
+
     /// Every view the model can be built from, driven from the state types rather than a hand-written
     /// list of interesting cases — a hand-written list silently stops covering states added later.
     fn every_view() -> Vec<TrayView> {
@@ -625,16 +701,19 @@ mod tests {
                         for profile_id in [None, Some("dig1abc".to_string())] {
                             for receive_address in [None, Some("xch1abc".to_string())] {
                                 for running in [false, true] {
-                                    views.push(TrayView {
-                                        account: Some(account.clone()),
-                                        window_host: host,
-                                        second_factor,
-                                        cache,
-                                        profile_id: profile_id.clone(),
-                                        receive_address: receive_address.clone(),
-                                        running,
-                                        ..TrayView::default()
-                                    });
+                                    for update in EVERY_BEACON_READING {
+                                        views.push(TrayView {
+                                            account: Some(account.clone()),
+                                            window_host: host,
+                                            second_factor,
+                                            cache,
+                                            profile_id: profile_id.clone(),
+                                            receive_address: receive_address.clone(),
+                                            running,
+                                            update,
+                                            ..TrayView::default()
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -648,7 +727,7 @@ mod tests {
     /// A one-line description of a view, so a failure names the case that produced it.
     fn describe(view: &TrayView) -> String {
         format!(
-            "account={:?} host={:?} second_factor={} running={} cache={} profile_id={} address={}",
+            "account={:?} host={:?} second_factor={} running={} cache={} profile_id={} address={} update={:?}",
             view.account,
             view.window_host,
             view.second_factor,
@@ -656,6 +735,7 @@ mod tests {
             view.cache.is_some(),
             view.profile_id.is_some(),
             view.receive_address.is_some(),
+            view.update,
         )
     }
 
@@ -886,8 +966,8 @@ mod tests {
         assert_eq!(
             candidates.len(),
             // five account readings (Unlocked counts twice, recoverable or not) x host x cache
-            // x profile_id x address x running
-            5 * 2 * 2 * 2 * 2 * 2,
+            // x profile_id x address x running x beacon reading
+            5 * 2 * 2 * 2 * 2 * 2 * EVERY_BEACON_READING.len(),
             "the enrolled-account cases must all be covered"
         );
         for view in candidates {
@@ -895,6 +975,226 @@ mod tests {
             assert!(
                 reachable.contains("TurnOffTwoFactor"),
                 "the way out of a wedged account vanished\n  view: {}",
+                describe(&view)
+            );
+        }
+    }
+
+    /// **The Settings tab renders in every state, and always offers the way to the explanation.**
+    ///
+    /// The floor the tab must never drop below: whatever the beacon says or fails to say, a person
+    /// opening Settings finds a tab that is there and a row they can click. A surface whose only
+    /// content depends on another program answering is a surface that is blank on the machines that
+    /// need it most.
+    #[test]
+    fn settings_renders_and_offers_a_route_in_every_state() {
+        for view in every_view() {
+            let tab = build(&view)
+                .tab(TabId::Settings)
+                .cloned()
+                .unwrap_or_else(|| panic!("Settings must render\n  view: {}", describe(&view)));
+            assert!(
+                tab.actions().contains(&TrayAction::AboutAutoUpdate),
+                "Settings must always offer the explainer\n  view: {}",
+                describe(&view)
+            );
+        }
+    }
+
+    /// **The heading tells the three beacon states apart, and never calls a stopped machine "on".**
+    ///
+    /// Every heading here is derived from the same reading the rows are, so a heading that reported
+    /// only `paused` would sit above a correct row saying the opposite. The opted-out case is asserted
+    /// against the RUNNING case's wording rather than by matching a phrase, so re-wording the feature
+    /// cannot make this pass by accident: what is pinned is that the two states do not read the same.
+    #[test]
+    fn the_auto_update_heading_names_which_thing_is_off() {
+        let status = |paused, schedule_opted_out| crate::auto_update::BeaconStatus {
+            paused,
+            schedule_opted_out,
+            channel: UpdateChannel::Stable,
+        };
+        let heading = |status| auto_update_label(Some(&status));
+
+        let live = heading(status(false, false));
+        let paused = heading(status(true, false));
+        let opted_out = heading(status(false, true));
+
+        assert!(
+            live.contains("on,"),
+            "a running beacon's heading must say so: {live}"
+        );
+        for stopped in [&paused, &opted_out] {
+            assert!(
+                stopped.contains("off,"),
+                "a machine that does not update itself must not read as on: {stopped}"
+            );
+        }
+        assert_ne!(
+            opted_out, paused,
+            "a removed daily check and a pause need different remedies, so they cannot share a \
+             heading"
+        );
+        assert_ne!(
+            opted_out, live,
+            "the state that reports `paused: false` while never updating must not read as running"
+        );
+        // The channel names a person reads, not the beacon's wire tokens.
+        assert!(
+            live.contains(UpdateChannel::Stable.display_name()),
+            "the heading uses the channel's display name: {live}"
+        );
+    }
+
+    /// **The auto-update controls appear exactly when the beacon has answered, and they follow it.**
+    ///
+    /// Pinned from both sides. With a status, the on/off row names the state it moves TO — the
+    /// opposite of the one reported — and exactly one channel row is offered per channel. Without one,
+    /// neither control exists, because a switch drawn for a beacon nobody heard from is a switch that
+    /// lies about its position.
+    #[test]
+    fn the_auto_update_controls_track_the_beacon_and_vanish_without_it() {
+        for view in every_view() {
+            let actions = build(&view)
+                .tab(TabId::Settings)
+                .map(Tab::actions)
+                .unwrap_or_default();
+            let case = describe(&view);
+
+            let Some(status) = view.update else {
+                // Two rows, both the explainer: one states the precondition, one is the concept's own
+                // "About…". They survive de-duplication because they say DIFFERENT things, exactly as
+                // the Cache tab's two `AboutCache` rows do. What must not survive is a control.
+                assert!(
+                    actions.iter().all(|a| *a == TrayAction::AboutAutoUpdate),
+                    "with no beacon there is nothing to set, only something to read\n  view: {case}"
+                );
+                assert!(
+                    actions.contains(&TrayAction::AboutAutoUpdate),
+                    "with no beacon the explainer is the whole route\n  view: {case}"
+                );
+                continue;
+            };
+
+            // Derived from the beacon's own account of what is BLOCKING updates, not from a single
+            // flag: on an opted-out host the row must be the schedule re-arm, and asserting against
+            // `paused` alone would have accepted the `resume` that silently does nothing (#2324).
+            let expected = match status.blocking_updates() {
+                None => TrayAction::SetAutoUpdate { enabled: false },
+                Some(crate::auto_update::Change::Enable(_)) => {
+                    TrayAction::SetAutoUpdate { enabled: true }
+                }
+                Some(crate::auto_update::Change::RearmSchedule) => TrayAction::RearmUpdateSchedule,
+                Some(crate::auto_update::Change::Channel { .. }) => {
+                    unreachable!("not a way to turn updates on")
+                }
+            };
+            assert!(
+                actions.contains(&expected),
+                "the on/off row must offer {expected:?}, the change that actually unblocks \
+                 updates\n  view: {case}"
+            );
+            let contradiction = match expected {
+                TrayAction::SetAutoUpdate { enabled } => {
+                    TrayAction::SetAutoUpdate { enabled: !enabled }
+                }
+                // The re-arm has no opposite row to confuse it with; assert the resume that would
+                // have been the silent no-op is NOT offered instead.
+                _ => TrayAction::SetAutoUpdate { enabled: true },
+            };
+            assert!(
+                !actions.contains(&contradiction),
+                "a row that re-applies the state already in force does nothing\n  view: {case}"
+            );
+            for channel in UpdateChannel::ALL {
+                assert!(
+                    actions.contains(&TrayAction::SetUpdateChannel(channel)),
+                    "{channel:?} must be choosable\n  view: {case}"
+                );
+            }
+        }
+    }
+
+    /// **The channel in force is marked, and only it.** A chooser that shows no current value asks a
+    /// person to change a setting they cannot read.
+    #[test]
+    fn exactly_one_channel_row_is_marked_current() {
+        for view in every_view() {
+            let Some(status) = view.update else { continue };
+            let tab = build(&view)
+                .tab(TabId::Settings)
+                .cloned()
+                .expect("Settings");
+            let marked: Vec<&str> = tab
+                .sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .filter_map(|row| match row {
+                    MenuRow::Action {
+                        action: TrayAction::SetUpdateChannel(channel),
+                        label,
+                        ..
+                    } if label.contains("current") => Some(channel.display_name()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                marked,
+                vec![status.channel.display_name()],
+                "the marked channel must be the one the beacon reports\n  view: {}",
+                describe(&view)
+            );
+        }
+    }
+
+    /// **Settings answers all four async questions**, each from a view that produces it and a view
+    /// that does not.
+    ///
+    /// `Empty` is the fourth, and it is asserted as UNREACHABLE rather than demonstrated: the
+    /// explainer row is offered in every state, so the tab always has something to click. That is a
+    /// claim about the builder, so it is checked across every view rather than asserted once — if a
+    /// refactor ever drops the explainer, this fails and `nothing_to_do(Settings)` becomes real.
+    #[test]
+    fn the_settings_pane_states_are_each_reachable_and_none_is_universal() {
+        let note = |view: &TrayView| build(view).tab(TabId::Settings).map(|tab| tab.note.clone());
+        let reading = BeaconStatus {
+            paused: false,
+            schedule_opted_out: false,
+            channel: UpdateChannel::Stable,
+        };
+
+        let booting = TrayView {
+            running: false,
+            update: Some(reading),
+            ..TrayView::default()
+        };
+        let no_beacon = TrayView {
+            running: true,
+            update: None,
+            ..TrayView::default()
+        };
+        let up = TrayView {
+            running: true,
+            update: Some(reading),
+            ..TrayView::default()
+        };
+
+        // Loading — and note the booting view HAS a reading, so this cannot be passing merely because
+        // the beacon was absent.
+        assert_eq!(
+            note(&booting),
+            Some(PaneNote::Waiting(
+                "The auto-update settings are still being read."
+            ))
+        );
+        // Error, and its absence once the beacon has answered.
+        assert!(matches!(note(&no_beacon), Some(PaneNote::Unreachable(_))));
+        assert_eq!(note(&up), Some(PaneNote::Ready));
+
+        for view in every_view() {
+            assert!(
+                !matches!(note(&view), Some(PaneNote::Empty(_))),
+                "Settings became empty, so its empty-state sentence is now live and untested\n  view: {}",
                 describe(&view)
             );
         }
@@ -1178,6 +1478,7 @@ mod tests {
             TabId::Wallet,
             TabId::Apps,
             TabId::Cache,
+            TabId::Settings,
             TabId::Advanced,
         ];
         let ids: BTreeSet<String> = tabs.iter().map(|tab| tab_element_id(*tab)).collect();
@@ -1233,6 +1534,7 @@ mod tests {
             expect(TabId::Apps, apps_actions());
             expect(TabId::Cache, cache_actions(view.cache.as_ref()));
             expect(TabId::Wallet, wallet_actions(&view, &account));
+            expect(TabId::Settings, auto_update_actions(view.update.as_ref()));
             // The Account tab is the one that composes TWO builders onto a single pane, so it is the
             // one where a label can repeat across a section boundary — `AboutDid` ends both. The
             // de-dupe runs across the whole tab, so `seen` is shared here rather than per-section.

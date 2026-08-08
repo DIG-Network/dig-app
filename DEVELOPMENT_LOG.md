@@ -1,3 +1,28 @@
+## #2325 — PowerShell has five single quotes, and the audit shared the escape's blind spot
+
+- **`CharTraits.IsSingleQuote` admits FIVE codepoints — U+0027, U+2018, U+2019, U+201A, U+201B — and
+  `ScanStringLiteral` terminates on any of them regardless of which opened the string.** A
+  quote-doubling escape that handles only U+0027 therefore does not close the class. All four curly
+  quotes are legal in NTFS and arrive from Word or macOS autocorrect, so this was reachable without an
+  attacker: with the beacon at a path containing U+2019, `Start-Process -FilePath 'C:\dig<U+2019>;…'`
+  truncated to `C:\dig`, failed, and executed the tail — and because `Start-Process` had failed,
+  `-Verb RunAs` never ran, so the injected fragment executed at the user's integrity level with NO UAC
+  prompt at all. Executed end to end: `EXIT: Some(42)`, `STDOUT: PWNED_BY_U2019`.
+- **The test could not have caught it.** Its helper re-implemented PowerShell's string scanner to model
+  the CONSUMER's rule rather than our escape — a genuinely good instinct — but modelled only ASCII `'`,
+  the exact blind spot of the function it audited. Adding a U+2019 fixture left the test PASSING. An
+  instrument that models the parser can be wrong about the parser in the same way the code is.
+- **The fix is to stop escaping, not to escape harder.** Widening the `.replace` to five codepoints
+  leaves a denylist one Unicode revision from being wrong and a second copy of the tokenizer's rule to
+  keep in step. Passing the path via `Command::env` and referring to it as `$env:NAME` — an unquoted
+  variable, which PowerShell binds as one argument without re-tokenizing — removes the class: nothing
+  in the command string derives from a run-time value.
+- **Assert the absence, and pair it.** "No fragment of the path appears in the command string" models
+  nothing, so no tokenizer change can invalidate it — but it passes just as happily if the path is
+  dropped on the floor, so it needs a companion asserting the value arrives unmodified by the other
+  route. Keep look-alikes (U+201C is a DOUBLE quote, U+00B4 an acute accent, U+02BC a modifier letter)
+  in the fixture list as negative controls: over-escaping them breaks the elevation just as surely.
+
 ## #86 — two probes that lie about a wedged tray, and where the logs actually are
 
 - **dig-app in a normal user session cannot write `%ProgramData%\DigNetwork\logs\dig-app\` at all.** The

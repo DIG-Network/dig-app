@@ -785,7 +785,7 @@ Binding rules:
 ### 3.1c-0 The app window (normative)
 
 Where the host can open one (§3.1c), the app window carries the twenty-five verbs the tray no longer
-shows. It is arranged by `dig_app_core::window_model` from the SAME group builders the tray menu composes,
+shows, plus the surfaces that were never on the tray at all (auto-update, §3.1c-iii). It is arranged by `dig_app_core::window_model` from the SAME group builders the tray menu composes,
 so no rule about which rows exist or whether they are enabled is decided twice.
 
 - **It is a tab surface, not a second product.** Tabs are listed in a sidebar, which becomes a strip of
@@ -955,6 +955,70 @@ any lower request at **64 MiB**.
   512 MiB the node's tier-0 relevancy caching is disabled. Sizes are binary (1 GiB = 1024³) and the copy
   MUST say so, so the displayed number matches the stored bytes. The copy MUST NOT present lowering the cap
   as free of a privacy cost.
+
+### 3.1c-iii The auto-update surface (normative)
+
+The app window MUST carry a **Settings** tab holding an **auto-update** group, built from the same pure
+model as every other surface (`dig_app_core::tray_menu` + `dig_app_core::auto_update`) so these rules are
+testable without a desktop.
+
+- **The beacon is the authority (MUST).** Auto-update is performed by `dig-updater`, which consults its own
+  `config.json` in an Admin/SYSTEM-only directory before every pass and returns without touching the
+  network when it says paused. dig-app MUST NOT write that file, disable the scheduled task or unit, or
+  keep a parallel switch of its own that anything reads as the setting. A change MUST be made by running
+  the beacon's own commands — `pause`, `resume`, `channel set <token>`, `schedule install` — and the state
+  SHOWN MUST come from the beacon's unprivileged status mirror (`status --json`), never from dig-app's
+  remembered preference.
+- **Auto-update is ON by default (MUST).** A machine on which no one has expressed a preference updates
+  itself. An `agent.json` written before the preference existed MUST load as ENABLED; a `#[serde(default)]`
+  bool, which yields `false`, is not a conforming implementation of this rule.
+- **"On" MUST mean the machine actually updates itself (MUST, dig_ecosystem#2324).** The status mirror
+  reports two independent facts that each stop updates: `paused`, and `schedule_opted_out` — the daily
+  schedule DELIBERATELY removed by `schedule uninstall`, recorded as a privileged-owned sentinel. A surface
+  MUST derive "on" from BOTH; reading `paused` alone reports an opted-out host as up to date. The remedy
+  MUST match the cause: `resume` clears a pause and does NOT re-arm a removed schedule, so a host reporting
+  `schedule_opted_out` MUST be offered `schedule install` instead. Running `resume` there exits zero having
+  changed nothing, and reporting that as a saved setting is a false success notice. An absent
+  `schedule_opted_out` field MUST read as `false`, since a beacon predating the sentinel cannot have one.
+- **The beacon MUST NOT be spawned per repaint (MUST, dig_ecosystem#2311).** Reading the mirror means
+  spawning a subprocess, and the surfaces that show it rebuild about twice a second. An implementation MUST
+  hold the reading across repaints and re-read on its own cadence (`BEACON_REFRESH`, 5s), and MUST re-read
+  immediately after a change is applied rather than showing the pre-change position until the interval
+  lapses. On Windows every such spawn MUST set `CREATE_NO_WINDOW`: dig-app is a GUI-subsystem process and
+  `dig-updater` is a console binary, so without it Windows paints a console window per call.
+- **The elevation command MUST contain no run-time value (MUST, dig_ecosystem#2325).** The Windows route
+  passes PowerShell source to `-Command`, so any value spliced into that string is offered to a tokenizer.
+  The beacon's path and every argument MUST instead travel in the elevator's environment block, and the
+  command string MUST refer to them only as `$env:` variables whose names are generated from an index.
+  Escaping MUST NOT be relied on in their place: PowerShell terminates a single-quoted literal on any of
+  FIVE codepoints (U+0027, U+2018, U+2019, U+201A, U+201B), all legal in NTFS, so a quote-doubling escape
+  truncated the `-FilePath` and executed the tail — unelevated, because `Start-Process` had already failed
+  and `-Verb RunAs` never ran. Conformance MUST be asserted as an ABSENCE (no fragment of the path appears
+  in the command string), paired with an assertion that the value still arrives unmodified by the other
+  route; an instrument that models PowerShell's quoting rules can share the escape's blind spot.
+- **The state shown MUST be the state observed (MUST, §6.4).** Where the beacon cannot be asked — not
+  installed, or unwilling to answer — the group MUST say so and MUST NOT draw an on/off control or a
+  channel selection. A switch position no one reported is a lie about the machine's configuration. The
+  explainer MUST remain reachable in that state, so the surface is never a dead end (§3.1c).
+- **The channel choice MUST show which channel is in force**, marked with a WORD and not a glyph (the
+  window's font stack has no U+2713). Both channels MUST be offered; the two feeds are
+  `https://updates.dig.net/v1/stable/manifest.json` and `/v1/nightly/manifest.json`.
+- **A channel switch MUST be confirmed before it is applied (MUST).** Each channel is an independent trust
+  context with its own rollback floor, so a switch cannot rewind the floor of the channel being left — but
+  leaving nightly CAN move installed components back to an older stable release, because nightly is usually
+  ahead. The user MUST be told that the version can go DOWN, and MUST agree, before the change is made.
+  Declining returns quietly (§3.1c-ii).
+- **The elevation cost MUST be stated in the control's own label (MUST).** Writing the beacon's config
+  requires Administrator/root on every platform DIG ships on. The row MUST say so before it is clicked; a
+  cost revealed only at the prompt is a surprise. READING the state MUST never require elevation.
+- **A platform with no elevation route MUST refuse and explain (MUST).** Where the host offers no way for a
+  desktop app to request elevation that DIG will use, the change MUST NOT be attempted; the notice MUST
+  name the equivalent terminal command so the setting stays reachable. A declined elevation prompt MUST
+  read as "nothing was changed", not as a DIG fault, and MUST NOT update the remembered preference.
+- **The auto-update group is a WINDOW surface, not a tray one.** The tray's top level MUST stay short
+  (§3.1c), and this group is not one of the verbs that earns a spine row. Hosts with no window
+  (`WindowHost::Unavailable`) also have no elevation route, so the beacon's own CLI is the conforming
+  interface there.
 
 **The Apps surface (MUST, dig_ecosystem#2101).** The menu MUST offer an **Apps** submenu grouping the other
 DIG apps this install can open, so a sibling app (Chat today; dig-email, dig-video-chat to follow — §5.4) is

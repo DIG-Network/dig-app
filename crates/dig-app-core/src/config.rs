@@ -50,6 +50,20 @@ pub struct AgentConfig {
     /// back must be able to have it without editing source.
     #[serde(default)]
     pub open_bar_shortcut: Option<String>,
+
+    /// The user's auto-update preference — on or off, and which feed to follow
+    /// (dig_ecosystem#2293).
+    ///
+    /// Non-secret boot-time settings, so this is the right home: the Settings tab must be able to
+    /// show a meaningful, persisted choice before any profile is unlocked. The AUTHORITY for what
+    /// actually happens is the beacon's own config, which only an administrator can write; see
+    /// [`crate::auto_update`] for why the remembered preference and the observed state are different
+    /// facts rather than two sources of truth.
+    ///
+    /// Defaults to enabled, including for an `agent.json` written before this field existed — see
+    /// [`AutoUpdate`](crate::auto_update::AutoUpdate).
+    #[serde(default)]
+    pub auto_update: crate::auto_update::AutoUpdate,
 }
 
 fn default_tick_secs() -> u64 {
@@ -63,6 +77,7 @@ impl Default for AgentConfig {
             active_profile: None,
             tick_secs: DEFAULT_TICK_SECS,
             open_bar_shortcut: None,
+            auto_update: crate::auto_update::AutoUpdate::default(),
         }
     }
 }
@@ -138,6 +153,10 @@ mod tests {
             active_profile: Some("did:chia:abc".to_string()),
             tick_secs: 42,
             open_bar_shortcut: Some("Ctrl+Shift+D".to_string()),
+            auto_update: crate::auto_update::AutoUpdate {
+                enabled: false,
+                channel: crate::auto_update::UpdateChannel::Nightly,
+            },
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());
@@ -186,6 +205,73 @@ mod tests {
             cfg.open_bar_shortcut(),
             Err(crate::hotkey::HotkeyError::UnknownKey("Banana".to_string()))
         );
+    }
+
+    /// **An `agent.json` written before auto-update existed loads as auto-update ON.**
+    ///
+    /// The upgrade path this feature ships on, and the one a naive implementation inverts: a plain
+    /// `#[serde(default)]` on a `bool` yields `false`, which would silently opt every existing install
+    /// OUT of updates on the version that added the switch. Pinned at BOTH levels a real file can be
+    /// missing the setting at — the whole object absent (an older file), and the object present but
+    /// missing the flag (a file written by a build with a differently-shaped preference).
+    #[test]
+    fn a_config_written_before_auto_update_existed_loads_as_enabled() {
+        use crate::auto_update::UpdateChannel;
+        let dir = tempfile::tempdir().unwrap();
+        let path = AgentConfig::path_in(dir.path());
+
+        std::fs::write(&path, br#"{"tick_secs":7}"#).unwrap();
+        let older = AgentConfig::load(&path).unwrap();
+        assert!(
+            older.auto_update.enabled,
+            "an older config must update itself"
+        );
+        assert_eq!(older.auto_update.channel, UpdateChannel::Stable);
+        assert_eq!(
+            older.tick_secs, 7,
+            "the rest of the file must still be read"
+        );
+
+        std::fs::write(&path, br#"{"auto_update":{"channel":"nightly"}}"#).unwrap();
+        let partial = AgentConfig::load(&path).unwrap();
+        assert!(partial.auto_update.enabled);
+        assert_eq!(partial.auto_update.channel, UpdateChannel::Nightly);
+
+        // The other side: a file that explicitly says OFF stays off across a load, or "default on"
+        // would be a value that cannot be changed rather than a default.
+        std::fs::write(&path, br#"{"auto_update":{"enabled":false}}"#).unwrap();
+        assert!(!AgentConfig::load(&path).unwrap().auto_update.enabled);
+    }
+
+    /// **The preference survives a restart** — saved by one run, read back by the next.
+    ///
+    /// Distinct from [`save_then_load_round_trips`] in what it proves: that test round-trips one
+    /// struct, while this one writes a NON-default choice and re-reads it through a fresh load, which
+    /// is the only shape that can fail if `save` silently dropped the field.
+    #[test]
+    fn the_auto_update_choice_survives_a_restart() {
+        use crate::auto_update::{AutoUpdate, UpdateChannel};
+        let dir = tempfile::tempdir().unwrap();
+        let path = AgentConfig::path_in(dir.path());
+
+        let chosen = AutoUpdate {
+            enabled: false,
+            channel: UpdateChannel::Nightly,
+        };
+        assert_ne!(
+            chosen,
+            AutoUpdate::default(),
+            "the fixture must differ from the default, or a save that wrote nothing would pass"
+        );
+
+        AgentConfig {
+            auto_update: chosen,
+            ..AgentConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        assert_eq!(AgentConfig::load(&path).unwrap().auto_update, chosen);
     }
 
     #[test]

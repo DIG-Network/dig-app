@@ -86,6 +86,13 @@ fn view_for(state: AccountState) -> TrayView {
             cap_bytes: dig_app_core::cache::GIB,
             used_bytes: 0,
         }),
+        // Not the subject here: this suite is about the account LOCK state, and auto-update is not
+        // gated on an account at all — it is exercised by `window_model`'s own tests.
+        update: Some(dig_app_core::auto_update::BeaconStatus {
+            paused: false,
+            schedule_opted_out: false,
+            channel: dig_app_core::auto_update::UpdateChannel::Stable,
+        }),
         // Not the subject here: this suite is about the account LOCK state.
         window_host: dig_app_core::tray_menu::WindowHost::Available,
     }
