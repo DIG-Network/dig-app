@@ -273,8 +273,8 @@ mod tests {
             width,
         );
 
-        let agent = placed(&laid, copy::header::AGENT_LABEL)
-            .union(placed(&laid, copy::agent_state(true)));
+        let agent =
+            placed(&laid, copy::header::AGENT_LABEL).union(placed(&laid, copy::agent_state(true)));
         let node = placed(&laid, copy::header::NODE_LABEL)
             .union(placed(&laid, super::super::pane::facts::NODE_SEARCHING));
 

@@ -65,7 +65,11 @@ use crate::tray_menu::{
 ///   never, and only widened every sweep written over the tab set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum TabId {
-    /// What DIG is doing on this computer, the other DIG apps it can open, and the way to the logs.
+    /// What DIG is doing on this computer, the way to the logs, and the other DIG apps it can open.
+    ///
+    /// In that order, which is the order [`build`] emits: the diagnostics first because a person
+    /// who opens this tab because something is wrong came for them, the launcher under them because
+    /// that is what they browse when nothing is.
     Home,
     /// The account: what it is, how it is protected, and how to create, restore, replace or remove
     /// it.
