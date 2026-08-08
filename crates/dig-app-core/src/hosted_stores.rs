@@ -624,8 +624,20 @@ mod tests {
         );
         let link = connected_to(&node);
 
-        for _ in 0..12 {
-            assert_eq!(poller.observe(&link), HostedStoresReading::Pending);
+        // Only the FIRST observation is pinned to `Pending`: at that instant nothing has been read,
+        // so the state is known independently of the clock. The later ones are deliberately NOT
+        // asserted, because whether the 800 ms read has landed by repaint N is a property of the
+        // machine, not of this code — asserting it made the test fail on a loaded macOS runner,
+        // where the twelve repaints outlive the delay and the (correct) answer becomes `Known`.
+        // Nothing is weakened: the property under test is the SERVER-side count below, and these
+        // repaints are what would stack extra reads if de-duplication were absent.
+        assert_eq!(
+            poller.observe(&link),
+            HostedStoresReading::Pending,
+            "before any read has answered there is no list and no fault"
+        );
+        for _ in 0..11 {
+            let _ = poller.observe(&link);
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(matches!(
