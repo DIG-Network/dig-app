@@ -280,7 +280,12 @@ fn actions_of(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// A closed list rather than a guess from the label: a destructive control must be told apart from a
 /// save by more than the words on it, and inferring that from prose would make the danger colour
 /// depend on how a label happens to be phrased.
-fn is_destructive(action: TrayAction) -> bool {
+///
+/// `pub(crate)`: the [`Account`](super::account) pane both colours these verbs AND places their card
+/// last on the pane, so it asks the same question this does. A second list would eventually disagree
+/// with this one about which verbs erase key material, and the pane that got it wrong would be the
+/// one drawing a destroy as an ordinary button.
+pub(crate) fn is_destructive(action: TrayAction) -> bool {
     matches!(
         action,
         TrayAction::RemoveAccount

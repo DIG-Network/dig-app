@@ -53,6 +53,7 @@
 //! [`state::PaneState::Unwired`] is a state every pane must handle, so a designed-but-unplumbed
 //! surface says so in the pane, in plain words.
 
+pub(crate) mod account;
 pub(crate) mod action;
 pub(crate) mod card;
 pub(crate) mod copy;
@@ -60,6 +61,7 @@ pub(crate) mod data;
 pub(crate) mod facts;
 pub(crate) mod flow;
 pub(crate) mod identity;
+pub(crate) mod security;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod text;
@@ -116,6 +118,8 @@ pub(crate) fn draw_tab(
 
     let pressed = match tab.id {
         TabId::Status => status::draw(&mut flow, t, tab, facts),
+        TabId::Account => account::draw(&mut flow, t, tab, facts),
+        TabId::Security => security::draw(&mut flow, t, tab, facts),
         _ => generic(&mut flow, t, tab),
     };
     (flow.cursor() - at.top(), pressed)
