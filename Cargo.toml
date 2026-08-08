@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "7.0.0"
+version = "7.0.1"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -85,16 +85,16 @@ dig-session = "0.5"
 # The custody OBJECT MODEL + crypto crate (#1497/#1509): AccountStore/AccountSession/UnlockedAccount,
 # keystore at-rest crypto, AuthPolicy verification + KDF unlock, per-profile identity signing
 # (ProfileSigner: dig_ipc_protocol::SessionSigner), the wallet money-path (WalletOps), DEK, DID/dig-store
-# mint. dig-app is the THIN HARNESS consumer (#1509): it implements + injects AuthProvider + SpendAuthorizer
-# and wires ProfileSigner into the IPC sign callback. Consumed as the published crates.io release
-# (release-first, §4.1): dig-account 0.3.0 is live — it adds the per-profile X25519 sealing keypair
-# (`UnlockedAccount::profile_sealing_key`/`profile_sealing_public_key`) the `identity.*` capability
-# class (SPEC §5.6, #1931) seals DIGCHAT1 messages with — so dig-app pins the crates.io version, never
-# a git source (§3.6 all-crates rule).
+# mint. dig-app is the THIN HARNESS consumer (#1509): it implements + injects the AuthProvider ceremony
+# and wires ProfileSigner into the IPC sign callback. It does NOT supply the custody gate — 0.5.0
+# removed the `SpendAuthorizer` trait dig-app used to inject (its implementation authorized everything),
+# so the crate's own `PolicyAuthorizer` is now mechanically the only thing that can permit a spend.
+# Consumed as the published crates.io release (release-first, §4.1), never a git source (§3.6
+# all-crates rule).
 dig-account = "0.5.0"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
-# SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account 0.3
+# SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account
 # resolves ("2") so the `StaticSecret`/`PublicKey` types UNIFY to one definition — Cargo coalesces a
 # single crate+major, so there is never a drifted second copy of the type. No hand-rolled curve math.
 x25519-dalek = "2"
@@ -106,14 +106,14 @@ chacha20poly1305 = "0.10"
 # (`WalletOps::money_signer(network)` → `dig_wallet_backend::types::Network`). dig-app names ONLY this
 # selector type from the wallet backend — it does NOT use its client seam (the app signs through
 # dig-account's canonical money signer, ratified Option A #1024). Pinned to the same 0.16 line
-# dig-account 0.1.1 resolves so the `Network` type is one shared definition, never a drifted copy.
+# dig-account resolves so the `Network` type is one shared definition, never a drifted copy.
 dig-wallet-backend = "0.16"
 # The ecosystem's single source of truth for shared byte-frozen constants (dig_ecosystem#681/§4.1).
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
 # copy dig-session's `derive_symmetric_key` already sources from the same crate (§5.1 back-compat).
-# Pinned to the 0.9 line dig-account 0.3 resolves so there is ONE dig-constants in the graph — the
-# same crate that owns the frozen `PROFILE_SEALING_X25519_LABEL` dig-account 0.3 derives the sealing
+# Pinned to the 0.9 line dig-account resolves so there is ONE dig-constants in the graph — the
+# same crate that owns the frozen `PROFILE_SEALING_X25519_LABEL` dig-account derives the sealing
 # key from.
 dig-constants = "0.9"
 # The BIP-39 recovery phrase (dig_ecosystem#1752, the #1500 derived account model): the 24-word

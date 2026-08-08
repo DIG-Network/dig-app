@@ -917,3 +917,25 @@ derive or a generator. `strum::EnumIter` costs one compile-time dependency and m
 a property of the type. Worth pairing with the inverse assertion — every DECLARED tab is actually
 emitted — because a derived list also catches the opposite failure: a variant that exists as a name
 in the sidebar with no pane behind it.
+
+## Dropping an unlocked account is not a lock — the seed has more than one owner
+
+`AccountResidency::lock_all` set the shared slot to `None` and stopped there, on the stated reasoning
+that dropping the `UnlockedAccount` drops its `Arc<UnlockedMasterSeed>` and the seed is zeroized. That
+sentence is only true while nobody else holds a clone, and `dig-account` hands out capabilities that
+do: a `LocalMoneySigner` keeps its own reference so that it derives per signature from the LIVE seed.
+After the drop the bytes stayed resident, the unlock was never revoked, and a signer obtained before
+the lock produced a real aggregated signature while the residency reported `is_any_unlocked() == false`
+and refused to issue a new one.
+
+The lock therefore has two halves, and only one of them is dig-app's. Live-view capabilities the
+residency ISSUES (`ResidencySigner`, `ResidencySealer`) read back through it and relock for free.
+Capabilities `dig-account` issued directly cannot, and are closed only by `UnlockedAccount::lock`,
+which revokes the unlock's shared liveness token — an enforcement every derived capability observes
+before acting, rather than an obligation on the host to rebuild things.
+
+The test discipline is the transferable part. Every existing lock test asked the residency about
+ITSELF — lock, then request a new signer, then assert `None` — and the accessor was always right, so
+the suite was green and blind. A lock's whole job is to defeat a capability already handed out, so a
+test that never holds one across the transition cannot see it. `dig-account` shipped this same class
+in `UnlockGate` and its own suite missed it for the same reason.

@@ -1678,6 +1678,21 @@ through. The host MUST hold exactly ONE `PolicyAuthorizer` per profile for the u
 rolling period cap's ledger lives inside it, so a gate built per request would start each call with an
 empty ledger and silently turn a period cap into N per-transaction limits.
 
+**The prompt budget.** The gate raises at most `AutoSendPolicy::max_confirmations_per_period`
+confirmation ceremonies within any `period_seconds` window; past that, a spend that would have
+escalated is refused as indeterminate rather than prompted. The bound exists because every spend the
+policy will not auto-approve escalates to a person, and an out-of-process request is always
+`Undeclared` and therefore always escalates — so an unbounded prompt rate is an attack on the user's
+attention rather than on the policy. The bound is on the COUNT of prompts, never on whether a prompt
+may be shown: its default MUST be non-zero, since zero would make a confirmable spend unspendable.
+
+`dig-account` has no notion of a request's ORIGIN, so it bounds only the TOTAL. Its `SPEC.md` §6.4
+places the other half on the host: **a host that serves multiple origins MUST additionally bound
+prompts per origin.** dig-app serves exactly one origin today — every caller of the money path is
+in-process — so the crate's total bound is sufficient. dig-app MUST take on the per-origin bound
+before any surface that can be reached from outside the process (the loopback dapp seam) is allowed to
+reach `authorize_and_sign`; otherwise one origin can exhaust the whole budget and deny every other.
+
 A caller declares a spend's intent as a `SpendOpClass`. Only an in-process caller that BUILT the spend
 may declare one truthfully; anything arriving from outside the process (a dapp, an IPC peer) MUST pass
 `Undeclared`, which can never auto-approve and is routed to the human instead.
@@ -1686,6 +1701,14 @@ The signer is drawn from the shared, lockable account residency and built AFTER 
 (lock-now / idle timeout / OS screen lock) that lands while the confirm window is open fails the sign
 closed. The residency is the SAME lockable seed home the identity signer reads — a locked account
 refuses to sign money AND identity.
+
+A lock MUST **revoke**, not merely stop re-issuing. A money signer obtained while unlocked holds its
+own reference to the live seed, so dropping the unlocked account leaves those bytes resident and that
+signer able to produce real signatures while the host reports itself locked. Locking therefore calls
+`UnlockedAccount::lock`, which revokes the unlock's shared liveness token; every capability derived
+from that unlock observes the revocation before acting and refuses afterwards. The property is
+strictly stronger than "a locked account issues no new signer", and it is the one that binds a
+capability already handed out.
 
 **No user key on the wire (#908).** The seed and every money/identity secret derived from it stay owned
 by the account crate; the money signer holds the key inside its vetted core and exposes signing only.

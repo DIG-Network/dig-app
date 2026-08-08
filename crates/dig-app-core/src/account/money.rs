@@ -227,6 +227,8 @@ mod tests {
     use chia_puzzle_types::Memos;
     use chia_sdk_driver::{SpendContext, StandardLayer};
     use chia_sdk_types::Conditions;
+    use chia_sdk_utils::Address;
+    use dig_account::SpendRecipient;
     use dig_account::{
         AccountSession, AccountStore, AuthFactors, FixedClock, HotWallet, OpClassLimits, ProfileIx,
         Result as AccountResult, SpendConfirmRequest, SpendDecision, UnlockRequest, Vault,
@@ -235,6 +237,7 @@ mod tests {
     use dig_keystore::MemoryBackend;
     use dig_session::{Password, ENTROPY_LEN};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     /// A fixed 32-byte entropy that gets BIP-39-expanded before key derivation so the test's
     /// independently-built coin spend (via dig-account's [`WalletKey`]) and the residency's
@@ -347,9 +350,17 @@ mod tests {
     /// A recording [`AuthProvider`] that returns a canned [`SpendDecision`] and counts how many times
     /// the confirm ceremony ran — so a test can prove the ceremony DID or did NOT run, rather than
     /// only checking where the spend ended up.
+    ///
+    /// It also KEEPS each request. Counting ceremonies proves one ran; it says nothing about what the
+    /// user was shown, and a provider that discarded the request would be satisfied identically by a
+    /// dialog naming the wrong account or the wrong profile — asserting that the ceremony happened
+    /// rather than that it was right, which is the same shape as the always-approve authorizer #139
+    /// removed.
     struct RecordingProvider {
         decision: SpendDecision,
         confirms: AtomicUsize,
+        /// Every request put to the ceremony, in order.
+        requests: Mutex<Vec<SpendConfirmRequest>>,
         /// Locked from INSIDE the ceremony when set, to reproduce a user locking their account while
         /// the confirm window is open.
         lock_during_the_ceremony: Option<AccountResidency>,
@@ -360,8 +371,16 @@ mod tests {
             Self {
                 decision,
                 confirms: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
                 lock_during_the_ceremony: None,
             }
+        }
+
+        /// Read the single request this provider was asked to confirm.
+        fn with_sole_request<T>(&self, f: impl FnOnce(&SpendConfirmRequest) -> T) -> T {
+            let requests = self.requests.lock().expect("not poisoned");
+            assert_eq!(requests.len(), 1, "exactly one ceremony was expected");
+            f(&requests[0])
         }
 
         /// A ceremony that approves the spend and locks `residency` before returning.
@@ -381,9 +400,10 @@ mod tests {
 
         async fn confirm_spend(
             &self,
-            _request: SpendConfirmRequest,
+            request: SpendConfirmRequest,
         ) -> AccountResult<SpendDecision> {
             self.confirms.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().expect("not poisoned").push(request);
             if let Some(residency) = &self.lock_during_the_ceremony {
                 residency.lock_all();
             }
@@ -451,6 +471,16 @@ mod tests {
     /// `summary.recipients` at all. The hot-wallet half therefore passes the outflow rule vacuously,
     /// over an empty recipient list. It is an honest control for "the gate does not refuse all vault
     /// spends"; the address COMPARISON itself is dig-account's own property and is tested there.
+    ///
+    /// What the FIRST half additionally pins, measured rather than assumed: rebuilding the gate with
+    /// the stranger's own address as the configured hot wallet makes this spend authorize and SIGN —
+    /// a real signature paying a third party out of a vault. So the refusal is not merely "vaults
+    /// refuse strangers"; it discriminates the address `MoneyPath::new` hands the gate from the one
+    /// wrong value that matters most. Any OTHER foreign address leaves both halves passing here, and
+    /// is caught elsewhere: under `CustodyPolicy::Hot` the gate's scope carries the configured wallet
+    /// and the signer compares it against the puzzle hash it derives live from the seed, so every
+    /// hot-path test in this module fails on a substituted address. Between them the input is pinned;
+    /// neither alone would be enough.
     #[tokio::test]
     async fn a_vault_spend_to_a_stranger_is_refused_outright_but_one_to_ourselves_is_not() {
         let to_a_stranger = money_path(
@@ -649,6 +679,125 @@ mod tests {
         assert!(
             matches!(built, Err(MoneyPathError::Locked)),
             "a locked account has no hot-wallet address, so there is no gate to build"
+        );
+    }
+
+    /// **The consent surface describes THIS spend, drawn from THIS account, signed by THIS profile.**
+    ///
+    /// A confirm ceremony that runs is not a confirm ceremony that is right. Nothing in this suite
+    /// read the request at all, so substituting a foreign account id — or a profile index the wallet
+    /// does not sign at — left every test green: a dialog can be truthful about the money and still
+    /// ask the user to approve it for the wrong identity.
+    ///
+    /// The profile is pinned to [`ProfileIx::ROOT`] rather than to `ActiveProfile::SOLE.ix()`, which
+    /// is the value the code under test passes: restating a production constant agrees with itself
+    /// whatever it becomes. `ROOT` is where this fixture's wallet key is derived and therefore where
+    /// the signature actually comes from, so what is asserted is that the dialog names the profile
+    /// whose key signs — two independently obtained facts rather than one repeated.
+    #[tokio::test]
+    async fn the_confirm_ceremony_names_this_account_this_profile_and_this_spend() {
+        let path = money_path(
+            RecordingProvider::new(SpendDecision::Approve),
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            // No auto-send allowance, so the spend is escalated and there is a request to read.
+            AutoSendPolicy::default(),
+        );
+
+        path.authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
+            .await
+            .expect("the user approved it");
+
+        path.auth_provider.with_sole_request(|request| {
+            assert_eq!(
+                request.account,
+                account_id(),
+                "the dialog must name the account the money leaves"
+            );
+            assert_eq!(
+                request.profile,
+                ProfileIx::ROOT,
+                "the dialog must name the profile whose key signs"
+            );
+            assert_eq!(
+                request.summary.recipients,
+                vec![SpendRecipient {
+                    address: Address::new(A_STRANGER, "xch".to_string())
+                        .encode()
+                        .expect("a puzzle hash encodes"),
+                    amount_mojos: 600,
+                    asset_id: None,
+                }],
+                "the dialog must show who is paid, and how much"
+            );
+            assert_eq!(
+                request.summary.fee, 10,
+                "and the fee that is burned with it"
+            );
+        });
+    }
+
+    /// **A money signer obtained BEFORE a lock must refuse to sign AFTER it** — the retained-capability
+    /// half of the lock, which no other test in this crate could see.
+    ///
+    /// Every other lock test here interrogates the residency about ITSELF: it locks, then asks for a
+    /// NEW signer and is told `None`. That is a true statement about the accessor and says nothing
+    /// about a capability already handed out — and a capability already handed out is the only thing a
+    /// lock has to defeat. So this one takes the signer out ONCE, while unlocked, keeps it across the
+    /// transition, and asks it to sign afterwards.
+    ///
+    /// The wrong implementation it is aimed at is the one dig-app shipped: `lock_all` dropping the
+    /// `UnlockedAccount` instead of calling [`UnlockedAccount::lock`]. The drop releases one reference
+    /// to a seed this very signer also holds, so the bytes stay resident, the unlock is never revoked,
+    /// and the retained signer produces a real mainnet signature while the app reports itself locked.
+    ///
+    /// Both approvals are minted BEFORE the lock so the lock is the only thing that changes between
+    /// the two signatures, and the first one is a truthful control: this exact signer, holding this
+    /// exact approval, genuinely does sign — so "refused" cannot be read as "the fixture never worked".
+    #[test]
+    fn a_money_signer_taken_out_before_a_lock_refuses_to_sign_after_it() {
+        let residency = residency_at_seed();
+        let address = residency
+            .receiving_address()
+            .expect("unlocked")
+            .expect("an address encodes");
+        let authorizer = PolicyAuthorizer::new(
+            ActiveProfile::SOLE.ix(),
+            hot_wallet_that_tiers_our_fixture_as_auto_send(),
+            small_sends_up_to(SPEND_TOTAL, SPEND_TOTAL * 10),
+            &address,
+            frozen_clock(),
+        )
+        .expect("the fixture address is a valid hot-wallet address");
+
+        let approve_a_send = |authorizer: &PolicyAuthorizer| match authorizer
+            .authorize_op(&send_to_a_stranger(600, 10), SpendOpClass::SmallSend)
+            .expect("the fixture spend is decodable")
+        {
+            SpendRuling::Approved(approval) => approval,
+            SpendRuling::RequiresConfirmation(_) => {
+                panic!("the fixture spend is inside its limits and must auto-approve")
+            }
+        };
+
+        // The capability under test, taken out ONCE while unlocked and held across the lock.
+        let retained_signer = residency
+            .money_signer(Network::Mainnet)
+            .expect("an unlocked residency yields a money signer");
+        let before_the_lock = approve_a_send(&authorizer);
+        let after_the_lock = approve_a_send(&authorizer);
+
+        retained_signer
+            .sign_approved(before_the_lock)
+            .expect("control: this very signer signs while the account is unlocked");
+
+        residency.lock_all();
+        assert!(!residency.is_any_unlocked(), "the account is locked");
+
+        let signed_anyway = retained_signer.sign_approved(after_the_lock);
+        assert!(
+            matches!(signed_anyway, Err(AccountError::Locked)),
+            "a signer handed out before the lock must be REVOKED by it, not merely un-reissuable: \
+             {signed_anyway:?}"
         );
     }
 

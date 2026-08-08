@@ -15,6 +15,14 @@
 //! timeout / OS screen lock that drops the residency ([`SessionKeys::lock_all`]) immediately relocks
 //! the running sign + seal paths over the master-HD account, without relying on dig-account's deferred
 //! capability relock. The signer never forges when locked, and the sealer fails closed when locked.
+//!
+//! # The two halves of a lock
+//!
+//! Live views cover the capabilities this residency ISSUES, because they read back through it. They
+//! cannot cover a capability `dig-account` issued directly — a [`LocalMoneySigner`], which holds its
+//! own clone of the seed. That half is closed by [`UnlockedAccount::lock`], which revokes the unlock's
+//! shared liveness token; every capability derived from that unlock observes it before acting. So
+//! [`SessionKeys::lock_all`] does BOTH: it revokes the unlock and then drops the account.
 
 use std::sync::{Arc, Mutex};
 
@@ -189,9 +197,18 @@ impl AccountResidency {
 
 impl SessionKeys for AccountResidency {
     fn lock_all(&self) {
-        // Dropping the `UnlockedAccount` drops its `Arc<UnlockedMasterSeed>`; with no live-view
-        // capability holding a clone (they read through this residency), the seed is zeroized.
-        *self.guard() = None;
+        // REVOKE, then drop. Dropping alone is not a lock: a capability dig-account already handed out
+        // — a `LocalMoneySigner` — holds its OWN clone of the `Arc<UnlockedMasterSeed>`, so the drop
+        // releases one reference of several, the bytes stay resident, and that signer keeps producing
+        // real signatures while this residency reports itself locked.
+        //
+        // `UnlockedAccount::lock` revokes the unlock's shared liveness token, which every capability
+        // derived from it observes before acting. That is what makes the lock authoritative over
+        // handles this residency cannot see, and it is why nothing here relies on the seed's reference
+        // count reaching zero. The bytes are zeroized once the last surviving handle drops.
+        if let Some(account) = self.guard().take() {
+            account.lock();
+        }
     }
 
     fn is_any_unlocked(&self) -> bool {
