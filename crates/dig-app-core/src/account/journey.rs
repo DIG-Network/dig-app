@@ -1301,21 +1301,30 @@ impl<'a> WindowedWait<'a> {
     }
 }
 
+/// The check-in as a prompt: [`waiting_screen`]'s words, plus the two answers it offers.
+///
+/// Split from `checking_in` so ONE place decides that this screen has two buttons. A gallery that
+/// rebuilt it would eventually photograph a one-button lookalike — a picture of a wait that cannot be
+/// stopped, which is the specific thing this screen exists to avoid being.
+pub fn waiting_claim(screen: &WizardNotice) -> ClaimPrompt<'_> {
+    ClaimPrompt {
+        title: screen.title,
+        heading: screen.heading,
+        body: &screen.body,
+        affirm: copy::wait::KEEP_WAITING,
+        decline: Some(copy::wait::STOP_WATCHING),
+        // Keeping the watch is what the user asked for and costs nothing; stopping is the deliberate
+        // choice, so the affirmative stays the default.
+        refusal_is_default: false,
+        scannable: None,
+        identifier: None,
+    }
+}
+
 impl WaitSurface for WindowedWait<'_> {
     fn checking_in(&self, progress: &WaitProgress) -> KeepWaiting {
         let screen = waiting_screen(progress);
-        match self.confirmer.confirm_claim(&ClaimPrompt {
-            title: screen.title,
-            heading: screen.heading,
-            body: &screen.body,
-            affirm: copy::wait::KEEP_WAITING,
-            decline: Some(copy::wait::STOP_WATCHING),
-            // Keeping the watch is what the user asked for and costs nothing; stopping is the
-            // deliberate choice, so the affirmative stays the default.
-            refusal_is_default: false,
-            scannable: None,
-            identifier: None,
-        }) {
+        match self.confirmer.confirm_claim(&waiting_claim(&screen)) {
             ConfirmDecision::Approve => KeepWaiting::Yes,
             // A refusal stops the watch; so does a host that could not draw the window, because
             // waiting on a check-in nobody can answer is the wedged spinner in another costume.
