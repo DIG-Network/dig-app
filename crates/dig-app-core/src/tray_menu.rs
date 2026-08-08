@@ -1207,7 +1207,7 @@ fn full(view: &TrayView) -> MenuModel {
 /// also what makes "unlock/lock" literally true of this row.
 ///
 /// The row is therefore present in every state, and the trimmed menu is four rows in every state.
-fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
+pub(crate) fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
     match account {
         // The one honestly-disabled row left on the top level, and it names its own reason (rule 3).
         AccountState::Unsupported => Some(MenuRow::action(

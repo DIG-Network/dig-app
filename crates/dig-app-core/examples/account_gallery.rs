@@ -33,6 +33,7 @@ use std::sync::Arc;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{open_app_window, AppWindow, Theme, ThemeChoice};
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
+use dig_app_core::window_model::TabId;
 
 /// The account state named by `argument`, or `None` when it names nothing.
 ///
@@ -137,6 +138,10 @@ fn main() {
         // terminal beside the screenshot, and it is the honest thing for an example with no worker
         // and no account behind it to do.
         act: Arc::new(|action| println!("a row was clicked: {action:?}")),
+        // The whole point of this gallery: open ON the tab being photographed, so a capture needs no
+        // click. A harness that clicks to set up a shot eventually photographs whatever was actually
+        // on screen — which is how a committed "Cache" screenshot turned out to be the Status tab.
+        initial_tab: Some(TabId::Account),
     });
     let _ = ThemeChoice::for_host().write(previous);
 
