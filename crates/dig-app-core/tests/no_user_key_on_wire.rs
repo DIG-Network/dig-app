@@ -35,9 +35,9 @@ use dig_app_core::wallet::engine::{
 use dig_app_core::wallet::WalletError;
 
 use dig_account::{
-    profile_dek, AccountId, AccountSession, AccountStore, AuthFactors, AuthProvider, CustodyPolicy,
-    ProfileIx, Result as AccountResult, SpendAuthorizer, SpendConfirmRequest, SpendDecision,
-    SpendSummary, UnlockRequest, Vault,
+    profile_dek, AccountId, AccountSession, AccountStore, AuthFactors, AuthProvider,
+    AutoSendPolicy, CustodyPolicy, HotWallet, ProfileIx, Result as AccountResult,
+    SpendConfirmRequest, SpendDecision, SpendOpClass, SystemClock, UnlockRequest,
 };
 use dig_ipc_protocol::signer::SessionSigner;
 use dig_keystore::{BackendKey, MemoryBackend};
@@ -92,14 +92,6 @@ impl WalletEngine for WireRecordingEngine {
     ) -> Result<dig_app_core::wallet::engine::BalanceResponse, WalletError> {
         self.record(&request);
         Ok(dig_app_core::wallet::engine::BalanceResponse { balance: 0 })
-    }
-}
-
-/// The fail-closed programmatic authorizer (production's default) — the confirm ceremony is the gate.
-struct AllowAll;
-impl SpendAuthorizer for AllowAll {
-    fn authorize(&self, _summary: &SpendSummary) -> AccountResult<()> {
-        Ok(())
     }
 }
 
@@ -181,17 +173,24 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 #[tokio::test]
 async fn no_user_key_crosses_the_ipc_wire_on_a_live_signed_spend() {
     let residency = residency_at_seed();
+    // A hot-wallet policy with the default (zero) allowance, so this spend is tiered `Confirm` and
+    // reaches the signer through the confirm ceremony. A `Vault` policy would be refused outright by
+    // the custody gate — the spend pays a third party — and this test needs a spend that ACTUALLY
+    // signs, since an unsigned spend would trivially satisfy "no key on the wire".
     let path = MoneyPath::new(
         residency.clone(),
-        AllowAll,
         ApprovingProvider,
         AccountId::new("wire-test"),
         dig_wallet_backend::types::Network::Mainnet,
-    );
+        CustodyPolicy::Hot(HotWallet::default()),
+        AutoSendPolicy::default(),
+        Arc::new(SystemClock),
+    )
+    .expect("an unlocked residency yields a money path");
 
-    // Drive the LIVE money path: authorize -> confirm -> sign.
+    // Drive the LIVE money path: rule -> confirm -> sign.
     let bundle = path
-        .authorize_and_sign(real_send(), &CustodyPolicy::Vault(Vault::default()))
+        .authorize_and_sign(real_send(), SpendOpClass::Undeclared)
         .await
         .expect("the approved live spend signs");
 

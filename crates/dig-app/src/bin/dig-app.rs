@@ -496,10 +496,12 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
     // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
-    // Nothing can mint a DID on this build — `dig-account`'s minter is a Phase-2 stub
-    // (dig_ecosystem#2342) — so the wizard is handed the stub, which refuses honestly rather than
-    // fabricating a spend for the wait to watch. Everything else the DID step needs is real, so the
-    // day the minter lands this wiring is the only thing that changes.
+    // Nothing can mint a DID on this build. `dig-account` 0.5.0 DOES implement one — that is not the
+    // gap any more — but no host can reach it: `ProfileMinter::new` needs an `Arc<UnlockedMasterSeed>`
+    // and `UnlockedAccount` keeps the seed private, handing out only a signer, wallet ops, a DEK and a
+    // sealing key (dig_ecosystem#2371 adds the accessor). So the wizard is handed the stub, which
+    // refuses honestly rather than fabricating a spend for the wait to watch. Everything else the DID
+    // step needs is real, so the day that accessor lands this wiring is the only thing that changes.
     let minting = DidMinting {
         minter: &UnavailableMinter,
         observer: &UnreachableChain,
@@ -2723,8 +2725,9 @@ mod tray {
 
     /// What an on-chain DID is, what it would cost, and why the account is complete without one.
     ///
-    /// Minting a `did:chia:` is a real mainnet spend and `dig-account`'s minter is still a Phase-2 stub, so
-    /// the tray offers no way to mint one at all (see [`tray_menu::TrayAction::AboutDid`]). It offers this
+    /// Minting a `did:chia:` is a real mainnet spend, and no code path in this build can make one — see
+    /// [`dig_app_core::account::mint`] for why — so the tray offers no way to mint one at all (see
+    /// [`tray_menu::TrayAction::AboutDid`]). It offers this
     /// explanation instead, which is something it can actually deliver — the honest alternative both to a
     /// button that fails obscurely and to a permanently-greyed row (§3.7).
     fn explain_did(confirmer: &dyn NativeConfirmer) {

@@ -702,8 +702,9 @@ pub enum TrayAction {
     CopyDigId,
     /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
     ///
-    /// There is deliberately no `CreateDid` action: `dig-account`'s minter is a Phase-2 stub, so an action
-    /// that mints does not exist and therefore is not offered — not even disabled. Because no
+    /// There is deliberately no `CreateDid` action: nothing in this build can mint (see
+    /// [`crate::account::mint`]), so an action that mints does not exist and therefore is not offered —
+    /// not even disabled. Because no
     /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
     /// of one `enabled: false`.
     AboutDid,
@@ -2938,9 +2939,9 @@ mod tests {
         );
     }
 
-    /// **Regression (#1773).** No tray row may offer to MINT a DID, in any account state — minting does
-    /// not exist (`dig-account`'s minter is a Phase-2 stub). The guarantee is STRUCTURAL (no `TrayAction`
-    /// mints), so this also guards a future lane reintroducing one before the minter exists.
+    /// **Regression (#1773).** No tray row may offer to MINT a DID, in any account state — no code path
+    /// in this build can mint (see `crate::account::mint`). The guarantee is STRUCTURAL (no `TrayAction`
+    /// mints), so this also guards a future lane reintroducing one before minting is reachable.
     #[test]
     fn no_row_offers_to_mint_a_did_because_minting_does_not_exist_yet() {
         for account in EVERY_STATE {

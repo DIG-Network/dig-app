@@ -127,9 +127,9 @@ impl AccountResidency {
     /// sign closed rather than signing under a snapshot the user meant to relock.
     ///
     /// The returned [`LocalMoneySigner`] holds the master key inside dig-account's vetted signer and
-    /// exposes signing only — the seed never crosses this boundary. The inner `Result` is
-    /// dig-account's (a signer-construction failure).
-    pub fn money_signer(&self, network: Network) -> Option<AccountResult<LocalMoneySigner>> {
+    /// exposes signing only — the seed never crosses this boundary. Since `dig-account` 0.5.0 building
+    /// the signer is infallible, so `None` means one thing and one thing only: the account is locked.
+    pub fn money_signer(&self, network: Network) -> Option<LocalMoneySigner> {
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().money_signer(network))
@@ -558,7 +558,7 @@ mod tests {
         let residency = residency();
 
         assert!(
-            matches!(residency.money_signer(Network::Mainnet), Some(Ok(_))),
+            residency.money_signer(Network::Mainnet).is_some(),
             "an unlocked residency yields a live money signer"
         );
 
