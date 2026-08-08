@@ -1495,15 +1495,42 @@ down:
      reach the enrol step unchanged (the same-identity guarantee, §3.1a).
 
    Any refusal at any point leaves the host untouched (§3.1a, §3.2a).
-3. **Fund** — show the account's OWN derived receiving address. It is SHOWN, not awaited: the flow is a
-   chain of OS-owned modal windows (§3.1d) and a modal cannot poll a chain, so an implementation MUST NOT
-   present a "waiting for funds" screen it cannot actually be waiting on.
-4. **DID** — name the on-chain DID as the remaining REQUIRED step (§3.1b) and state plainly that minting
-   is not available in this version. It MUST NOT present a control that appears to mint.
+3. **Fund** — show the account's OWN derived receiving address, THREE ways: as the window's one mono
+   identifier, as a scannable code where the confirmer draws one (`NativeConfirmer::draws_qr`), and on
+   the clipboard via a control on the same screen. A code alone is NOT sufficient: the person most
+   likely to be funding is doing so from a wallet on the SAME computer and cannot scan their own
+   screen. The code MUST be drawn black-on-white in either theme (§3.1d) and MUST NOT be offered on a
+   host that will not draw it, since the copy would then point at a picture that is not there. Funding
+   is SHOWN, not awaited: the flow is a chain of OS-owned modal windows (§3.1d) and a modal cannot poll
+   a chain, so an implementation MUST NOT present a "waiting for funds" screen it cannot be waiting on.
+4. **DID** — offer the mint, naming what it costs, with the refusal PRE-SELECTED (affirming spends real
+   XCH). On a build that cannot mint (§3.1b), name the on-chain DID as the remaining REQUIRED step and
+   state plainly that minting is not available in this version; it MUST NOT present a control that
+   appears to mint.
+5. **Wait** — where a mint WAS submitted, watch the chain (`account::mint::await_confirmation`). The
+   wait MUST report what is being waited for and HOW LONG it has been waiting, and MUST offer a way to
+   stop that does not cancel the spend. It MUST end in one of four distinct, honest outcomes —
+   confirmed, rejected by the chain, still pending, or the chain unreachable — and MUST NOT present an
+   indefinite indicator that can neither fail nor time out.
 
-Both routes end on the SAME fund + DID screens (`show_account_ready`) so they cannot drift. Every step
+Both routes end on the SAME fund + DID steps (`finish_the_identity`) so they cannot drift. Every step
 MUST be escapable without half-creating an account. Reading content is NOT gated on any of
 this: `Open URL…` stays enabled in every account state (§6.0 — consumption is never gated on custody).
+
+**What gates the wizard (normative).** It runs when the account has NO DID — not when it has no
+account (`account::journey::wizard_needed`). A wallet enrolled by an earlier version therefore still
+reaches the fund and DID steps, entering at step 3. A DID is read ONLY from a
+`account::did::DidRecord`, which cannot exist without a `MintEvidence` carrying a confirmation height,
+so no key, address or locally-written DID-shaped string can satisfy the gate (§3.1b).
+
+**What the absence of a DID gates (normative).** It gates the surfaces that BEAR the user's identity —
+publishing, signing for an app, messaging (`account::did::Capability`) — and NOTHING else. Reading
+content and holding funds MUST remain available with no account and no DID, so the wizard MUST NOT be
+made an unconditional wall: a user who declines it keeps a usable app.
+
+**Success requires evidence (normative).** A submitted spend is NOT a minted DID. An implementation
+MUST NOT record a DID, report an identity as ready, or show a success screen from a submission — only
+from a chain sighting that confirms it, and the evidence from that sighting is what is recorded.
 
 ### 3.3 Wallet
 

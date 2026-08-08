@@ -18,8 +18,8 @@ use crate::account::boot::DiscardOutcome;
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::mint::{
-    await_confirmation, DidMinter, KeepWaiting, MintObserver, MintOutcome, Submission, WaitProgress,
-    WaitSurface, POLL_EVERY_SECS,
+    await_confirmation, DidMinter, KeepWaiting, MintObserver, MintOutcome, Submission,
+    WaitProgress, WaitSurface, POLL_EVERY_SECS,
 };
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
@@ -906,7 +906,7 @@ pub trait AddressCopier {
 /// Grouped into one struct so the wizard's signature states one dependency rather than five, and so a
 /// test can swap the whole chain — minter, chain, wait surface, clock, ledger — at once.
 pub struct DidMinting<'a> {
-    /// Builds, signs and pushes the mint spend. [`UnavailableMinter`] until `dig-account`'s minter is
+    /// Builds, signs and pushes the mint spend. [`UnavailableMinter`](crate::account::mint::UnavailableMinter) until `dig-account`'s minter is
     /// real; the wizard's copy is honest about that on its own.
     pub minter: &'a dyn DidMinter,
     /// Watches the chain for the submitted spend.
@@ -915,7 +915,8 @@ pub struct DidMinting<'a> {
     pub surface: &'a dyn WaitSurface,
     /// The wall clock the wait measures elapsed time against.
     pub clock: &'a dyn Clock,
-    /// Where a CONFIRMED mint is remembered. Written on exactly one path — see [`mint_the_did`].
+    /// Where a CONFIRMED mint is remembered. Written on exactly one path: the arm of
+    /// [`mint_report`] that handles [`MintOutcome::Confirmed`], and nowhere else.
     pub ledger: &'a dyn DidLedger,
 }
 
@@ -1276,6 +1277,7 @@ pub fn waiting_screen(progress: &WaitProgress) -> WizardNotice {
                 false => copy::wait::AFTER_WAITED,
             }
         ),
+        identifier: None,
     }
 }
 
@@ -1341,7 +1343,13 @@ fn report_the_mint(confirmer: &dyn NativeConfirmer, ledger: &dyn DidLedger, outc
         _ => None,
     };
     let screen = mint_report(outcome, recorded);
-    notify(confirmer, screen.title, screen.heading, &screen.body);
+    confirmer.show_notice(&NoticePrompt {
+        title: screen.title,
+        heading: screen.heading,
+        body: &screen.body,
+        acknowledge: "OK",
+        identifier: screen.identifier.as_deref(),
+    });
 }
 
 /// One of the wizard's report screens, composed rather than drawn.
@@ -1354,8 +1362,15 @@ pub struct WizardNotice {
     pub title: &'static str,
     /// The one-line heading.
     pub heading: &'static str,
-    /// The body, which carries the DID, the spend id or the chain's own reason.
+    /// The body — prose, and the chain's own reason where there is one.
     pub body: String,
+    /// The one bare identifier this screen shows: the DID, or the spend to look up. `None` where the
+    /// screen shows neither.
+    ///
+    /// Kept out of the body because the window sets it in Space Mono, and a DID or a spend id is read
+    /// or transcribed character by character — in prose it wraps mid-token and `1`/`l` stop being
+    /// distinguishable.
+    pub identifier: Option<String>,
 }
 
 /// What the user is told about `outcome`.
@@ -1368,25 +1383,30 @@ pub fn mint_report(outcome: &MintOutcome, recorded: Option<bool>) -> WizardNotic
         MintOutcome::Confirmed { did, .. } => WizardNotice {
             title: copy::did::CONFIRMED_TITLE,
             heading: copy::did::CONFIRMED_HEADING,
-            body: format!(
-                "{did}
-
-{}",
-                match recorded {
-                    // The chain is the truth and it says the DID exists; what failed is this
-                    // computer's note of it. Saying so is better than a silent re-mint offer that
-                    // would spend again.
-                    Some(false) => copy::did::CONFIRMED_BUT_UNRECORDED_BODY,
-                    _ => copy::did::CONFIRMED_BODY,
-                }
-            ),
+            body: match recorded {
+                // The chain is the truth and it says the DID exists; what failed is this computer's
+                // note of it. Saying so is better than a silent re-mint offer that would spend again.
+                Some(false) => copy::did::CONFIRMED_BUT_UNRECORDED_BODY.to_owned(),
+                _ => copy::did::CONFIRMED_BODY.to_owned(),
+            },
+            identifier: Some(did.clone()),
         },
         MintOutcome::Rejected { reason } => WizardNotice {
             title: copy::did::REJECTED_TITLE,
             heading: copy::did::REJECTED_HEADING,
-            body: format!("{reason}
+            // The chain's own words are LABELLED and put last rather than led with. Unlabelled, a
+            // lowercase fragment from a node reads as a broken first sentence of DIG's own prose.
+            body: format!(
+                "{}
 
-{}", copy::did::REJECTED_BODY),
+{}
+{reason}",
+                copy::did::REJECTED_BODY,
+                copy::did::REJECTED_REASON_LABEL
+            ),
+            // A rejected spend is not something to look up or keep; the chain's reason is the
+            // whole answer, and it is prose.
+            identifier: None,
         },
         MintOutcome::StillPending {
             spend_id,
@@ -1395,7 +1415,7 @@ pub fn mint_report(outcome: &MintOutcome, recorded: Option<bool>) -> WizardNotic
             title: copy::did::PENDING_TITLE,
             heading: copy::did::PENDING_HEADING,
             body: format!(
-                "{}{}{}{spend_id}
+                "{}{}{}
 
 {}",
                 copy::did::PENDING_BEFORE_WAITED,
@@ -1403,13 +1423,13 @@ pub fn mint_report(outcome: &MintOutcome, recorded: Option<bool>) -> WizardNotic
                 copy::did::PENDING_AFTER_WAITED,
                 copy::did::PENDING_BODY,
             ),
+            identifier: Some(spend_id.clone()),
         },
         MintOutcome::ConnectionLost { spend_id } => WizardNotice {
             title: copy::did::OFFLINE_TITLE,
             heading: copy::did::OFFLINE_HEADING,
-            body: format!("{spend_id}
-
-{}", copy::did::OFFLINE_BODY),
+            body: copy::did::OFFLINE_BODY.to_owned(),
+            identifier: Some(spend_id.clone()),
         },
     }
 }
@@ -1590,7 +1610,9 @@ mod copy {
         pub const REJECTED_TITLE: &str = "DIG — Your DID was not created";
         /// Its heading.
         pub const REJECTED_HEADING: &str = "The blockchain did not accept the transaction.";
-        /// Its body, shown beneath the reason the chain gave.
+        /// The label the chain's own words are put under.
+        pub const REJECTED_REASON_LABEL: &str = "The blockchain's reason:";
+        /// Its body, shown above the reason the chain gave.
         pub const REJECTED_BODY: &str =
             "No DID was created. A rejected transaction does not spend the amount it was for, though a \
              fee may have been used.\n\n\
@@ -1602,14 +1624,18 @@ mod copy {
         pub const PENDING_HEADING: &str = "Your DID has been sent but is not confirmed.";
         /// The sentence before the elapsed figure.
         pub const PENDING_BEFORE_WAITED: &str = "DIG waited ";
-        /// The sentence after it, leading into the spend id.
-        pub const PENDING_AFTER_WAITED: &str =
-            " and the blockchain has not confirmed it yet. This is the transaction:\n\n";
-        /// The body beneath the spend id.
+        /// The sentence after it.
+        ///
+        /// It does NOT end in a blank line: [`mint_report`] joins the paragraphs, and a trailing
+        /// separator here made the rendered screen open with a hole the height of two lines.
+        pub const PENDING_AFTER_WAITED: &str = " and the blockchain has not confirmed it yet.";
+        /// The rest of the body. It ends by introducing the spend id, which the window draws beneath
+        /// the prose as its one mono identifier.
         pub const PENDING_BODY: &str =
             "Nothing has gone wrong — a busy blockchain can take longer than this, and your \
              transaction is still out there. Do NOT create a second DID; that would spend again.\n\n\
-             Open the DIG menu later and it will tell you whether this one confirmed.";
+             Open the DIG menu later and it will tell you whether this one confirmed. This is the \
+             transaction:";
         /// How a sub-minute wait is described.
         pub const LESS_THAN_A_MINUTE: &str = "less than a minute";
         /// The title when the chain could not be reached.
@@ -1621,7 +1647,7 @@ mod copy {
             "Your transaction was sent and is probably fine — what stopped is this computer's ability \
              to watch for it. Do NOT create a second DID; that would spend again.\n\n\
              Check this computer's internet connection, then open the DIG menu to see whether the DID \
-             confirmed.";
+             confirmed. This is the transaction:";
     }
 }
 

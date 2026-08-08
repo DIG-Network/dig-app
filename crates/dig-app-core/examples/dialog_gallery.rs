@@ -388,7 +388,10 @@ mod wizard {
         };
         let notice = match which {
             "fund" => {
-                let art = confirmer.draws_qr().then(|| QrArt::encode(ADDRESS)).flatten();
+                let art = confirmer
+                    .draws_qr()
+                    .then(|| QrArt::encode(ADDRESS))
+                    .flatten();
                 let decision = confirmer.confirm_claim(&funding_claim(ADDRESS, art.as_ref()));
                 println!("did fund: {decision:?}");
                 return;
@@ -438,7 +441,7 @@ mod wizard {
             heading: notice.heading,
             body: &notice.body,
             acknowledge: "OK",
-            identifier: None,
+            identifier: notice.identifier.as_deref(),
         });
         println!("did {which}: {decision:?}");
     }

@@ -38,7 +38,7 @@ use dig_app_core::account::boot::{
 use dig_app_core::account::did::DidFile;
 use dig_app_core::account::journey::{
     ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier, DidMinting,
-    FirstRunOutcome, Replacement, WindowedWait, WindowedPresenter,
+    FirstRunOutcome, Replacement, WindowedPresenter, WindowedWait,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
