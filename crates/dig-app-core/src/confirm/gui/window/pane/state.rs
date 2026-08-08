@@ -156,14 +156,6 @@ fn notice(
     height
 }
 
-/// A pane with nothing in it: what this area is for, and the way onward.
-///
-/// Never a blank region. An empty list rendering as void is a bug, and on a window whose tabs come
-/// and go with the account's state it is a bug a person will hit.
-pub(crate) fn nothing_here(ui: &mut Ui, at: Rect, t: &Tokens) -> f32 {
-    text::body(ui, at, t, copy::NOTHING_HERE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

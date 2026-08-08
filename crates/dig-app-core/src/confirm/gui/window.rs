@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use egui::{Key, Rect, Vec2};
 use zeroize::Zeroizing;
 
+mod header;
 mod pane;
 mod panes;
 mod preview;

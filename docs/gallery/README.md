@@ -1,7 +1,8 @@
 # The DIG app gallery
 
-What this application actually looks like: every tab, in both themes, at both widths; every account
-state the Account and Security panes can be in; and every screen of the first-run DID wizard.
+What this application actually looks like: every one of the five tabs, in both themes, at both
+widths; every account state the Account pane can be in; and every screen of the first-run DID
+wizard.
 
 Regenerate the whole set with one command:
 
@@ -15,7 +16,7 @@ pwsh tools/shoot-gallery.ps1
 |---|---|
 | `<tab>-<theme>-<width>.png` | a tab at 960 (the shipping width) or 480 (`SHELL_MIN`, the narrowest the window can be dragged to), on an unlocked account |
 | `account-<state>.png` | the Account pane in one of the account states that is **not** the happy path |
-| `security-<case>.png` | the Security pane where the account state or the second factor changes what it offers |
+| `account-second-factor-on.png` | the Account pane with a second factor enrolled — the one control that appears and disappears with a setting rather than with the account's state |
 | `did-<screen>-<theme>.png` | one screen of the first-run DID wizard |
 
 Every image is **2× the logical size in its name**, on every host — the render scale is pinned rather

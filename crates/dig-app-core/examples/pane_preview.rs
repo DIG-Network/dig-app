@@ -91,18 +91,16 @@ impl Beacon {
     }
 }
 
-/// Every tab the preview can open, by the name given on the command line.
+/// Every tab the preview can open, by the name given on the command line — its label, lowercased.
+///
+/// Derived from [`TabId::all`] rather than listed, so this cannot come to disagree with the window
+/// about which tabs exist. The hand-written version still accepted `status`, `security`, `apps` and
+/// `cache` after those tabs were merged away (dig_ecosystem#2358), which is how a capture lands
+/// under a name that describes a picture nobody can take.
 fn tab(name: &str) -> Option<TabId> {
-    match name {
-        "status" => Some(TabId::Status),
-        "account" => Some(TabId::Account),
-        "security" => Some(TabId::Security),
-        "wallet" => Some(TabId::Wallet),
-        "apps" => Some(TabId::Apps),
-        "cache" => Some(TabId::Cache),
-        "settings" => Some(TabId::Settings),
-        _ => None,
-    }
+    TabId::all()
+        .into_iter()
+        .find(|tab| format!("{tab:?}").to_lowercase() == name)
 }
 
 /// A departure from the healthy view, for the states worth photographing.

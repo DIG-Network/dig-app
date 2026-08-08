@@ -882,3 +882,38 @@ tolerance: the attacker controls the value being compared, so a shorter window d
 under load and excludes no forgeries at all. The recurring lesson is the one this repo keeps
 relearning — **state a guard's rationale over the CLASS of attacker, not over one attacker behaviour**,
 because "a forged post carries no input" is true only of the forgery that did not try.
+
+## Two sentence sets over one state machine drift silently, and "each set is consistent" cannot see it
+
+`copy::account::summary` and `copy::security::protection` were two hand-maintained six-arm matches
+over one `AccountKind`, one per tab. Each had a test asserting its OWN arms were distinct. Nothing in
+the repository compared them to each other, so they were free to diverge indefinitely while both
+suites stayed green — and a reader who visited both tabs would eventually be told two different
+things about one state. A THIRD such set would have passed both suites too.
+
+The test shape that catches it is not "each set is tidy" but **"there is one"**, asserted as a
+CLOSURE over what the pane actually paints: in every state, every string on screen must be the one
+summary, the badge word, a named fixed constant, or something the model supplied. A second per-state
+set is, by construction, a state-chosen string that is none of those, and it fails in all six states
+at once. Proved load-bearing by reintroducing the deleted set — the guard names the offending
+sentence verbatim.
+
+Two details make it real rather than decorative. It reads the PAINTED shapes, because a sentence that
+exists in a `match` and never reaches a reader is not a second presentation of anything, and one
+drawn from a constant the test never names is exactly the case it must be able to see. And its
+allow-list holds only `const`s — one string, the same in all six states — so nothing per-state can
+hide inside it without six hand-written entries appearing in a diff.
+
+## A hand-written `[Self; N]` over an enum is not exhaustive, and the sweeps that iterate it inherit that
+
+`TabId::ALL` was an array literal whose own doc comment admitted the gap: adding a variant forced it
+to be given a label and nothing forced it into the array, so a new tab would compile, be absent from
+the list, and escape all three sweeps written over it — the copy-voice guard, the lead guard and the
+pane-state guard. Documenting a hole is not closing it; every one of those guards read as a
+whole-product sweep while silently covering a subset.
+
+Stable Rust has no way to make an array literal exhaustive over an enum, so the honest options are a
+derive or a generator. `strum::EnumIter` costs one compile-time dependency and makes the enumeration
+a property of the type. Worth pairing with the inverse assertion — every DECLARED tab is actually
+emitted — because a derived list also catches the opposite failure: a variant that exists as a name
+in the sidebar with no pane behind it.

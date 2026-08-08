@@ -1,4 +1,11 @@
-//! The Apps tab: one card per DIG app this install can open.
+//! The app launcher: one card per DIG app this install can open.
+//!
+//! # Why it is a strip on Home and not a tab of its own (dig_ecosystem#2358)
+//!
+//! One card and half a pane of void. A dedicated tab advertises emptiness — a person clicks it,
+//! finds a single app, and learns the tab set overstates what is here. As the last group on Home it
+//! is exactly as discoverable and claims exactly as much as it holds, and it grows into a real strip
+//! as the registry does without anything here changing.
 //!
 //! # Why a card and not a row
 //!
@@ -31,11 +38,25 @@ use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 
-/// Draw the Apps pane's content into `flow`, and report the action pressed.
-pub(crate) fn draw(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let mut pressed = None;
-    let verbs = split_by_app(super::actions_of(tab));
+/// Draw the launcher into `flow`, headed like the model's own section, and report the verb pressed.
+///
+/// Drawn only where the model put launch rows: on a build whose registry is empty the group is
+/// omitted rather than left as a heading over nothing.
+pub(crate) fn launcher(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
+    let verbs = split_by_app(launch_section_actions(tab));
+    if verbs.apps.is_empty() && verbs.other.is_empty() {
+        return None;
+    }
 
+    flow.place(|ui, at| {
+        (
+            text::heading(ui, at, t, crate::window_model::APPS_HEADING),
+            (),
+        )
+    });
+    flow.gap(space::S3);
+
+    let mut pressed = None;
     for card in verbs.apps {
         pressed = pressed.or(app_card(flow, t, card.app, card.open));
         flow.gap(space::S4);
@@ -44,6 +65,35 @@ pub(crate) fn draw(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction>
 
     flow.place(|ui, at| (text::caption(ui, at, t, copy::apps::INSTALL_NOTE), ()));
     pressed
+}
+
+/// Every verb the launcher draws, weighted and id'd exactly as the pane will draw them.
+///
+/// Shared with [`super::home`], which subtracts these from its diagnostics card: one derivation, so
+/// the two cannot come to disagree about which rows the launcher owns and leave a verb drawn twice —
+/// or drawn nowhere.
+pub(crate) fn launch_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
+    launch_section_actions(tab)
+}
+
+/// The rows of the model's launcher section, weighted through the ONE shared derivation.
+///
+/// The actions are built from the WHOLE tab and only then narrowed to the launcher's section,
+/// because the occurrence count that gives each row its element id is a position in the model's
+/// complete list — deriving ids from a filtered list would address these rows differently from the
+/// rest of the app.
+fn launch_section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
+    let mut seen = std::collections::HashMap::new();
+    tab.sections
+        .iter()
+        .flat_map(|section| {
+            let drawn = super::actions_in(section.rows.iter().cloned(), &mut seen);
+            match section.heading.as_deref() == Some(crate::window_model::APPS_HEADING) {
+                true => drawn,
+                false => Vec::new(),
+            }
+        })
+        .collect()
 }
 
 /// One app card: the registry entry, and the model's verb for opening it.
@@ -144,7 +194,7 @@ mod tests {
     /// The real Apps tab, as the shipping model builds it.
     fn shipping_tab() -> Tab {
         crate::window_model::build(&TrayView::default())
-            .tab(TabId::Apps)
+            .tab(TabId::Home)
             .expect("the Apps tab is always emitted")
             .clone()
     }
@@ -166,7 +216,7 @@ mod tests {
             enabled: true,
         };
         let tab = Tab {
-            id: TabId::Apps,
+            id: TabId::Home,
             label: "Apps".to_string(),
             note: crate::window_model::PaneNote::Ready,
             sections: vec![Section {
@@ -200,24 +250,42 @@ mod tests {
         );
     }
 
-    /// **The pane renders exactly the verbs the model put on the tab — no more, no fewer.**
+    /// **The launcher renders exactly the verbs the model put in its OWN section — no more.**
     ///
-    /// Asserted against the real builder, so the day the Apps tab gains a row upstream this test
-    /// covers it without being edited.
+    /// The "no more" half is the one the merge introduced (dig_ecosystem#2358). Home carries the
+    /// launcher AND its two diagnostic verbs, so a launcher that swept the whole tab would draw
+    /// `Open the log folder` as though it were an app, and the diagnostics card would draw it a
+    /// second time. Asserted against the real builder, so a row added upstream is covered without
+    /// this test being edited.
     #[test]
-    fn the_pane_offers_the_models_verbs_and_nothing_else() {
+    fn the_launcher_offers_its_own_sections_verbs_and_nothing_else() {
         let tab = shipping_tab();
-        let verbs = split_by_app(super::super::actions_of(&tab));
+        let verbs = split_by_app(launch_section_actions(&tab));
         let rendered: Vec<TrayAction> = verbs
             .apps
             .into_iter()
             .map(|card| card.open.id)
             .chain(verbs.other.into_iter().map(|action| action.id))
             .collect();
-        assert_eq!(rendered, tab.actions());
+
+        let expected: Vec<TrayAction> = tab
+            .sections
+            .iter()
+            .filter(|section| section.heading.as_deref() == Some(crate::window_model::APPS_HEADING))
+            .flat_map(|section| &section.rows)
+            .filter_map(|row| match row {
+                MenuRow::Action { action, .. } => Some(*action),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rendered, expected);
         assert!(
             !rendered.is_empty(),
-            "the shipping Apps tab offers nothing, so this proves nothing"
+            "the shipping launcher offers nothing, so this proves nothing"
+        );
+        assert!(
+            tab.actions().len() > rendered.len(),
+            "the fixture holds nothing BEYOND the launcher, so this cannot tell a launcher that              reads its own section from one that sweeps the whole tab"
         );
     }
 
@@ -269,7 +337,7 @@ mod tests {
     fn no_copy_on_this_tab_claims_an_app_is_installed_or_missing() {
         let said = format!(
             "{} {} {}",
-            copy::lead(TabId::Apps),
+            copy::lead(TabId::Home),
             copy::apps::INSTALL_NOTE,
             crate::apps::APPS[0].tagline
         )
@@ -297,14 +365,18 @@ mod tests {
     #[test]
     fn the_drawn_pane_gives_each_app_a_card_and_keeps_a_verb_that_is_not_one() {
         let mut tab = shipping_tab();
-        tab.sections.push(Section {
-            heading: None,
-            rows: vec![MenuRow::Action {
-                action: TrayAction::OpenLogs,
-                label: "Open the log folder".to_string(),
-                enabled: true,
-            }],
-        });
+        // Added INSIDE the launcher's own section, not beside it: a row in another section belongs
+        // to another card, and the leftover card exists for a verb the model puts in the LAUNCHER
+        // that is not a launch.
+        for section in &mut tab.sections {
+            if section.heading.as_deref() == Some(crate::window_model::APPS_HEADING) {
+                section.rows.push(MenuRow::Action {
+                    action: TrayAction::AboutCache,
+                    label: "About the content cache".to_string(),
+                    enabled: true,
+                });
+            }
+        }
 
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
@@ -358,7 +430,7 @@ mod tests {
             "a card drew an app's name without saying what it is: {all}"
         );
         assert!(
-            all.contains(copy::apps::OTHER_CARD) && all.contains("Open the log folder"),
+            all.contains(copy::apps::OTHER_CARD) && all.contains("About the content cache"),
             "a verb that is not an app launch was dropped rather than kept in its own card: {all}"
         );
         assert!(

@@ -792,6 +792,26 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   chips when the window is too narrow for a column; the selected tab's sections fill the rest. The window
   MUST reuse the consent windows' own palette, type and chrome, because a person who has just been shown a
   DIG consent prompt MUST be able to recognise this as the same application.
+- **The tab set is exactly `Home · Account · Wallet · Content · Settings` (MUST).** Each names a
+  destination a person can hold in mind, not an implementation area: `Content` is what this computer keeps
+  on disk for the network (never "Cache", which is jargon §6.1 requires abstracting), and `Account` carries
+  BOTH what the account is and how it is protected, because "is my account safe" and "I want a different
+  account" is a distinction between cards rather than between destinations. Splitting them cost two
+  parallel per-state sentence sets over one state machine, which is what the next rule now forbids.
+- **One account state, one sentence (MUST).** Exactly ONE per-state sentence set describes the account
+  anywhere in the window, chosen by an exhaustive match over the account's state. A second set — however
+  well tested against itself — is two surfaces free to tell a reader different things about one state, and
+  it MUST be provable by test that only one exists, not merely that each is internally consistent.
+- **The window carries a persistent status strip on EVERY tab (MUST).** Whether the background agent is
+  running and whether a node is reachable MUST be legible from every tab, because both explain what the
+  rest of the window is showing — an unreachable node is frequently the reason a balance reads "not known",
+  and a person MUST NOT have to change tabs to learn it. The strip states each in a glance, MUST NOT sense
+  a click (a reading that responds to one is a control), and MUST take its readings from the same
+  projection the panes read, so the strip and a pane can never describe one machine differently.
+- **The declared tab set and the emitted tab set MUST agree (MUST).** Every declared tab is emitted in
+  every view, and the enumeration the guards sweep MUST be derived from the tab type rather than
+  hand-written: a hand-written list admits a tab that compiles, is absent from the list, and so escapes
+  every sweep written over it.
 - **Every emitted tab MUST be clickable at every width the window allows (MUST).** The chip strip WRAPS
   onto as many rows as the tabs need and the content pane begins below the last row; the strip MUST NOT
   omit, clip out of the window, or overlap a chip, at any width down to the window's own minimum. A label
@@ -1071,7 +1091,9 @@ reachable from the one surface a person has on a fresh install. Binding rules:
   material MUST NOT be placed on the child's command line, because pairing is the launched app's own job
   (§5.4). The launch-vs-notice decision is a pure function (`dig_app_core::apps::plan_launch`) so both
   outcomes are tested without spawning a process or drawing a window.
-- **The window's Apps tab MAY state presence, and ONLY from an observed fact (MUST).** It renders one card
+- **The window's app launcher MAY state presence, and ONLY from an observed fact (MUST).** The launcher is
+  a group on the **Home** tab, not a tab of its own — a dedicated tab for a single card advertises
+  emptiness. It renders one card
   per registry entry — the display name, the registry's one-line description, and the model's launch row
   unchanged — and a card MUST NOT re-word the model's label. It MAY additionally show an **"Installed"**
   chip, but only when the snapshot carries an actual observation. Presence is therefore a THREE-state
@@ -1090,7 +1112,7 @@ reachable from the one surface a person has on a fresh install. Binding rules:
   chip is never the authority for whether a launch succeeds — a file can vanish between the observation and
   the click, and only the notice path speaks to that.
 
-  The tab MUST still say how apps arrive (alongside DIG, with nothing to download), because the chip
+  The launcher MUST still say how apps arrive (alongside DIG, with nothing to download), because the chip
   answers "is it here yet" and not "how does it get here". A per-app version MUST NOT be shown: no source
   for one exists that does not mean spawning every app to ask.
 

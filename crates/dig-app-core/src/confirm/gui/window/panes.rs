@@ -597,23 +597,27 @@ mod tests {
 
     /// Every [`TabId`] there is, labelled long enough that one row cannot hold them.
     ///
-    /// Seven is not a hypothetical count — dig_ecosystem#2293 adds the seventh — and the labels are
-    /// long because a label is model data: a longer word, or a translation of the same word, must
-    /// not be able to delete a tab.
+    /// Taken from [`TabId::all`] rather than written out, so a tab added upstream is exercised here
+    /// without anyone remembering to add it — which is the hazard the derived list closes
+    /// (dig_ecosystem#2358). The labels are deliberately equal and long, because a label is model
+    /// data: a longer word, or a translation of the same word, must not be able to delete a tab.
+    ///
+    /// The label GREW when the tab set shrank from seven to five. Five chips of `"Configuration"`
+    /// fit comfortably on one row at every width tested here, which would have made this fixture
+    /// answer "does the strip wrap" with a strip that never wrapped. The vacuity guard in
+    /// [`every_tab_is_reachable_at_every_width_the_window_allows`] is what caught that rather than
+    /// letting the property quietly stop being tested — and it is why the length is stated against
+    /// the widest width the test drives, not chosen by eye.
     fn a_strip_that_cannot_fit_on_one_row() -> Vec<Tab> {
-        [
-            TabId::Status,
-            TabId::Account,
-            TabId::Security,
-            TabId::Wallet,
-            TabId::Apps,
-            TabId::Cache,
-            TabId::Advanced,
-        ]
-        .into_iter()
-        .map(|id| tab_labelled(id, "Configuration"))
-        .collect()
+        TabId::all()
+            .into_iter()
+            .map(|id| tab_labelled(id, OVERFLOWING_LABEL))
+            .collect()
     }
+
+    /// A tab label long enough that [`TabId::all`]-many of them cannot share one row at
+    /// [`NARROW_AT`] — the widest window the narrow strip is ever drawn in.
+    const OVERFLOWING_LABEL: &str = "Configuration and options";
 
     /// **A strip that wrapped onto a second row pushes the content pane down, rather than over it.**
     ///
