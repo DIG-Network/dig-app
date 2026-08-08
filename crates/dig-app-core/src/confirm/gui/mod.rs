@@ -48,7 +48,10 @@ pub mod theme;
 mod window;
 
 pub use theme::{Theme, ThemeChoice, Tokens};
-pub use window::{open_app_window, AppWindow, BrandedInput, BrandedWindow};
+pub use window::{
+    open_app_window, open_pane_preview, preview_theme, stored_theme, AppWindow, BrandedInput,
+    BrandedWindow,
+};
 
 /// Whether this host can draw a prompt window at all.
 ///

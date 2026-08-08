@@ -69,12 +69,16 @@
 //! to be written honestly; this vocabulary means it does not have to be written carefully.
 
 pub(crate) mod action;
+pub(crate) mod apps;
 pub(crate) mod card;
 pub(crate) mod copy;
 pub(crate) mod data;
 pub(crate) mod facts;
+pub(crate) mod field;
 pub(crate) mod flow;
 pub(crate) mod identity;
+pub(crate) mod select;
+pub(crate) mod settings;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod text;
@@ -131,6 +135,8 @@ pub(crate) fn draw_tab(
 
     let pressed = match tab.id {
         TabId::Status => status::draw(&mut flow, t, tab, facts),
+        TabId::Apps => apps::draw(&mut flow, t, tab),
+        TabId::Settings => settings::draw(&mut flow, t, tab, facts),
         _ => generic(&mut flow, t, tab),
     };
     (flow.cursor() - at.top(), pressed)
@@ -242,6 +248,22 @@ fn is_destructive(action: TrayAction) -> bool {
         TrayAction::RemoveAccount
             | TrayAction::ReplaceWithNewAccount
             | TrayAction::ReplaceFromPhrase
+    )
+}
+
+/// Every verb on a tab, as weighted actions, in the model's order.
+///
+/// The whole-tab form of [`actions_in`], and the one a pane written per-tab should reach for: the
+/// occurrence counter that makes each element id unique must span the TAB, and a pane that kept one
+/// per section would give two identically-labelled rows the same id — which egui reports as a
+/// duplicate and which leaves one of them unclickable.
+pub(crate) fn actions_of(tab: &Tab) -> Vec<action::Action<TrayAction>> {
+    let mut seen = std::collections::HashMap::new();
+    actions_in(
+        tab.sections
+            .iter()
+            .flat_map(|section| section.rows.iter().cloned()),
+        &mut seen,
     )
 }
 

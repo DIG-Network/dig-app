@@ -36,7 +36,10 @@ use zeroize::Zeroizing;
 
 mod pane;
 mod panes;
+mod preview;
 mod shell;
+
+pub use preview::{open_pane_preview, preview_theme, stored_theme};
 
 use super::paint;
 use super::render::{

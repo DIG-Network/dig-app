@@ -84,6 +84,26 @@ Do not wait on the `TrayView` enrichment (#2330). Build against the facts that e
 | `identity` | Values a person takes elsewhere: `copyable`, `scannable` | A value nobody transcribes |
 | `copy` | Every string, named | A literal inside a paint call |
 | `facts` | The readings a pane may display | Anything that decides a verb |
+| `field` | A labelled text input, its help text, and its error attached BENEATH IT | A value nobody edits. A form error dumped at the foot of a card |
+
+## A setting is not a verb
+
+Almost everything a pane offers is a `TrayAction` the model decided and the shell dispatches. A
+**setting** is not: it is a field of `AgentConfig` that no menu has ever offered, and the Settings
+pane writes it directly (`pane/settings/prefs.rs`) rather than inventing a menu action for a form.
+
+Three rules make that safe, and they apply to any pane that grows one:
+
+- **The file is the authority, and a write is read BACK.** `prefs::save` writes, re-reads, and
+  returns what the file now says — so a write that silently did not land shows the OLD value. That is
+  PR #120's rule (*never infer success from an exit code; re-read and report what it now says*)
+  applied one level down.
+- **A privileged or remote state is read from its own source, never from what was once asked for.**
+  The Settings pane reads the beacon for whether updates are running; `AgentConfig::auto_update` is
+  the remembered wish, and the two disagree exactly when a change did not take.
+- **Every escape hatch works from an invalid value.** "Go back to automatic" clears the setting
+  whatever is in the box — a control that validated first would refuse the very press that gets a
+  person out.
 
 ### Scales
 
