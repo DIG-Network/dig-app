@@ -119,6 +119,18 @@ mod tests {
 
     /// Every string the strip painted for `view`, at `width`.
     fn painted(view: &TrayView, width: f32) -> Vec<String> {
+        laid_out(view, width)
+            .into_iter()
+            .map(|(said, _where)| said)
+            .collect()
+    }
+
+    /// Every string the strip painted for `view`, WITH the rectangle it occupies.
+    ///
+    /// Position is the half a string alone cannot carry: a reading drawn 400 px off the right edge
+    /// is painted exactly as faithfully as one that fits, so a test that only collects text cannot
+    /// tell a correct layout from an overflowing one.
+    fn laid_out(view: &TrayView, width: f32) -> Vec<(String, Rect)> {
         let ctx = egui::Context::default();
         super::super::install_fonts(&ctx);
         let facts = PaneFacts::of_tray(view);
@@ -143,9 +155,12 @@ mod tests {
             );
         }
 
-        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Rect)>) {
             match shape {
-                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    Rect::from_min_size(text.pos, text.galley.size()),
+                )),
                 egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
                 _ => {}
             }
@@ -231,28 +246,52 @@ mod tests {
     /// the second reading either fits or is drawn over the first. Asserted by driving the WORST
     /// case — a searching node, whose word is the long one — rather than the connected case, which
     /// fits with room to spare and would prove nothing about the layout under pressure.
+    ///
+    /// Asserted on GEOMETRY, not on the presence of the strings. An earlier version of this test
+    /// checked only that all four strings were painted, which overflow, overlap and a correct
+    /// layout all satisfy identically: pushing the node reading 400 px off the right edge of a
+    /// 480 px window left it green. What "fits" means is that the last reading's ink ends inside
+    /// the bar and the two readings do not occupy the same pixels, so that is what is checked.
+    /// Where `word` was painted, failing loudly if the strip never painted it at all.
+    fn placed(laid_out: &[(String, Rect)], word: &str) -> Rect {
+        laid_out
+            .iter()
+            .find(|(said, _)| said == word)
+            .unwrap_or_else(|| panic!("the strip never painted {word:?}: {laid_out:?}"))
+            .1
+    }
+
     #[test]
     fn both_readings_fit_at_the_narrowest_width() {
-        let said = painted(
+        let width = super::super::shell::SHELL_MIN;
+        let laid = laid_out(
             &TrayView {
                 running: true,
                 node_connected: false,
                 ..TrayView::default()
             },
-            super::super::shell::SHELL_MIN,
+            width,
         );
-        for expected in [
-            copy::header::AGENT_LABEL,
-            copy::header::NODE_LABEL,
-            copy::agent_state(true),
-            super::super::pane::facts::NODE_SEARCHING,
-        ] {
-            assert!(
-                said.iter().any(|line| line == expected),
-                "{expected:?} was not painted at {} px, so the strip's second reading is being \
-                 drawn off the edge or over the first: {said:?}",
-                super::super::shell::SHELL_MIN
-            );
-        }
+
+        let agent = placed(&laid, copy::header::AGENT_LABEL)
+            .union(placed(&laid, copy::agent_state(true)));
+        let node = placed(&laid, copy::header::NODE_LABEL)
+            .union(placed(&laid, super::super::pane::facts::NODE_SEARCHING));
+
+        // A badge's chip is wider than the word inside it: `data::badge` sizes itself to the galley
+        // plus `space::S3`, centred, so the ink the reader sees extends half a step past the text on
+        // each side. Measuring the text alone would under-report the strip's true extent by exactly
+        // that, and let a reading whose CHIP is clipped pass as fitting.
+        let chip_overhang = space::S3 / 2.0;
+        assert!(
+            node.right() + chip_overhang <= width,
+            "the node reading ends at {} px in a {width} px window, so it is drawn off the right \
+             edge: {laid:?}",
+            node.right() + chip_overhang
+        );
+        assert!(
+            !agent.intersects(node),
+            "the two readings overlap — agent occupies {agent:?}, node {node:?}"
+        );
     }
 }
