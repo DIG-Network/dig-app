@@ -157,6 +157,38 @@ pub(crate) fn promote<Id: PartialEq>(mut actions: Vec<Action<Id>>, lead: &Id) ->
     actions
 }
 
+/// The tab's verbs minus the one this pane has already drawn beside the value it acts on.
+///
+/// # Why the ecosystem has one of these and not one per pane (dig_ecosystem#2357)
+///
+/// Wallet and Account both show an identifier with a copy control attached to it, and both are ALSO
+/// offered a `Copy my …` verb by the model. Drawing both is the same verb twice on one tab, once
+/// where the value is and once in a card that exists only to hold the duplicate. The rule lives here
+/// rather than in either pane because two panes with their own copies of it are two panes that can
+/// come to disagree about what the rule is — which is what they did.
+///
+/// # Why the caller passes an `Option` and not a `bool`
+///
+/// A duplicate may only be removed where the ORIGINAL exists. Wallet's receive card draws no copy
+/// control for a sealed account, and Account's identity card draws none before there is a DIG ID —
+/// filtering unconditionally therefore deletes the SOLE rendering of a verb, on exactly the states
+/// that cannot reach it any other way. `None` means nothing was drawn, so nothing is removed.
+///
+/// Matched on the ACTION, never on the label: the label is a sentence the tray is free to reword,
+/// and a filter that read its words would let the duplicate back in the first time it changed.
+pub(crate) fn without_the_one_already_drawn<Id: PartialEq>(
+    actions: Vec<Action<Id>>,
+    already_drawn: Option<Id>,
+) -> Vec<Action<Id>> {
+    let Some(drawn) = already_drawn else {
+        return actions;
+    };
+    actions
+        .into_iter()
+        .filter(|action| action.id != drawn)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

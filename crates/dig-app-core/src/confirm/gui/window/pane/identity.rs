@@ -9,7 +9,7 @@ use super::copy;
 use super::data::{self, Value};
 use super::text;
 use crate::confirm::gui::paint;
-use crate::confirm::gui::render::{mono, rgba, size, space, Weight};
+use crate::confirm::gui::render::{rgba, space, Weight};
 use crate::confirm::gui::theme::Tokens;
 
 /// How long the control reads "Copied" before returning to "Copy", in seconds.
@@ -127,8 +127,16 @@ fn remember_copy(ui: &Ui, element: egui::Id) {
 /// grey square dominating a pane.
 const QR_CAP: f32 = 220.0;
 
-/// A scannable code on its own plate, with the value beneath it in mono and a caption saying what to
-/// do with it. Returns the height used.
+/// A scannable code on its own plate, with a caption saying what to do with it. Returns the height
+/// used.
+///
+/// # Why the value is NOT printed under the code (dig_ecosystem#2357)
+///
+/// It used to be, and every caller draws a [`copyable`] readout of the same value immediately below
+/// — so Wallet and Status each showed one address twice, three lines apart, in two different faces.
+/// A reader who sees the same identifier twice on one card has to compare them before trusting
+/// either. The code is the machine's copy of the value and the readout is the reader's; printing a
+/// third is not redundancy, it is a question.
 ///
 /// # Why the code is black on white in a dark theme too
 ///
@@ -162,17 +170,6 @@ pub(crate) fn scannable(ui: &mut Ui, at: Rect, t: &Tokens, value: &str, caption:
         &art,
     );
     let mut y = drawn.bottom() + space::S3;
-
-    let identifier =
-        ui.painter()
-            .layout(value.to_owned(), mono(size::SM), rgba(t.muted), at.width());
-    let identifier_height = identifier.size().y;
-    ui.painter().galley(
-        egui::Pos2::new(at.center().x - identifier.size().x / 2.0, y),
-        identifier,
-        egui::Color32::PLACEHOLDER,
-    );
-    y += identifier_height + space::S2;
 
     y += text::caption(
         ui,

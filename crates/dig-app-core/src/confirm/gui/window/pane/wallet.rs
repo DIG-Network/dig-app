@@ -263,25 +263,16 @@ fn spare_verbs_card(
 
 /// The tab's verbs minus the ones this pane has already drawn as part of a value.
 ///
-/// # Why this is conditional, which is the whole difficulty
-///
-/// A duplicate may only be removed where the ORIGINAL exists. `Copy my receive address` is offered
-/// in every account state, but the receive card only draws a copy control when there IS an address —
-/// a sealed account gets the sentence explaining the lock instead. Filtering unconditionally
-/// therefore deleted the sole rendering of a verb the model offers, on exactly the states that
-/// cannot reach it any other way. The pane guard in [`super::super::panes`] caught that, which is
-/// what it is for.
-///
-/// Matched on the ACTION, never on the label: the label is a sentence the tray is free to reword,
-/// and a filter that read its words would let the duplicate back in the first time it changed.
+/// The rule itself is [`action::without_the_one_already_drawn`], shared with the Account tab; this
+/// names WHICH verb the receive card renders, and only when it actually rendered it.
 fn spare_verbs(
     actions: Vec<action::Action<TrayAction>>,
     drew_copy_control: bool,
 ) -> Vec<action::Action<TrayAction>> {
-    actions
-        .into_iter()
-        .filter(|action| !(drew_copy_control && action.id == TrayAction::CopyReceiveAddress))
-        .collect()
+    action::without_the_one_already_drawn(
+        actions,
+        drew_copy_control.then_some(TrayAction::CopyReceiveAddress),
+    )
 }
 
 /// Whether the receive card drew a copy control this frame — the condition [`spare_verbs`] turns on.
@@ -328,6 +319,89 @@ mod tests {
 
     fn facts_with(view: TrayView) -> PaneFacts {
         PaneFacts::of_tray(&view)
+    }
+
+    /// Every word the whole Wallet pane paints for `view`, at `width`.
+    ///
+    /// The assembled pane rather than one block, because the defect this exists to catch is not
+    /// inside any single block: each of the code and the readout is right on its own, and the fault
+    /// is that a card draws both.
+    fn painted_pane(view: &TrayView, width: f32) -> Vec<String> {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let model = crate::window_model::build(view);
+        let tab = model
+            .tab(crate::window_model::TabId::Wallet)
+            .expect("Wallet renders in every state")
+            .clone();
+        let facts = PaneFacts::of_tray(view);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(width, 4_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("wallet-pane-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = super::super::flow::Flow::new(ui, column, true);
+                            draw(&mut flow, &t, &tab, &facts);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// **An address the pane can show is written on the tab exactly ONCE (dig_ecosystem#2357).**
+    ///
+    /// The receive card offers the same value three ways — a code to scan, a readout to read, and a
+    /// control to copy — and only ONE of those is text. The code used to print the address beneath
+    /// itself as well, so the tab carried it twice in two faces a few lines apart, which asks a
+    /// reader to compare two identifiers before trusting either.
+    ///
+    /// Counted over the WHOLE pane rather than one block, because a count taken inside the code
+    /// block would still read 1 if the printing merely moved to the card around it — the property
+    /// is about the tab, so the fixture has to be the tab. Asserted at two widths because the
+    /// readout reflows below its control on a narrow column, which is a second layout path.
+    #[test]
+    fn the_receive_address_is_written_on_the_tab_exactly_once() {
+        let view = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        };
+        for width in [480.0, 900.0] {
+            let said = painted_pane(&view, width);
+            let times = said.iter().filter(|word| word.contains(ADDRESS)).count();
+            assert_eq!(
+                times, 1,
+                "at {width} px the Wallet tab writes the address {times} times, not once: {said:?}"
+            );
+        }
     }
 
     /// **Every** [`BalanceUnknown`] state, so a guard asserted "over all of them" is.
