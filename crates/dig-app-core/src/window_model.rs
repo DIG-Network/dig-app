@@ -308,13 +308,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         // cannot say what is wrong, which is why it leads the window rather than hiding in Advanced.
         tab(
             TabId::Status,
-            // The agent starts asynchronously, so a window opened during boot shows a Status tab whose
-            // figures are still being gathered. Saying so is the loading state; saying nothing leaves a
-            // person reading stale defaults as though they were the answer.
-            match view.running {
-                true => PaneNote::Ready,
-                false => PaneNote::Waiting("The DIG agent is still starting."),
-            },
+            status_note(view),
             vec![Section {
                 heading: None,
                 rows: vec![
@@ -406,6 +400,25 @@ pub fn build(view: &TrayView) -> WindowModel {
 
     WindowModel {
         tabs: tabs.into_iter().filter(Tab::has_content).collect(),
+    }
+}
+
+/// How complete the **Status** tab is (dig_ecosystem#2330).
+///
+/// Three honest cases, in the order a launch passes through them. The agent starts asynchronously,
+/// so a window opened during boot has no figures yet — saying so is the loading state, and saying
+/// nothing leaves a person reading stale defaults as though they were the answer. Once the agent is
+/// running, a node that did not answer means the tab's figures are ABSENT rather than late, so it
+/// names the act that changes the answer — the same shape the Cache tab already uses, for the same
+/// reason.
+fn status_note(view: &TrayView) -> PaneNote {
+    match (view.running, view.node_connected) {
+        (false, _) => PaneNote::Waiting("The DIG agent is still starting."),
+        (true, false) => PaneNote::Unreachable(
+            "No node is connected, so there is nothing to report about it yet. Start the DIG node \
+             and this tab will fill in.",
+        ),
+        (true, true) => PaneNote::Ready,
     }
 }
 
@@ -1432,6 +1445,9 @@ mod tests {
         };
         let up = TrayView {
             running: true,
+            // A node that ANSWERED — the Status tab reports on the node, so a healthy fixture must
+            // have one (dig_ecosystem#2330).
+            node_connected: true,
             account: Some(AccountState::Unlocked { recoverable: true }),
             receive_address: Some("xch1abc".to_string()),
             cache: Some(CacheSnapshot {
@@ -1465,6 +1481,40 @@ mod tests {
 
         // Success.
         assert_eq!(note(&up, TabId::Apps), Some(PaneNote::Ready));
+    }
+
+    /// **A running agent with no node reports an unreachable node, not a ready one**
+    /// (dig_ecosystem#2330).
+    ///
+    /// The Status tab reports on the node, so `Ready` with nothing connected is the same shape of
+    /// false claim the Cache tab already avoids. The two controls either side keep the assertion
+    /// from being satisfied by a note that is always `Unreachable` or always `Waiting`.
+    #[test]
+    fn the_status_tab_names_the_missing_node_rather_than_reporting_ready() {
+        let note = |view: &TrayView| build(view).tab(TabId::Status).map(|tab| tab.note.clone());
+        let booting = TrayView {
+            running: false,
+            node_connected: false,
+            ..TrayView::default()
+        };
+        let no_node = TrayView {
+            running: true,
+            node_connected: false,
+            ..TrayView::default()
+        };
+        let connected = TrayView {
+            running: true,
+            node_connected: true,
+            ..TrayView::default()
+        };
+
+        assert!(matches!(note(&booting), Some(PaneNote::Waiting(_))));
+        assert!(
+            matches!(note(&no_node), Some(PaneNote::Unreachable(_))),
+            "a started agent with no node must say the node is missing: {:?}",
+            note(&no_node)
+        );
+        assert_eq!(note(&connected), Some(PaneNote::Ready));
     }
 
     /// A pane note is a complete sentence, and the two that state a PROBLEM also state the way out.

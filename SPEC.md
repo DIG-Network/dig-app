@@ -1071,13 +1071,76 @@ reachable from the one surface a person has on a fresh install. Binding rules:
   material MUST NOT be placed on the child's command line, because pairing is the launched app's own job
   (§5.4). The launch-vs-notice decision is a pure function (`dig_app_core::apps::plan_launch`) so both
   outcomes are tested without spawning a process or drawing a window.
-- **The window's Apps tab MUST NOT state presence (MUST).** It renders one card per registry entry — the
-  display name, the registry's one-line description, and the model's launch row unchanged — and MUST NOT
-  show an installed/not-installed indicator or grey a row, because presence is discovered inside the click
-  and this surface cannot read it. A card MUST NOT re-word the model's label, and the tab MUST say how apps
-  arrive (alongside DIG, with nothing to download) so the question a chip would answer is still answered.
-  A per-app version MUST NOT be shown: no source for one exists that does not mean spawning every app to
-  ask.
+- **The window's Apps tab MAY state presence, and ONLY from an observed fact (MUST).** It renders one card
+  per registry entry — the display name, the registry's one-line description, and the model's launch row
+  unchanged — and a card MUST NOT re-word the model's label. It MAY additionally show an **"Installed"**
+  chip, but only when the snapshot carries an actual observation. Presence is therefore a THREE-state
+  reading in the view (`dig_app_core::apps::AppPresence`), and the rendering of each state is normative:
+  - `Known(apps)` containing this app — the chip MAY be drawn;
+  - `Known(apps)` NOT containing this app — the chip MUST be omitted, and the card MUST NOT be greyed or
+    made a dead end; the row stays enabled and the click path still ends in the §3.1c honest notice, which
+    is the only surface that has re-checked presence at the moment it matters;
+  - `Unknown` — the chip MUST be omitted and MUST NOT be rendered as "not installed". Nobody looked, so
+    "not installed" would be a claim about the user's machine that nothing checked. This is the whole
+    reason the reading is three-state rather than a list.
+
+  What the chip asserts is bounded by what the check tests: a name in the shared bin dir is a file
+  (`is_file`), not a verified executable, so the chip means *this install has that app's binary beside it*
+  and MUST NOT be worded as a stronger guarantee. Presence is still re-checked inside the click, and the
+  chip is never the authority for whether a launch succeeds — a file can vanish between the observation and
+  the click, and only the notice path speaks to that.
+
+  The tab MUST still say how apps arrive (alongside DIG, with nothing to download), because the chip
+  answers "is it here yet" and not "how does it get here". A per-app version MUST NOT be shown: no source
+  for one exists that does not mean spawning every app to ask.
+
+### 3.1c-v The hosted-store reading (normative)
+
+The window's cache surface MUST be able to name the stores this node holds, rather than only their count.
+The list comes from the node's **`control.hostedStores.list`** control method — `{}` →
+`{ stores: [{ store_id, pinned, capsule_count, total_bytes, … }] }` — read over the endpoint the §5.1.0
+ladder resolved. dig-app distils each entry (`dig_app_core::hosted_stores::HostedStore`) rather than
+carrying the contract type verbatim: the wire entry also carries every cached capsule with a
+last-used timestamp that moves whenever content is served, and a snapshot compared field-by-field on every
+tick MUST NOT contain a field that changes while nothing visibly does. A surface needing per-capsule detail
+asks `control.hostedStores.status` for the one store a person opened.
+
+- **A list that could not be read MUST NOT be rendered as an empty list (MUST).** The reading is
+  three-state (`HostedStoresReading`): `Pending` — a read is under way and nothing has failed;
+  `Known(vec![])` — the node ANSWERED and holds nothing; `Unknown(reason)` — nobody answered. Only
+  `Known(vec![])` may be drawn as "this node is hosting nothing". Collapsing a failed read into an empty
+  list is the class of defect [dig_ecosystem#2325] fixed for the balance — a slow node reported as an
+  absent one — and the empty variant MUST be constructible only from a node's actual answer.
+- **The reason MUST be derived from the node's own reply, keyed on the stable `data.code` symbol** and
+  never on the human message, which is not contract-stable. One variant per REMEDY: no node connected, a
+  node that does not serve the method, a refusal, a timeout, an unreachable node, and an unclassifiable
+  refusal carrying the node's own words. A timeout and an unreachable node MUST stay distinct all the way
+  to the sentence a person reads, because only the latter is evidence about whether a node exists.
+- **`401`/`403` from this method is `Unauthorized`, NEVER "this node cannot read" (MUST).** Unlike
+  `control.wallet.balance` (§3.3), which is served as an OPEN read, `control.hostedStores.list` is
+  **token-gated**, and dig-node refuses at the HTTP layer — before any JSON-RPC error exists to carry a
+  `data.code`. The HTTP status is therefore a fact that MUST be carried as one, not recovered by parsing a
+  string that also contains the node's own message. The two classifications name two different remedies:
+  `Unauthorized` means *this app cannot read the node's control token* and is fixed by the token, while a
+  method-not-served refusal (`METHOD_NOT_FOUND` / `NOT_SUPPORTED`) means *this build is too old* and is
+  fixed by an upgrade. Reporting one as the other sends a person to change something that cannot help.
+- **The read MUST be throttled independently of the repaint rate (MUST).** A snapshot is taken twice a
+  second and this is a node round trip. A reading is reused for **30 s** (`REFRESH_INTERVAL`) before the
+  node is asked again — longer than the balance's interval because a store joins or leaves the cache when
+  content is fetched or evicted, not on a chain's schedule.
+- **ONE read may take 10 s (`STORES_READ_TIMEOUT`), and this MUST NOT be the §5.1.0 probe budget (MUST).**
+  Those budgets answer different questions: a probe budget bounds how long one tier may take to prove it is
+  alive before the ladder falls through, while this read walks the node's on-disk cache index, so a large
+  cache on slow storage can legitimately take seconds. An implementation that reuses the probe budget fails
+  every read on such a machine. Past the budget the read is abandoned AND said to have been abandoned.
+- **The read MUST NOT block the surface that asks for it (MUST).** A repaint-driven caller receives an
+  answer immediately — `Pending`, or the reading already held — while at most ONE read is in flight, so a
+  slow node is asked once however many repaints happen while it thinks.
+- **A refresh MUST NOT blank a list already being read (MUST).** While a FIRST read is in flight the answer
+  is `Pending`; a refresh of a list already held answers with that list until the new answer arrives.
+- **A reading MUST NOT outlive the node it describes (MUST).** A store list is a property of ONE node, so a
+  reading taken from one endpoint MUST NOT be answered for another, and the held reading MUST be dropped
+  when no node is connected — otherwise the surface reports stores the current node does not hold.
 
 ### 3.1d Native input, modals and prompts (normative)
 

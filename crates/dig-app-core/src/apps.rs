@@ -148,6 +148,67 @@ impl AppLocator for InstalledApps {
     }
 }
 
+/// Which apps this install can actually open, or that nobody has been able to look
+/// (dig_ecosystem#2330).
+///
+/// # Why this is a reading and not a `Vec<AppId>`
+///
+/// Presence used to be discovered only inside the click handler, so a pane drawing an "Installed"
+/// chip had nothing to draw it from — and a chip guessing is exactly the placeholder-that-looks-real
+/// this surface must not have. Carrying the answer in the view fixes that, but only if the answer can
+/// say *"I could not look"*: [`InstalledApps::beside_this_exe`] returns `None` when the running
+/// executable's own path cannot be determined, and reporting that as "nothing is installed" would
+/// state a fact about the user's machine that nothing checked.
+///
+/// So: [`Unknown`](Self::Unknown) is nobody looked, and `Known(vec![])` is somebody looked and found
+/// none. A surface renders a chip only from the second.
+///
+/// # What "installed" is currently evidence of
+///
+/// [`InstalledApps::locate`] tests `is_file` and nothing else — it does not check that the file is
+/// executable, or even non-empty, so a truncated or half-written download reports as installed
+/// (dig-app#2344). `Known` therefore means *a file with that name is in the bin dir*, which is the
+/// strongest claim this check can support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppPresence {
+    /// Nobody has been able to look — there is no locator, so no claim about this machine is made.
+    Unknown,
+    /// The registry was checked. The apps found present, in [`APPS`] order; empty means none are.
+    Known(Vec<AppId>),
+}
+
+impl Default for AppPresence {
+    /// Before any look has happened the answer is [`Unknown`](Self::Unknown) — not an empty list,
+    /// which would be a claim.
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl AppPresence {
+    /// Check every [`APPS`] row against `locator`.
+    ///
+    /// Always a [`Known`](Self::Known): being handed a locator IS the look. `Unknown` is for the
+    /// caller that has no locator to hand.
+    pub fn observe(locator: &dyn AppLocator) -> Self {
+        Self::Known(
+            APPS.iter()
+                .filter(|entry| locator.locate(entry.binary_stem).is_some())
+                .map(|entry| entry.id)
+                .collect(),
+        )
+    }
+
+    /// Whether `id` is installed — `None` when nobody has looked, so a caller cannot mistake an
+    /// unchecked machine for one with nothing on it.
+    pub fn is_installed(&self, id: AppId) -> Option<bool> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(found) => Some(found.contains(&id)),
+        }
+    }
+}
+
 /// A plain informational message for the shell to draw. Owned strings because the heading and body are
 /// composed from the app's name; the title is a constant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +353,36 @@ mod tests {
         assert!(
             text.contains("once it ships") || text.contains("automatically"),
             "the notice must say it will appear on its own once dig-chat ships"
+        );
+    }
+
+    /// **An unchecked machine is not an empty machine.** The three states are distinct, and the one
+    /// a chip may be drawn from is the only one that came from an actual look.
+    ///
+    /// The fixture varies ONE actor — whether the locator finds the stem — so a `Known(vec![])`
+    /// produced by never looking would fail the third assertion.
+    #[test]
+    fn app_presence_tells_unchecked_apart_from_checked_and_absent() {
+        let absent = AppPresence::observe(&FakeLocator {
+            stem: "dig-chat",
+            at: None,
+        });
+        let present = AppPresence::observe(&FakeLocator {
+            stem: "dig-chat",
+            at: Some(PathBuf::from("/opt/dig/bin/dig-chat")),
+        });
+
+        assert_eq!(AppPresence::Unknown.is_installed(AppId::Chat), None);
+        assert_eq!(absent, AppPresence::Known(vec![]));
+        assert_eq!(absent.is_installed(AppId::Chat), Some(false));
+        assert_eq!(present, AppPresence::Known(vec![AppId::Chat]));
+        assert_eq!(present.is_installed(AppId::Chat), Some(true));
+        // The default must not assert anything about a machine nobody has examined.
+        assert_eq!(AppPresence::default(), AppPresence::Unknown);
+        assert_ne!(
+            AppPresence::default(),
+            AppPresence::Known(vec![]),
+            "'nobody looked' and 'looked, found none' must not be the same value"
         );
     }
 

@@ -139,6 +139,66 @@ pub mod node {
             /// How long the node takes to give it.
             delay: Duration,
         },
+        /// A healthy node that also answers `control.hostedStores.list` per the given
+        /// [`StoresReply`] (dig_ecosystem#2330).
+        ///
+        /// Unlike the wallet read this stays BEHIND the control token, exactly as the real node
+        /// gates it — so a client that forgot the header sees the `401` it would really get, and
+        /// "the node would not tell this app" stays a distinguishable outcome rather than
+        /// collapsing into "no stores".
+        HostedStores(StoresReply),
+        /// [`HostedStores`](Self::HostedStores), answered only after `delay` — a node that is up,
+        /// authorized, and simply slow (the shape dig_ecosystem#2325 was mistaken for an absent
+        /// node).
+        SlowHostedStores {
+            /// The answer eventually given.
+            reply: StoresReply,
+            /// How long the node takes to give it.
+            delay: Duration,
+        },
+    }
+
+    /// How a [`FakeNode`] should answer `control.hostedStores.list`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StoresReply {
+        /// Answer with these stores, in this order.
+        Stores(Vec<FakeStore>),
+        /// Refuse, in the node's error envelope: a numeric wire code plus the stable UPPER_SNAKE
+        /// `data.code` symbol a client is contractually required to branch on.
+        Rejected {
+            /// The numeric JSON-RPC error code.
+            code: i64,
+            /// The stable `data.code` symbol.
+            symbol: String,
+        },
+    }
+
+    impl StoresReply {
+        /// A refusal carrying `code` + its stable `symbol`.
+        pub fn rejected(code: i64, symbol: &str) -> Self {
+            StoresReply::Rejected {
+                code,
+                symbol: symbol.to_string(),
+            }
+        }
+    }
+
+    /// One store a [`FakeNode`] reports from `control.hostedStores.list`.
+    ///
+    /// It carries `capsule_count` rather than a capsule list because the fixture GENERATES that many
+    /// capsule entries into the wire body: the real node's `capsules` array is a field dig-app
+    /// deliberately drops, and a fixture that sent an empty array could not prove the drop was a
+    /// decision rather than an accident of the fixture.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FakeStore {
+        /// The canonical lowercase 64-hex store id.
+        pub store_id: String,
+        /// Whether the operator has pinned this store.
+        pub pinned: bool,
+        /// How many cached capsules of this store the node reports.
+        pub capsule_count: u64,
+        /// The total cached bytes across those capsules.
+        pub total_bytes: u64,
     }
 
     /// How a [`FakeNode`] should answer `control.wallet.balance`.
@@ -208,6 +268,16 @@ pub mod node {
         /// A fake that answers `control.wallet.balance` with `reply`, but only after `delay`.
         pub fn serving_wallet_slowly(reply: WalletReply, delay: Duration) -> Self {
             Self::with_behaviour(Behaviour::SlowWallet { reply, delay })
+        }
+
+        /// A fake that answers `control.hostedStores.list` with `reply` (dig_ecosystem#2330).
+        pub fn serving_stores(reply: StoresReply) -> Self {
+            Self::with_behaviour(Behaviour::HostedStores(reply))
+        }
+
+        /// A fake that answers `control.hostedStores.list` with `reply`, but only after `delay`.
+        pub fn serving_stores_slowly(reply: StoresReply, delay: Duration) -> Self {
+            Self::with_behaviour(Behaviour::SlowHostedStores { reply, delay })
         }
 
         /// A fake with an explicit [`Behaviour`], bound to an ephemeral loopback port.
@@ -289,6 +359,7 @@ pub mod node {
                 .to_lowercase()
                 .contains(&format!("{}: {}", CONTROL_TOKEN_HEADER, FakeNode::TOKEN).to_lowercase());
             let method_is_open_read = request.contains("control.wallet.balance");
+            let method_is_hosted_list = request.contains("control.hostedStores.list");
             let asset = if request.contains("\"asset\":\"dig\"") {
                 Asset::Dig
             } else {
@@ -310,9 +381,20 @@ pub mod node {
                 // Every other `control.*` method is gated exactly as the real node gates it,
                 // otherwise a client that forgot the header would still see a green test.
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),
-                Behaviour::Status | Behaviour::Wallet(_) | Behaviour::SlowWallet { .. } => {
-                    (200, status_result())
+                // Authorized, and asking for the hosted-store list: answer it. Any OTHER method
+                // falls through to the status body below, so a fake set up for stores still
+                // supports a client that probes `control.status` first.
+                Behaviour::HostedStores(reply) if method_is_hosted_list => {
+                    (200, stores_result(reply))
                 }
+                Behaviour::SlowHostedStores { reply, .. } if method_is_hosted_list => {
+                    (200, stores_result(reply))
+                }
+                Behaviour::Status
+                | Behaviour::Wallet(_)
+                | Behaviour::SlowWallet { .. }
+                | Behaviour::HostedStores(_)
+                | Behaviour::SlowHostedStores { .. } => (200, status_result()),
                 Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
                 Behaviour::Http(code, body) => (*code, body.clone()),
             };
@@ -320,8 +402,11 @@ pub mod node {
             // before the reply is written, so the client sees a connection that succeeded and a
             // read that did not finish -- precisely the state dig_ecosystem#2325 mistook for a
             // missing node.
-            if let Behaviour::SlowWallet { delay, .. } = &behaviour {
-                std::thread::sleep(*delay);
+            match &behaviour {
+                Behaviour::SlowWallet { delay, .. } | Behaviour::SlowHostedStores { delay, .. } => {
+                    std::thread::sleep(*delay)
+                }
+                _ => {}
             }
             let _ = write!(
                 stream,
@@ -372,6 +457,55 @@ pub mod node {
             })
             .to_string(),
         }
+    }
+
+    /// The `control.hostedStores.list` reply, field-for-field as dig-node's
+    /// `control::hosted_stores_list` emits it — including the per-store `capsules` array dig-app
+    /// drops (see [`FakeStore`]).
+    fn stores_result(reply: &StoresReply) -> String {
+        match reply {
+            StoresReply::Stores(stores) => {
+                let stores: Vec<serde_json::Value> = stores.iter().map(fake_store_json).collect();
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": { "stores": stores }
+                })
+                .to_string()
+            }
+            StoresReply::Rejected { code, symbol } => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": code,
+                    "message": "the node refused this hosted-store read",
+                    "data": { "code": symbol, "origin": "node" }
+                }
+            })
+            .to_string(),
+        }
+    }
+
+    /// One `HostedStore` entry, with `capsule_count` synthetic capsules so the body is faithful to
+    /// what the node really sends.
+    fn fake_store_json(store: &FakeStore) -> serde_json::Value {
+        let capsules: Vec<serde_json::Value> = (0..store.capsule_count)
+            .map(|i| {
+                serde_json::json!({
+                    "capsule": format!("{}:{i:064x}", store.store_id),
+                    "root": format!("{i:064x}"),
+                    "size_bytes": 1_024 * (i + 1),
+                    "last_used_unix_ms": 1_700_000_000_000u64 + i,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "store_id": store.store_id,
+            "pinned": store.pinned,
+            "capsule_count": store.capsule_count,
+            "total_bytes": store.total_bytes,
+            "capsules": capsules,
+        })
     }
 
     /// The `control.status` snapshot as a typed result, for a test that needs an

@@ -95,8 +95,29 @@ pub enum ControlCallError {
     TimedOut(String),
     /// Something answered, but not with a JSON-RPC response we could read.
     BadResponse(String),
-    /// The node answered with a refusal — most often an absent or unrecognized control token.
+    /// The node understood the call and answered a JSON-RPC **error** — it declined the request.
+    ///
+    /// The string is the node's OWN message, which is explicitly not contract-stable. Nothing may
+    /// branch on its words; a caller that must know *which* refusal this was needs a typed fact,
+    /// which is what [`HttpRefused`](Self::HttpRefused) is.
     Refused(String),
+    /// The node refused at the HTTP layer, before any JSON-RPC error could exist — most often a
+    /// `401` for an absent or unrecognized control token.
+    ///
+    /// # Why this is its own variant and not a formatted [`Refused`](Self::Refused)
+    ///
+    /// It began as one: `Refused(format!("HTTP {code} …"))`, with the status recovered by parsing
+    /// that string back out. But the same variant also carries the node's own JSON-RPC message, so a
+    /// node answering the message `"HTTP 401 …"` would be read as an authorization refusal it never
+    /// made — a fact derived from prose the node controls rather than from anything this module
+    /// observed (dig_ecosystem#2330). The status is a fact, so it is carried as one.
+    HttpRefused {
+        /// The HTTP status. `401` and `403` mean this app holds no usable control token, which is a
+        /// permission fault with a real remedy — never an absent or incapable node.
+        code: u16,
+        /// The response body, for a diagnosis.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ControlCallError {
@@ -107,6 +128,11 @@ impl std::fmt::Display for ControlCallError {
             ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
+            // The same sentence a formatted `Refused` produced before the split, so no surface's
+            // copy changed when the variant did.
+            ControlCallError::HttpRefused { code, detail } => {
+                write!(f, "the node refused the request: HTTP {code} {detail}")
+            }
         }
     }
 }
@@ -497,7 +523,7 @@ fn read_http_body(stream: TcpStream) -> Result<Vec<u8>, ControlCallError> {
 
     if !(200..300).contains(&code) {
         let detail = String::from_utf8_lossy(&body).trim().to_string();
-        return Err(ControlCallError::Refused(format!("HTTP {code} {detail}")));
+        return Err(ControlCallError::HttpRefused { code, detail });
     }
     Ok(body)
 }
@@ -609,11 +635,55 @@ mod tests {
     fn a_missing_token_is_refused_not_reported_connected() {
         // The fake gates on the token exactly as the node does, so omitting it must surface as a
         // refusal — never as a success, and never as "unreachable" (the node IS there).
+        //
+        // The refusal happens at the HTTP layer, before a JSON-RPC error could exist, so the honest
+        // shape is `HttpRefused` carrying the status as a fact rather than `Refused` carrying prose
+        // (dig_ecosystem#2330). Asserting the code and not merely the variant is what distinguishes
+        // "this app holds no usable token" — which has a remedy — from any other HTTP failure.
         let node = FakeNode::serving_status();
         let err = fetch_status(&node.endpoint(), None, quick()).expect_err("must be refused");
         assert!(
-            matches!(err, ControlCallError::Refused(_)),
-            "expected a refusal, got {err:?}"
+            matches!(err, ControlCallError::HttpRefused { code: 401, .. }),
+            "expected a 401 refusal, got {err:?}"
+        );
+    }
+
+    /// **An HTTP refusal carries its status as a FACT, and a node's prose cannot forge one**
+    /// (dig_ecosystem#2330).
+    ///
+    /// A caller telling "this app holds no usable control token" apart from "the node fell over"
+    /// branches on this status, so where it comes from is the whole property. The second half is the
+    /// load-bearing one: the earlier shape formatted the status into `Refused`'s string and parsed
+    /// it back, and this fixture — a node whose JSON-RPC *message* is literally `HTTP 401 …` — is
+    /// the only one that can see the difference, because both shapes agree on every other input.
+    #[test]
+    fn an_http_refusal_carries_its_status_and_a_node_message_cannot_forge_one() {
+        for status in [401u16, 403, 500] {
+            let node = FakeNode::with_behaviour(Behaviour::Http(status, "refused".into()));
+            let err = fetch_status(&node.endpoint(), Some(node.token()), quick())
+                .expect_err("a non-2xx is not a status");
+            assert!(
+                matches!(err, ControlCallError::HttpRefused { code, .. } if code == status),
+                "the status must survive the trip as a typed fact; got {err:?}"
+            );
+        }
+
+        let node = FakeNode::with_behaviour(Behaviour::JsonRpcError("HTTP 401 nice try".into()));
+        let err = fetch_status(&node.endpoint(), Some(node.token()), quick())
+            .expect_err("a JSON-RPC error is not a status");
+        assert_eq!(
+            err,
+            ControlCallError::Refused("HTTP 401 nice try".to_string()),
+            "a message the NODE wrote must not become an authorization refusal it never made"
+        );
+        // ...and the sentence a person reads did not change when the variant split.
+        assert_eq!(
+            ControlCallError::HttpRefused {
+                code: 401,
+                detail: "no".to_string()
+            }
+            .to_string(),
+            "the node refused the request: HTTP 401 no"
         );
     }
 

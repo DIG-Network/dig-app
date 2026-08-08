@@ -53,6 +53,11 @@ fn main() {
                 },
             ),
             account: Some(account.clone()),
+            // A connected node, matching the `node` line above: the gallery photographs the
+            // account states, so the #2330 fields are pinned rather than varied.
+            node_facts: None,
+            hosted_stores: dig_app_core::hosted_stores::HostedStoresReading::Known(Vec::new()),
+            installed_apps: dig_app_core::apps::AppPresence::Known(Vec::new()),
             // Present exactly while unlocked, as the shell's live derivation off the residency is.
             receive_address: matches!(account, AccountState::Unlocked { .. }).then(|| {
                 "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()

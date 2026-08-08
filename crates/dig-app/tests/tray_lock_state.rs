@@ -72,6 +72,11 @@ fn view_for(state: AccountState) -> TrayView {
         // Not yet polled. This suite is about the LOCK axis, so the balance is held constant.
         balance: dig_app_core::wallet::overview::BalanceReading::default(),
         account: Some(state),
+        // This suite is about the LOCK axis, so the #2330 node/app fields are pinned to a plain
+        // connected node with nothing hosted and no sibling app installed.
+        node_facts: None,
+        hosted_stores: dig_app_core::hosted_stores::HostedStoresReading::Known(Vec::new()),
+        installed_apps: dig_app_core::apps::AppPresence::Known(Vec::new()),
         profile_id: Some("a".repeat(96)),
         did: None,
         // This suite is about the LOCK state, so the second-factor axis is pinned off and covered by

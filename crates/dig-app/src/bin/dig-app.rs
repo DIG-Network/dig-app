@@ -1288,6 +1288,7 @@ mod tray {
     ) -> TrayView {
         use dig_app_core::account::residency::AddressObservation;
         use dig_app_core::engine::EngineState;
+        use dig_app_core::node_facts::NodeFacts;
 
         let account = account_state(env, session, attempt);
         // ONE observation of the residency, not two separate calls — so "unlocked" and "no address"
@@ -1382,7 +1383,43 @@ mod tray {
             // `None` — the beacon absent, or unwilling to answer — is shown as "could not be asked"
             // rather than as a confident switch position.
             update: read_beacon_status(),
+            // What the node says about ITSELF, distilled once here rather than carried verbatim
+            // (dig_ecosystem#2330). Same `control.status` call the cache figures above come from —
+            // no extra round trip — and the uptime is bucketed to the minute by the distillation,
+            // so this cannot repaint the window every second.
+            node_facts: status
+                .read()
+                .ok()
+                .and_then(|s| s.engine.status().map(NodeFacts::of_status)),
+            // The stores this node holds (dig_ecosystem#2330). The poller owns the cadence — this
+            // snapshot runs twice a second and the list is a node round trip — and every decision
+            // about what the reading MEANS lives in `dig_app_core::hosted_stores`, because a binary
+            // is a test-free zone.
+            hosted_stores: match status.read() {
+                Ok(status) => hosted_stores_poller().observe(&status.engine),
+                // A poisoned lock says nothing about the node's stores, and "nothing" is not an
+                // empty list.
+                Err(_) => dig_app_core::hosted_stores::HostedStoresReading::default(),
+            },
+            // Which sibling apps are installed (dig_ecosystem#2330). A machine whose own executable
+            // path cannot be read has not been examined, so it reports `Unknown` rather than
+            // claiming nothing is installed — see `AppPresence`.
+            installed_apps: match dig_app_core::apps::InstalledApps::beside_this_exe() {
+                Some(locator) => dig_app_core::apps::AppPresence::observe(&locator),
+                None => dig_app_core::apps::AppPresence::Unknown,
+            },
         }
+    }
+
+    /// The process-wide hosted-store poller (dig_ecosystem#2330).
+    ///
+    /// A single instance for the same reason [`balance_poller`] is one: a per-snapshot poller would
+    /// have an empty cache every time and turn the twice-a-second repaint into twice-a-second node
+    /// reads.
+    fn hosted_stores_poller() -> &'static dig_app_core::hosted_stores::NodeHostedStores {
+        static POLLER: std::sync::OnceLock<dig_app_core::hosted_stores::NodeHostedStores> =
+            std::sync::OnceLock::new();
+        POLLER.get_or_init(dig_app_core::hosted_stores::NodeHostedStores::default)
     }
 
     /// The process-wide beacon-status cache (dig_ecosystem#2311).

@@ -153,7 +153,15 @@ impl EngineConnector for NodeConnector {
 fn disconnected_reason(failures: &[(String, ControlCallError)], had_token: bool) -> String {
     if let Some((endpoint, error)) = failures
         .iter()
-        .find(|(_, e)| matches!(e, ControlCallError::Refused(_)))
+        // Both refusal shapes: a node that declined in JSON-RPC, and one that refused at the HTTP
+        // layer (the `401` an absent control token draws). They are the same fault to a person —
+        // a node is running and will not talk to this app — and the sentence below says so.
+        .find(|(_, e)| {
+            matches!(
+                e,
+                ControlCallError::Refused(_) | ControlCallError::HttpRefused { .. }
+            )
+        })
     {
         return if had_token {
             format!("the node at {endpoint} refused this app ({error})")
@@ -306,7 +314,10 @@ mod tests {
     fn a_refusal_without_a_token_names_the_token_as_the_cause() {
         let failures = vec![(
             "http://localhost:9778".to_string(),
-            ControlCallError::Refused("HTTP 401".to_string()),
+            ControlCallError::HttpRefused {
+                code: 401,
+                detail: "unauthorized".to_string(),
+            },
         )];
         let reason = disconnected_reason(&failures, false);
         assert!(
@@ -324,7 +335,10 @@ mod tests {
         let failures = vec![
             (
                 "http://dig.local".to_string(),
-                ControlCallError::Refused("HTTP 401".to_string()),
+                ControlCallError::HttpRefused {
+                    code: 401,
+                    detail: "unauthorized".to_string(),
+                },
             ),
             (
                 "http://localhost:9778".to_string(),
