@@ -425,7 +425,11 @@ fn menu_reason(why: &BalanceUnknown) -> &'static str {
 
 /// The clause that completes "not known — …". Each one names the missing thing and, where there is
 /// one, the way to fix it.
-fn unknown_reason(why: &BalanceUnknown) -> String {
+///
+/// `pub` because the Wallet content pane shows the same reason on its own, under a "Balance" label
+/// that supplies the words this clause completes. One set of sentences for both surfaces: two would
+/// drift, and the reason a balance is missing is exactly the copy that must not.
+pub fn unknown_reason(why: &BalanceUnknown) -> String {
     match why {
         BalanceUnknown::NoAddress(AddressUnavailable::NoAccount) => {
             "there is no account on this computer to hold one.".to_string()

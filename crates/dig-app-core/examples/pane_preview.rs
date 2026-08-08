@@ -105,9 +105,85 @@ fn tab(name: &str) -> Option<TabId> {
     }
 }
 
+/// A departure from the healthy view, for the states worth photographing.
+///
+/// The beacon argument above varies the UPDATER; this varies the machine the pane is reporting on.
+/// Both are parameters for the same reason: a state a capture cannot be opened directly into is a
+/// state somebody eventually reaches by clicking, and a committed screenshot must not depend on a
+/// click landing (dig_ecosystem#2309).
+#[derive(Clone, Copy)]
+enum Case {
+    /// Node up, account unlocked, balance read: the state the whole-pane captures use.
+    Healthy,
+    /// A balance read in flight — on screen for the seconds a chain lookup takes.
+    BalancePending,
+    /// A node that connected and did not answer in time. Deliberately not "no node is running":
+    /// that is the wrong sentence a live user was shown (dig_ecosystem#2325).
+    BalanceTimedOut,
+    /// A sealed account: no address to derive, so no code and no figure.
+    Locked,
+    /// Nothing answered the §5.3 ladder, so no cache snapshot and no balance.
+    NoNode,
+}
+
+impl Case {
+    /// Apply this case to the healthy view.
+    fn apply(self, view: TrayView) -> TrayView {
+        use dig_app_core::wallet::overview::{BalanceReading, BalanceUnknown};
+        match self {
+            Self::Healthy => TrayView {
+                balance: BalanceReading::Known(HELD),
+                ..view
+            },
+            Self::BalancePending => TrayView {
+                balance: BalanceReading::Pending,
+                ..view
+            },
+            Self::BalanceTimedOut => TrayView {
+                balance: BalanceReading::Unknown(BalanceUnknown::NodeTimedOut),
+                ..view
+            },
+            Self::Locked => TrayView {
+                account: Some(AccountState::Locked),
+                receive_address: None,
+                ..view
+            },
+            Self::NoNode => TrayView {
+                running: false,
+                node_connected: false,
+                node: "No DIG node answered on this computer".to_string(),
+                cache: None,
+                ..view
+            },
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "healthy" => Some(Self::Healthy),
+            "pending" => Some(Self::BalancePending),
+            "timedout" => Some(Self::BalanceTimedOut),
+            "locked" => Some(Self::Locked),
+            "no-node" => Some(Self::NoNode),
+            _ => None,
+        }
+    }
+}
+
+/// The balance the healthy captures show: 12.5 $DIG and 0.25 XCH, in each asset's own base unit.
+///
+/// Written in base units rather than as decimals, because that is what the type holds and what the
+/// pane's one formatter divides — a preview that pre-divided would photograph a figure the
+/// application does not produce.
+const HELD: dig_app_core::wallet::overview::Balances = dig_app_core::wallet::overview::Balances {
+    dig_units: 12_500,
+    xch_mojos: 250_000_000_000,
+};
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: pane_preview <tab> <light|dark> [width] [height] [live|opted-out|absent]";
+    let usage = "usage: pane_preview <tab> <light|dark> [width] [height] [live|opted-out|absent] \
+                 [healthy|pending|timedout|locked|no-node] [zoom]";
 
     let Some(tab) = args.first().and_then(|name| tab(name)) else {
         eprintln!("{usage}");
@@ -126,8 +202,17 @@ fn main() {
         std::process::exit(2);
     };
 
-    println!("previewing {tab:?} at {size:?} logical px; close the window when you are done");
-    if let Err(why) = open_pane_preview(theme, tab, size, preview_view(beacon)) {
+    let Some(case) = Case::parse(args.get(5).map(String::as_str).unwrap_or("healthy")) else {
+        eprintln!("{usage}");
+        std::process::exit(2);
+    };
+
+    // A pane taller than the display is clamped by the window manager, not by the size asked for,
+    // so a whole-pane capture of a long pane needs this rather than a bigger number.
+    let zoom: f32 = args.get(6).and_then(|z| z.parse().ok()).unwrap_or(1.0);
+
+    println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
+    if let Err(why) = open_pane_preview(theme, tab, size, zoom, case.apply(preview_view(beacon))) {
         eprintln!("{why}");
         std::process::exit(1);
     }

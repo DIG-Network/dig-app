@@ -30,11 +30,19 @@ use crate::window_model::{self, TabId};
 /// `view` is the snapshot the model and the facts are BOTH built from — one value, so the pane
 /// cannot be photographed describing two different instants.
 ///
+/// `zoom` scales the whole pane, and exists for one reason: a window manager REFUSES an inner size
+/// taller than the work area, silently clamping it. A pane taller than the display therefore came
+/// out cut mid-sentence however large a height was asked for. Drawing at, say, 0.8 fits the whole
+/// pane in the window the display allows — every proportion intact, one figure to declare beside the
+/// capture. Photographing a truncated pane and describing the part that fell off is the alternative,
+/// and it is how a README comes to describe cards that are not in the image.
+///
 /// Returns an error string when this host cannot open a window at all.
 pub fn open_pane_preview(
     theme: Theme,
     tab: TabId,
     size: (f32, f32),
+    zoom: f32,
     view: TrayView,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
@@ -52,6 +60,7 @@ pub fn open_pane_preview(
         options,
         Box::new(move |cc| {
             super::super::window::install_fonts(&cc.egui_ctx);
+            cc.egui_ctx.set_zoom_factor(zoom);
             Ok(Box::new(Preview { theme, tab, view }))
         }),
     )

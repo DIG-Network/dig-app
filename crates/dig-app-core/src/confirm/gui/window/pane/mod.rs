@@ -71,6 +71,7 @@
 pub(crate) mod account;
 pub(crate) mod action;
 pub(crate) mod apps;
+pub(crate) mod cache;
 pub(crate) mod card;
 pub(crate) mod copy;
 pub(crate) mod data;
@@ -84,6 +85,7 @@ pub(crate) mod settings;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod text;
+pub(crate) mod wallet;
 
 use egui::{Rect, Ui};
 
@@ -141,6 +143,8 @@ pub(crate) fn draw_tab(
         TabId::Settings => settings::draw(&mut flow, t, tab, facts),
         TabId::Account => account::draw(&mut flow, t, tab, facts),
         TabId::Security => security::draw(&mut flow, t, tab, facts),
+        TabId::Wallet => wallet::draw(&mut flow, t, tab, facts),
+        TabId::Cache => cache::draw(&mut flow, t, tab, facts),
         _ => generic(&mut flow, t, tab),
     };
     (flow.cursor() - at.top(), pressed)
