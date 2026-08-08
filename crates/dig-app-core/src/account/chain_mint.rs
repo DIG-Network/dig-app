@@ -132,6 +132,20 @@ where
     P: SpendPublisher + ?Sized,
 {
     fn submit(&self) -> Submission {
+        // ALREADY DONE. A second push would spend a second fee, create a second DID, and overwrite
+        // the pending slot -- which would make the FIRST mint unobservable, so the money would be
+        // gone with no DID ever recorded (dig_ecosystem#2377). The wizard's copy asks the person not
+        // to do this three separate times; this is that request as an invariant.
+        if let Some(pending) = self.remembered() {
+            return Submission::Refused {
+                reason: format!(
+                    "This DIG Account has already paid for a mint ({}). Wait for it to confirm \
+                     rather than paying again.",
+                    pending.pending_did_string()
+                ),
+            };
+        }
+
         // Derived here, per call. A locked account produces no minter, so a mint attempted after a
         // lock-now, an idle timeout or an OS screen lock cannot even be built (module docs).
         let Some(minter) = self.residency.profile_minter() else {
@@ -168,11 +182,19 @@ where
     P: SpendPublisher + ?Sized,
 {
     fn look(&self, spend_id: &str) -> Sighting {
-        let Some(pending) = self.remembered() else {
-            // Asked about a mint this instance never pushed. Reported as unreachable rather than as
-            // a rejection: nothing here knows the spend failed, only that it cannot be looked up.
-            tracing::warn!(%spend_id, "asked about a mint this minter did not push");
-            return Sighting::Unreachable;
+        // Asked about a mint this instance did not push -- either because it pushed nothing, or
+        // because the id names a DIFFERENT spend. Both are the same fact and get the same answer:
+        // this observer cannot look. Comparing the id rather than merely checking that SOMETHING was
+        // pushed is what makes the guard match its own rationale (dig_ecosystem#2377); without it,
+        // asking about somebody else's spend returned this mint's status under their name.
+        let pending = match self.remembered() {
+            Some(pending) if hex_id(pending.did_coin_id()) == spend_id => pending,
+            _ => {
+                // Reported as unreachable rather than as a rejection: nothing here knows the spend
+                // failed, only that it cannot be looked up.
+                tracing::warn!(%spend_id, "asked about a mint this minter did not push");
+                return Sighting::Unreachable;
+            }
         };
 
         let Some(minter) = self.residency.profile_minter() else {
@@ -431,6 +453,81 @@ mod tests {
         );
     }
 
+    /// **A second submit on the same minter must not spend again** (dig_ecosystem#2377).
+    ///
+    /// Before the guard, the second call pushed a SECOND real mint, paid a second fee, and
+    /// overwrote `pending` — so the FIRST mint became unobservable: money spent, DID never
+    /// recorded. The wizard's copy warns three separate times not to do this, which is copy
+    /// standing in for an invariant.
+    ///
+    /// Two assertions, and the second is the load-bearing one. A guard that merely returned a
+    /// refusal while still pushing would satisfy the first; only the PUBLISHER's own count can see
+    /// whether a bundle left the machine. The fixture keeps the mint genuinely fundable throughout
+    /// — the first submit succeeds — so this cannot pass because nothing could ever be pushed.
+    #[test]
+    fn a_second_submit_refuses_rather_than_spending_a_second_time() {
+        let bench = Bench::funded();
+        let chain = SimulatorChain::new();
+        chain.fund(bench.puzzle_hash, FUNDED_MOJOS);
+        let minter = bench.mint(&chain, &chain);
+
+        let Submission::Submitted { spend_id, .. } = minter.submit() else {
+            panic!("the first mint must go through");
+        };
+        let pushed_once = chain.pushed();
+
+        let second = minter.submit();
+        assert!(
+            matches!(second, Submission::Refused { .. }),
+            "a minter that already pushed must refuse; got {second:?}"
+        );
+        assert_eq!(
+            chain.pushed(),
+            pushed_once,
+            "a second submit reached the network and spent again"
+        );
+        // ...and the FIRST mint is still the one this minter can be asked about.
+        assert_eq!(
+            hex_id(
+                minter
+                    .remembered()
+                    .expect("the first mint is still remembered")
+                    .did_coin_id()
+            ),
+            spend_id
+        );
+    }
+
+    /// **`look` answers about THIS mint, not merely about "some mint I pushed"**
+    /// (dig_ecosystem#2377).
+    ///
+    /// The guard's rationale is "did I push THIS spend", and before the fix the `spend_id` argument
+    /// was ignored outside the log — so asking about somebody else's spend returned this instance's
+    /// own status under the other spend's name. The fixture varies ONE thing: the id asked about,
+    /// against a minter that genuinely did push, so a blanket `Unreachable` implementation is
+    /// caught by the control assertion.
+    #[test]
+    fn a_look_at_a_different_spend_is_not_answered_from_this_one() {
+        let bench = Bench::funded();
+        let chain = SimulatorChain::new();
+        chain.fund(bench.puzzle_hash, FUNDED_MOJOS);
+        let minter = bench.mint(&chain, &chain);
+        let Submission::Submitted { spend_id, .. } = minter.submit() else {
+            panic!("the bench must be able to push");
+        };
+
+        assert_eq!(
+            minter.look("0x0000000000000000000000000000000000000000000000000000000000000001"),
+            Sighting::Unreachable,
+            "a mint this instance did not push cannot be reported on"
+        );
+        assert_eq!(
+            minter.look(&spend_id),
+            Sighting::Pending,
+            "the control: its OWN spend is still answerable"
+        );
+    }
+
     /// A wallet with nothing in it reports a SHORTFALL, in XCH, rather than a generic refusal.
     ///
     /// The distinction matters because it is the one failure the person can actually act on — and it
@@ -558,6 +655,9 @@ mod tests {
     struct SimulatorChain {
         sim: RefCell<Simulator>,
         mempool: RefCell<Vec<SpendBundle>>,
+        /// Every push ever made, counted where the NETWORK sees it. A count taken from the mempool
+        /// alone would be reset by farming and could not prove a second spend did not happen.
+        pushed: std::cell::Cell<usize>,
     }
 
     impl SimulatorChain {
@@ -565,6 +665,7 @@ mod tests {
             let chain = Self {
                 sim: RefCell::new(Simulator::new()),
                 mempool: RefCell::new(Vec::new()),
+                pushed: std::cell::Cell::new(0),
             };
             // Leave genesis behind: no real coin is created in block 0, and a confirmation there is
             // indistinguishable from a fabricated height (dig-account rejects one).
@@ -588,6 +689,11 @@ mod tests {
                     .expect("the mint bundle must pass consensus validation");
             }
             self.bury(MIN_CONFIRMATION_DEPTH);
+        }
+
+        /// How many bundles have been pushed to this chain, ever — including those already farmed.
+        fn pushed(&self) -> usize {
+            self.pushed.get()
         }
 
         fn bury(&self, blocks: u32) {
@@ -656,6 +762,7 @@ mod tests {
 
     impl SpendPublisher for SimulatorChain {
         fn push(&self, bundle: &SpendBundle) -> Result<PushOutcome, ChainUnavailable> {
+            self.pushed.set(self.pushed.get() + 1);
             self.mempool.borrow_mut().push(bundle.clone());
             Ok(PushOutcome::Accepted)
         }
