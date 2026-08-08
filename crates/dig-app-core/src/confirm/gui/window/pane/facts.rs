@@ -54,6 +54,29 @@ pub(crate) struct PaneFacts {
     pub(crate) balance: crate::wallet::overview::BalanceReading,
     /// The installed version of this app.
     pub(crate) version: &'static str,
+    /// What the node says about ITSELF — version, build, address, uptime and its three content
+    /// counts — or `None` when no node answered (dig_ecosystem#2330).
+    ///
+    /// Carried BESIDE [`node_summary`](Self::node_summary), not instead of it. The summary is the
+    /// engine's pre-joined sentence, which a row can show as a label but a pane cannot lay out: a
+    /// pane wanting to draw the cached-capsule count as its own readout would have to parse prose
+    /// the engine is free to reword. These are the same facts as fields.
+    ///
+    /// `None` means nobody has spoken to a node, never "a node holding nothing" — the difference a
+    /// zeroed struct here would erase.
+    pub(crate) node_facts: Option<crate::node_facts::NodeFacts>,
+    /// The stores this node holds, or why they are not known.
+    ///
+    /// A [`HostedStoresReading`](crate::hosted_stores::HostedStoresReading) and not a `Vec`, because
+    /// an empty vector is the claim *this node holds nothing* and a read that has not answered has
+    /// made no claim at all.
+    pub(crate) hosted_stores: crate::hosted_stores::HostedStoresReading,
+    /// Which sibling DIG apps this install can open, or that nobody has been able to look.
+    ///
+    /// Same shape and same reason as [`hosted_stores`](Self::hosted_stores): an empty list is a
+    /// finding, and [`AppPresence::Unknown`](crate::apps::AppPresence::Unknown) is the absence of
+    /// one. It is what lets the Apps pane draw an "Installed" chip from a fact rather than a guess.
+    pub(crate) installed_apps: crate::apps::AppPresence,
     /// What the update beacon says about itself, or `None` when it could not be asked.
     ///
     /// A READING, and the only honest source for what this machine will do about updates: the
@@ -80,6 +103,9 @@ impl PaneFacts {
             // decides a figure is not shown at all when there is no address for it to be ABOUT, and
             // a pane reading the raw field would skip it.
             balance: crate::wallet::overview::WalletOverview::of_tray(view).balance,
+            node_facts: view.node_facts.clone(),
+            hosted_stores: view.hosted_stores.clone(),
+            installed_apps: view.installed_apps.clone(),
             version: env!("CARGO_PKG_VERSION"),
             update: view.update,
         }
@@ -224,6 +250,8 @@ fn account_word(state: &AccountState) -> &'static str {
 mod tests {
     use super::super::data::Tone;
     use super::*;
+    use crate::apps::AppPresence;
+    use crate::hosted_stores::{HostedStoresReading, HostedStoresUnknown};
 
     /// **Every account state gets its own word.**
     ///
@@ -379,6 +407,84 @@ mod tests {
         assert_eq!(full.node_summary, "Connected to dig.local");
         assert_eq!(full.receive_address.as_deref(), Some("xch1abc"));
         assert_eq!(full.cache.map(|c| c.used_bytes), Some(512));
+    }
+
+    /// **A pane can read the node's counts as NUMBERS, and an unasked node stays absent**
+    /// (dig_ecosystem#2330).
+    ///
+    /// The pane layer could previously reach only [`PaneFacts::node_summary`] — the engine's
+    /// pre-joined sentence (`"Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted"`). A pane
+    /// cannot lay out a sentence: drawing the counts as separate readouts means parsing prose the
+    /// engine is free to rewrite. So the projection must carry the numbers themselves.
+    ///
+    /// The fixture is the fake node's real snapshot, whose three counts all DIFFER, so a projection
+    /// that read one count and reused it for the others cannot pass. The absent half is the honesty
+    /// control: a projection substituting a zeroed `NodeFacts` for an unasked node would draw
+    /// "0 capsules cached" about a node nobody has spoken to, which is the placeholder-that-reads-as-
+    /// real-data this surface exists to keep out.
+    #[test]
+    fn the_projection_carries_the_node_s_counts_as_numbers_not_as_a_sentence() {
+        assert_eq!(
+            PaneFacts::of_tray(&TrayView::default()).node_facts,
+            None,
+            "a node nobody has asked must stay absent, never a zeroed set of counts"
+        );
+
+        let status = crate::test_support::node::fake_status_result();
+        let facts = PaneFacts::of_tray(&TrayView {
+            node_facts: Some(crate::node_facts::NodeFacts::of_status(&status)),
+            ..TrayView::default()
+        })
+        .node_facts
+        .expect("a reported node must survive the projection");
+
+        assert_eq!(facts.hosted_store_count, status.hosted_store_count);
+        assert_eq!(facts.cached_capsule_count, status.cached_capsule_count);
+        assert_eq!(facts.pinned_store_count, status.pinned_store_count);
+        assert_ne!(
+            facts.hosted_store_count, facts.cached_capsule_count,
+            "the fixture must keep the counts distinguishable, or this test cannot see a swap"
+        );
+        assert_eq!(facts.version, status.version);
+    }
+
+    /// **An unread list and an empty one stay different types through the projection**
+    /// (dig_ecosystem#2330).
+    ///
+    /// Both readings default to a not-yet-known state precisely because an empty vector is a CLAIM —
+    /// "this node holds nothing", "no sibling app is installed". A projection that flattened either
+    /// to a `Vec` would make that claim on behalf of a read that never happened, and every pane
+    /// downstream would render it as fact.
+    ///
+    /// Three states each rather than two: `Pending` and `Unknown` are both "no list", so a
+    /// projection collapsing every non-`Known` reading into one variant still passes a two-state
+    /// test. The `Unknown` case carries a specific reason so that collapse is visible here.
+    #[test]
+    fn the_projection_keeps_an_unread_list_apart_from_an_empty_one() {
+        let bare = PaneFacts::of_tray(&TrayView::default());
+        assert_eq!(bare.hosted_stores, HostedStoresReading::Pending);
+        assert_eq!(bare.installed_apps, AppPresence::Unknown);
+
+        let no_node = PaneFacts::of_tray(&TrayView {
+            hosted_stores: HostedStoresReading::Unknown(HostedStoresUnknown::NoNode),
+            ..TrayView::default()
+        });
+        assert_eq!(
+            no_node.hosted_stores,
+            HostedStoresReading::Unknown(HostedStoresUnknown::NoNode),
+            "the REASON a list is missing is what tells a person whether to start their node"
+        );
+
+        let answered = PaneFacts::of_tray(&TrayView {
+            hosted_stores: HostedStoresReading::Known(Vec::new()),
+            installed_apps: AppPresence::Known(Vec::new()),
+            ..TrayView::default()
+        });
+        assert_eq!(
+            answered.hosted_stores,
+            HostedStoresReading::Known(Vec::new())
+        );
+        assert_eq!(answered.installed_apps, AppPresence::Known(Vec::new()));
     }
 
     /// The version reported is this build's own, never a literal that can drift from the manifest.

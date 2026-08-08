@@ -246,6 +246,44 @@ pub struct TrayView {
     /// `agent.json`). This field is the observed state, and the observed state is what the surface
     /// shows whenever it exists — see [`crate::auto_update`] for why those are different facts.
     pub update: Option<crate::auto_update::BeaconStatus>,
+    /// What the connected node says about ITSELF — version, build, protocol, address, uptime, sync
+    /// availability and its three content counts — or `None` when no node answered
+    /// (dig_ecosystem#2330).
+    ///
+    /// The rich data has always existed one layer down, in `EngineState::Connected`'s
+    /// [`StatusResult`](dig_node_control_interface::results::StatusResult); the view reduced all of
+    /// it to [`node_connected`](Self::node_connected) plus the pre-summarised
+    /// [`node`](Self::node) line, so the Status pane had nothing to draw but that sentence.
+    ///
+    /// It is a DISTILLATION ([`crate::node_facts::NodeFacts`]) rather than the contract type
+    /// verbatim, and its uptime is bucketed to the minute before it gets here. Both are repaint
+    /// decisions, argued in that module's docs.
+    ///
+    /// `None` is honest when there is no node: the REASON there is none is already
+    /// [`node`](Self::node)'s, which carries the engine's actionable diagnosis.
+    pub node_facts: Option<crate::node_facts::NodeFacts>,
+    /// The stores this node holds, or why they are not known (dig_ecosystem#2330).
+    ///
+    /// Polled on its own cadence by [`crate::hosted_stores::NodeHostedStores`] rather than read
+    /// while the window is drawn: a snapshot is taken twice a second and this is a node round trip
+    /// — the same reason [`balance`](Self::balance) is polled.
+    ///
+    /// The default — [`HostedStoresReading::Pending`](crate::hosted_stores::HostedStoresReading::Pending)
+    /// — is the truth before the first poll: nothing has answered, and nothing has failed either. It
+    /// is deliberately NOT an empty list; see [`crate::hosted_stores`] for why an unread list and a
+    /// node holding nothing are different types.
+    pub hosted_stores: crate::hosted_stores::HostedStoresReading,
+    /// Which sibling DIG apps this install can open, or that nobody has been able to look
+    /// (dig_ecosystem#2330).
+    ///
+    /// Presence used to be discovered only inside the click handler
+    /// ([`crate::apps::plan_launch`]), so a pane could not draw an accurate "Installed" chip at all
+    /// — and a chip that guessed would be the placeholder-that-looks-real this surface must not
+    /// have. Carrying it here is what makes the chip drawable from a fact.
+    ///
+    /// [`AppPresence::Unknown`](crate::apps::AppPresence::Unknown) is the default and means exactly
+    /// that nobody looked; see that type for why it is not an empty list.
+    pub installed_apps: crate::apps::AppPresence,
 }
 
 impl TrayView {
@@ -287,6 +325,9 @@ impl TrayView {
             menu_suppressed,
             window_host,
             update,
+            node_facts,
+            hosted_stores,
+            installed_apps,
         } = self;
 
         running == &other.running
@@ -327,6 +368,25 @@ impl TrayView {
             // elevation prompt changes nothing else in the view, so without this the group would keep
             // showing the OLD setting until something unrelated moved (dig_ecosystem#2293).
             && update == &other.update
+            // The Status pane RENDERS these facts, so a node that restarted into a new version — or
+            // whose capsule count moved — must repaint. Safe to compare because the one field that
+            // moved every second is bucketed to the minute before it arrives here
+            // (`crate::node_facts`); at minute granularity this contributes at most one extra
+            // repaint a minute, which is a fact a person can actually see change.
+            && node_facts == &other.node_facts
+            // The Cache pane RENDERS this list, so a store that was just cached — or a read that
+            // finished, failed, or timed out — must repaint. Without it the first real list would
+            // never replace "checking" until something else in the view happened to move, which is
+            // the freeze `balance` needed this same arm to avoid (dig_ecosystem#2206).
+            //
+            // It cannot change per tick: the poller returns a CACHED reading for a whole
+            // `REFRESH_INTERVAL`, and the per-capsule detail that a busy node rewrites continuously
+            // is deliberately not carried (`crate::hosted_stores::HostedStore`).
+            && hosted_stores == &other.hosted_stores
+            // The Apps pane draws an "Installed" chip from this, so an app that finished installing
+            // while the window was open must repaint. It changes only when a sibling binary appears
+            // or disappears — an event, not a tick.
+            && installed_apps == &other.installed_apps
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -1959,6 +2019,24 @@ mod tests {
             }),
             ("menu_suppressed", |v| v.menu_suppressed = true),
             ("window_host", |v| v.window_host = WindowHost::Unavailable),
+            // Absent from this table until dig_ecosystem#2330 despite `renders_same_as` comparing
+            // it: the destructure guarantees a new field is DECIDED about, not that a case is added
+            // here, and this one was decided and then never pinned. The count assertion below could
+            // not catch it, because it was written from the table rather than from the struct.
+            ("update", |v| {
+                v.update = Some(crate::auto_update::BeaconStatus {
+                    paused: true,
+                    schedule_opted_out: false,
+                    channel: crate::auto_update::UpdateChannel::Stable,
+                })
+            }),
+            ("node_facts", |v| v.node_facts = Some(fixture_node_facts())),
+            ("hosted_stores", |v| {
+                v.hosted_stores = crate::hosted_stores::HostedStoresReading::Known(Vec::new())
+            }),
+            ("installed_apps", |v| {
+                v.installed_apps = crate::apps::AppPresence::Known(Vec::new())
+            }),
         ];
 
         for (field, mutate) in &cases {
@@ -1979,13 +2057,50 @@ mod tests {
         // The table is only a guard if it is complete. `renders_same_as` destructures exhaustively, so
         // the field count is fixed at compile time; this pins the table to it.
         assert_eq!(
-            14,
+            18,
             cases.len(),
             "TrayView gained or lost a field — add or remove its case above"
         );
         assert!(
             base.renders_same_as(&base.clone()),
             "an unchanged view must not force a repaint, or the tray rebuilds on every tick"
+        );
+    }
+
+    /// **The other half of the repaint contract: no field may move on every tick**
+    /// (dig_ecosystem#2330).
+    ///
+    /// The table above pins that a changed field repaints. This pins the converse for the one field
+    /// whose SOURCE changes every second — the node's `uptime_secs`. If the bucketing lived in the
+    /// renderer instead of at the seam, the view would differ on every tick and the window would
+    /// rebuild twice a second forever, showing a figure that had not visibly changed.
+    ///
+    /// The assertion is made through `renders_same_as` rather than on `NodeFacts` alone, because the
+    /// property under test is a PLACEMENT — bucket before the view, not after it — and only the
+    /// comparison the shell actually performs can see where the bucketing happened.
+    #[test]
+    fn a_second_of_node_uptime_does_not_repaint_the_window() {
+        use dig_node_control_interface::results::StatusResult;
+        let facts_at = |uptime_secs: u64| {
+            Some(crate::node_facts::NodeFacts::of_status(&StatusResult {
+                uptime_secs,
+                ..crate::test_support::node::fake_status_result()
+            }))
+        };
+        let view_at = |uptime_secs: u64| TrayView {
+            node_facts: facts_at(uptime_secs),
+            ..view(AccountState::Unlocked { recoverable: true })
+        };
+
+        assert!(
+            view_at(4_200).renders_same_as(&view_at(4_259)),
+            "59 further seconds of uptime rebuilt the whole window for a figure nobody can read"
+        );
+        // The control. Without it a `node_facts` dropped from the comparison entirely — or pinned to
+        // `None` — would satisfy the assertion above while freezing the pane.
+        assert!(
+            !view_at(4_200).renders_same_as(&view_at(4_260)),
+            "a whole minute later is a different phrase, and the pane must repaint to show it"
         );
     }
 
@@ -2088,6 +2203,13 @@ mod tests {
     /// the derivation is proven in `account::residency`; what the menu cares about is present vs absent.
     const FIXTURE_ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
 
+    /// The facts a node matching the fixture's `node` line would report — built by DISTILLING a real
+    /// status snapshot rather than hand-writing the struct, so the fixture cannot drift from the
+    /// conversion the shell performs.
+    fn fixture_node_facts() -> crate::node_facts::NodeFacts {
+        crate::node_facts::NodeFacts::of_status(&crate::test_support::node::fake_status_result())
+    }
+
     fn view(account: AccountState) -> TrayView {
         // Only an UNLOCKED account can derive an address, so the fixture mirrors that rather than handing
         // every state an address the shell could never have produced for it.
@@ -2122,6 +2244,12 @@ mod tests {
             // (`crate::window_host`). The four-row trim a windowed host gets has its own tests, which
             // set this to `Available` explicitly.
             window_host: WindowHost::Unavailable,
+            // The three #2330 fields are pinned to the same connected node the `node` line above
+            // describes, so nothing in this suite turns on them. Each is exercised by its own
+            // module's tests and by `window_model`'s pane notes.
+            node_facts: Some(fixture_node_facts()),
+            hosted_stores: crate::hosted_stores::HostedStoresReading::Known(Vec::new()),
+            installed_apps: crate::apps::AppPresence::Known(Vec::new()),
             // A beacon that answered: auto-update on, following stable — the ordinary success case.
             // The tests that describe the absent beacon and the nightly channel null this out or
             // replace it explicitly.
