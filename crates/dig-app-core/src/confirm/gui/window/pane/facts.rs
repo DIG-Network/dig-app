@@ -38,6 +38,13 @@ pub(crate) struct PaneFacts {
     pub(crate) receive_address: Option<String>,
     /// The installed version of this app.
     pub(crate) version: &'static str,
+    /// What the update beacon says about itself, or `None` when it could not be asked.
+    ///
+    /// A READING, and the only honest source for what this machine will do about updates: the
+    /// remembered preference in `agent.json` is what somebody once asked for, which is a different
+    /// fact and is wrong precisely when a privileged change did not take
+    /// ([`crate::auto_update::BeaconStatus`]).
+    pub(crate) update: Option<crate::auto_update::BeaconStatus>,
 }
 
 impl PaneFacts {
@@ -52,6 +59,7 @@ impl PaneFacts {
             cache: view.cache,
             receive_address: view.receive_address.clone(),
             version: env!("CARGO_PKG_VERSION"),
+            update: view.update,
         }
     }
 

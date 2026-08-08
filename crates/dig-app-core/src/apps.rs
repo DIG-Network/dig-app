@@ -50,6 +50,14 @@ pub struct DigApp {
     pub id: AppId,
     /// The name shown in the menu — plain product language, no `dig-` prefix.
     pub display_name: &'static str,
+    /// One line saying what the app IS, for a surface with room for more than a name.
+    ///
+    /// The window's Apps tab draws a card per entry and a card needs a sentence; the tray, which has
+    /// room for a name and nothing else, ignores this. It is registry DATA for the same reason
+    /// [`display_name`](Self::display_name) is — a second app is a row here, never new menu or pane
+    /// code — and it describes the app rather than the click, so no surface can mistake it for a
+    /// verb: what a click DOES is still decided once, by [`crate::tray_menu`].
+    pub tagline: &'static str,
     /// The installed binary's file STEM (no extension). Because DIG components install as siblings in
     /// one bin dir, presence is this stem in dig-app's own directory (see the module docs).
     pub binary_stem: &'static str,
@@ -59,6 +67,8 @@ pub struct DigApp {
 pub const APPS: [DigApp; 1] = [DigApp {
     id: AppId::Chat,
     display_name: "Chat",
+    tagline: "Private messages between DIG accounts, end-to-end encrypted so only the person you \
+              are writing to can read them.",
     binary_stem: "dig-chat",
 }];
 
@@ -203,6 +213,30 @@ mod tests {
         // An exhaustive match so a new AppId variant fails to compile until it is added to APPS.
         match AppId::Chat {
             AppId::Chat => {}
+        }
+    }
+
+    /// **Every registry row carries a tagline that says something the name does not.**
+    ///
+    /// The window draws a card per app, and a card whose sentence is its own title back again is a
+    /// placeholder wearing a description. Both halves are asserted over the WHOLE registry rather
+    /// than over Chat, so the next app cannot be added with an empty or echoing one — which is the
+    /// only moment this can go wrong, since the field is a constant.
+    #[test]
+    fn every_app_describes_itself_in_words_its_name_does_not_already_say() {
+        for entry in APPS {
+            let tagline = entry.tagline.trim();
+            assert!(
+                tagline.len() > entry.display_name.len(),
+                "{}'s tagline ({tagline:?}) is no longer than its name, so the card would say the \
+                 same thing twice",
+                entry.display_name
+            );
+            assert!(
+                tagline.ends_with('.'),
+                "{}'s tagline is not a sentence: {tagline:?}",
+                entry.display_name
+            );
         }
     }
 

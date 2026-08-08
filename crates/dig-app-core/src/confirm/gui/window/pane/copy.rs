@@ -56,6 +56,118 @@ pub(crate) mod status {
         "If DIG is not behaving, the log folder is the first place to look.";
 }
 
+/// The Apps pane.
+pub(crate) mod apps {
+    /// The sentence under the tab's title, saying what the tab is for.
+    pub(crate) const LEAD: &str =
+        "The other DIG apps this computer can open. They share your DIG Account, so there is \
+         nothing to sign in to.";
+    /// The card holding any verb on the tab that is not an app's own.
+    pub(crate) const OTHER_CARD: &str = "Also on this tab";
+    /// The closing line, which is the tab's answer to "where do I install these?".
+    ///
+    /// The honest form of the presence question while dig-app cannot READ presence
+    /// (dig_ecosystem#2330). It says how apps arrive and what a click will tell you, which is
+    /// everything a person can act on — where an "Installed" chip would be a guess drawn as a fact.
+    pub(crate) const INSTALL_NOTE: &str =
+        "DIG apps are installed alongside DIG itself, so there is nothing to download here. Open \
+         one and DIG will either start it or say that this install does not carry it yet.";
+}
+
+/// The Settings pane.
+///
+/// The order the groups are declared in is the order they are drawn in, and it is deliberate:
+/// updates first because it is the one a person comes here for, then the node, then the shortcut.
+pub(crate) mod settings {
+    /// The sentence under the tab's title.
+    pub(crate) const LEAD: &str =
+        "How DIG looks after itself on this computer. Each group says what a change costs before \
+         you make it.";
+
+    /// The updates group.
+    pub(crate) const UPDATES_CARD: &str = "Automatic updates";
+    /// What the updates group controls.
+    pub(crate) const UPDATES_ABOUT: &str =
+        "Whether DIG installs its own updates, and which builds it follows.";
+    /// Said before the update controls, because every one of them costs this.
+    ///
+    /// The row labels carry it too — that is [`crate::tray_menu`]'s rule, and this does not replace
+    /// it. Saying it once above the group is what makes the cost visible to someone reading the
+    /// card rather than reading a button.
+    pub(crate) const UPDATES_COST: &str =
+        "Changing any of these asks Windows for an administrator, because the update schedule \
+         belongs to the whole computer rather than to your account.";
+    /// The readout naming which feed DIG follows.
+    pub(crate) const CHANNEL_LABEL: &str = "Following";
+    /// The readout naming whether the daily check exists.
+    pub(crate) const SCHEDULE_LABEL: &str = "Daily check";
+    /// The panel grouping the channel choice.
+    pub(crate) const CHANNEL_PANEL: &str = "Which builds to follow";
+    /// The label above the channel dropdown.
+    pub(crate) const CHANNEL_FIELD: &str = "Channel";
+    /// Shown in the chooser when no beacon has reported a channel — never the first option, which
+    /// would be a setting nobody reported drawn as one that was.
+    pub(crate) const CHANNEL_UNKNOWN: &str = "Not reported";
+
+    /// The connection group.
+    pub(crate) const NODE_CARD: &str = "Node connection";
+    /// What the connection group controls.
+    pub(crate) const NODE_ABOUT: &str =
+        "Which DIG node this computer reads content through. Leave it automatic unless you run a \
+         node of your own.";
+    /// The field label.
+    pub(crate) const NODE_FIELD: &str = "Node address";
+    /// What an empty field means — never a fake value.
+    pub(crate) const NODE_PLACEHOLDER: &str = "Automatic";
+    /// The field's help text.
+    pub(crate) const NODE_HELP: &str =
+        "A host, or a full http address. Leave it empty and DIG finds a node itself.";
+    /// The readout naming what DIG will actually dial.
+    pub(crate) const NODE_EFFECTIVE: &str = "DIG will use";
+    /// The cost of changing the node, said before the field.
+    pub(crate) const NODE_COST: &str =
+        "A saved address is used the next time DIG starts, so restart DIG after changing it.";
+    /// The button that saves the typed address.
+    pub(crate) const NODE_SAVE: &str = "Save address";
+    /// The escape back to the automatic ladder — always offered, so a bad address is never a trap.
+    pub(crate) const NODE_AUTOMATIC: &str = "Go back to automatic";
+    /// The button that dials the address to see whether anything is there.
+    pub(crate) const NODE_TEST: &str = "Test connection";
+
+    /// The shortcut group.
+    pub(crate) const SHORTCUT_CARD: &str = "Keyboard shortcut";
+    /// What the shortcut group controls.
+    pub(crate) const SHORTCUT_ABOUT: &str = "The keys that open the DIG address bar from anywhere.";
+    /// The field label.
+    pub(crate) const SHORTCUT_FIELD: &str = "Shortcut";
+    /// The field's help text.
+    pub(crate) const SHORTCUT_HELP: &str =
+        "Modifiers and one key, written as Ctrl+Shift+D. Leave it empty for the default.";
+    /// The cost of the default, stated because DIG takes the chord from Windows.
+    pub(crate) const SHORTCUT_COST: &str =
+        "While DIG is running it owns this chord, so Windows will not use it for anything else. \
+         The default, Alt+Space, is the chord Windows uses for a window's own menu.";
+    /// The button that saves the typed chord.
+    pub(crate) const SHORTCUT_SAVE: &str = "Save shortcut";
+    /// The escape back to the shipped chord.
+    pub(crate) const SHORTCUT_DEFAULT: &str = "Go back to the default";
+    /// The readout naming the chord in force.
+    pub(crate) const SHORTCUT_EFFECTIVE: &str = "In use";
+
+    /// Said after a setting has been written and read back.
+    pub(crate) const SAVED: &str = "Saved.";
+    /// Said when the settings file cannot be found or read at all, in place of the controls.
+    ///
+    /// The controls are REMOVED rather than disabled in this state, which is the rule PR #120
+    /// established for the beacon: a switch that cannot move is a switch that will be tried.
+    pub(crate) const NO_CONFIG: &str =
+        "DIG cannot read its settings file on this computer, so these cannot be changed here. Open \
+         the log folder from the Status tab to find out why.";
+
+    /// What the connection test says while it is running.
+    pub(crate) const TESTING: &str = "Asking the node…";
+}
+
 /// The words for the agent's two states, chosen by an exhaustive match rather than a boolean.
 pub(crate) fn agent_state(running: bool) -> &'static str {
     match running {

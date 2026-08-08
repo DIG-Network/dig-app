@@ -1020,6 +1020,37 @@ testable without a desktop.
   (`WindowHost::Unavailable`) also have no elevation route, so the beacon's own CLI is the conforming
   interface there.
 
+### 3.1c-iv The settings the window WRITES (normative)
+
+Beside the auto-update group — which dig-app may only ask the beacon to change (§3.1c-iii) — the Settings
+tab MUST expose the two `agent.json` fields a person otherwise has to hand-edit: the **node address**
+(`node_url`, the ecosystem §5.3 override, whose exposure §5.4 already requires) and the **global shortcut**
+(`open_bar_shortcut`, §3.1c-i). These are values, not verbs; they are written by the pane itself rather than
+dispatched as menu actions.
+
+- **A write MUST be read back, and what is SHOWN MUST be what was read (MUST).** After storing a setting the
+  implementation MUST re-read the file and display that result. This is §3.1c-iii's rule generalised: a
+  write that reported success and did not land MUST leave the previous value on screen, never the typed one.
+- **A refused value MUST NOT reach the file, and the reason MUST name the remedy (MUST).** Validation MUST
+  use the same parsers the agent runs at start-up (`hotkey::Hotkey::parse` for a chord), so a value the pane
+  accepts is a value that will work. A read that fails MUST refuse the write rather than replacing an
+  unreadable config with defaults, which would silently discard fields this surface does not edit.
+- **What DIG will actually use MUST be shown, derived from the code that will use it (MUST).** The effective
+  node address is `control::endpoint_ladder`'s own answer, so the sentence cannot drift from the behaviour,
+  and a bare `host:port` is displayed as the `http://host:port` that will be dialled.
+- **Clearing MUST always be offered and MUST work from an invalid value (MUST).** An empty field means "DIG
+  chooses" and MUST remove the setting rather than storing an empty string. The control that clears it MUST
+  NOT validate the current text first, or a person who typed an address DIG refuses would have no way out
+  (§6.1, never trap the user).
+- **The cost MUST be stated before the control (MUST).** A saved node address and a saved chord both take
+  effect at the next start, and the default chord displaces the Windows window menu (§3.1c-i); both MUST be
+  said in the surface rather than discovered afterwards.
+- **A host with no readable settings file MUST say so INSTEAD of drawing the form (MUST).** The same rule as
+  an unreachable beacon: a control that cannot take effect MUST NOT be drawn, disabled or otherwise.
+- **A connection test, where offered, MUST make the agent's own request** (`control.fetch_status` over the
+  §5.1.0 ladder) and MUST report the endpoint that answered or every candidate's reason for not answering.
+  It MUST NOT block the frame, and its answer MUST be withdrawn when the address is edited.
+
 **The Apps surface (MUST, dig_ecosystem#2101).** The menu MUST offer an **Apps** submenu grouping the other
 DIG apps this install can open, so a sibling app (Chat today; dig-email, dig-video-chat to follow — §5.4) is
 reachable from the one surface a person has on a fresh install. Binding rules:
@@ -1040,6 +1071,13 @@ reachable from the one surface a person has on a fresh install. Binding rules:
   material MUST NOT be placed on the child's command line, because pairing is the launched app's own job
   (§5.4). The launch-vs-notice decision is a pure function (`dig_app_core::apps::plan_launch`) so both
   outcomes are tested without spawning a process or drawing a window.
+- **The window's Apps tab MUST NOT state presence (MUST).** It renders one card per registry entry — the
+  display name, the registry's one-line description, and the model's launch row unchanged — and MUST NOT
+  show an installed/not-installed indicator or grey a row, because presence is discovered inside the click
+  and this surface cannot read it. A card MUST NOT re-word the model's label, and the tab MUST say how apps
+  arrive (alongside DIG, with nothing to download) so the question a chip would answer is still answered.
+  A per-app version MUST NOT be shown: no source for one exists that does not mean spawning every app to
+  ask.
 
 ### 3.1d Native input, modals and prompts (normative)
 
