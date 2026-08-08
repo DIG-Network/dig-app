@@ -123,6 +123,7 @@ fn main() {
         // terminal beside the screenshot, and it is the honest thing for an example with no worker
         // and no account behind it to do.
         act: Arc::new(|action| println!("a row was clicked: {action:?}")),
+        initial_tab: None,
     }) {
         eprintln!("this host cannot draw the DIG app window");
         std::process::exit(1);

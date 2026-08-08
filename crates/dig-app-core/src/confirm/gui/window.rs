@@ -264,6 +264,16 @@ pub struct AppWindow {
     /// deadlock. A window row dispatches exactly as a tray click does, on a worker, and this
     /// callback is the seam that makes that the only expressible option.
     pub act: Arc<dyn Fn(crate::tray_menu::TrayAction) + Send + Sync>,
+    /// The tab to open on, or `None` for the usual first tab.
+    ///
+    /// Exists so a gallery can photograph a tab that is not the one the window opens on. Reaching
+    /// the fourth tab otherwise takes a CLICK, and a capture harness must not synthesise input —
+    /// driving a click to set up a screenshot is how a capture ends up photographing whatever the
+    /// pointer happened to land on rather than the surface under review (dig_ecosystem#2326).
+    ///
+    /// A caller that leaves this `None` gets the shipping behaviour unchanged, so the gallery seam
+    /// cannot alter what a person sees.
+    pub initial_tab: Option<crate::window_model::TabId>,
 }
 
 /// The long-lived thread every prompt window is drawn on.
@@ -4998,6 +5008,7 @@ mod tests {
                     theme: self.store.clone(),
                     view: Arc::new(crate::tray_menu::TrayView::default),
                     act: Arc::new(|_| {}),
+                    initial_tab: None,
                 }))
                 .expect("the prompt thread is still accepting jobs");
         }
