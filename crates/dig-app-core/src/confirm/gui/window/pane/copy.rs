@@ -460,7 +460,23 @@ pub(crate) mod cache {
     pub(crate) const USAGE_UNKNOWN: &str =
         "No node has reported its cache yet, so how much disk DIG is using is not known. Start the \
          DIG node and this fills in.";
-    /// The aside under the size-limit buttons.
+    /// The label above the size-limit chooser.
+    pub(crate) const LIMIT_FIELD: &str = "Limit";
+    /// Said in the closed chooser when no node has reported a cap at all.
+    ///
+    /// Never the first preset: a chooser resting on `256 MiB` is indistinguishable from one
+    /// reporting that 256 MiB is the limit, which is a setting nobody has told this window about.
+    pub(crate) const LIMIT_UNKNOWN: &str = "Not reported";
+    /// Said in the closed chooser when the node's cap is real but is not one of the presets.
+    ///
+    /// A cap set through `Custom size…` matches no option in the list, and the honest answer is the
+    /// figure itself — saying "not reported" about a limit the node has plainly reported would deny
+    /// a setting that exists.
+    pub(crate) fn limit_custom(size: &str) -> String {
+        format!("{size} (a custom size)")
+    }
+
+    /// The aside under the size-limit chooser.
     pub(crate) const LIMIT_HINT: &str =
         "Choosing a limit below what is already used makes the node delete cached content to fit. \
          DIG asks before it does that.";

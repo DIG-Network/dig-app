@@ -113,23 +113,46 @@ fn press<Id>(ui: &mut Ui, rect: Rect, t: &Tokens, live: bool, action: &Action<Id
     .clicked()
 }
 
-/// Assign a weight to each action in a group the model has already ordered.
+/// Assign a weight to an action from what it DOES.
 ///
-/// # The rule, stated once
+/// # Emphasis is not a position (dig_ecosystem#2354)
 ///
-/// The FIRST enabled action in a group is its primary; everything else is a ghost; anything the
-/// caller has named destructive is drawn as danger wherever it sits. That is a decision about
-/// emphasis within an ordering the model chose — it reads `enabled`, and it never changes it.
+/// This used to make the first enabled action of every group the pane's primary, which meant nothing
+/// about a control's meaning entered the decision. Three panes were visibly wrong because of it, and
+/// the gallery caught all three: Settings' loudest control was *"Turn auto-update off (asks for
+/// administrator)…"*, so the most prominent thing on the tab disabled a safety feature; the Account
+/// tab's brightest control was a documentation LINK, so the pane's emphasis pointed away from itself;
+/// and the Cache tab had to override the rule by hand to stop `256 MiB` being drawn as a
+/// recommendation.
 ///
-/// A group whose first action is disabled has NO primary, deliberately: promoting the first
-/// *pressable* one would make the pane's most prominent control move as the account's state changes,
-/// and a person would learn that the big button is wherever it happens to be today.
-pub(crate) fn weigh(index: usize, enabled: bool, destructive: bool) -> Weight {
-    match (destructive, index, enabled) {
-        (true, _, _) => Weight::Danger,
-        (false, 0, true) => Weight::Primary,
-        _ => Weight::Ghost,
+/// So the default is now the honest one: **nothing is a primary unless a pane says so.** Danger is
+/// still decided here, because it follows from the action alone — a destroy is a destroy wherever it
+/// sits, and that must not be a per-pane choice anyone can forget to make. A pane that has one verb
+/// worth leading with names it through [`promote`]; a pane with none — which is most of them —
+/// simply does not call it.
+pub(crate) fn weigh(destructive: bool) -> Weight {
+    match destructive {
+        true => Weight::Danger,
+        false => Weight::Ghost,
     }
+}
+
+/// Name the ONE action a pane leads with, and draw it as the primary.
+///
+/// Returns the group unchanged when `lead` names nothing in it, or names something the model has
+/// disabled — a disabled primary is a bright control that cannot be pressed, and a pane whose
+/// loudest button moves to whatever happens to be pressable today is the defect [`weigh`] describes.
+///
+/// A destructive action is never promoted. Its weight follows what it does, and a destroy drawn as
+/// the friendly affirmative is the one mistake this vocabulary must make impossible.
+pub(crate) fn promote<Id: PartialEq>(mut actions: Vec<Action<Id>>, lead: &Id) -> Vec<Action<Id>> {
+    if let Some(action) = actions
+        .iter_mut()
+        .find(|action| &action.id == lead && action.enabled && action.weight != Weight::Danger)
+    {
+        action.weight = Weight::Primary;
+    }
+    actions
 }
 
 #[cfg(test)]
@@ -147,28 +170,77 @@ mod tests {
         }
     }
 
-    /// **The first action of a group leads it, and the rest recede.**
+    /// **No position makes an action the primary — only a pane naming it (dig_ecosystem#2354).**
     ///
-    /// Pinned on the weighting rule rather than on pixels, and from both sides of the one case that
-    /// is easy to get wrong: a group whose FIRST action is disabled has no primary at all, rather
-    /// than promoting the second and moving the pane's loudest control around under the reader.
+    /// [`weigh`] no longer takes a position at all, so the old rule is unexpressible rather than
+    /// merely unused. What remains checkable is that it never yields `Primary` on its own, and that
+    /// danger still follows the action.
     #[test]
-    fn a_groups_emphasis_follows_its_order_and_never_moves_when_a_verb_is_disabled() {
-        assert_eq!(weigh(0, true, false), Weight::Primary);
-        assert_eq!(weigh(1, true, false), Weight::Ghost);
+    fn weight_alone_never_promotes_anything_and_danger_still_follows_the_action() {
+        assert_eq!(weigh(false), Weight::Ghost);
+        assert_eq!(weigh(true), Weight::Danger);
+    }
+
+    /// **A pane that names its lead gets exactly one primary, and only when it can be pressed.**
+    ///
+    /// The fixture varies ONE actor at a time against a truthful control. The disabled case is the
+    /// one that matters: promoting a verb the model refuses would draw a bright button a person
+    /// cannot press, and the group must come back with no primary at all rather than the next
+    /// pressable one — which is the moving-emphasis defect stated as an assertion.
+    #[test]
+    fn naming_a_lead_promotes_it_once_and_refuses_a_verb_the_model_disabled() {
+        let group = || {
+            vec![
+                action("Open the log folder", 0, Weight::Ghost, true),
+                action("Check for updates now", 1, Weight::Ghost, true),
+            ]
+        };
+
+        let led = promote(group(), &1);
         assert_eq!(
-            weigh(0, false, false),
-            Weight::Ghost,
-            "a disabled leading action must not be drawn as the primary"
+            led[1].weight,
+            Weight::Primary,
+            "the named lead was not drawn as the primary"
         );
         assert_eq!(
-            weigh(1, true, false),
+            led[0].weight,
             Weight::Ghost,
-            "the second action must not be promoted when the first is disabled"
+            "naming one lead promoted a second control as well"
         );
-        // Destructive wins wherever it sits, including first.
-        assert_eq!(weigh(0, true, true), Weight::Danger);
-        assert_eq!(weigh(3, true, true), Weight::Danger);
+        assert_eq!(
+            led.iter().filter(|a| a.weight == Weight::Primary).count(),
+            1
+        );
+
+        // Naming nothing on the pane leaves the group exactly as it was.
+        assert_eq!(promote(group(), &7), group());
+
+        // A disabled lead is refused, and — the control that makes this load-bearing — its enabled
+        // sibling is NOT promoted in its place.
+        let mut disabled = group();
+        disabled[1].enabled = false;
+        let refused = promote(disabled, &1);
+        assert!(
+            refused.iter().all(|a| a.weight != Weight::Primary),
+            "a disabled lead was drawn as the pane's brightest control, or its neighbour was \
+             promoted in its place"
+        );
+    }
+
+    /// **A destroy is never promoted, however loudly a pane asks.**
+    ///
+    /// The one mistake this vocabulary must make impossible: a destroy drawn as the friendly
+    /// affirmative. Asserted with the destroy named as the lead, which is the only way it could ever
+    /// happen.
+    #[test]
+    fn a_destroying_verb_cannot_be_promoted_into_the_affirmative() {
+        let group = vec![action(
+            "Remove this account from this computer…",
+            0,
+            Weight::Danger,
+            true,
+        )];
+        assert_eq!(promote(group, &0)[0].weight, Weight::Danger);
     }
 
     /// A body that draws a real button group and can click and type at it.

@@ -25,6 +25,7 @@ use super::data::{self, Readout, Tone, Value};
 use super::facts::PaneFacts;
 use super::field;
 use super::flow::Flow;
+use super::select::{self, Choice};
 use super::state::{self, PaneState};
 use super::text;
 use crate::cache::CacheSnapshot;
@@ -59,7 +60,7 @@ pub(crate) fn draw(
 ) -> Option<TrayAction> {
     usage_card(flow, t, facts.cache);
     flow.gap(space::S4);
-    let pressed = limit_card(flow, t, tab);
+    let pressed = limit_card(flow, t, tab, facts.cache);
     flow.gap(space::S4);
     // `None`: the view carries no list yet, so the card says so rather than showing an empty one —
     // an empty list and an unread list are different claims, and only one of them is true here.
@@ -104,23 +105,154 @@ fn usage_card(flow: &mut Flow, t: &Tokens, cache: Option<CacheSnapshot>) {
     });
 }
 
-/// The size-limit choices, exactly as the model decided them, with what a smaller one costs.
-fn limit_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let actions = peers(super::actions_of(tab));
-    if actions.is_empty() {
+/// The size limit: a chooser over the presets, the verb that opens a custom one, and the cost.
+///
+/// # Why a chooser, and why the group had to be taken apart first (dig_ecosystem#2355)
+///
+/// The limit is a SETTING with one value in force, which is what [`super::select`] exists to say —
+/// its own doc names a cache preset as the case it was built for, and the update channel already
+/// uses it. Drawn as buttons instead, the card put seven pills across two rows that wrapped to four
+/// ragged rows at 480 px, and it mixed three different KINDS of thing into one run of identical
+/// controls: six values, one verb, and a help link. A link that navigates looked exactly like a
+/// value that selects.
+///
+/// So the group is partitioned by what each element IS. The presets become choices, `Custom size…`
+/// becomes a ghost button beside the chooser because it opens something rather than being something,
+/// and the privacy link leaves the control group entirely for the foot of the card.
+fn limit_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    tab: &Tab,
+    cache: Option<CacheSnapshot>,
+) -> Option<TrayAction> {
+    let parts = LimitRows::of(tab);
+    if parts.is_empty() {
         return None;
     }
     let live = flow.live();
+    let options = parts.options();
+    let selected = parts.preset_in_force(cache);
+    let unknown = parts.unknown_label(cache);
+
     flow.place(|ui, at| {
         let (height, pressed) =
             card::interactive_card(ui, at, t, live, Some(copy::cache::LIMIT_CARD), |inner| {
-                let hit = inner.place(|ui, at| action::buttons(ui, at, t, live, &actions));
-                inner.gap(space::S3);
+                let mut hit = None;
+                if !options.is_empty() {
+                    hit = inner.place(|ui, at| {
+                        select::select(
+                            ui,
+                            at,
+                            t,
+                            live,
+                            &select::Select {
+                                label: copy::cache::LIMIT_FIELD,
+                                options: &options,
+                                selected,
+                                unknown: &unknown,
+                                id: egui::Id::new("dig-cache-size-limit"),
+                            },
+                        )
+                    });
+                    inner.gap(space::S3);
+                }
+                if !parts.verbs.is_empty() {
+                    hit = hit
+                        .or(inner.place(|ui, at| action::buttons(ui, at, t, live, &parts.verbs)));
+                    inner.gap(space::S3);
+                }
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::cache::LIMIT_HINT), ()));
+                if !parts.about.is_empty() {
+                    inner.gap(space::S3);
+                    hit = hit
+                        .or(inner.place(|ui, at| action::buttons(ui, at, t, live, &parts.about)));
+                }
                 hit
             });
         (height, pressed.flatten())
     })
+}
+
+/// The limit card's rows, sorted by what each one IS rather than by where it sits.
+///
+/// Matched on the ACTION, never on the label: the preset labels carry a `— current` marker that
+/// moves as the setting changes, and a partition that read the words would re-sort itself the first
+/// time one was reworded (`settings::channel_in_force` records the same rule for the channel).
+struct LimitRows {
+    /// The size presets — the values one of which is in force.
+    presets: Vec<Action<TrayAction>>,
+    /// The verbs that OPEN something rather than being a value. `Custom size…` today.
+    verbs: Vec<Action<TrayAction>>,
+    /// The explainer link, which is neither a value nor a verb on this setting.
+    ///
+    /// Kept as the model's own row rather than written here, and rendered at the foot of the card
+    /// away from the control group — where it can no longer be mistaken for a size.
+    about: Vec<Action<TrayAction>>,
+}
+
+impl LimitRows {
+    /// Sort `tab`'s rows, keeping the model's order and its element ids.
+    fn of(tab: &Tab) -> Self {
+        let mut rows = Self {
+            presets: Vec::new(),
+            verbs: Vec::new(),
+            about: Vec::new(),
+        };
+        for action in super::actions_of(tab) {
+            match action.id {
+                TrayAction::SetCacheCap { .. } => rows.presets.push(action),
+                TrayAction::SetCustomCacheCap => rows.verbs.push(action),
+                // Includes the row the model emits INSTEAD of the presets when no node has been
+                // reached — `Change the size limit (connect a node first)…`, which is an explainer
+                // wearing a setting's name. It routes to the same place and belongs with the link.
+                _ => rows.about.push(action),
+            }
+        }
+        rows
+    }
+
+    fn is_empty(&self) -> bool {
+        self.presets.is_empty() && self.verbs.is_empty() && self.about.is_empty()
+    }
+
+    /// The presets as choices, with the model's labels verbatim — marker included.
+    fn options(&self) -> Vec<Choice<TrayAction>> {
+        self.presets
+            .iter()
+            .map(|action| Choice {
+                label: action.label.clone(),
+                id: action.id,
+            })
+            .collect()
+    }
+
+    /// Which preset the node's own cap matches, or `None` when none of them does.
+    ///
+    /// Read from the CAP the snapshot reports — the same figure the model builds its `— current`
+    /// marker from — rather than by looking for that marker's words. A cap a person set through
+    /// `Custom size…` matches no preset, and `None` is the truthful answer there: the chooser then
+    /// draws [`unknown_label`](Self::unknown_label) instead of resting on a preset nobody chose.
+    fn preset_in_force(&self, cache: Option<CacheSnapshot>) -> Option<usize> {
+        let cap = cache?.cap_bytes;
+        self.presets.iter().position(
+            |action| matches!(action.id, TrayAction::SetCacheCap { bytes } if bytes == cap),
+        )
+    }
+
+    /// What the closed chooser says when no preset is in force.
+    ///
+    /// Two different absences, and they must not share a sentence. A node that has reported a cap
+    /// this list does not contain HAS a limit, and the honest thing is to state it — so the control
+    /// says the real figure rather than "not reported", which would deny a setting that exists. With
+    /// no snapshot at all nothing has been read, and that is the one that says so.
+    fn unknown_label(&self, cache: Option<CacheSnapshot>) -> String {
+        match cache {
+            Some(snapshot) => {
+                copy::cache::limit_custom(&crate::cache::format_cap(snapshot.cap_bytes))
+            }
+            None => copy::cache::LIMIT_UNKNOWN.to_string(),
+        }
+    }
 }
 
 /// What this computer mirrors: the list, its two empty states, or the fact that it is not read yet.
@@ -320,29 +452,6 @@ fn problem(typed: &str) -> Option<String> {
     }
 }
 
-/// Draw a group of equals as equals.
-///
-/// # Why this card overrides the default weight
-///
-/// [`action::weigh`] makes the first enabled verb in a group the primary, which is right where a
-/// group has a lead action. A row of cache-size presets has none: they are alternatives, and one of
-/// them is already in force. Drawing `256 MiB` as the pane's brightest control recommends the
-/// smallest cache on a screen whose current setting is 10 GiB — an emphasis the model never
-/// expressed. Weight is presentation, so this is a presentation choice; the verbs and their
-/// enablement are untouched.
-fn peers(actions: Vec<Action<TrayAction>>) -> Vec<Action<TrayAction>> {
-    actions
-        .into_iter()
-        .map(|action| Action {
-            weight: match action.weight {
-                Weight::Danger => Weight::Danger,
-                _ => Weight::Ghost,
-            },
-            ..action
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,53 +594,177 @@ mod tests {
         );
     }
 
-    /// **No size preset is drawn as the pane's primary, and every verb survives.**
-    ///
-    /// Found by looking at the pane: `256 MiB` — first in the model's order — was rendered in the
-    /// accent gradient while the card's own caption said the current limit was 10 GiB, which reads as
-    /// a recommendation to shrink the cache. Asserted both ways: nothing is `Primary`, AND the same
-    /// verbs come back with the same enablement, so a "fix" that dropped or disabled a preset to make
-    /// the first assertion true fails the second.
-    #[test]
-    fn the_size_presets_are_drawn_as_peers_and_none_is_lost() {
+    /// The Cache tab as the real model builds it for `cap`.
+    fn cache_tab(cap: u64) -> Tab {
         let view = crate::tray_menu::TrayView {
             running: true,
             node_connected: true,
             cache: Some(CacheSnapshot {
-                cap_bytes: 10 * GIB,
+                cap_bytes: cap,
                 used_bytes: 407 * MIB,
             }),
             ..crate::tray_menu::TrayView::default()
         };
-        let model = crate::window_model::build(&view);
-        let tab = model
-            .tabs
-            .iter()
-            .find(|tab| tab.id == crate::window_model::TabId::Cache)
-            .expect("the Cache tab exists with a node connected");
+        crate::window_model::build(&view)
+            .tab(crate::window_model::TabId::Cache)
+            .cloned()
+            .expect("the Cache tab exists with a node connected")
+    }
 
-        let decided = super::super::actions_of(tab);
-        assert!(
-            decided
+    /// **The chooser rests on the preset the model marks as current — for every preset, not one.**
+    ///
+    /// The property is that the control's selection and the model's `— current` marker name the SAME
+    /// option. The fixture drives every preset in turn, because a selection derived from a position
+    /// — or from the first option, or from the last — agrees with the marker on exactly one cap and
+    /// disagrees everywhere else; a single-cap fixture cannot tell those apart.
+    ///
+    /// The marker is what the assertion compares against rather than the cap the test fed in. That
+    /// is deliberate: the marker is the model's own published answer, so this fails if the pane and
+    /// the model ever come to disagree about which limit is in force, which is the only failure that
+    /// matters to a reader.
+    #[test]
+    fn the_chooser_rests_on_the_very_preset_the_model_marks_as_current() {
+        for &cap in crate::cache::CACHE_PRESETS.iter() {
+            let tab = cache_tab(cap);
+            let rows = LimitRows::of(&tab);
+            let snapshot = CacheSnapshot {
+                cap_bytes: cap,
+                used_bytes: 407 * MIB,
+            };
+
+            let marked: Vec<usize> = rows
+                .presets
                 .iter()
-                .any(|action| action.weight == Weight::Primary),
-            "the default weighting produced no primary, so this test cannot see one being removed"
-        );
-        let drawn = peers(decided.clone());
+                .enumerate()
+                .filter(|(_, action)| action.label.contains("— current"))
+                .map(|(at, _)| at)
+                .collect();
+            assert_eq!(
+                marked.len(),
+                1,
+                "the model marked {} presets as current at a {cap}-byte cap, so there is no single \
+                 answer for the chooser to agree with",
+                marked.len()
+            );
+            assert_eq!(
+                rows.preset_in_force(Some(snapshot)),
+                Some(marked[0]),
+                "the chooser and the model disagree about which limit is in force at {cap} bytes"
+            );
+        }
+    }
+
+    /// **A cap the presets do not contain is stated, not rounded to a neighbouring preset.**
+    ///
+    /// The custom-size case, and the honesty rule on a chooser: resting on `1 GiB` because the real
+    /// limit is nearest to it would report a setting nobody chose. Three actors — a custom cap, no
+    /// snapshot at all, and a genuine preset as the control — because the first two are DIFFERENT
+    /// absences and a chooser that said "Not reported" for both would deny a limit the node has
+    /// plainly reported.
+    #[test]
+    fn a_custom_cap_is_named_rather_than_resting_on_the_nearest_preset() {
+        let custom = 3 * GIB + 512 * MIB;
         assert!(
-            drawn.iter().all(|action| action.weight != Weight::Primary),
-            "a size preset is still drawn as the pane's primary control"
+            !crate::cache::CACHE_PRESETS.contains(&custom),
+            "the fixture's cap is a preset, so it cannot exercise the custom case"
+        );
+        let snapshot = CacheSnapshot {
+            cap_bytes: custom,
+            used_bytes: 407 * MIB,
+        };
+        let rows = LimitRows::of(&cache_tab(custom));
+
+        assert_eq!(
+            rows.preset_in_force(Some(snapshot)),
+            None,
+            "a cap matching no preset was drawn as though a preset were in force"
+        );
+        let said = rows.unknown_label(Some(snapshot));
+        assert!(
+            said.contains(&crate::cache::format_cap(custom)),
+            "the chooser did not say what the limit actually is: {said}"
+        );
+        assert_ne!(
+            said,
+            rows.unknown_label(None),
+            "a reported custom limit and an unreported one are shown the same words, so one of the \
+             two readers is being told something untrue"
+        );
+        assert_eq!(rows.unknown_label(None), copy::cache::LIMIT_UNKNOWN);
+
+        // The control: a real preset still resolves, so `None` above is a finding rather than a
+        // lookup that never matches anything.
+        let preset = crate::cache::CACHE_PRESETS[0];
+        assert!(LimitRows::of(&cache_tab(preset))
+            .preset_in_force(Some(CacheSnapshot {
+                cap_bytes: preset,
+                used_bytes: 0,
+            }))
+            .is_some());
+    }
+
+    /// **The three kinds of row on this card are told apart, and none is lost.**
+    ///
+    /// The whole point of #2355: a help link that navigates was drawn identically to a size that
+    /// selects. Asserted as a partition — every row the model offered lands in exactly one group —
+    /// so a sort that dropped the privacy link to tidy the card fails, as does one that left it
+    /// among the values.
+    #[test]
+    fn each_row_is_sorted_by_what_it_is_and_nothing_is_dropped() {
+        let tab = cache_tab(crate::cache::CACHE_PRESETS[0]);
+        let rows = LimitRows::of(&tab);
+
+        assert_eq!(
+            rows.presets.len(),
+            crate::cache::CACHE_PRESETS.len(),
+            "a size preset did not reach the chooser"
         );
         assert_eq!(
-            drawn
-                .iter()
-                .map(|action| (action.label.clone(), action.enabled, action.id))
-                .collect::<Vec<_>>(),
-            decided
-                .iter()
-                .map(|action| (action.label.clone(), action.enabled, action.id))
-                .collect::<Vec<_>>(),
-            "changing the weight changed which verbs are offered or whether they are enabled"
+            rows.verbs.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![TrayAction::SetCustomCacheCap],
+            "`Custom size…` is a verb and must sit beside the chooser, not inside it"
+        );
+        assert_eq!(
+            rows.about.iter().map(|a| a.id).collect::<Vec<_>>(),
+            vec![TrayAction::AboutCache],
+            "the privacy link is still inside the control group, where it looks like a size"
+        );
+
+        let mut sorted: Vec<TrayAction> = rows
+            .presets
+            .iter()
+            .chain(&rows.verbs)
+            .chain(&rows.about)
+            .map(|a| a.id)
+            .collect();
+        let mut offered = tab.actions();
+        sorted.sort_by_key(|a| format!("{a:?}"));
+        offered.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(sorted, offered, "a verb the model offered reached no group");
+    }
+
+    /// **With no node the card offers the model's explainer and no chooser at all.**
+    ///
+    /// The model emits no presets in this state, and a chooser over an empty list would be a control
+    /// with nothing in it. The row it does emit is kept rather than dropped, so the surface still
+    /// does something visible (#1800).
+    #[test]
+    fn an_unread_cache_offers_the_explainer_and_no_chooser() {
+        let tab = crate::window_model::build(&crate::tray_menu::TrayView {
+            running: true,
+            cache: None,
+            ..crate::tray_menu::TrayView::default()
+        })
+        .tab(crate::window_model::TabId::Cache)
+        .cloned()
+        .expect("the Cache tab is emitted with no node");
+
+        let rows = LimitRows::of(&tab);
+        assert!(rows.presets.is_empty(), "a preset was offered with no node");
+        assert!(rows.options().is_empty());
+        assert!(
+            !rows.about.is_empty(),
+            "the tab offers nothing at all, so a person has no route to the explanation"
         );
     }
 

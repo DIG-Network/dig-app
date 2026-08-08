@@ -222,13 +222,12 @@ pub(crate) fn actions_in(
             // Separators divide a LIST; a group of buttons is not one.
             MenuRow::Separator | MenuRow::Submenu { .. } => None,
         })
-        .enumerate()
-        .map(|(index, (act, label, enabled))| {
+        .map(|(act, label, enabled)| {
             let occurrence = seen.entry(label.clone()).or_insert(0);
             let element = row_element_id(&label, *occurrence);
             *occurrence += 1;
             action::Action {
-                weight: action::weigh(index, enabled, is_destructive(act)),
+                weight: action::weigh(is_destructive(act)),
                 element,
                 label,
                 enabled,
@@ -352,6 +351,87 @@ mod tests {
                 .iter()
                 .any(|a| a.weight != super::super::super::render::Weight::Danger),
             "every verb on the tab came out destructive, so the registry is not discriminating"
+        );
+    }
+
+    /// **The shared derivation promotes nothing, on any tab, in any account state.**
+    ///
+    /// The structural half of dig_ecosystem#2354. Every pane builds its buttons from
+    /// [`actions_in`] — so once this cannot produce a `Primary`, the only way one exists anywhere in
+    /// the window is a pane naming it through [`action::promote`], and "at most one primary per
+    /// pane" stops being a convention anyone can forget and becomes a property of the code.
+    ///
+    /// Swept over every tab in every account state rather than one, because the tab set and its rows
+    /// both change with the state — and the two defects the gallery caught lived in states a single
+    /// fixture would not have visited: an `Unsupported` host whose only verb is a documentation
+    /// link, and a Settings tab whose beacon could not be asked.
+    #[test]
+    fn no_tab_in_any_account_state_promotes_a_verb_by_where_it_sits() {
+        use crate::tray_menu::{AccountState, TrayView};
+
+        let mut swept = 0;
+        for account in [
+            AccountState::Unsupported,
+            AccountState::Absent,
+            AccountState::Locked,
+            AccountState::Unopenable,
+            AccountState::NeedsPassword,
+            AccountState::Unlocked { recoverable: true },
+        ] {
+            let model = crate::window_model::build(&TrayView {
+                running: true,
+                node_connected: true,
+                account: Some(account.clone()),
+                cache: Some(crate::cache::CacheSnapshot {
+                    cap_bytes: 10 * crate::cache::GIB,
+                    used_bytes: 407 * crate::cache::MIB,
+                }),
+                ..TrayView::default()
+            });
+            for tab in &model.tabs {
+                for drawn in actions_of(tab) {
+                    swept += 1;
+                    assert_ne!(
+                        drawn.weight,
+                        crate::confirm::gui::render::Weight::Primary,
+                        "“{}” on the {:?} tab ({account:?}) was promoted by the derivation itself",
+                        drawn.label,
+                        tab.id
+                    );
+                }
+            }
+        }
+        assert!(
+            swept > 20,
+            "only {swept} verbs were examined, which is too few to have visited the tabs this \
+             guard is about"
+        );
+    }
+
+    /// **…and exactly one pane still names a lead, so the window has not simply lost emphasis.**
+    ///
+    /// The control for the sweep above, which deleting `Weight::Primary` outright would satisfy.
+    /// Security is the pane the MODEL designates a lead for — the one thing this account needs from
+    /// the user right now — and it must still be the pane's loudest control.
+    #[test]
+    fn the_security_pane_still_leads_with_the_verb_the_model_designates() {
+        use crate::tray_menu::{AccountState, TrayView};
+
+        let model = crate::window_model::build(&TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        let tab = model.tab(TabId::Security).expect("Security is emitted");
+        let promoted = security::promoted_lead(tab).expect("a locked account leads with Unlock…");
+        assert_eq!(
+            promoted.id,
+            tab.actions()[0],
+            "the promoted verb is not the model's own leading row"
+        );
+        assert_eq!(
+            promoted.weight,
+            crate::confirm::gui::render::Weight::Primary
         );
     }
 

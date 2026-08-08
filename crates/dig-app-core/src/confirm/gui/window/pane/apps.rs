@@ -254,10 +254,12 @@ mod tests {
             .expect("the model offers a launch row for the first registry app");
         assert_eq!(action.label, label, "the pane re-worded the model's label");
         assert!(action.enabled, "the pane greyed an app the model offered");
-        assert_eq!(
+        assert_ne!(
             action.weight,
             Weight::Primary,
-            "the leading enabled verb on the tab is not the pane's primary control"
+            "an app is drawn as the pane's primary. The apps on this tab are peers — there is no \
+             one of them a person came here to open — and promoting whichever the registry lists \
+             first is the positional emphasis dig_ecosystem#2354 removed"
         );
     }
 

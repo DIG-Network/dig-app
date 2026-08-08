@@ -189,6 +189,14 @@ fn line_card(
     })
 }
 
+/// The verb this pane promotes on `tab`, as it will be drawn.
+///
+/// The single-source answer to "which control on this window is the primary", for the guard that
+/// checks nothing else is (dig_ecosystem#2354).
+pub(crate) fn promoted_lead(tab: &Tab) -> Option<Action<TrayAction>> {
+    Parts::of(tab).lead_action().cloned()
+}
+
 /// The tab's rows, sorted into the three things this pane is about.
 ///
 /// # Sorting by action, not by position
@@ -240,7 +248,23 @@ impl Parts {
                 _ => parts.lead.push(action),
             }
         }
+
+        // The one promotion in the whole window (dig_ecosystem#2354). Security is the only pane the
+        // MODEL designates a lead for: `security_actions` puts the thing this account needs from the
+        // user right now at the top in every state, and `urgent_account_row` promotes the same verb
+        // on the tray. So this pane is naming a decision made upstream, not making one from a
+        // position — which is precisely the distinction the positional rule could not draw.
+        if let Some(lead) = parts.lead.first().map(|action| action.id) {
+            parts.lead = action::promote(std::mem::take(&mut parts.lead), &lead);
+        }
         parts
+    }
+
+    /// The verb this pane leads with, already weighted — the window's one promotion.
+    ///
+    /// Exposed so the cross-pane guard in [`super`] can name it without rebuilding the sort.
+    pub(crate) fn lead_action(&self) -> Option<&Action<TrayAction>> {
+        self.lead.first()
     }
 
     /// The leading row's label, for a sentence that must name the way forward exactly.
