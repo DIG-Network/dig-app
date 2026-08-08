@@ -84,8 +84,6 @@ pub(crate) mod status {
     ];
     /// Said in place of every figure on the sharing card, because none of them is a reading.
     pub(crate) const SHARING_UNKNOWN: &str = "Not read from the node yet.";
-    /// The meter above the cache bar.
-    pub(crate) const CACHE_METER_LABEL: &str = "Cache used against its limit";
 
     /// Said in place of a cache reading when no node has reported one.
     pub(crate) const CACHE_UNKNOWN: &str =
