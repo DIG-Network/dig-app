@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "7.0.1"
+version = "8.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -91,7 +91,7 @@ dig-session = "0.5"
 # so the crate's own `PolicyAuthorizer` is now mechanically the only thing that can permit a spend.
 # Consumed as the published crates.io release (release-first, §4.1), never a git source (§3.6
 # all-crates rule).
-dig-account = "0.5.0"
+dig-account = "0.6.0"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account
@@ -191,9 +191,20 @@ hex = "0.4"
 chip35-dl-coin = "0.8"
 chia-bls = "0.26"
 chia-protocol = "0.26"
+# The ONE canonical chain-READ seam (reads only — it deliberately cannot broadcast). dig-account's
+# mint is generic over it, so the DID mint reads coins, peak height and its own confirmation through
+# this trait and dig-app can hand it any provider without dig-account knowing which.
+dig-chainsource-interface = "0.1"
 chia-puzzle-types = "0.26"
 chia-sdk-driver = "0.30"
 chia-sdk-signer = "0.30"
+# The in-process Chia consensus validator (dev-only). The DID-mint tests run their bundle through the
+# same CLVM + BLS verification a full node runs, so a mint that confirms in them is one whose puzzles
+# and signatures are genuinely correct — not one a hand-written double agreed with.
+chia-sdk-test = "0.30"
+# TESTNET11 consensus constants for that validator: a bundle signed under mainnet's AGG_SIG_ME domain
+# verifies nowhere else, so the fixture must sign under the constants it validates against.
+chia-wallet-sdk = { version = "0.30", default-features = false }
 chia-sdk-types = "0.30"
 chia-traits = "0.26"
 clvm-traits = "0.26"

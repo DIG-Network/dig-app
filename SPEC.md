@@ -269,15 +269,34 @@ value that merely has DID-shaped text in it — a profile reference, a config en
 an on-chain DID, because doing so tells the user they have a published, verifiable identity they do not
 have.
 
-**Current state:** minting is not implemented, so no profile can have a DID and there is no tray action that
-mints — the menu offers an EXPLANATION of what a DID is and costs instead (§3.1c). The absence is
-structural: no `TrayAction` mints, so it cannot be re-enabled by accident.
+The DID wizard MUST open when the app starts and this computer has an enrolled account with no minted
+DID, at the wizard's DID step (`account::journey::startup_wizard`). Two refusals are normative, and
+neither may be relaxed:
 
-Because that absence is universal and permanent for this version, "no DID yet" MUST NOT be modelled as an
-`AccountState` (§3.1c): every account on every host would sit in it for ever, with no control that could
-ever leave it, which would make the lock states lie. It is reported as completeness
+- It MUST NOT open on a host that cannot complete a mint. A blocking window whose only forward control
+  cannot work has no way out but the close button, on every launch, for every account. Availability is
+  reported as `account::chain_mint::MintAvailability`; a wallet with no FUNDS is NOT this case and MUST
+  still reach the wizard, because the funding step is what tells that person what to do.
+- It MUST NOT open on a computer with no account. Reading DIG content needs no account, no wallet and
+  no DID (§3.1c), and answering "no DID was minted" with an unrequested account-creation flow at every
+  launch would break that.
+
+**Current state:** the mint itself is implemented and proven. `dig-account` 0.6.0 exposes
+`UnlockedAccount::profile_minter`, and `account::chain_mint::ChainMint` drives `begin_did_mint` →
+`mint_status` end to end through a Chia consensus validator. The minter is derived from the residency
+per call and never retained, so a mint observes lock-now, the idle timeout and the OS screen lock
+exactly as the money signer does.
+
+What is missing is the TRANSPORT. `dig-node-control-interface` 0.3.0 exposes one wallet method,
+`control.wallet.balance`: there is no coin read, no peak height and no push, which is why
+`wallet::node::NodeWalletEngine` refuses `coins` and `broadcast`. So `MintAvailability` is
+`NoChainTransport` on this build, the startup gate correctly draws nothing, and no `TrayAction` mints.
+
+Because that is still the state for every account on this version, "no DID yet" MUST NOT be modelled as
+an `AccountState` (§3.1c): every account on every host would sit in it, with no control that could leave
+it, which would make the lock states lie. It is reported as completeness
 (`account::journey::AccountCompleteness`) — a fact about the account — and the first-run flow (§3.2b)
-names the DID as the remaining REQUIRED step while stating plainly that it cannot be taken yet.
+names the DID as the remaining REQUIRED step.
 
 ### 3.1b-lv Every loop the user waits on MUST be watched from outside itself (normative)
 
@@ -617,9 +636,10 @@ phrase. The fourth is the one most easily and most damagingly collapsed into "lo
 The tray's top level MUST stay short; rare and destructive verbs belong in a submenu or a window tab,
 never beside `Lock now`.
 
-Minting an on-chain DID is deliberately NOT among them: no implementation exists (§3.1b), so the menu
-offers an EXPLANATION of what a DID is and costs, and there is no tray action that mints — the absence is
-structural, not an `enabled: false` that a later change could flip on by accident.
+Minting an on-chain DID is deliberately NOT among them: this build has no chain transport to mint over
+(§3.1b), so the menu offers an EXPLANATION of what a DID is and costs, and there is no tray action that
+mints — the absence is structural, not an `enabled: false` that a later change could flip on by
+accident.
 
 Binding rules:
 

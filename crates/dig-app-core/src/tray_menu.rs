@@ -1886,12 +1886,14 @@ fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
 /// It names the cost rather than hiding it in the dialog, so a person knows before they open it that a
 /// DID is a real spend (§3.7 — mainnet is real money). It deliberately no longer says "optional": a DID
 /// is the bedrock of a DIG Account (dig_ecosystem#1820), and calling it optional was the copy that made a
-/// required step look like a nicety. It must not promise to CREATE one either: nothing can mint yet.
+/// required step look like a nicety. It must not promise to CREATE one from here: this build has no
+/// chain transport to mint over (`SPEC.md` §3.1b), so the row explains rather than offers.
 const DID_LABEL: &str = "About on-chain DIDs (required, costs XCH)…";
 
-/// The DID line. Absent is the state of every account today, because minting is not implemented — so it
-/// names the remaining step AND why it cannot be taken, rather than reading as something the user has
-/// neglected (dig_ecosystem#1820).
+/// The DID line. Absent is the state of every account on this build — the mint is implemented and
+/// proven, but nothing here can reach a chain to run it (`SPEC.md` §3.1b) — so it names the remaining
+/// step AND why it cannot be taken, rather than reading as something the user has neglected
+/// (dig_ecosystem#1820).
 fn did_label(did: Option<&str>) -> String {
     did.unwrap_or("not created yet — on-chain minting is not available in this version")
         .to_string()

@@ -15,6 +15,7 @@
 //!   are dropped; the functions return an outcome, never a phrase.
 
 use crate::account::boot::DiscardOutcome;
+use crate::account::chain_mint::MintAvailability;
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::mint::{
@@ -827,23 +828,19 @@ pub fn replace_account<S: ProfileSealer>(
 /// fact about an account and is reported as one; it is not a lock state, and pretending otherwise would
 /// make the lock states lie.
 ///
-/// # Why nothing yet GATES on this, and what has to be true before anything does
+/// # What gates on this, and the one condition that can still withhold the gate
 ///
-/// A startup gate that showed the wizard whenever an account is [`WalletOnly`](Self::WalletOnly) is the
-/// user's stated intent (dig_ecosystem#2359: *"the DiD wizard should appear when the program starts and
-/// it detects no DiD was minted"*), and it is not wired yet, deliberately.
+/// [`startup_wizard`] gates on it: an account that is [`WalletOnly`](Self::WalletOnly) meets the DID
+/// wizard when the app starts, which is dig_ecosystem#2359's instruction — *"the DiD wizard should
+/// appear when the program starts and it detects no DiD was minted"*.
 ///
-/// **dig-app still cannot mint a DID.** `dig-account` 0.5.0 does implement one —
-/// `ProfileMinter::begin_did_mint` builds, signs and pushes a real spend, and `mint_status` turns a
-/// buried confirmation into evidence — but no host can reach it: `ProfileMinter::new` needs an
-/// `Arc<UnlockedMasterSeed>`, and `UnlockedAccount` hands out a signer, wallet ops, a DEK and a sealing
-/// key while keeping the seed itself private. dig_ecosystem#2371 is the accessor that closes that.
-///
-/// Until it does, gating on DID absence would make EVERY existing account, on every machine, meet the
-/// gate on every launch — with no control that could clear it. That is the dead end
-/// dig_ecosystem#1800 removed from this app once already, and moving it from the menu to the startup
-/// path would make it unavoidable rather than merely present. So the fact is reported, and the gate
-/// waits for the mint.
+/// The mint itself is real and proven: `dig-account` 0.6.0 exposes `UnlockedAccount::profile_minter`,
+/// and [`crate::account::chain_mint`] drives it through a Chia consensus validator end to end. What
+/// remains conditional is the TRANSPORT — a chain reader and a publisher this host can reach — which
+/// is why `startup_wizard` also takes a
+/// [`MintAvailability`]. Showing the wizard on a build
+/// that cannot reach a chain would put every account on every machine in front of a window with no
+/// control that could clear it, which is the dead end dig_ecosystem#1800 removed once already.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountCompleteness {
     /// A wallet exists — a seed, a recovery phrase, an address, a working signer — but no on-chain DID
@@ -903,6 +900,55 @@ pub enum AccountPresence<'a> {
 /// satisfy this with a key, an address, or a hopeful flag.
 pub fn wizard_needed(did: Option<&DidRecord>) -> bool {
     did.is_none()
+}
+
+/// What this host has, at rest, when the app starts — read without unlocking anything.
+///
+/// Both facts are readable from disk: whether an account is enrolled, and whether a DID has been
+/// recorded with its mint evidence. The app deliberately starts LOCKED (dig_ecosystem#1817), so a
+/// startup decision that needed a key could not be made at startup at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupAccount {
+    /// No DIG account on this computer. Nothing has been set up.
+    NotEnrolled,
+    /// An account exists, and this is how far it has got.
+    Enrolled(AccountCompleteness),
+}
+
+/// What the app should do about the DID when it starts (dig_ecosystem#2359).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupWizard {
+    /// Show nothing. The account already has a DID, there is no account to give one to, or no mint
+    /// could be completed on this build.
+    NotNeeded,
+    /// Open the wizard at its DID step: fund, then mint. The account exists and has no DID.
+    AtTheDidStep,
+}
+
+/// Decide whether the DID wizard opens when the program starts.
+///
+/// The user's instruction is the whole of the intent: *"The DiD wizard should appear when the program
+/// starts and it detects no DiD was minted."* This is that sentence, with the two conditions that keep
+/// it from becoming a trap.
+///
+/// # The two things it refuses to do, and why each would be worse than not gating
+///
+/// - **It never opens on a host that cannot mint.** A wizard whose only forward control cannot work is
+///   a window with no way out but the close button, on every launch, for every account — the dead end
+///   dig_ecosystem#1800 removed. A wallet with no FUNDS is a different case entirely and is NOT
+///   withheld: that person can act on what they are told, and the funding step is what tells them.
+/// - **It never opens on a computer with no account.** Reading DIG content needs no account and no
+///   wallet, which is what dig-app tells its users on its own wallet screen. Someone who installed DIG
+///   to read must reach the app; setting up an account stays the deliberate choice it is today, from
+///   the DIG menu. "No DID was minted" is true of that machine too, and answering it with an
+///   unrequested account-creation flow at every launch would break a promise the app makes elsewhere.
+pub fn startup_wizard(account: StartupAccount, mint: MintAvailability) -> StartupWizard {
+    match (account, mint) {
+        (StartupAccount::Enrolled(AccountCompleteness::WalletOnly), MintAvailability::Possible) => {
+            StartupWizard::AtTheDidStep
+        }
+        _ => StartupWizard::NotNeeded,
+    }
 }
 
 /// Puts the account's receiving address on the clipboard.
@@ -1201,8 +1247,11 @@ fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &DidMinting<'_>) -> Op
         return None;
     }
 
-    let (did, spend_id) = match minting.minter.submit() {
-        Submission::Submitted { spend_id, did } => (did, spend_id),
+    // The submitted DID is deliberately dropped here. It names what the bundle was built to create,
+    // and the DID that gets reported and recorded must come from the chain's confirmation instead —
+    // see `Sighting::Confirmed`.
+    let spend_id = match minting.minter.submit() {
+        Submission::Submitted { spend_id, .. } => spend_id,
         // The state this build is actually in. The wording is the one #1820 settled on: the DID is
         // REQUIRED, and minting it is not available in this version — not "optional", not a button
         // that quietly does nothing.
@@ -1239,13 +1288,7 @@ fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &DidMinting<'_>) -> Op
         }
     };
 
-    let outcome = await_confirmation(
-        &did,
-        &spend_id,
-        minting.observer,
-        minting.surface,
-        minting.clock,
-    );
+    let outcome = await_confirmation(&spend_id, minting.observer, minting.surface, minting.clock);
     report_the_mint(confirmer, minting.ledger, &outcome);
     Some(outcome)
 }
@@ -1719,8 +1762,14 @@ mod tests {
 
     // ---- The DID wizard's doubles (dig_ecosystem#2341) --------------------------------------------
 
-    /// A DID distinctive enough that finding it in the drawn text cannot be an accident.
+    /// The DID the SUBMISSION names — the one the bundle was built to create, before the chain has
+    /// said anything. Distinct from [`CONFIRMED_DID`] on purpose: the two are the same value in
+    /// reality, so a fixture that used one string could not tell "recorded from the confirmation"
+    /// apart from "recorded from the push", which is the property the ledger's whole rule rests on.
     const MINTED_DID: &str = "did:chia:1wizardfixturedid00000000000000000000000000000000000000000";
+    /// The DID the CONFIRMATION attests to. Only this may reach the ledger.
+    const CONFIRMED_DID: &str =
+        "did:chia:1wizardconfirmeddid0000000000000000000000000000000000000000";
     /// The spend the scripted minter reports.
     const MINTED_SPEND: &str = "0xwizardfixturespend";
 
@@ -2292,10 +2341,10 @@ mod tests {
     #[test]
     fn a_confirmed_mint_records_the_did_with_its_evidence() {
         let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::minting_successfully(Sighting::Confirmed(MintEvidence::confirmed(
-            MINTED_SPEND,
-            5_412_009,
-        )));
+        let bench = Bench::minting_successfully(Sighting::Confirmed {
+            did: CONFIRMED_DID.to_owned(),
+            evidence: MintEvidence::confirmed(MINTED_SPEND, 5_412_009),
+        });
         let surface = PatientWait(&bench.clock);
 
         let outcome = first_run_wizard(
@@ -2309,9 +2358,13 @@ mod tests {
 
         assert_eq!(outcome, FirstRunOutcome::IdentityReady);
         let recorded = bench.ledger.recorded().expect("the DID must be recorded");
-        assert_eq!(recorded.did(), MINTED_DID);
+        assert_eq!(
+            recorded.did(),
+            CONFIRMED_DID,
+            "the DID recorded must be the one the chain attested to, not the one that was pushed"
+        );
         assert_eq!(recorded.evidence().confirmed_height(), 5_412_009);
-        assert!(confirmer.drawn().contains(MINTED_DID));
+        assert!(confirmer.drawn().contains(CONFIRMED_DID));
     }
 
     /// A chain that REJECTS the spend gets its own honest screen and records nothing.
@@ -2867,6 +2920,94 @@ mod tests {
         assert_eq!(
             AccountCompleteness::of(Some("did:chia:abc")),
             AccountCompleteness::DidBound
+        );
+    }
+
+    /// **The wizard opens at startup for exactly one state: an enrolled account with no DID, on a
+    /// host that can mint.**
+    ///
+    /// Asserted over the WHOLE cross-product rather than the one true case, because the property is
+    /// the shape of the decision, not a single answer. The nearest wrong implementation — "open
+    /// whenever no DID is recorded" — agrees with this test on the true case and disagrees on three
+    /// of the four false ones, which is exactly what the enumeration is for.
+    #[test]
+    fn the_startup_wizard_opens_only_for_an_enrolled_account_that_can_still_mint() {
+        use MintAvailability::{NoChainTransport, Possible};
+        use StartupAccount::{Enrolled, NotEnrolled};
+
+        assert_eq!(
+            startup_wizard(Enrolled(AccountCompleteness::WalletOnly), Possible),
+            StartupWizard::AtTheDidStep,
+            "an account with a wallet and no DID is precisely what dig_ecosystem#2359 describes"
+        );
+
+        for (account, mint, why) in [
+            (
+                Enrolled(AccountCompleteness::DidBound),
+                Possible,
+                "an account that already holds a DID must never see the wizard again",
+            ),
+            (
+                Enrolled(AccountCompleteness::WalletOnly),
+                NoChainTransport,
+                "a host that cannot mint must not show a window with no control that could clear it",
+            ),
+            (
+                NotEnrolled,
+                Possible,
+                "reading DIG content needs no account, so a reader is never made to create one",
+            ),
+            (
+                NotEnrolled,
+                NoChainTransport,
+                "neither condition holds, so neither reason to open it does",
+            ),
+        ] {
+            assert_eq!(
+                startup_wizard(account, mint),
+                StartupWizard::NotNeeded,
+                "{why}"
+            );
+        }
+    }
+
+    /// The two startup states, read the way the shell reads them: off a [`DidLedger`].
+    ///
+    /// This is the second half of the same property — that the decision is driven by RECORDED mint
+    /// evidence rather than by a flag — so the fixture writes a real record and reads it back through
+    /// the production ledger rather than passing a hand-made enum.
+    #[test]
+    fn a_recorded_mint_is_what_turns_the_startup_wizard_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = crate::account::did::DidFile::new(dir.path());
+
+        let before = ledger.recorded();
+        assert_eq!(
+            startup_wizard(
+                StartupAccount::Enrolled(AccountCompleteness::of(
+                    before.as_ref().map(DidRecord::did)
+                )),
+                MintAvailability::Possible
+            ),
+            StartupWizard::AtTheDidStep,
+            "before any mint, the wizard opens"
+        );
+
+        assert!(ledger.record(&DidRecord::from_mint(
+            MINTED_DID,
+            MintEvidence::confirmed(MINTED_SPEND, 5_412_009)
+        )));
+
+        let after = ledger.recorded();
+        assert_eq!(
+            startup_wizard(
+                StartupAccount::Enrolled(AccountCompleteness::of(
+                    after.as_ref().map(DidRecord::did)
+                )),
+                MintAvailability::Possible
+            ),
+            StartupWizard::NotNeeded,
+            "once a mint is recorded with its evidence, the wizard stays shut"
         );
     }
 

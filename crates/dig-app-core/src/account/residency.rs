@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 
 use chia_protocol::CoinSpend;
 use dig_account::{
-    CustodyPolicy, LocalMoneySigner, ProfileIx, Result as AccountResult, SpendSummary,
-    UnlockedAccount,
+    CustodyPolicy, LocalMoneySigner, ProfileIx, ProfileMinter, Result as AccountResult,
+    SpendSummary, UnlockedAccount,
 };
 use dig_ipc_protocol::domain::{Signature, SigningPublicKey};
 use dig_ipc_protocol::signer::SessionSigner;
@@ -141,6 +141,18 @@ impl AccountResidency {
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().money_signer(network))
+    }
+
+    /// Build the LIVE DID minter through the CURRENT account — or `None` once the residency is locked.
+    ///
+    /// Read on every call, exactly as [`money_signer`](Self::money_signer) is, and for the same
+    /// reason: a mint spends real XCH, so a minter derived once and kept would go on spending after a
+    /// lock-now, an idle timeout or an OS screen lock. dig-account 0.6.0 makes
+    /// [`UnlockedAccount::profile_minter`] the single door to a minter precisely so the capability
+    /// observes the unlock; deriving it here per call keeps that property whole rather than trading it
+    /// for a cached handle.
+    pub fn profile_minter(&self) -> Option<ProfileMinter> {
+        self.guard().as_ref().map(UnlockedAccount::profile_minter)
     }
 
     /// The account's receiving address, in `xch1…` form — where a user sends XCH or $DIG.
@@ -288,20 +300,23 @@ impl ProfileSealer for ResidencySealer {
     }
 }
 
+/// Building a REAL residency, for the tests of every module that needs one.
+///
+/// It enrols through `dig-account`'s own `AccountSession::enroll`, so what a test drives is a genuine
+/// [`UnlockedAccount`] rather than a double that cannot lock. Shared across modules because a second
+/// hand-rolled enrol would be a second definition of what "an unlocked account" means here.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use dig_account::{AccountId, AccountSession, AccountStore};
     use dig_keystore::MemoryBackend;
     use dig_session::{Password, ENTROPY_LEN};
     use std::sync::Arc as StdArc;
 
-    const DID: &str = "did:chia:residency-test";
-
     /// Enrol a fresh account (synchronous keystore enrol) into a residency, so the tests exercise the
     /// real dig-account [`UnlockedAccount`] handle. Each call uses a distinct random seed so two
     /// residencies hold genuinely different key material.
-    fn residency() -> AccountResidency {
+    pub(crate) fn residency() -> AccountResidency {
         use rand_core::RngCore;
         let mut seed = [0u8; ENTROPY_LEN];
         rand_core::OsRng.fill_bytes(&mut seed);
@@ -309,7 +324,7 @@ mod tests {
     }
 
     /// Enrol a residency over an EXACT seed, so a test can pin what the account derives from.
-    fn residency_from_seed(seed: &[u8; ENTROPY_LEN]) -> AccountResidency {
+    pub(crate) fn residency_from_seed(seed: &[u8; ENTROPY_LEN]) -> AccountResidency {
         let store = StdArc::new(AccountStore::new(StdArc::new(MemoryBackend::new())));
         let unlocked = AccountSession::enroll(
             store,
@@ -321,6 +336,26 @@ mod tests {
         .unwrap();
         AccountResidency::new(unlocked)
     }
+
+    impl AccountResidency {
+        /// Test-only: the puzzle hash this account's wallet spends from, so a chain fixture can hold
+        /// a coin the mint will actually select. Not production API — a puzzle hash is the address in
+        /// a different encoding, and the app shows the address.
+        pub(crate) fn wallet_puzzle_hash_for_test(&self) -> Option<chia_protocol::Bytes32> {
+            self.guard()
+                .as_ref()
+                .map(|acct| acct.wallet_ops().puzzle_hash())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{residency, residency_from_seed};
+    use super::*;
+    use dig_session::ENTROPY_LEN;
+
+    const DID: &str = "did:chia:residency-test";
 
     /// The receiving address is a real derived `xch1…` address, differs per account, and fails closed
     /// once the residency locks.
