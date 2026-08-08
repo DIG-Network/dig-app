@@ -74,7 +74,7 @@ pub enum TabId {
 impl TabId {
     /// Every tab this window can emit, in the order a person meets them.
     ///
-    /// Written out rather than derived, and kept exhaustive by [`TabId::label`]'s own match — a new
+    /// Written out rather than derived, and kept exhaustive by `TabId::label`'s own match — a new
     /// variant has to be given a label there, which is the same edit that brings someone here.
     pub const ALL: [Self; 8] = [
         Self::Status,
