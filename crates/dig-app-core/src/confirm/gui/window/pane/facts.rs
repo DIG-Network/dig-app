@@ -36,6 +36,13 @@ pub(crate) struct PaneFacts {
     pub(crate) cache: Option<crate::cache::CacheSnapshot>,
     /// The account's `xch1…` receive address, when there is an unlocked account to derive one from.
     pub(crate) receive_address: Option<String>,
+    /// What the app can honestly say about the account's money: a reading, a read in flight, or the
+    /// reason there is no figure.
+    ///
+    /// Carried as the WHOLE reading rather than as two numbers plus a flag, because the three states
+    /// are what keep an unknown balance from being drawn as a zero — see
+    /// [`crate::wallet::overview::BalanceReading`].
+    pub(crate) balance: crate::wallet::overview::BalanceReading,
     /// The installed version of this app.
     pub(crate) version: &'static str,
 }
@@ -51,6 +58,10 @@ impl PaneFacts {
             second_factor: view.second_factor,
             cache: view.cache,
             receive_address: view.receive_address.clone(),
+            // Through `WalletOverview::of_tray`, never `view.balance` directly: that mapping is what
+            // decides a figure is not shown at all when there is no address for it to be ABOUT, and
+            // a pane reading the raw field would skip it.
+            balance: crate::wallet::overview::WalletOverview::of_tray(view).balance,
             version: env!("CARGO_PKG_VERSION"),
         }
     }

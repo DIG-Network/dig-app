@@ -49,7 +49,11 @@ impl DigLink {
 }
 
 /// 64 lowercase-or-uppercase hex characters, the shape the node's own parser requires.
-fn is_64_hex(s: &str) -> bool {
+///
+/// `pub(crate)` because the Cache pane validates a typed store id against the SAME rule before
+/// offering to mirror it. A second copy of "64 hex" would be a second answer the moment either
+/// moved.
+pub(crate) fn is_64_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 

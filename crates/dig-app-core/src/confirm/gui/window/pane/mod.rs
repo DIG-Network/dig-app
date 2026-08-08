@@ -54,6 +54,7 @@
 //! surface says so in the pane, in plain words.
 
 pub(crate) mod action;
+pub(crate) mod cache;
 pub(crate) mod card;
 pub(crate) mod copy;
 pub(crate) mod data;
@@ -63,6 +64,7 @@ pub(crate) mod identity;
 pub(crate) mod state;
 pub(crate) mod status;
 pub(crate) mod text;
+pub(crate) mod wallet;
 
 use egui::{Rect, Ui};
 
@@ -116,6 +118,8 @@ pub(crate) fn draw_tab(
 
     let pressed = match tab.id {
         TabId::Status => status::draw(&mut flow, t, tab, facts),
+        TabId::Wallet => wallet::draw(&mut flow, t, tab, facts),
+        TabId::Cache => cache::draw(&mut flow, t, tab, facts),
         _ => generic(&mut flow, t, tab),
     };
     (flow.cursor() - at.top(), pressed)
