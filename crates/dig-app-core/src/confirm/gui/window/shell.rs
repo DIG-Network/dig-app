@@ -179,6 +179,211 @@ pub(super) fn draw(
     None
 }
 
+/// Open the shell on `tab` at `size`, let it settle, read its framebuffer back into a PNG at `path`,
+/// and close it. Returns the image's pixel dimensions.
+///
+/// # Why the gallery photographs itself
+///
+/// A screen capture cannot do this. GDI — `PrintWindow`, `BitBlt`, every screenshot tool built on
+/// them — is blind to a hardware GL surface: it returns a black rectangle of exactly the right size,
+/// which is worse than an error because the harness reports success and the file looks plausible
+/// until somebody opens it. Reading the framebuffer with [`egui::ViewportCommand::Screenshot`] is
+/// the only capture that sees what was actually drawn.
+///
+/// It is also the only capture that cannot photograph the wrong thing. Nothing is clicked, nothing
+/// is dragged, and no window has to be in the foreground — so no capture can be of whatever happened
+/// to be on top, which is how a committed screenshot labelled "Cache" turned out to be the Status
+/// tab (dig_ecosystem#2326).
+///
+/// `view` is the snapshot the model and the facts are both built from, and `size` is in LOGICAL
+/// pixels. The scale is PINNED rather than taken from the host, so the gallery is the same picture
+/// on every machine: at the host's own DPI these files would differ in size between two laptops and
+/// a screenshot set whose dimensions depend on who ran it cannot be diffed between two versions of
+/// the window.
+///
+/// Returns an error string when this host cannot open a window at all.
+pub fn photograph(
+    theme: Theme,
+    tab: TabId,
+    size: Vec2,
+    view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
+    path: &std::path::Path,
+) -> Result<(usize, usize), String> {
+    // The shell reads its theme from a store and its toggle writes back to one. A scratch store
+    // keeps both away from the person's own preference — a gallery has no business changing settings
+    // — and it is per-process, so two captures running at once cannot read each other's theme.
+    let scratch = std::env::temp_dir().join(format!("dig-gallery-{}", std::process::id()));
+    let store = ThemeChoice::in_brand_dir(&scratch);
+    store
+        .write(theme)
+        .map_err(|e| format!("the gallery theme could not be stored: {e}"))?;
+
+    // The shell hosts prompts from this queue. The gallery raises none, so it holds the only sender
+    // and never sends: the receiver must simply stay open, because a disconnected queue is a
+    // different state from an empty one.
+    let (_keep_open, queue) = std::sync::mpsc::channel();
+    let app = ShellApp::new(theme, store, view, Arc::new(|_| {}), Some(tab));
+
+    let recorded = Arc::new(Mutex::new(None));
+    let size_slot = Arc::clone(&recorded);
+    let target = path.to_path_buf();
+    let mut options = native_options();
+    options.viewport = options.viewport.with_inner_size(size);
+    // eframe restores the LAST run's geometry in preference to the size asked for, so without this
+    // every capture after the first came out at the first one's size — two files claiming two widths
+    // and holding one picture.
+    options.persist_window = false;
+
+    eframe::run_native(
+        "DIG",
+        options,
+        Box::new(move |cc| {
+            install_fonts(&cc.egui_ctx);
+            Ok(Box::new(Photographer {
+                app,
+                queue,
+                wanted: size,
+                settled_for: None,
+                frames: 0,
+                path: target,
+                size: size_slot,
+            }))
+        }),
+    )
+    .map_err(|e| format!("this host cannot open the DIG app window: {e}"))?;
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    let answer = *recorded.lock().map_err(|_| "the size slot was poisoned")?;
+    answer.ok_or_else(|| "the window closed before its framebuffer was read".to_string())
+}
+
+/// How pixel-dense a gallery capture is, independent of the display it was taken on.
+const GALLERY_SCALE: f32 = 2.0;
+
+/// How many frames to draw after the window has reached its asked-for size, before reading back.
+///
+/// egui lays out on the frame AFTER the one that measured, and fonts land a frame later still, so an
+/// early read photographs a half-built window. Generous on purpose: the cost is milliseconds.
+const SETTLE_FRAMES: u32 = 12;
+
+/// How many frames to keep asking for a size before concluding the window manager will not grant it.
+const GIVE_UP_FRAMES: u32 = 240;
+
+/// Draws the real shell, then photographs it.
+struct Photographer {
+    app: ShellApp,
+    queue: Receiver<Work>,
+    /// The size the CAPTURE is of, in the points the shell lays itself out in.
+    ///
+    /// Not the display's points. Pinning `pixels_per_point` to [`GALLERY_SCALE`] decouples the two,
+    /// and a viewport command speaks in the shell's — which is what makes the file name and the
+    /// picture the same claim on every host. Asked for in DISPLAY points instead, a 480 file taken on
+    /// a 2.5x screen would hold a 600-point layout, and every narrow-width judgement made from it
+    /// would be about a layout no user sees.
+    wanted: Vec2,
+    /// Frames drawn since the window reached [`Self::wanted`]; `None` until it has.
+    settled_for: Option<u32>,
+    /// Frames drawn in total, so a size the window manager refuses ends the run instead of looping.
+    frames: u32,
+    path: std::path::PathBuf,
+    size: Arc<Mutex<Option<(usize, usize)>>>,
+}
+
+impl eframe::App for Photographer {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let bg = self.app.theme.tokens().bg;
+        [
+            f32::from(bg.r) / 255.0,
+            f32::from(bg.g) / 255.0,
+            f32::from(bg.b) / 255.0,
+            1.0,
+        ]
+    }
+
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.set_pixels_per_point(GALLERY_SCALE);
+        // The SHIPPING paint path, not a re-creation of it. A gallery that drew its own approximation
+        // of the shell would photograph the approximation.
+        self.app.frame(ctx, &self.queue);
+
+        // The window is asked for its size every frame until it HAS it, and the settle count only
+        // starts once it does. A window manager clamps a request it cannot honour — to the work area,
+        // or to the shell's own minimum — and counting frames from the request instead would
+        // photograph whatever the window was mid-resize.
+        let reached = ctx.screen_rect().size();
+        let on_size = (reached - self.wanted).abs().max_elem() < 1.0;
+        match (on_size, self.settled_for) {
+            (false, _) => {
+                self.settled_for = None;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.wanted));
+            }
+            (true, Some(frames)) => self.settled_for = Some(frames + 1),
+            (true, None) => self.settled_for = Some(0),
+        }
+        if self.settled_for == Some(SETTLE_FRAMES) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        self.frames += 1;
+        // A size the window manager will not grant — taller than the work area, narrower than the
+        // shell's floor — would otherwise loop here forever asking for it. Leaving WITHOUT a file is
+        // the honest outcome: `photograph` reports it, and the alternative is a picture whose name
+        // describes a size it is not.
+        if self.frames > GIVE_UP_FRAMES && self.settled_for.is_none() {
+            tracing::error!(
+                wanted = ?self.wanted,
+                reached = ?reached,
+                "the window manager would not grant the size this capture asked for"
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        let Some(image) = shot else {
+            return;
+        };
+        let (width, height) = (image.width(), image.height());
+        // RGB, not RGBA: the window is opaque, so an alpha channel is a quarter of the file spent
+        // storing 0xFF. `Best` on top, because these frames are large flat fields of brand colour
+        // that deflate very well and the gallery is committed.
+        let bytes: Vec<u8> = image
+            .pixels
+            .iter()
+            .flat_map(|p| [p.r(), p.g(), p.b()])
+            .collect();
+        if let Err(err) = write_png(&self.path, width, height, &bytes) {
+            tracing::error!(%err, path = %self.path.display(), "the gallery capture was not written");
+        } else if let Ok(mut slot) = self.size.lock() {
+            *slot = Some((width, height));
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
+/// Encode `bytes` — tightly packed RGB — as a PNG at `path`.
+fn write_png(
+    path: &std::path::Path,
+    width: usize,
+    height: usize,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_compression(png::Compression::Best);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(bytes))
+        .map_err(std::io::Error::other)
+}
+
 /// Run `paint` with this window registered for wedge-watching, and hand it the heartbeat to stamp.
 ///
 /// # Why the registration is a wrapper rather than two lines in [`draw`]
