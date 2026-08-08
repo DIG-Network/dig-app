@@ -68,6 +68,7 @@
 //! is not enforced, and dig_ecosystem#2337 for making a placeholder unexpressible. A pane still has
 //! to be written honestly; this vocabulary means it does not have to be written carefully.
 
+pub(crate) mod account;
 pub(crate) mod action;
 pub(crate) mod apps;
 pub(crate) mod card;
@@ -77,6 +78,7 @@ pub(crate) mod facts;
 pub(crate) mod field;
 pub(crate) mod flow;
 pub(crate) mod identity;
+pub(crate) mod security;
 pub(crate) mod select;
 pub(crate) mod settings;
 pub(crate) mod state;
@@ -137,6 +139,8 @@ pub(crate) fn draw_tab(
         TabId::Status => status::draw(&mut flow, t, tab, facts),
         TabId::Apps => apps::draw(&mut flow, t, tab),
         TabId::Settings => settings::draw(&mut flow, t, tab, facts),
+        TabId::Account => account::draw(&mut flow, t, tab, facts),
+        TabId::Security => security::draw(&mut flow, t, tab, facts),
         _ => generic(&mut flow, t, tab),
     };
     (flow.cursor() - at.top(), pressed)
