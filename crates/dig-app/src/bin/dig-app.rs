@@ -1883,6 +1883,8 @@ mod tray {
                         );
                     }
                 }),
+                // The shipping window always opens on its first tab; only a gallery names one.
+                initial_tab: None,
             })
         }
     }

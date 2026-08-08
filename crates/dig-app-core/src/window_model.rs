@@ -250,6 +250,23 @@ pub const TRAY_SPINE: [TrayAction; 8] = [
     TrayAction::Quit,
 ];
 
+/// The note for a tab whose whole content is a statement about the account.
+///
+/// `view.account` is `None` until the first boot report arrives — NOT "there is no account". The
+/// difference matters because [`TrayView::account`] defaults `None` to
+/// [`AccountState::Absent`](crate::tray_menu::AccountState::Absent), so a pane reading through that
+/// default asserts a machine has no account while the agent is still starting. That is a wrong claim
+/// about someone's custody, and it is the shape dig_ecosystem#2326 exists to keep out of these panes.
+///
+/// Single-sourced here rather than left to each pane, so a third account-bearing tab inherits the
+/// honesty instead of remembering it.
+fn account_note(view: &TrayView) -> PaneNote {
+    match view.account {
+        Some(_) => PaneNote::Ready,
+        None => PaneNote::Waiting("DIG is still reading this computer's account."),
+    }
+}
+
 /// Words that turn a statement of fact into a remedy — see [`label_names_a_remedy`].
 const REMEDY_VERBS: [&str; 10] = [
     "set up", "unlock", "connect", "install", "restore", "choose", "open", "start", "add", "set a",
@@ -308,7 +325,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         ),
         tab(
             TabId::Account,
-            PaneNote::Ready,
+            account_note(view),
             vec![
                 Section {
                     heading: Some("What this account is".to_string()),
@@ -322,7 +339,7 @@ pub fn build(view: &TrayView) -> WindowModel {
         ),
         tab(
             TabId::Security,
-            PaneNote::Ready,
+            account_note(view),
             vec![Section {
                 heading: None,
                 rows: security_actions(&account, view.second_factor),
@@ -825,6 +842,48 @@ mod tests {
     ///
     /// Hand-built because `build` cannot produce it — which is the point. Without this the replacement
     /// for the deleted `unavailable` filters would be an assertion nothing could ever fail.
+    /// **Proves:** before the first boot report, the account-bearing tabs say they are still reading
+    /// rather than asserting the machine has no account.
+    /// **Catches:** a pane reading `view.account` through `TrayView::account()`, whose `None` default
+    /// is `Absent` — which would tell a person with an account that they have none (#2326).
+    #[test]
+    fn an_unreported_account_is_a_wait_not_a_claim_that_there_is_none() {
+        let unreported = TrayView {
+            account: None,
+            ..TrayView::default()
+        };
+        for id in [TabId::Account, TabId::Security] {
+            let note = build(&unreported)
+                .tab(id)
+                .map(|t| t.note.clone())
+                .expect("the tab is emitted");
+            assert!(
+                matches!(note, PaneNote::Waiting(_)),
+                "{id:?} claimed {note:?} about an account nothing has reported yet"
+            );
+        }
+    }
+
+    /// The control the test above needs: a machine that genuinely HAS no account must still be told
+    /// so plainly. Without this, a permanent "still reading" would pass.
+    #[test]
+    fn a_genuinely_absent_account_is_still_stated_plainly() {
+        let absent = TrayView {
+            account: Some(AccountState::Absent),
+            ..TrayView::default()
+        };
+        for id in [TabId::Account, TabId::Security] {
+            let note = build(&absent)
+                .tab(id)
+                .map(|t| t.note.clone())
+                .expect("the tab is emitted");
+            assert!(
+                !matches!(note, PaneNote::Waiting(_)),
+                "{id:?} said it was still reading about a machine that reported no account"
+            );
+        }
+    }
+
     #[test]
     fn a_subsuming_tab_that_renders_nothing_is_not_a_route() {
         let view = TrayView::default();

@@ -141,7 +141,7 @@ pub(super) fn draw(
     watched: &Mutex<Option<Vigil>>,
 ) -> Option<Outcome> {
     let theme = shell.theme.read();
-    let app = ShellApp::new(theme, shell.theme, shell.view, shell.act);
+    let app = ShellApp::new(theme, shell.theme, shell.view, shell.act, shell.initial_tab);
     let run = watched_while_painting(watched, |beat| {
         let creator_beat = Arc::clone(&beat);
         eframe::run_native(
@@ -234,9 +234,45 @@ pub(super) fn watched_while_painting<T>(
 /// repainting into a window nobody can see, while [`super::Job::over_by`] counts down to a refusal
 /// the person never saw. Being unmissable is the security property, and it does not weaken because
 /// the prompt happened to be raised while a window was open.
+/// The DIG mark, embedded so the window's own icon is the brand rather than the toolkit's default.
+///
+/// Without this eframe supplies its own placeholder — a letter "e" — which is what the window
+/// actually showed in the corner and in the taskbar (dig_ecosystem#2340). The 64px source is the
+/// same file the tray uses, so the two surfaces cannot drift into showing different marks.
+const WINDOW_MARK: &[u8] = include_bytes!("../../../../assets/mark-64.png");
+
+/// Decode [`WINDOW_MARK`] into the RGBA an icon wants, or `None` if it will not decode.
+///
+/// **Fallible on purpose, exactly as the tray's decode is.** A corrupt asset should cost the window
+/// its picture and nothing else — never the user's whole consent surface — so every failure here
+/// returns `None` and the window opens with the toolkit default instead of not opening.
+fn window_icon() -> Option<egui::IconData> {
+    let mut reader = png::Decoder::new(WINDOW_MARK).read_info().ok()?;
+    let info = reader.info();
+    // Only the one shape the checked-in asset has. A PNG in another colour type or bit depth would
+    // need resampling, and silently mis-decoding a brand mark is worse than showing no mark.
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    let (width, height) = (info.width, info.height);
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut rgba).ok()?;
+    rgba.truncate(frame.buffer_size());
+    Some(egui::IconData {
+        rgba,
+        width,
+        height,
+    })
+}
+
 fn native_options() -> eframe::NativeOptions {
+    let mut viewport = egui::ViewportBuilder::default();
+    // Attached only if it decoded, for the reason `window_icon` states.
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title("DIG")
             .with_inner_size([SHELL_WIDTH, SHELL_HEIGHT])
             .with_min_inner_size([SHELL_MIN, SHELL_MIN])
@@ -432,6 +468,7 @@ impl ShellApp {
         theme_store: ThemeChoice,
         view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
         act: Arc<dyn Fn(TrayAction) + Send + Sync>,
+        initial_tab: Option<TabId>,
     ) -> Self {
         Self {
             theme,
@@ -440,7 +477,8 @@ impl ShellApp {
             closing: false,
             view,
             act,
-            selected: FIRST_TAB,
+            // A caller that names no tab gets the shipping behaviour; only a gallery names one.
+            selected: initial_tab.unwrap_or(FIRST_TAB),
         }
     }
 
@@ -1107,6 +1145,7 @@ mod tests {
                     Arc::new(move |action| {
                         sink.lock().expect("the sink is not poisoned").push(action)
                     }),
+                    None,
                 ),
                 ctx,
                 jobs,
@@ -1605,6 +1644,7 @@ mod tests {
                 theme: shelf.store.clone(),
                 view: Arc::new(busy_view),
                 act: Arc::new(|_| {}),
+                initial_tab: None,
             }))
             .expect("the queue is open");
 
@@ -1628,6 +1668,7 @@ mod tests {
                 theme: shelf.store.clone(),
                 view: Arc::new(busy_view),
                 act: Arc::new(|_| {}),
+                initial_tab: None,
             }))
             .expect("the queue is open");
         let answers = shelf.queue_live_prompt();
@@ -2081,6 +2122,29 @@ mod tests {
     /// the test's — which is why the strip's own behaviour when the chips do not fit is pinned by
     /// `panes::tests::every_tab_is_reachable_at_every_width_the_window_allows`, whose fixture
     /// refuses to run unless they genuinely overflow.
+    /// **Proves:** the embedded mark decodes, so the window opens with the DIG brand rather than
+    /// eframe's default placeholder — the letter "e" the window actually showed (#2340).
+    /// **Catches:** a mark replaced with a PNG in another colour type or bit depth, which
+    /// `window_icon` refuses rather than mis-decoding, and which would silently restore the default.
+    #[test]
+    fn the_window_opens_with_the_dig_mark_not_the_toolkits_default() {
+        let icon = window_icon().expect("the embedded mark decodes");
+        assert_eq!(
+            icon.width, icon.height,
+            "the mark is square; {}x{} means the wrong asset is embedded",
+            icon.width, icon.height
+        );
+        assert_eq!(
+            icon.rgba.len() as u32,
+            icon.width * icon.height * 4,
+            "RGBA is four bytes a pixel; a shorter buffer is a partial decode drawn as garbage"
+        );
+        assert!(
+            icon.rgba.chunks_exact(4).any(|px| px[3] != 0),
+            "every pixel is transparent, so the window would show an empty square"
+        );
+    }
+
     #[test]
     fn a_narrow_window_keeps_every_tab_reachable() {
         let tabs = window_model::build(&busy_view()).tabs;
@@ -2935,6 +2999,7 @@ mod tests {
                 store,
                 Arc::new(crate::tray_menu::TrayView::default),
                 Arc::new(|_| {}),
+                None,
             ),
             queue: &queue,
             beat: Arc::clone(&beat),
