@@ -91,6 +91,16 @@ pub enum WalletError {
     #[error("the DIG node is still syncing")]
     EngineNotSynced,
 
+    /// A node answered and refused on AUTHORIZATION grounds, on a method that is token-gated.
+    ///
+    /// Deliberately not [`EngineUnsupported`](Self::EngineUnsupported). On the two OPEN wallet
+    /// reads an authorization refusal can only come from a build that predates them, so it means
+    /// "upgrade". On a GATED method — the push — it means this app could not read the node's
+    /// control token, and telling that person to upgrade a node that already serves the method
+    /// sends them after the wrong remedy entirely.
+    #[error("this app is not authorized to ask the DIG node to do that")]
+    EngineUnauthorized,
+
     /// A node answered and DOES serve the read, but has no live chain source to answer it FROM.
     ///
     /// Separate from [`EngineUnsupported`](Self::EngineUnsupported) (that build is not capable) and

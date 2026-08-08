@@ -80,6 +80,7 @@ impl WalletEngine for WireRecordingEngine {
         Ok(BroadcastResponse {
             accepted: true,
             transaction_id: Some("recorded".into()),
+            rejection: None,
         })
     }
     fn coins(&self, request: CoinsRequest) -> Result<CoinsResponse, WalletError> {

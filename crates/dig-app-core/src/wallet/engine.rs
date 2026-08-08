@@ -37,6 +37,11 @@ pub struct BroadcastRequest {
 }
 
 /// `control.wallet.broadcast` response: the mempool acceptance outcome.
+///
+/// # Accepted is not confirmed
+///
+/// `accepted` says the mempool took the bundle. It is not evidence that anything reached a block,
+/// and no caller may record an outcome from it — only a buried confirmation of the created coin is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BroadcastResponse {
     /// Whether the network accepted the bundle into the mempool.
@@ -44,6 +49,13 @@ pub struct BroadcastResponse {
     /// The transaction id (spend-bundle name), lowercase hex, when accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_id: Option<String>,
+    /// Why the mempool refused, when it refused; `None` on acceptance.
+    ///
+    /// A refusal is a VALUE and not an error — the bundle was seen and judged — so the reason has
+    /// to travel with it. Without this field the caller could tell that a push did not land and not
+    /// which of the two opposite remedies applies: retry the same bundle, or build a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
 }
 
 /// `control.wallet.coins` / `control.wallet.balance` request: which address + asset to read.
@@ -108,6 +120,7 @@ pub(crate) mod test_support {
             Ok(BroadcastResponse {
                 accepted: true,
                 transaction_id: Some("fake-txid".to_string()),
+                rejection: None,
             })
         }
 

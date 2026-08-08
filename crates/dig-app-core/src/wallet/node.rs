@@ -29,7 +29,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dig_node_control_interface::error::ControlErrorCode;
-use dig_node_control_interface::params::{Asset as WireAsset, WalletBalanceParams};
+use dig_node_control_interface::method::ControlMethod;
+use dig_node_control_interface::params::{
+    Asset as WireAsset, WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
+};
+use dig_node_control_interface::results::WalletCoinRecord;
 
 use crate::control::{self, ControlCallError, ControlFailure};
 use crate::engine::EngineState;
@@ -39,7 +43,7 @@ use super::engine::{
     CoinsResponse, WalletEngine,
 };
 use super::overview::{AddressReading, BalanceReading, ChainSource, WalletOverview};
-use super::state::Asset;
+use super::state::{Asset, CoinRecord};
 use super::WalletError;
 
 /// How long a balance reading is reused before the node is asked again.
@@ -94,19 +98,38 @@ impl NodeWalletEngine {
 }
 
 impl WalletEngine for NodeWalletEngine {
-    /// Broadcasting is the send path (dig_ecosystem#2207) and is not wired.
+    /// Push an ALREADY-SIGNED bundle through the node's `control.wallet.broadcast`.
     ///
-    /// It refuses rather than pretending: a `broadcast` that silently reported success would tell a
-    /// person their money moved when it did not.
-    fn broadcast(&self, _request: BroadcastRequest) -> Result<BroadcastResponse, WalletError> {
-        Err(WalletError::EngineUnsupported)
+    /// The node never sees a key: this carries signed bytes and nothing else (§908). A mempool that
+    /// judged the bundle comes back as a [`BroadcastResponse`] carrying its verdict — including a
+    /// refusal — and only a failure to REACH a mempool is an error here.
+    fn broadcast(&self, request: BroadcastRequest) -> Result<BroadcastResponse, WalletError> {
+        let params = WalletBroadcastParams {
+            signed_bundle_hex: request.signed_bundle_hex,
+        };
+        let result = self.call(&params, ControlMethod::WalletBroadcast)?;
+        Ok(BroadcastResponse {
+            accepted: result.accepted,
+            transaction_id: result.transaction_id,
+            rejection: result.rejection,
+        })
     }
 
-    /// Per-coin reads are not wired: the overview needs sums, and `control.wallet.coins` has no
-    /// consumer yet. Refused for the same reason as [`broadcast`](Self::broadcast) — an empty coin
-    /// list would read as "you hold nothing".
-    fn coins(&self, _request: CoinsRequest) -> Result<CoinsResponse, WalletError> {
-        Err(WalletError::EngineUnsupported)
+    /// Read an address's spendable coins through the node's `control.wallet.coins`.
+    ///
+    /// An empty list is the node's ANSWER — this address holds nothing — and every way of failing
+    /// to consult a chain is an error instead. Collapsing the two would report "you hold nothing"
+    /// to somebody who holds funds, and a spend built on that answer refuses with a shortfall that
+    /// is not true.
+    fn coins(&self, request: CoinsRequest) -> Result<CoinsResponse, WalletError> {
+        let params = WalletCoinsParams {
+            address: request.address,
+            asset: wire_asset(request.asset),
+        };
+        let result = self.call(&params, ControlMethod::WalletCoins)?;
+        Ok(CoinsResponse {
+            coins: result.coins.iter().map(app_coin).collect(),
+        })
     }
 
     fn balance(&self, request: BalanceRequest) -> Result<BalanceResponse, WalletError> {
@@ -120,7 +143,7 @@ impl WalletEngine for NodeWalletEngine {
             self.token.as_deref(),
             self.timeout,
         )
-        .map_err(classify)?;
+        .map_err(|failure| classify(ControlMethod::WalletBalance, failure))?;
 
         // The node answered with figures AND told us they are stale. A stale number still reads as
         // the truth on a menu row, so it is reported as an unknown rather than shown with a caveat.
@@ -133,6 +156,43 @@ impl WalletEngine for NodeWalletEngine {
     }
 }
 
+impl NodeWalletEngine {
+    /// One control call to this engine's node, with `method`'s refusals classified for `method`.
+    ///
+    /// The method travels alongside the call because the SAME refusal symbol means different things
+    /// on different methods — see [`classify`] — and deriving it from the call's own type is what
+    /// keeps the two from drifting apart.
+    fn call<C>(&self, call: &C, method: ControlMethod) -> Result<C::Output, WalletError>
+    where
+        C: dig_node_control_interface::traits::ControlCall,
+    {
+        control::call_control_result(&self.endpoint, call, self.token.as_deref(), self.timeout)
+            .map_err(|failure| classify(method, failure))
+    }
+}
+
+/// One of the node's coin records as dig-app's own [`CoinRecord`].
+///
+/// The node's record is a SUPERSET: it also carries the parent, the puzzle hash and the two
+/// heights, which is what a spend needs to reconstruct a `Coin`. dig-app's wallet surface needs
+/// only the identity and the amount, so the rest is dropped HERE, visibly, rather than by a
+/// tolerant deserializer — a reader should be able to see that the drop is a decision.
+fn app_coin(record: &WalletCoinRecord) -> CoinRecord {
+    CoinRecord {
+        coin_id: record.coin_id.clone(),
+        asset: app_asset(record.asset),
+        amount: record.amount,
+    }
+}
+
+/// The contract's wire enum as dig-app's [`Asset`] — the inverse of [`wire_asset`].
+fn app_asset(asset: WireAsset) -> Asset {
+    match asset {
+        WireAsset::Xch => Asset::Xch,
+        WireAsset::Dig => Asset::Dig,
+    }
+}
+
 /// dig-app's [`Asset`] as the control contract's wire enum. Both serialize to the same lowercase
 /// token; this conversion is what keeps that a compile-time fact rather than a coincidence.
 fn wire_asset(asset: Asset) -> WireAsset {
@@ -142,39 +202,75 @@ fn wire_asset(asset: Asset) -> WireAsset {
     }
 }
 
-/// The stable `data.code` symbols a node emits when it cannot serve a wallet read at all.
+/// The stable `data.code` symbols that mean "this build cannot serve the method at all".
 ///
-/// `METHOD_NOT_FOUND` is a build predating the method. `NOT_SUPPORTED` is a build that has it but
-/// cannot offer it. `UNAUTHORIZED` belongs here too, and the reason is worth stating: every build
-/// that HAS `control.wallet.balance` serves it as an OPEN read needing no token, so a refusal on
-/// authorization grounds can only come from a build that gates it behind the control plane — one
-/// without the method. Telling that user "the read failed" would send them hunting a fault in their
-/// account; "this node does not read balances yet" names the upgrade that actually fixes it.
+/// `METHOD_NOT_FOUND` is a build predating the method; `NOT_SUPPORTED` is a build that has it but
+/// cannot offer it. Both name an upgrade as the remedy.
+///
+/// `UNAUTHORIZED` is deliberately NOT here — it belongs to [`classify`], which decides what it means
+/// from the METHOD it was raised on.
 const CANNOT_SERVE: &[&str] = &[
-    // Taken from the contract crate rather than retyped. The doc directly above argues the client
-    // must key on the stable contract symbol and never on a locally re-derived one -- hand-typing
-    // these was doing exactly what it warns against, and no test could have caught a divergence
-    // because the fixtures would have retyped the same literal (dig-app#109 review).
+    // Taken from the contract crate rather than retyped. A client must key on the stable contract
+    // symbol and never on a locally re-derived one -- hand-typing these was doing exactly what that
+    // rule warns against, and no test could have caught a divergence because the fixtures would
+    // have retyped the same literal (dig-app#109 review).
     ControlErrorCode::MethodNotFound.name(),
     ControlErrorCode::NotSupported.name(),
-    ControlErrorCode::Unauthorized.name(),
 ];
 
+/// Turn a control-plane failure into the typed wallet error the overview renders from.
+///
+/// Keyed on the stable UPPER_SNAKE `data.code`, never on the human message — the message is
+/// explicitly not contract-stable, so matching on its words would break on a reword.
+///
+/// # Why the method is an argument
+///
+/// An authorization refusal means opposite things on the two kinds of wallet method, and only the
+/// method can tell them apart:
+///
+/// - On an **open read** (`balance`, `coins`, `peak`) no token is ever required, so a refusal on
+///   authorization grounds can only come from a build that gates the method behind the control
+///   plane — that is, one that does not really have it. The remedy is an upgrade.
+/// - On a **token-gated** method (`broadcast`) it means exactly what it says: this app did not
+///   present a usable control token. The remedy is to make the node's token readable, and telling
+///   the user to upgrade a node that already serves the push would send them nowhere.
+///
+/// The same fork covers the transport-level `401` a real node answers a tokenless gated call with,
+/// which never reaches the JSON-RPC error layer at all.
+fn classify(method: ControlMethod, failure: ControlFailure) -> WalletError {
+    /// What an authorization refusal on `method` means.
+    fn unauthorized(method: ControlMethod) -> WalletError {
+        match method.is_open_read() {
+            true => WalletError::EngineUnsupported,
+            false => WalletError::EngineUnauthorized,
+        }
+    }
+
+    match failure {
+        ControlFailure::Transport(ControlCallError::HttpRefused { code: 401, .. }) => {
+            unauthorized(method)
+        }
+        ControlFailure::Rejected(ref e)
+            if e.data.code == ControlErrorCode::Unauthorized.name() =>
+        {
+            unauthorized(method)
+        }
+        other => classify_read_failure(other),
+    }
+}
+
 /// The stable symbol for "answered, but still catching up".
-const NOT_SYNCED: &str = "WALLET_NOT_SYNCED";
+const NOT_SYNCED: &str = ControlErrorCode::WalletNotSynced.name();
 
 /// The stable symbol for "the method is here, but there is no chain to read from".
 ///
 /// This is what a DEFAULT dig-node install answers today: the method is served, unauthenticated, and
 /// its chain source is absent. It is neither a missing capability nor an ordinary lag, so it gets its
 /// own reason all the way to the sentence the user reads.
-const NO_CHAIN_SOURCE: &str = "WALLET_NO_CHAIN_SOURCE";
+const NO_CHAIN_SOURCE: &str = ControlErrorCode::WalletNoChainSource.name();
 
-/// Turn a control-plane failure into the typed wallet error the overview renders from.
-///
-/// Keyed on the stable UPPER_SNAKE `data.code`, never on the human message — the message is
-/// explicitly not contract-stable, so matching on its words would break on a reword.
-fn classify(failure: ControlFailure) -> WalletError {
+/// Every failure whose meaning does NOT depend on which method raised it.
+fn classify_read_failure(failure: ControlFailure) -> WalletError {
     match failure {
         ControlFailure::Transport(ControlCallError::Unreachable(detail)) => {
             WalletError::EngineUnreachable(detail)
@@ -367,7 +463,7 @@ impl NodeBalance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::node::{FakeNode, WalletReply};
+    use crate::test_support::node::{BroadcastReply, CoinsReply, FakeCoin, FakeNode, WalletReply};
     use crate::wallet::overview::{balance_line, BalanceUnknown, Balances};
 
     const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
@@ -658,16 +754,196 @@ mod tests {
         ));
     }
 
-    /// The send path is #2207's: this engine refuses to broadcast rather than reporting a success it
-    /// did not achieve.
+    /// Nothing listening is "no node is running" for a PUSH too — and a push that never reached a
+    /// mempool must never look like one the mempool refused.
     #[test]
-    fn the_node_engine_refuses_to_broadcast() {
+    fn a_push_with_no_node_listening_is_unreachable_not_a_refusal() {
         let engine = NodeWalletEngine::new("http://localhost:1", None, Duration::from_millis(50));
-        assert!(engine
-            .broadcast(BroadcastRequest {
-                signed_bundle_hex: "deadbeef".to_string(),
-            })
-            .is_err());
+        assert!(matches!(
+            engine.broadcast(push()),
+            Err(WalletError::EngineUnreachable(_))
+        ));
+    }
+
+    /// A bundle to push. The bytes are arbitrary; what matters is that they arrive unchanged.
+    fn push() -> BroadcastRequest {
+        BroadcastRequest {
+            signed_bundle_hex: SIGNED_BUNDLE.to_string(),
+        }
+    }
+
+    /// The hex the fixtures push. Distinctive enough that finding it in the server's copy of the
+    /// request proves THESE bytes travelled, rather than some bytes.
+    const SIGNED_BUNDLE: &str = "ff01c0ffee";
+
+    /// **The headline coin read.** A node that serves `control.wallet.coins` yields the real
+    /// records, over a real socket, in the real wire shape.
+    ///
+    /// The two coins carry different amounts and, through [`FakeCoin::confirmed`], three ids that
+    /// differ from one another — so a client that read the puzzle hash where it meant the coin id,
+    /// or reported one coin twice, fails here rather than passing on a uniform fixture.
+    #[test]
+    fn a_node_that_serves_coins_yields_the_real_records() {
+        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![
+            FakeCoin::confirmed("dig", 1_500),
+            FakeCoin::confirmed("dig", 2_500),
+        ]));
+        let read = read_coins(&engine_for(&node), Asset::Dig).expect("the node answered");
+
+        assert_eq!(
+            read.coins.iter().map(|c| c.amount).collect::<Vec<_>>(),
+            [1_500, 2_500]
+        );
+        assert_eq!(
+            read.coins.iter().map(|c| c.coin_id.as_str()).collect::<Vec<_>>(),
+            [format!("{:064x}", 1_500), format!("{:064x}", 2_500)]
+        );
+        assert!(read.coins.iter().all(|c| c.asset == Asset::Dig));
+        assert!(node.received().contains("control.wallet.coins"));
+    }
+
+    /// **An empty list is an ANSWER**: the node consulted a chain and this address holds nothing.
+    #[test]
+    fn an_address_holding_nothing_reads_as_an_empty_list() {
+        let node = FakeNode::serving_coins(CoinsReply::Coins(Vec::new()));
+        assert_eq!(
+            read_coins(&engine_for(&node), Asset::Xch)
+                .expect("an empty address is a successful read")
+                .coins,
+            Vec::new()
+        );
+    }
+
+    /// **...and an unreachable chain is an ERROR, never that same empty list.**
+    ///
+    /// This is the pair that makes the previous test mean something. The nearest wrong
+    /// implementation maps every refusal to `Ok(no coins)`, which would tell somebody who holds
+    /// funds that they hold nothing — and would then refuse their mint with a shortfall that is not
+    /// true. Both fixtures are needed: either alone is satisfied by a constant.
+    #[test]
+    fn a_chain_that_could_not_be_read_is_an_error_never_an_empty_list() {
+        for (code, symbol) in [
+            (-32040, "WALLET_NO_CHAIN_SOURCE"),
+            (-32041, "WALLET_NOT_SYNCED"),
+            (-32042, "WALLET_READ_FAILED"),
+        ] {
+            let node = FakeNode::serving_coins(CoinsReply::rejected(code, symbol));
+            let outcome = read_coins(&engine_for(&node), Asset::Xch);
+            assert!(
+                outcome.is_err(),
+                "{symbol} became a successful read: {outcome:?}"
+            );
+        }
+    }
+
+    /// The coin read is OPEN, exactly as the contract declares it — a machine whose control-token
+    /// file this user cannot read still gets its coins.
+    #[test]
+    fn coins_are_readable_with_no_control_token_at_all() {
+        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![FakeCoin::confirmed("xch", 42)]));
+        let engine = NodeWalletEngine::new(node.endpoint(), None, Duration::from_secs(5));
+        assert_eq!(
+            read_coins(&engine, Asset::Xch).expect("an open read needs no token").coins.len(),
+            1
+        );
+    }
+
+    /// A node predating the method says so, and the remedy is an upgrade.
+    #[test]
+    fn an_older_node_that_cannot_read_coins_says_so() {
+        let node = FakeNode::serving_coins(CoinsReply::rejected(-32601, "METHOD_NOT_FOUND"));
+        assert!(matches!(
+            read_coins(&engine_for(&node), Asset::Xch),
+            Err(WalletError::EngineUnsupported)
+        ));
+    }
+
+    /// **A push the mempool accepted comes back as an acceptance carrying the transaction id** —
+    /// and the SIGNED BYTES are what went out, asserted from the server's own copy.
+    #[test]
+    fn an_accepted_push_reports_the_transaction_id() {
+        let node = FakeNode::serving_broadcast(BroadcastReply::Accepted {
+            transaction_id: "abc123".to_string(),
+        });
+        let outcome = engine_for(&node).broadcast(push()).expect("the node answered");
+
+        assert!(outcome.accepted);
+        assert_eq!(outcome.transaction_id.as_deref(), Some("abc123"));
+        assert_eq!(outcome.rejection, None);
+        let sent = node.received();
+        assert!(sent.contains("control.wallet.broadcast"));
+        assert!(sent.contains(SIGNED_BUNDLE), "the signed bytes must travel");
+    }
+
+    /// **A mempool that looked at the bundle and said no is a VALUE, not an error** — and it
+    /// carries the reason, because "retry the same bundle" and "build a new one" are opposite
+    /// remedies.
+    ///
+    /// The nearest wrong implementation turns any non-acceptance into an `Err`, which would make a
+    /// double-spend indistinguishable from a dropped network connection.
+    #[test]
+    fn a_mempool_refusal_is_an_answer_carrying_its_reason() {
+        let node = FakeNode::serving_broadcast(BroadcastReply::RefusedByMempool {
+            reason: "DOUBLE_SPEND".to_string(),
+        });
+        let outcome = engine_for(&node)
+            .broadcast(push())
+            .expect("a judged bundle is a successful call");
+
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.rejection.as_deref(), Some("DOUBLE_SPEND"));
+        assert_eq!(outcome.transaction_id, None);
+    }
+
+    /// **An authorization refusal on the PUSH means the token is missing — never "this node is too
+    /// old".**
+    ///
+    /// The two reads are open, so a refusal on them can only come from a build that lacks them, and
+    /// [`an_authorization_refusal_on_this_open_read_reads_as_an_older_node`] pins that. The push is
+    /// token-gated, so the same symbol means the opposite thing, and telling this user to upgrade a
+    /// node that already serves the method would send them after the wrong remedy entirely.
+    ///
+    /// The fixture varies ONE actor: the SAME node, serving the SAME method, asked once without a
+    /// token and once with one. The control is what keeps this from passing because the fake is
+    /// broken — a node that refused everybody would satisfy the first assertion on its own.
+    #[test]
+    fn an_authorization_refusal_on_the_push_names_the_token_not_the_node() {
+        let node = FakeNode::serving_broadcast(BroadcastReply::Accepted {
+            transaction_id: "abc123".to_string(),
+        });
+
+        let tokenless = NodeWalletEngine::new(node.endpoint(), None, Duration::from_secs(5));
+        let refusal = tokenless
+            .broadcast(push())
+            .expect_err("a token-gated method refuses a tokenless caller");
+        assert!(
+            matches!(refusal, WalletError::EngineUnauthorized),
+            "a gated method's refusal is about the token, not the build; got {refusal:?}"
+        );
+
+        assert!(
+            engine_for(&node).broadcast(push()).is_ok(),
+            "the control: the same node accepts the same push WITH a token"
+        );
+    }
+
+    /// A build predating the push genuinely is too old, and that stays distinguishable from the
+    /// token case above.
+    #[test]
+    fn an_older_node_that_cannot_push_reads_as_an_older_node() {
+        let node = FakeNode::serving_broadcast(BroadcastReply::rejected(-32601, "METHOD_NOT_FOUND"));
+        assert!(matches!(
+            engine_for(&node).broadcast(push()),
+            Err(WalletError::EngineUnsupported)
+        ));
+    }
+
+    /// Read `asset`'s coins at the fixture address.
+    fn read_coins(engine: &NodeWalletEngine, asset: Asset) -> Result<CoinsResponse, WalletError> {
+        engine.coins(CoinsRequest {
+            address: ADDRESS.to_string(),
+            asset,
+        })
     }
 
     /// **The poller reaches a real node end to end** — the path the shipped app takes: an
