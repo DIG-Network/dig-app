@@ -99,7 +99,11 @@ impl TabId {
     }
 
     /// The tab's user-facing label.
-    fn label(self) -> &'static str {
+    ///
+    /// Visible to the crate because it is also the vocabulary the COPY may use: a sentence that
+    /// sends a reader to a named tab is only true while that name is one of these, so the copy
+    /// sweep checks itself against this function rather than against a second hand-kept list.
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
             Self::Account => "Account",

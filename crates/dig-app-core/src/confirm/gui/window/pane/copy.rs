@@ -197,7 +197,7 @@ pub(crate) mod settings {
     /// established for the beacon: a switch that cannot move is a switch that will be tried.
     pub(crate) const NO_CONFIG: &str =
         "DIG cannot read its settings file on this computer, so these cannot be changed here. Open \
-         the log folder from the Status tab to find out why.";
+         the log folder from the Home tab to find out why.";
 
     /// What the connection test says while it is running.
     pub(crate) const TESTING: &str = "Asking the node…";
@@ -585,6 +585,18 @@ mod tests {
             protection::SECOND_FACTOR_ON,
             protection::SECOND_FACTOR_OFF,
             protection::PAIRED_APPS_HINT,
+            settings::UPDATES_ABOUT,
+            settings::UPDATES_COST,
+            settings::CHANNEL_UNKNOWN,
+            settings::NODE_ABOUT,
+            settings::NODE_HELP,
+            settings::NODE_COST,
+            settings::SHORTCUT_ABOUT,
+            settings::SHORTCUT_HELP,
+            settings::SHORTCUT_COST,
+            settings::SAVED,
+            settings::NO_CONFIG,
+            settings::TESTING,
             account::UNREAD,
             account::DESTRUCTIVE_CAVEAT,
             account::DIG_ID_UNKNOWN,
@@ -691,6 +703,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **No sentence sends the reader to a tab that does not exist.**
+    ///
+    /// The Settings pane's error state — the one state where the reader is already lost — told them
+    /// to *"open the log folder from the Status tab"* for a whole review cycle after
+    /// dig_ecosystem#2358 deleted the Status tab. Nothing caught it: `every_sentence` did not
+    /// enumerate `copy::settings` at all, which is the dig_ecosystem#2356 shape again — a sweep
+    /// scoped to one KIND of sentence is a sweep for one kind of sentence.
+    ///
+    /// So the vocabulary is taken from [`TabId::label`] itself rather than a second hand-kept list,
+    /// and deleting a tab now fails this test until the copy that names it is rewritten.
+    #[test]
+    fn no_sentence_names_a_tab_the_window_does_not_have() {
+        let real: Vec<&str> = TabId::all().into_iter().map(TabId::label).collect();
+        assert!(
+            !real.contains(&"Status"),
+            "the Status tab is back, so this guard's own example no longer discriminates"
+        );
+
+        for said in every_sentence() {
+            for named in tabs_named(said) {
+                assert!(
+                    real.contains(&named.as_str()),
+                    "a sentence sends the reader to the {named:?} tab, which this window does not \
+                     have — the tabs are {real:?}: {said}"
+                );
+            }
+        }
+    }
+
+    /// Every capitalised name used as `<Name> tab` in `sentence`.
+    ///
+    /// Capitalisation is what separates a NAME from a reference to the tab the reader is already on
+    /// (*"everything on this tab"*), which is always true and never needs checking.
+    fn tabs_named(sentence: &str) -> Vec<String> {
+        let words: Vec<&str> = sentence.split_whitespace().collect();
+        words
+            .windows(2)
+            .filter(|pair| pair[1].trim_end_matches(['.', ',', ';', ':']) == "tab")
+            .map(|pair| pair[0].to_owned())
+            .filter(|name| name.starts_with(|c: char| c.is_uppercase()))
+            .collect()
     }
 
     /// **Every state's copy is distinct, so a match arm cannot silently share another's sentence.**
