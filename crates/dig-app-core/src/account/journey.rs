@@ -1532,15 +1532,15 @@ mod copy {
              Chia wallet on your phone, or use \"Copy my address\" and send from a wallet on this \
              computer.\n\n\
              Creating your on-chain DID is a real Chia transaction, so it costs a small amount of XCH. \
-             You do not need any funds to read content, and DIG will never spend anything without \
-             showing you exactly what it is spending first.\n\n\
+             You do not need any funds to read content, and DIG spends nothing until you approve the \
+             transaction on the next screen.\n\n\
              You can see this address again at any time from the DIG menu.";
         /// The body on a host that draws no code, where the text address is the whole path.
         pub const BODY_TEXT_ONLY: &str =
             "Your address is below. Use \"Copy my address\" and send to it from any Chia wallet.\n\n\
              Creating your on-chain DID is a real Chia transaction, so it costs a small amount of XCH. \
-             You do not need any funds to read content, and DIG will never spend anything without \
-             showing you exactly what it is spending first.\n\n\
+             You do not need any funds to read content, and DIG spends nothing until you approve the \
+             transaction on the next screen.\n\n\
              You can see this address again at any time from the DIG menu.";
         /// The control that moves on.
         pub const CONTINUE: &str = "Continue";
@@ -1610,8 +1610,9 @@ mod copy {
             "A DID publishes your identity on the Chia blockchain so others can find and verify it. It \
              is what turns the wallet on this computer into a full DIG Account, and it is what \
              publishing, signing for an app and messaging need.\n\n\
-             Creating one is a real transaction that spends real XCH from your account. You will see \
-             the exact cost, and approve it, before anything is spent.\n\n\
+             Creating one is a real transaction that spends real XCH from your account: a small \
+             network fee, plus one mojo that becomes the DID itself. Choosing \"Create my DID\" is \
+             the approval — the transaction is sent straight away and cannot be called back.\n\n\
              Once it is sent, the blockchain takes a few minutes to confirm it. DIG will wait with you \
              and tell you how it went — you can stop watching at any time without cancelling anything.";
         /// The affirming control.
@@ -1638,8 +1639,7 @@ mod copy {
             "A DID is what publishes your identity on the Chia blockchain so others can find and verify \
              it, and it is the step that turns this wallet into a full DIG Account.\n\n\
              Minting one is not available in this version of DIG. Nothing is missing from your setup and \
-             there is nothing for you to do — when minting arrives, the DIG menu will offer it here, and \
-             you will see the exact cost before anything is spent.\n\n\
+             there is nothing for you to do — when minting arrives, the DIG menu will offer it here.\n\n\
              Until then your account holds funds, signs, and reads content normally.";
         /// The title when the wallet cannot pay for the mint.
         pub const UNAFFORDABLE_TITLE: &str = "DIG — Not enough XCH yet";
@@ -1812,6 +1812,100 @@ mod tests {
     impl DidMinter for ScriptedMinter {
         fn submit(&self) -> Submission {
             self.0.clone()
+        }
+    }
+
+    /// A minter that records HOW MANY windows the user had been shown at the instant it spent.
+    ///
+    /// The count is what makes the property observable. Whether a cost is shown before a spend is a
+    /// statement about the ORDER of two things, and no assertion on the returned outcome — or on the
+    /// text of the windows afterwards — can tell a flow that showed a cost screen from one that did
+    /// not. Only the count taken INSIDE the spend can.
+    struct WindowCountingMinter<'a> {
+        confirmer: &'a ScriptedConfirmer,
+        windows_at_spend: Mutex<Option<usize>>,
+        /// The text of everything drawn when it spent, so the ONE window can be identified.
+        text_at_spend: Mutex<String>,
+    }
+
+    impl DidMinter for WindowCountingMinter<'_> {
+        fn submit(&self) -> Submission {
+            *self.windows_at_spend.lock().unwrap() = Some(self.confirmer.windows_drawn());
+            *self.text_at_spend.lock().unwrap() = self.confirmer.drawn();
+            Submission::Submitted {
+                spend_id: MINTED_SPEND.to_owned(),
+                did: MINTED_DID.to_owned(),
+            }
+        }
+    }
+
+    /// **The offer IS the approval, and the copy may not promise otherwise** (dig_ecosystem#2377).
+    ///
+    /// `OFFER_BODY` used to promise *"You will see the exact cost, and approve it, before anything is
+    /// spent"*, and the funding screen promised DIG *"will never spend anything without showing you
+    /// exactly what it is spending first"*. Both were true only while nothing could spend. The first
+    /// half of this test measures what the flow actually does — exactly ONE window stands between the
+    /// person and a real mainnet spend, and it is the offer — and the second half holds every
+    /// pre-spend sentence to that measurement.
+    ///
+    /// Written as a measurement rather than a transcription on purpose: if a cost screen is ever
+    /// added, the first assertion fails and the copy rule below is the one that should then change.
+    #[test]
+    fn nothing_shown_before_a_spend_may_promise_a_cost_screen_that_does_not_exist() {
+        let confirmer = ScriptedConfirmer::new(Vec::new(), vec![ConfirmDecision::Approve]);
+        let minter = WindowCountingMinter {
+            confirmer: &confirmer,
+            windows_at_spend: Mutex::new(None),
+            text_at_spend: Mutex::new(String::new()),
+        };
+        let clock = TestClock::default();
+        let surface = PatientWait(&clock);
+        let ledger = MemoryLedger::default();
+        let chain = ChainDouble(Sighting::Pending);
+
+        mint_the_did(
+            &confirmer,
+            &DidMinting {
+                minter: &minter,
+                observer: &chain,
+                surface: &surface,
+                clock: &clock,
+                ledger: &ledger,
+            },
+        );
+
+        let count = minter
+            .windows_at_spend
+            .lock()
+            .unwrap()
+            .expect("the approved offer must reach the spend");
+        let text = minter.text_at_spend.lock().unwrap().clone();
+        assert_eq!(
+            count, 1,
+            "the offer is the ONLY thing between a person and a real spend: {text}"
+        );
+        assert!(
+            text.contains(copy::did::OFFER_HEADING),
+            "and that one window is the offer: {text}"
+        );
+
+        // So no screen a person sees before that spend may defer the approval to a later one.
+        for (name, body) in [
+            ("the mint offer", copy::did::OFFER_BODY),
+            ("the unavailable notice", copy::did::UNAVAILABLE_BODY),
+            ("the funding screen", copy::fund::BODY_WITH_A_CODE),
+            ("the funding screen (text only)", copy::fund::BODY_TEXT_ONLY),
+        ] {
+            for promise in [
+                "before anything is spent",
+                "showing you exactly what it is spending first",
+                "see the exact cost",
+            ] {
+                assert!(
+                    !body.contains(promise),
+                    "{name} promises \"{promise}\", and no such screen exists"
+                );
+            }
         }
     }
 
