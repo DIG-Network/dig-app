@@ -38,16 +38,13 @@ use dig_app_core::account::boot::{
 use dig_app_core::account::did::DidFile;
 use dig_app_core::account::journey::{
     ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier, DidMinting,
-    FirstRunOutcome, Replacement, WindowedPresenter,
+    FirstRunOutcome, Replacement, WindowedWait, WindowedPresenter,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
 #[cfg(feature = "tray")]
 use dig_app_core::account::migration;
-use dig_app_core::account::mint::{
-    KeepWaiting, MintObserver, Sighting, UnavailableMinter, WaitProgress, WaitSurface,
-    POLL_EVERY_SECS,
-};
+use dig_app_core::account::mint::{MintObserver, Sighting, UnavailableMinter};
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
@@ -506,7 +503,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     let minting = DidMinting {
         minter: &UnavailableMinter,
         observer: &UnreachableChain,
-        surface: &SleepingWait,
+        surface: &WindowedWait::new(confirmer),
         clock: &WallClock,
         ledger: &DidFile::new(&dir),
     };
@@ -578,26 +575,6 @@ struct UnreachableChain;
 impl MintObserver for UnreachableChain {
     fn look(&self, _spend_id: &str) -> Sighting {
         Sighting::Unreachable
-    }
-}
-
-/// The wait surface for a build that cannot mint.
-///
-/// It STOPS at the first check-in, for the same fail-safe reason [`UnreachableChain`] reports a lost
-/// connection: a surface that silently answered "keep waiting" would be a window a person could not
-/// leave, which is exactly what a real one must never be. Sleeping between polls is the honest
-/// production pace; the real surface replaces this whole type when the minter lands.
-#[cfg(feature = "tray")]
-struct SleepingWait;
-
-#[cfg(feature = "tray")]
-impl WaitSurface for SleepingWait {
-    fn checking_in(&self, _progress: &WaitProgress) -> KeepWaiting {
-        KeepWaiting::No
-    }
-
-    fn wait_a_moment(&self) {
-        std::thread::sleep(std::time::Duration::from_secs(POLL_EVERY_SECS));
     }
 }
 

@@ -18,7 +18,8 @@ use crate::account::boot::DiscardOutcome;
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::mint::{
-    await_confirmation, DidMinter, MintObserver, MintOutcome, Submission, WaitSurface,
+    await_confirmation, DidMinter, KeepWaiting, MintObserver, MintOutcome, Submission, WaitProgress,
+    WaitSurface, POLL_EVERY_SECS,
 };
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
@@ -1113,21 +1114,7 @@ fn show_where_to_send_funds(
         .draws_qr()
         .then(|| QrArt::encode(address))
         .flatten();
-    let decision = confirmer.confirm_claim(&ClaimPrompt {
-        title: copy::fund::TITLE,
-        heading: copy::fund::HEADING,
-        body: match scannable.is_some() {
-            true => copy::fund::BODY_WITH_A_CODE,
-            false => copy::fund::BODY_TEXT_ONLY,
-        },
-        affirm: copy::fund::CONTINUE,
-        decline: Some(copy::fund::COPY_ADDRESS),
-        // Both controls continue and neither spends anything, so the friendly default is the one that
-        // simply moves on — this is not a claim the user is making about the world.
-        refusal_is_default: false,
-        scannable: scannable.as_ref(),
-        identifier: Some(address),
-    });
+    let decision = confirmer.confirm_claim(&funding_claim(address, scannable.as_ref()));
 
     if decision != ConfirmDecision::Deny {
         return;
@@ -1147,6 +1134,31 @@ fn show_where_to_send_funds(
             copy::fund::COPY_FAILED_HEADING,
             &format!("{}\n\n{}", address, copy::fund::COPY_FAILED_BODY),
         ),
+    }
+}
+
+/// The funding window, built in one place so the wizard and the screenshot gallery draw the SAME
+/// screen (dig_ecosystem#2341).
+///
+/// Public because a photograph of re-typed copy is a photograph of a second implementation of it,
+/// which is how a screenshot stops being evidence about the product. `scannable` is `None` on a host
+/// whose windows draw no code, and the body changes with it rather than pointing at a picture that is
+/// not there.
+pub fn funding_claim<'a>(address: &'a str, scannable: Option<&'a QrArt>) -> ClaimPrompt<'a> {
+    ClaimPrompt {
+        title: copy::fund::TITLE,
+        heading: copy::fund::HEADING,
+        body: match scannable.is_some() {
+            true => copy::fund::BODY_WITH_A_CODE,
+            false => copy::fund::BODY_TEXT_ONLY,
+        },
+        affirm: copy::fund::CONTINUE,
+        decline: Some(copy::fund::COPY_ADDRESS),
+        // Both controls continue and neither spends anything, so the friendly default is the one that
+        // simply moves on — this is not a claim the user is making about the world.
+        refusal_is_default: false,
+        scannable,
+        identifier: Some(address),
     }
 }
 
@@ -1223,9 +1235,11 @@ fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &DidMinting<'_>) -> Op
 
 /// The offer that starts a mint: what a DID is for, that it costs real XCH, and a real way to say no.
 ///
+/// Public for the same reason [`funding_claim`] is: the gallery photographs THIS screen, not a copy.
+///
 /// Named rather than inline so its `refusal_is_default` is reachable from a test: affirming it SPENDS
 /// REAL MONEY, so a bare Enter must not (the rule dig_ecosystem#2098 exists for).
-fn mint_offer() -> ClaimPrompt<'static> {
+pub fn mint_offer() -> ClaimPrompt<'static> {
     ClaimPrompt {
         title: copy::did::OFFER_TITLE,
         heading: copy::did::OFFER_HEADING,
@@ -1239,57 +1253,164 @@ fn mint_offer() -> ClaimPrompt<'static> {
     }
 }
 
+/// The wait screen itself: what is being waited for, how long it has been, and a way to stop.
+///
+/// Returned as a value (rather than drawn here) for the same reason the report screens are: one
+/// unit-tested place decides the words, and the gallery photographs the real thing.
+///
+/// The elapsed figure is the whole point. A wait that says only "please wait" is indistinguishable
+/// from a wedged one, and cannot be told apart from a spinner that will never stop.
+pub fn waiting_screen(progress: &WaitProgress) -> WizardNotice {
+    WizardNotice {
+        title: copy::wait::TITLE,
+        heading: match progress.connection_lost() {
+            true => copy::wait::HEADING_OFFLINE,
+            false => copy::wait::HEADING,
+        },
+        body: format!(
+            "{}{}{}",
+            copy::wait::BEFORE_WAITED,
+            minutes(progress.elapsed_secs),
+            match progress.connection_lost() {
+                true => copy::wait::AFTER_WAITED_OFFLINE,
+                false => copy::wait::AFTER_WAITED,
+            }
+        ),
+    }
+}
+
+/// The production [`WaitSurface`]: an OS-owned window that reports the wait and offers to stop it.
+///
+/// # Why the window is a CLAIM and not a notice
+///
+/// Refusing it genuinely changes what happens — the watch stops — so the negative choice is
+/// load-bearing and must be a real, labelled control. It is also the ONLY reason this wait is not the
+/// trap `professional-ui`'s first rule forbids: a person who does not want to sit through a dozen
+/// blocks can leave, and leaving costs them nothing, because the spend is on the chain either way.
+pub struct WindowedWait<'a> {
+    /// Where the check-in is drawn.
+    confirmer: &'a dyn NativeConfirmer,
+}
+
+impl<'a> WindowedWait<'a> {
+    /// Wait through `confirmer`.
+    pub fn new(confirmer: &'a dyn NativeConfirmer) -> Self {
+        Self { confirmer }
+    }
+}
+
+impl WaitSurface for WindowedWait<'_> {
+    fn checking_in(&self, progress: &WaitProgress) -> KeepWaiting {
+        let screen = waiting_screen(progress);
+        match self.confirmer.confirm_claim(&ClaimPrompt {
+            title: screen.title,
+            heading: screen.heading,
+            body: &screen.body,
+            affirm: copy::wait::KEEP_WAITING,
+            decline: Some(copy::wait::STOP_WATCHING),
+            // Keeping the watch is what the user asked for and costs nothing; stopping is the
+            // deliberate choice, so the affirmative stays the default.
+            refusal_is_default: false,
+            scannable: None,
+            identifier: None,
+        }) {
+            ConfirmDecision::Approve => KeepWaiting::Yes,
+            // A refusal stops the watch; so does a host that could not draw the window, because
+            // waiting on a check-in nobody can answer is the wedged spinner in another costume.
+            _ => KeepWaiting::No,
+        }
+    }
+
+    fn wait_a_moment(&self) {
+        std::thread::sleep(std::time::Duration::from_secs(POLL_EVERY_SECS));
+    }
+}
+
 /// Tell the user how the wait ended, and record the DID on the ONE ending that earned it.
 ///
 /// The write and the congratulation live on the same arm deliberately: they are the same claim, so
 /// they cannot drift into a screen that says "your DID is ready" over a ledger that holds nothing.
 fn report_the_mint(confirmer: &dyn NativeConfirmer, ledger: &dyn DidLedger, outcome: &MintOutcome) {
-    match outcome {
+    // The write happens BEFORE the screen is composed, because what the screen says depends on
+    // whether it succeeded: a confirmed mint whose note could not be saved must not be congratulated
+    // as if it had been.
+    let recorded = match outcome {
         MintOutcome::Confirmed { did, evidence } => {
-            let stored = ledger.record(&DidRecord::from_mint(did, evidence.clone()));
-            notify(
-                confirmer,
-                copy::did::CONFIRMED_TITLE,
-                copy::did::CONFIRMED_HEADING,
-                &format!(
-                    "{did}\n\n{}",
-                    match stored {
-                        true => copy::did::CONFIRMED_BODY,
-                        // The chain is the truth and it says the DID exists; what failed is this
-                        // computer's note of it. Saying so is better than a silent re-mint offer that
-                        // would spend again.
-                        false => copy::did::CONFIRMED_BUT_UNRECORDED_BODY,
-                    }
-                ),
-            );
+            Some(ledger.record(&DidRecord::from_mint(did, evidence.clone())))
         }
-        MintOutcome::Rejected { reason } => notify(
-            confirmer,
-            copy::did::REJECTED_TITLE,
-            copy::did::REJECTED_HEADING,
-            &format!("{reason}\n\n{}", copy::did::REJECTED_BODY),
-        ),
+        _ => None,
+    };
+    let screen = mint_report(outcome, recorded);
+    notify(confirmer, screen.title, screen.heading, &screen.body);
+}
+
+/// One of the wizard's report screens, composed rather than drawn.
+///
+/// A value so the gallery can photograph every ending without a chain, and so the copy for each
+/// ending is decided in one unit-tested place instead of inside a `match` that also draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WizardNotice {
+    /// The window title.
+    pub title: &'static str,
+    /// The one-line heading.
+    pub heading: &'static str,
+    /// The body, which carries the DID, the spend id or the chain's own reason.
+    pub body: String,
+}
+
+/// What the user is told about `outcome`.
+///
+/// `recorded` is `Some(true)` when a confirmed DID was written down, `Some(false)` when the write
+/// failed, and `None` for every ending that has no DID to record — so the "confirmed but not saved"
+/// screen cannot be reached by any ending except a real confirmation.
+pub fn mint_report(outcome: &MintOutcome, recorded: Option<bool>) -> WizardNotice {
+    match outcome {
+        MintOutcome::Confirmed { did, .. } => WizardNotice {
+            title: copy::did::CONFIRMED_TITLE,
+            heading: copy::did::CONFIRMED_HEADING,
+            body: format!(
+                "{did}
+
+{}",
+                match recorded {
+                    // The chain is the truth and it says the DID exists; what failed is this
+                    // computer's note of it. Saying so is better than a silent re-mint offer that
+                    // would spend again.
+                    Some(false) => copy::did::CONFIRMED_BUT_UNRECORDED_BODY,
+                    _ => copy::did::CONFIRMED_BODY,
+                }
+            ),
+        },
+        MintOutcome::Rejected { reason } => WizardNotice {
+            title: copy::did::REJECTED_TITLE,
+            heading: copy::did::REJECTED_HEADING,
+            body: format!("{reason}
+
+{}", copy::did::REJECTED_BODY),
+        },
         MintOutcome::StillPending {
             spend_id,
             waited_secs,
-        } => notify(
-            confirmer,
-            copy::did::PENDING_TITLE,
-            copy::did::PENDING_HEADING,
-            &format!(
-                "{}{}{}{spend_id}\n\n{}",
+        } => WizardNotice {
+            title: copy::did::PENDING_TITLE,
+            heading: copy::did::PENDING_HEADING,
+            body: format!(
+                "{}{}{}{spend_id}
+
+{}",
                 copy::did::PENDING_BEFORE_WAITED,
                 minutes(*waited_secs),
                 copy::did::PENDING_AFTER_WAITED,
                 copy::did::PENDING_BODY,
             ),
-        ),
-        MintOutcome::ConnectionLost { spend_id } => notify(
-            confirmer,
-            copy::did::OFFLINE_TITLE,
-            copy::did::OFFLINE_HEADING,
-            &format!("{spend_id}\n\n{}", copy::did::OFFLINE_BODY),
-        ),
+        },
+        MintOutcome::ConnectionLost { spend_id } => WizardNotice {
+            title: copy::did::OFFLINE_TITLE,
+            heading: copy::did::OFFLINE_HEADING,
+            body: format!("{spend_id}
+
+{}", copy::did::OFFLINE_BODY),
+        },
     }
 }
 
@@ -1319,15 +1440,16 @@ mod copy {
         pub const HEADING: &str = "Send XCH to this address to pay for your DID.";
         /// The body where the window will draw a scannable code.
         pub const BODY_WITH_A_CODE: &str =
-            "Scan the code with a Chia wallet on your phone, or copy the address below and send from \
-             a wallet on this computer.\n\n\
+            "Your address is below, with the same thing as a code beneath it. Scan the code with a \
+             Chia wallet on your phone, or use \"Copy my address\" and send from a wallet on this \
+             computer.\n\n\
              Creating your on-chain DID is a real Chia transaction, so it costs a small amount of XCH. \
              You do not need any funds to read content, and DIG will never spend anything without \
              showing you exactly what it is spending first.\n\n\
              You can see this address again at any time from the DIG menu.";
         /// The body on a host that draws no code, where the text address is the whole path.
         pub const BODY_TEXT_ONLY: &str =
-            "Copy the address below and send from any Chia wallet.\n\n\
+            "Your address is below. Use \"Copy my address\" and send to it from any Chia wallet.\n\n\
              Creating your on-chain DID is a real Chia transaction, so it costs a small amount of XCH. \
              You do not need any funds to read content, and DIG will never spend anything without \
              showing you exactly what it is spending first.\n\n\
@@ -1353,6 +1475,40 @@ mod copy {
         pub const COPY_FAILED_BODY: &str =
             "Nothing was copied, so whatever was on your clipboard before is still there. Select the \
              address above and copy it by hand, or find it again from the DIG menu.";
+    }
+
+    /// The check-in shown while the chain is being waited on.
+    pub(super) mod wait {
+        /// The window title.
+        pub const TITLE: &str = "DIG — Waiting for the blockchain";
+        /// The heading on a healthy wait.
+        pub const HEADING: &str = "Your DID is on its way.";
+        /// The heading when the watcher cannot reach the chain.
+        pub const HEADING_OFFLINE: &str = "DIG is having trouble reaching the blockchain.";
+        /// The sentence before the elapsed figure.
+        pub const BEFORE_WAITED: &str = "DIG has been waiting ";
+        /// The sentence after it, on a healthy wait.
+        ///
+        /// `concat!` rather than backslash continuations: this file has been bitten before by a
+        /// literal that acquired a hole mid-sentence, and this very sentence acquired two — visible
+        /// in the screenshot, invisible to every assertion that only looked for substrings.
+        pub const AFTER_WAITED: &str = concat!(
+            " for the blockchain to confirm the transaction that creates your DID. ",
+            "A few minutes is normal.\n\n",
+            "You can stop watching at any time. That does not cancel anything — the transaction is ",
+            "already on the blockchain, and the DIG menu will tell you how it went.",
+        );
+        /// The sentence after it when the connection is the problem.
+        pub const AFTER_WAITED_OFFLINE: &str = concat!(
+            " and cannot currently reach the blockchain to check. Your transaction was sent and is ",
+            "probably fine; what stopped is this computer's ability to watch for it.\n\n",
+            "Check this computer's internet connection. You can stop watching at any time — that ",
+            "cancels nothing, and the DIG menu will tell you how it went.",
+        );
+        /// The control that keeps the watch running.
+        pub const KEEP_WAITING: &str = "Keep waiting";
+        /// The control that stops it. NOT "Cancel" — nothing is cancelled.
+        pub const STOP_WATCHING: &str = "Stop watching";
     }
 
     /// The DID step, from the offer through every way the wait can end.
@@ -2225,6 +2381,78 @@ mod tests {
         );
         assert!(drawn.to_lowercase().contains("nothing was spent"));
         assert!(bench.ledger.recorded().is_none());
+    }
+
+    /// **The wait screen names the elapsed time and a way to stop.**
+    ///
+    /// Both halves matter: a check-in with no duration cannot be told from a wedged one, and a
+    /// check-in with no way out is the trap this whole design exists to avoid.
+    #[test]
+    fn the_wait_screen_reports_how_long_it_has_been_and_how_to_stop() {
+        let screen = waiting_screen(&WaitProgress {
+            elapsed_secs: 240,
+            give_up_after_secs: 600,
+            unreachable_looks: 0,
+        });
+        assert!(
+            screen.body.contains("4 minutes"),
+            "the real elapsed time must be on the screen: {}",
+            screen.body
+        );
+        assert!(
+            screen.body.to_lowercase().contains("stop watching"),
+            "the way out must be named: {}",
+            screen.body
+        );
+        assert!(
+            screen.body.to_lowercase().contains("cancel"),
+            "stopping must be explained as not cancelling anything: {}",
+            screen.body
+        );
+    }
+
+    /// A wait whose watcher cannot reach the chain SAYS so, rather than looking identical to a healthy
+    /// one. The two screens are compared, so copy that never varied would fail.
+    #[test]
+    fn a_wait_that_cannot_see_the_chain_looks_different_from_a_healthy_one() {
+        let healthy = WaitProgress {
+            elapsed_secs: 240,
+            give_up_after_secs: 600,
+            unreachable_looks: 0,
+        };
+        let offline = WaitProgress {
+            unreachable_looks: 6,
+            ..healthy
+        };
+        assert_ne!(waiting_screen(&healthy), waiting_screen(&offline));
+        assert!(waiting_screen(&offline)
+            .heading
+            .to_lowercase()
+            .contains("reaching the blockchain"));
+    }
+
+    /// **A host that cannot draw the check-in STOPS the watch.**
+    ///
+    /// The alternative — treat an undrawable window as "keep waiting" — is a loop nobody can see and
+    /// nobody can leave, on a machine that by definition cannot ask.
+    #[test]
+    fn a_check_in_that_cannot_be_drawn_stops_the_watch() {
+        let progress = WaitProgress {
+            elapsed_secs: 240,
+            give_up_after_secs: 600,
+            unreachable_looks: 0,
+        };
+        assert_eq!(
+            WindowedWait::new(&crate::confirm::HeadlessConfirmer).checking_in(&progress),
+            KeepWaiting::No
+        );
+        // ... and a host that CAN draw, and whose user says keep going, keeps going — so the assertion
+        // above is about the undrawable host, not about a surface that always stops.
+        let willing = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve]);
+        assert_eq!(
+            WindowedWait::new(&willing).checking_in(&progress),
+            KeepWaiting::Yes
+        );
     }
 
     /// The elapsed wait is described in the user's terms, and never rounded UP into a longer wait than
@@ -3771,7 +3999,48 @@ mod tests {
             None::<&PhraseVault<PassthroughSealer>>,
         );
 
-        for window in [confirmer.drawn(), RETENTION_AND_REVEAL_COPY.to_string()] {
+        // Plus every screen the DID wizard draws (dig_ecosystem#2341). Added because two of them
+        // shipped with exactly this defect — a hole mid-sentence that every substring assertion in
+        // this file passed straight over and only a screenshot showed.
+        let wizard = ScriptedConfirmer::drawing_qr(vec![ConfirmDecision::Approve; 8]);
+        let bench = Bench::minting_successfully(Sighting::Pending);
+        let surface = PatientWait(&bench.clock);
+        first_run_wizard(
+            &wizard,
+            AccountPresence::Wallet { address: ADDRESS },
+            || panic!("must not create"),
+            never_imports,
+            &RecordingCopier::working(),
+            &bench.wiring(&surface),
+        );
+        let wait_screens = [
+            waiting_screen(&WaitProgress {
+                elapsed_secs: 240,
+                give_up_after_secs: 600,
+                unreachable_looks: 0,
+            }),
+            waiting_screen(&WaitProgress {
+                elapsed_secs: 240,
+                give_up_after_secs: 600,
+                unreachable_looks: 6,
+            }),
+            mint_report(
+                &MintOutcome::Confirmed {
+                    did: MINTED_DID.to_owned(),
+                    evidence: MintEvidence::confirmed(MINTED_SPEND, 12),
+                },
+                Some(false),
+            ),
+        ]
+        .map(|screen| screen.body)
+        .join("\n");
+
+        for window in [
+            confirmer.drawn(),
+            wizard.drawn(),
+            wait_screens,
+            RETENTION_AND_REVEAL_COPY.to_string(),
+        ] {
             for (index, line) in window.lines().enumerate() {
                 assert!(
                     !line.contains("   "),

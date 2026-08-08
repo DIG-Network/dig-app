@@ -233,6 +233,29 @@ fn main() {
             identifier: None,
             })
         }
+        // The first-run DID wizard (dig_ecosystem#2341). ONE screen per invocation, so a capture
+        // never needs a click driven at the window before it — and every screen is built by the
+        // journey's own builder, so this photographs the product rather than a re-typed copy of it.
+        //
+        // ```text
+        // cargo run -p dig-app-core --example dialog_gallery -- did fund
+        // ```
+        //
+        // | screen | what it is |
+        // |---|---|
+        // | `fund` | the funding claim, with the scannable code and the address in mono |
+        // | `offer` | the mint offer — the window that spends real XCH |
+        // | `waiting` | the confirmation check-in, four minutes in |
+        // | `waiting-offline` | the same check-in with the chain unreachable |
+        // | `pending` | the mint that never confirmed |
+        // | `rejected` | the mint the chain refused |
+        // | `offline` | the watch that lost its connection |
+        // | `confirmed` | the one success screen |
+        "did" => {
+            let screen = std::env::args().nth(2).unwrap_or_else(|| "fund".into());
+            wizard::draw(confirmer.as_ref(), &screen);
+            return;
+        }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
             secret: "your 24-word DIG recovery phrase",
@@ -320,11 +343,103 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, authorization, destroy, unopenable, input, passphrase, open or bar"
+                "unknown window `{other}` — expected notice, claim, did-wizard, authorization, destroy, unopenable, input, passphrase, open or bar"
             );
             std::process::exit(2);
         }
     };
 
     println!("{which}: {decision:?}");
+}
+
+/// The fixtures the DID wizard is drawn against, kept together so nothing here can be mistaken for a
+/// production path: no chain is reached, no key is used, and no DID is recorded.
+mod wizard {
+    use dig_app_core::account::did::MintEvidence;
+    use dig_app_core::account::journey::{funding_claim, mint_offer, mint_report, WindowedWait};
+    use dig_app_core::account::mint::{MintOutcome, WaitProgress, WaitSurface};
+    use dig_app_core::confirm::{NativeConfirmer, NoticePrompt, QrArt};
+
+    /// A mainnet-shaped receiving address, so the code and the mono line are photographed at the real
+    /// length. It is a fixture, not anyone's address.
+    const ADDRESS: &str = "xch1galleryfixtureaddress0000000000000000000000000000000000000000";
+    /// The DID the fixture mint creates.
+    const DID: &str = "did:chia:1galleryfixturedid000000000000000000000000000000000000000000";
+    /// The spend the fixture mint reports — a full-length id, since its wrapping is part of what a
+    /// screenshot is checking.
+    const SPEND: &str = "0x9f2c41a7e5b8d03c6a1f7e94b2d8c05e3a7f61b9d4c28e07a5f3b1c9d6e024f8";
+    /// How long the photographed wait has been going.
+    const WAITED_SECS: u64 = 240;
+
+    /// The wait's progress, at `unreachable_looks` consecutive failed looks.
+    fn progress(unreachable_looks: u32) -> WaitProgress {
+        WaitProgress {
+            elapsed_secs: WAITED_SECS,
+            give_up_after_secs: dig_app_core::account::mint::GIVE_UP_AFTER_SECS,
+            unreachable_looks,
+        }
+    }
+
+    /// Draw exactly the screen `which` names.
+    pub fn draw(confirmer: &dyn NativeConfirmer, which: &str) {
+        let confirmed = MintOutcome::Confirmed {
+            did: DID.to_owned(),
+            evidence: MintEvidence::confirmed(SPEND, 5_412_009),
+        };
+        let notice = match which {
+            "fund" => {
+                let art = confirmer.draws_qr().then(|| QrArt::encode(ADDRESS)).flatten();
+                let decision = confirmer.confirm_claim(&funding_claim(ADDRESS, art.as_ref()));
+                println!("did fund: {decision:?}");
+                return;
+            }
+            "offer" => {
+                let decision = confirmer.confirm_claim(&mint_offer());
+                println!("did offer: {decision:?}");
+                return;
+            }
+            // Drawn through the PRODUCTION wait surface, so the photograph is the real two-button
+            // check-in — "Keep waiting" and "Stop watching" — and not a one-button lookalike.
+            "waiting" | "waiting-offline" => {
+                let looks = u32::from(which == "waiting-offline") * 6;
+                let answer = WindowedWait::new(confirmer).checking_in(&progress(looks));
+                println!("did {which}: {answer:?}");
+                return;
+            }
+            "pending" => mint_report(
+                &MintOutcome::StillPending {
+                    spend_id: SPEND.to_owned(),
+                    waited_secs: WAITED_SECS,
+                },
+                None,
+            ),
+            "rejected" => mint_report(
+                &MintOutcome::Rejected {
+                    reason: "the coin this transaction spends was already spent".to_owned(),
+                },
+                None,
+            ),
+            "offline" => mint_report(
+                &MintOutcome::ConnectionLost {
+                    spend_id: SPEND.to_owned(),
+                },
+                None,
+            ),
+            "confirmed" => mint_report(&confirmed, Some(true)),
+            other => {
+                eprintln!(
+                    "unknown screen `{other}` — expected fund, offer, waiting, waiting-offline, pending, rejected, offline or confirmed"
+                );
+                std::process::exit(2);
+            }
+        };
+        let decision = confirmer.show_notice(&NoticePrompt {
+            title: notice.title,
+            heading: notice.heading,
+            body: &notice.body,
+            acknowledge: "OK",
+            identifier: None,
+        });
+        println!("did {which}: {decision:?}");
+    }
 }
