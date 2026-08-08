@@ -17,12 +17,19 @@
 //!
 //! # And the rule underneath it
 //!
-//! An unknown balance is never a numeral. [`BalanceReading`] has three states and this pane renders
-//! each as itself: a reading becomes two figures, a read in flight becomes the sentence saying so,
-//! and an unknown becomes the sentence naming which thing is missing — the same sentences the tray's
-//! wallet window shows, from [`crate::wallet::overview`], so the two surfaces cannot drift.
+//! An unknown balance is never PRESENTED as a figure. [`BalanceReading`] has three states and this
+//! pane renders each as itself: a reading becomes two figures, a read in flight becomes the sentence
+//! saying so, and an unknown becomes a `Value::Unknown` naming which thing is missing — the same
+//! sentences the tray's wallet window shows, from [`crate::wallet::overview`], so the two surfaces
+//! cannot drift.
+//!
+//! Said that precisely, because the stronger form is false. Every non-reading is a `Value::Unknown`,
+//! and the eleven reasons whose words this crate writes carry no digit at all — but
+//! [`BalanceUnknown::ReadFailed`](crate::wallet::overview::BalanceUnknown::ReadFailed) quotes the
+//! node, and a node says things like *rpc error 500 after 30s*. Those numerals arrive inside a
+//! sentence beginning `Not known —`, never beside an asset label.
 
-use super::action::{self, Action};
+use super::action;
 use super::card;
 use super::copy;
 use super::data::{self, Readout, Tone, Value};
@@ -223,7 +230,7 @@ fn sending_card(flow: &mut Flow, t: &Tokens) {
 
 /// The tab's own verbs, as a weighted button group. Omitted when the model offers none.
 fn actions_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let actions = actions_of(tab);
+    let actions = super::actions_of(tab);
     if actions.is_empty() {
         return None;
     }
@@ -235,17 +242,6 @@ fn actions_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
             });
         (height, pressed.flatten())
     })
-}
-
-/// The tab's rows as weighted actions, through the one derivation in [`super::actions_in`].
-fn actions_of(tab: &Tab) -> Vec<Action<TrayAction>> {
-    let mut seen = std::collections::HashMap::new();
-    super::actions_in(
-        tab.sections
-            .iter()
-            .flat_map(|section| section.rows.iter().cloned()),
-        &mut seen,
-    )
 }
 
 /// The address reading this pane renders.
@@ -286,25 +282,52 @@ mod tests {
         PaneFacts::of_tray(&view)
     }
 
-    /// **A not-known balance reads as a sentence, not as a clause starting mid-thought.**
+    /// **Every** [`BalanceUnknown`] state, so a guard asserted "over all of them" is.
     ///
-    /// Found by looking at the locked pane: `wallet::overview`'s reasons are written to complete
-    /// "Balance: not known — ", so under a bare `Balance` label they began in lower case — *"your
-    /// account is locked, so DIG cannot tell which address to read."* Reusing those sentences is
-    /// right; presenting them without the words they complete was not. Asserted over every reason,
-    /// because one arm fixed by hand is one arm, and the property belongs to all of them.
-    #[test]
-    fn a_not_known_balance_supplies_the_words_its_reason_completes() {
-        let reasons = [
+    /// Written out rather than derived, because the enum carries a `String` payload and cannot be
+    /// enumerated — which is exactly how the earlier 7-of-12 list passed for "every reason". The
+    /// list is checked against the enum's arms by
+    /// [`every_unknown_reason_lists_every_arm_of_the_enum`], so adding a variant reddens this file
+    /// rather than silently shrinking the guard.
+    fn every_unknown_reason() -> Vec<BalanceUnknown> {
+        vec![
+            BalanceUnknown::NoAddress(AddressUnavailable::NoAccount),
+            BalanceUnknown::NoAddress(AddressUnavailable::HostUnsupported),
+            BalanceUnknown::NoAddress(AddressUnavailable::NoPasswordYet),
+            BalanceUnknown::NoAddress(AddressUnavailable::Locked),
+            BalanceUnknown::NoAddress(AddressUnavailable::Unopenable),
+            BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed),
             BalanceUnknown::NoNode,
             BalanceUnknown::NodeTimedOut,
             BalanceUnknown::NodeCannotRead,
             BalanceUnknown::NoChainSource,
             BalanceUnknown::NotSynced,
-            BalanceUnknown::NoAddress(AddressUnavailable::Locked),
-            BalanceUnknown::NoAddress(AddressUnavailable::NoAccount),
-        ];
-        for why in reasons {
+            // The one arm whose sentence comes from OUTSIDE this crate, given the node text that
+            // breaks a naive no-digit rule: an HTTP status and a timeout are both numerals.
+            BalanceUnknown::ReadFailed("rpc error 500 after 30s".to_string()),
+        ]
+    }
+
+    /// Whether a reason's sentence is the node's own words rather than this crate's.
+    fn is_node_supplied(why: &BalanceUnknown) -> bool {
+        matches!(why, BalanceUnknown::ReadFailed(_))
+    }
+
+    /// **A not-known balance reads as a sentence, not as a clause starting mid-thought.**
+    ///
+    /// Found by looking at the locked pane: `wallet::overview`'s reasons are written to complete
+    /// "Balance: not known — ", so under a bare `Balance` label they began in lower case — *"your
+    /// account is locked, so DIG cannot tell which address to read."* Reusing those sentences is
+    /// right; presenting them without the words they complete was not. Asserted over EVERY reason
+    /// the enum has, because one arm fixed by hand is one arm.
+    ///
+    /// The second assertion is what an earlier `first.is_uppercase()` could not be: that check read
+    /// the first character of the `Not known —` CONSTANT, so it passed whatever the reason did —
+    /// including for a pane that rendered the prefix and dropped the reason entirely. That is the
+    /// nearest wrong implementation, so the clause AFTER the prefix is what is asserted here.
+    #[test]
+    fn a_not_known_balance_supplies_the_words_its_reason_completes() {
+        for why in every_unknown_reason() {
             let shown = holdings(&BalanceReading::Unknown(why.clone()))[0]
                 .value
                 .shown()
@@ -313,10 +336,15 @@ mod tests {
                 shown.starts_with(copy::wallet::BALANCE_NOT_KNOWN),
                 "{why:?} renders as a bare clause: {shown}"
             );
-            let first = shown.chars().next().expect("the sentence is not empty");
+            let clause = shown[copy::wallet::BALANCE_NOT_KNOWN.len()..].trim();
             assert!(
-                first.is_uppercase(),
-                "{why:?} renders a sentence that starts in lower case: {shown}"
+                !clause.is_empty(),
+                "{why:?} rendered a prefix with nothing after it: {shown}"
+            );
+            assert_eq!(
+                clause,
+                unknown_reason(&why).trim(),
+                "{why:?} rendered the prefix without the reason it introduces"
             );
         }
     }
@@ -372,39 +400,59 @@ mod tests {
         assert_eq!(items[1].value.shown(), "0.000000000001");
     }
 
-    /// **No balance state that is not a reading can produce a numeral.**
+    /// **No balance state that is not a reading is presented as a figure.**
     ///
-    /// The money-lie guard, asserted over EVERY non-`Known` state rather than a sample: a pending
-    /// read and each unknown reason must render as a `Value::Unknown` whose text contains no digit
-    /// at all. A digit here is how a person reads "not known" as "you hold nothing" — and the
-    /// `ReadFailed` case is included with a digit-bearing detail string, because that is the one
-    /// arm whose text comes from outside this crate.
+    /// The money-lie guard, asserted over EVERY non-`Known` state — all twelve `BalanceUnknown`
+    /// arms plus `Pending` — rather than over a sample. It is stated in two parts because the arms
+    /// are not alike, and the earlier single "contains no digit" rule was only ever true of the
+    /// eleven arms this crate writes the words for:
+    ///
+    /// - **Every** state renders as a `Value::Unknown` — never a `Measure` or a `Word` — so nothing
+    ///   here can be read as an amount whatever its text says. This is the load-bearing half.
+    /// - The eleven arms whose sentence THIS crate authors additionally contain no digit at all,
+    ///   because a stray numeral in copy under a `Balance` label is how "not known" is read as
+    ///   "you hold nothing".
+    /// - `ReadFailed` carries the node's own words, which legitimately contain numerals — an HTTP
+    ///   status, a timeout. It is asserted instead to be `Unknown` and prefixed `Not known —`, so
+    ///   its digits arrive inside a sentence about a failure rather than beside an asset label.
     #[test]
-    fn nothing_but_a_reading_renders_a_figure() {
-        let not_readings = [
-            BalanceReading::Pending,
-            BalanceReading::Unknown(BalanceUnknown::NoNode),
-            BalanceReading::Unknown(BalanceUnknown::NodeTimedOut),
-            BalanceReading::Unknown(BalanceUnknown::NodeCannotRead),
-            BalanceReading::Unknown(BalanceUnknown::NoChainSource),
-            BalanceReading::Unknown(BalanceUnknown::NotSynced),
-            BalanceReading::Unknown(BalanceUnknown::NoAddress(AddressUnavailable::Locked)),
-            BalanceReading::Unknown(BalanceUnknown::NoAddress(AddressUnavailable::NoAccount)),
-        ];
-        for reading in not_readings {
-            let items = holdings(&reading);
+    fn nothing_but_a_reading_is_presented_as_a_figure() {
+        let mut not_readings = vec![BalanceReading::Pending];
+        not_readings.extend(
+            every_unknown_reason()
+                .into_iter()
+                .map(BalanceReading::Unknown),
+        );
+
+        for reading in &not_readings {
+            let items = holdings(reading);
             assert_eq!(items.len(), 1, "{reading:?} rendered more than one readout");
             assert!(
                 !items[0].value.is_known(),
                 "{reading:?} rendered as a known value"
             );
-            assert!(
-                !items[0].value.shown().chars().any(|c| c.is_ascii_digit()),
-                "{reading:?} put a numeral where a person reads a balance: {}",
-                items[0].value.shown()
-            );
+            let shown = items[0].value.shown().to_string();
+
+            let quotes_the_node =
+                matches!(reading, BalanceReading::Unknown(why) if is_node_supplied(why));
+            if quotes_the_node {
+                assert!(
+                    shown.starts_with(copy::wallet::BALANCE_NOT_KNOWN),
+                    "{reading:?} put the node's words under a balance label without saying the balance is not known: {shown}"
+                );
+                assert!(
+                    shown.chars().any(|c| c.is_ascii_digit()),
+                    "the fixture lost its numerals, so this arm no longer tells the no-digit rule apart from the presented-as-unknown one: {shown}"
+                );
+            } else {
+                assert!(
+                    !shown.chars().any(|c| c.is_ascii_digit()),
+                    "{reading:?} put a numeral where a person reads a balance: {shown}"
+                );
+            }
         }
-        // A real reading, by contrast, DOES produce figures — without this the test above is
+
+        // A real reading, by contrast, DOES produce figures — without this the assertions above are
         // satisfied by a `holdings` that never returns a number at all.
         let known = holdings(&BalanceReading::Known(Balances {
             xch_mojos: 1_000_000_000_000,
@@ -414,23 +462,48 @@ mod tests {
         assert!(known.iter().all(|item| item.value.is_known()));
     }
 
+    /// **The reason list these guards run over is the whole enum.**
+    ///
+    /// [`every_unknown_reason`] is hand-written, so nothing stops it going stale the day a variant
+    /// is added — which is precisely how the earlier guard came to cover 7 of 12 while its comment
+    /// said "every". This match has no wildcard: a new arm fails to compile here first.
+    #[test]
+    fn every_unknown_reason_lists_every_arm_of_the_enum() {
+        fn arm(why: &BalanceUnknown) -> u8 {
+            match why {
+                BalanceUnknown::NoAddress(AddressUnavailable::NoAccount) => 0,
+                BalanceUnknown::NoAddress(AddressUnavailable::HostUnsupported) => 1,
+                BalanceUnknown::NoAddress(AddressUnavailable::NoPasswordYet) => 2,
+                BalanceUnknown::NoAddress(AddressUnavailable::Locked) => 3,
+                BalanceUnknown::NoAddress(AddressUnavailable::Unopenable) => 4,
+                BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => 5,
+                BalanceUnknown::NoNode => 6,
+                BalanceUnknown::NodeTimedOut => 7,
+                BalanceUnknown::NodeCannotRead => 8,
+                BalanceUnknown::NoChainSource => 9,
+                BalanceUnknown::NotSynced => 10,
+                BalanceUnknown::ReadFailed(_) => 11,
+            }
+        }
+        let mut arms: Vec<u8> = every_unknown_reason().iter().map(arm).collect();
+        arms.sort_unstable();
+        arms.dedup();
+        assert_eq!(
+            arms,
+            (0..12).collect::<Vec<u8>>(),
+            "the guard's reason list is not the whole enum"
+        );
+    }
+
     /// **Each not-known reason says something different from the others.**
     ///
-    /// Five reasons that all read alike is one reason wearing five names, and these five call for
-    /// five different responses — start a node, wait, upgrade, connect the node to the chain, wait
-    /// for a sync. Asserted over the set, so a new reason cannot be given an existing sentence.
+    /// Reasons that all read alike are one reason wearing twelve names, and these call for different
+    /// responses — set up an account, choose a password, unlock, start a node, wait, upgrade,
+    /// connect the node to the chain. Asserted over the WHOLE enum, so a new reason cannot be given
+    /// an existing sentence.
     #[test]
     fn every_not_known_reason_is_distinguishable() {
-        let reasons = [
-            BalanceUnknown::NoNode,
-            BalanceUnknown::NodeTimedOut,
-            BalanceUnknown::NodeCannotRead,
-            BalanceUnknown::NoChainSource,
-            BalanceUnknown::NotSynced,
-            BalanceUnknown::NoAddress(AddressUnavailable::Locked),
-            BalanceUnknown::NoAddress(AddressUnavailable::NoAccount),
-        ];
-        let mut sentences: Vec<String> = reasons
+        let mut sentences: Vec<String> = every_unknown_reason()
             .iter()
             .map(|why| {
                 holdings(&BalanceReading::Unknown(why.clone()))[0]
@@ -520,7 +593,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let drawn: Vec<(String, bool)> = actions_of(tab)
+        let drawn: Vec<(String, bool)> = super::super::actions_of(tab)
             .into_iter()
             .map(|action| (action.label, action.enabled))
             .collect();
@@ -549,7 +622,7 @@ mod tests {
             .iter()
             .find(|tab| tab.id == crate::window_model::TabId::Wallet)
             .expect("the Wallet tab exists for a locked account");
-        let drawn = actions_of(tab);
+        let drawn = super::super::actions_of(tab);
         assert!(
             drawn.iter().any(|action| !action.enabled),
             "the fixture has no disabled verb, so it cannot see a wrongly-promoted one"

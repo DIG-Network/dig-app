@@ -23,6 +23,7 @@ use super::card;
 use super::copy;
 use super::data::{self, Readout, Tone, Value};
 use super::facts::PaneFacts;
+use super::field;
 use super::flow::Flow;
 use super::state::{self, PaneState};
 use super::text;
@@ -105,7 +106,7 @@ fn usage_card(flow: &mut Flow, t: &Tokens, cache: Option<CacheSnapshot>) {
 
 /// The size-limit choices, exactly as the model decided them, with what a smaller one costs.
 fn limit_card(flow: &mut Flow, t: &Tokens, tab: &Tab) -> Option<TrayAction> {
-    let actions = peers(actions_of(tab));
+    let actions = peers(super::actions_of(tab));
     if actions.is_empty() {
         return None;
     }
@@ -248,7 +249,8 @@ fn add_card(flow: &mut Flow, t: &Tokens) {
     flow.place(|ui, at| {
         (
             card::card(ui, at, t, Some(copy::cache::ADD_CARD), |inner| {
-                inner.place(|ui, at| (field(ui, at, t), ()));
+                let live = inner.live();
+                inner.place(|ui, at| (field(ui, at, t, live), ()));
                 inner.gap(space::S2);
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::cache::ADD_NOT_WIRED), ()));
             }),
@@ -257,64 +259,33 @@ fn add_card(flow: &mut Flow, t: &Tokens) {
     });
 }
 
-/// The store-id field, its help text, and its inline error. Returns the height used.
-fn field(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens) -> f32 {
+/// The store-id field and the control it would enable, through the shared [`super::field`].
+///
+/// The input, its help line and its inline error come from the shared form vocabulary rather than
+/// from a second copy here: a pane that draws its own input gives the product two input styles, and
+/// the error-attached-beneath rule is exactly the kind of thing one copy keeps and two copies drift
+/// on. Only the refused submit button is local, because no other pane has one.
+fn field(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, live: bool) -> f32 {
     let element = egui::Id::new("dig-window-cache-add-store-id");
     let mut typed: String = ui.ctx().data(|d| d.get_temp(element)).unwrap_or_default();
 
     let mut y = at.top();
-    y += text::caption(
+    y += field::text_field(
         ui,
-        egui::Rect::from_min_size(
-            egui::Pos2::new(at.left(), y),
-            egui::Vec2::new(at.width(), (at.bottom() - y).max(0.0)),
-        ),
+        at,
         t,
-        copy::cache::ADD_FIELD_LABEL,
-    ) + space::S1;
-
-    let width = at.width().min(FIELD_MAX_WIDTH);
-    let box_at = egui::Rect::from_min_size(
-        egui::Pos2::new(at.left(), y),
-        egui::Vec2::new(width, paint::BUTTON_HEIGHT),
+        live,
+        &field::Field {
+            label: copy::cache::ADD_FIELD_LABEL,
+            placeholder: "",
+            help: copy::cache::ADD_FIELD_HINT,
+            error: problem(&typed),
+            id: element.with("edit"),
+        },
+        &mut typed,
     );
-    let response = ui.put(
-        box_at,
-        egui::TextEdit::singleline(&mut typed)
-            .id(element.with("edit"))
-            .hint_text("")
-            .margin(egui::Margin::symmetric(space::S3 as i8, space::S2 as i8))
-            .background_color(rgba(t.surface_2))
-            .font(mono(size::SM)),
-    );
-    if response.changed() {
-        ui.ctx().data_mut(|d| d.insert_temp(element, typed.clone()));
-    }
-    y += box_at.height() + space::S2;
-
-    // The error is attached UNDER the field it belongs to, never collected at the bottom of the
-    // form: a message a reader has to trace back to a control is a message they correct by guessing.
-    let sentence = match problem(&typed) {
-        Some(error) => error,
-        None => copy::cache::ADD_FIELD_HINT.to_string(),
-    };
-    let ink = match problem(&typed) {
-        Some(_) => t.amber,
-        None => t.muted,
-    };
-    let galley = ui.painter().layout(
-        sentence,
-        regular(size::SM),
-        rgba(ink),
-        text::measure(at.width()),
-    );
-    let explained = galley.size().y;
-    ui.painter().galley(
-        egui::Pos2::new(at.left(), y),
-        galley,
-        egui::Color32::PLACEHOLDER,
-    );
-    y += explained + space::S3;
+    ui.ctx().data_mut(|d| d.insert_temp(element, typed));
+    y += space::S3;
 
     // Never pressable: the verb behind it does not exist in the model yet, and this card's banner
     // says as much. Drawn so the finished shape of the form is visible, refused so it cannot lie.
@@ -335,10 +306,6 @@ fn field(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens) -> f32 {
     );
     y + paint::BUTTON_HEIGHT - at.top()
 }
-
-/// The widest the store-id field is drawn. A 64-hex id in 13 px mono needs about this much, and a
-/// field stretched past its content invites the reader to expect more of it.
-const FIELD_MAX_WIDTH: f32 = 460.0;
 
 /// What is wrong with a typed store id, or `None` when there is nothing to say yet.
 ///
@@ -374,17 +341,6 @@ fn peers(actions: Vec<Action<TrayAction>>) -> Vec<Action<TrayAction>> {
             ..action
         })
         .collect()
-}
-
-/// The tab's rows as weighted actions, through the one derivation in [`super::actions_in`].
-fn actions_of(tab: &Tab) -> Vec<Action<TrayAction>> {
-    let mut seen = std::collections::HashMap::new();
-    super::actions_in(
-        tab.sections
-            .iter()
-            .flat_map(|section| section.rows.iter().cloned()),
-        &mut seen,
-    )
 }
 
 #[cfg(test)]
@@ -518,7 +474,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let drawn: Vec<(String, bool)> = actions_of(tab)
+        let drawn: Vec<(String, bool)> = super::super::actions_of(tab)
             .into_iter()
             .map(|action| (action.label, action.enabled))
             .collect();
@@ -554,7 +510,7 @@ mod tests {
             .find(|tab| tab.id == crate::window_model::TabId::Cache)
             .expect("the Cache tab exists with a node connected");
 
-        let decided = actions_of(tab);
+        let decided = super::super::actions_of(tab);
         assert!(
             decided
                 .iter()
