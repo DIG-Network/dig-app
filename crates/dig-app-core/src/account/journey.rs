@@ -15,7 +15,7 @@
 //!   are dropped; the functions return an outcome, never a phrase.
 
 use crate::account::boot::DiscardOutcome;
-use crate::account::chain_mint::MintAvailability;
+use crate::account::chain_mint::{MintAvailability, MintSeams};
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::mint::{
@@ -942,8 +942,8 @@ pub enum StartupWizard {
 ///   to read must reach the app; setting up an account stays the deliberate choice it is today, from
 ///   the DIG menu. "No DID was minted" is true of that machine too, and answering it with an
 ///   unrequested account-creation flow at every launch would break a promise the app makes elsewhere.
-pub fn startup_wizard(account: StartupAccount, mint: MintAvailability) -> StartupWizard {
-    match (account, mint) {
+pub fn startup_wizard(account: StartupAccount, mint: &MintSeams<'_>) -> StartupWizard {
+    match (account, mint.availability()) {
         (StartupAccount::Enrolled(AccountCompleteness::WalletOnly), MintAvailability::Possible) => {
             StartupWizard::AtTheDidStep
         }
@@ -1007,9 +1007,10 @@ pub struct DidMinting<'a> {
 ///   window toolkit and adding one to a custody-holding binary is a security surface, not a crate pick —
 ///   and a modal cannot poll a chain or update itself. So the user is given their address and told to
 ///   fund it when they are ready, instead of a "waiting for funds…" screen that could never be waiting.
-/// - **The DID step cannot mint, and says so.** Nothing in this build can mint (see
-///   [`crate::account::mint`]) and no [`TrayAction`](crate::tray_menu::TrayAction) can either — that is
-///   structural, not an oversight. #1820
+/// - **The DID step cannot mint, and says so.** The mint itself is real and proven against a Chia
+///   consensus validator ([`crate::account::chain_mint`]); what this build lacks is a TRANSPORT that
+///   can watch one confirm, so [`MintSeams::NoChainTransport`] is what the shell supplies and every
+///   entry point refuses honestly (dig_ecosystem#2376). #1820
 ///   requires a DID be presented as REQUIRED rather than optional, so the step names it as the remaining,
 ///   required step and states plainly that it is not available in this version, rather than presenting a
 ///   button that silently does nothing or claiming the account "fully works without a DID".
@@ -1532,15 +1533,15 @@ mod copy {
              Chia wallet on your phone, or use \"Copy my address\" and send from a wallet on this \
              computer.\n\n\
              Creating your on-chain DID is a real Chia transaction, so it costs a small amount of XCH. \
-             You do not need any funds to read content, and DIG will never spend anything without \
-             showing you exactly what it is spending first.\n\n\
+             You do not need any funds to read content, and DIG spends nothing until you approve the \
+             transaction on the next screen.\n\n\
              You can see this address again at any time from the DIG menu.";
         /// The body on a host that draws no code, where the text address is the whole path.
         pub const BODY_TEXT_ONLY: &str =
             "Your address is below. Use \"Copy my address\" and send to it from any Chia wallet.\n\n\
              Creating your on-chain DID is a real Chia transaction, so it costs a small amount of XCH. \
-             You do not need any funds to read content, and DIG will never spend anything without \
-             showing you exactly what it is spending first.\n\n\
+             You do not need any funds to read content, and DIG spends nothing until you approve the \
+             transaction on the next screen.\n\n\
              You can see this address again at any time from the DIG menu.";
         /// The control that moves on.
         pub const CONTINUE: &str = "Continue";
@@ -1610,8 +1611,9 @@ mod copy {
             "A DID publishes your identity on the Chia blockchain so others can find and verify it. It \
              is what turns the wallet on this computer into a full DIG Account, and it is what \
              publishing, signing for an app and messaging need.\n\n\
-             Creating one is a real transaction that spends real XCH from your account. You will see \
-             the exact cost, and approve it, before anything is spent.\n\n\
+             Creating one is a real transaction that spends real XCH from your account: a small \
+             network fee, plus one mojo that becomes the DID itself. Choosing \"Create my DID\" is \
+             the approval — the transaction is sent straight away and cannot be called back.\n\n\
              Once it is sent, the blockchain takes a few minutes to confirm it. DIG will wait with you \
              and tell you how it went — you can stop watching at any time without cancelling anything.";
         /// The affirming control.
@@ -1638,8 +1640,7 @@ mod copy {
             "A DID is what publishes your identity on the Chia blockchain so others can find and verify \
              it, and it is the step that turns this wallet into a full DIG Account.\n\n\
              Minting one is not available in this version of DIG. Nothing is missing from your setup and \
-             there is nothing for you to do — when minting arrives, the DIG menu will offer it here, and \
-             you will see the exact cost before anything is spent.\n\n\
+             there is nothing for you to do — when minting arrives, the DIG menu will offer it here.\n\n\
              Until then your account holds funds, signs, and reads content normally.";
         /// The title when the wallet cannot pay for the mint.
         pub const UNAFFORDABLE_TITLE: &str = "DIG — Not enough XCH yet";
@@ -1806,12 +1807,129 @@ mod tests {
         }
     }
 
+    /// Seams that CAN mint, as the shell would build them once a chain transport exists.
+    ///
+    /// Built from a real minter rather than named as an availability, which is the whole point of
+    /// [`MintSeams`]: there is no way to write "a mint is possible here" without one.
+    fn wired() -> MintSeams<'static> {
+        /// A minter that pushes the fixture spend. `'static` so the seams can be, too.
+        struct AlwaysSubmits;
+
+        impl DidMinter for AlwaysSubmits {
+            fn submit(&self) -> Submission {
+                Submission::Submitted {
+                    spend_id: MINTED_SPEND.to_owned(),
+                    did: MINTED_DID.to_owned(),
+                }
+            }
+        }
+
+        MintSeams::Wired {
+            minter: &AlwaysSubmits,
+            observer: &crate::account::chain_mint::UnreachableChain,
+        }
+    }
+
     /// A minter that returns one scripted [`Submission`].
     struct ScriptedMinter(Submission);
 
     impl DidMinter for ScriptedMinter {
         fn submit(&self) -> Submission {
             self.0.clone()
+        }
+    }
+
+    /// A minter that records HOW MANY windows the user had been shown at the instant it spent.
+    ///
+    /// The count is what makes the property observable. Whether a cost is shown before a spend is a
+    /// statement about the ORDER of two things, and no assertion on the returned outcome — or on the
+    /// text of the windows afterwards — can tell a flow that showed a cost screen from one that did
+    /// not. Only the count taken INSIDE the spend can.
+    struct WindowCountingMinter<'a> {
+        confirmer: &'a ScriptedConfirmer,
+        windows_at_spend: Mutex<Option<usize>>,
+        /// The text of everything drawn when it spent, so the ONE window can be identified.
+        text_at_spend: Mutex<String>,
+    }
+
+    impl DidMinter for WindowCountingMinter<'_> {
+        fn submit(&self) -> Submission {
+            *self.windows_at_spend.lock().unwrap() = Some(self.confirmer.windows_drawn());
+            *self.text_at_spend.lock().unwrap() = self.confirmer.drawn();
+            Submission::Submitted {
+                spend_id: MINTED_SPEND.to_owned(),
+                did: MINTED_DID.to_owned(),
+            }
+        }
+    }
+
+    /// **The offer IS the approval, and the copy may not promise otherwise** (dig_ecosystem#2377).
+    ///
+    /// `OFFER_BODY` used to promise *"You will see the exact cost, and approve it, before anything is
+    /// spent"*, and the funding screen promised DIG *"will never spend anything without showing you
+    /// exactly what it is spending first"*. Both were true only while nothing could spend. The first
+    /// half of this test measures what the flow actually does — exactly ONE window stands between the
+    /// person and a real mainnet spend, and it is the offer — and the second half holds every
+    /// pre-spend sentence to that measurement.
+    ///
+    /// Written as a measurement rather than a transcription on purpose: if a cost screen is ever
+    /// added, the first assertion fails and the copy rule below is the one that should then change.
+    #[test]
+    fn nothing_shown_before_a_spend_may_promise_a_cost_screen_that_does_not_exist() {
+        let confirmer = ScriptedConfirmer::new(Vec::new(), vec![ConfirmDecision::Approve]);
+        let minter = WindowCountingMinter {
+            confirmer: &confirmer,
+            windows_at_spend: Mutex::new(None),
+            text_at_spend: Mutex::new(String::new()),
+        };
+        let clock = TestClock::default();
+        let surface = PatientWait(&clock);
+        let ledger = MemoryLedger::default();
+        let chain = ChainDouble(Sighting::Pending);
+
+        mint_the_did(
+            &confirmer,
+            &DidMinting {
+                minter: &minter,
+                observer: &chain,
+                surface: &surface,
+                clock: &clock,
+                ledger: &ledger,
+            },
+        );
+
+        let count = minter
+            .windows_at_spend
+            .lock()
+            .unwrap()
+            .expect("the approved offer must reach the spend");
+        let text = minter.text_at_spend.lock().unwrap().clone();
+        assert_eq!(
+            count, 1,
+            "the offer is the ONLY thing between a person and a real spend: {text}"
+        );
+        assert!(
+            text.contains(copy::did::OFFER_HEADING),
+            "and that one window is the offer: {text}"
+        );
+
+        // So no screen a person sees before that spend may defer the approval to a later one.
+        for (name, body) in [
+            ("the mint offer", copy::did::OFFER_BODY),
+            ("the unavailable notice", copy::did::UNAVAILABLE_BODY),
+            ("the funding screen", copy::fund::BODY_WITH_A_CODE),
+            ("the funding screen (text only)", copy::fund::BODY_TEXT_ONLY),
+        ] {
+            for promise in [
+                "before anything is spent",
+                "showing you exactly what it is spending first",
+                "see the exact cost",
+            ] {
+                assert!(
+                    !body.contains(promise),
+                    "{name} promises \"{promise}\", and no such screen exists"
+                );
+            }
         }
     }
 
@@ -2932,11 +3050,11 @@ mod tests {
     /// of the four false ones, which is exactly what the enumeration is for.
     #[test]
     fn the_startup_wizard_opens_only_for_an_enrolled_account_that_can_still_mint() {
-        use MintAvailability::{NoChainTransport, Possible};
         use StartupAccount::{Enrolled, NotEnrolled};
+        let (possible, no_transport) = (wired(), MintSeams::NoChainTransport);
 
         assert_eq!(
-            startup_wizard(Enrolled(AccountCompleteness::WalletOnly), Possible),
+            startup_wizard(Enrolled(AccountCompleteness::WalletOnly), &possible),
             StartupWizard::AtTheDidStep,
             "an account with a wallet and no DID is precisely what dig_ecosystem#2359 describes"
         );
@@ -2944,22 +3062,22 @@ mod tests {
         for (account, mint, why) in [
             (
                 Enrolled(AccountCompleteness::DidBound),
-                Possible,
+                &possible,
                 "an account that already holds a DID must never see the wizard again",
             ),
             (
                 Enrolled(AccountCompleteness::WalletOnly),
-                NoChainTransport,
+                &no_transport,
                 "a host that cannot mint must not show a window with no control that could clear it",
             ),
             (
                 NotEnrolled,
-                Possible,
+                &possible,
                 "reading DIG content needs no account, so a reader is never made to create one",
             ),
             (
                 NotEnrolled,
-                NoChainTransport,
+                &no_transport,
                 "neither condition holds, so neither reason to open it does",
             ),
         ] {
@@ -2987,7 +3105,7 @@ mod tests {
                 StartupAccount::Enrolled(AccountCompleteness::of(
                     before.as_ref().map(DidRecord::did)
                 )),
-                MintAvailability::Possible
+                &wired()
             ),
             StartupWizard::AtTheDidStep,
             "before any mint, the wizard opens"
@@ -3004,7 +3122,7 @@ mod tests {
                 StartupAccount::Enrolled(AccountCompleteness::of(
                     after.as_ref().map(DidRecord::did)
                 )),
-                MintAvailability::Possible
+                &wired()
             ),
             StartupWizard::NotNeeded,
             "once a mint is recorded with its evidence, the wizard stays shut"

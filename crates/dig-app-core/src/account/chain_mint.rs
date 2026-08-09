@@ -20,15 +20,23 @@
 //! keeps them apart: the canonical read trait deliberately cannot broadcast. This module takes one of
 //! each, so a host can supply a reader with no way to spend.
 //!
-//! # What this module still cannot do, and it is not dig-account's fault any more
+//! # What this module still cannot do, and exactly which method is missing
 //!
-//! dig-app has no production transport for EITHER seam. `dig-node-control-interface` 0.3.0 exposes
-//! exactly one wallet method — `control.wallet.balance` — so there is no coin read, no peak height and
-//! no push, and [`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) refuses both
-//! `coins` and `broadcast` for that reason. So the code below is complete and proven against a chain,
-//! and the binary wires [`MintAvailability::NoChainTransport`] until the node grows those methods
-//! (dig_ecosystem#2376). That is why the startup gate asks whether a mint is POSSIBLE before it shows
-//! anybody a wizard: see [`crate::account::journey::startup_wizard`].
+//! `dig-node-control-interface` 0.6.0 gave dig-app three of the four reads a mint needs:
+//! `control.wallet.coins` selects the funding coin, `control.wallet.peak` bounds a claimed
+//! confirmation, and `control.wallet.broadcast` pushes the signed bundle
+//! ([`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) speaks all three).
+//!
+//! The fourth is **a coin read BY COIN ID**, and it does not exist. `mint_status` asks the chain for
+//! the DID coin's record — that is the confirmation — and for the funding coin's, to tell a mint that
+//! is merely slow from one that can never confirm because its input was spent elsewhere. The coins
+//! method answers for an ADDRESS and reports only UNSPENT coins, so it can see neither.
+//!
+//! A mint on that transport could be pushed — real XCH, gone — and then never observed, and a DID is
+//! recorded only from evidence of a confirmation. So the binary supplies
+//! [`MintSeams::NoChainTransport`] until the node grows that read (dig_ecosystem#2376), and the
+//! startup gate asks whether a mint is POSSIBLE before it shows anybody a wizard: see
+//! [`crate::account::journey::startup_wizard`].
 
 use std::sync::Mutex;
 
@@ -40,7 +48,7 @@ use dig_chainsource_interface::ChainSource;
 
 use crate::account::active_profile::ActiveProfile;
 use crate::account::did::MintEvidence;
-use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission};
+use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission, UnavailableMinter};
 use crate::account::residency::AccountResidency;
 
 /// Mojos in one XCH. Used only to render a shortfall a person can read.
@@ -58,6 +66,72 @@ pub enum MintAvailability {
     /// This build has no way to read coins or push a bundle, so no mint can be attempted on any
     /// account. Distinct from a wallet that merely has no funds — that one the user can fix.
     NoChainTransport,
+}
+
+/// The DID-minting seams a build actually has — and the ONLY source of a [`MintAvailability`].
+///
+/// # Why this type exists (dig_ecosystem#2377)
+///
+/// The gate and the minter used to be separate expressions: a free-standing `mint_availability()`
+/// returned a constant, while the wizard was handed its minter somewhere else entirely. Flipping
+/// that constant to [`MintAvailability::Possible`] in ONE line therefore opened an undismissible
+/// wizard whose only forward control answered "not available in this version" — the dead end
+/// dig_ecosystem#1800 removed — and, on the same line, made the app ask for a password at start-up.
+/// Neither was catchable by a test, because both lived in the binary.
+///
+/// Here the two cannot disagree, because they are the same value: the availability is READ OFF the
+/// seams, and obtaining a `Possible` means having constructed a real minter to read it from. A build
+/// with no chain transport has no `Wired` variant to name.
+pub enum MintSeams<'a> {
+    /// A real minter and the observer that can see what it pushed.
+    Wired {
+        /// Builds, signs and pushes the mint spend.
+        minter: &'a dyn DidMinter,
+        /// Watches the chain for the pushed spend's confirmation.
+        observer: &'a dyn MintObserver,
+    },
+    /// This build has no way to read coins or push a bundle, so nothing on this machine can mint.
+    NoChainTransport,
+}
+
+impl MintSeams<'_> {
+    /// Whether a mint can be attempted at all — derived from the seams, never asserted beside them.
+    pub fn availability(&self) -> MintAvailability {
+        match self {
+            MintSeams::Wired { .. } => MintAvailability::Possible,
+            MintSeams::NoChainTransport => MintAvailability::NoChainTransport,
+        }
+    }
+
+    /// The minter the wizard should use. Without a transport this is the one that refuses honestly,
+    /// so a wizard reached by any other route still cannot fabricate a spend.
+    pub fn minter(&self) -> &dyn DidMinter {
+        match self {
+            MintSeams::Wired { minter, .. } => *minter,
+            MintSeams::NoChainTransport => &UnavailableMinter,
+        }
+    }
+
+    /// The observer the wizard should watch with, paired with [`minter`](Self::minter).
+    pub fn observer(&self) -> &dyn MintObserver {
+        match self {
+            MintSeams::Wired { observer, .. } => *observer,
+            MintSeams::NoChainTransport => &UnreachableChain,
+        }
+    }
+}
+
+/// The observer a build with no transport gets: it can never look, and says so.
+///
+/// Lives beside [`MintSeams`] rather than in the binary so the transport-less pairing is one value
+/// a test can hold, rather than two constants a shell assembles by hand.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UnreachableChain;
+
+impl MintObserver for UnreachableChain {
+    fn look(&self, _spend_id: &str) -> Sighting {
+        Sighting::Unreachable
+    }
 }
 
 /// Mints a DID through dig-account, against an injected chain reader and publisher.
@@ -132,6 +206,20 @@ where
     P: SpendPublisher + ?Sized,
 {
     fn submit(&self) -> Submission {
+        // ALREADY DONE. A second push would spend a second fee, create a second DID, and overwrite
+        // the pending slot -- which would make the FIRST mint unobservable, so the money would be
+        // gone with no DID ever recorded (dig_ecosystem#2377). The wizard's copy asks the person not
+        // to do this three separate times; this is that request as an invariant.
+        if let Some(pending) = self.remembered() {
+            return Submission::Refused {
+                reason: format!(
+                    "This DIG Account has already paid for a mint ({}). Wait for it to confirm \
+                     rather than paying again.",
+                    pending.pending_did_string()
+                ),
+            };
+        }
+
         // Derived here, per call. A locked account produces no minter, so a mint attempted after a
         // lock-now, an idle timeout or an OS screen lock cannot even be built (module docs).
         let Some(minter) = self.residency.profile_minter() else {
@@ -168,11 +256,19 @@ where
     P: SpendPublisher + ?Sized,
 {
     fn look(&self, spend_id: &str) -> Sighting {
-        let Some(pending) = self.remembered() else {
-            // Asked about a mint this instance never pushed. Reported as unreachable rather than as
-            // a rejection: nothing here knows the spend failed, only that it cannot be looked up.
-            tracing::warn!(%spend_id, "asked about a mint this minter did not push");
-            return Sighting::Unreachable;
+        // Asked about a mint this instance did not push -- either because it pushed nothing, or
+        // because the id names a DIFFERENT spend. Both are the same fact and get the same answer:
+        // this observer cannot look. Comparing the id rather than merely checking that SOMETHING was
+        // pushed is what makes the guard match its own rationale (dig_ecosystem#2377); without it,
+        // asking about somebody else's spend returned this mint's status under their name.
+        let pending = match self.remembered() {
+            Some(pending) if hex_id(pending.did_coin_id()) == spend_id => pending,
+            _ => {
+                // Reported as unreachable rather than as a rejection: nothing here knows the spend
+                // failed, only that it cannot be looked up.
+                tracing::warn!(%spend_id, "asked about a mint this minter did not push");
+                return Sighting::Unreachable;
+            }
         };
 
         let Some(minter) = self.residency.profile_minter() else {
@@ -431,6 +527,118 @@ mod tests {
         );
     }
 
+    /// **A second submit on the same minter must not spend again** (dig_ecosystem#2377).
+    ///
+    /// Before the guard, the second call pushed a SECOND real mint, paid a second fee, and
+    /// overwrote `pending` — so the FIRST mint became unobservable: money spent, DID never
+    /// recorded. The wizard's copy warns three separate times not to do this, which is copy
+    /// standing in for an invariant.
+    ///
+    /// Two assertions, and the second is the load-bearing one. A guard that merely returned a
+    /// refusal while still pushing would satisfy the first; only the PUBLISHER's own count can see
+    /// whether a bundle left the machine. The fixture keeps the mint genuinely fundable throughout
+    /// — the first submit succeeds — so this cannot pass because nothing could ever be pushed.
+    #[test]
+    fn a_second_submit_refuses_rather_than_spending_a_second_time() {
+        let bench = Bench::funded();
+        let chain = SimulatorChain::new();
+        chain.fund(bench.puzzle_hash, FUNDED_MOJOS);
+        let minter = bench.mint(&chain, &chain);
+
+        let Submission::Submitted { spend_id, .. } = minter.submit() else {
+            panic!("the first mint must go through");
+        };
+        let pushed_once = chain.pushed();
+
+        let second = minter.submit();
+        assert!(
+            matches!(second, Submission::Refused { .. }),
+            "a minter that already pushed must refuse; got {second:?}"
+        );
+        assert_eq!(
+            chain.pushed(),
+            pushed_once,
+            "a second submit reached the network and spent again"
+        );
+        // ...and the FIRST mint is still the one this minter can be asked about.
+        assert_eq!(
+            hex_id(
+                minter
+                    .remembered()
+                    .expect("the first mint is still remembered")
+                    .did_coin_id()
+            ),
+            spend_id
+        );
+    }
+
+    /// **`look` answers about THIS mint, not merely about "some mint I pushed"**
+    /// (dig_ecosystem#2377).
+    ///
+    /// The guard's rationale is "did I push THIS spend", and before the fix the `spend_id` argument
+    /// was ignored outside the log — so asking about somebody else's spend returned this instance's
+    /// own status under the other spend's name. The fixture varies ONE thing: the id asked about,
+    /// against a minter that genuinely did push, so a blanket `Unreachable` implementation is
+    /// caught by the control assertion.
+    #[test]
+    fn a_look_at_a_different_spend_is_not_answered_from_this_one() {
+        let bench = Bench::funded();
+        let chain = SimulatorChain::new();
+        chain.fund(bench.puzzle_hash, FUNDED_MOJOS);
+        let minter = bench.mint(&chain, &chain);
+        let Submission::Submitted { spend_id, .. } = minter.submit() else {
+            panic!("the bench must be able to push");
+        };
+
+        assert_eq!(
+            minter.look("0x0000000000000000000000000000000000000000000000000000000000000001"),
+            Sighting::Unreachable,
+            "a mint this instance did not push cannot be reported on"
+        );
+        assert_eq!(
+            minter.look(&spend_id),
+            Sighting::Pending,
+            "the control: its OWN spend is still answerable"
+        );
+    }
+
+    /// **An availability and the minter it describes cannot disagree** (dig_ecosystem#2377).
+    ///
+    /// The defect this replaces was a PLACEMENT: the gate lived in one expression and the minter in
+    /// another, so a one-line edit to the gate produced a wizard that opened unbidden and could not
+    /// be completed. A test asserting only "the gate says no" would have been satisfied by that
+    /// arrangement identically.
+    ///
+    /// So this asserts the PAIRING, from both sides — the transport-less seams yield both
+    /// `NoChainTransport` AND a minter that refuses, and a wired seam yields both `Possible` AND a
+    /// minter that pushes. The second half is what keeps the first from passing trivially: with
+    /// only the transport-less case, a `minter()` hardcoded to `UnavailableMinter` would pass.
+    #[test]
+    fn the_availability_and_the_minter_are_read_off_the_same_value() {
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let publisher = RecordingPublisher::default();
+        let real = bench.mint(&chain, &publisher);
+
+        let absent = MintSeams::NoChainTransport;
+        assert_eq!(absent.availability(), MintAvailability::NoChainTransport);
+        assert_eq!(
+            absent.minter().submit(),
+            Submission::NotAvailable,
+            "a build reported as having no transport must also be unable to spend"
+        );
+
+        let wired = MintSeams::Wired {
+            minter: &real,
+            observer: &real,
+        };
+        assert_eq!(wired.availability(), MintAvailability::Possible);
+        assert!(
+            matches!(wired.minter().submit(), Submission::Submitted { .. }),
+            "a build reported as able to mint must have a minter that really can"
+        );
+    }
+
     /// A wallet with nothing in it reports a SHORTFALL, in XCH, rather than a generic refusal.
     ///
     /// The distinction matters because it is the one failure the person can actually act on — and it
@@ -558,6 +766,9 @@ mod tests {
     struct SimulatorChain {
         sim: RefCell<Simulator>,
         mempool: RefCell<Vec<SpendBundle>>,
+        /// Every push ever made, counted where the NETWORK sees it. A count taken from the mempool
+        /// alone would be reset by farming and could not prove a second spend did not happen.
+        pushed: std::cell::Cell<usize>,
     }
 
     impl SimulatorChain {
@@ -565,6 +776,7 @@ mod tests {
             let chain = Self {
                 sim: RefCell::new(Simulator::new()),
                 mempool: RefCell::new(Vec::new()),
+                pushed: std::cell::Cell::new(0),
             };
             // Leave genesis behind: no real coin is created in block 0, and a confirmation there is
             // indistinguishable from a fabricated height (dig-account rejects one).
@@ -588,6 +800,11 @@ mod tests {
                     .expect("the mint bundle must pass consensus validation");
             }
             self.bury(MIN_CONFIRMATION_DEPTH);
+        }
+
+        /// How many bundles have been pushed to this chain, ever — including those already farmed.
+        fn pushed(&self) -> usize {
+            self.pushed.get()
         }
 
         fn bury(&self, blocks: u32) {
@@ -656,6 +873,7 @@ mod tests {
 
     impl SpendPublisher for SimulatorChain {
         fn push(&self, bundle: &SpendBundle) -> Result<PushOutcome, ChainUnavailable> {
+            self.pushed.set(self.pushed.get() + 1);
             self.mempool.borrow_mut().push(bundle.clone());
             Ok(PushOutcome::Accepted)
         }

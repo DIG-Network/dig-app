@@ -35,7 +35,7 @@ use dig_app_core::account::boot::{
     unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome, UnlockFailure,
 };
 #[cfg(feature = "tray")]
-use dig_app_core::account::chain_mint::MintAvailability;
+use dig_app_core::account::chain_mint::MintSeams;
 #[cfg(feature = "tray")]
 use dig_app_core::account::did::{DidFile, DidLedger, DidRecord};
 use dig_app_core::account::journey::{
@@ -46,7 +46,6 @@ use dig_app_core::account::journey::{
 use dig_app_core::account::lifecycle::Seeding;
 #[cfg(feature = "tray")]
 use dig_app_core::account::migration;
-use dig_app_core::account::mint::{MintObserver, Sighting, UnavailableMinter};
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
@@ -193,9 +192,14 @@ fn main() {
             // no way for a human to authorize a signature, so it starts no signing channel at all
             // rather than one that could only ever fail closed.
             // The app starts with the account LOCKED, like a password manager (dig_ecosystem#1817).
-            // Unlocking needs the user's password, so it happens when they ask for it — never at login
-            // — and the APP-SIGN loopback stays down until then rather than serving with a seed it has
-            // no business holding unprompted.
+            // Unlocking needs the user's password, so it happens when they ask for it, and the
+            // APP-SIGN loopback stays down until then rather than serving with a seed it has no
+            // business holding unprompted.
+            //
+            // The ONE start-up path that asks is the DID wizard below, and only when the host has an
+            // enrolled account with no minted DID: the wizard cannot show a funding address without
+            // opening the account. See [`show_the_did_wizard_if_needed`] for why that prompt is asked
+            // FOR rather than unbidden.
             #[cfg(feature = "tray")]
             let tray_session: Option<TraySession> = show_the_did_wizard_if_needed(&env);
             #[cfg(not(feature = "tray"))]
@@ -328,8 +332,8 @@ fn env_os_of<T>(_agent: &T) -> Os {
 /// logs + returns otherwise (never blocks or crashes the shell):
 ///
 /// 1. **An unlocked master-HD account** — the injected live-view signer + sealer read the master seed
-///    from the [`AccountResidency`]. Only Windows/macOS can unlock zero-prompt via the OS credential
-///    store; Linux needs a user passphrase (a UX not yet wired), so the channel defers there.
+///    from the [`AccountResidency`]. Every unlock asks the user for their password (dig_ecosystem#1817);
+///    only Windows/macOS have a native window to ask in, so the channel defers on every other OS.
 /// 2. **A desktop session** — guaranteed here because this runs only on the [`FormFactor::Tray`] path,
 ///    so the per-OS [`native_confirmer`] can raise a real biometric confirm.
 ///
@@ -374,9 +378,12 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     // phrase, and a recovery-phrase window that appears unbidden at login is a window people click
     // away. Setup is something the user asks for.
     //
-    // It also never runs at START-UP any more (dig_ecosystem#1817): it draws a password window, so it
-    // runs only when the user clicks `Unlock…` (or a signature needs the account). A password prompt at
-    // login would be exactly the unbidden window the paragraph above rejects.
+    // It draws a password window, so it runs when the user clicks `Unlock…`, when a signature needs
+    // the account, and on exactly ONE start-up path: the DID wizard
+    // ([`show_the_did_wizard_if_needed`]), which cannot show a funding address without opening the
+    // account. Every OTHER start-up path leaves the account locked (dig_ecosystem#1817) — a password
+    // prompt at login with nothing asking for it would be exactly the unbidden window the paragraph
+    // above rejects, and the wizard is not that: it is the flow the user launched the app to finish.
     let booted = unlock_existing_account_reporting(
         &brand_dir,
         "DIG needs your password to unlock your account.",
@@ -493,12 +500,18 @@ fn account_state(
 /// detects no DiD was minted."* [`journey::startup_wizard`] holds the whole rule and its two refusals;
 /// this function only reads the host facts and acts on the answer.
 ///
-/// # Why it can read the answer without unlocking anything
+/// # Why it can read the answer without unlocking anything — and the one deliberate exception
 ///
 /// Both inputs are on disk. Whether an account is enrolled is a directory check, and whether a DID was
 /// minted is [`DidFile`], which refuses any record that does not carry its mint evidence. The app boots
-/// with the account LOCKED (dig_ecosystem#1817) and this keeps that true: nothing here asks for a key
-/// unless the answer is that the wizard should run, and then it is the wizard that asks.
+/// with the account LOCKED (dig_ecosystem#1817) and this keeps that true for every path that does not
+/// run the wizard.
+///
+/// The one start-up path that DOES open the account is `AtTheDidStep` (the branch below): it calls
+/// [`start_sign_service`] before the wizard draws, because unlocking IS what produces the receiving
+/// address the funding screen shows. This is not the unbidden password window dig_ecosystem#1817
+/// rejected — the user has an unminted account and the wizard is the reason they launched the app;
+/// the unlock is a necessary step on that path, not an incidental side-effect of booting.
 ///
 /// # What it returns
 ///
@@ -515,7 +528,8 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
         )),
     };
 
-    match journey::startup_wizard(account, mint_availability()) {
+    let seams = mint_seams();
+    match journey::startup_wizard(account, &seams) {
         journey::StartupWizard::NotNeeded => None,
         journey::StartupWizard::AtTheDidStep => {
             tracing::info!("this account has no minted DID — opening the DID wizard");
@@ -525,27 +539,32 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
             let session = start_sign_service(env)?;
             let address = session.residency.receiving_address()?.ok()?;
             let confirmer = native_confirmer();
-            run_the_did_step(confirmer.as_ref(), &dir, &address);
+            run_the_did_step(confirmer.as_ref(), &dir, &address, &seams);
             Some(session)
         }
     }
 }
 
-/// Whether a DID mint can be completed on this build at all (dig_ecosystem#2359).
+/// The DID-minting seams this build has (dig_ecosystem#2359, #2377).
 ///
-/// **It cannot, yet, and the reason is a missing TRANSPORT rather than a missing mint.**
+/// **There are none yet, and the reason is a missing TRANSPORT rather than a missing mint.**
 /// `dig-account` 0.6.0's minter is real and dig-app drives it end to end through a Chia consensus
-/// validator ([`dig_app_core::account::chain_mint`]). What dig-app has no way to do is reach a chain:
-/// `dig-node-control-interface` 0.3.0 exposes exactly one wallet method, `control.wallet.balance`, so
-/// there is no coin read, no peak height and no push — which is why
-/// [`NodeWalletEngine`](dig_app_core::wallet::node::NodeWalletEngine) refuses `coins` and `broadcast`.
+/// validator ([`dig_app_core::account::chain_mint`]). What dig-app still has no way to do is WATCH a
+/// mint confirm: `dig_account`'s `mint_status` needs a coin read BY COIN ID — for the DID coin, and
+/// for the funding coin including whether it was spent elsewhere — and
+/// `dig-node-control-interface` 0.6.0 has no such method. Its `control.wallet.coins` reads the
+/// unspent coins at an ADDRESS, which selects the funding coin and cannot see either confirmation.
 ///
-/// Reported here as one value rather than assumed at each call site, so the day those node methods
-/// land this function is the only thing that changes and the gate turns on with it
-/// (dig_ecosystem#2376).
+/// A mint offered on that transport could be PUSHED — real XCH, gone — and never confirmed, and a
+/// DID is recorded only from evidence of a confirmation. So this stays [`MintSeams::NoChainTransport`]
+/// until the node grows a coin-by-id read (dig_ecosystem#2376).
+///
+/// Returned as the SEAMS rather than as an availability flag, deliberately: the wizard's gate reads
+/// its answer off this same value, so there is no line here that could report a mint as possible
+/// while the wizard is handed a minter that refuses (dig_ecosystem#2377).
 #[cfg(feature = "tray")]
-fn mint_availability() -> MintAvailability {
-    MintAvailability::NoChainTransport
+fn mint_seams() -> MintSeams<'static> {
+    MintSeams::NoChainTransport
 }
 
 /// Run the wizard from its DID step for an account that already has a wallet.
@@ -555,10 +574,15 @@ fn mint_availability() -> MintAvailability {
 /// [`first_run_wizard`] the "Set up" menu row drives — one wizard, entered from two places, never two
 /// copies that could drift.
 #[cfg(feature = "tray")]
-fn run_the_did_step(confirmer: &dyn NativeConfirmer, dir: &std::path::Path, address: &str) {
+fn run_the_did_step(
+    confirmer: &dyn NativeConfirmer,
+    dir: &std::path::Path,
+    address: &str,
+    seams: &MintSeams<'_>,
+) {
     let minting = DidMinting {
-        minter: &UnavailableMinter,
-        observer: &UnreachableChain,
+        minter: seams.minter(),
+        observer: seams.observer(),
         surface: &WindowedWait::new(confirmer),
         clock: &WallClock,
         ledger: &DidFile::new(dir),
@@ -585,13 +609,13 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
     // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
-    // The stub minter, because this build has no chain TRANSPORT — see `mint_availability`. The mint
-    // itself is real and proven (`account::chain_mint`); what is missing is a way to read coins and
-    // push a bundle. Handing the wizard `UnavailableMinter` makes it refuse honestly rather than
-    // fabricate a spend for the wait to watch.
+    // The SAME seams the startup gate consults -- see `mint_seams`. On a build with no chain
+    // transport they hand the wizard a minter that refuses honestly, rather than one that fabricates
+    // a spend for the wait to watch.
+    let seams = mint_seams();
     let minting = DidMinting {
-        minter: &UnavailableMinter,
-        observer: &UnreachableChain,
+        minter: seams.minter(),
+        observer: seams.observer(),
         surface: &WindowedWait::new(confirmer),
         clock: &WallClock,
         ledger: &DidFile::new(&dir),
@@ -648,22 +672,6 @@ struct SystemClipboard;
 impl AddressCopier for SystemClipboard {
     fn copy(&self, address: &str) -> bool {
         tray::write_clipboard(address)
-    }
-}
-
-/// The chain watcher this build does not have (dig_ecosystem#2342).
-///
-/// Nothing can mint here, so nothing is ever submitted and nothing is ever watched. It reports
-/// UNREACHABLE rather than PENDING deliberately: if a future wiring ever reached it with a real spend,
-/// the wait would end in "DIG cannot reach the blockchain" — which would be true — instead of waiting
-/// out its full bound on a watcher that was never connected to anything.
-#[cfg(feature = "tray")]
-struct UnreachableChain;
-
-#[cfg(feature = "tray")]
-impl MintObserver for UnreachableChain {
-    fn look(&self, _spend_id: &str) -> Sighting {
-        Sighting::Unreachable
     }
 }
 
