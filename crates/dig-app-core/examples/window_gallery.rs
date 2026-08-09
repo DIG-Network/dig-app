@@ -273,6 +273,76 @@ fn refuse(problem: &str) -> ! {
     std::process::exit(2);
 }
 
+fn main() {
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    // Flags are taken out before the positionals are read, so `--second-factor` cannot shift the
+    // output path along by one. It did exactly that once, and the picture landed in a file named
+    // for the flag -- a gallery is only as trustworthy as the name on each file.
+    let args: Vec<&String> = all
+        .iter()
+        .filter(|argument| !argument.starts_with("--"))
+        .collect();
+    let Some(tab) = args.first().map(|a| a.as_str()).and_then(tab) else {
+        refuse("no tab named");
+    };
+    let theme = match args.get(1).map(|a| a.as_str()) {
+        Some("light") => Theme::Light,
+        Some("dark") => Theme::Dark,
+        other => refuse(&format!("unknown theme {other:?} — expected light or dark")),
+    };
+    let (Some(width), Some(height)) = (
+        args.get(2).and_then(|value| value.parse().ok()),
+        args.get(3).and_then(|value| value.parse().ok()),
+    ) else {
+        refuse("width and height must both be given, in logical pixels");
+    };
+    let Some(named) = args.get(4).copied() else {
+        refuse("no account state named");
+    };
+    let Some(account) = account_state(named) else {
+        refuse(&format!("unknown account state `{named}`"));
+    };
+    let Some(path) = args.get(5).copied() else {
+        refuse("no output path given");
+    };
+    // Off by default so the Security pane's no-control second-factor line is what a plain run shows:
+    // it is the case the design brief singles out, and the one an invented disabled button would
+    // have hidden.
+    let second_factor = all.iter().any(|argument| argument == "--second-factor");
+
+    // A live capture takes its readings ONCE, before the window opens, so every frame of the
+    // capture shows the same instant — and so a node that is not there stops the run here, with no
+    // file written, rather than being papered over by the fixture the closure would otherwise build.
+    let live = match all.iter().any(|argument| argument == "--live") {
+        false => None,
+        true => match live_readings() {
+            Ok(readings) => Some(readings),
+            Err(problem) => refuse(&format!("--live was asked for but {problem}")),
+        },
+    };
+
+    let view = Arc::new(move || {
+        let fixture = view_for(account.clone(), second_factor);
+        match &live {
+            None => fixture,
+            Some(readings) => with_live(fixture, readings),
+        }
+    });
+    match photograph_shell(
+        theme,
+        tab,
+        egui::Vec2::new(width, height),
+        view,
+        std::path::Path::new(path),
+    ) {
+        Ok((pixels_wide, pixels_high)) => println!("{path} — {pixels_wide} x {pixels_high} px"),
+        Err(problem) => {
+            eprintln!("{path} was not written: {problem}");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,75 +499,5 @@ mod tests {
              quantity twice and differently: {}",
             live.node
         );
-    }
-}
-
-fn main() {
-    let all: Vec<String> = std::env::args().skip(1).collect();
-    // Flags are taken out before the positionals are read, so `--second-factor` cannot shift the
-    // output path along by one. It did exactly that once, and the picture landed in a file named
-    // for the flag -- a gallery is only as trustworthy as the name on each file.
-    let args: Vec<&String> = all
-        .iter()
-        .filter(|argument| !argument.starts_with("--"))
-        .collect();
-    let Some(tab) = args.first().map(|a| a.as_str()).and_then(tab) else {
-        refuse("no tab named");
-    };
-    let theme = match args.get(1).map(|a| a.as_str()) {
-        Some("light") => Theme::Light,
-        Some("dark") => Theme::Dark,
-        other => refuse(&format!("unknown theme {other:?} — expected light or dark")),
-    };
-    let (Some(width), Some(height)) = (
-        args.get(2).and_then(|value| value.parse().ok()),
-        args.get(3).and_then(|value| value.parse().ok()),
-    ) else {
-        refuse("width and height must both be given, in logical pixels");
-    };
-    let Some(named) = args.get(4).copied() else {
-        refuse("no account state named");
-    };
-    let Some(account) = account_state(named) else {
-        refuse(&format!("unknown account state `{named}`"));
-    };
-    let Some(path) = args.get(5).copied() else {
-        refuse("no output path given");
-    };
-    // Off by default so the Security pane's no-control second-factor line is what a plain run shows:
-    // it is the case the design brief singles out, and the one an invented disabled button would
-    // have hidden.
-    let second_factor = all.iter().any(|argument| argument == "--second-factor");
-
-    // A live capture takes its readings ONCE, before the window opens, so every frame of the
-    // capture shows the same instant — and so a node that is not there stops the run here, with no
-    // file written, rather than being papered over by the fixture the closure would otherwise build.
-    let live = match all.iter().any(|argument| argument == "--live") {
-        false => None,
-        true => match live_readings() {
-            Ok(readings) => Some(readings),
-            Err(problem) => refuse(&format!("--live was asked for but {problem}")),
-        },
-    };
-
-    let view = Arc::new(move || {
-        let fixture = view_for(account.clone(), second_factor);
-        match &live {
-            None => fixture,
-            Some(readings) => with_live(fixture, readings),
-        }
-    });
-    match photograph_shell(
-        theme,
-        tab,
-        egui::Vec2::new(width, height),
-        view,
-        std::path::Path::new(path),
-    ) {
-        Ok((pixels_wide, pixels_high)) => println!("{path} — {pixels_wide} x {pixels_high} px"),
-        Err(problem) => {
-            eprintln!("{path} was not written: {problem}");
-            std::process::exit(1);
-        }
     }
 }
