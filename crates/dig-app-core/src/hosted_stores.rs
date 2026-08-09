@@ -407,28 +407,41 @@ mod tests {
     /// **`all()` really is all of them**, so a surface sweep built on it cannot silently stop
     /// covering a reason.
     ///
-    /// Matched exhaustively rather than counted: a `len()` check passes on a list that names one
-    /// variant twice and omits another, which is exactly how a hand-kept enumeration rots.
+    /// The exhaustive match inside `shape_of` is what makes this test load-bearing: the compiler
+    /// rejects it if any variant is added to `HostedStoresUnknown` but omitted from the match, so
+    /// a new reason cannot be compiled without also updating the match. The separate check that
+    /// every discriminant appears in `all()` then catches an omission from the list.
     #[test]
     fn every_reason_is_in_all() {
+        // Returns a stable integer tag for each variant. The compiler enforces exhaustion — no
+        // wildcard — so adding a variant without updating this match is a compile error.
+        fn shape_of(r: &HostedStoresUnknown) -> u8 {
+            match r {
+                HostedStoresUnknown::NoNode => 0,
+                HostedStoresUnknown::NodeCannotRead => 1,
+                HostedStoresUnknown::Unauthorized => 2,
+                HostedStoresUnknown::TimedOut(_) => 3,
+                HostedStoresUnknown::Unreachable(_) => 4,
+                HostedStoresUnknown::ReadFailed(_) => 5,
+            }
+        }
+        // One representative per variant. Payloads are empty strings; only the tag matters.
+        let all_shapes: [u8; 6] = [
+            shape_of(&HostedStoresUnknown::NoNode),
+            shape_of(&HostedStoresUnknown::NodeCannotRead),
+            shape_of(&HostedStoresUnknown::Unauthorized),
+            shape_of(&HostedStoresUnknown::TimedOut(String::new())),
+            shape_of(&HostedStoresUnknown::Unreachable(String::new())),
+            shape_of(&HostedStoresUnknown::ReadFailed(String::new())),
+        ];
         let listed = HostedStoresUnknown::all();
-        for reason in [
-            HostedStoresUnknown::NoNode,
-            HostedStoresUnknown::NodeCannotRead,
-            HostedStoresUnknown::Unauthorized,
-            HostedStoresUnknown::TimedOut(String::new()),
-            HostedStoresUnknown::Unreachable(String::new()),
-            HostedStoresUnknown::ReadFailed(String::new()),
-        ] {
-            // Compared by SHAPE, because `all()` carries realistic payloads and this list does not.
-            let shape = |r: &HostedStoresUnknown| std::mem::discriminant(r);
+        for shape in all_shapes {
             assert!(
-                listed.iter().any(|listed| shape(listed) == shape(&reason)),
-                "{reason:?} is a real reason that `all()` does not enumerate, so every surface \
-                 sweep built on it is blind to that reason"
+                listed.iter().any(|r| shape_of(r) == shape),
+                "discriminant {shape} is a real variant that `all()` does not enumerate"
             );
         }
-        assert_eq!(listed.len(), 6, "a reason is enumerated twice");
+        assert_eq!(listed.len(), all_shapes.len(), "a reason is enumerated twice in `all()`");
     }
 
     /// **The headline property.** Against a node that serves the method, every field of every store
