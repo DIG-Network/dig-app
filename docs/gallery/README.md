@@ -33,6 +33,15 @@ They therefore **need a running dig-node**, and are shot only when asked for:
 pwsh tools/shoot-gallery.ps1 -Live
 ```
 
+**Know what you are publishing before you shoot them.** A `-live-` capture commits your machine's real
+holding set — the store ids it has cached or pinned, their sizes, and your node's uptime — to a public
+repository. None of that is secret: a node announces its holdings to the DHT by design, so anyone can
+already learn who holds what. The residual is correlation, since intersecting the DHT providers of all
+the ids in one image narrows to the machine that shot it. Nothing else about the host travels: the
+account, address, DID and profile fields are the fixture's on every live capture, because `--live`
+replaces only the four node readings and the round-trip test pins that. If your node holds something
+you would rather not point at yourself, shoot these on a scratch node.
+
 `window_gallery --live` refuses and writes nothing when no node answers, rather than falling back to
 the fixture. A file labelled live that was quietly synthetic is the same failure as the screenshot
 labelled "Cache" that was the Status tab, and the harness will not produce one. Only the node's two

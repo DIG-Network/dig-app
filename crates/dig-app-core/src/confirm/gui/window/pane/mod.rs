@@ -552,9 +552,16 @@ mod tests {
     ///
     /// The property they were protecting is not. A card wired to a node is one refresh away from
     /// having no answer, and the failure is the same one: a figure the reader cannot tell from a
-    /// reading. So the sweep now runs against the state where every reading is genuinely absent —
-    /// [`TrayView::default`](crate::tray_menu::TrayView::default), no node, no cache, no store list —
-    /// and asserts that nothing on any tab comes out as a quantity.
+    /// reading. So the sweep runs against the state where every reading is genuinely absent and
+    /// asserts that nothing on any tab comes out as a quantity.
+    ///
+    /// That state is `healthy_view` rather than [`TrayView::default`](crate::tray_menu::TrayView::default),
+    /// and the difference is what makes the sweep bite. `healthy_view` sets only `running`,
+    /// `node_connected` and an unlocked account — every READING (`cache`, `node_facts`,
+    /// `hosted_stores`, `balance`) is left at its default absence. So the panes draw their full
+    /// layout, with nothing to put in it. A bare `TrayView::default` would instead render the
+    /// no-account state on most tabs, and the sweep would pass by having almost no text to examine
+    /// — which is the failure the `said.len() > 3` control below exists to catch.
     ///
     /// It is asserted over the painted TEXT rather than over the values, because the values are
     /// where the honesty types already hold: `Value::Unknown` and the three-state readings make a
