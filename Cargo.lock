@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "9.1.0"
+version = "9.1.1"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1737,7 +1737,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "9.1.0"
+version = "9.1.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "9.1.0"
+version = "9.1.1"
 dependencies = [
  "clap",
  "dig-app-core",
