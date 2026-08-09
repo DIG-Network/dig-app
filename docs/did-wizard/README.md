@@ -1,7 +1,11 @@
 # The DID wizard
 
-Every screen of the first-run DID wizard, in both themes. Light is the default; dark is the persisted
-opt-in.
+Every MINT screen of the first-run DID wizard, in both themes. Light is the default; dark is the
+persisted opt-in. Not captured here: the "On-chain minting is not available in this version" notice, which is the only
+DID surface this build actually renders. It is a native tray notice from the DIG menu's **About
+on-chain DIDs (required, costs XCH)…** row, not a wizard screen, and it needs a running app on a host
+with an enrolled account — so it
+is described in `SPEC.md` §3.1b rather than shown.
 
 The wizard opens from the DIG menu's **Set up** row, and — since dig_ecosystem#2359 — **when the app
 starts and this computer has an account with no minted DID, on a build that can actually mint one**.

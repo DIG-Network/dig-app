@@ -192,9 +192,14 @@ fn main() {
             // no way for a human to authorize a signature, so it starts no signing channel at all
             // rather than one that could only ever fail closed.
             // The app starts with the account LOCKED, like a password manager (dig_ecosystem#1817).
-            // Unlocking needs the user's password, so it happens when they ask for it — never at login
-            // — and the APP-SIGN loopback stays down until then rather than serving with a seed it has
-            // no business holding unprompted.
+            // Unlocking needs the user's password, so it happens when they ask for it, and the
+            // APP-SIGN loopback stays down until then rather than serving with a seed it has no
+            // business holding unprompted.
+            //
+            // The ONE start-up path that asks is the DID wizard below, and only when the host has an
+            // enrolled account with no minted DID: the wizard cannot show a funding address without
+            // opening the account. See [`show_the_did_wizard_if_needed`] for why that prompt is asked
+            // FOR rather than unbidden.
             #[cfg(feature = "tray")]
             let tray_session: Option<TraySession> = show_the_did_wizard_if_needed(&env);
             #[cfg(not(feature = "tray"))]
@@ -327,8 +332,8 @@ fn env_os_of<T>(_agent: &T) -> Os {
 /// logs + returns otherwise (never blocks or crashes the shell):
 ///
 /// 1. **An unlocked master-HD account** — the injected live-view signer + sealer read the master seed
-///    from the [`AccountResidency`]. Only Windows/macOS can unlock zero-prompt via the OS credential
-///    store; Linux needs a user passphrase (a UX not yet wired), so the channel defers there.
+///    from the [`AccountResidency`]. Every unlock asks the user for their password (dig_ecosystem#1817);
+///    only Windows/macOS have a native window to ask in, so the channel defers on every other OS.
 /// 2. **A desktop session** — guaranteed here because this runs only on the [`FormFactor::Tray`] path,
 ///    so the per-OS [`native_confirmer`] can raise a real biometric confirm.
 ///
@@ -373,9 +378,12 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     // phrase, and a recovery-phrase window that appears unbidden at login is a window people click
     // away. Setup is something the user asks for.
     //
-    // It also never runs at START-UP any more (dig_ecosystem#1817): it draws a password window, so it
-    // runs only when the user clicks `Unlock…` (or a signature needs the account). A password prompt at
-    // login would be exactly the unbidden window the paragraph above rejects.
+    // It draws a password window, so it runs when the user clicks `Unlock…`, when a signature needs
+    // the account, and on exactly ONE start-up path: the DID wizard
+    // ([`show_the_did_wizard_if_needed`]), which cannot show a funding address without opening the
+    // account. Every OTHER start-up path leaves the account locked (dig_ecosystem#1817) — a password
+    // prompt at login with nothing asking for it would be exactly the unbidden window the paragraph
+    // above rejects, and the wizard is not that: it is the flow the user launched the app to finish.
     let booted = unlock_existing_account_reporting(
         &brand_dir,
         "DIG needs your password to unlock your account.",
