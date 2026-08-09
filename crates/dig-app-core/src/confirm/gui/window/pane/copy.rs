@@ -618,8 +618,8 @@ pub(crate) mod content {
 
     /// The aside under that control, saying why it cannot be pressed.
     ///
-    /// A caption rather than a second unwired banner: the card above already carries one, and the
-    /// same amber paragraph twice on one screen teaches a reader to skip both.
+    /// A caption rather than a banner: an absence is stated once, in the place it is about, as a
+    /// note under the control it is about. A banner would repeat what the caption already says.
     pub(crate) const ADD_NOT_WIRED: &str = concat!(
         "DIG cannot ask the node to mirror a store yet, so the control above does nothing. The id ",
         "you type is still checked, so you can tell a good one from a typo."

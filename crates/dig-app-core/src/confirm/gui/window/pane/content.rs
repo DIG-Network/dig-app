@@ -435,8 +435,9 @@ fn field(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, live: bool) -> f32 {
     ui.ctx().data_mut(|d| d.insert_temp(element, typed));
     y += space::S3;
 
-    // Never pressable: the verb behind it does not exist in the model yet, and this card's banner
-    // says as much. Drawn so the finished shape of the form is visible, refused so it cannot lie.
+    // Never pressable: the verb behind it does not exist in the model yet. The caption below the
+    // button states the absence once, in the place it is about. Drawn so the finished shape of the
+    // form is visible, refused so it cannot lie.
     paint::button_at(
         ui,
         egui::Rect::from_min_size(
