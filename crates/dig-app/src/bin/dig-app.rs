@@ -492,12 +492,18 @@ fn account_state(
 /// detects no DiD was minted."* [`journey::startup_wizard`] holds the whole rule and its two refusals;
 /// this function only reads the host facts and acts on the answer.
 ///
-/// # Why it can read the answer without unlocking anything
+/// # Why it can read the answer without unlocking anything — and the one deliberate exception
 ///
 /// Both inputs are on disk. Whether an account is enrolled is a directory check, and whether a DID was
 /// minted is [`DidFile`], which refuses any record that does not carry its mint evidence. The app boots
-/// with the account LOCKED (dig_ecosystem#1817) and this keeps that true: nothing here asks for a key
-/// unless the answer is that the wizard should run, and then it is the wizard that asks.
+/// with the account LOCKED (dig_ecosystem#1817) and this keeps that true for every path that does not
+/// run the wizard.
+///
+/// The one start-up path that DOES open the account is `AtTheDidStep` (the branch below): it calls
+/// [`start_sign_service`] before the wizard draws, because unlocking IS what produces the receiving
+/// address the funding screen shows. This is not the unbidden password window dig_ecosystem#1817
+/// rejected — the user has an unminted account and the wizard is the reason they launched the app;
+/// the unlock is a necessary step on that path, not an incidental side-effect of booting.
 ///
 /// # What it returns
 ///
