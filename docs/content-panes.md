@@ -46,17 +46,23 @@ Two things make honesty the EASY path instead of a review checklist:
 - **Absence has a first-class spelling.** `Value::Unknown(reason)` carries the sentence saying why
   and draws in the unavailable colour, so a figure is either derived from data or it names its own
   absence — and a reviewer can tell which at a glance.
-- **`PaneState::Unwired` is a state every pane must handle.** A card built ahead of its data says so
-  in the pane, in plain words, with a badge for the glance and a banner for the sentence.
+- **The reading types separate the three absences.** `HostedStoresReading`, `BalanceReading` and
+  `AppPresence` each distinguish *a read is under way* from *the answer is nothing* from *nobody
+  could ask*, so there is no path that quietly turns an unknown into a zero.
 
 **Neither is a guarantee, and do not write as though it were.** `Value::Word("0")` compiles, and
 `Value::measure_bytes(0)` renders `0 MiB` quite happily. Making a placeholder genuinely
 unexpressible needs private variants behind checked constructors; that is #2337 and it is not true
 today. Write the pane honestly — the vocabulary means you do not have to write it *carefully*.
 
-The unwired copy denies the reading rather than promising work. "Coming soon" is compatible with a
-person believing the numbers above it; *"Nothing on this card is a reading from your computer"* is
-not.
+**Deny the reading; do not promise the work.** "Coming soon" is compatible with a person believing
+the numbers above it; a sentence saying this figure is not a reading from your computer is not. That
+rule outlived the state that used to carry it: there was a fifth `PaneState`, `Unwired`, which said
+it once per CARD, and dig_ecosystem#2397 removed it when the last two surfaces using it were wired.
+A pane-wide banner is the wrong grain anyway — it denies figures that ARE readings alongside the one
+that is not. Say it where it is true: per figure, as `Value::Unknown(reason)`, or as a caption on the
+one control that cannot act (`copy::content::ADD_NOT_WIRED` is the worked example — the Content tab's
+store list is live while the mirror button below it still is not).
 
 ---
 
@@ -71,8 +77,10 @@ A tab without its own module falls to `pane::generic`, which renders its section
 weighted buttons. It is a floor, not a target — but it means you can convert tabs one at a time and
 an unconverted one still looks like the application.
 
-Do not wait on the `TrayView` enrichment (#2330). Build against the facts that exist today and use
-`PaneState::Unwired` for the rest — skeleton first, backfill after.
+The `TrayView` enrichment (#2330) has landed, so a new pane builds against real readings: node facts,
+the hosted-store list and app presence are all on the view. Where a reading genuinely does not exist
+yet, reach for the honest absence of the thing you are waiting on — which says something true about
+the machine — rather than a state that says something about this project's build order.
 
 ## The vocabulary
 

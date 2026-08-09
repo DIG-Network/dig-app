@@ -139,6 +139,26 @@ pub enum HostedStoresUnknown {
     ReadFailed(String),
 }
 
+impl HostedStoresUnknown {
+    /// Every reason, for the tests and screenshots that must cover all of them.
+    ///
+    /// Hand-listed because the variants carry payloads and Rust cannot enumerate them, but asserted
+    /// to be complete by `every_reason_is_in_all`: without that, a seventh reason would ship with no
+    /// sentence of its own and no picture, while every surface test stayed green. Same rule and same
+    /// reason as [`AccountKind::ALL`](crate::confirm::gui::window::pane::facts::AccountKind::ALL).
+    #[cfg(test)]
+    pub(crate) fn all() -> Vec<Self> {
+        vec![
+            Self::NoNode,
+            Self::NodeCannotRead,
+            Self::Unauthorized,
+            Self::TimedOut("the read took longer than 10s".to_string()),
+            Self::Unreachable("connection refused".to_string()),
+            Self::ReadFailed("the node fell over".to_string()),
+        ]
+    }
+}
+
 /// The `data.code` symbols meaning "this build does not serve the method at all".
 ///
 /// Taken from the contract crate rather than retyped, so a rename upstream is a compile error here
@@ -382,6 +402,50 @@ mod tests {
                 settled => return settled,
             }
         }
+    }
+
+    /// **`all()` really is all of them**, so a surface sweep built on it cannot silently stop
+    /// covering a reason.
+    ///
+    /// The exhaustive match inside `shape_of` is what makes this test load-bearing: the compiler
+    /// rejects it if any variant is added to `HostedStoresUnknown` but omitted from the match, so
+    /// a new reason cannot be compiled without also updating the match. The separate check that
+    /// every discriminant appears in `all()` then catches an omission from the list.
+    #[test]
+    fn every_reason_is_in_all() {
+        // Returns a stable integer tag for each variant. The compiler enforces exhaustion — no
+        // wildcard — so adding a variant without updating this match is a compile error.
+        fn shape_of(r: &HostedStoresUnknown) -> u8 {
+            match r {
+                HostedStoresUnknown::NoNode => 0,
+                HostedStoresUnknown::NodeCannotRead => 1,
+                HostedStoresUnknown::Unauthorized => 2,
+                HostedStoresUnknown::TimedOut(_) => 3,
+                HostedStoresUnknown::Unreachable(_) => 4,
+                HostedStoresUnknown::ReadFailed(_) => 5,
+            }
+        }
+        // One representative per variant. Payloads are empty strings; only the tag matters.
+        let all_shapes: [u8; 6] = [
+            shape_of(&HostedStoresUnknown::NoNode),
+            shape_of(&HostedStoresUnknown::NodeCannotRead),
+            shape_of(&HostedStoresUnknown::Unauthorized),
+            shape_of(&HostedStoresUnknown::TimedOut(String::new())),
+            shape_of(&HostedStoresUnknown::Unreachable(String::new())),
+            shape_of(&HostedStoresUnknown::ReadFailed(String::new())),
+        ];
+        let listed = HostedStoresUnknown::all();
+        for shape in all_shapes {
+            assert!(
+                listed.iter().any(|r| shape_of(r) == shape),
+                "discriminant {shape} is a real variant that `all()` does not enumerate"
+            );
+        }
+        assert_eq!(
+            listed.len(),
+            all_shapes.len(),
+            "a reason is enumerated twice in `all()`"
+        );
     }
 
     /// **The headline property.** Against a node that serves the method, every field of every store

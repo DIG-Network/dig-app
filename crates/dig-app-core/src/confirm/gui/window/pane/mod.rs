@@ -28,7 +28,7 @@
 //! | [`card`] | Grouping related facts under a title | A single self-describing thing; three levels of nesting |
 //! | [`data`] | Readouts, measures, meters, badges | Prose; an unbounded count in a meter |
 //! | [`action`] | Verbs, with primary/ghost/danger weight | Anything not decided by the model |
-//! | [`state`] | The five pane states, banner-drawn | A success banner — success shows itself |
+//! | [`state`] | The four async states, banner-drawn | A success banner — success shows itself |
 //! | [`identity`] | Values a person takes elsewhere: copy, QR | A value nobody transcribes |
 //! | [`copy`] | Every string, named | A literal inside a paint call |
 //! | [`facts`] | The readings a pane may display | Anything that decides a verb |
@@ -59,11 +59,18 @@
 //!
 //! # Honesty
 //!
-//! A skeleton must never imply a fact it does not have. Two things make that the EASY path rather
-//! than a review checklist: an absent figure has a first-class spelling,
-//! [`data::Value::Unknown`], which carries the sentence saying why; and
-//! [`state::PaneState::Unwired`] is a state every pane must handle, so a designed-but-unplumbed
-//! surface says so in the pane, in plain words.
+//! A card must never imply a fact it does not have. Two things make that the EASY path rather than a
+//! review checklist: an absent figure has a first-class spelling, [`data::Value::Unknown`], which
+//! carries the sentence saying WHY it is absent; and the reading types a pane draws from —
+//! [`crate::hosted_stores::HostedStoresReading`], [`crate::wallet::overview::BalanceReading`],
+//! [`crate::apps::AppPresence`] — separate *a read is under way* from *the answer is nothing* from
+//! *nobody could ask*, so there is no path that turns an unknown into a zero.
+//!
+//! There was a fifth pane state, `Unwired`, for cards designed ahead of their plumbing. Both of the
+//! surfaces that used it are wired now (dig_ecosystem#2397), and a state nothing can legitimately
+//! reach is a banner a pane can still opt into wrongly — so it was removed rather than kept for a
+//! future skeleton. A future skeleton should reach for the honest absence of the reading it is
+//! waiting on, which says something true about the machine rather than about this project.
 //!
 //! Neither is a guarantee. `Value::Word("0")` still compiles — see [`data`] for exactly what is and
 //! is not enforced, and dig_ecosystem#2337 for making a placeholder unexpressible. A pane still has
@@ -405,16 +412,32 @@ mod tests {
         );
     }
 
-    /// Every string a tab painted at `width`, with `note` forced onto it.
-    fn painted_with_note(id: TabId, note: crate::window_model::PaneNote) -> Vec<String> {
-        use crate::tray_menu::TrayView;
-
-        let view = TrayView {
+    /// The view the state sweeps are painted against.
+    ///
+    /// The agent is up, a node has been found and an account is open, so every tab is emitted and no
+    /// sweep skips one. Every READING is left at its default absence — no cache snapshot, no node
+    /// facts, no store list, no balance — which is both the real state of the window for the first
+    /// seconds after it opens and the state in which an invented zero cannot be told from a reading.
+    fn healthy_view() -> crate::tray_menu::TrayView {
+        crate::tray_menu::TrayView {
             running: true,
             node_connected: true,
             account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
-            ..TrayView::default()
-        };
+            ..crate::tray_menu::TrayView::default()
+        }
+    }
+
+    /// Every string a tab painted, with `note` forced onto it.
+    fn painted_with_note(id: TabId, note: crate::window_model::PaneNote) -> Vec<String> {
+        painted(healthy_view(), id, note)
+    }
+
+    /// Every string tab `id` painted from `view`, with `note` forced onto it.
+    fn painted(
+        view: crate::tray_menu::TrayView,
+        id: TabId,
+        note: crate::window_model::PaneNote,
+    ) -> Vec<String> {
         let model = crate::window_model::build(&view);
         let mut tab = model
             .tab(id)
@@ -517,65 +540,58 @@ mod tests {
         }
     }
 
-    /// **Every unwired surface in the window says so in the same three ways, or in none of them.**
+    /// **On a computer where nothing has been read, no tab paints a zero** (dig_ecosystem#2397).
     ///
-    /// # Why this sweep exists (dig_ecosystem#2358, hazard 2)
+    /// # What this replaces, and why it is the better guard
     ///
-    /// The four async states got a sweep of their own the day they were centralised
-    /// ([`every_tab_presents_every_state_in_the_same_words`]). The FIFTH state did not: its
-    /// uniformity held only by CONSTRUCTION — both panes that use it happen to call
-    /// [`state::banner`], which happens to draw all three parts. Nothing asserted it. A pane that
-    /// grew its own amber paragraph, or kept the glance-level badge and softened the sentence under
-    /// it, would have been the exact drift #2356 removed from the other four states, on the one
-    /// state whose whole job is to stop a reader mistaking a placeholder for a reading.
+    /// It stands where `every_unwired_surface_says_so_in_the_same_words` did. That sweep checked
+    /// that the two skeleton cards carried the *"Not wired up"* badge and its caveat identically,
+    /// and it carried a vacuity guard insisting at least two panes still drew them — written to fail
+    /// "the day the last skeleton is plumbed in". This is that day: both cards read the node now, so
+    /// the fifth state and its words are gone.
     ///
-    /// The property is all-or-nothing per tab: the heading, the badge and the caveat travel
-    /// together. Asserted in both directions, because each catches a different way to get it wrong —
-    /// a badge with no caveat is a surface marked "not wired up" without saying what that means for
-    /// the figures beside it, and a caveat with no badge is a paragraph a skimming reader never sees.
+    /// The property they were protecting is not. A card wired to a node is one refresh away from
+    /// having no answer, and the failure is the same one: a figure the reader cannot tell from a
+    /// reading. So the sweep now runs against the state where every reading is genuinely absent —
+    /// [`TrayView::default`](crate::tray_menu::TrayView::default), no node, no cache, no store list —
+    /// and asserts that nothing on any tab comes out as a quantity.
     ///
-    /// The vacuity guard is the important half. If no pane drew the state at all — the day the last
-    /// skeleton is plumbed in — every tab would trivially satisfy "none of them" and this would pass
-    /// while proving nothing. So it insists that at least two tabs genuinely carry it: one alone
-    /// cannot show that two surfaces AGREE, which is the whole property.
+    /// It is asserted over the painted TEXT rather than over the values, because the values are
+    /// where the honesty types already hold: `Value::Unknown` and the three-state readings make a
+    /// zero hard to construct, and this catches the ways round them — a `Value::Word("0")`, a
+    /// formatted `0 B`, an `up 0 minutes`. The control below keeps it from passing on a window that
+    /// simply painted nothing.
     #[test]
-    fn every_unwired_surface_says_so_in_the_same_words() {
+    fn no_tab_paints_a_zero_when_nothing_has_been_read() {
         use crate::window_model::PaneNote;
 
-        let parts = [
-            ("heading", copy::unwired::HEADING),
-            ("badge", copy::unwired::BADGE),
-            ("caveat", copy::unwired::CAVEAT),
-        ];
+        // The shapes a not-yet-known figure takes when it is drawn as one anyway. Substrings rather
+        // than whole lines, because each of these is how the app's own formatters render a zero.
+        let inventions = ["0 B", "0 stores", "0 capsules", "up 0", "0 of "];
 
-        let mut carrying = 0;
         for tab in TabId::all() {
             let said = painted_with_note(tab, PaneNote::Ready);
-            let present: Vec<&str> = parts
-                .iter()
-                .filter(|(_, text)| said.iter().any(|line| line == text))
-                .map(|(name, _)| *name)
-                .collect();
-
-            assert!(
-                present.is_empty() || present.len() == parts.len(),
-                "the {tab:?} pane draws {present:?} of the unwired state but not all of it. The \
-                 three parts are one presentation: a badge with no caveat marks a card as unwired \
-                 without saying what that means for the figures on it, and a caveat with no badge \
-                 is a paragraph a skimming reader never sees"
-            );
-            if !present.is_empty() {
-                carrying += 1;
+            for line in &said {
+                for invented in inventions {
+                    assert!(
+                        !line.contains(invented),
+                        "the {tab:?} pane painted {line:?} on a computer that has reported \
+                         nothing. A zero a reader cannot tell from a reading is the one thing this \
+                         window may not draw"
+                    );
+                }
+                assert_ne!(
+                    line.trim(),
+                    "0",
+                    "the {tab:?} pane painted a bare zero where a figure goes"
+                );
             }
+            assert!(
+                said.len() > 3,
+                "the {tab:?} pane painted almost nothing ({said:?}), so this sweep is passing \
+                 because there was no text to examine"
+            );
         }
-
-        assert!(
-            carrying >= 2,
-            "only {carrying} pane(s) draw the unwired state, so this sweep cannot show that two \
-             surfaces present it the same way — which is the only thing it is for. If the last \
-             skeleton has genuinely been plumbed in, delete this guard rather than letting it pass \
-             vacuously"
-        );
     }
 
     /// An id is derived from the label and occurrence only — never from a position on screen.

@@ -36,9 +36,16 @@
 //! wallet.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{photograph_shell, Theme};
+use dig_app_core::engine::{EngineConnector, EngineState, NodeConnector};
+use dig_app_core::hosted_stores::{
+    HostedStoresReading, HostedStoresUnknown, NodeHostedStores, REFRESH_INTERVAL,
+    STORES_READ_TIMEOUT,
+};
+use dig_app_core::node_facts::NodeFacts;
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::wallet::overview::{BalanceReading, Balances};
 use dig_app_core::window_model::TabId;
@@ -118,18 +125,151 @@ fn view_for(account: AccountState, second_factor: bool) -> TrayView {
     }
 }
 
+/// Everything the node itself reports, as one capture carries it.
+///
+/// **All four travel together or the picture contradicts itself.** The first cut of `--live` carried
+/// only the two fields the new cards read, and produced an image where the Node connection card said
+/// `1 store(s) hosted` — the fixture's sentence — inches above a live sharing card reading `3
+/// stores`. Both figures are the node's `hosted_store_count`; one of them was three weeks old and
+/// invented. A capture that appears to disprove the behaviour it is evidence FOR is worse than no
+/// capture, so the boundary is drawn at "the node reported it", not at "a card added in this ticket
+/// reads it".
+struct NodeReadings {
+    /// The one-line link summary, from [`EngineState::summary`] — the SAME builder the shipped
+    /// binary calls (`dig-app.rs`, `status.engine.summary()`). Retyping the sentence here would let
+    /// the gallery's copy drift from the app's, which is the whole failure this ticket's own
+    /// `store_contents`/`SHARING_LABELS` sharing exists to avoid.
+    summary: String,
+    /// The node's own cap and usage. `None` only when there is no node, which `--live` refuses.
+    cache: Option<CacheSnapshot>,
+    /// What the node says about itself. `Option` so a live view can be turned back into its fixture
+    /// counterpart field for field, which is how the round-trip test proves nothing else moved.
+    facts: Option<NodeFacts>,
+    /// The stores it holds.
+    stores: HostedStoresReading,
+}
+
+/// `view` with every field the node supplies replaced, and every other field untouched.
+///
+/// Split out from the reading itself so what `--live` VARIES is one function with no node in it:
+/// the capture must differ from its fixture counterpart in what the node reported and nothing else,
+/// and `live_readings_replace_the_node_fields_and_leave_the_rest_alone` pins that here.
+///
+/// The fields deliberately left alone are the ones that are NOT node readings — the account, the
+/// address, the second factor, the updater. Varying those would drag key and account state into a
+/// capture harness that is documented to reach neither.
+fn with_live(view: TrayView, readings: &NodeReadings) -> TrayView {
+    TrayView {
+        node: readings.summary.clone(),
+        cache: readings.cache,
+        node_facts: readings.facts.clone(),
+        hosted_stores: readings.stores.clone(),
+        ..view
+    }
+}
+
+/// Whether the NODE ITSELF produced this reading, whatever it said.
+///
+/// The line a `--live` capture is allowed to be taken across. A node that answered `UNAUTHORIZED`,
+/// or that does not serve the method, said something real about a machine that is demonstrably
+/// running — those panes are worth photographing. `Pending` and the three unreachable reasons are
+/// the absence of an answer, and a picture taken from one would be a file labelled live showing
+/// fixture-shaped nothing. That is the failure this harness's own header exists to prevent.
+fn answered(reading: &HostedStoresReading) -> bool {
+    match reading {
+        HostedStoresReading::Pending => false,
+        HostedStoresReading::Known(_) => true,
+        HostedStoresReading::Unknown(reason) => !matches!(
+            reason,
+            HostedStoresUnknown::NoNode
+                | HostedStoresUnknown::Unreachable(_)
+                | HostedStoresUnknown::TimedOut(_)
+        ),
+    }
+}
+
+/// How long the harness waits for the store read to land before giving up on it.
+///
+/// Taken FROM the poller's own budget rather than picked, and doubled: the read may be abandoned at
+/// [`STORES_READ_TIMEOUT`] and the poller records the abandonment a moment later, so a wait fitted
+/// exactly to the budget would report "no answer" for a node that was about to say `TimedOut`.
+const LIVE_WAIT: Duration = Duration::from_secs(STORES_READ_TIMEOUT.as_secs() * 2);
+
+/// Everything a live capture shows, taken from the running node — or the reason there is nothing.
+///
+/// The node is found the way the application finds it: [`NodeConnector`] walking the §5.3 ladder,
+/// rather than a second client invented here with its own idea of where a node lives. Only
+/// `control.status` and `control.hostedStores.list` are called, so this reads a node and reaches no
+/// key, wallet or chain — the standing constraint on this file.
+///
+/// **There is no fallback.** Every branch that cannot produce a reading returns an error naming what
+/// did not answer, and the caller writes no file.
+fn live_readings() -> Result<NodeReadings, String> {
+    let link = NodeConnector::default().probe("");
+    let EngineState::Connected { .. } = &link else {
+        return Err(format!(
+            "no node answered control.status, so there is nothing live to photograph — {}",
+            link.summary()
+        ));
+    };
+    let status = link.status().expect("a connected link carries its status");
+    let facts = NodeFacts::of_status(status);
+    // The same two fields the shipped binary lifts out of the status snapshot for the tray
+    // (`dig-app.rs`: `st.cache.cap_bytes` / `st.cache.used_bytes`). Read from the node rather than
+    // held at the fixture's 350 MiB, which sat above a live store list of three 128.7 MiB stores —
+    // arithmetic anyone reading the image can check, and it did not add up.
+    let cache = Some(CacheSnapshot {
+        cap_bytes: status.cache.cap_bytes,
+        used_bytes: status.cache.used_bytes,
+    });
+    let summary = link.summary();
+
+    let poller = NodeHostedStores::new(REFRESH_INTERVAL, STORES_READ_TIMEOUT);
+    let deadline = Instant::now() + LIVE_WAIT;
+    loop {
+        let reading = poller.observe(&link);
+        if answered(&reading) {
+            return Ok(NodeReadings {
+                summary,
+                cache,
+                facts: Some(facts),
+                stores: reading,
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the node did not answer control.hostedStores.list within {LIVE_WAIT:?} \
+                 ({reading:?}), so no live capture can be taken"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 const USAGE: &str = "usage: window_gallery <tab> <light|dark> <width> <height> <account-state> \
-                     <out.png> [--second-factor]\n  \
-                     tab: status account security wallet apps cache settings\n  \
+                     <out.png> [--second-factor] [--live]\n  \
+                     --live: read the two node cards from the RUNNING node; refuses if none \
+                     answers\n  \
                      account-state: unsupported absent locked unopenable needs-password unlocked \
                      unlocked-no-phrase";
+
+/// Report `problem`, the tabs that exist, and the usage, then stop.
+///
+/// The tab list is asked of [`TabId`] rather than written here, for the reason [`name`] gives: the
+/// hand-written one went on offering `status`, `security`, `apps` and `cache` long after those tabs
+/// were merged away (dig_ecosystem#2358), so the one message a person reads after mistyping a tab
+/// named four tabs they could not photograph.
+fn tabs_line() -> String {
+    let named: Vec<String> = TabId::all().into_iter().map(name).collect();
+    format!("  tab: {}", named.join(" "))
+}
 
 /// Report `problem` alongside the usage and stop.
 ///
 /// Nothing is half-written: a gallery that guessed at a mistyped argument would write a file under a
 /// name that describes a different picture, which is the one failure a screenshot set cannot survive.
 fn refuse(problem: &str) -> ! {
-    eprintln!("{problem}\n{USAGE}");
+    eprintln!("{problem}\n{USAGE}\n{}", tabs_line());
     std::process::exit(2);
 }
 
@@ -170,7 +310,24 @@ fn main() {
     // have hidden.
     let second_factor = all.iter().any(|argument| argument == "--second-factor");
 
-    let view = Arc::new(move || view_for(account.clone(), second_factor));
+    // A live capture takes its readings ONCE, before the window opens, so every frame of the
+    // capture shows the same instant — and so a node that is not there stops the run here, with no
+    // file written, rather than being papered over by the fixture the closure would otherwise build.
+    let live = match all.iter().any(|argument| argument == "--live") {
+        false => None,
+        true => match live_readings() {
+            Ok(readings) => Some(readings),
+            Err(problem) => refuse(&format!("--live was asked for but {problem}")),
+        },
+    };
+
+    let view = Arc::new(move || {
+        let fixture = view_for(account.clone(), second_factor);
+        match &live {
+            None => fixture,
+            Some(readings) => with_live(fixture, readings),
+        }
+    });
     match photograph_shell(
         theme,
         tab,
@@ -183,5 +340,164 @@ fn main() {
             eprintln!("{path} was not written: {problem}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dig_app_core::hosted_stores::{HostedStore, HostedStoresUnknown};
+
+    /// One store, so a `Known` reading under test is a list rather than an empty one.
+    fn one_store() -> Vec<HostedStore> {
+        vec![HostedStore {
+            store_id: "ab".repeat(32),
+            pinned: true,
+            capsule_count: 2,
+            total_bytes: 4_096,
+        }]
+    }
+
+    fn some_facts() -> NodeFacts {
+        NodeFacts {
+            version: "0.99.10".to_string(),
+            commit: "abcdef0".to_string(),
+            protocol: "1".to_string(),
+            addr: "127.0.0.1:9778".to_string(),
+            upstream: "https://rpc.dig.net".to_string(),
+            uptime_minutes: 42,
+            sync_available: true,
+            // Deliberately NOT the fixture summary's `1 store(s) hosted`: a live capture that left
+            // the summary alone would then state the same quantity twice and differently, and
+            // `a_live_capture_does_not_state_the_store_count_twice_and_differently` is blind to that
+            // unless the two numbers differ.
+            hosted_store_count: 3,
+            cached_capsule_count: 3,
+            pinned_store_count: 2,
+        }
+    }
+
+    /// **The refusal rule.** A `--live` capture may only be written when the NODE ITSELF answered
+    /// the store read — whatever it answered. Every reading that means "nobody answered" is refused,
+    /// including the empty-looking [`HostedStoresReading::Pending`], because a picture taken from
+    /// one would be labelled live while showing nothing the node said.
+    ///
+    /// The unknowns are split rather than lumped: `NodeCannotRead`, `Unauthorized` and `ReadFailed`
+    /// are the node's OWN words on a node that is demonstrably reachable, so they are honest live
+    /// readings and the pane must be photographable in them. `NoNode`, `Unreachable` and `TimedOut`
+    /// are the absence of an answer.
+    #[test]
+    fn only_a_reading_the_node_itself_produced_counts_as_live() {
+        for silent in [
+            HostedStoresReading::Pending,
+            HostedStoresReading::Unknown(HostedStoresUnknown::NoNode),
+            HostedStoresReading::Unknown(HostedStoresUnknown::Unreachable("refused".into())),
+            HostedStoresReading::Unknown(HostedStoresUnknown::TimedOut("10s".into())),
+        ] {
+            assert!(
+                !answered(&silent),
+                "{silent:?} is the absence of an answer, and a picture taken from it would be \
+                 labelled live while showing nothing the node said"
+            );
+        }
+        for spoken in [
+            HostedStoresReading::Known(Vec::new()),
+            HostedStoresReading::Known(one_store()),
+            HostedStoresReading::Unknown(HostedStoresUnknown::NodeCannotRead),
+            HostedStoresReading::Unknown(HostedStoresUnknown::Unauthorized),
+            HostedStoresReading::Unknown(HostedStoresUnknown::ReadFailed("fell over".into())),
+        ] {
+            assert!(
+                answered(&spoken),
+                "{spoken:?} is what a reachable node said, so the pane must be photographable in it"
+            );
+        }
+    }
+
+    /// The four readings a live capture carries, all differing from the fixture's.
+    fn readings() -> NodeReadings {
+        NodeReadings {
+            summary: "Node v0.103.0 · 3 capsule(s) cached · 3 store(s) hosted".to_string(),
+            cache: Some(CacheSnapshot {
+                cap_bytes: GIB,
+                used_bytes: 388 * MIB,
+            }),
+            facts: Some(some_facts()),
+            stores: HostedStoresReading::Known(one_store()),
+        }
+    }
+
+    /// **`--live` varies the node's readings and NOTHING else**, so a live capture differs from its
+    /// fixture counterpart only in what the node reported.
+    ///
+    /// Proven by a round trip rather than by listing the fields that must not move: putting the
+    /// base's own readings back must restore the base exactly. The comparison is
+    /// [`TrayView::renders_same_as`], which destructures with no `..` — so a field this harness
+    /// starts overwriting cannot escape it, which a hand-written list of assertions could.
+    #[test]
+    fn live_readings_replace_the_node_fields_and_leave_the_rest_alone() {
+        let base = view_for(AccountState::Unlocked { recoverable: true }, false);
+        let live = with_live(base.clone(), &readings());
+
+        assert_eq!(live.node, readings().summary);
+        assert_eq!(live.cache, readings().cache);
+        assert_eq!(live.node_facts, Some(some_facts()));
+        assert_eq!(
+            live.hosted_stores,
+            HostedStoresReading::Known(one_store()),
+            "the node's list must reach the view it is photographed from"
+        );
+        // The control: with the base's own readings restored, nothing else moved.
+        let restored = with_live(
+            live,
+            &NodeReadings {
+                summary: base.node.clone(),
+                cache: base.cache,
+                facts: base.node_facts.clone(),
+                stores: base.hosted_stores.clone(),
+            },
+        );
+        assert!(
+            restored.renders_same_as(&base),
+            "a live capture must differ from its fixture counterpart in the node's readings alone"
+        );
+    }
+
+    /// **The defect this pass exists to fix.** A live capture must not put the FIXTURE's summary
+    /// sentence — which states a hosted-store count — above a live sharing card that states the same
+    /// quantity from the node. The first cut of `--live` did exactly that and photographed `1
+    /// store(s) hosted` above `3 stores`.
+    ///
+    /// The fixture is built so the nearest wrong implementation — the one that leaves `node` alone —
+    /// cannot pass: the node's own count (3) differs from the count in the fixture's summary (1), so
+    /// a summary left untouched leaves the picture stating both.
+    #[test]
+    fn a_live_capture_does_not_state_the_store_count_twice_and_differently() {
+        let fixture = view_for(AccountState::Unlocked { recoverable: true }, false);
+        assert!(
+            fixture.node.contains("1 store(s) hosted"),
+            "this test is only meaningful while the fixture states a DIFFERENT count from the \
+             node's: {}",
+            fixture.node
+        );
+
+        let live = with_live(fixture, &readings());
+        let hosted = live
+            .node_facts
+            .as_ref()
+            .expect("live facts")
+            .hosted_store_count;
+
+        assert!(
+            live.node.contains(&format!("{hosted} store(s) hosted")),
+            "the sentence above the sharing card must carry the node's own hosted-store count: {}",
+            live.node
+        );
+        assert!(
+            !live.node.contains("1 store(s) hosted"),
+            "the fixture's count survived into a live capture, so the image states the same \
+             quantity twice and differently: {}",
+            live.node
+        );
     }
 }

@@ -82,15 +82,54 @@ pub(crate) mod home {
     pub(crate) const VERSION_LABEL: &str = "Version";
     /// The card holding the figures about what this computer shares.
     pub(crate) const SHARING_CARD: &str = "What this computer is sharing";
-    /// The four figures that card is designed around, in render order.
+    /// The four figures that card reports, in render order.
+    ///
+    /// # Why the first one is not called `Stores hosted` (dig_ecosystem#2397)
+    ///
+    /// It was, and the word named two different sets on one screen. The figure behind it is
+    /// `control.status`'s `hosted_store_count`, which counts only stores with content CACHED. The
+    /// Content tab's list comes from `control.hostedStores.list`, which dig-node's `SPEC.md` §7.6
+    /// defines normatively as cached ∪ pinned — a pinned-but-uncached store MUST appear there. On the
+    /// live node those are 3 and 5.
+    ///
+    /// Both numbers are right, so the fix is the label rather than the arithmetic. Saying what the
+    /// figure actually counts lets the two coexist: a reader who notices the difference resolves it
+    /// on the Content tab, where the two extra rows say plainly that nothing is cached for them yet.
     pub(crate) const SHARING_LABELS: [&str; 4] = [
-        "Stores hosted",
+        "Stores with cached content",
         "Capsules cached",
         "Stores pinned",
         "Uptime",
     ];
-    /// Said in place of every figure on the sharing card, because none of them is a reading.
-    pub(crate) const SHARING_UNKNOWN: &str = "Not read from the node yet.";
+
+    /// Said in place of the sharing figures when no node has reported them, naming THIS machine's
+    /// situation rather than the project's build order.
+    ///
+    /// # One sentence per state, and each one names its own remedy
+    ///
+    /// It used to be a single const, *"Not read from the node yet."*, which described dig-app's
+    /// wiring rather than the reader's computer — the voice dig_ecosystem#2356 removed from the
+    /// unwired caveat. The three states have three different remedies: start DIG, wait for it to find
+    /// a node, or wait for the first read. Keyed on the same two facts
+    /// [`PaneFacts::node_state`](super::super::facts::PaneFacts::node_state) reads, in an exhaustive
+    /// match, so the badge above the card and this sentence cannot come to describe different
+    /// machines.
+    pub(crate) fn sharing_unknown(agent_running: bool, node_connected: bool) -> &'static str {
+        match (agent_running, node_connected) {
+            (false, _) => {
+                "The DIG agent has not started yet, so nothing has asked a node what this computer \
+                 is sharing."
+            }
+            (true, false) => {
+                "DIG has not found a node on this computer yet, and only a node can say what is \
+                 being shared from here."
+            }
+            (true, true) => {
+                "DIG is talking to a node but has not read these figures from it yet. They fill in \
+                 within a few seconds."
+            }
+        }
+    }
 
     /// Said in place of a cache reading when no node has reported one.
     pub(crate) const CACHE_UNKNOWN: &str =
@@ -361,27 +400,6 @@ pub(crate) fn agent_state(running: bool) -> &'static str {
     }
 }
 
-/// The not-wired-up state — the fifth state, and the one the epic exists to keep honest.
-pub(crate) mod unwired {
-    /// The heading over an unwired surface.
-    pub(crate) const HEADING: &str = "Not connected to live data yet";
-    /// The glance-level badge on an unwired surface.
-    pub(crate) const BADGE: &str = "Not wired up";
-    /// The sentence that always follows it, whatever the surface.
-    ///
-    /// Deliberately says what a reader must NOT conclude, not merely that work is pending: the
-    /// failure this state exists to prevent is a person reading a designed-but-unwired pane as a
-    /// report on their own machine.
-    ///
-    /// It also says so without describing the project (dig_ecosystem#2356). It used to close *"It
-    /// is the finished layout, waiting for the node to be wired up to it"* — a sentence about
-    /// dig-app's own build order, addressed to a reader who has no node, no layout and no wiring.
-    /// What they need is what to do with the figures, which is nothing.
-    pub(crate) const CAVEAT: &str =
-        "Nothing on this card is a reading from your computer. Treat every figure here as a \
-         placeholder until DIG can show you your own.";
-}
-
 /// The copy-to-clipboard affordance.
 pub(crate) mod clipboard {
     /// The control's resting label.
@@ -504,6 +522,77 @@ pub(crate) mod content {
     /// The word marking a capsule the node keeps regardless of the cache's limit.
     pub(crate) const PINNED_BADGE: &str = "Pinned";
 
+    /// Said while the node is being asked what it holds.
+    ///
+    /// A WAIT, not a fault and not an empty list: the read walks the node's on-disk cache index, so
+    /// on a large cache it legitimately takes seconds
+    /// ([`crate::hosted_stores::STORES_READ_TIMEOUT`]).
+    pub(crate) const CAPSULES_PENDING: &str =
+        "Asking the node what this computer is mirroring. A large cache takes a moment to list.";
+
+    /// What one listed store's second line says about its contents.
+    ///
+    /// # Why a store with nothing cached does not report `0 B` (dig_ecosystem#2397)
+    ///
+    /// The node's list is cached ∪ pinned stores (dig-node `SPEC.md` §7.6), so a store pinned before
+    /// its content arrived is listed with no capsules and no bytes. That is the ordinary state of a
+    /// store somebody has just asked for — but drawn as `Pinned · 0 B` it reads as a broken row, and
+    /// a reader goes looking for a fault that is not there. So the zero is written as the situation
+    /// it is rather than as a measurement.
+    pub(crate) fn store_contents(capsule_count: u64, size: &str) -> String {
+        match capsule_count {
+            0 => "Nothing cached yet".to_string(),
+            1 => format!("1 capsule · {size}"),
+            n => format!("{n} capsules · {size}"),
+        }
+    }
+
+    /// Why no list of mirrored stores could be read — **one sentence per remedy**.
+    ///
+    /// # Why this match is exhaustive over the reason, not over a rough category
+    ///
+    /// [`HostedStoresUnknown`](crate::hosted_stores::HostedStoresUnknown) is documented as one
+    /// variant per REMEDY, and that only reaches a person if the remedies survive to the sentence
+    /// they read. Two of them are the reason it exists: `Unauthorized` is a permission fault on a
+    /// perfectly capable node, so sending that reader after an upgrade wastes their afternoon; and
+    /// `TimedOut` must never be worded as an absent node, because only `Unreachable` is evidence
+    /// about whether a node exists at all (dig_ecosystem#2325).
+    ///
+    /// The node's own words are carried where it gave any, after the sentence rather than instead of
+    /// it: a diagnostic detail is for the person who can use it, and a remedy is for everyone else.
+    pub(crate) fn stores_unknown(reason: &crate::hosted_stores::HostedStoresUnknown) -> String {
+        use crate::hosted_stores::HostedStoresUnknown as Why;
+        match reason {
+            Why::NoNode => "No node is connected, so there is nothing to ask what this computer is \
+                            mirroring. Start the DIG node and this list fills in."
+                .to_string(),
+            Why::NodeCannotRead => {
+                "This node is an older build that cannot list what it holds. Update DIG on this \
+                 computer and the list appears."
+                    .to_string()
+            }
+            Why::Unauthorized => {
+                "The node refused to list what it holds, because DIG could not read this computer's \
+                 node control token. The node itself is fine — reinstall DIG, or run it as the \
+                 account that installed the node, to restore access."
+                    .to_string()
+            }
+            Why::TimedOut(detail) => format!(
+                "The node is running but took too long to list what it holds, so the read was \
+                 abandoned. This usually means a large cache on slow storage; DIG asks again \
+                 shortly. The node said: {detail}"
+            ),
+            Why::Unreachable(detail) => format!(
+                "The node could not be reached for this read, so it may have stopped since DIG last \
+                 spoke to it. Check the DIG node is still running. The reason was: {detail}"
+            ),
+            Why::ReadFailed(detail) => format!(
+                "The node refused this read and DIG cannot tell why. The log folder on the Home tab \
+                 has the details. The node said: {detail}"
+            ),
+        }
+    }
+
     /// Said when the cache holds bytes but no capsule is listed.
     ///
     /// This is the state that reads as a fault and is not one: content arrives as blocks and is only
@@ -529,8 +618,8 @@ pub(crate) mod content {
 
     /// The aside under that control, saying why it cannot be pressed.
     ///
-    /// A caption rather than a second unwired banner: the card above already carries one, and the
-    /// same amber paragraph twice on one screen teaches a reader to skip both.
+    /// A caption rather than a banner: an absence is stated once, in the place it is about, as a
+    /// note under the control it is about. A banner would repeat what the caption already says.
     pub(crate) const ADD_NOT_WIRED: &str = concat!(
         "DIG cannot ask the node to mirror a store yet, so the control above does nothing. The id ",
         "you type is still checked, so you can tell a good one from a typo."
@@ -564,11 +653,8 @@ mod tests {
     /// Written out because these are `const`s in nested modules and nothing enumerates them. The
     /// tab LEADS are appended from [`TabId::all`], which IS exhaustive — it is derived from the enum
     /// rather than hand-listed (dig_ecosystem#2358), so a new tab's lead arrives here on its own.
-    fn every_sentence() -> Vec<&'static str> {
-        let mut all = vec![
-            unwired::HEADING,
-            unwired::BADGE,
-            unwired::CAVEAT,
+    fn every_sentence() -> Vec<String> {
+        let mut all: Vec<&'static str> = vec![
             home::CACHE_UNKNOWN,
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
@@ -582,6 +668,7 @@ mod tests {
             content::CAPSULES_EMPTY_WITH_BYTES,
             content::ADD_FIELD_HINT,
             content::ADD_NOT_WIRED,
+            content::CAPSULES_PENDING,
             protection::SECOND_FACTOR_ON,
             protection::SECOND_FACTOR_OFF,
             protection::PAIRED_APPS_HINT,
@@ -608,7 +695,25 @@ mod tests {
                 .iter()
                 .map(|kind| account::summary(*kind)),
         );
-        all
+        // The three sharing absences, keyed the same way the card keys them.
+        all.extend([
+            home::sharing_unknown(false, false),
+            home::sharing_unknown(true, false),
+            home::sharing_unknown(true, true),
+        ]);
+
+        let mut said: Vec<String> = all.into_iter().map(str::to_owned).collect();
+        // Every reason a store list can be missing, enumerated from the reading's own list rather
+        // than sampled — a sweep that visits some of the sentences is a sweep for some of them.
+        said.extend(
+            crate::hosted_stores::HostedStoresUnknown::all()
+                .iter()
+                .map(content::stores_unknown),
+        );
+        said.push(content::store_contents(0, "0 B"));
+        said.push(content::store_contents(1, "12 MiB"));
+        said.push(content::store_contents(4, "407 MiB"));
+        said
     }
 
     /// The phrasings that describe how dig-app was BUILT rather than what the reader is looking at.
@@ -724,7 +829,7 @@ mod tests {
         );
 
         for said in every_sentence() {
-            for named in tabs_named(said) {
+            for named in tabs_named(&said) {
                 assert!(
                     real.contains(&named.as_str()),
                     "a sentence sends the reader to the {named:?} tab, which this window does not \
@@ -759,25 +864,129 @@ mod tests {
         assert_ne!(clipboard::COPY, clipboard::COPIED);
     }
 
-    /// **The unwired caveat denies the reading rather than merely promising work.**
+    /// **Every reason a store list is missing gets its OWN sentence** (dig_ecosystem#2397).
     ///
-    /// "Coming soon" is compatible with a person believing the numbers above it. The sentence has to
-    /// say the figures are not theirs.
+    /// The property [`content::stores_unknown`] exists for. `HostedStoresUnknown` is documented as
+    /// one variant per REMEDY, and a remedy only reaches a person through the sentence they read —
+    /// so two reasons sharing words is two remedies collapsed back together at the last step.
+    ///
+    /// Asserted over the WHOLE set rather than a sample, in the shape `no_two_account_states_share_a
+    /// _word` uses, so a seventh reason cannot silently inherit another's sentence. The two pairs
+    /// named individually are the ones that have actually gone wrong: `Unauthorized` is a permission
+    /// fault on a capable node, and `TimedOut` is a node that is UP.
     #[test]
-    fn the_unwired_caveat_denies_that_the_figures_are_real() {
-        let caveat = unwired::CAVEAT.to_lowercase();
-        // A negation AND the word it negates, rather than one literal phrasing: the property is
-        // that the sentence DENIES the figures are readings, and there is more than one honest way
-        // to write that. Transcribing the current wording would pin the sentence, not the property.
+    fn no_two_reasons_for_a_missing_store_list_share_a_sentence() {
+        use crate::hosted_stores::HostedStoresUnknown as Why;
+
+        let reasons = Why::all();
+        let mut said: Vec<String> = reasons.iter().map(content::stores_unknown).collect();
+        let total = said.len();
+        said.sort();
+        said.dedup();
+        assert_eq!(
+            said.len(),
+            total,
+            "two reasons a store list is missing are shown the same sentence, so one of the two \
+             readers is being sent after the wrong remedy: {said:?}"
+        );
+
+        // An upgrade is the remedy for exactly ONE reason. Telling a user with a token problem to
+        // update DIG sends them after a fault that is not there.
+        let refused = content::stores_unknown(&Why::Unauthorized).to_lowercase();
         assert!(
-            caveat.contains("reading"),
-            "the unwired caveat never mentions what it is denying: {caveat}"
+            !refused.contains("update") && !refused.contains("older"),
+            "a permission fault is worded as an out-of-date node: {refused}"
         );
         assert!(
-            ["nothing ", "not ", "no "]
-                .iter()
-                .any(|negation| caveat.contains(negation)),
-            "the unwired caveat promises work without denying the figures are real: {caveat}"
+            refused.contains("token"),
+            "the permission fault never names what is actually missing: {refused}"
+        );
+        let old = content::stores_unknown(&Why::NodeCannotRead).to_lowercase();
+        assert!(
+            old.contains("update"),
+            "the one reason an upgrade fixes does not mention one: {old}"
+        );
+
+        // A slow node is UP. Only `Unreachable` is evidence about whether a node exists
+        // (dig_ecosystem#2325), so the timeout sentence must not deny one.
+        let slow = content::stores_unknown(&Why::TimedOut("4s".to_string())).to_lowercase();
+        assert!(
+            slow.contains("running"),
+            "a node that answered late is not reported as a node that is running: {slow}"
+        );
+        for absence in ["no node", "not running", "stopped"] {
+            assert!(
+                !slow.contains(absence),
+                "a slow node is worded as an absent one, which is dig_ecosystem#2325 in a new \
+                 pane: {slow}"
+            );
+        }
+    }
+
+    /// **A store with nothing cached reads as a state, not as a measurement of zero.**
+    ///
+    /// The live node lists two pinned stores whose content has not arrived. `Pinned · 0 B` is the
+    /// nearest wrong rendering: every figure in it is true, and it reads as a broken row. Both sides
+    /// are asserted, because a helper that ALWAYS said "Nothing cached yet" would satisfy the first
+    /// half alone while erasing every real size on the card.
+    #[test]
+    fn a_store_with_nothing_cached_does_not_report_a_size() {
+        let empty = content::store_contents(0, "0 B");
+        assert!(
+            !empty.contains('0') && !empty.contains(" B"),
+            "a store awaiting its content reports a measurement of zero: {empty}"
+        );
+        assert!(empty.to_lowercase().contains("yet"), "{empty}");
+
+        let held = content::store_contents(4, "407 MiB");
+        assert!(
+            held.contains("407 MiB") && held.contains("4 capsules"),
+            "a store with content does not report what it holds: {held}"
+        );
+        assert!(
+            content::store_contents(1, "12 MiB").contains("1 capsule "),
+            "one capsule is reported in the plural"
+        );
+    }
+
+    /// **Each way of having no sharing figures names its own situation**, and none of them describes
+    /// dig-app's build order.
+    ///
+    /// The const this replaced said *"Not read from the node yet."* for all three — true, and useless
+    /// to the reader whose agent has not started. Distinctness is asserted over the whole set; the
+    /// voice half is covered for these sentences too by
+    /// [`no_sentence_explains_the_app_to_the_reader`](tests::no_sentence_explains_the_app_to_the_reader),
+    /// because [`every_sentence`] now carries them.
+    #[test]
+    fn each_reason_the_sharing_figures_are_absent_names_its_own_machine() {
+        let states = [(false, false), (false, true), (true, false), (true, true)];
+        let said: Vec<&str> = states
+            .iter()
+            .map(|(running, connected)| home::sharing_unknown(*running, *connected))
+            .collect();
+
+        assert_eq!(
+            said[0], said[1],
+            "an agent that has not started is not looking for a node either way, so both must read \
+             the same"
+        );
+        let mut distinct = vec![said[0], said[2], said[3]];
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "two different machines are described in the same words: {said:?}"
+        );
+        assert!(
+            said[0].to_lowercase().contains("agent"),
+            "a stopped agent is not named as the thing to start: {}",
+            said[0]
+        );
+        assert!(
+            said[2].to_lowercase().contains("node"),
+            "a running agent with no node does not name the node: {}",
+            said[2]
         );
     }
 }

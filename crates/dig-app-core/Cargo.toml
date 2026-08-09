@@ -188,3 +188,20 @@ dig-chainsource-interface = { workspace = true, features = ["testing"] }
 # The in-process consensus validator the DID-mint end-to-end test runs its real bundle through.
 chia-sdk-test.workspace = true
 chia-wallet-sdk.workspace = true
+
+# The capture harness behind `docs/gallery` — declared explicitly for ONE reason: `test = true`.
+#
+# An example target defaults to `test = false`, which compiles its `#[cfg(test)]` module and never
+# runs it. The three tests in `window_gallery.rs` are the only thing standing between a `--live`
+# capture and the defect that produced it — an image whose Node connection card said `1 store(s)
+# hosted` inches above a live sharing card reading `3 stores`, both of them the node's
+# `hosted_store_count`. Left at the default they compiled green in CI while asserting nothing, so the
+# guard against a self-contradicting capture was itself unfalsifiable. This is the same shape as the
+# `src/bin` blind spot the coverage job already excludes by name.
+#
+# `required-features` is what the auto-discovered target had implicitly: the harness draws through
+# `confirm::gui`, so a `--no-default-features` build must skip it rather than fail to compile it.
+[[example]]
+name = "window_gallery"
+test = true
+required-features = ["gui"]

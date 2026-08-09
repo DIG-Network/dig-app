@@ -5,8 +5,8 @@
 //!
 //! It is the tab a person lands on, it is the most data-rich one that needs no new plumbing, and it
 //! exercises the parts of the vocabulary a Phase-2 tab will reach for first: cards grouping facts,
-//! readouts with units, a badge, an action group with a hierarchy, a launcher, and both honest
-//! absences — a figure the node has not reported, and a card whose data is not wired up.
+//! readouts with units, a badge, an action group with a hierarchy, a launcher, and the honest
+//! absence — a figure the node has not reported, drawn as the reason rather than as a zero.
 //!
 //! # What it deliberately no longer holds (dig_ecosystem#2358)
 //!
@@ -31,7 +31,6 @@ use super::copy;
 use super::data::{self, Readout, Value};
 use super::facts::PaneFacts;
 use super::flow::Flow;
-use super::state::{self, PaneState};
 use super::text;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
@@ -49,15 +48,16 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     node_card(flow, t, facts);
     flow.gap(space::S4);
-    // Verbs before figures-with-no-figures. The sharing card is the least urgent thing on the tab
-    // and the diagnostics are what a person on a broken machine came here for, so an unwired card
-    // must not push the log-folder button below the fold at the default window size.
+    // Verbs before figures. The diagnostics are what a person on a broken machine came here for, so
+    // the sharing card — which is the least urgent thing on the tab, and which says nothing at all
+    // on a machine with no node — must not push the log-folder button below the fold at the default
+    // window size.
     let mut pressed = diagnostics_card(flow, t, tab);
     flow.gap(space::S4);
     // The launcher LAST, because it is what a person browses when nothing is wrong.
     pressed = pressed.or(super::apps::launcher(flow, t, tab));
     flow.gap(space::S4);
-    sharing_card(flow, t);
+    sharing_card(flow, t, facts);
     pressed
 }
 
@@ -149,51 +149,21 @@ fn cache_reading(cache: Option<crate::cache::CacheSnapshot>) -> Value {
     }
 }
 
-/// What this computer is sharing with the network — DESIGNED, and not yet wired to the node.
+/// What this computer is sharing with the network, read from the node (dig_ecosystem#2397).
 ///
-/// # Why a card with no data in it is worth shipping
+/// # Why there is no banner and no badge here
 ///
-/// These four figures come from the node's `control.status`, which this window does not read yet.
-/// The card exists so the Phase-2 implementer inherits a worked example of the honest skeleton: the
-/// layout is finished, every value is an explicit absence carrying its reason, and the pane SAYS the
-/// figures are not readings. A card of plausible zeroes would look finished and be a lie; an absent
-/// card would hide that the work is planned.
-fn sharing_card(flow: &mut Flow, t: &Tokens) {
-    // Every value is `Unknown` — not because the type forces it (it does not, see `data`), but
-    // because none of these four figures has been read from anything. The card is the worked
-    // example: a finished layout whose every figure names its own absence.
-    let items: Vec<Readout> = copy::home::SHARING_LABELS
-        .iter()
-        .map(|label| {
-            Readout::new(
-                *label,
-                Value::Unknown(copy::home::SHARING_UNKNOWN.to_string()),
-            )
-        })
-        .collect();
-
+/// This card carried both while its figures were undrawn skeletons. Both are gone: the four values
+/// are readings now, and when they are not, each one says so itself. `window_model` already draws a
+/// tab-level banner for a machine with no node — a second amber paragraph inside this card, saying
+/// the same thing about the same node, is how a reader learns to skip amber paragraphs. The card
+/// follows the precedent [`copy::content::ADD_NOT_WIRED`] set: state an absence once, in the place
+/// it is about.
+fn sharing_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) {
+    let items = sharing_readouts(facts);
     flow.place(|ui, at| {
         (
             card::card(ui, at, t, Some(copy::home::SHARING_CARD), |inner| {
-                // The glance-level half of what the banner spells out. A reader skimming the pane
-                // must not have to read a paragraph to learn that this card is not reporting on
-                // their machine.
-                inner.place(|ui, at| {
-                    (
-                        data::badge(
-                            ui,
-                            at.left_top(),
-                            t,
-                            copy::unwired::BADGE,
-                            data::Tone::Neutral,
-                        )
-                        .height(),
-                        (),
-                    )
-                });
-                inner.gap(space::S3);
-                inner.place(|ui, at| (state::banner(ui, at, t, &PaneState::Unwired), ()));
-                inner.gap(space::S4);
                 inner.place(|ui, at| {
                     (
                         card::panel(ui, at, t, None, |panel| {
@@ -206,6 +176,69 @@ fn sharing_card(flow: &mut Flow, t: &Tokens) {
             (),
         )
     });
+}
+
+/// The four sharing figures, each either a reading or the reason there is none.
+///
+/// # All four come from `control.status`, and the first one's LABEL is why (dig_ecosystem#2397)
+///
+/// The obvious-looking alternative is to take the store count from
+/// [`PaneFacts::hosted_stores`](super::facts::PaneFacts::hosted_stores) — the same list the Content
+/// tab draws — so the two tabs agree. That is wrong here, and the reason is directly above this card:
+/// [`node_card`] renders [`PaneFacts::node_summary`], which `engine.rs` builds from the SAME
+/// `hosted_store_count` and which reads *"Node v0.102.2 · 3 capsule(s) cached · 3 store(s) hosted"*.
+/// A list-derived figure would put 5 inches below a 3 on one tab — a contradiction visible in a
+/// single glance, which is worse than the cross-tab difference it would fix.
+///
+/// The two numbers are both correct and count different sets: `hosted_store_count` counts stores with
+/// content CACHED, while `control.hostedStores.list` returns cached ∪ pinned — dig-node's `SPEC.md`
+/// §7.6 makes a pinned-but-uncached store appearing in the list a MUST. So the figure stays on the
+/// status field, agreeing with the sentence above it, and the LABEL says which set it counts. The
+/// reconciliation happens on the Content tab, where the extra rows say for themselves that nothing is
+/// cached for them yet.
+///
+/// **Do not "fix" this to match the Content tab's row count.** That reintroduces the same-tab
+/// contradiction, and it does so while looking like a tidy-up.
+fn sharing_readouts(facts: &PaneFacts) -> Vec<Readout> {
+    let absent = copy::home::sharing_unknown(facts.agent_running, facts.node_connected);
+    let reading =
+        |value: Option<Value>| value.unwrap_or_else(|| Value::Unknown(absent.to_string()));
+    let node = facts.node_facts.as_ref();
+
+    let [stores, capsules, pinned, uptime] = copy::home::SHARING_LABELS;
+    vec![
+        Readout::new(
+            stores,
+            reading(node.map(|n| count(n.hosted_store_count, "store"))),
+        ),
+        Readout::new(
+            capsules,
+            reading(node.map(|n| count(n.cached_capsule_count, "capsule"))),
+        ),
+        Readout::new(
+            pinned,
+            reading(node.map(|n| count(n.pinned_store_count, "store"))),
+        ),
+        Readout::new(
+            uptime,
+            reading(node.map(|n| Value::Word(n.uptime_phrase()))),
+        ),
+    ]
+}
+
+/// A count and the thing it counts, as a measure.
+///
+/// Never a bare [`Value::Word`] of digits: [`data`]'s own rule is that a figure without its unit is a
+/// figure a reader has to guess at, and these three counts sit in one column where `5`, `3` and `2`
+/// with no units would read as one quantity measured three ways.
+fn count(n: u64, singular: &str) -> Value {
+    Value::Measure {
+        amount: n.to_string(),
+        unit: match n {
+            1 => singular.to_string(),
+            _ => format!("{singular}s"),
+        },
+    }
 }
 
 /// The tab's diagnostic verbs, as a weighted button group.
@@ -390,6 +423,211 @@ mod tests {
             !unread.shown().chars().any(|c| c.is_ascii_digit()),
             "the unreported sentence carries a numeral where a person reads a size: {}",
             unread.shown()
+        );
+    }
+
+    /// The live node's own status, so the figures under test are the ones a person actually sees.
+    fn live_node_facts() -> crate::node_facts::NodeFacts {
+        crate::node_facts::NodeFacts::of_status(&crate::test_support::node::fake_status_result())
+    }
+
+    /// The sharing readouts for a machine in `state`, keyed by their label.
+    fn sharing(view: TrayView) -> Vec<Readout> {
+        sharing_readouts(&PaneFacts::of_tray(&view))
+    }
+
+    /// **A node that has not been read leaves every sharing figure an explicit absence** — never a
+    /// zero (dig_ecosystem#2397).
+    ///
+    /// The nearest wrong implementation reads `node_facts.unwrap_or_default()`, which draws
+    /// "0 stores · 0 capsules · 0 pinned · up less than a minute" about a node nobody has spoken to.
+    /// Every one of those figures is plausible and none of them is a reading.
+    ///
+    /// The absence's REASON is asserted too, and against the machine rather than against a constant:
+    /// an agent that has not started and one that cannot find a node have different remedies, and the
+    /// sentence that served both said neither.
+    #[test]
+    fn an_unread_node_leaves_every_sharing_figure_absent_with_its_own_reason() {
+        let stopped = sharing(TrayView::default());
+        assert_eq!(stopped.len(), copy::home::SHARING_LABELS.len());
+        for item in &stopped {
+            assert!(
+                !item.value.is_known(),
+                "{} was drawn as a figure on a computer whose node has said nothing: {:?}",
+                item.label,
+                item.value
+            );
+            assert!(
+                !item.value.shown().chars().any(|c| c.is_ascii_digit()),
+                "{} carries a numeral where a person reads a count: {}",
+                item.label,
+                item.value.shown()
+            );
+        }
+
+        // One actor varied — the agent is now running — and the sentence must change with it.
+        let searching = sharing(TrayView {
+            running: true,
+            ..TrayView::default()
+        });
+        assert_ne!(
+            stopped[0].value.shown(),
+            searching[0].value.shown(),
+            "a stopped agent and one that cannot find a node are given the same sentence, so one \
+             of the two readers is sent after the wrong remedy"
+        );
+    }
+
+    /// **Every sharing figure is the node's own, and the four are not one number repeated.**
+    ///
+    /// The fixture's three counts all differ, so an implementation that read one field and reused it
+    /// — or that swapped two of the three, which are all `u64` — cannot pass.
+    #[test]
+    fn every_sharing_figure_is_the_one_the_node_reported() {
+        let node = live_node_facts();
+        let items = sharing(TrayView {
+            running: true,
+            node_connected: true,
+            node_facts: Some(node.clone()),
+            ..TrayView::default()
+        });
+
+        let shown: Vec<&str> = items.iter().map(|item| item.value.shown()).collect();
+        assert_eq!(
+            shown,
+            vec![
+                node.hosted_store_count.to_string().as_str(),
+                node.cached_capsule_count.to_string().as_str(),
+                node.pinned_store_count.to_string().as_str(),
+                node.uptime_phrase().as_str(),
+            ],
+            "the sharing card is not reporting the node's own figures, in the labels' order"
+        );
+        assert_ne!(
+            node.hosted_store_count, node.cached_capsule_count,
+            "the fixture's counts are indistinguishable, so this cannot see a swap"
+        );
+        for item in &items {
+            assert!(item.value.is_known(), "{} came back absent", item.label);
+        }
+    }
+
+    /// **The store count agrees with the sentence drawn above it on the same tab**
+    /// (dig_ecosystem#2397).
+    ///
+    /// The defect this pane came closest to shipping. `node_card` renders
+    /// [`PaneFacts::node_summary`], which `engine.rs` builds from `status.hosted_store_count` and
+    /// which reads *"… · 3 store(s) hosted"*. Taking the card's figure from the hosted-store LIST
+    /// instead — cached ∪ pinned, and legitimately longer — would put a 5 inches below that 3.
+    ///
+    /// The fixture is what makes this load-bearing: the store list carries MORE entries than the
+    /// status count, exactly as the live node does, so a figure derived from the list disagrees with
+    /// the summary and fails here. Against a list of equal length the two implementations are
+    /// indistinguishable.
+    #[test]
+    fn the_store_count_agrees_with_the_summary_sentence_above_it() {
+        use crate::hosted_stores::{HostedStore, HostedStoresReading};
+
+        let node = live_node_facts();
+        let listed: Vec<HostedStore> = (0..node.hosted_store_count + 2)
+            .map(|n| HostedStore {
+                store_id: format!("{n:064x}"),
+                pinned: n >= node.hosted_store_count,
+                capsule_count: 0,
+                total_bytes: 0,
+            })
+            .collect();
+        assert!(
+            listed.len() as u64 > node.hosted_store_count,
+            "the fixture's list is not longer than the status count, so this test cannot \
+             distinguish the two sources"
+        );
+
+        let view = TrayView {
+            running: true,
+            node_connected: true,
+            node: crate::engine::EngineState::Connected {
+                endpoint: "http://127.0.0.1:9778".to_string(),
+                status: Box::new(crate::test_support::node::fake_status_result()),
+            }
+            .summary(),
+            node_facts: Some(node.clone()),
+            hosted_stores: HostedStoresReading::Known(listed.clone()),
+            ..TrayView::default()
+        };
+        let facts = PaneFacts::of_tray(&view);
+        let shown = sharing_readouts(&facts)[0].value.shown().to_string();
+
+        assert!(
+            facts
+                .node_summary
+                .contains(&format!("{} store(s) hosted", node.hosted_store_count)),
+            "the fixture's summary does not carry a store count, so this proves nothing: {}",
+            facts.node_summary
+        );
+        assert_eq!(
+            shown,
+            node.hosted_store_count.to_string(),
+            "the sharing card and the sentence above it report different store counts on one tab"
+        );
+        assert_ne!(
+            shown,
+            listed.len().to_string(),
+            "the card took its figure from the hosted-store list, which counts cached ∪ pinned \
+             stores and so contradicts the summary directly above it"
+        );
+    }
+
+    /// **The store count's label says which set it counts.**
+    ///
+    /// The figure and the Content tab's list are both right and are different numbers, so the label
+    /// is what keeps them from reading as a contradiction. A label of the bare word "hosted" is the
+    /// one that names both sets at once, which is where this started.
+    #[test]
+    fn the_store_counts_label_names_the_set_it_counts() {
+        let label = copy::home::SHARING_LABELS[0].to_lowercase();
+        assert!(
+            label.contains("cached"),
+            "the store count's label does not say that it counts only stores with content cached, \
+             so it reads as a count of the Content tab's rows: {label}"
+        );
+        let mut unique = copy::home::SHARING_LABELS.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            copy::home::SHARING_LABELS.len(),
+            "two sharing figures share a label"
+        );
+    }
+
+    /// **A single store is reported in the singular.**
+    ///
+    /// Both sides, because a helper that always pluralised and one that never did each satisfy a
+    /// one-case test — and "1 stores" beside three other figures is the kind of thing a reader
+    /// notices and a suite does not.
+    #[test]
+    fn a_count_of_one_is_not_reported_in_the_plural() {
+        assert_eq!(
+            count(1, "store"),
+            Value::Measure {
+                amount: "1".to_string(),
+                unit: "store".to_string()
+            }
+        );
+        assert_eq!(
+            count(0, "store"),
+            Value::Measure {
+                amount: "0".to_string(),
+                unit: "stores".to_string()
+            }
+        );
+        assert_eq!(
+            count(5, "capsule"),
+            Value::Measure {
+                amount: "5".to_string(),
+                unit: "capsules".to_string()
+            }
         );
     }
 

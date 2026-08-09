@@ -7,6 +7,13 @@ photographed with `PrintWindow(PW_RENDERFULLCONTENT)` after
 **Display scaling was 240 dpi (2.5×)**, so every pixel size below is physical and the logical size is
 2.5× smaller. The window was resized with `SetWindowPos` — a window-management call, not a click.
 
+> **These are a historical record, not the current application.** They photograph the Status pane,
+> which the five-tab reorganisation replaced, and they predate dig_ecosystem#2397 — so the `Not wired
+> up` badge and the amber unwired banner below are things the app no longer draws anywhere, and
+> `PaneState::Unwired` no longer exists. The sharing card's figures are readings now. For what the
+> application currently looks like, see [`docs/gallery`](../../../../docs/gallery/README.md), which
+> covers every tab in both themes at both widths and includes captures taken from a running node.
+
 | File | Logical | Physical | What it shows |
 | --- | --- | --- | --- |
 | `status-light-960x640.png` | 960 × 640 | 2400 × 1600 | The default window size. Sidebar, two-column readouts, the cache meter, and the weighted action group. The log-folder button is above the fold. |
