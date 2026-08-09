@@ -120,6 +120,12 @@ impl Default for HostedStoresReading {
 /// Why no hosted-store list is available. **One variant per REMEDY**, never per rough category — the
 /// reason is the only thing that tells a person whether to start their node, wait, or fix a
 /// permission.
+// Under test, the variant list is generated rather than retyped, so `every_reason_is_in_all` is
+// checking `all()` against the compiler's own idea of this enum instead of against a second
+// hand-written array that a new variant would be equally absent from. Same device and same reason as
+// `window_model::TabId`. Test-only: nothing in production iterates these, so the shipped API gains
+// no trait impl from it.
+#[cfg_attr(test, derive(strum::EnumIter))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostedStoresUnknown {
     /// No node is connected at all, so there is nothing to ask.
@@ -407,14 +413,26 @@ mod tests {
     /// **`all()` really is all of them**, so a surface sweep built on it cannot silently stop
     /// covering a reason.
     ///
-    /// The exhaustive match inside `shape_of` is what makes this test load-bearing: the compiler
-    /// rejects it if any variant is added to `HostedStoresUnknown` but omitted from the match, so
-    /// a new reason cannot be compiled without also updating the match. The separate check that
-    /// every discriminant appears in `all()` then catches an omission from the list.
+    /// Two devices hold it, and BOTH are needed — an earlier version of this test had only the
+    /// second and could be defeated by the very mistake it names.
+    ///
+    /// `strum::EnumIter` generates the variant list from the enum itself, so the set this test
+    /// sweeps is the compiler's, not a second array that a new variant would be equally missing
+    /// from. `shape_of`'s exhaustive match then makes a new variant a COMPILE error here, which is
+    /// what turns "the sweep is complete" into something a person cannot forget rather than
+    /// something they must remember.
+    ///
+    /// The failure this rules out: add a seventh reason, satisfy the two matches the compiler
+    /// complains about, and leave `all()` at six. Every surface sweep built on `all()` — the
+    /// sentence tests in `copy.rs` — then silently stops covering that reason. Verified by doing
+    /// exactly that and watching this test fail.
     #[test]
     fn every_reason_is_in_all() {
-        // Returns a stable integer tag for each variant. The compiler enforces exhaustion — no
-        // wildcard — so adding a variant without updating this match is a compile error.
+        use strum::IntoEnumIterator;
+
+        // A stable tag per variant, so representatives compare by VARIANT and ignore their payloads.
+        // The compiler enforces exhaustion — no wildcard — so a new variant cannot be compiled
+        // without being given a tag here.
         fn shape_of(r: &HostedStoresUnknown) -> u8 {
             match r {
                 HostedStoresUnknown::NoNode => 0,
@@ -425,25 +443,20 @@ mod tests {
                 HostedStoresUnknown::ReadFailed(_) => 5,
             }
         }
-        // One representative per variant. Payloads are empty strings; only the tag matters.
-        let all_shapes: [u8; 6] = [
-            shape_of(&HostedStoresUnknown::NoNode),
-            shape_of(&HostedStoresUnknown::NodeCannotRead),
-            shape_of(&HostedStoresUnknown::Unauthorized),
-            shape_of(&HostedStoresUnknown::TimedOut(String::new())),
-            shape_of(&HostedStoresUnknown::Unreachable(String::new())),
-            shape_of(&HostedStoresUnknown::ReadFailed(String::new())),
-        ];
+
         let listed = HostedStoresUnknown::all();
-        for shape in all_shapes {
+        let mut expected = 0;
+        for variant in HostedStoresUnknown::iter() {
+            expected += 1;
             assert!(
-                listed.iter().any(|r| shape_of(r) == shape),
-                "discriminant {shape} is a real variant that `all()` does not enumerate"
+                listed.iter().any(|r| shape_of(r) == shape_of(&variant)),
+                "`{variant:?}` is a real variant that `all()` does not enumerate, so every surface \
+                 sweep built on `all()` silently skips it"
             );
         }
         assert_eq!(
             listed.len(),
-            all_shapes.len(),
+            expected,
             "a reason is enumerated twice in `all()`"
         );
     }

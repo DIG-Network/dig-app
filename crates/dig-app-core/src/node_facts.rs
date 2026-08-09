@@ -49,7 +49,14 @@ pub struct NodeFacts {
     pub uptime_minutes: u64,
     /// Whether authenticated §21 whole-store sync is available on this node.
     pub sync_available: bool,
-    /// Distinct stores this node holds.
+    /// Distinct stores with content CACHED — **not** every store this node holds.
+    ///
+    /// The node derives it from its cached capsules alone, so a store that is pinned with nothing
+    /// cached yet is absent from this count while being present, by dig-node's `SPEC.md` §7.6 MUST,
+    /// in `control.hostedStores.list`. On a real node those two numbers differ, which is why the
+    /// surface reading this renders it as "Stores with cached content" rather than "Stores hosted"
+    /// (dig_ecosystem#2397). Do not describe it as "stores held" — that phrasing is what put one
+    /// number under a different one on the same screen.
     pub hosted_store_count: u64,
     /// Capsules currently in its content cache.
     pub cached_capsule_count: u64,
