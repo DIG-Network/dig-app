@@ -441,7 +441,11 @@ mod tests {
                 "discriminant {shape} is a real variant that `all()` does not enumerate"
             );
         }
-        assert_eq!(listed.len(), all_shapes.len(), "a reason is enumerated twice in `all()`");
+        assert_eq!(
+            listed.len(),
+            all_shapes.len(),
+            "a reason is enumerated twice in `all()`"
+        );
     }
 
     /// **The headline property.** Against a node that serves the method, every field of every store
