@@ -1,24 +1,25 @@
 //! The states a pane can be in, and how each one looks.
 //!
-//! # Five states, not four
+//! # Four states — the ones `professional-ui` asks for, and no more (dig_ecosystem#2397)
 //!
-//! `professional-ui` requires four on every async surface — loading, error, empty, success.
-//! dig_ecosystem#2326 adds a fifth, because tabs ship as designed skeletons ahead of the node
-//! plumbing behind them: [`PaneState::Unwired`].
+//! Loading, error, empty, success. There was briefly a fifth, `Unwired`, because tabs shipped as
+//! designed skeletons ahead of the node plumbing behind them (dig_ecosystem#2326): a card whose data
+//! did not exist yet said so in words rather than drawing a plausible zero.
 //!
-//! # Why the fifth state is a TYPE and not a convention
-//!
-//! A skeleton must never imply a fact it does not have. A pane showing a plausible zero is worse
-//! than an empty one, because a reader cannot tell it apart from a reading. Making "not wired up"
-//! a variant every pane must handle means a Phase-2 tab cannot ship a placeholder without SAYING it
-//! is one — the state is in the way, rather than in a review checklist somebody has to remember.
+//! It is gone because the last two skeletons were plumbed in, and a state nothing can reach is worse
+//! than no state at all — it is a banner a pane can still opt into, saying a card is not reporting on
+//! this machine when it is. What it protected is now carried by the four real states plus
+//! [`data::Value::Unknown`](super::data::Value::Unknown): a read in flight is [`Self::Waiting`], a
+//! read that failed is [`Self::Unreachable`] naming the remedy, and a figure nobody has is an
+//! `Unknown` carrying its own reason. The honesty rule is unchanged — **a card must never imply a
+//! fact it does not have** — and every one of those spellings is now a claim about the MACHINE
+//! rather than about dig-app's build order.
 //!
 //! Success draws no banner at all: a pane whose content is present says so by showing it. A banner
 //! reading "loaded successfully" over a working pane is noise that trains people to skip banners.
 
 use egui::{Rect, Ui, Vec2};
 
-use super::copy;
 use super::text;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{rgba, space};
@@ -37,8 +38,6 @@ pub(crate) enum PaneState {
     Unreachable(String),
     /// The pane works and has nothing for this person. Names what would change that.
     Empty(String),
-    /// The layout is finished and the data behind it is not connected. Says so, unmistakably.
-    Unwired,
 }
 
 impl PaneState {
@@ -46,9 +45,12 @@ impl PaneState {
     ///
     /// A straight mapping: the four async states are decided by [`crate::window_model`] from the
     /// same snapshot the rows come from, and re-deciding them here would be the second
-    /// implementation this whole design exists to avoid. Only [`PaneState::Unwired`] has no model
-    /// counterpart, because "this surface has no plumbing yet" is a fact about the CODE, not about
-    /// the account.
+    /// implementation this whole design exists to avoid.
+    ///
+    /// A CARD may still build a state directly — the Content tab's list card does, because the
+    /// hosted-store read has its own three-state reading and its own remedies, which the tab-level
+    /// note knows nothing about. That is a state about one card, drawn inside it, beneath the tab's
+    /// own banner.
     pub(crate) fn of_note(note: &PaneNote) -> Self {
         match note {
             PaneNote::Ready => Self::Ready,
@@ -68,19 +70,11 @@ impl PaneState {
 pub(crate) fn banner(ui: &mut Ui, at: Rect, t: &Tokens, state: &PaneState) -> f32 {
     match state {
         PaneState::Ready => 0.0,
-        PaneState::Waiting(sentence) => notice(ui, at, t, Look::Neutral, sentence, None),
-        PaneState::Empty(sentence) => notice(ui, at, t, Look::Neutral, sentence, None),
+        PaneState::Waiting(sentence) => notice(ui, at, t, Look::Neutral, sentence),
+        PaneState::Empty(sentence) => notice(ui, at, t, Look::Neutral, sentence),
         // Only the state that means something is WRONG gets the amber treatment. Painting a
         // still-loading pane in warning colours teaches people to ignore the warning colour.
-        PaneState::Unreachable(sentence) => notice(ui, at, t, Look::Problem, sentence, None),
-        PaneState::Unwired => notice(
-            ui,
-            at,
-            t,
-            Look::Problem,
-            copy::unwired::CAVEAT,
-            Some(copy::unwired::HEADING),
-        ),
+        PaneState::Unreachable(sentence) => notice(ui, at, t, Look::Problem, sentence),
     }
 }
 
@@ -93,15 +87,8 @@ enum Look {
     Problem,
 }
 
-/// One banner: an optional heading, then a sentence, inside a panel. Returns its height.
-fn notice(
-    ui: &mut Ui,
-    at: Rect,
-    t: &Tokens,
-    look: Look,
-    sentence: &str,
-    heading: Option<&str>,
-) -> f32 {
+/// One banner: a sentence inside a panel. Returns its height.
+fn notice(ui: &mut Ui, at: Rect, t: &Tokens, look: Look, sentence: &str) -> f32 {
     let pad = space::S3;
     let inner_width = (at.width() - pad * 2.0).max(1.0);
     let ink = match look {
@@ -109,28 +96,13 @@ fn notice(
         Look::Problem => t.amber,
     };
 
-    let mut height = pad;
-    let heading_galley = heading.map(|heading| {
-        ui.painter().layout(
-            heading.to_owned(),
-            crate::confirm::gui::render::semibold(crate::confirm::gui::render::size::SM),
-            rgba(match look {
-                Look::Neutral => t.text,
-                Look::Problem => t.amber,
-            }),
-            inner_width,
-        )
-    });
     let body = ui.painter().layout(
         sentence.to_owned(),
         crate::confirm::gui::render::regular(crate::confirm::gui::render::size::SM),
         rgba(ink),
         text::measure(inner_width),
     );
-    if let Some(galley) = &heading_galley {
-        height += galley.size().y + space::S1;
-    }
-    height += body.size().y + pad;
+    let height = pad + body.size().y + pad;
 
     let panel = Rect::from_min_size(at.left_top(), Vec2::new(at.width(), height));
     match look {
@@ -138,18 +110,8 @@ fn notice(
         Look::Problem => paint::warning_panel(ui, panel, t),
     }
 
-    let mut y = at.top() + pad;
-    if let Some(galley) = heading_galley {
-        let size = galley.size().y;
-        ui.painter().galley(
-            egui::Pos2::new(at.left() + pad, y),
-            galley,
-            egui::Color32::PLACEHOLDER,
-        );
-        y += size + space::S1;
-    }
     ui.painter().galley(
-        egui::Pos2::new(at.left() + pad, y),
+        egui::Pos2::new(at.left() + pad, at.top() + pad),
         body,
         egui::Color32::PLACEHOLDER,
     );
@@ -182,22 +144,20 @@ mod tests {
                 "{note:?} became {state:?}, whose silence is wrong"
             );
         }
-        assert!(
-            !PaneState::Unwired.is_silent(),
-            "an unwired pane that says nothing is the exact failure this state exists to prevent"
-        );
     }
 
     /// **A banner's height matches what it drew, at both widths the window spans.**
     ///
-    /// The unwired banner carries two paragraphs and is the tallest; a height computed from one of
-    /// them would leave the next block sitting on the second. Measured at 480 px as well as at a
-    /// desktop width because the sentence wraps to more lines in the narrow case, which is exactly
-    /// where a wrong height shows.
+    /// The sentence is a long one — the shape the hosted-store reasons take — so it wraps to more
+    /// lines at 300 px than at 520, and a height computed from anything but the laid-out text leaves
+    /// the next block sitting on the banner's last line. The narrow case is where that shows.
     #[test]
     fn a_banner_is_taller_when_its_sentence_has_to_wrap_further() {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
+        let sentence = PaneState::Unreachable(super::super::copy::content::stores_unknown(
+            &crate::hosted_stores::HostedStoresUnknown::Unauthorized,
+        ));
         let measured = std::cell::Cell::new((0.0_f32, 0.0_f32));
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -206,8 +166,8 @@ mod tests {
                     let narrow = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(300.0, 400.0));
                     let wide = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(520.0, 400.0));
                     measured.set((
-                        banner(ui, narrow, &t, &PaneState::Unwired),
-                        banner(ui, wide, &t, &PaneState::Unwired),
+                        banner(ui, narrow, &t, &sentence),
+                        banner(ui, wide, &t, &sentence),
                     ));
                 });
             });

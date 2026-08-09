@@ -139,6 +139,26 @@ pub enum HostedStoresUnknown {
     ReadFailed(String),
 }
 
+impl HostedStoresUnknown {
+    /// Every reason, for the tests and screenshots that must cover all of them.
+    ///
+    /// Hand-listed because the variants carry payloads and Rust cannot enumerate them, but asserted
+    /// to be complete by `every_reason_is_in_all`: without that, a seventh reason would ship with no
+    /// sentence of its own and no picture, while every surface test stayed green. Same rule and same
+    /// reason as [`AccountKind::ALL`](crate::confirm::gui::window::pane::facts::AccountKind::ALL).
+    #[cfg(test)]
+    pub(crate) fn all() -> Vec<Self> {
+        vec![
+            Self::NoNode,
+            Self::NodeCannotRead,
+            Self::Unauthorized,
+            Self::TimedOut("the read took longer than 10s".to_string()),
+            Self::Unreachable("connection refused".to_string()),
+            Self::ReadFailed("the node fell over".to_string()),
+        ]
+    }
+}
+
 /// The `data.code` symbols meaning "this build does not serve the method at all".
 ///
 /// Taken from the contract crate rather than retyped, so a rename upstream is a compile error here
@@ -382,6 +402,33 @@ mod tests {
                 settled => return settled,
             }
         }
+    }
+
+    /// **`all()` really is all of them**, so a surface sweep built on it cannot silently stop
+    /// covering a reason.
+    ///
+    /// Matched exhaustively rather than counted: a `len()` check passes on a list that names one
+    /// variant twice and omits another, which is exactly how a hand-kept enumeration rots.
+    #[test]
+    fn every_reason_is_in_all() {
+        let listed = HostedStoresUnknown::all();
+        for reason in [
+            HostedStoresUnknown::NoNode,
+            HostedStoresUnknown::NodeCannotRead,
+            HostedStoresUnknown::Unauthorized,
+            HostedStoresUnknown::TimedOut(String::new()),
+            HostedStoresUnknown::Unreachable(String::new()),
+            HostedStoresUnknown::ReadFailed(String::new()),
+        ] {
+            // Compared by SHAPE, because `all()` carries realistic payloads and this list does not.
+            let shape = |r: &HostedStoresUnknown| std::mem::discriminant(r);
+            assert!(
+                listed.iter().any(|listed| shape(listed) == shape(&reason)),
+                "{reason:?} is a real reason that `all()` does not enumerate, so every surface \
+                 sweep built on it is blind to that reason"
+            );
+        }
+        assert_eq!(listed.len(), 6, "a reason is enumerated twice");
     }
 
     /// **The headline property.** Against a node that serves the method, every field of every store

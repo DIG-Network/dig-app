@@ -10,13 +10,27 @@
 //! [`copy::content::CAPSULES_EMPTY`] when it does not — and which one appears is decided from the
 //! usage figure rather than from the list alone.
 //!
-//! # What is wired, and what is not
+//! # Every figure on this pane is a reading (dig_ecosystem#2397)
 //!
-//! The meter and the size limit are real: both come from the node's `control.status` cache snapshot
-//! that [`crate::tray_menu::TrayView`] already carries. The capsule LIST does not exist in the view
-//! yet (dig_ecosystem#2330), so the list card renders as [`PaneState::Unwired`] — the finished layout
-//! saying, in words, that it is not reporting on this machine. When the list arrives, [`capsules`]
-//! takes a `Some` and nothing else here moves.
+//! The meter and the size limit come from the node's `control.status` cache snapshot; the LIST comes
+//! from `control.hostedStores.list`, through [`crate::hosted_stores::HostedStoresReading`]. That
+//! reading is taken WHOLE rather than as an `Option<Vec<_>>`, and the card matches it exhaustively,
+//! because its three states are three different sentences: a read under way is a wait, a node that
+//! answered with nothing is an empty list, and a read that failed names the one remedy that fixes
+//! it. Collapsed into an `Option`, the first and the last become the same `None` — which is the
+//! honesty failure this pane was rebuilt to remove.
+//!
+//! One thing on this tab is still not wired: **mirroring**. The add-a-store form validates what is
+//! typed and cannot ask the node to act on it (dig_ecosystem#2324), and says so in a caption under
+//! its own control rather than in a second banner.
+//!
+//! # The list is legitimately longer than the Home tab's store count
+//!
+//! `control.hostedStores.list` returns cached ∪ pinned stores — dig-node's `SPEC.md` §7.6 makes a
+//! pinned-but-uncached store appearing here a MUST — while `control.status`'s `hosted_store_count`,
+//! which Home reports, counts only the stores with content cached. On the live node that is 5 rows
+//! against 3. Both are right; the two extra rows say plainly that nothing is cached for them yet,
+//! which is what lets a reader reconcile the two numbers by looking rather than by guessing.
 
 use super::action::{self, Action};
 use super::card;
@@ -32,24 +46,9 @@ use crate::cache::CacheSnapshot;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{mono, regular, rgba, size, space, Weight};
 use crate::confirm::gui::theme::Tokens;
+use crate::hosted_stores::{HostedStore, HostedStoresReading};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
-
-/// One store this computer keeps a full copy of.
-///
-/// Defined here rather than taken from the view because the view does not carry it yet
-/// (dig_ecosystem#2330). It is the shape the list is drawn from, so the renderer and its tests are
-/// real today and the enrichment lands as a projection into this type rather than as a new pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Mirror {
-    /// The 64-hex store id.
-    pub(crate) store_id: String,
-    /// How much disk this store's content occupies.
-    pub(crate) bytes: u64,
-    /// Whether the node keeps it regardless of the limit. A pinned store is not evicted, which is
-    /// the fact that decides whether a person needs to act when the meter fills.
-    pub(crate) pinned: bool,
-}
 
 /// Draw the Cache pane's content into `flow`, and report the action pressed.
 pub(crate) fn draw(
@@ -62,9 +61,7 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     let pressed = limit_card(flow, t, tab, facts.cache);
     flow.gap(space::S4);
-    // `None`: the view carries no list yet, so the card says so rather than showing an empty one —
-    // an empty list and an unread list are different claims, and only one of them is true here.
-    capsules_card(flow, t, None, facts.cache);
+    capsules_card(flow, t, &facts.hosted_stores, facts.cache);
     flow.gap(space::S4);
     add_card(flow, t);
     pressed
@@ -255,44 +252,67 @@ impl LimitRows {
     }
 }
 
-/// What this computer mirrors: the list, its two empty states, or the fact that it is not read yet.
+/// What this computer mirrors: the list, the empty state that fits it, or why there is no list.
 fn capsules_card(
     flow: &mut Flow,
     t: &Tokens,
-    mirrors: Option<&[Mirror]>,
+    reading: &HostedStoresReading,
     cache: Option<CacheSnapshot>,
 ) {
-    let listing = mirrors.map(|mirrors| mirrors.to_vec());
+    let reading = reading.clone();
     flow.place(|ui, at| {
         (
-            card::card(
-                ui,
-                at,
-                t,
-                Some(copy::content::CAPSULES_CARD),
-                |inner| match &listing {
-                    Some(mirrors) => capsules(inner, t, mirrors, cache),
-                    None => unwired(inner, t),
-                },
-            ),
+            card::card(ui, at, t, Some(copy::content::CAPSULES_CARD), |inner| {
+                match &reading {
+                    HostedStoresReading::Known(stores) => capsules(inner, t, stores, cache),
+                    // The card's own state, drawn inside it: the read that failed is THIS card's,
+                    // and the tab-level banner above knows nothing about it.
+                    other => {
+                        inner.place(|ui, at| (state::banner(ui, at, t, &unread(other)), ()));
+                    }
+                }
+            }),
             (),
         )
     });
 }
 
+/// The state to draw for a reading that produced no list.
+///
+/// A wait and a failure are different banners on purpose: [`PaneState::Waiting`] is drawn in the
+/// recessed panel and [`PaneState::Unreachable`] in amber, because painting a read that is simply
+/// still going in warning colours is how people learn to ignore warning colours.
+///
+/// `Known` cannot reach here — it has a list to draw — and is mapped to its own empty sentence
+/// rather than being made unreachable, because a `panic!` in a paint path is a crash on a frame
+/// nobody can reproduce.
+fn unread(reading: &HostedStoresReading) -> PaneState {
+    match reading {
+        HostedStoresReading::Pending => {
+            PaneState::Waiting(copy::content::CAPSULES_PENDING.to_string())
+        }
+        HostedStoresReading::Unknown(why) => {
+            PaneState::Unreachable(copy::content::stores_unknown(why))
+        }
+        HostedStoresReading::Known(_) => {
+            PaneState::Empty(copy::content::CAPSULES_EMPTY.to_string())
+        }
+    }
+}
+
 /// The list itself, or the empty state that fits what the cache actually holds.
-fn capsules(inner: &mut Flow, t: &Tokens, mirrors: &[Mirror], cache: Option<CacheSnapshot>) {
-    if mirrors.is_empty() {
+fn capsules(inner: &mut Flow, t: &Tokens, stores: &[HostedStore], cache: Option<CacheSnapshot>) {
+    if stores.is_empty() {
         let sentence = empty_reason(cache);
         inner.place(|ui, at| (text::body(ui, at, t, sentence), ()));
         return;
     }
-    for (index, mirror) in mirrors.iter().enumerate() {
+    for (index, store) in stores.iter().enumerate() {
         if index > 0 {
             inner.gap(space::S3);
         }
-        let mirror = mirror.clone();
-        inner.place(|ui, at| (capsule_row(ui, at, t, &mirror), ()));
+        let store = store.clone();
+        inner.place(|ui, at| (capsule_row(ui, at, t, &store), ()));
     }
 }
 
@@ -307,18 +327,24 @@ fn empty_reason(cache: Option<CacheSnapshot>) -> &'static str {
     }
 }
 
-/// One mirrored store: its id in mono, then its size with the pinned badge beside it. Returns the
-/// height used.
+/// One mirrored store: its id in mono, then what it holds with the pinned badge beside it. Returns
+/// the height used.
 ///
 /// # Why the badge sits under the id rather than opposite it
 ///
 /// A store id is 64 characters and takes the whole column at 480 px. A badge on the same line would
 /// have to be measured first and would take that room from the id, which is the value a person is
 /// actually here to read — so the second line carries the qualifiers instead, in reading order.
-fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, mirror: &Mirror) -> f32 {
+///
+/// # Why the second line is a phrase and not a size
+///
+/// It was a size. Two of the five stores on the live node are pinned with nothing cached yet, and
+/// `Pinned · 0 B` reads as a broken row rather than as the ordinary state of a store whose content
+/// has not arrived — see [`copy::content::store_contents`], which is where that is decided.
+fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, store: &HostedStore) -> f32 {
     let id = text::one_line(
         ui,
-        &mirror.store_id,
+        &store.store_id,
         mono(size::SM),
         rgba(t.text),
         at.width(),
@@ -330,7 +356,7 @@ fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, mirror: &Mirror) -
 
     let second_line = at.top() + height;
     let mut x = at.left();
-    if mirror.pinned {
+    if store.pinned {
         let drawn = data::badge(
             ui,
             egui::Pos2::new(x, second_line),
@@ -341,7 +367,10 @@ fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, mirror: &Mirror) -
         x = drawn.right() + space::S2;
     }
     let measured = ui.painter().layout(
-        crate::cache::format_cap(mirror.bytes),
+        copy::content::store_contents(
+            store.capsule_count,
+            &crate::cache::format_cap(store.total_bytes),
+        ),
         regular(size::SM),
         rgba(t.muted),
         (at.right() - x).max(1.0),
@@ -355,28 +384,15 @@ fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, mirror: &Mirror) -
     height + tail
 }
 
-/// The list card before dig_ecosystem#2330 wires it: the badge, the caveat, and nothing that could
-/// be mistaken for a reading.
-fn unwired(inner: &mut Flow, t: &Tokens) {
-    inner.place(|ui, at| {
-        (
-            data::badge(ui, at.left_top(), t, copy::unwired::BADGE, Tone::Neutral).height(),
-            (),
-        )
-    });
-    inner.gap(space::S3);
-    inner.place(|ui, at| (state::banner(ui, at, t, &PaneState::Unwired), ()));
-}
-
 /// The add-a-store form: a field that validates as you type, and the control it would enable.
 ///
 /// # Why the control is drawn and refused rather than omitted
 ///
 /// This differs from the Wallet tab's missing **Send** on purpose. Sending is a capability the app
 /// does not have; mirroring is one the NODE has and this window cannot yet ask for
-/// (dig_ecosystem#2324). The form is the finished surface for it, under the unwired banner that says
-/// so — and the validation is real, so the id a person pastes is checked against the same 64-hex rule
-/// the link parser applies rather than against a second opinion.
+/// (dig_ecosystem#2324). The form is the finished surface for it, under a caption that says so in its
+/// own words — and the validation is real, so the id a person pastes is checked against the same
+/// 64-hex rule the link parser applies rather than against a second opinion.
 fn add_card(flow: &mut Flow, t: &Tokens) {
     flow.place(|ui, at| {
         (
@@ -456,12 +472,212 @@ fn problem(typed: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::cache::{GIB, MIB};
+    use crate::hosted_stores::HostedStoresUnknown;
 
-    fn mirror(id: &str, bytes: u64, pinned: bool) -> Mirror {
-        Mirror {
-            store_id: id.to_string(),
-            bytes,
+    /// The live node's own list, as `control.hostedStores.list` returns it: five stores, two of them
+    /// pinned with nothing cached yet.
+    ///
+    /// Used as the fixture rather than an invented pair because the two empty rows are the case this
+    /// card had to be redesigned around, and a fixture of three healthy stores cannot exhibit it.
+    fn live_stores() -> Vec<HostedStore> {
+        vec![
+            store("a".repeat(64), false, 2, 300 * MIB),
+            store("b".repeat(64), true, 1, 107 * MIB),
+            store("c".repeat(64), true, 0, 0),
+            store("d".repeat(64), false, 0, 0),
+            store("e".repeat(64), false, 1, 12 * MIB),
+        ]
+    }
+
+    fn store(store_id: String, pinned: bool, capsule_count: u64, total_bytes: u64) -> HostedStore {
+        HostedStore {
+            store_id,
             pinned,
+            capsule_count,
+            total_bytes,
+        }
+    }
+
+    /// Every string the list card painted at `width` for `reading`.
+    ///
+    /// Drawn through the real card rather than through its helpers, because the property under test
+    /// is what a person SEES: a helper returning the right state proves nothing about a card that
+    /// draws an empty list beside it.
+    fn card_says(
+        reading: &HostedStoresReading,
+        cache: Option<CacheSnapshot>,
+        width: f32,
+    ) -> String {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(width, 4_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("capsules-card-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = Flow::new(ui, column, true);
+                            capsules_card(&mut flow, &t, reading, cache);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said.join(" | ")
+    }
+
+    /// **A read still in flight must not be drawn as an empty list** (dig_ecosystem#2397).
+    ///
+    /// The headline honesty property, and the reason this card takes the whole reading rather than an
+    /// `Option<&[_]>`: an `Option` collapses *nobody has answered yet* and *the node holds nothing*
+    /// into one `None`, and the second of those is a claim about the reader's computer.
+    ///
+    /// Asserted from BOTH sides against a cache holding real bytes, because that is the state in
+    /// which the two are hardest to tell apart on screen — the meter above says 407 MiB either way.
+    /// The empty-list control is what stops this passing on a card that simply never draws a list.
+    #[test]
+    fn a_store_list_still_being_read_is_not_drawn_as_an_empty_one() {
+        let cache = Some(CacheSnapshot {
+            cap_bytes: GIB,
+            used_bytes: 407 * MIB,
+        });
+
+        let pending = card_says(&HostedStoresReading::Pending, cache, 960.0);
+        assert!(
+            pending.contains(copy::content::CAPSULES_PENDING),
+            "a read in flight did not say so: {pending}"
+        );
+        for claim in [
+            copy::content::CAPSULES_EMPTY,
+            copy::content::CAPSULES_EMPTY_WITH_BYTES,
+        ] {
+            assert!(
+                !pending.contains(claim),
+                "a read that has not answered was drawn as a node holding nothing: {pending}"
+            );
+        }
+
+        // The control: the node ANSWERED with nothing, which is a different claim and must reach
+        // the screen as one.
+        let answered = card_says(&HostedStoresReading::Known(Vec::new()), cache, 960.0);
+        assert!(
+            answered.contains(copy::content::CAPSULES_EMPTY_WITH_BYTES),
+            "a node that answered with an empty list did not get the empty state: {answered}"
+        );
+        assert!(
+            !answered.contains(copy::content::CAPSULES_PENDING),
+            "an answered read was drawn as one still going: {answered}"
+        );
+    }
+
+    /// **A list that could not be read is never drawn as a zero, and each reason reaches the screen
+    /// with its OWN remedy.**
+    ///
+    /// Swept over every variant [`HostedStoresUnknown::all`] enumerates rather than a sample, in the
+    /// shape `no_two_account_states_share_a_word` uses: a new reason cannot silently inherit
+    /// another's sentence, because it would arrive here with no sentence at all.
+    ///
+    /// The cache deliberately holds bytes, so a card that fell back to the bytes-explaining empty
+    /// sentence — which is plausible-looking and wrong — fails rather than reads as ordinary.
+    #[test]
+    fn every_reason_a_list_is_missing_reaches_the_screen_as_its_own_remedy() {
+        let cache = Some(CacheSnapshot {
+            cap_bytes: GIB,
+            used_bytes: 407 * MIB,
+        });
+
+        for why in HostedStoresUnknown::all() {
+            let said = card_says(&HostedStoresReading::Unknown(why.clone()), cache, 960.0);
+            let sentence = copy::content::stores_unknown(&why);
+            assert!(
+                said.contains(&sentence),
+                "{why:?} did not reach the card as its own sentence. It painted: {said}"
+            );
+            for claim in [
+                copy::content::CAPSULES_EMPTY,
+                copy::content::CAPSULES_EMPTY_WITH_BYTES,
+                copy::content::CAPSULES_PENDING,
+            ] {
+                assert!(
+                    !said.contains(claim),
+                    "{why:?} was drawn as an empty or still-loading list: {said}"
+                );
+            }
+        }
+    }
+
+    /// **A store pinned before its content arrived reads as an ordinary state, not as a fault.**
+    ///
+    /// Two of the live node's five stores are exactly this. The nearest wrong rendering is
+    /// `Pinned · 0 B`: every part of it is true, and a reader sees a broken row.
+    ///
+    /// Drawn through the whole card at BOTH widths, and the fixture keeps three stores that DO hold
+    /// content — without them a card that replaced every size with the same phrase would pass.
+    #[test]
+    fn a_pinned_store_with_nothing_cached_does_not_read_as_a_broken_row() {
+        for width in [960.0_f32, 480.0] {
+            let said = card_says(&HostedStoresReading::Known(live_stores()), None, width);
+
+            assert!(
+                said.contains(&copy::content::store_contents(0, "0 B")),
+                "at {width} px a store awaiting its content said nothing about it: {said}"
+            );
+            assert!(
+                !said.contains("0 B"),
+                "at {width} px a store with nothing cached reported a measurement of zero, which \
+                 reads as a broken row: {said}"
+            );
+            // The control: the stores that DO hold content still report what they hold.
+            assert!(
+                said.contains("300 MiB") && said.contains("107 MiB") && said.contains("12 MiB"),
+                "at {width} px a real size was lost: {said}"
+            );
+            assert!(
+                said.contains(copy::content::PINNED_BADGE),
+                "at {width} px the pinned marker is missing: {said}"
+            );
+        }
+    }
+
+    /// **Every store the node listed is drawn** — the list is not truncated, deduplicated or
+    /// filtered by this pane.
+    ///
+    /// The five ids differ in their first character only, which is enough to tell one row from five
+    /// while keeping the fixture the real shape a 64-hex id has.
+    #[test]
+    fn every_store_the_node_listed_reaches_the_card() {
+        let stores = live_stores();
+        let said = card_says(&HostedStoresReading::Known(stores.clone()), None, 960.0);
+        for store in &stores {
+            assert!(
+                said.contains(&store.store_id),
+                "{} was listed by the node and not drawn: {said}",
+                store.store_id
+            );
         }
     }
 
@@ -768,29 +984,60 @@ mod tests {
         );
     }
 
-    /// **The add form does not repeat the unwired banner the card above it already carries.**
+    /// **The add form says in its OWN words that it cannot act, and does not borrow a sentence from
+    /// the card above it.**
     ///
-    /// Two identical amber paragraphs on one screen is how a reader learns to skip amber paragraphs.
-    /// The form still says it is not connected — in its own words, under the control it is about —
-    /// so this pins that the second statement is DIFFERENT, not that it is gone.
+    /// Mirroring is still unwired (dig_ecosystem#2324) while the list above it is not, so this is the
+    /// one place on the tab that has to say a control will do nothing. It says it as a caption under
+    /// that control rather than as a second banner: two amber paragraphs on one screen is how a
+    /// reader learns to skip amber paragraphs.
+    ///
+    /// It used to be compared against the retired unwired caveat; the remaining property is that the
+    /// sentence is its own — distinct from every other piece of prose this card can draw — and that
+    /// it states both halves a person needs, that the button will not act and that the field still
+    /// checks what they type.
     #[test]
-    fn the_add_form_says_it_is_unwired_in_its_own_words() {
-        assert_ne!(copy::content::ADD_NOT_WIRED, copy::unwired::CAVEAT);
-        let sentence = copy::content::ADD_NOT_WIRED.to_lowercase();
+    fn the_add_form_says_in_its_own_words_that_it_cannot_act() {
+        let caption = copy::content::ADD_NOT_WIRED;
+        for other in [
+            copy::content::CAPSULES_EMPTY,
+            copy::content::CAPSULES_EMPTY_WITH_BYTES,
+            copy::content::CAPSULES_PENDING,
+            copy::content::USAGE_UNKNOWN,
+            copy::content::LIMIT_HINT,
+        ] {
+            assert_ne!(
+                caption, other,
+                "the form borrowed another part of the tab's prose instead of saying its own thing"
+            );
+        }
+
+        let sentence = caption.to_lowercase();
         assert!(
             sentence.contains("does nothing") || sentence.contains("cannot"),
             "the form never says the control will not act: {sentence}"
         );
+        assert!(
+            sentence.contains("check"),
+            "the form never says what it DOES do, so the field looks as dead as the button: \
+             {sentence}"
+        );
     }
 
-    /// **A mirror's size is formatted by the app's one byte formatter.**
+    /// **A listed store's size is formatted by the app's one byte formatter.**
     ///
     /// Not a local divisor: the tray, the meter and this row all report the same disk in the same
     /// binary units, and a second formatter here would eventually disagree with the bar directly
     /// above it about the same number.
     #[test]
-    fn a_mirror_row_reports_its_size_in_the_shared_units() {
-        let listed = mirror(&"b".repeat(64), 407 * MIB, true);
-        assert_eq!(crate::cache::format_cap(listed.bytes), "407 MiB");
+    fn a_store_row_reports_its_size_in_the_shared_units() {
+        let listed = store("b".repeat(64), true, 3, 407 * MIB);
+        assert_eq!(
+            copy::content::store_contents(
+                listed.capsule_count,
+                &crate::cache::format_cap(listed.total_bytes)
+            ),
+            "3 capsules · 407 MiB"
+        );
     }
 }
