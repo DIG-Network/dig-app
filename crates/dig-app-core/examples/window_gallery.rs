@@ -125,19 +125,45 @@ fn view_for(account: AccountState, second_factor: bool) -> TrayView {
     }
 }
 
-/// `view` with the two fields the node supplies replaced, and every other field untouched.
+/// Everything the node itself reports, as one capture carries it.
+///
+/// **All four travel together or the picture contradicts itself.** The first cut of `--live` carried
+/// only the two fields the new cards read, and produced an image where the Node connection card said
+/// `1 store(s) hosted` — the fixture's sentence — inches above a live sharing card reading `3
+/// stores`. Both figures are the node's `hosted_store_count`; one of them was three weeks old and
+/// invented. A capture that appears to disprove the behaviour it is evidence FOR is worse than no
+/// capture, so the boundary is drawn at "the node reported it", not at "a card added in this ticket
+/// reads it".
+struct NodeReadings {
+    /// The one-line link summary, from [`EngineState::summary`] — the SAME builder the shipped
+    /// binary calls (`dig-app.rs`, `status.engine.summary()`). Retyping the sentence here would let
+    /// the gallery's copy drift from the app's, which is the whole failure this ticket's own
+    /// `store_contents`/`SHARING_LABELS` sharing exists to avoid.
+    summary: String,
+    /// The node's own cap and usage. `None` only when there is no node, which `--live` refuses.
+    cache: Option<CacheSnapshot>,
+    /// What the node says about itself. `Option` so a live view can be turned back into its fixture
+    /// counterpart field for field, which is how the round-trip test proves nothing else moved.
+    facts: Option<NodeFacts>,
+    /// The stores it holds.
+    stores: HostedStoresReading,
+}
+
+/// `view` with every field the node supplies replaced, and every other field untouched.
 ///
 /// Split out from the reading itself so what `--live` VARIES is one function with no node in it:
 /// the capture must differ from its fixture counterpart in what the node reported and nothing else,
-/// and `live_readings_replace_the_two_node_fields_and_leave_the_rest_alone` pins that here.
-fn with_live(
-    view: TrayView,
-    node_facts: Option<NodeFacts>,
-    hosted_stores: HostedStoresReading,
-) -> TrayView {
+/// and `live_readings_replace_the_node_fields_and_leave_the_rest_alone` pins that here.
+///
+/// The fields deliberately left alone are the ones that are NOT node readings — the account, the
+/// address, the second factor, the updater. Varying those would drag key and account state into a
+/// capture harness that is documented to reach neither.
+fn with_live(view: TrayView, readings: &NodeReadings) -> TrayView {
     TrayView {
-        node_facts,
-        hosted_stores,
+        node: readings.summary.clone(),
+        cache: readings.cache,
+        node_facts: readings.facts.clone(),
+        hosted_stores: readings.stores.clone(),
         ..view
     }
 }
@@ -169,8 +195,7 @@ fn answered(reading: &HostedStoresReading) -> bool {
 /// exactly to the budget would report "no answer" for a node that was about to say `TimedOut`.
 const LIVE_WAIT: Duration = Duration::from_secs(STORES_READ_TIMEOUT.as_secs() * 2);
 
-/// The two readings a live capture needs, taken from the running node — or the reason there are
-/// none.
+/// Everything a live capture shows, taken from the running node — or the reason there is nothing.
 ///
 /// The node is found the way the application finds it: [`NodeConnector`] walking the §5.3 ladder,
 /// rather than a second client invented here with its own idea of where a node lives. Only
@@ -179,7 +204,7 @@ const LIVE_WAIT: Duration = Duration::from_secs(STORES_READ_TIMEOUT.as_secs() * 
 ///
 /// **There is no fallback.** Every branch that cannot produce a reading returns an error naming what
 /// did not answer, and the caller writes no file.
-fn live_readings() -> Result<(NodeFacts, HostedStoresReading), String> {
+fn live_readings() -> Result<NodeReadings, String> {
     let link = NodeConnector::default().probe("");
     let EngineState::Connected { .. } = &link else {
         return Err(format!(
@@ -189,13 +214,27 @@ fn live_readings() -> Result<(NodeFacts, HostedStoresReading), String> {
     };
     let status = link.status().expect("a connected link carries its status");
     let facts = NodeFacts::of_status(status);
+    // The same two fields the shipped binary lifts out of the status snapshot for the tray
+    // (`dig-app.rs`: `st.cache.cap_bytes` / `st.cache.used_bytes`). Read from the node rather than
+    // held at the fixture's 350 MiB, which sat above a live store list of three 128.7 MiB stores —
+    // arithmetic anyone reading the image can check, and it did not add up.
+    let cache = Some(CacheSnapshot {
+        cap_bytes: status.cache.cap_bytes,
+        used_bytes: status.cache.used_bytes,
+    });
+    let summary = link.summary();
 
     let poller = NodeHostedStores::new(REFRESH_INTERVAL, STORES_READ_TIMEOUT);
     let deadline = Instant::now() + LIVE_WAIT;
     loop {
         let reading = poller.observe(&link);
         if answered(&reading) {
-            return Ok((facts, reading));
+            return Ok(NodeReadings {
+                summary,
+                cache,
+                facts: Some(facts),
+                stores: reading,
+            });
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -258,9 +297,13 @@ mod tests {
             upstream: "https://rpc.dig.net".to_string(),
             uptime_minutes: 42,
             sync_available: true,
-            hosted_store_count: 1,
-            cached_capsule_count: 2,
-            pinned_store_count: 1,
+            // Deliberately NOT the fixture summary's `1 store(s) hosted`: a live capture that left
+            // the summary alone would then state the same quantity twice and differently, and
+            // `a_live_capture_does_not_state_the_store_count_twice_and_differently` is blind to that
+            // unless the two numbers differ.
+            hosted_store_count: 3,
+            cached_capsule_count: 3,
+            pinned_store_count: 2,
         }
     }
 
@@ -301,22 +344,33 @@ mod tests {
         }
     }
 
-    /// **`--live` varies the node's two readings and NOTHING else**, so a live capture differs from
-    /// its fixture counterpart only in what the node reported.
+    /// The four readings a live capture carries, all differing from the fixture's.
+    fn readings() -> NodeReadings {
+        NodeReadings {
+            summary: "Node v0.103.0 · 3 capsule(s) cached · 3 store(s) hosted".to_string(),
+            cache: Some(CacheSnapshot {
+                cap_bytes: GIB,
+                used_bytes: 388 * MIB,
+            }),
+            facts: Some(some_facts()),
+            stores: HostedStoresReading::Known(one_store()),
+        }
+    }
+
+    /// **`--live` varies the node's readings and NOTHING else**, so a live capture differs from its
+    /// fixture counterpart only in what the node reported.
     ///
     /// Proven by a round trip rather than by listing the fields that must not move: putting the
     /// base's own readings back must restore the base exactly. The comparison is
     /// [`TrayView::renders_same_as`], which destructures with no `..` — so a field this harness
     /// starts overwriting cannot escape it, which a hand-written list of assertions could.
     #[test]
-    fn live_readings_replace_the_two_node_fields_and_leave_the_rest_alone() {
+    fn live_readings_replace_the_node_fields_and_leave_the_rest_alone() {
         let base = view_for(AccountState::Unlocked { recoverable: true }, false);
-        let live = with_live(
-            view_for(AccountState::Unlocked { recoverable: true }, false),
-            Some(some_facts()),
-            HostedStoresReading::Known(one_store()),
-        );
+        let live = with_live(base.clone(), &readings());
 
+        assert_eq!(live.node, readings().summary);
+        assert_eq!(live.cache, readings().cache);
         assert_eq!(live.node_facts, Some(some_facts()));
         assert_eq!(
             live.hosted_stores,
@@ -324,10 +378,56 @@ mod tests {
             "the node's list must reach the view it is photographed from"
         );
         // The control: with the base's own readings restored, nothing else moved.
-        let restored = with_live(live, base.node_facts.clone(), base.hosted_stores.clone());
+        let restored = with_live(
+            live,
+            &NodeReadings {
+                summary: base.node.clone(),
+                cache: base.cache,
+                facts: base.node_facts.clone(),
+                stores: base.hosted_stores.clone(),
+            },
+        );
         assert!(
             restored.renders_same_as(&base),
             "a live capture must differ from its fixture counterpart in the node's readings alone"
+        );
+    }
+
+    /// **The defect this pass exists to fix.** A live capture must not put the FIXTURE's summary
+    /// sentence — which states a hosted-store count — above a live sharing card that states the same
+    /// quantity from the node. The first cut of `--live` did exactly that and photographed `1
+    /// store(s) hosted` above `3 stores`.
+    ///
+    /// The fixture is built so the nearest wrong implementation — the one that leaves `node` alone —
+    /// cannot pass: the node's own count (3) differs from the count in the fixture's summary (1), so
+    /// a summary left untouched leaves the picture stating both.
+    #[test]
+    fn a_live_capture_does_not_state_the_store_count_twice_and_differently() {
+        let fixture = view_for(AccountState::Unlocked { recoverable: true }, false);
+        assert!(
+            fixture.node.contains("1 store(s) hosted"),
+            "this test is only meaningful while the fixture states a DIFFERENT count from the \
+             node's: {}",
+            fixture.node
+        );
+
+        let live = with_live(fixture, &readings());
+        let hosted = live
+            .node_facts
+            .as_ref()
+            .expect("live facts")
+            .hosted_store_count;
+
+        assert!(
+            live.node.contains(&format!("{hosted} store(s) hosted")),
+            "the sentence above the sharing card must carry the node's own hosted-store count: {}",
+            live.node
+        );
+        assert!(
+            !live.node.contains("1 store(s) hosted"),
+            "the fixture's count survived into a live capture, so the image states the same \
+             quantity twice and differently: {}",
+            live.node
         );
     }
 }
@@ -384,7 +484,7 @@ fn main() {
         let fixture = view_for(account.clone(), second_factor);
         match &live {
             None => fixture,
-            Some((facts, stores)) => with_live(fixture, Some(facts.clone()), stores.clone()),
+            Some(readings) => with_live(fixture, readings),
         }
     });
     match photograph_shell(
