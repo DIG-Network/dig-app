@@ -5,8 +5,8 @@
 //!
 //! It is the tab a person lands on, it is the most data-rich one that needs no new plumbing, and it
 //! exercises the parts of the vocabulary a Phase-2 tab will reach for first: cards grouping facts,
-//! readouts with units, a badge, an action group with a hierarchy, a launcher, and both honest
-//! absences — a figure the node has not reported, and a card whose data is not wired up.
+//! readouts with units, a badge, an action group with a hierarchy, a launcher, and the honest
+//! absence — a figure the node has not reported, drawn as the reason rather than as a zero.
 //!
 //! # What it deliberately no longer holds (dig_ecosystem#2358)
 //!
