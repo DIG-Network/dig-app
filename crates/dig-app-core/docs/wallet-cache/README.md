@@ -57,11 +57,14 @@ will be ignored.
 
 ## Two states these pictures cannot show
 
-- **The capsule list with rows in it**, and **the cache holding bytes while listing nothing** — the
-  state that reads as a fault and is not one. `TrayView` carries no capsule list yet (#2330), so the
-  card renders as `PaneState::Unwired` and both list states are covered by tests in `pane/cache.rs`
-  rather than by a photograph. They appear here as soon as #2330 lands; nothing in the pane changes
-  but the argument passed to `capsules_card`.
+- **The capsule list with rows in it** — no longer true of the application, only of these files.
+  `TrayView` carries the list as of #2330, and #2397 wired the card to it, so the `Not wired up`
+  badge and the amber banner these pictures show are both gone; `PaneState::Unwired` no longer
+  exists. The list with real rows is photographed from a running node in
+  [`docs/gallery`](../../../../docs/gallery/README.md) — `content-live-960.png` and its 480
+  counterpart. **The cache holding bytes while listing nothing** is still covered by tests in
+  `pane/cache.rs` rather than by a photograph: it is the state that reads as a fault and is not one,
+  and it needs a node in a condition this machine cannot arrange on demand.
 - **The inline field error.** It needs typing, and these captures drive no input of any kind — which
   is the whole point of how they are taken. The rule it applies is `link::is_64_hex`, pinned from
   both sides in `pane/cache.rs`.
