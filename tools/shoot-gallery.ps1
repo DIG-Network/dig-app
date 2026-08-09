@@ -22,10 +22,20 @@ twice over:
 
 Prints the pixel size of every PNG written. Every image is 2x the logical size in its name, on every
 host, because the scale is pinned rather than taken from the display.
+
+The `-Live` switch additionally shoots the four `*-live-*` captures, which read the two node-backed
+cards from the RUNNING local dig-node instead of the fixture (dig_ecosystem#2397). They are opt-in
+because they need a node: `window_gallery --live` refuses rather than falling back to fixture data,
+so on a machine with no node running this switch fails the script instead of writing a picture that
+would be labelled live and be synthetic.
+
+.EXAMPLE
+tools/shoot-gallery.ps1 -Live
 #>
 [CmdletBinding()]
 param(
-    [string]$OutDir = "docs/gallery"
+    [string]$OutDir = "docs/gallery",
+    [switch]$Live
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +47,8 @@ Set-Location $root
 $WIDE = 960
 $NARROW = 480
 $TALL = 900
+# The live captures alone are shot taller -- see the `-Live` block below for why.
+$LIVE_TALL = 1400
 
 $shots = @()
 
@@ -67,6 +79,24 @@ foreach ($state in @('unsupported', 'absent', 'locked', 'unopenable', 'needs-pas
 $shots += @{
     file = 'account-second-factor-on.png'
     args = @('account', 'light', "$WIDE", "$TALL", 'unlocked', '--second-factor')
+}
+
+# The two cards that read the node (dig_ecosystem#2397): the Home tab's sharing card and the Content
+# tab's hosted-store list. `--live` fills them from the RUNNING node, so these are the only images in
+# the set whose contents depend on the machine that shot them -- and the only ones that cannot be
+# taken at all without a node, which is why they are opt-in.
+#
+# Taller than $TALL because both cards are the LAST thing on their tab, and at 900 the sharing card
+# is below the fold: a capture that cannot show the card it is evidence for is not evidence.
+if ($Live) {
+    foreach ($tab in @('home', 'content')) {
+        foreach ($width in @($WIDE, $NARROW)) {
+            $shots += @{
+                file = "$tab-live-$width.png"
+                args = @($tab, 'light', "$width", "$LIVE_TALL", 'unlocked', '--live')
+            }
+        }
+    }
 }
 
 cargo build -p dig-app-core --features gui --example window_gallery | Out-Null
