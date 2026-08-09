@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [9.1.1] - 2026-08-09
+
+### Bug Fixes
+- **window:** Wire the content list and Sharing cards to the node readings #2330 delivered (#143)
+
+### Testing
+- **hosted-stores:** Enumerate the reasons from the compiler, not a second array (#144)
+
 ## [9.0.0] - 2026-08-09
 
 ### Features
