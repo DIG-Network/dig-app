@@ -1035,7 +1035,7 @@ pub mod node {
                 let wanted = string_param(request, "coin_id").unwrap_or_default();
                 let coin = chain.coins.iter().find(|c| c.coin_id == wanted);
                 serde_json::json!({
-                    "coin": coin.map(|c| chain_coin_json(c)),
+                    "coin": coin.map(chain_coin_json),
                     "source": chain.source,
                     "synced": chain.synced,
                     "peak_height": chain.peak_height,
@@ -1131,7 +1131,7 @@ pub mod node {
         };
 
         serde_json::json!({
-            "coins": coins.iter().map(|c| chain_coin_json(c)).collect::<Vec<_>>(),
+            "coins": coins.iter().map(chain_coin_json).collect::<Vec<_>>(),
             "complete": complete,
             "cursor": cursor,
             "source": chain.source,

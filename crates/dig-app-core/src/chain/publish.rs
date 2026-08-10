@@ -111,7 +111,10 @@ impl std::fmt::Display for PublishFailure {
                 write!(f, "the node could not complete {METHOD}: {detail}")
             }
             Self::Unserializable { detail } => {
-                write!(f, "{METHOD} was not sent: the bundle could not be encoded ({detail})")
+                write!(
+                    f,
+                    "{METHOD} was not sent: the bundle could not be encoded ({detail})"
+                )
             }
         }
     }
@@ -166,12 +169,13 @@ impl ControlSpendPublisher {
             return Err(PublishFailure::NoToken);
         };
 
-        let signed_bundle_hex = bundle
-            .to_bytes()
-            .map(hex::encode)
-            .map_err(|e| PublishFailure::Unserializable {
-                detail: e.to_string(),
-            })?;
+        let signed_bundle_hex =
+            bundle
+                .to_bytes()
+                .map(hex::encode)
+                .map_err(|e| PublishFailure::Unserializable {
+                    detail: e.to_string(),
+                })?;
 
         let answer = control::call_control_result(
             &self.endpoint,
@@ -222,12 +226,12 @@ fn publish_failure_from(failure: ControlFailure) -> PublishFailure {
             detail: e.to_string(),
         },
         ControlFailure::Rejected(e) => match e.code_enum() {
-            Some(ControlErrorCode::Unauthorized) => PublishFailure::Unauthorized {
-                detail: e.message,
-            },
-            Some(ControlErrorCode::MethodNotFound) => PublishFailure::Unsupported {
-                detail: e.message,
-            },
+            Some(ControlErrorCode::Unauthorized) => {
+                PublishFailure::Unauthorized { detail: e.message }
+            }
+            Some(ControlErrorCode::MethodNotFound) => {
+                PublishFailure::Unsupported { detail: e.message }
+            }
             _ => PublishFailure::NodeCouldNotAnswer { detail: e.message },
         },
     }

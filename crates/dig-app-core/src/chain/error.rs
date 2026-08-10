@@ -191,7 +191,10 @@ mod tests {
     /// the sentence say the wrong thing.
     #[test]
     fn unauthorized_and_method_not_found_both_say_upgrade_on_an_open_read() {
-        for code in [ControlErrorCode::Unauthorized, ControlErrorCode::MethodNotFound] {
+        for code in [
+            ControlErrorCode::Unauthorized,
+            ControlErrorCode::MethodNotFound,
+        ] {
             let failure =
                 ControlFailure::Rejected(ControlError::of(code, "no valid control token"));
             let mapped = ChainReadError::from_open_read_failure(METHOD, failure);
@@ -227,7 +230,10 @@ mod tests {
                 detail: "unauthorized control request".into(),
             }),
         );
-        assert!(matches!(mapped, ChainReadError::Unsupported { .. }), "{mapped:?}");
+        assert!(
+            matches!(mapped, ChainReadError::Unsupported { .. }),
+            "{mapped:?}"
+        );
         assert!(mapped.to_string().contains("upgrade dig-node"));
     }
 
@@ -246,7 +252,10 @@ mod tests {
                 "the chain source timed out",
             )),
         );
-        assert!(matches!(mapped, ChainReadError::Transport { .. }), "{mapped:?}");
+        assert!(
+            matches!(mapped, ChainReadError::Transport { .. }),
+            "{mapped:?}"
+        );
         assert!(!mapped.to_string().contains("upgrade"));
     }
 
@@ -257,7 +266,10 @@ mod tests {
             METHOD,
             ControlFailure::Transport(ControlCallError::Unreachable("connection refused".into())),
         );
-        assert!(matches!(mapped, ChainReadError::Transport { .. }), "{mapped:?}");
+        assert!(
+            matches!(mapped, ChainReadError::Transport { .. }),
+            "{mapped:?}"
+        );
         assert!(mapped.to_string().contains("connection refused"));
     }
 }

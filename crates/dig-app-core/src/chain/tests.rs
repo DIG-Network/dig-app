@@ -9,17 +9,17 @@
 //! are also satisfied by a client that is wrong in a way the fixture cannot see, so the fixture is
 //! chosen to make the wrong version fail rather than merely to make the right version pass.
 
-use chia_protocol::{Bytes32, Coin, SpendBundle};
 use chia_bls::Signature;
+use chia_protocol::{Bytes32, SpendBundle};
 use dig_account::mint::{PushOutcome, SpendPublisher};
 use dig_chainsource_interface::ChainSource;
 use dig_node_control_interface::results::WalletReadSource;
 use std::time::Duration;
 
-use crate::chain::{ChainReadError, ControlChainSource, ControlSpendPublisher, PublishFailure};
-use crate::test_support::node::{
-    Behaviour, ChainReply, FakeChain, FakeCoin, FakeNode, FakeSpend,
+use crate::chain::{
+    ChainReadError, ControlChainSource, ControlSpendPublisher, PublishFailure, MAX_CHILD_PAGES,
 };
+use crate::test_support::node::{Behaviour, ChainReply, FakeChain, FakeCoin, FakeNode, FakeSpend};
 
 /// The peak the scripted chain reports.
 const PEAK: u32 = 9_104_152;
@@ -64,15 +64,21 @@ fn source(node: &FakeNode) -> ControlChainSource {
 #[test]
 fn a_truncated_page_can_never_be_read_as_the_whole_child_set() {
     let kids: Vec<FakeCoin> = (1..=5).map(|n| FakeCoin::confirmed("xch", n)).collect();
-    let node = FakeNode::serving_chain(ChainReply::of(
-        FakeChain::synced_at(PEAK).with_children(&id_hex(70), kids, 2),
-    ));
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_children(
+        &id_hex(70),
+        kids,
+        2,
+    )));
 
     let children = source(&node)
         .coin_records_by_parent(id(70))
         .expect("the node answered every page");
 
-    assert_eq!(children.len(), 5, "every child must be collected: {children:?}");
+    assert_eq!(
+        children.len(),
+        5,
+        "every child must be collected: {children:?}"
+    );
     assert_eq!(
         node.request_count(),
         3,
@@ -93,12 +99,19 @@ fn a_truncated_page_can_never_be_read_as_the_whole_child_set() {
 /// coins alone would notice.
 #[test]
 fn a_complete_page_carrying_a_cursor_is_not_mistaken_for_more() {
-    let kids = vec![FakeCoin::confirmed("xch", 11), FakeCoin::confirmed("xch", 12)];
-    let node = FakeNode::serving_chain(ChainReply::of(
-        FakeChain::synced_at(PEAK).with_children(&id_hex(70), kids, 0),
-    ));
+    let kids = vec![
+        FakeCoin::confirmed("xch", 11),
+        FakeCoin::confirmed("xch", 12),
+    ];
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_children(
+        &id_hex(70),
+        kids,
+        0,
+    )));
 
-    let children = source(&node).coin_records_by_parent(id(70)).expect("answered");
+    let children = source(&node)
+        .coin_records_by_parent(id(70))
+        .expect("answered");
 
     assert_eq!(children.len(), 2);
     assert_eq!(
@@ -159,7 +172,52 @@ fn an_incomplete_page_with_no_cursor_is_refused_on_the_first_page() {
         matches!(outcome, Err(ChainReadError::Malformed { .. })),
         "a self-contradicting page is unbelievable, got {outcome:?}"
     );
-    assert_eq!(node.request_count(), 1, "there is nothing to gain by re-asking");
+    assert_eq!(
+        node.request_count(),
+        1,
+        "there is nothing to gain by re-asking"
+    );
+}
+
+/// **The page bound is pinned from BOTH sides: at the bound the walk succeeds, one over it fails.**
+///
+/// A published bound tested only from one side can only confirm itself — an off-by-one, or a bound
+/// silently lowered by a later edit, would keep a one-sided test green. So the fixture serves one
+/// child per page and varies ONE thing: whether the child set needs exactly [`MAX_CHILD_PAGES`]
+/// pages or one more.
+///
+/// The at-bound half is the more valuable of the two, because the nearest wrong implementation is a
+/// loop that runs `MAX_CHILD_PAGES - 1` times and errors on a walk that was about to finish — which
+/// turns a good answer into an unknown, and every other test here would stay green.
+#[test]
+fn the_page_bound_admits_exactly_max_child_pages_and_refuses_one_more() {
+    let at_bound: Vec<FakeCoin> = (1..=MAX_CHILD_PAGES as u64)
+        .map(|n| FakeCoin::confirmed("xch", n))
+        .collect();
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_children(
+        &id_hex(70),
+        at_bound,
+        1,
+    )));
+    let children = source(&node)
+        .coin_records_by_parent(id(70))
+        .expect("a child set needing exactly the bound must be readable");
+    assert_eq!(children.len(), MAX_CHILD_PAGES);
+    assert_eq!(node.request_count(), MAX_CHILD_PAGES);
+
+    let one_over: Vec<FakeCoin> = (1..=MAX_CHILD_PAGES as u64 + 1)
+        .map(|n| FakeCoin::confirmed("xch", n))
+        .collect();
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_children(
+        &id_hex(70),
+        one_over,
+        1,
+    )));
+    let outcome = source(&node).coin_records_by_parent(id(70));
+    assert!(
+        matches!(outcome, Err(ChainReadError::Transport { .. })),
+        "one child past the bound is an unknown child set, never a prefix: {outcome:?}"
+    );
 }
 
 // --------------------------------------------------------------------------------------------
@@ -211,7 +269,10 @@ fn an_unauthorized_on_an_open_read_says_upgrade_and_never_mentions_a_token() {
     let Err(error) = outcome else {
         panic!("a refusal is never an answer: {outcome:?}");
     };
-    assert!(matches!(error, ChainReadError::Unsupported { .. }), "{error:?}");
+    assert!(
+        matches!(error, ChainReadError::Unsupported { .. }),
+        "{error:?}"
+    );
     let sentence = error.to_string();
     assert!(sentence.contains("upgrade dig-node"), "said: {sentence}");
     assert!(
@@ -285,7 +346,9 @@ fn a_healthy_node_still_answers_and_still_reports_genuine_absences() {
     assert!(!found.is_spent());
 
     assert_eq!(
-        source.coin_record(id(9999)).expect("a healthy node answers"),
+        source
+            .coin_record(id(9999))
+            .expect("a healthy node answers"),
         None,
         "a coin the chain does not hold is a genuine absence"
     );
@@ -323,10 +386,16 @@ fn the_answering_tier_is_disclosed_rather_than_discarded() {
     }));
     let source = source(&node);
 
-    assert_eq!(source.last_freshness(), None, "nothing is claimed before a read");
+    assert_eq!(
+        source.last_freshness(),
+        None,
+        "nothing is claimed before a read"
+    );
     source.coin_record(bytes32(&coin_id)).expect("answered");
 
-    let freshness = source.last_freshness().expect("a successful read discloses its tier");
+    let freshness = source
+        .last_freshness()
+        .expect("a successful read discloses its tier");
     assert_eq!(freshness.source, Some(WalletReadSource::Fallback));
     assert!(!freshness.synced, "a fallback answer is never a synced one");
     assert_eq!(
@@ -438,7 +507,10 @@ fn an_unbuilt_lineage_walk_is_unsupported_and_never_a_melted_singleton() {
     let Err(error) = outcome else {
         panic!("an unbuilt walk must not answer a verdict about an identity: {outcome:?}");
     };
-    assert!(matches!(error, ChainReadError::Unsupported { .. }), "{error:?}");
+    assert!(
+        matches!(error, ChainReadError::Unsupported { .. }),
+        "{error:?}"
+    );
     assert!(error.to_string().contains("2572"), "{error}");
 }
 
@@ -505,11 +577,9 @@ fn good_token() -> Option<String> {
 /// shows the refusal happened BEFORE a signed bundle went anywhere.
 #[test]
 fn a_tokenless_push_is_refused_locally_and_never_reads_as_an_absent_node() {
-    let node = FakeNode::serving_broadcast(
-        crate::test_support::node::BroadcastReply::Accepted {
-            transaction_id: "ab".repeat(32),
-        },
-    );
+    let node = FakeNode::serving_broadcast(crate::test_support::node::BroadcastReply::Accepted {
+        transaction_id: "ab".repeat(32),
+    });
     let publisher =
         ControlSpendPublisher::with_token_reader(node.endpoint(), no_token, TEST_TIMEOUT);
 
@@ -536,11 +606,9 @@ fn a_tokenless_push_is_refused_locally_and_never_reads_as_an_absent_node() {
 /// would have dig-account discard a perfectly good signed bundle over a missing file permission.
 #[test]
 fn a_tokenless_push_is_unavailable_rather_than_a_mempool_verdict() {
-    let node = FakeNode::serving_broadcast(
-        crate::test_support::node::BroadcastReply::Accepted {
-            transaction_id: "ab".repeat(32),
-        },
-    );
+    let node = FakeNode::serving_broadcast(crate::test_support::node::BroadcastReply::Accepted {
+        transaction_id: "ab".repeat(32),
+    });
     let publisher =
         ControlSpendPublisher::with_token_reader(node.endpoint(), no_token, TEST_TIMEOUT);
 
@@ -630,9 +698,10 @@ fn a_duplicate_in_the_mempool_is_a_success_not_a_rejection() {
 /// of them, whichever way it chose.
 #[test]
 fn an_unauthorized_on_the_push_is_a_credential_fault_not_an_old_node() {
-    let node = FakeNode::serving_broadcast(
-        crate::test_support::node::BroadcastReply::rejected(-32030, "UNAUTHORIZED"),
-    );
+    let node = FakeNode::serving_broadcast(crate::test_support::node::BroadcastReply::rejected(
+        -32030,
+        "UNAUTHORIZED",
+    ));
     let publisher =
         ControlSpendPublisher::with_token_reader(node.endpoint(), good_token, TEST_TIMEOUT);
 

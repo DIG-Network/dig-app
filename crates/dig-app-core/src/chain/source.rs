@@ -65,7 +65,7 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// The contract's own maximum, taken from the contract rather than restated, so a raised ceiling
 /// needs no edit here and a lowered one cannot leave this asking for a value the node refuses
 /// outright (an over-max limit is `INVALID_PARAMS`, never a clamp).
-const CHILD_PAGE_SIZE: u32 = COINS_BY_PARENT_MAX_LIMIT;
+pub const CHILD_PAGE_SIZE: u32 = COINS_BY_PARENT_MAX_LIMIT;
 
 /// How many pages of one coin's children this client will draw before giving up.
 ///
@@ -85,7 +85,7 @@ const CHILD_PAGE_SIZE: u32 = COINS_BY_PARENT_MAX_LIMIT;
 ///
 /// 16 pages of the contract's 1000-row maximum is 16,000 children — far above any real spend, whose
 /// output count is bounded by block cost, and far below a loop that never ends.
-const MAX_CHILD_PAGES: usize = 16;
+pub const MAX_CHILD_PAGES: usize = 16;
 
 /// The `control.*` method names, as they appear in a [`ChainReadError`]. Taken from the contract's
 /// own name table so an error can never name a method the client did not actually call.
@@ -301,8 +301,10 @@ impl ChainSource for ControlChainSource {
             if after_coin_id.as_deref() == Some(cursor.as_str()) {
                 return Err(ChainReadError::malformed(
                     method::COINS_BY_PARENT,
-                    format!("the node handed back the same cursor twice ({cursor}), so the walk \
-                             cannot advance"),
+                    format!(
+                        "the node handed back the same cursor twice ({cursor}), so the walk \
+                             cannot advance"
+                    ),
                 ));
             }
             after_coin_id = Some(cursor);
@@ -453,7 +455,7 @@ fn program_from(
     hex_text: &str,
 ) -> Result<Program, ChainReadError> {
     let digits = hex_text.strip_prefix("0x").unwrap_or(hex_text);
-    hex::decode(digits).map(Program::from).map_err(|e| {
-        ChainReadError::malformed(method, format!("{field} is not hex: {e}"))
-    })
+    hex::decode(digits)
+        .map(Program::from)
+        .map_err(|e| ChainReadError::malformed(method, format!("{field} is not hex: {e}")))
 }

@@ -40,4 +40,4 @@ mod tests;
 
 pub use error::ChainReadError;
 pub use publish::{ControlSpendPublisher, PublishFailure, PUSH_TIMEOUT};
-pub use source::{ControlChainSource, Freshness, READ_TIMEOUT};
+pub use source::{ControlChainSource, Freshness, CHILD_PAGE_SIZE, MAX_CHILD_PAGES, READ_TIMEOUT};
