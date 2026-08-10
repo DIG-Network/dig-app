@@ -3534,7 +3534,37 @@ mod tray {
     ) {
         use dig_app_core::profiles::{copy, ProfileCreation, ProfilesReading};
 
+        let held = match profiles_reading(env, session) {
+            ProfilesReading::Known(rows) if !rows.is_empty() => format!(
+                "This account holds {} profile(s), and the Account tab lists them.
+
+",
+                rows.len()
+            ),
+            // Says nothing about a count in every other state, because in every other state there is
+            // no count to say — including the one where the registry would not load.
+            _ => String::new(),
+        };
+
         let creation = ProfileCreation::of(super::mint_seams().availability());
+        // The same branch the window's create panel carries, and for the same reason: `blocked()`
+        // is always `Some` on every build shipped so far, and `None` is where a real create step
+        // will hang the day dig-account's mint publishes (see `ProfileCreation`).
+        let Some(blocked) = creation.blocked() else {
+            notify(
+                confirmer,
+                copy::ABOUT_TITLE,
+                copy::ABOUT_HEADING,
+                &format!(
+                    "{}
+
+{held}{}",
+                    copy::WHAT_A_PROFILE_IS,
+                    copy::HIDE_NOTE
+                ),
+            );
+            return;
+        };
         let held = match profiles_reading(env, session) {
             ProfilesReading::Known(rows) if !rows.is_empty() => format!(
                 "This account holds {} profile(s), and the Account tab lists them.\n\n",
@@ -3552,7 +3582,7 @@ mod tray {
             &format!(
                 "{}\n\n{held}{}\n\n{}",
                 copy::WHAT_A_PROFILE_IS,
-                copy::cannot_create(creation),
+                copy::cannot_create(blocked),
                 copy::HIDE_NOTE
             ),
         );

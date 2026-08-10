@@ -183,46 +183,94 @@ impl ProfilesReading {
     }
 }
 
-/// Whether this build can create a profile — and if not, which missing piece stops it.
+/// Which missing piece stops a profile being created on this build.
 ///
-/// **There is no `Possible` arm**, and [`of`](Self::of) is the only constructor. See the module docs:
-/// creating a profile is a mint, dig-account's profile minter is `todo!()`, and the arm a surface
-/// would need in order to offer a create control does not exist for it to match on.
+/// **One variant per MISSING PIECE**, the rule [`ProfilesUnknown`] follows: the two are different
+/// faults with different remedies, and a person told the wrong one goes looking for something that
+/// is not broken.
+///
+/// Kept SEPARATE from [`ProfileCreation`] because *whether* creation is possible and *why it is not*
+/// are different questions, asked by different code. Copy keys on this; a control keys on the
+/// answer. That split is what makes the day this build can mint a change of BODIES rather than of
+/// shapes — see [`ProfileCreation`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProfileCreation {
-    /// This build cannot read coins or push a bundle at all, so nothing here reaches the chain.
-    /// The same fact the start-up wizard's gate reads, arrived at from the same value.
+pub enum CreationBlocked {
+    /// This build cannot read coins or push a bundle at all, so nothing here reaches the chain. The
+    /// same fact the start-up wizard's gate reads, arrived at from the same value.
     NoChainTransport,
     /// The chain transport is wired and the profile MINT is still not implemented — dig-account
-    /// 0.8's `ProfileMinter::mint` is `todo!()`. Distinct from
-    /// [`NoChainTransport`](Self::NoChainTransport) because they are two different missing pieces
-    /// and a person told the wrong one would go looking for a fault they do not have.
+    /// 0.8's `ProfileMinter::mint` is `todo!()` (`profile_mint.rs:89`).
     NoProfileMinter,
 }
 
+/// Whether this build can create a profile.
+///
+/// # There is no `Possible` arm YET, and this type is shaped so that adding one is a body change
+///
+/// The user's standing direction is that creating a profile MUST become real. It cannot be made real
+/// here: `dig-account`'s `ProfileMinter::mint` is `todo!()`, and the chain to fix it runs through
+/// dig-account's chia-0.36 migration and then its mint, neither of which is published. Until they
+/// are, a `Possible` arm would be a claim this crate cannot honour — and dig_ecosystem#2377 measured
+/// exactly what that costs: flipping one availability constant early opened an undismissible dead
+/// end AND a start-up password window, **neither catchable by a test**, because both live in the
+/// binary.
+///
+/// So the arm is absent and the SHAPE is ready for it. Consumers ask
+/// [`blocked`](Self::blocked) — an `Option`, whose `None` is already spelled *creation is possible* —
+/// and render [`copy::cannot_create`] from the REASON. Nothing matches this enum exhaustively. The
+/// day the mint publishes, the work is: add `Possible`, return it from [`of`](Self::of) where the
+/// seams are wired, and give the one surface that draws a control its new branch. No consumer's
+/// shape moves, and no sentence is rewritten.
+///
+/// # Why it is derived from the mint seam rather than asserted beside it
+///
+/// [`of`](Self::of) is a **function of** the [`MintAvailability`] the start-up wizard's gate reads.
+/// Two independent answers to one question is how a surface comes to advertise a capability whose
+/// implementation refuses — the dead end dig_ecosystem#1800 removed once already, and the drift
+/// dig_ecosystem#2377 removed a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileCreation {
+    /// Creation cannot be attempted, and this is the piece that is missing.
+    Blocked(CreationBlocked),
+}
+
 impl Default for ProfileCreation {
-    /// The build's own answer: [`NoChainTransport`](Self::NoChainTransport).
+    /// The build's own answer: blocked, for want of a chain transport.
     ///
-    /// Safe as a default precisely because there is no arm that OFFERS a create control — a view
-    /// that never had this field filled cannot fall into claiming a capability. It matches what
-    /// `mint_seams()` returns in the shipped binary, so a snapshot built without it renders the same
-    /// surface as one built with it.
+    /// Safe as a default precisely because no arm OFFERS creation — a view whose field was never
+    /// filled cannot fall into claiming a capability. It matches what `mint_seams()` returns in the
+    /// shipped binary, so a snapshot built without it renders the same surface as one built with it.
     fn default() -> Self {
-        Self::NoChainTransport
+        Self::Blocked(CreationBlocked::NoChainTransport)
     }
 }
 
 impl ProfileCreation {
     /// Derive creation's availability from the mint seam the wizard's gate reads.
     ///
-    /// A **function of** [`MintAvailability`], never a second opinion about it. With no transport
-    /// the transport is the honest answer, because it is the blocker a person would hit first; with
-    /// one, the profile minter is what is still missing.
+    /// With no transport the transport is the honest answer, because it is the blocker a person
+    /// would hit first; with one, the profile minter is what is still missing.
     pub fn of(mint: MintAvailability) -> Self {
-        match mint {
-            MintAvailability::NoChainTransport => Self::NoChainTransport,
-            MintAvailability::Possible => Self::NoProfileMinter,
+        Self::Blocked(match mint {
+            MintAvailability::NoChainTransport => CreationBlocked::NoChainTransport,
+            MintAvailability::Possible => CreationBlocked::NoProfileMinter,
+        })
+    }
+
+    /// Which piece is missing, or `None` once creation is possible.
+    ///
+    /// The one accessor consumers use. `None` is unreachable today and is deliberately already
+    /// spelled, so the surface that will draw a create control has somewhere to hang it without this
+    /// type changing shape.
+    pub fn blocked(self) -> Option<CreationBlocked> {
+        match self {
+            Self::Blocked(why) => Some(why),
         }
+    }
+
+    /// Whether a profile can be created here. `false` on every build shipped so far.
+    pub fn is_possible(self) -> bool {
+        self.blocked().is_none()
     }
 }
 
@@ -288,7 +336,7 @@ impl SwitchPlan {
 /// the binary anyway. Card titles, badge words and captions stay in the pane's copy module, because
 /// only the pane has cards.
 pub mod copy {
-    use super::ProfileCreation;
+    use super::CreationBlocked;
 
     /// The title of the notice the explainer row opens.
     pub const ABOUT_TITLE: &str = "DIG — Profiles";
@@ -301,25 +349,26 @@ pub mod copy {
 
     /// Why a profile cannot be created on this build, one sentence per missing piece.
     ///
-    /// An EXHAUSTIVE match on [`ProfileCreation`], whose own constructor derives it from the mint
-    /// seam the start-up wizard reads — so a card, a notice and that wizard cannot come to disagree
-    /// about whether a mint is possible.
+    /// An EXHAUSTIVE match on [`CreationBlocked`], which
+    /// [`ProfileCreation::of`](super::ProfileCreation::of) derives from the mint seam the start-up
+    /// wizard reads — so a card, a notice and that wizard cannot come to disagree about whether a
+    /// mint is possible.
     ///
     /// # The wording is #1820's, and "optional" is the word it settled against
     ///
     /// A profile is REQUIRED for publishing, signing and messaging, and creating one is *not
     /// available in this version*. Calling it optional would tell a person they had chosen to go
     /// without something they have simply not been offered.
-    pub fn cannot_create(creation: ProfileCreation) -> &'static str {
-        match creation {
-            ProfileCreation::NoChainTransport => {
+    pub fn cannot_create(blocked: CreationBlocked) -> &'static str {
+        match blocked {
+            CreationBlocked::NoChainTransport => {
                 "Creating a profile mints a DID and a store on the Chia blockchain, and this \
                  version of DIG has no way to reach the chain to do it. It is required for \
                  publishing, signing for an app and messaging, and it is not available in this \
                  version. Nothing is missing from your setup and there is nothing for you to do — \
                  when it arrives, this card will offer it."
             }
-            ProfileCreation::NoProfileMinter => {
+            CreationBlocked::NoProfileMinter => {
                 "This copy of DIG can reach the chain, and the step that mints a profile is not \
                  built yet. It is required for publishing, signing for an app and messaging, and it \
                  is not available in this version. Nothing is missing from your setup and there is \
@@ -490,12 +539,12 @@ mod tests {
     #[test]
     fn creation_is_derived_from_the_mint_seam_and_is_never_possible() {
         assert_eq!(
-            ProfileCreation::of(MintAvailability::NoChainTransport),
-            ProfileCreation::NoChainTransport
+            ProfileCreation::of(MintAvailability::NoChainTransport).blocked(),
+            Some(CreationBlocked::NoChainTransport)
         );
         assert_eq!(
-            ProfileCreation::of(MintAvailability::Possible),
-            ProfileCreation::NoProfileMinter,
+            ProfileCreation::of(MintAvailability::Possible).blocked(),
+            Some(CreationBlocked::NoProfileMinter),
             "a wired chain transport was read as a profile this build can mint, which no code path \
              in dig-account 0.8 can do"
         );
@@ -505,6 +554,22 @@ mod tests {
             "creation gives the same answer whatever the mint seam says, so it is not derived from \
              it at all"
         );
+
+        // No build shipped so far can create a profile, and `is_possible` is the one place a future
+        // control will ask. Asserted over BOTH seam values, so an arm added without wiring a real
+        // minter fails here rather than shipping a control that refuses.
+        for mint in [
+            MintAvailability::NoChainTransport,
+            MintAvailability::Possible,
+        ] {
+            let creation = ProfileCreation::of(mint);
+            assert!(
+                !creation.is_possible(),
+                "{mint:?} was read as a build that can create a profile, and dig-account 0.8's \
+                 `ProfileMinter::mint` is still `todo!()`"
+            );
+            assert!(creation.blocked().is_some());
+        }
     }
 
     /// **A switch discloses BOTH ends before it happens.**

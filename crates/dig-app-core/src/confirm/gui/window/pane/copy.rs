@@ -404,7 +404,7 @@ pub(crate) mod protection {
 /// for anyone to resolve. [`no_profile_copy_implies_a_profile_can_be_deleted`](super::tests) is that
 /// rule as an assertion.
 pub(crate) mod profiles {
-    use crate::profiles::ProfileCreation;
+    use crate::profiles::CreationBlocked;
 
     /// The card holding the list and its controls.
     pub(crate) const CARD: &str = "Profiles on this account";
@@ -463,8 +463,8 @@ pub(crate) mod profiles {
     /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
     /// because the shell says the same thing in a native notice and two constants stating one fact
     /// is how the account state machine came to have two sentence sets that drifted (#2357).
-    pub(crate) fn cannot_create(creation: ProfileCreation) -> &'static str {
-        crate::profiles::copy::cannot_create(creation)
+    pub(crate) fn cannot_create(blocked: CreationBlocked) -> &'static str {
+        crate::profiles::copy::cannot_create(blocked)
     }
 
     /// Said above the switch controls, BEFORE anything is pressed.
@@ -803,8 +803,8 @@ mod tests {
         // written, which is why they are here rather than trusted.
         all.extend(
             [
-                crate::profiles::ProfileCreation::NoChainTransport,
-                crate::profiles::ProfileCreation::NoProfileMinter,
+                crate::profiles::CreationBlocked::NoChainTransport,
+                crate::profiles::CreationBlocked::NoProfileMinter,
             ]
             .map(profiles::cannot_create),
         );

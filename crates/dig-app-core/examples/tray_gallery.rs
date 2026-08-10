@@ -61,7 +61,7 @@ fn main() {
             // The profile rows live in the WINDOW, not on the tray, so this gallery pins them to
             // the state every real account is in rather than varying them.
             profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
-            profile_creation: dig_app_core::profiles::ProfileCreation::NoChainTransport,
+            profile_creation: dig_app_core::profiles::ProfileCreation::default(),
             // Present exactly while unlocked, as the shell's live derivation off the residency is.
             receive_address: matches!(account, AccountState::Unlocked { .. }).then(|| {
                 "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()

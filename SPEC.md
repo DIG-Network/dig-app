@@ -1550,12 +1550,27 @@ telling that person they hold none is a claim no read supports.
 **Hidden profiles MUST be listed by this surface.** Visibility is a LOCAL preference and the surface
 that sets it is the surface that must be able to unset it. `registry.shown()` is for pickers.
 
-**Creating a profile MUST NOT be offered, and the absence MUST be structural.** No `TrayAction` in
-this shell creates a profile, so "this build cannot create one" is a property of the code rather than
-of an `enabled` flag. `profiles::ProfileCreation` is a FUNCTION of the `MintAvailability` the
-start-up wizard's gate reads (§3.1b) and has no *possible* arm; the surface states which piece is
-missing, in the §3.1b wording — the profile is REQUIRED and creating one is *not available in this
-version*, never "optional".
+**Creating a profile MUST NOT be offered while no code path can mint one, and the absence MUST be
+structural.** No `TrayAction` in this shell creates a profile, so "this build cannot create one" is a
+property of the code rather than of an `enabled` flag. `profiles::ProfileCreation` is a FUNCTION of
+the `MintAvailability` the start-up wizard's gate reads (§3.1b) — never a second opinion about it —
+and it has no *possible* arm while `dig-account`'s `ProfileMinter::mint` is `todo!()`. The surface
+states which piece is missing, in the §3.1b wording: the profile is REQUIRED and creating one is
+*not available in this version*, never "optional".
+
+**Creation MUST become real, and the type is shaped for it (normative sequencing).** The absence
+above is a statement about this build, not a design position: creating a profile is required product
+functionality, blocked on `dig-account` publishing its mint. Consumers therefore MUST ask
+`ProfileCreation::blocked()` — an `Option` whose `None` already means *creation is possible* — and
+MUST NOT match the enum exhaustively, so adding the `Possible` arm is a change of bodies rather than
+of shapes. Two rules bind whoever adds it:
+
+- **The create step MUST be the same ceremony first run drives (§3.2b).** One implementation, reached
+  from both places. A second implementation of a flow that spends real XCH is how the two drift.
+- **A pushed mint is NOT a created profile.** `mint_status` distinguishes confirmed from awaiting
+  from failed, and the surface MUST carry all three; a profile is recorded ONLY from evidence of an
+  actual on-chain mint (§3.1b). Reporting success from a submission rather than a confirmation makes
+  every identity surface assert a falsehood about the chain.
 
 **Hiding MUST NOT be described as deleting.** A minted profile is a `did:chia:` singleton and a store
 on chain, both permanent. Copy on this surface MUST NOT say delete, remove, erase or destroy, MUST

@@ -82,7 +82,7 @@ fn view_for(state: AccountState) -> TrayView {
         // The profile rows are on the WINDOW's Account tab, not on the tray this suite exercises,
         // so they are pinned to the state every real account is in.
         profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
-        profile_creation: dig_app_core::profiles::ProfileCreation::NoChainTransport,
+        profile_creation: dig_app_core::profiles::ProfileCreation::default(),
         profile_id: Some("a".repeat(96)),
         did: None,
         // This suite is about the LOCK state, so the second-factor axis is pinned off and covered by

@@ -1021,11 +1021,11 @@ mod tests {
         // all six — so this is not a second per-state sentence set; both arms are listed because
         // the fixture holds the seam fixed and either could be the one drawn.
         allowed.push(
-            copy::profiles::cannot_create(crate::profiles::ProfileCreation::NoChainTransport)
+            copy::profiles::cannot_create(crate::profiles::CreationBlocked::NoChainTransport)
                 .to_string(),
         );
         allowed.push(
-            copy::profiles::cannot_create(crate::profiles::ProfileCreation::NoProfileMinter)
+            copy::profiles::cannot_create(crate::profiles::CreationBlocked::NoProfileMinter)
                 .to_string(),
         );
         allowed.push(copy::protection::second_factor_needs(&lead));

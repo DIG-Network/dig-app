@@ -322,7 +322,14 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
 fn create_panel(flow: &mut Flow, t: &Tokens, creation: crate::profiles::ProfileCreation) {
-    let sentence = copy::profiles::cannot_create(creation);
+    // The one branch the `Possible` arm will land in. Today `blocked()` is always `Some`, so the
+    // panel always explains; the day dig-account's mint publishes, `None` arrives here and this is
+    // where the create control goes — a body change, with no consumer's shape moving
+    // (`ProfileCreation`'s own docs record the sequencing).
+    let Some(blocked) = creation.blocked() else {
+        return;
+    };
+    let sentence = copy::profiles::cannot_create(blocked);
     flow.place(|ui, at| {
         (
             card::panel(ui, at, t, Some(copy::profiles::CREATE_PANEL), |inner| {
@@ -337,7 +344,7 @@ fn create_panel(flow: &mut Flow, t: &Tokens, creation: crate::profiles::ProfileC
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{expected_did, session_with};
-    use crate::profiles::{ProfileCreation, ProfilesReading, ProfilesUnknown};
+    use crate::profiles::{CreationBlocked, ProfileCreation, ProfilesReading, ProfilesUnknown};
     use crate::tray_menu::{AccountState, TrayView};
     use crate::window_model::TabId;
     use dig_account::registry::ProfileVisibility;
@@ -686,20 +693,25 @@ mod tests {
     #[test]
     fn the_card_explains_why_it_offers_no_way_to_create_a_profile() {
         let mut said = Vec::new();
-        for creation in [
-            ProfileCreation::NoChainTransport,
-            ProfileCreation::NoProfileMinter,
+        for blocked in [
+            CreationBlocked::NoChainTransport,
+            CreationBlocked::NoProfileMinter,
         ] {
+            let creation = ProfileCreation::Blocked(blocked);
+            assert!(
+                !creation.is_possible(),
+                "no build shipped so far can create a profile, so a fixture that says otherwise is                  not a state this card can be in"
+            );
             let view = TrayView {
                 profile_creation: creation,
                 ..view_with(ProfilesReading::Known(Vec::new()))
             };
             let painted = card_says(&view, 960.0);
             assert!(
-                painted.contains(copy::profiles::cannot_create(creation)),
-                "{creation:?} did not reach the card as its own sentence: {painted}"
+                painted.contains(copy::profiles::cannot_create(blocked)),
+                "{blocked:?} did not reach the card as its own sentence: {painted}"
             );
-            said.push(copy::profiles::cannot_create(creation));
+            said.push(copy::profiles::cannot_create(blocked));
         }
         assert_ne!(
             said[0], said[1],

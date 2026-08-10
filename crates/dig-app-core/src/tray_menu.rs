@@ -2405,7 +2405,7 @@ mod tests {
             // build one from a registry fixture explicitly.
             profiles: crate::profiles::ProfilesReading::Known(Vec::new()),
             // What `mint_seams()` returns in the shipped binary.
-            profile_creation: crate::profiles::ProfileCreation::NoChainTransport,
+            profile_creation: crate::profiles::ProfileCreation::default(),
             // A beacon that answered: auto-update on, following stable — the ordinary success case.
             // The tests that describe the absent beacon and the nightly channel null this out or
             // replace it explicitly.
