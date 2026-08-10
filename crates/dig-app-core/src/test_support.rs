@@ -576,17 +576,24 @@ pub mod node {
                 Behaviour::WalletCoins(reply) if method_is_coins && method_is_open_read => {
                     (200, coins_result(reply))
                 }
-                // `control.wallet.arrivals` is the narrowest OPEN wallet read, served tokenless for
-                // the same reason. The page index comes from the SERVED counter, so successive calls
-                // walk the scripted conversation.
-                Behaviour::WalletArrivals(reply) if method_is_arrivals && method_is_open_read => (
-                    200,
-                    arrivals_result(
-                        reply,
-                        served.load(Ordering::SeqCst).saturating_sub(1),
-                        &request,
-                    ),
-                ),
+                // `control.wallet.arrivals` is TOKEN-GATED (dig_ecosystem#2548): the caller supplies
+                // only a cursor, so the answer names the node's OWN watched puzzle hashes. The
+                // openness is still read from the CONTRACT rather than asserted here, so if the
+                // contract ever reopens the method this fake follows it instead of contradicting
+                // it. The page index comes from the SERVED counter, so successive calls walk the
+                // scripted conversation.
+                Behaviour::WalletArrivals(reply)
+                    if method_is_arrivals && (method_is_open_read || authorized) =>
+                {
+                    (
+                        200,
+                        arrivals_result(
+                            reply,
+                            served.load(Ordering::SeqCst).saturating_sub(1),
+                            &request,
+                        ),
+                    )
+                }
                 // Every other `control.*` method is gated exactly as the real node gates it,
                 // otherwise a client that forgot the header would still see a green test.
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),

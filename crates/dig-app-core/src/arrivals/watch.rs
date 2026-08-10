@@ -2,8 +2,8 @@
 //!
 //! Two pieces, mirroring [`crate::wallet::node`]:
 //!
-//! - [`ControlPlaneSource`] — the [`ArrivalSource`] over `control.wallet.arrivals`, an OPEN,
-//!   token-less read of the node's own local ledger.
+//! - [`ControlPlaneSource`] — the [`ArrivalSource`] over `control.wallet.arrivals`, a TOKEN-GATED
+//!   read of the node's own local ledger.
 //! - [`ArrivalWatch`] — the throttle that owns *when* that read happens, so the tray's
 //!   twice-a-second repaint does not become twice-a-second node calls, and so the read never runs
 //!   on the caller's thread.
@@ -18,9 +18,16 @@
 //!
 //! # The custody boundary (§908)
 //!
-//! Everything here is a token-less read of the node's own replica. No key, seed, address or
-//! signature is involved, nothing on this path can spend, and there is no oracle leg — polling it
-//! discloses nothing off-machine.
+//! Everything here is a READ of the node's own replica. No key, seed, address or signature is
+//! involved, nothing on this path can spend, and there is no oracle leg — polling it discloses
+//! nothing off-machine.
+//!
+//! It is nonetheless the one wallet READ that needs the control token, and the reason is worth
+//! keeping in view: the other reads answer about an address the CALLER named, while this one takes
+//! a cursor and answers with the node's own watched puzzle hashes and the receive history behind
+//! them. The chain facts are public; the association between this machine and those addresses is
+//! not. So a tray that cannot read the control token gets no arrival toasts, and that is the
+//! correct trade — the alternative is any local process enumerating the user's addresses.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -67,8 +74,9 @@ pub struct ControlPlaneSource {
 impl ControlPlaneSource {
     /// A source reading the ledger of the node at `endpoint`, presenting `token` when there is one.
     ///
-    /// `token` is optional because `control.wallet.arrivals` is an OPEN read: a machine whose
-    /// control token this user cannot read still learns when it was paid.
+    /// `token` is an `Option` because the tray cannot always read one — an install whose token
+    /// file is unreadable has none to present. The read is TOKEN-GATED, so a `None` here means the
+    /// node will refuse and the watch stays quiet; it does NOT mean the read is open.
     pub fn new(endpoint: impl Into<String>, token: Option<String>, timeout: Duration) -> Self {
         Self {
             endpoint: endpoint.into(),
@@ -658,6 +666,56 @@ mod tests {
             node.received().contains("\"after_seq\":41"),
             "the cursor did not reach the wire: {}",
             node.received()
+        );
+    }
+
+    /// **An UNAUTHENTICATED arrivals read is refused, and the same read WITH the token succeeds.**
+    ///
+    /// The cursor is token-gated (dig_ecosystem#2548): it names the node's own watched puzzle
+    /// hashes to a caller that supplied nothing but a position. This is the behavioural half of
+    /// that gate — the contract-level membership test in `dig-node-control-interface` pins the
+    /// constant, and this pins what a caller actually experiences.
+    ///
+    /// The fixture varies exactly ONE thing, the token, against ONE fake node, and the tokened leg
+    /// is the control. Without it the refusal could equally be a fake that serves nothing, a
+    /// mis-typed method name, or a client that never dialled — every one of which produces the same
+    /// `Unavailable`. The token is also asserted to have reached the WIRE, because a client that
+    /// held a token and failed to send it would still pass a test that only read its own return
+    /// value.
+    #[test]
+    fn an_untokened_arrivals_read_is_refused_and_the_tokened_one_is_served() {
+        let node = FakeNode::serving_arrivals(ArrivalsReply::Pages(vec![FakeArrivalPage {
+            rows: vec![(7, 2_500, None)],
+            latest: 7,
+        }]));
+
+        let untokened = ControlPlaneSource::new(node.endpoint(), None, Duration::from_secs(5))
+            .arrivals_since(6);
+        assert!(
+            matches!(untokened, Err(ArrivalSourceError::Unavailable(_))),
+            "an untokened arrivals read must be refused, got {untokened:?}"
+        );
+
+        let page = source_for(&node)
+            .arrivals_since(6)
+            .expect("the tokened read must be served");
+        assert_eq!(page.cursor, 7, "the tokened read reached the ledger");
+
+        // The fake hands back the requests in the order it received them, so the first is the
+        // untokened attempt and the second is the tokened one. Reading BOTH is what proves the
+        // token is the only difference between them.
+        let (first, second) = (node.received(), node.received());
+        assert!(
+            !first
+                .to_lowercase()
+                .contains(&FakeNode::TOKEN.to_lowercase()),
+            "the untokened leg must not have sent a token: {first}"
+        );
+        assert!(
+            second
+                .to_lowercase()
+                .contains(&FakeNode::TOKEN.to_lowercase()),
+            "the control token never reached the wire: {second}"
         );
     }
 
