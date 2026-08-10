@@ -620,7 +620,7 @@ mod tests {
         let door = CountingDoor::default();
         let refuses = MockChainSource::new()
             .with_peak(PEAK)
-            .fail_with(ChainSourceError::Unsupported("no lineage walk here".into()));
+            .fail_with(ChainSourceError::Unsupported("no lineage walk here"));
 
         let seams = ProfileMintSeams::probe(&door, &refuses);
 
@@ -654,7 +654,7 @@ mod tests {
         let door = CountingDoor::default();
         let refusing = MockChainSource::new()
             .with_peak(PEAK)
-            .fail_with(ChainSourceError::Unsupported("nope".into()));
+            .fail_with(ChainSourceError::Unsupported("nope"));
 
         for seams in [
             ProfileMintSeams::probe(&door, &WalksLineages),
