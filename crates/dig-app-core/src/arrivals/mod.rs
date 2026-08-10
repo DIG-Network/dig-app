@@ -82,6 +82,24 @@ pub struct ArrivalPage {
     pub latest: u64,
 }
 
+/// A row of one of dig-node's money ledgers, identified by its position in it.
+///
+/// The one thing [`ArrivalCursor`] needs to know about a row, and therefore the whole of what makes
+/// the cursor reusable by the outgoing ledger (dig_ecosystem#2565). The cursor's rules — adopt on
+/// first read, advance to the last row HANDED OVER, never rewind, filter per row — are the same four
+/// money-safety rules in both directions, and a second copy of them is a second place for one of
+/// them to be dropped.
+pub trait LedgerRow: Clone {
+    /// This row's position in the node's ledger.
+    fn seq(&self) -> u64;
+}
+
+impl LedgerRow for Arrival {
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+}
+
 /// How far through the node's arrival ledger this machine has been told.
 ///
 /// `None` means this machine has never read the ledger, which is the one case that must not
@@ -119,14 +137,20 @@ impl ArrivalCursor {
     /// It also never moves BACKWARDS. A node whose ledger was rebuilt could answer a lower `cursor`
     /// than this machine has already announced from, and rewinding would replay those toasts.
     pub fn advance(&mut self, page: &ArrivalPage) -> Vec<Arrival> {
+        self.advance_rows(&page.arrivals, page.cursor, page.latest)
+    }
+
+    /// [`advance`](Self::advance) over any node ledger's rows — the actual implementation, shared
+    /// with the outgoing ledger (dig_ecosystem#2565) so both directions obey ONE copy of the four
+    /// rules. Every test in this module exercises this code through the incoming path.
+    pub fn advance_rows<R: LedgerRow>(&mut self, rows: &[R], cursor: u64, latest: u64) -> Vec<R> {
         let Some(position) = self.position else {
-            self.position = Some(page.latest);
+            self.position = Some(latest);
             return Vec::new();
         };
-        self.position = Some(position.max(page.cursor));
-        page.arrivals
-            .iter()
-            .filter(|arrival| arrival.seq > position)
+        self.position = Some(position.max(cursor));
+        rows.iter()
+            .filter(|row| row.seq() > position)
             .cloned()
             .collect()
     }

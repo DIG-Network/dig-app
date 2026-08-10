@@ -1394,6 +1394,18 @@ mod tray {
         WATCH.get_or_init(dig_app_core::arrivals::watch::ArrivalWatch::for_host)
     }
 
+    /// The one send watch, poked from the same repaint (dig_ecosystem#2565).
+    ///
+    /// A SECOND watch rather than a second job inside the arrival one: the two ledgers have their
+    /// own cursors, files and preferences, and a node too old to serve `control.wallet.sends` must
+    /// not be able to cost the user their arrival toasts. Every decision about what a send IS, and
+    /// about how much actually left, lives in dig-node's own ledger.
+    fn send_watch() -> &'static dig_app_core::sends::watch::SendWatch {
+        static WATCH: std::sync::OnceLock<dig_app_core::sends::watch::SendWatch> =
+            std::sync::OnceLock::new();
+        WATCH.get_or_init(dig_app_core::sends::watch::SendWatch::for_host)
+    }
+
     /// Read the current state of the world into the one snapshot the menu is built from.
     fn snapshot(
         status: &SharedStatus,
@@ -1475,6 +1487,7 @@ mod tray {
                     // reading on a worker, so this call never blocks and contributes nothing to the
                     // view.
                     arrival_watch().observe(&status.engine);
+                    send_watch().observe(&status.engine);
                     balance_poller().observe(&status.engine, receive_address.as_deref())
                 }
                 // A poisoned lock says nothing about the balance, and "nothing" is not zero.

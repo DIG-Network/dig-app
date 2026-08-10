@@ -170,6 +170,7 @@ mod tests {
             },
             notifications: crate::notifications::Notifications {
                 funds_received: false,
+                funds_sent: false,
             },
         };
         cfg.save(&path).unwrap();
@@ -311,6 +312,7 @@ mod tests {
         AgentConfig {
             notifications: crate::notifications::Notifications {
                 funds_received: false,
+                funds_sent: false,
             },
             ..AgentConfig::default()
         }

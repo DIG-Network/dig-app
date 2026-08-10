@@ -232,7 +232,7 @@ pub(crate) mod settings {
     pub(crate) const NOTIFY_CARD: &str = "Notifications";
     /// What the notifications group controls.
     pub(crate) const NOTIFY_ABOUT: &str =
-        "Whether DIG tells you when money arrives in your wallet.";
+        "Whether DIG tells you when money moves in your wallet. The two are separate switches.";
     /// The limitation, said in the card rather than discovered.
     ///
     /// A person who is told "DIG will notify me when I am paid" and then is not has been misled by
@@ -245,8 +245,23 @@ pub(crate) mod settings {
         "DIG tells you about a payment once it is confirmed on the blockchain. Payments that \
          arrive while this window is closed are still noticed, and you are told the next time you \
          open DIG. Nothing is noticed while the DIG background service is stopped.";
-    /// The label above the on/off chooser.
+    /// The label above the incoming on/off chooser.
     pub(crate) const NOTIFY_FIELD: &str = "When money arrives";
+    /// The label above the OUTGOING on/off chooser (dig_ecosystem#2565).
+    ///
+    /// Its own switch because the two answer different questions: an arrival is news, while a send
+    /// is usually confirmation of something you just did. The case that most wants this one ON is a
+    /// payment made from a DIFFERENT wallet app on the same seed.
+    pub(crate) const NOTIFY_SENT_FIELD: &str = "When money leaves";
+    /// The readout naming what DIG will do about outgoing payments.
+    pub(crate) const NOTIFY_SENT_EFFECTIVE: &str = "For payments you send, DIG will";
+    /// What an outgoing notification actually says, stated before the switch.
+    ///
+    /// The figure is what LEFT the wallet, and it includes the network fee, because nothing the
+    /// node can observe separates the two. Saying so here is cheaper than a person comparing the
+    /// toast against the amount they typed and concluding the app cannot count.
+    pub(crate) const NOTIFY_SENT_COST: &str =
+        "An outgoing notification reports the total that left your wallet, which includes the          blockchain fee, so it can read slightly higher than the amount you sent. Payments made          from another wallet app on the same recovery phrase are reported too.";
     /// The readout naming what DIG will actually do.
     pub(crate) const NOTIFY_EFFECTIVE: &str = "DIG will";
     /// What the readout says for each choice, in the words of the thing that will happen.

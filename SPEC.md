@@ -2192,7 +2192,9 @@ transaction in which the user SENT money.
 
 **The seam.** `ArrivalSource::arrivals_since(after_seq)` yields an `ArrivalPage`
 (`arrivals`, `cursor`, `latest`). `watch::ControlPlaneSource` implements it over
-`control.wallet.arrivals`, an OPEN token-less read of the node's own local replica. A future push
+`control.wallet.arrivals`, a TOKEN-GATED read of the node's own local replica — gated although it
+is a read, because the caller supplies only a cursor and the answer names the node's OWN watched
+puzzle hashes. A tray that cannot read the control token therefore gets no toasts. A future push
 transport implements the same trait and nothing above it changes.
 
 **What `arrivals` is responsible for.** Exactly one property: *each recorded arrival is announced at
@@ -2226,9 +2228,51 @@ genuinely not covered is an arrival while the NODE is stopped: it is recorded by
 follows, and is an arrival unless that catch-up is the wallet's first (see dig-node's
 `sage::arrivals` arrival baseline). The Settings card states this in the user's words.
 
-**Custody (§908).** The one input is a cursor position, over a token-less read of the node's own
-replica. Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no
-oracle leg — polling it discloses nothing off-machine.
+**Custody (§908).** The one input is a cursor position, over a read of the node's own replica.
+Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no oracle
+leg — polling it discloses nothing off-machine.
+
+### 3.7b Confirmed-send notifications (`sends`, #2565)
+
+The outgoing twin of §3.7a, and it inherits every rule above: **dig-node decides what a send is and
+how much left; dig-app decides what to say and when to stop saying it.** `sends` MUST NOT re-derive
+either from coin reads.
+
+That prohibition is stronger here than for arrivals, because a send is not a coin — it is a
+DIFFERENCE. Spending a 9 XCH coin to pay 1 XCH returns ~8 XCH of change to the same wallet, so the
+figure a person needs is the wallet's own inputs minus what came back, over a whole confirmed height,
+against the set of puzzle hashes the wallet watches. dig-app holds none of that. A client that
+guessed would reproduce the `Received 8.999 XCH` defect with the sign flipped.
+
+**The seam.** `SendSource::sends_since(after_seq)` yields a `SendPage` (`sends`, `cursor`, `latest`).
+`sends::watch::ControlPlaneSendSource` implements it over `control.wallet.sends` (dig-node ≥ 0.110.0),
+TOKEN-GATED for a strictly stronger reason than the arrival cursor: the answer says when this wallet
+is SPENDING. A node too old to know the method answers method-not-found, which is an ordinary
+unavailable read — nothing is announced and the arrival watch is unaffected, because the two are
+separate watches with separate cursors.
+
+**The figure.** `SentPayment::net_outflow` is what LEFT the wallet, in the asset's base unit, and it
+INCLUDES any network fee. Nothing splits the two: a node observing only the chain never sees the
+recipient's output, because it sits at a puzzle hash the node does not watch. dig-app MUST NOT show a
+fee beside the figure, and MUST NOT present the figure as the amount typed into a send form. The
+Settings card states the inclusion in the user's words, so a toast reading slightly high is explained
+before it is seen rather than after.
+
+**Cursor.** The same `ArrivalCursor` type and therefore the same four rules — adopt on first read,
+advance to the last row RECEIVED, never rewind, filter per row — persisted to its OWN file
+(`send-cursor.json`). Its own file, not a second field in the arrival cursor: the node keeps two
+independent `AUTOINCREMENT` sequences, and one document would let a corrupt write re-adopt a ledger
+that was fine.
+
+**Preference.** `AgentConfig.notifications.funds_sent`, defaulting to ON — including for an
+`agent.json` written before the field existed. It is a SEPARATE switch from `funds_received`: an
+arrival is news, a send is usually confirmation of something the person just did, and the case that
+most wants sends ON (a payment made from another wallet app on the same seed) is not the case that
+wants receipts. It gates the TOAST, never the cursor.
+
+**Custody (§908).** A cursor position in, a figure out. Nothing on this path holds, derives or uses a
+key, nothing on it can spend, and detection happens in the node from chain observation — which is why
+a payment made from a DIFFERENT client on the same seed is announced identically.
 
 ---
 

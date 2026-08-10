@@ -85,6 +85,7 @@ pub mod pairing_code;
 pub mod profiles;
 pub mod sealer;
 pub mod secret_file;
+pub mod sends;
 pub mod session;
 pub mod session_lock;
 pub mod shutdown;

@@ -99,6 +99,17 @@ impl PendingActivity {
         self.received.entry(asset).or_default().add(base_units);
     }
 
+    /// Fold one confirmed OUTFLOW into the tally, in the asset's own base unit
+    /// (dig_ecosystem#2565).
+    ///
+    /// `base_units` is what LEFT the wallet — the node's `net_outflow`, inclusive of any fee — and
+    /// never a spent coin's amount. The twin of [`received`](Self::received) and separate from
+    /// [`record`](Self::record) for the same reason: [`crate::sends`] holds a ledger row, not a
+    /// [`WalletEvent`], and a notification must not be built out of invented fields.
+    pub fn sent(&mut self, asset: Option<AssetId>, base_units: u64) {
+        self.sent.entry(asset).or_default().add(base_units);
+    }
+
     /// Fold one funds event into the tally. Non-funds events are ignored (the sink only forwards
     /// funds events, but recording is total-function to keep the model self-contained).
     pub fn record(&mut self, event: &WalletEvent) {
@@ -190,6 +201,41 @@ pub fn announce_arrivals(
         return;
     }
     if let Some(notification) = arrival_notification(arrivals) {
+        notifier.show(&notification);
+    }
+}
+
+/// One honest notification for a batch of confirmed SENDS, or `None` when the batch is empty
+/// (dig_ecosystem#2565).
+///
+/// The outgoing twin of [`arrival_notification`], and it renders through the SAME [`summarize`], so
+/// a sweep that carried both directions could only ever produce one toast. Each figure is the
+/// node's `net_outflow` — what left the wallet, fee included — so the line reads "Sent 1 XCH" for a
+/// 1 XCH payment out of a 9 XCH coin, and there is no fee shown beside it because the node did not
+/// measure one.
+pub fn send_notification(sends: &[crate::sends::SentPayment]) -> Option<Notification> {
+    let dig = dig_asset_id();
+    let mut pending = PendingActivity::default();
+    for send in sends {
+        pending.sent(send.asset_id.clone(), send.net_outflow);
+    }
+    summarize(&pending, Some(&dig))
+}
+
+/// Show `sends` as one notification — unless the user turned SEND notifications off.
+///
+/// The switch is checked here, at the one place a toast is drawn, for the reason
+/// [`announce_arrivals`] gives: [`crate::sends`] must keep advancing its cursor while notifications
+/// are off, or turning them back on would announce everything that left in between.
+pub fn announce_sends(
+    sends: &[crate::sends::SentPayment],
+    enabled: bool,
+    notifier: &dyn NativeNotifier,
+) {
+    if !enabled {
+        return;
+    }
+    if let Some(notification) = send_notification(sends) {
         notifier.show(&notification);
     }
 }

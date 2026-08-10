@@ -180,18 +180,38 @@ pub(crate) fn save(
     store.read()
 }
 
-/// Turn the funds-arrived notification on or off, then report what the file NOW says.
+/// Which notification switch a write is aimed at (dig_ecosystem#2565).
+///
+/// An enum rather than two functions so the read-modify-write-read-back sequence exists once: that
+/// sequence is what stops the chooser showing a state the file disagrees with, and a second copy of
+/// it is a second place for the read-back to be dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotifySwitch {
+    /// Money arriving.
+    Received,
+    /// Money leaving.
+    Sent,
+}
+
+/// Turn one notification switch on or off, then report what the file NOW says.
 ///
 /// A separate function from [`save`] because this setting is a CHOICE and not typed text: there is
 /// nothing to validate and nothing to clear, so routing it through [`Setting`] would mean inventing
 /// a string form for a boolean and parsing it back. The read-back rule is identical and is the whole
 /// point — a chooser showing "Off" over a file that still says on is the defect PR #120 named.
+///
+/// Writing one switch leaves the other exactly as the file had it: the config is read, ONE field is
+/// changed, and it is written back whole.
 pub(crate) fn save_notifications(
     store: &dyn ConfigStore,
-    funds_received: bool,
+    switch: NotifySwitch,
+    wanted: bool,
 ) -> Result<AgentConfig, String> {
     let mut config = store.read()?;
-    config.notifications.funds_received = funds_received;
+    match switch {
+        NotifySwitch::Received => config.notifications.funds_received = wanted,
+        NotifySwitch::Sent => config.notifications.funds_sent = wanted,
+    }
     store.write(&config)?;
     store.read()
 }
@@ -388,13 +408,13 @@ pub(crate) mod tests {
             "the fixture must start ON, or turning it off proves nothing"
         );
         assert!(
-            !save_notifications(&store, false)
+            !save_notifications(&store, NotifySwitch::Received, false)
                 .unwrap()
                 .notifications
                 .funds_received
         );
         assert!(
-            save_notifications(&store, true)
+            save_notifications(&store, NotifySwitch::Received, true)
                 .unwrap()
                 .notifications
                 .funds_received
@@ -403,12 +423,36 @@ pub(crate) mod tests {
         let mut lossy = FakeStore::holding(AgentConfig::default());
         lossy.writes_are_lost = true;
         assert!(
-            save_notifications(&lossy, false)
+            save_notifications(&lossy, NotifySwitch::Received, false)
                 .expect("the store reported success")
                 .notifications
                 .funds_received,
             "the pane would have shown notifications off while the file still says on"
         );
+    }
+
+    /// **The two switches are independent, and writing one preserves the other.**
+    ///
+    /// A read-modify-write that rebuilt `Notifications` from one field would silently reset the
+    /// other to its default — turning receipts back ON for somebody who had turned them off, the
+    /// moment they silenced sends.
+    #[test]
+    fn writing_one_notification_switch_leaves_the_other_alone() {
+        let store = FakeStore::holding(AgentConfig::default());
+        let after = save_notifications(&store, NotifySwitch::Received, false).unwrap();
+        assert!(!after.notifications.funds_received);
+        assert!(after.notifications.funds_sent, "sends must be untouched");
+
+        let after = save_notifications(&store, NotifySwitch::Sent, false).unwrap();
+        assert!(
+            !after.notifications.funds_received,
+            "silencing sends must not turn receipts back on"
+        );
+        assert!(!after.notifications.funds_sent);
+
+        let after = save_notifications(&store, NotifySwitch::Sent, true).unwrap();
+        assert!(!after.notifications.funds_received);
+        assert!(after.notifications.funds_sent);
     }
 
     /// **Turning notifications off leaves every other setting alone.**
@@ -419,7 +463,7 @@ pub(crate) mod tests {
             active_profile: Some("did:dig:abc".to_string()),
             ..AgentConfig::default()
         });
-        let after = save_notifications(&store, false).unwrap();
+        let after = save_notifications(&store, NotifySwitch::Received, false).unwrap();
         assert_eq!(after.node_url.as_deref(), Some("http://kept"));
         assert_eq!(after.active_profile.as_deref(), Some("did:dig:abc"));
     }

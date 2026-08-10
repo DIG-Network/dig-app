@@ -24,15 +24,24 @@ use serde::{Deserialize, Serialize};
 
 /// Which notifications the user wants drawn.
 ///
-/// One field today. It is a struct rather than a bare `bool` so a second class of notification does
-/// not have to reshape `agent.json` — the same reason [`AutoUpdate`](crate::auto_update::AutoUpdate)
-/// is one.
+/// Two independent switches, which is the affordance this struct was made for. They are separate
+/// because the two notifications answer different questions: an arrival is news a person could not
+/// otherwise have, while a send is usually confirmation of something they just did — and on a
+/// machine that publishes or runs a dapp, the outgoing one is the noisier. The case that most wants
+/// sends ON is also the one that most wants receipts quiet: a payment made from ANOTHER client on
+/// the same seed (dig_ecosystem#2565). One switch cannot serve both people.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notifications {
     /// Whether a confirmed incoming payment raises an OS notification. Defaults to ON, including
     /// for a config file written before this setting existed.
     #[serde(default = "default_enabled")]
     pub funds_received: bool,
+    /// Whether a confirmed OUTGOING payment raises an OS notification. Defaults to ON, including
+    /// for a config file written before this setting existed — a bare `#[serde(default)]` here
+    /// would read every `agent.json` in the wild as an explicit opt-out on the release that adds
+    /// the switch.
+    #[serde(default = "default_enabled")]
+    pub funds_sent: bool,
 }
 
 /// Notifications are on unless somebody said otherwise — see the module docs.
@@ -44,6 +53,7 @@ impl Default for Notifications {
     fn default() -> Self {
         Self {
             funds_received: default_enabled(),
+            funds_sent: default_enabled(),
         }
     }
 }
@@ -67,6 +77,7 @@ mod tests {
     #[test]
     fn notifications_are_on_by_default() {
         assert!(Notifications::default().funds_received);
+        assert!(Notifications::default().funds_sent);
     }
 
     /// **A file written before the setting existed loads as ON, at both levels it can be missing.**
@@ -78,12 +89,29 @@ mod tests {
         let whole_object_absent: Notifications =
             serde_json::from_str("{}").expect("an empty object is a valid Notifications");
         assert!(whole_object_absent.funds_received);
+        assert!(whole_object_absent.funds_sent);
+
+        // The #2565 case specifically: a config written by dig-app 10.0.0 has `funds_received` and
+        // has never heard of `funds_sent`. It must load as ON, not as a silent opt-out.
+        let pre_2565: Notifications =
+            serde_json::from_str(r#"{"funds_received":true}"#).expect("valid");
+        assert!(
+            pre_2565.funds_sent,
+            "adding the switch must not opt every existing install out of it"
+        );
 
         // And the other side: an explicit OFF stays off, or the default would be a value nobody
         // could change.
         let explicit: Notifications =
-            serde_json::from_str(r#"{"funds_received":false}"#).expect("valid");
+            serde_json::from_str(r#"{"funds_received":false,"funds_sent":false}"#).expect("valid");
         assert!(!explicit.funds_received);
+        assert!(!explicit.funds_sent);
+
+        // And the two switches are independent: silencing one must not silence the other.
+        let only_sends_off: Notifications =
+            serde_json::from_str(r#"{"funds_received":true,"funds_sent":false}"#).expect("valid");
+        assert!(only_sends_off.funds_received);
+        assert!(!only_sends_off.funds_sent);
     }
 
     #[test]
