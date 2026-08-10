@@ -453,7 +453,9 @@ mod tests {
                 residency.lock_all();
             }
             if let Some((session, ix)) = &self.switch_during_the_ceremony {
-                let _switched = session.switch_to(*ix).expect("the target profile is confirmed");
+                let _switched = session
+                    .switch_to(*ix)
+                    .expect("the target profile is confirmed");
             }
             Ok(self.decision.clone())
         }
@@ -595,7 +597,10 @@ mod tests {
     #[tokio::test]
     async fn a_profile_switch_during_the_ceremony_signs_nothing() {
         let session = ProfileSession::load(Arc::new(MemoryRegistryStore::seeded(registry_json(
-            &[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), Some("work"))],
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
             ProfileIx::ROOT,
         ))))
         .expect("the fixture registry loads");

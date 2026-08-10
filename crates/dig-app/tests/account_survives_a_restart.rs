@@ -21,11 +21,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::boot::{
-    account_exists, assemble_residency, account_scoped_id, DEFAULT_ACCOUNT_ID,
+    account_exists, account_scoped_id, assemble_residency, DEFAULT_ACCOUNT_ID,
 };
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::AccountId;
 use dig_app_core::tray_menu::{self, AccountState, AtRest, OpenAttempt};

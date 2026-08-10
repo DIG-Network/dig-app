@@ -131,7 +131,9 @@ fn a_retained_identity_signer_follows_the_switch() {
         "control: before any switch the signer must derive the canonical key for the FIRST profile"
     );
 
-    let switched = session.switch_to(SECOND).expect("the second profile is confirmed");
+    let switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
     assert_eq!(SECOND, switched.to_ix());
 
     let after = signer.signing_public_key().as_bytes().to_vec();
@@ -169,7 +171,9 @@ fn a_retained_sealer_follows_the_switch_and_can_no_longer_open_the_old_profiles_
         "control: the blob opens under the profile that sealed it"
     );
 
-    let _switched = session.switch_to(SECOND).expect("the second profile is confirmed");
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
 
     // Control: the sealer still WORKS, so the refusal below is isolation and not breakage.
     let sealed_under_second = sealer
@@ -211,7 +215,9 @@ fn the_profile_directory_moves_but_the_account_scoped_id_does_not() {
     let account_before = account_scoped_id(&residency).expect("unlocked");
     let dir_before = profile_dir(brand, &active_profile_id(&residency).expect("unlocked"));
 
-    let _switched = session.switch_to(SECOND).expect("the second profile is confirmed");
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
 
     let dir_after = profile_dir(brand, &active_profile_id(&residency).expect("unlocked"));
     assert_ne!(
@@ -246,7 +252,9 @@ fn the_wallet_refuses_to_answer_for_a_profile_it_was_not_opened_at() {
         .expect("control: an address derives while the wallet and the active profile agree");
     assert!(before.starts_with("xch1"), "{before}");
 
-    let _switched = session.switch_to(SECOND).expect("the second profile is confirmed");
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
 
     let after = residency.receiving_address().expect("still unlocked");
     assert!(
@@ -254,7 +262,9 @@ fn the_wallet_refuses_to_answer_for_a_profile_it_was_not_opened_at() {
         "the wallet must refuse rather than show the PREVIOUS profile's receive address: {after:?}"
     );
     assert!(
-        residency.money_signer(dig_wallet_backend::types::Network::Mainnet).is_none(),
+        residency
+            .money_signer(dig_wallet_backend::types::Network::Mainnet)
+            .is_none(),
         "and it must sign nothing, or a spend would leave the profile the user switched away from"
     );
 }
@@ -265,7 +275,9 @@ fn the_live_slot_reports_the_profile_switched_to() {
     let (residency, session) = two_profile_account();
     assert_eq!(FIRST, residency.slot().ix());
 
-    let switched = session.switch_to(SECOND).expect("the second profile is confirmed");
+    let switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
 
     assert_eq!(SECOND, residency.slot().ix());
     assert_eq!(Some(FIRST), switched.from_ix());

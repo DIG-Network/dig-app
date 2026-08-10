@@ -2066,9 +2066,7 @@ mod tests {
         use crate::session::{sign_callback_message, verify_signature, SessionSigner as _};
 
         let residency = test_residency();
-        let pubkey = residency
-            .signer()
-            .signing_public_key();
+        let pubkey = residency.signer().signing_public_key();
         let router = router_persisting(&residency, Arc::new(NullSealedStore));
 
         let origin = "https://dapp.example";

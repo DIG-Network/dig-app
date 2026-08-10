@@ -237,9 +237,9 @@ pub fn default_account() -> AccountId {
 mod tests {
     use super::*;
     use crate::account::boot::finish_boot;
-    use crate::account::profile_session::ProfileSession;
     use crate::account::ceremony::CredentialCeremony;
     use crate::account::lifecycle::PhrasePresenter;
+    use crate::account::profile_session::ProfileSession;
     use crate::keystore::KeystoreError;
     use dig_account::ProfileIx;
     use dig_ipc_protocol::signer::SessionSigner;
@@ -442,7 +442,9 @@ mod tests {
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
-        let before = residency.signing_public_key_hex_at(ProfileIx::ROOT).unwrap();
+        let before = residency
+            .signing_public_key_hex_at(ProfileIx::ROOT)
+            .unwrap();
         finish_boot(dir.path(), residency, phrase)
             .residency
             .lock_all();
@@ -481,7 +483,9 @@ mod tests {
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
-        let before = residency.signing_public_key_hex_at(ProfileIx::ROOT).unwrap();
+        let before = residency
+            .signing_public_key_hex_at(ProfileIx::ROOT)
+            .unwrap();
         residency.lock_all();
         let machine_password = cred
             .get(&machine_password_key(&account()))
@@ -572,9 +576,6 @@ mod tests {
             Seeding::NewPhrase(&NeverEnrols),
         )
         .unwrap();
-        assert!(residency
-            .signer()
-            .try_sign(b"challenge")
-            .is_some());
+        assert!(residency.signer().try_sign(b"challenge").is_some());
     }
 }

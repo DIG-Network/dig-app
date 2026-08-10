@@ -143,8 +143,12 @@ impl RegistryStore for FileRegistryStore {
         // The same crash-safe idiom every security-critical file here is written with: an owner-only
         // temp file, fsynced, renamed over the target, and the parent directory fsynced so the rename
         // itself is durable.
-        crate::storage::write_durably(&self.path, &self.path.with_extension("json.tmp"), json.as_bytes())
-            .map_err(io)?;
+        crate::storage::write_durably(
+            &self.path,
+            &self.path.with_extension("json.tmp"),
+            json.as_bytes(),
+        )
+        .map_err(io)?;
         crate::storage::restrict_to_owner(&self.path).map_err(io)
     }
 }
@@ -444,7 +448,6 @@ pub mod test_support {
         ))))
         .expect("the fixture must load")
     }
-
 }
 
 #[cfg(test)]
@@ -477,7 +480,10 @@ mod tests {
     #[test]
     fn a_switch_moves_the_live_index_and_survives_a_reload() {
         let store = Arc::new(MemoryRegistryStore::seeded(registry_json(
-            &[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), Some("work"))],
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
             ProfileIx::ROOT,
         )));
         let session = ProfileSession::load(store.clone()).unwrap();
@@ -587,7 +593,11 @@ mod tests {
         let store = FileRegistryStore::under(dir.path());
         std::fs::create_dir_all(dir.path().join("profiles")).unwrap();
         // Active on an index with no entry — invariant 2, which dig-account re-checks on deserialize.
-        std::fs::write(store.path(), r#"{"entries":[],"active":3,"in_progress":[]}"#).unwrap();
+        std::fs::write(
+            store.path(),
+            r#"{"entries":[],"active":3,"in_progress":[]}"#,
+        )
+        .unwrap();
 
         assert!(matches!(store.read(), Err(ProfileError::Corrupt(_))));
     }

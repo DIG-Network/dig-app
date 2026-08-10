@@ -88,7 +88,11 @@ impl AccountResidency {
     /// House a freshly-unlocked `account` for an UNPROFILED session — nothing minted, deriving at
     /// [`ProfileIx::ROOT`]. The bootstrap, and what every test that does not exercise profiles wants.
     pub fn new(account: UnlockedAccount) -> Self {
-        Self::with_profiles(account, WalletSlot::unprofiled(), ProfileSession::unprofiled())
+        Self::with_profiles(
+            account,
+            WalletSlot::unprofiled(),
+            ProfileSession::unprofiled(),
+        )
     }
 
     /// House `account`, which was opened at `wallet_slot`, against the live `profiles` registry.
@@ -788,9 +792,13 @@ mod tests {
     #[test]
     fn signing_public_key_hex_is_present_while_unlocked_and_absent_once_locked() {
         let residency = residency();
-        assert!(residency.signing_public_key_hex_at(ProfileIx::ROOT).is_some());
+        assert!(residency
+            .signing_public_key_hex_at(ProfileIx::ROOT)
+            .is_some());
         residency.lock_all();
-        assert!(residency.signing_public_key_hex_at(ProfileIx::ROOT).is_none());
+        assert!(residency
+            .signing_public_key_hex_at(ProfileIx::ROOT)
+            .is_none());
     }
 
     impl AccountResidency {

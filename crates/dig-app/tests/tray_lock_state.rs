@@ -18,9 +18,9 @@
 
 use std::sync::Arc;
 
-use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::boot::{assemble_residency, reunlock_into, DEFAULT_ACCOUNT_ID};
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::account::AccountId;

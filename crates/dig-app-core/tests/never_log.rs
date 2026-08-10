@@ -13,13 +13,13 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::fmt::MakeWriter;
 
 use dig_account::AccountId;
-use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::boot::{
     assemble_residency, finish_boot, reunlock_into, DEFAULT_ACCOUNT_ID,
 };
 use dig_app_core::account::ceremony::PreCollectedPassword;
 use dig_app_core::account::journey::{reveal_phrase, WindowedPresenter};
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::confirm::{
