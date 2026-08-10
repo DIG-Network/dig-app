@@ -46,10 +46,10 @@ use dig_app_core::hosted_stores::{
     STORES_READ_TIMEOUT,
 };
 use dig_app_core::node_facts::NodeFacts;
+use dig_app_core::profiles::ProfilesReading;
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::wallet::overview::{BalanceReading, Balances};
 use dig_app_core::window_model::TabId;
-use dig_app_core::profiles::ProfilesReading;
 
 /// The tab named by `argument`, or `None` when it names nothing.
 fn tab(argument: &str) -> Option<TabId> {
