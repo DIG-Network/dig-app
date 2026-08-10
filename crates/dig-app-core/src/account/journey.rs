@@ -2158,10 +2158,7 @@ mod tests {
                 "the lost-contact screen",
                 copy::did::OFFLINE_BODY.to_owned(),
             ),
-            (
-                "the mint wait screen",
-                copy::wait::AFTER_WAITED.to_owned(),
-            ),
+            ("the mint wait screen", copy::wait::AFTER_WAITED.to_owned()),
             (
                 "the lost-contact wait screen",
                 copy::wait::AFTER_WAITED_OFFLINE.to_owned(),
