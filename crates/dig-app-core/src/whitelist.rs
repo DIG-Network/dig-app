@@ -309,6 +309,51 @@ mod tests {
         );
     }
 
+    /// **A grant is refused when the profile moved between the consent and the write.**
+    ///
+    /// The store is the enforcement point, so it is asserted here as well as through the router: a
+    /// consent read under A, presented while B is active, must record nothing — not under B, whose
+    /// owner never saw the modal, and not under A, which is no longer the profile being written for.
+    ///
+    /// The control is the SAME consent presented while A is still active, which must grant: without it
+    /// a store that refused every grant would look identical.
+    #[test]
+    fn a_grant_is_refused_when_the_profile_moved_since_the_consent() {
+        use crate::live::Live;
+        use std::sync::Arc;
+
+        let active = Arc::new(Mutex::new("did:chia:consenting".to_string()));
+        let source = Arc::clone(&active);
+        let store = WhitelistStore::new(
+            test_sealer(DID),
+            Live::read(move || Some(source.lock().expect("test mutex").clone())),
+        );
+
+        let consent = store.consent_now();
+        *active.lock().expect("test mutex") = "did:chia:arrived-after".to_string();
+
+        let moved = store.grant(&consent, ORIGIN, vec![], 1).err();
+        assert!(
+            matches!(moved, Some(ConsentError::ProfileMoved)),
+            "a grant written for a profile nobody consented for must be refused: {moved:?}"
+        );
+        assert!(
+            !store.is_whitelisted(ORIGIN),
+            "and a refused grant registers nothing for the profile that arrived"
+        );
+
+        *active.lock().expect("test mutex") = "did:chia:consenting".to_string();
+        assert!(
+            !store.is_whitelisted(ORIGIN),
+            "nor for the profile that consented — the grant did not half-land"
+        );
+        assert!(
+            store.grant(&consent, ORIGIN, vec![], 2).is_ok(),
+            "control: the same consent grants once its own profile is active again"
+        );
+        assert!(store.is_whitelisted(ORIGIN));
+    }
+
     #[test]
     fn a_locked_profile_fails_closed_on_grant() {
         use crate::account::residency::AccountResidency;
