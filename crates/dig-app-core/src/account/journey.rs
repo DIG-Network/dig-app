@@ -1676,14 +1676,16 @@ mod copy {
             " for the blockchain to confirm the transaction that creates your DID. ",
             "A few minutes is normal.\n\n",
             "You can stop watching at any time. That does not cancel anything — the transaction is ",
-            "already on the blockchain, and the DIG menu will tell you how it went.",
+            "already on the blockchain. DIG has stopped watching and does not check again on its own ",
+            "in this version; any Chia block explorer can tell you how it went.",
         );
         /// The sentence after it when the connection is the problem.
         pub const AFTER_WAITED_OFFLINE: &str = concat!(
             " and cannot currently reach the blockchain to check. Your transaction was sent and is ",
             "probably fine; what stopped is this computer's ability to watch for it.\n\n",
             "Check this computer's internet connection. You can stop watching at any time — that ",
-            "cancels nothing, and the DIG menu will tell you how it went.",
+            "cancels nothing. DIG has stopped watching and does not check again on its own in this ",
+            "version; any Chia block explorer can tell you how it went.",
         );
         /// The control that keeps the watch running.
         pub const KEEP_WAITING: &str = "Keep waiting";
@@ -2155,6 +2157,14 @@ mod tests {
             (
                 "the lost-contact screen",
                 copy::did::OFFLINE_BODY.to_owned(),
+            ),
+            (
+                "the mint wait screen",
+                copy::wait::AFTER_WAITED.to_owned(),
+            ),
+            (
+                "the lost-contact wait screen",
+                copy::wait::AFTER_WAITED_OFFLINE.to_owned(),
             ),
         ]
     }
