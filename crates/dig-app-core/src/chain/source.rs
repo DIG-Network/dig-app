@@ -218,6 +218,21 @@ impl ChainSource for ControlChainSource {
     /// the unspent set would be a wrong answer wearing the shape of a right one — a caller looking
     /// for a spent coin would be told it does not exist. So the unserviceable half of the method is
     /// [`ChainReadError::Unsupported`], and the caller can see which capability it needs.
+    ///
+    /// # This read is narrowed to XCH, and that narrowing is a KNOWN divergence
+    ///
+    /// The trait says this answers ALL coins paying to `puzzle_hash`. `control.wallet.coins` is
+    /// scoped to exactly one asset, so this asks for [`Asset::Xch`] and can only ever answer XCH.
+    /// A puzzle hash holding only $DIG CAT coins therefore answers `vec![]`, which on this trait
+    /// means *no matching coins* — the same wrong-answer-in-the-shape-of-a-right-one this method
+    /// refuses `include_spent` for. It is tolerated (and NOT refused) only because the one caller
+    /// on the mint path selects XCH funding coins, so the narrowing costs no capability today;
+    /// widening it needs either a per-asset loop or a control method that is not scoped.
+    ///
+    /// The `"xch"` address HRP is likewise a mainnet-only assumption. There is no testnet build of
+    /// this app, and the control plane names no network, so `"txch"` has nowhere to come from.
+    ///
+    /// Both facts are recorded in [`crate::chain`]'s absence rule and in `SPEC.md` §3.1b.
     fn coin_records_by_puzzle_hash(
         &self,
         puzzle_hash: Bytes32,
