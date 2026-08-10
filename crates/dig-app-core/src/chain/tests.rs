@@ -17,7 +17,8 @@ use dig_node_control_interface::results::WalletReadSource;
 use std::time::Duration;
 
 use crate::chain::{
-    ChainReadError, ControlChainSource, ControlSpendPublisher, PublishFailure, MAX_CHILD_PAGES,
+    ChainReadError, ControlChainSource, ControlSpendPublisher, PublishFailure, CHILD_PAGE_SIZE,
+    MAX_CHILD_PAGES,
 };
 use crate::test_support::node::{Behaviour, ChainReply, FakeChain, FakeCoin, FakeNode, FakeSpend};
 
@@ -488,6 +489,121 @@ fn include_spent_is_refused_rather_than_answered_with_the_unspent_set() {
     assert_eq!(unspent[0].coin.amount, 900);
 }
 
+/// **A coin the node labelled with another asset is never handed back as an XCH funding coin.**
+///
+/// `control.wallet.coins` is scoped to ONE asset and the contract requires it to echo the concrete
+/// asset it was scoped to. The caller of this read picks funding coins, so a record labelled `dig`
+/// is either a node widening a scoped answer or mislabelling one — and the nearest wrong
+/// implementation deserializes it and returns it, after which a CAT coin is selected as if it held
+/// mojos.
+///
+/// The fixture varies ONE field. The same coin, at the same amount, is served twice: once as `xch`,
+/// which MUST be believed, and once as `dig`, which MUST NOT. Asserting only the refusal would be
+/// satisfied by a client that refused everything, and asserting only the acceptance is what the
+/// suite already did — which is why nothing caught this.
+#[test]
+fn a_coin_labelled_another_asset_is_refused_rather_than_read_as_xch() {
+    let truthful = FakeNode::serving_chain(ChainReply::of(FakeChain {
+        address_coins: vec![FakeCoin::confirmed("xch", 900)],
+        ..FakeChain::synced_at(PEAK)
+    }));
+    let believed = source(&truthful)
+        .coin_records_by_puzzle_hash(id(3), false)
+        .expect("an xch-labelled coin from an xch-scoped read is the ordinary case");
+    assert_eq!(believed.len(), 1);
+
+    let mislabelled = FakeNode::serving_chain(ChainReply::of(FakeChain {
+        address_coins: vec![FakeCoin::confirmed("dig", 900)],
+        ..FakeChain::synced_at(PEAK)
+    }));
+    let outcome = source(&mislabelled).coin_records_by_puzzle_hash(id(3), false);
+    assert!(
+        matches!(outcome, Err(ChainReadError::Malformed { .. })),
+        "an xch-scoped read may not answer a dig coin, got {outcome:?}"
+    );
+}
+
+/// **A page longer than the limit asked for is refused, not absorbed.**
+///
+/// [`MAX_CHILD_PAGES`] states its guarantee in ROWS — sixteen pages of the contract's 1000-row
+/// maximum — but the client only ever ASKED for that limit, and the reply was unchecked. The
+/// nearest wrong implementation collects whatever arrives, so a node ignoring the limit makes the
+/// documented bound arithmetic false while every existing test stays green (each of them serves
+/// short pages).
+///
+/// The fixture is sized FROM the contract's own maximum rather than a round number: exactly one row
+/// past [`CHILD_PAGE_SIZE`], served as a single COMPLETE page, so the refusal cannot be coming from
+/// the page-count bound or from an incomplete-page rule.
+#[test]
+fn a_page_longer_than_the_limit_asked_for_is_refused() {
+    let over: Vec<FakeCoin> = (1..=u64::from(CHILD_PAGE_SIZE) + 1)
+        .map(|n| FakeCoin::confirmed("xch", n))
+        .collect();
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_children(
+        &id_hex(70),
+        over,
+        0,
+    )));
+
+    let outcome = source(&node).coin_records_by_parent(id(70));
+
+    assert!(
+        matches!(outcome, Err(ChainReadError::Malformed { .. })),
+        "a page over the asked-for limit is unbelievable, got {outcome:?}"
+    );
+}
+
+/// **A walk that never finished leaves no freshness behind.**
+///
+/// `last_freshness` exists to answer *is this coin really unspent, or is that a stale replica* —
+/// so a value recorded by a read that then ERRORED answers a money question from a failure. The
+/// nearest wrong implementation notes freshness per PAGE, which is what this client did: sixteen
+/// good pages followed by the bound firing left freshness set by a call that returned `Err`.
+///
+/// The fixture varies ONE thing against a truthful control: whether the walk completes. Both walks
+/// read real pages from the same synced node, so the failing case cannot be passing merely because
+/// nothing was ever read — the control proves a completed walk DOES record freshness.
+#[test]
+fn a_failed_walk_records_no_freshness() {
+    let completed =
+        FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_children(
+            &id_hex(70),
+            vec![
+                FakeCoin::confirmed("xch", 31),
+                FakeCoin::confirmed("xch", 32),
+            ],
+            1,
+        )));
+    let source_of_completed = source(&completed);
+    source_of_completed
+        .coin_records_by_parent(id(70))
+        .expect("answered");
+    assert_eq!(
+        source_of_completed.last_freshness().map(|f| f.peak_height),
+        Some(Some(PEAK)),
+        "a completed walk reports the freshness it was answered at"
+    );
+
+    let endless = FakeNode::serving_chain(ChainReply::of(FakeChain {
+        endless_children: true,
+        ..FakeChain::synced_at(PEAK).with_children(
+            &id_hex(70),
+            vec![FakeCoin::confirmed("xch", 33)],
+            1,
+        )
+    }));
+    let source_of_endless = source(&endless);
+    assert!(
+        source_of_endless.coin_records_by_parent(id(70)).is_err(),
+        "the page bound must fire on an endless node"
+    );
+    assert_eq!(
+        source_of_endless.last_freshness(),
+        None,
+        "a walk that ended in an error has no freshness to report"
+    );
+}
+
 /// **A launcher the chain does not have is a genuine `Ok(None)` — proving the walk is SERVED.**
 ///
 /// Through 10.3.0 this method was a stated `Unsupported` placeholder, so the nearest wrong
@@ -788,6 +904,109 @@ fn a_duplicate_in_the_mempool_is_a_success_not_a_rejection() {
     assert_eq!(
         publisher.push_detailed(&a_bundle()),
         Ok(PushOutcome::AlreadyInMempool)
+    );
+}
+
+/// **Only the exact duplicate token is a duplicate; every other refusal keeps its rebuild.**
+///
+/// The duplicate reading is the one refusal that becomes `Ok(())` inside dig-account, so widening
+/// it silently converts a refusal into a reported success. Two nearest wrong implementations are
+/// ruled out here, and neither is hypothetical — both were in this file:
+///
+/// 1. **A substring match.** `rejection` is free-form prose the contract does not pin to a token
+///    vocabulary, and it comes from the node — which, if compromised, is attacker-controlled. The
+///    `prose_containing_the_token` row is a refusal that merely CONTAINS the duplicate token, and a
+///    `contains` implementation reports it as a success. This row fails against `contains`.
+/// 2. **Matching a sibling of the duplicate in chia's error enum.** `MEMPOOL_CONFLICT` (19) says
+///    ANOTHER mempool item spends one of these coins — a different bundle, whose remedy is a
+///    rebuild — and it is the one an ordinary concurrent send from a second wallet on the same seed
+///    actually produces. `DOUBLE_SPEND` (5) and `DOUBLE_SPEND_IN_FORK` (122) are refusals too.
+///
+/// The truthful control (the bare token) is kept in the table rather than left to the test above,
+/// so a client that classified NOTHING as a duplicate could not pass this test either.
+#[test]
+fn only_the_bare_duplicate_token_is_read_as_a_duplicate() {
+    use crate::test_support::node::BroadcastReply;
+
+    let cases: [(&str, PushOutcome); 6] = [
+        (
+            "ALREADY_INCLUDING_TRANSACTION",
+            PushOutcome::AlreadyInMempool,
+        ),
+        // Case and surrounding whitespace are the node's business, not a different fact.
+        (
+            "  already_including_transaction  ",
+            PushOutcome::AlreadyInMempool,
+        ),
+        (
+            "MEMPOOL_CONFLICT",
+            PushOutcome::Rejected {
+                reason: String::new(),
+            },
+        ),
+        (
+            "DOUBLE_SPEND",
+            PushOutcome::Rejected {
+                reason: String::new(),
+            },
+        ),
+        (
+            "DOUBLE_SPEND_IN_FORK",
+            PushOutcome::Rejected {
+                reason: String::new(),
+            },
+        ),
+        (
+            "refused: not ALREADY_INCLUDING_TRANSACTION, the fee is too low",
+            PushOutcome::Rejected {
+                reason: String::new(),
+            },
+        ),
+    ];
+
+    for (reason, expected) in cases {
+        let node = FakeNode::serving_broadcast(BroadcastReply::RefusedByMempool {
+            reason: reason.to_string(),
+        });
+        let outcome =
+            ControlSpendPublisher::with_token_reader(node.endpoint(), good_token, TEST_TIMEOUT)
+                .push_detailed(&a_bundle());
+
+        match (&expected, &outcome) {
+            (PushOutcome::AlreadyInMempool, Ok(PushOutcome::AlreadyInMempool)) => {}
+            (PushOutcome::Rejected { .. }, Ok(PushOutcome::Rejected { reason: got })) => {
+                assert_eq!(got, reason, "the node's own words must reach the caller");
+            }
+            _ => panic!("{reason:?} must be {expected:?}, got {outcome:?}"),
+        }
+    }
+}
+
+/// **A reply that is both accepted and refused is not read as "your money moved".**
+///
+/// The contract says `rejection` is null on acceptance, and the wire shape cannot enforce it. This
+/// module already refuses the mirror-image contradiction — `accepted: false` with no reason — on
+/// the grounds that nothing entitles a client to invent the missing half. The nearest wrong
+/// implementation here trusts `accepted` alone, and it errs in the worse direction of the two: it
+/// tells the caller a spend reached a mempool when the same reply says it was refused.
+#[test]
+fn a_reply_both_accepted_and_refused_is_not_an_acceptance() {
+    let node = FakeNode::serving_broadcast(
+        crate::test_support::node::BroadcastReply::AcceptedAndRefused {
+            reason: "MEMPOOL_CONFLICT".into(),
+        },
+    );
+
+    let outcome =
+        ControlSpendPublisher::with_token_reader(node.endpoint(), good_token, TEST_TIMEOUT)
+            .push_detailed(&a_bundle());
+
+    let Err(error) = outcome else {
+        panic!("a self-contradicting push reply is an unknown outcome: {outcome:?}");
+    };
+    assert!(
+        matches!(error, PublishFailure::NodeCouldNotAnswer { .. }),
+        "{error:?}"
     );
 }
 

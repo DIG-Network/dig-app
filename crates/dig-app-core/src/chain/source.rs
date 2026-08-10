@@ -245,6 +245,9 @@ impl ChainSource for ControlChainSource {
                  parameter; a spent coin must be read by its own id via control.wallet.coinById",
             ));
         }
+        // bech32m over a fixed 32-byte payload and a fixed HRP cannot fail, so this arm is
+        // unreachable in practice. It is kept rather than unwrapped because the alternative on a
+        // money path is a panic, and an error the caller can read costs one line.
         let address = Address::new(puzzle_hash, "xch".to_string())
             .encode()
             .map_err(|e| {
@@ -268,7 +271,24 @@ impl ChainSource for ControlChainSource {
         answer
             .coins
             .iter()
-            .map(|c| coin_record_from(method::COINS, c))
+            .map(|c| {
+                // The contract makes this the ONE read that must echo the concrete asset it was
+                // scoped to. Since the caller will treat these as XCH funding coins, a record
+                // labelled anything else -- or labelled nothing -- is a node widening or
+                // mislabelling a scoped answer, and believing it would spend a CAT coin as if it
+                // were XCH. An unbelievable answer, not an answer.
+                if c.asset != Some(Asset::Xch) {
+                    return Err(ChainReadError::malformed(
+                        method::COINS,
+                        format!(
+                            "control.wallet.coins was scoped to xch and answered a coin labelled \
+                             {:?}",
+                            c.asset
+                        ),
+                    ));
+                }
+                coin_record_from(method::COINS, c)
+            })
             .collect()
     }
 
@@ -293,15 +313,32 @@ impl ChainSource for ControlChainSource {
                     limit: Some(CHILD_PAGE_SIZE),
                 },
             )?;
-            self.note_freshness(Freshness {
-                source: page.source,
-                synced: page.synced,
-                peak_height: page.peak_height,
-            });
+            // [`MAX_CHILD_PAGES`] bounds this walk by reasoning about pages of at most
+            // [`CHILD_PAGE_SIZE`] rows -- but that is the limit ASKED for, and nothing on the way
+            // back enforces it. An over-long page makes the stated bound arithmetic false, so the
+            // page is refused rather than absorbed.
+            if page.coins.len() > CHILD_PAGE_SIZE as usize {
+                return Err(ChainReadError::malformed(
+                    method::COINS_BY_PARENT,
+                    format!(
+                        "the node answered {} children to a page limit of {CHILD_PAGE_SIZE}",
+                        page.coins.len()
+                    ),
+                ));
+            }
             for record in &page.coins {
                 children.push(coin_record_from(method::COINS_BY_PARENT, record)?);
             }
             if page.complete {
+                // Recorded HERE and nowhere else in the walk: freshness answers "is this coin
+                // really unspent, or is that a stale replica", so a value left behind by a walk
+                // that then failed on a later page would answer it from a read that returned
+                // `Err`. Only a completed walk has a freshness to report.
+                self.note_freshness(Freshness {
+                    source: page.source,
+                    synced: page.synced,
+                    peak_height: page.peak_height,
+                });
                 return Ok(children);
             }
             // An incomplete page with nothing to resume from is a contradiction the wire shape
