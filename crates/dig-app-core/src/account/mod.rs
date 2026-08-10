@@ -40,6 +40,7 @@ pub mod mint;
 pub mod money;
 pub mod password;
 pub mod phrase_vault;
+pub mod profile_session;
 pub mod recovery;
 pub mod registry;
 pub mod residency;
@@ -57,10 +58,14 @@ pub use dig_account::AccountId;
 /// names the default profile ([`ProfileIx::ROOT`](dig_account::ProfileIx::ROOT)) without depending on
 /// `dig-account` directly.
 ///
-/// A bare `ProfileIx` names ANY index in the HD tree. The subset the WALLET is active on is declared
-/// once in [`active_profile::ACTIVE_PROFILES`] and carried by [`active_profile::ActiveProfile`]
-/// (dig_ecosystem#2236) — prefer that type wherever an index selects the wallet's address.
+/// A bare `ProfileIx` names ANY index in the HD tree. Which index the app is actually deriving at is
+/// a LIVE question, answered only by [`profile_session::ProfileSession`] (dig_ecosystem#2398) — so
+/// prefer [`active_profile::WalletSlot`] or [`active_profile::MintTarget`] wherever an index selects a
+/// wallet or a mint, and never store the scalar.
 pub use dig_account::ProfileIx;
 
-/// The wallet's sole active derivation index, re-exported for the same reason as [`ProfileIx`].
-pub use active_profile::{is_active, ActiveProfile, ACTIVE_PROFILES};
+/// The live active-profile types, re-exported for the same reason as [`ProfileIx`].
+pub use active_profile::{ActiveSlot, MintTarget, WalletSlot};
+
+/// The live profile registry the whole app reads its active index from.
+pub use profile_session::{ProfileError, ProfileSession, ProfileSwitched};

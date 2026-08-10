@@ -84,6 +84,19 @@ pub(crate) struct PaneFacts {
     /// fact and is wrong precisely when a privileged change did not take
     /// ([`crate::auto_update::BeaconStatus`]).
     pub(crate) update: Option<crate::auto_update::BeaconStatus>,
+    /// This account's dig-profiles, or why they are not known (dig_ecosystem#2403).
+    ///
+    /// A [`ProfilesReading`](crate::profiles::ProfilesReading) and not a `Vec`, for the reason
+    /// [`hosted_stores`](Self::hosted_stores) is a reading: every real account's answer today is an
+    /// empty list, so *"you have no profiles"* and *"nobody has read them"* are the two states this
+    /// pane is most likely to confuse, and only one of them is a fact about the reader.
+    pub(crate) profiles: crate::profiles::ProfilesReading,
+    /// Whether a profile can be created here, and which missing piece stops it.
+    ///
+    /// A FACT, not a rule: it says what this build can do, and the pane renders the sentence for it.
+    /// It decides no verb, because there is no verb to decide — nothing in this shell can mint a
+    /// profile (see [`crate::tray_menu::TrayAction::AboutProfiles`]).
+    pub(crate) profile_creation: crate::profiles::ProfileCreation,
 }
 
 impl PaneFacts {
@@ -108,6 +121,8 @@ impl PaneFacts {
             installed_apps: view.installed_apps.clone(),
             version: env!("CARGO_PKG_VERSION"),
             update: view.update,
+            profiles: view.profiles.clone(),
+            profile_creation: view.profile_creation,
         }
     }
 

@@ -3,7 +3,7 @@
 //! # The one rule this module exists to enforce
 //!
 //! A DID is recorded **only from evidence of an actual on-chain mint** — never inferred from a key.
-//! [`crate::account::boot::root_profile_id`] returns the seed-derived identity public key precisely
+//! [`crate::account::boot::account_scoped_id`] returns the seed-derived identity public key precisely
 //! *because* nothing has been minted, so a key is exactly the thing that must not be mistaken for a DID.
 //!
 //! That rule is held by the TYPES rather than by discipline: a [`DidRecord`] cannot be built without a

@@ -23,7 +23,7 @@
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, NativeConfirmer, NoticePrompt,
 };
-use crate::loopback::PairedAppsControl;
+use crate::loopback::{PairedAppsControl, RevokeOutcome};
 use crate::pairing::PairedApp;
 use crate::pairing_code::{PairingCode, CODE_TTL_SECS};
 use crate::sealer::ProfileSealer;
@@ -72,8 +72,8 @@ pub trait PairedApps {
     fn issue_code(&self, now: u64) -> PairingCode;
     /// Every app currently paired, oldest first.
     fn list(&self) -> Vec<PairedApp>;
-    /// Revoke one app; `true` if it was paired.
-    fn revoke(&self, pairing_id: &str) -> bool;
+    /// Revoke one app, reporting whether it was paired and whether the revocation reached disk.
+    fn revoke(&self, pairing_id: &str) -> RevokeOutcome;
     /// Destroy any outstanding code. Used when the window that was to display one could not be drawn:
     /// a secret nobody has seen must not sit there for its full lifetime waiting to be guessed at.
     fn cancel_code(&self);
@@ -86,7 +86,7 @@ impl<S: ProfileSealer> PairedApps for PairedAppsControl<S> {
     fn list(&self) -> Vec<PairedApp> {
         PairedAppsControl::list(self)
     }
-    fn revoke(&self, pairing_id: &str) -> bool {
+    fn revoke(&self, pairing_id: &str) -> RevokeOutcome {
         PairedAppsControl::revoke(self, pairing_id)
     }
     fn cancel_code(&self) {
@@ -231,7 +231,17 @@ pub fn manage_paired_apps(
             Choice::NextPage => page = (page + 1) % pages,
             Choice::Revoke(index) => {
                 let app = &shown[index];
-                if confirm_revoke(confirmer, app) && apps.revoke(&app.pairing_id) {
+                if !confirm_revoke(confirmer, app) {
+                    continue;
+                }
+                let outcome = apps.revoke(&app.pairing_id);
+                if outcome == RevokeOutcome::RevokedForThisRunOnly {
+                    // The confirmation just promised "not at the next restart", and that is now
+                    // untrue. Correcting it here is the whole point of carrying the durability bit
+                    // out of the store (dig_ecosystem#2398 SEC-F1).
+                    warn_revoke_is_not_durable(confirmer, app);
+                }
+                if outcome.lost_access() {
                     revoked += 1;
                     // Any page number may now be past the end; the top of the loop re-clamps it.
                     page = 0;
@@ -271,6 +281,38 @@ fn confirm_revoke(confirmer: &dyn NativeConfirmer, app: &PairedApp) -> bool {
         }),
         ConfirmDecision::Approve
     )
+}
+
+/// Take back the confirmation's promise when the revoke could not be written down.
+///
+/// The app HAS lost access for this run, so this is not a failure notice — it is the difference between
+/// "gone" and "gone until you restart DIG", and only the person can decide what to do about it. It names
+/// the one action that makes it stick, because a notice that describes a problem without an answer is a
+/// dead end.
+///
+/// The named action has to be one the user can actually TAKE. It used to be "unlock and remove it
+/// again", which is impossible from here: the live pairing is already dropped, so the row is gone from
+/// the list this window shows and there is nothing left to remove. Following that advice shows an empty
+/// list, which reads as confirmation rather than as the failure it is. Restarting is the step that
+/// works, because `restore` brings the pairing back at the next start — which is precisely the problem
+/// — and it is then removable in the ordinary way.
+fn warn_revoke_is_not_durable(confirmer: &dyn NativeConfirmer, app: &PairedApp) {
+    let body = format!(
+        "\"{}\" has lost access right now, and cannot use your DIG Account again while DIG is \
+         running.\n\n\
+         DIG could not write the change down, because your account is locked. If you close DIG now, \
+         the app gets its access back at the next start.\n\n\
+         To remove it for good: close DIG and open it again, unlock your account, then remove the \
+         app from this list. It reappears here when DIG restarts.",
+        display_name(app),
+    );
+    confirmer.show_notice(&NoticePrompt {
+        title: "DIG - Remove an app's access",
+        heading: "Removed for now, but not written down",
+        body: &body,
+        acknowledge: "I understand",
+        identifier: None,
+    });
 }
 
 /// What the user typed on a management page.
@@ -432,11 +474,16 @@ mod tests {
     }
 
     /// A double for the live surface, recording what the journey did to it.
+    ///
+    /// `durable` is a separate dial from what `list` holds on purpose: "the app was paired" and "the
+    /// revoke reached disk" are INDEPENDENT facts, and a double that could only answer the first could
+    /// not express the case where a revoke takes effect now and comes back at the next start.
     struct FakeApps {
         listed: RefCell<Vec<PairedApp>>,
         revoked: RefCell<Vec<String>>,
         issued: RefCell<Vec<u64>>,
         cancelled: RefCell<bool>,
+        durable: bool,
     }
 
     impl FakeApps {
@@ -446,6 +493,16 @@ mod tests {
                 revoked: RefCell::new(Vec::new()),
                 issued: RefCell::new(Vec::new()),
                 cancelled: RefCell::new(false),
+                durable: true,
+            }
+        }
+
+        /// The same surface on a locked account: a revoke drops the live pairing but cannot delete the
+        /// sealed record.
+        fn that_cannot_write(listed: Vec<PairedApp>) -> Self {
+            Self {
+                durable: false,
+                ..Self::with(listed)
             }
         }
     }
@@ -461,12 +518,16 @@ mod tests {
         fn cancel_code(&self) {
             *self.cancelled.borrow_mut() = true;
         }
-        fn revoke(&self, pairing_id: &str) -> bool {
+        fn revoke(&self, pairing_id: &str) -> RevokeOutcome {
             self.revoked.borrow_mut().push(pairing_id.to_string());
             let mut listed = self.listed.borrow_mut();
             let before = listed.len();
             listed.retain(|a| a.pairing_id != pairing_id);
-            listed.len() != before
+            match (listed.len() != before, self.durable) {
+                (false, _) => RevokeOutcome::NotPaired,
+                (true, true) => RevokeOutcome::Revoked,
+                (true, false) => RevokeOutcome::RevokedForThisRunOnly,
+            }
         }
     }
 
@@ -613,6 +674,66 @@ mod tests {
             ManageOutcome::Reviewed { revoked: 1 }
         );
         assert_eq!(*apps.revoked.borrow(), vec!["pairing-app1".to_string()]);
+    }
+
+    /// **A revoke that could not be written down takes back the promise it just made.**
+    ///
+    /// `confirm_revoke` says "not at the next restart", and on a locked account that is false — the
+    /// sealed record survives and the app is restored at the next start (dig_ecosystem#2398 SEC-F1).
+    /// The app HAS lost access for this run, so the count still moves; what must change is that the
+    /// person is told, and told what makes it stick.
+    ///
+    /// The control is the identical journey against a store that CAN write: it must draw NO extra
+    /// window, so this cannot pass by warning on every revoke.
+    #[test]
+    fn a_revoke_that_could_not_be_written_down_says_so_instead_of_leaving_the_promise_standing() {
+        let notices_after = |apps: &FakeApps| {
+            let user = ScriptedUser::typing(vec!["1", ""]).approving_every_revoke();
+            let outcome = manage_paired_apps(&user, apps, NOW);
+            let notices = user.notices.lock().unwrap().clone();
+            (outcome, notices)
+        };
+
+        let locked = FakeApps::that_cannot_write(apps(2));
+        let (outcome, notices) = notices_after(&locked);
+        assert_eq!(
+            ManageOutcome::Reviewed { revoked: 1 },
+            outcome,
+            "the app did lose access for this run, so the count still moves"
+        );
+        let warning = notices
+            .iter()
+            .find(|notice| notice.contains("not written down"))
+            .expect("the person must be told the revoke did not last");
+
+        // The remedy has to be one the user can carry out FROM HERE, and this is what makes that a
+        // real constraint rather than a wording preference: the revoke already dropped the live
+        // pairing, so the row is gone. "Unlock and remove it again" therefore sends the person to a
+        // list the app is no longer in, where an empty result reads as confirmation.
+        let removed = locked.revoked.borrow().clone();
+        assert_eq!(1, removed.len(), "exactly one revoke was asked for");
+        assert!(
+            !locked.list().iter().any(|app| app.pairing_id == removed[0]),
+            "the fixture must reproduce the vanishing row, or it cannot see an impossible remedy"
+        );
+        assert!(
+            warning.contains("open it again"),
+            "the remedy must be the one that works — restart, then remove it: {warning}"
+        );
+        assert!(
+            warning.contains("reappears"),
+            "and must say the app comes back, or restarting looks like giving up: {warning}"
+        );
+
+        let unlocked = FakeApps::with(apps(2));
+        let (outcome, notices) = notices_after(&unlocked);
+        assert_eq!(ManageOutcome::Reviewed { revoked: 1 }, outcome);
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice.contains("not written down")),
+            "control: a durable revoke must draw no such window — {notices:?}"
+        );
     }
 
     #[test]

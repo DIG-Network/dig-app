@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
+use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{
     AuthFailure, Capability, CapabilitySet, NewPairing, PairedApp, PairingAuthority, PairingStore,
@@ -244,17 +245,34 @@ struct IdentityUnsealParams {
 }
 
 /// The connect-handle the app returns to a dapp on a successful `connect.request` (§5.6.4): the active
-/// profile plus the addresses/pubkeys the `window.chia` connect contract exposes. Computed once by the
-/// wiring layer (from the active profile's identity + wallet) and handed to the router, so the router
-/// stays decoupled from the wallet.
+/// profile plus the addresses/pubkeys the `window.chia` connect contract exposes. Supplied by the
+/// wiring layer (from the active profile's identity + wallet), so the router stays decoupled from the
+/// wallet.
+///
+/// # Every field is read at the moment it is advertised
+///
+/// This handle names an identity, and the router that holds it is moved onto a serving thread at
+/// boot. Captured values would go on advertising the DID and signing key of whichever profile was
+/// active THEN, while the live signer beside them signed for the profile active NOW — a false
+/// DID→key binding published to every paired dApp. Hence [`Live`]: each field answers for the
+/// current profile, or ([`LiveDid`]) reports that no profile is active at all.
 #[derive(Debug, Clone)]
 pub struct ProfileConnectInfo {
-    /// The active profile's DID.
-    pub profile_did: String,
+    /// The active profile's DID, or `None` once the account is locked.
+    pub profile_did: LiveDid,
     /// The wallet receive addresses (`xch1…`) exposed to a connected dapp.
-    pub addresses: Vec<String>,
-    /// The public keys (hex) exposed to a connected dapp.
-    pub pubkeys: Vec<String>,
+    pub addresses: Live<Vec<String>>,
+}
+
+impl ProfileConnectInfo {
+    /// A handle whose values cannot move — a fixture, or a host with a single fixed profile.
+    /// Production builds the fields with [`Live::read`] instead, so they follow a profile switch.
+    pub fn fixed(profile_did: impl Into<String>, addresses: Vec<String>) -> Self {
+        Self {
+            profile_did: profile_did.into().into(),
+            addresses: Live::fixed(addresses),
+        }
+    }
 }
 
 /// The session-lock re-auth gate the sign path consults immediately before it uses the identity key
@@ -536,6 +554,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
         };
         let request = base.with_capabilities(granted.clone());
 
+        // Whose consent this is, read BEFORE the prompt: the confirm names the app and not a profile,
+        // so the answer belongs to whoever is active as it is read, not to whoever is active when the
+        // token is minted. See `ConsentedProfile`.
+        let consent = self.pairings.consent_now();
         let decision = self.confirmer.confirm_pair(&PairPrompt {
             ext_id: &params.ext_id,
             ext_label: params.ext_label.as_deref(),
@@ -544,7 +566,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, code);
         }
 
-        match self.pairings.pair(&request, now_epoch_secs()) {
+        match self.pairings.pair(&consent, &request, now_epoch_secs()) {
             Ok(outcome) => {
                 // Persist the sealed record so the pairing survives a restart (#958). Best-effort:
                 // a failed write is logged inside the store and never fails the pairing.
@@ -566,8 +588,12 @@ impl<S: ProfileSealer> FrameRouter<S> {
                     }),
                 )
             }
+            // A profile switch landed between the confirm and the mint, so nobody here has agreed to
+            // this pairing: report it as not granted, which is what tells a well-behaved caller to ask
+            // again rather than to retry an unlock it does not need.
+            Err(ConsentError::ProfileMoved) => error(id, SignErrorCode::PairDenied),
             // Sealing fails only when the active profile is locked — surface it as LOCKED.
-            Err(_) => error(id, SignErrorCode::Locked),
+            Err(ConsentError::Seal(_)) => error(id, SignErrorCode::Locked),
         }
     }
 
@@ -605,9 +631,15 @@ impl<S: ProfileSealer> FrameRouter<S> {
         };
 
         if self.whitelist.is_whitelisted(&params.origin) {
-            return ok(id, self.connect_result());
+            return match self.connect_handle() {
+                Some(handle) => ok(id, handle),
+                None => error(id, SignErrorCode::Locked),
+            };
         }
 
+        // Read before the prompt, for the reason `handle_pair` gives: the grant this returns is durable
+        // authority, and it must belong to the profile whose owner approved it.
+        let consent = self.whitelist.consent_now();
         let decision = self.confirmer.confirm_connect(&ConnectPrompt {
             origin: &params.origin,
             dapp_name: params.dapp_name.as_deref(),
@@ -615,6 +647,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         match decision {
             ConfirmDecision::Approve => {
                 match self.whitelist.grant(
+                    &consent,
                     &params.origin,
                     params.requested_permissions,
                     now_epoch_secs(),
@@ -623,10 +656,16 @@ impl<S: ProfileSealer> FrameRouter<S> {
                         // Persist the sealed grant so the connected origin survives a restart (#958).
                         self.persist
                             .persist_whitelist(&params.origin, &outcome.sealed_record);
-                        ok(id, self.connect_result())
+                        match self.connect_handle() {
+                            Some(handle) => ok(id, handle),
+                            None => error(id, SignErrorCode::Locked),
+                        }
                     }
+                    // A switch landed between the confirm and the grant: the consent given does not
+                    // belong to the profile now here, so nothing is recorded under either.
+                    Err(ConsentError::ProfileMoved) => error(id, SignErrorCode::ConnectDenied),
                     // Sealing fails only when the active profile is locked — surface it as LOCKED.
-                    Err(_) => error(id, SignErrorCode::Locked),
+                    Err(ConsentError::Seal(_)) => error(id, SignErrorCode::Locked),
                 }
             }
             ConfirmDecision::Deny => error(id, SignErrorCode::ConnectDenied),
@@ -637,14 +676,18 @@ impl<S: ProfileSealer> FrameRouter<S> {
 
     /// The `connect.revoke` handler (§5.6.4): drop the origin's whitelist entry, returning it to
     /// `CONNECT_REQUIRED`. Idempotent — revoking an unknown origin still succeeds.
+    ///
+    /// A revoke succeeds only when it is DURABLE. The at-rest removal is attempted unconditionally,
+    /// because it is idempotent and because the live entry may already be gone from an earlier attempt
+    /// that could not reach disk; if it still cannot, the caller is refused `LOCKED` rather than told
+    /// `revoked: true` about a grant that `restore` would hand back at the next boot (#2398 SEC-F1).
     fn handle_connect_revoke(&self, id: &Value, params: &Value) -> Value {
         let Ok(params) = serde_json::from_value::<ConnectRevokeParams>(params.clone()) else {
             return error(id, SignErrorCode::ConnectDenied);
         };
         let revoked = self.whitelist.revoke(&params.origin);
-        if revoked {
-            // Drop the at-rest record too, so the revocation survives a restart (#958).
-            self.persist.remove_whitelist(&params.origin);
+        if !self.persist.remove_whitelist(&params.origin) {
+            return error(id, SignErrorCode::Locked);
         }
         ok(id, json!({ "revoked": revoked }))
     }
@@ -692,6 +735,15 @@ impl<S: ProfileSealer> FrameRouter<S> {
         if !self.reauth_gate.authorize_sign() {
             return error(id, SignErrorCode::Locked);
         }
+        // Re-decide the connect gate AFTER the re-auth, because `authorize_sign` is a STATE TRANSITION
+        // and not a predicate: it unlocks the account into whichever profile is active by the time it
+        // runs, and a profile switch needs no unlock to get there (`SetActiveProfile` reads the
+        // registry from disk). Everything decided before that call was decided about a different
+        // profile than the one about to hold the key, so the gate is asked again against the profile
+        // that will actually sign (dig_ecosystem#2398).
+        if !self.whitelist.is_whitelisted(&gate.origin) {
+            return error(id, SignErrorCode::ConnectRequired);
+        }
         // Sign fallibly: a locked profile (no identity in the session) yields `None`, which MUST become
         // a `LOCKED` error — NEVER a success envelope carrying a bogus/all-zero signature (SPEC §5.6.7).
         match self.signer.try_sign(&message) {
@@ -731,10 +783,19 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, SignErrorCode::Locked);
         };
 
+        // The DID is read HERE, beside the signature, rather than captured at boot — so an attestation
+        // binds the DID of the profile active at signing time, not the one active when this router was
+        // assembled. The two are still separate reads: a switch landing between them binds the previous
+        // profile's DID to the new profile's key, and only a single acquisition serving both could rule
+        // that out. No active profile ⇒ LOCKED, not a null DID.
+        let Some(did) = self.connect_info.profile_did.get() else {
+            return error(id, SignErrorCode::Locked);
+        };
+
         ok(
             id,
             json!({
-                "did": self.connect_info.profile_did,
+                "did": did,
                 "sealing_public_key_b64": BASE64.encode(sealing_pubkey),
                 "attestation_b64": BASE64.encode(signature.as_bytes()),
             }),
@@ -768,8 +829,14 @@ impl<S: ProfileSealer> FrameRouter<S> {
         // The plaintext buffer is dropped at the end of this scope — never stored on the router.
         let plaintext = zeroize::Zeroizing::new(plaintext);
 
+        // The sender claim is read at seal time for the same reason the attestation's DID is: it must
+        // name the profile whose key the recipient will see, not the one that was active at boot.
+        let Some(sender_did) = self.connect_info.profile_did.get() else {
+            return error(id, SignErrorCode::Locked);
+        };
+
         match digchat::seal(&SealInputs {
-            sender_did: &self.connect_info.profile_did,
+            sender_did: &sender_did,
             recipient_did: &params.recipient_did,
             recipient_sealing_public_key,
             plaintext: &plaintext,
@@ -813,14 +880,25 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// The `{ granted, profile_did, addresses[], pubkeys[] }` handle returned on a successful connect.
-    fn connect_result(&self) -> Value {
-        json!({
+    /// The `{ granted, profile_did, addresses[], pubkeys[] }` handle returned on a successful
+    /// connect, read from the profile active at THIS instant — or `None` when no profile is active,
+    /// which the caller surfaces as `LOCKED`.
+    ///
+    /// The three values are read together — adjacently, at the moment the handle is built — so the
+    /// window in which a profile switch could land between them is as narrow as this code can make it.
+    /// They remain three independent reads, so it is a narrowing and not an invariant: a switch that
+    /// interleaves them still yields a handle naming one profile's DID beside another's address. The
+    /// fix for that is one acquisition serving all three, which the residency does not yet offer.
+    fn connect_handle(&self) -> Option<Value> {
+        let profile_did = self.connect_info.profile_did.get()?;
+        Some(json!({
             "granted": true,
-            "profile_did": self.connect_info.profile_did,
-            "addresses": self.connect_info.addresses,
-            "pubkeys": self.connect_info.pubkeys,
-        })
+            "profile_did": profile_did,
+            "addresses": self.connect_info.addresses.get(),
+            // Read from the SIGNER, not from the handle: the key advertised here is then literally
+            // the key that will sign, so the two cannot name different profiles.
+            "pubkeys": [self.signer.signing_public_key_hex()],
+        }))
     }
 
     /// Verify a frame's `auth` object against the pairing store, mapping [`AuthFailure`] to the wire
@@ -842,8 +920,14 @@ impl<S: ProfileSealer> FrameRouter<S> {
                 AuthFailure::Replay => SignErrorCode::AuthReplay,
             })?;
         // The nonce advanced — persist the new high-water mark so a frame captured before a restart
-        // cannot replay into the next session (#956). Best-effort: a lost write only risks a one-frame
-        // replay window across a crash, and every sign still re-gates on the native confirm.
+        // cannot replay into the next session (#956). Best-effort, and the size of "best" stated
+        // exactly: `write_nonce_ledger` skips when no profile is active, but a locked account never
+        // reaches here at all (`verify_frame` refuses every frame as `NotPaired` before the mark
+        // moves), so no accepted frame's mark is lost to a lock. What remains is a write that fails or
+        // is never made durable — a full disk, a crash before flush — after which a restart rewinds the
+        // mark to the last successful write and the frames accepted since it become replayable.
+        // Tracked as dig_ecosystem#2546. Every sign still re-gates on the native confirm, which is what
+        // keeps this a hardening gap rather than a signing bypass.
         self.persist.persist_nonce(&auth.pairing_id, auth.nonce);
         // Only an AUTHENTICATED frame moves "last seen", so the management window cannot be made to
         // show a revoked or impersonated app as recently active.
@@ -945,17 +1029,48 @@ impl<S: ProfileSealer> PairedAppsControl<S> {
     }
 
     /// Revoke `pairing_id`: drop the live pairing FIRST so the next frame from that app fails
-    /// immediately, then delete its at-rest record so the revocation survives a restart. Returns
-    /// whether an app was actually paired under that id.
+    /// immediately, then delete its at-rest record so the revocation survives a restart.
     ///
     /// The order matters. Deleting the record first would leave a window — however short — in which
     /// the app is still authenticated on a channel the user has been told is closed.
-    pub fn revoke(&self, pairing_id: &str) -> bool {
+    ///
+    /// The at-rest removal is attempted whether or not a live pairing was found, because it is
+    /// idempotent and an earlier attempt may have dropped the live entry without reaching disk. Its
+    /// result is reported rather than swallowed, so the tray can only promise what actually happened
+    /// (#2398 SEC-F1).
+    pub fn revoke(&self, pairing_id: &str) -> RevokeOutcome {
         let was_paired = self.pairings.unpair(pairing_id);
-        if was_paired {
-            self.persist.remove_pairing(pairing_id);
+        let durable = self.persist.remove_pairing(pairing_id);
+        match (was_paired, durable) {
+            (false, _) => RevokeOutcome::NotPaired,
+            (true, true) => RevokeOutcome::Revoked,
+            (true, false) => RevokeOutcome::RevokedForThisRunOnly,
         }
-        was_paired
+    }
+}
+
+/// What came of revoking a paired app — whether anything was paired, and whether the revocation
+/// reached disk.
+///
+/// The durability distinction is user-visible on purpose. The tray tells a person their app "will lose
+/// access immediately - not at the next restart", and that sentence is only true when the sealed record
+/// is gone; a revoke taken while the account is locked cannot reach the profile's directory, so it must
+/// say so instead of quietly meaning the opposite (dig_ecosystem#2398 SEC-F1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// No app was paired under that id. Nothing live to drop and nothing at rest to return.
+    NotPaired,
+    /// Gone now and gone after a restart: the live pairing was dropped and its sealed record deleted.
+    Revoked,
+    /// The live pairing was dropped — the app is refused from its very next frame — but the sealed
+    /// record could not be deleted, so it would be restored at the next start.
+    RevokedForThisRunOnly,
+}
+
+impl RevokeOutcome {
+    /// Whether an app was paired and has now lost access, durably or not.
+    pub fn lost_access(self) -> bool {
+        matches!(self, Self::Revoked | Self::RevokedForThisRunOnly)
     }
 }
 
@@ -1015,6 +1130,7 @@ mod tests {
     use crate::account::sealer::AccountSealer;
     use crate::confirm::HeadlessConfirmer;
     use crate::pairing::{frame_mac_input, PairingScope, PairingStore};
+    use crate::sealer::SealError;
     use crate::test_support::{test_residency, test_sealer};
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
@@ -1071,12 +1187,8 @@ mod tests {
     fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let signer = test_residency().signer();
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -1102,11 +1214,7 @@ mod tests {
     ) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![signer.signing_public_key_hex()],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -1218,8 +1326,8 @@ mod tests {
 
     /// Pair, then connect `origin` through an approving router, returning `(pairing_id, token)` with
     /// the origin now whitelisted. Uses fresh monotonic nonces `n(1)` (pair carries none) + `n(1)`.
-    fn pair_and_connect(
-        router: &FrameRouter<AccountSealer>,
+    fn pair_and_connect<S: ProfileSealer>(
+        router: &FrameRouter<S>,
         origin: &str,
         nonce: u64,
     ) -> (String, String) {
@@ -1241,7 +1349,7 @@ mod tests {
     }
 
     /// Pair through the router (approving confirmer) and return `(pairing_id, channel_token_b64)`.
-    fn pair(router: &FrameRouter<AccountSealer>) -> (String, String) {
+    fn pair<S: ProfileSealer>(router: &FrameRouter<S>) -> (String, String) {
         let resp = router.handle(&request(
             "pair.begin",
             json!({ "ext_id": EXT, "requested_at": 1 }),
@@ -1554,7 +1662,7 @@ mod tests {
         ));
         assert_eq!(before["result"]["granted"], true);
 
-        assert!(control.revoke(&doomed_id));
+        assert_eq!(RevokeOutcome::Revoked, control.revoke(&doomed_id));
 
         let after = router.handle(&authed_request(
             "connect.request",
@@ -1579,7 +1687,11 @@ mod tests {
             untouched["result"]["granted"], true,
             "revoking one app must not disturb another"
         );
-        assert!(!control.revoke(&doomed_id), "revoking twice is idempotent");
+        assert_eq!(
+            RevokeOutcome::NotPaired,
+            control.revoke(&doomed_id),
+            "revoking twice is idempotent"
+        );
     }
 
     #[test]
@@ -1686,6 +1798,101 @@ mod tests {
         assert!(resp["result"]["pubkeys"][0].is_string());
         // The handle carries the wallet receive addresses the wiring layer populated (#961).
         assert_eq!(resp["result"]["addresses"][0], "xch1testaddress");
+    }
+
+    /// **A RETAINED router advertises the profile that is active NOW, not the one it was built with.**
+    ///
+    /// The router is moved onto the sign-service thread at boot and never rebuilt, so a connect handle
+    /// built from a captured DID goes on naming the boot-time profile while the signer beside it signs
+    /// with the current profile's key — a DID-to-key binding published to every connected dapp that is
+    /// false about one half or the other.
+    ///
+    /// The fixture moves ONE thing: the DID its source answers with. The pairing, the signer, the
+    /// addresses and the origin are all held constant, so a handle that reported the new DID for any
+    /// reason other than re-reading its source would have to invent it. Two connects through the SAME
+    /// router are what make it a retention test rather than a construction test.
+    #[test]
+    fn a_retained_connect_handle_reports_the_profile_active_at_the_moment_it_answers() {
+        const AFTER: &str = "did:chia:the-profile-switched-to";
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let router = {
+            let moved = Arc::clone(&moved);
+            let signer = test_residency().signer();
+            FrameRouter::new(
+                PairingStore::new(test_sealer(DID), DID),
+                WhitelistStore::new(test_sealer(DID), DID),
+                Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+                Box::new(signer),
+                ProfileConnectInfo {
+                    profile_did: LiveDid::read(move || {
+                        Some(match moved.load(std::sync::atomic::Ordering::SeqCst) {
+                            true => AFTER.to_owned(),
+                            false => DID.to_owned(),
+                        })
+                    }),
+                    addresses: Live::fixed(vec!["xch1testaddress".to_string()]),
+                },
+                [EXT.to_string()],
+            )
+        };
+
+        let (pairing_id, token) = pair(&router);
+        let connect = |nonce: u64| {
+            let params = json!({ "origin": "https://dapp.example" });
+            let auth = signed_auth(&token, &pairing_id, n(nonce), "connect.request", &params);
+            router.handle(&request("connect.request", params, Some(auth)))
+        };
+
+        let before = connect(1);
+        assert_eq!(
+            before["result"]["profile_did"], DID,
+            "control: the handle names the profile in force when it was asked"
+        );
+
+        moved.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let after = connect(2);
+        assert_eq!(
+            after["result"]["profile_did"], AFTER,
+            "the retained router advertised the profile it was BUILT with, not the one now active"
+        );
+        assert_eq!(
+            before["result"]["pubkeys"], after["result"]["pubkeys"],
+            "the advertised key is read from the signer, so an unchanged signer must advertise an              unchanged key — otherwise this test could pass on a handle that changed at random"
+        );
+    }
+
+    /// **A connect handle with no active profile is refused, never advertised as a null DID.**
+    ///
+    /// A locked account has no DID. Emitting `"profile_did": null` would hand a dapp a connect handle
+    /// that names no identity while reporting `granted: true`; `LOCKED` is the honest answer, and it
+    /// is the one the rest of this channel already gives for the same condition.
+    #[test]
+    fn a_connect_with_no_active_profile_is_locked_rather_than_a_null_handle() {
+        let signer = test_residency().signer();
+        let router = FrameRouter::new(
+            PairingStore::new(test_sealer(DID), DID),
+            WhitelistStore::new(test_sealer(DID), DID),
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(signer),
+            ProfileConnectInfo {
+                profile_did: LiveDid::read(|| None),
+                addresses: Live::fixed(vec![]),
+            },
+            [EXT.to_string()],
+        );
+
+        let (pairing_id, token) = pair(&router);
+        let params = json!({ "origin": "https://dapp.example" });
+        let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+        let resp = router.handle(&request("connect.request", params, Some(auth)));
+
+        assert_eq!(resp["error"]["message"], "LOCKED");
+        assert!(
+            resp["result"].is_null(),
+            "a refused connect must carry no handle at all: {resp}"
+        );
     }
 
     #[test]
@@ -1803,6 +2010,418 @@ mod tests {
         assert!(
             resp["result"]["signature_b64"].is_string(),
             "an authorized re-auth still yields a signature"
+        );
+    }
+
+    /// The DID the stores read as "the profile now active", switchable mid-test.
+    ///
+    /// This is the only moving part a lock or a profile switch actually presents to a running router:
+    /// the stores keep their entries, and the answer to "whose are they?" changes underneath them.
+    #[derive(Clone)]
+    struct ActiveProfile(Arc<std::sync::Mutex<Option<String>>>);
+
+    impl ActiveProfile {
+        fn starting_at(did: &str) -> Self {
+            Self(Arc::new(std::sync::Mutex::new(Some(did.to_owned()))))
+        }
+
+        /// `None` is a LOCKED account — which a profile switch can move underneath, because
+        /// `SetActiveProfile` reads the registry from disk and needs no unlock.
+        fn set(&self, did: Option<&str>) {
+            *self.0.lock().expect("test mutex") = did.map(str::to_owned);
+        }
+
+        fn live(&self) -> crate::live::LiveDid {
+            let source = Arc::clone(&self.0);
+            crate::live::LiveDid::read(move || source.lock().expect("test mutex").clone())
+        }
+    }
+
+    /// A sealer whose DEK follows the ACTIVE profile, as the production
+    /// [`ResidencySealer`](crate::account::residency::AccountResidency::sealer) does: it resolves the
+    /// profile in effect at each call and derives that profile's key, ignoring the advisory DID
+    /// argument the seam passes.
+    ///
+    /// A fixture pinning ONE DEK while feeding the stores a MOVING DID decouples the two halves that
+    /// production keeps together, and a decoupled fixture cannot express the failure this module is
+    /// about: a record sealed under one profile's key being opened while another is active would
+    /// simply succeed, so no test here could ever fail on it.
+    #[derive(Clone)]
+    struct LiveDekSealer(ActiveProfile);
+
+    impl LiveDekSealer {
+        /// The sealer for the profile active RIGHT NOW, or a fail-closed error when the account is
+        /// locked and there is no profile whose key this could be.
+        fn now(&self) -> Result<AccountSealer, SealError> {
+            match self.0 .0.lock().expect("test mutex").as_deref() {
+                Some(did) => Ok(test_sealer(did)),
+                None => Err(SealError::Seal("no active profile".to_string())),
+            }
+        }
+    }
+
+    impl ProfileSealer for LiveDekSealer {
+        fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+            self.now()?.seal(profile_did, plaintext)
+        }
+
+        fn open(
+            &self,
+            profile_did: &str,
+            ciphertext: &[u8],
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, SealError> {
+            self.now()?.open(profile_did, ciphertext)
+        }
+    }
+
+    /// An approving router whose pairing + whitelist stores read `active` live, so a lock or a switch
+    /// lands underneath it exactly as it does in the running app — DID *and* DEK, because
+    /// [`LiveDekSealer`] moves the key with the profile the way production does.
+    fn router_on(
+        active: &ActiveProfile,
+        gate: Arc<dyn SignReauthGate>,
+    ) -> FrameRouter<LiveDekSealer> {
+        let pairings = PairingStore::new(LiveDekSealer(active.clone()), active.live());
+        let whitelist = WhitelistStore::new(LiveDekSealer(active.clone()), active.live());
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(test_residency().signer()),
+            ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]),
+            [EXT.to_string()],
+        )
+        .with_reauth_gate(gate)
+    }
+
+    /// The re-auth gate as it really behaves: it does not ANSWER a question, it UNLOCKS the account —
+    /// into whichever profile is active when it runs, which is what makes it a state transition.
+    struct ReauthUnlocksInto {
+        active: ActiveProfile,
+        profile: String,
+    }
+
+    impl SignReauthGate for ReauthUnlocksInto {
+        fn authorize_sign(&self) -> bool {
+            self.active.set(Some(&self.profile));
+            true
+        }
+    }
+
+    /// **A locked account authorizes no sign, however it was connected.**
+    ///
+    /// A lock is not "the same profile, briefly quiet": the active profile can be changed while locked
+    /// (`SetActiveProfile` reads the registry from disk), and the sign path's re-auth gate then unlocks
+    /// into whatever that is. So a grant made under one profile must stop answering the moment the
+    /// account locks, before the gate is ever reached.
+    ///
+    /// The control is the identical frame on an UNLOCKED router: without it, a fixture whose MAC or
+    /// nonce was simply wrong would produce the same refusal.
+    #[test]
+    fn a_locked_account_authorizes_no_sign_even_from_an_origin_it_connected() {
+        let origin = "https://dapp.example";
+        let sign = |active: &ActiveProfile, router: &FrameRouter<LiveDekSealer>| {
+            let (pairing_id, token) = pair_and_connect(router, origin, n(1));
+            // The lock lands AFTER the grant, exactly as an idle timeout does.
+            active.set(None);
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            router.handle(&request("sign.request", params, Some(auth)))
+        };
+
+        let active = ActiveProfile::starting_at(DID);
+        let router = router_on(&active, Arc::new(ScriptedReauthGate::new(true)));
+        let locked = sign(&active, &router);
+        assert!(
+            locked["result"]["signature_b64"].is_null(),
+            "a locked account must not sign for a grant it can no longer attribute: {locked}"
+        );
+        assert_eq!(
+            SignErrorCode::AuthRequired.symbol(),
+            locked["error"]["message"],
+            "and the refusal must come from the authorization layer, not from the key: {locked}"
+        );
+
+        let unlocked = ActiveProfile::starting_at(DID);
+        let control = {
+            let router = router_on(&unlocked, Arc::new(ScriptedReauthGate::new(true)));
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            router.handle(&request("sign.request", params, Some(auth)))
+        };
+        assert!(
+            control["result"]["signature_b64"].is_string(),
+            "control: the same frame on an unlocked account must still sign — the refusal above is \
+             the lock, not a broken fixture: {control}"
+        );
+    }
+
+    /// **A profile switch landing INSIDE the re-auth unlock signs nothing.**
+    ///
+    /// Every gate in `handle_sign` runs before `authorize_sign`, and `authorize_sign` re-unlocks the
+    /// account into whichever profile is active by then. So a decision taken before it is a decision
+    /// about a different profile than the one holding the key at the signature.
+    ///
+    /// The fixture is deliberately TRUTHFUL up to the gate: the account is unlocked on the connecting
+    /// profile throughout, so the pre-gate whitelist read passes honestly and only a re-check placed
+    /// AFTER the transition can refuse. A test asserting the same outcome with the account already
+    /// locked would be satisfied by the fail-closed predicate alone and would stay green if this
+    /// re-check moved back above the gate — which is the mistake it exists to pin.
+    ///
+    /// The control is the same fixture whose re-auth unlocks into the SAME profile: without it, a
+    /// router that refused every sign would pass identically.
+    #[test]
+    fn a_profile_switch_inside_the_reauth_unlock_signs_nothing() {
+        const OTHER: &str = "did:chia:the-other-profile";
+        let origin = "https://dapp.example";
+
+        let sign_with_reauth_into = |unlocks_into: &str| {
+            let active = ActiveProfile::starting_at(DID);
+            let router = router_on(
+                &active,
+                Arc::new(ReauthUnlocksInto {
+                    active: active.clone(),
+                    profile: unlocks_into.to_owned(),
+                }),
+            );
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            router.handle(&request("sign.request", params, Some(auth)))
+        };
+
+        let switched = sign_with_reauth_into(OTHER);
+        assert!(
+            switched["result"]["signature_b64"].is_null(),
+            "the sign was gated on one profile's consent and signed with another's key: {switched}"
+        );
+        assert_eq!(
+            SignErrorCode::ConnectRequired.symbol(),
+            switched["error"]["message"],
+            "the profile now holding the key never connected this origin, so it must be asked: \
+             {switched}"
+        );
+
+        let same = sign_with_reauth_into(DID);
+        assert!(
+            same["result"]["signature_b64"].is_string(),
+            "control: a re-auth that unlocks the SAME profile must still sign — the refusal above is \
+             the switch, not the re-check refusing everything: {same}"
+        );
+    }
+
+    /// Approves every prompt, and moves the active profile as it answers ONE of them — the gap between
+    /// a person saying yes and the record being written.
+    ///
+    /// The switch is performed by the CONFIRMER because that is where the real gap is: prompts are
+    /// serialized on one thread, so a switch cannot be approved mid-confirm, but the confirm returns on
+    /// the loopback thread and the write happens after it.
+    struct SwitchesWhileAnswering {
+        active: ActiveProfile,
+        to: String,
+        answering: Answering,
+    }
+
+    /// Which prompt [`SwitchesWhileAnswering`] moves the profile under. Only one, so the other prompt
+    /// in a pair-then-connect flow stays honest and the test measures the one gap it names.
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum Answering {
+        Pair,
+        Connect,
+    }
+
+    impl SwitchesWhileAnswering {
+        fn answer(&self, prompt: Answering) -> ConfirmDecision {
+            if prompt == self.answering {
+                self.active.set(Some(&self.to));
+            }
+            ConfirmDecision::Approve
+        }
+    }
+
+    impl NativeConfirmer for SwitchesWhileAnswering {
+        fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
+            self.answer(Answering::Pair)
+        }
+        fn confirm_connect(&self, _: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            self.answer(Answering::Connect)
+        }
+        fn confirm_sign(&self, _: &crate::confirm::SignPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Approve
+        }
+    }
+
+    /// A router whose stores follow `active` (DID and DEK) and whose confirmer approves while moving
+    /// the profile under `answering` — `switch_to = None` for the honest control.
+    fn router_switching_while_answering(
+        active: &ActiveProfile,
+        answering: Answering,
+        switch_to: Option<&str>,
+    ) -> FrameRouter<LiveDekSealer> {
+        let confirmer: Arc<dyn NativeConfirmer> = match switch_to {
+            Some(to) => Arc::new(SwitchesWhileAnswering {
+                active: active.clone(),
+                to: to.to_owned(),
+                answering,
+            }),
+            None => Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+        };
+        FrameRouter::new(
+            PairingStore::new(LiveDekSealer(active.clone()), active.live()),
+            WhitelistStore::new(LiveDekSealer(active.clone()), active.live()),
+            confirmer,
+            Box::new(test_residency().signer()),
+            ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]),
+            [EXT.to_string()],
+        )
+    }
+
+    /// **A connect approved under one profile grants nothing to the profile that arrives next.**
+    ///
+    /// The connect modal names the origin and the dapp, never a profile, so the consent belongs to
+    /// whoever was active as it was read. A switch landing between that answer and the grant would
+    /// otherwise write DURABLE authority under B — and hand the dapp B's DID, addresses and pubkey —
+    /// from a yes that only A ever gave, leaving A, whose owner actually agreed, unconnected.
+    ///
+    /// The second assertion is made from the SWITCHED-BACK profile deliberately: re-reading state under
+    /// B could not tell a refusal apart from the existing "a grant does not survive a switch" filter,
+    /// whereas A is the profile that consented and so is the one a mis-placed grant would be missing
+    /// from. The control is the identical flow with no switch, which must connect and sign.
+    #[test]
+    fn a_connect_approved_under_one_profile_is_not_recorded_under_the_next() {
+        const OTHER: &str = "did:chia:arrived-after-the-yes";
+        let origin = "https://dapp.example";
+
+        let connect_switching_to = |switch_to: Option<&str>| {
+            let active = ActiveProfile::starting_at(DID);
+            let router = router_switching_while_answering(&active, Answering::Connect, switch_to);
+            // Pair first, under A and with no switch: the pairing must be honest so the frames below
+            // authenticate and the only thing under test is the connect.
+            let (pairing_id, token) = pair(&router);
+            let params = json!({ "origin": origin });
+            let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+            let connect = router.handle(&request("connect.request", params, Some(auth)));
+
+            // Back to the profile whose owner answered the modal, and ask it to sign: only a grant
+            // recorded for A can carry that past the connect gate.
+            active.set(Some(DID));
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            let sign = router.handle(&request("sign.request", params, Some(auth)));
+            (connect, sign)
+        };
+
+        let (connect, sign) = connect_switching_to(Some(OTHER));
+        assert_eq!(
+            SignErrorCode::ConnectDenied.symbol(),
+            connect["error"]["message"],
+            "a connect whose grant would land under a profile nobody consented for must be refused, \
+             not recorded: {connect}"
+        );
+        assert_eq!(
+            SignErrorCode::ConnectRequired.symbol(),
+            sign["error"]["message"],
+            "and the consenting profile must be left UNCONNECTED — a grant written under the profile \
+             that arrived would leave this one asking again while the other one held the authority: \
+             {sign}"
+        );
+
+        let (connect, sign) = connect_switching_to(None);
+        assert_eq!(
+            true, connect["result"]["granted"],
+            "control: with no switch the same flow must connect — the refusal above is the switch, \
+             not a consent check refusing everything: {connect}"
+        );
+        assert!(
+            sign["result"]["signature_b64"].is_string(),
+            "control: and the grant it recorded must authorize a sign: {sign}"
+        );
+    }
+
+    /// **A pairing approved under one profile mints no channel token for the profile that arrives.**
+    ///
+    /// The same gap as the connect above, on the surface that mints AUTHORITY rather than recording it:
+    /// a `pair.begin` yields a channel token whose scope may carry `may_sign`. A switch between the
+    /// confirm and the mint would hand that token out on a yes given about a different profile.
+    ///
+    /// A token is the observable, not a later state read: once minted it is already in the caller's
+    /// hands, so the assertion is that none is issued at all.
+    #[test]
+    fn a_pairing_approved_under_one_profile_mints_no_token_for_the_next() {
+        const OTHER: &str = "did:chia:arrived-after-the-yes";
+
+        let pair_switching_to = |switch_to: Option<&str>| {
+            let active = ActiveProfile::starting_at(DID);
+            let router = router_switching_while_answering(&active, Answering::Pair, switch_to);
+            router.handle(&request(
+                "pair.begin",
+                json!({ "ext_id": EXT, "requested_at": 1 }),
+                None,
+            ))
+        };
+
+        let switched = pair_switching_to(Some(OTHER));
+        assert!(
+            switched["result"]["channel_token_b64"].is_null(),
+            "a channel token minted here would be signing authority handed out on another profile's \
+             consent: {switched}"
+        );
+        assert_eq!(
+            SignErrorCode::PairDenied.symbol(),
+            switched["error"]["message"],
+            "and the refusal must read as not-granted, so a caller asks again rather than retrying an \
+             unlock it does not need: {switched}"
+        );
+
+        let control = pair_switching_to(None);
+        assert!(
+            control["result"]["channel_token_b64"].is_string(),
+            "control: with no switch the identical pairing must mint a token: {control}"
+        );
+    }
+
+    /// **A record sealed under one profile's DEK is not opened while another profile is active.**
+    ///
+    /// Restore is the path where the KEY, not the DID tag, is the only thing between two profiles:
+    /// `restore_sealed` opens the blob and then registers it live under whichever profile is active, so
+    /// an open that succeeded across a switch would file A's pairing as B's.
+    ///
+    /// This is expressible only because [`LiveDekSealer`] moves the DEK with the profile. Under a
+    /// fixed-DEK fixture the open succeeds, the pairing is registered as B's, and the assertion below
+    /// fails — which is precisely what a fixed-DEK fixture would have hidden.
+    #[test]
+    fn a_record_sealed_by_one_profile_does_not_open_under_another() {
+        const OTHER: &str = "did:chia:not-the-sealing-profile";
+
+        let active = ActiveProfile::starting_at(DID);
+        let store = PairingStore::new(LiveDekSealer(active.clone()), active.live());
+        let sealed = store
+            .pair(
+                &store.consent_now(),
+                &crate::pairing::NewPairing::pinned(EXT, None),
+                1,
+            )
+            .expect("the active profile seals its own pairing")
+            .sealed_record;
+
+        let restored = store.restore_sealed(&sealed);
+        assert!(
+            restored.is_ok(),
+            "control: the sealing profile reopens its own record — the refusal below is the switch, \
+             not an unopenable blob: {restored:?}"
+        );
+        let pairing_id = restored.expect("checked above");
+
+        active.set(Some(OTHER));
+        let across = store.restore_sealed(&sealed);
+        assert!(
+            matches!(across, Err(SealError::Open)),
+            "another profile's DEK must fail the AEAD tag rather than adopt the record: {across:?}"
+        );
+        assert!(
+            !store.is_paired(&pairing_id),
+            "and nothing may be registered live for the profile that could not open it"
         );
     }
 
@@ -1927,12 +2546,8 @@ mod tests {
     ) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = residency.signer(dig_account::ProfileIx::ROOT);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let signer = residency.signer();
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -1942,6 +2557,104 @@ mod tests {
             [EXT.to_string()],
         )
         .with_persistence(store)
+    }
+
+    /// A store that accepts every write and cannot complete a single removal — a locked account, whose
+    /// profile directory the store can no longer reach.
+    ///
+    /// The write half is deliberately left WORKING. A store that failed everything would make the
+    /// revoke tests below pass for the wrong reason: it is precisely the asymmetry (writes fine,
+    /// removals not) that the caller has to notice.
+    #[derive(Default)]
+    struct StoreThatCannotRemove;
+
+    impl SealedRecordStore for StoreThatCannotRemove {
+        fn persist_pairing(&self, _pairing_id: &str, _sealed: &[u8]) {}
+        fn persist_whitelist(&self, _origin: &str, _sealed: &[u8]) {}
+        fn persist_nonce(&self, _pairing_id: &str, _nonce: u64) {}
+        fn remove_whitelist(&self, _origin: &str) -> bool {
+            false
+        }
+        fn remove_pairing(&self, _pairing_id: &str) -> bool {
+            false
+        }
+        fn load(&self) -> crate::loopback::PersistedSignState {
+            crate::loopback::PersistedSignState::default()
+        }
+    }
+
+    /// **`connect.revoke` must not answer `revoked: true` for a grant it could not delete.**
+    ///
+    /// The sealed record outlives a removal the store could not perform, and `restore` hands it back at
+    /// the next boot — so a caller told the site was disconnected would find it connected again, having
+    /// been given no reason to look (dig_ecosystem#2398 SEC-F1).
+    ///
+    /// The control is the SAME frame against a store that CAN remove. Asserting only the refusal would
+    /// be satisfied by a handler that refused every revoke.
+    #[test]
+    fn a_revoke_that_cannot_be_written_down_is_refused_rather_than_reported_as_done() {
+        let residency = test_residency();
+        let origin = "https://dapp.example";
+
+        let revoke = |store: Arc<dyn SealedRecordStore>| {
+            let router = router_persisting(&residency, store);
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            router.handle(&authed_request(
+                "connect.revoke",
+                json!({ "origin": origin }),
+                &pairing_id,
+                &token,
+                n(2),
+            ))
+        };
+
+        let refused = revoke(Arc::new(StoreThatCannotRemove));
+        assert_eq!(
+            "LOCKED", refused["error"]["message"],
+            "a revoke that cannot reach disk must surface, not report success: {refused}"
+        );
+        assert!(
+            refused["result"].is_null(),
+            "and must carry no `revoked` verdict at all: {refused}"
+        );
+
+        let done = revoke(Arc::new(NullSealedStore));
+        assert_eq!(
+            true, done["result"]["revoked"],
+            "control: a revoke that IS durable still reports success: {done}"
+        );
+    }
+
+    /// **The tray's revoke reports whether it was written down.**
+    ///
+    /// The confirmation the user just answered promises the app loses access "not at the next
+    /// restart". That is only true when the sealed record is gone, so the durability has to reach the
+    /// journey rather than being swallowed in the store.
+    #[test]
+    fn the_tray_revoke_distinguishes_a_durable_removal_from_a_temporary_one() {
+        let residency = test_residency();
+
+        let revoke = |store: Arc<dyn SealedRecordStore>| {
+            let router = router_persisting(&residency, store);
+            let control = router.control();
+            let (pairing_id, _token) = pair(&router);
+            (control.revoke(&pairing_id), control.revoke("never-paired"))
+        };
+
+        let (temporary, unknown) = revoke(Arc::new(StoreThatCannotRemove));
+        assert_eq!(RevokeOutcome::RevokedForThisRunOnly, temporary);
+        assert_eq!(
+            RevokeOutcome::NotPaired,
+            unknown,
+            "an id that was never paired has nothing at rest either, whatever the store says"
+        );
+
+        let (durable, _) = revoke(Arc::new(NullSealedStore));
+        assert_eq!(
+            RevokeOutcome::Revoked,
+            durable,
+            "control: a revoke that IS durable must not be reported as temporary"
+        );
     }
 
     #[test]
@@ -2066,9 +2779,7 @@ mod tests {
         use crate::session::{sign_callback_message, verify_signature, SessionSigner as _};
 
         let residency = test_residency();
-        let pubkey = residency
-            .signer(dig_account::ProfileIx::ROOT)
-            .signing_public_key();
+        let pubkey = residency.signer().signing_public_key();
         let router = router_persisting(&residency, Arc::new(NullSealedStore));
 
         let origin = "https://dapp.example";
@@ -2161,13 +2872,9 @@ mod tests {
     ) {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         let signer_pubkey = SessionSigner::signing_public_key(&signer);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         let sealing = identity_sealing_secret();
         let router = FrameRouter::new(
             pairings,
@@ -2493,12 +3200,8 @@ mod tests {
         // A locked sealing seam yields no key → LOCKED, never a bogus attestation over an absent key.
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec![],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let signer = test_residency().signer();
+        let connect_info = ProfileConnectInfo::fixed(DID, vec![]);
         // No `.with_sealing_key` → the fail-closed LockedSealingKey.
         let router = FrameRouter::new(
             pairings,
@@ -2583,12 +3286,8 @@ mod tests {
         let bob_secret = StaticSecret::from([0xb0u8; 32]);
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec![],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let signer = test_residency().signer();
+        let connect_info = ProfileConnectInfo::fixed(DID, vec![]);
         let router = FrameRouter::new(
             pairings,
             whitelist,

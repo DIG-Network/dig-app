@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use dig_app_core::account::boot::{assemble_residency, reunlock_into, DEFAULT_ACCOUNT_ID};
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::account::AccountId;
@@ -44,6 +45,7 @@ fn live_residency() -> AccountResidency {
         backend,
         typed_password("tray-lock-state"),
         AccountId::new(DEFAULT_ACCOUNT_ID),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
     .expect("an in-memory account enrols");
@@ -68,7 +70,7 @@ fn view_for(state: AccountState) -> TrayView {
         // axis this suite is about, and what makes the Wallet row's copy/(unlock first) flip observable.
         receive_address: matches!(state, AccountState::Unlocked { .. })
             .then(|| "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()),
-        address_derivation_failed: false,
+        address_fault: None,
         // Not yet polled. This suite is about the LOCK axis, so the balance is held constant.
         balance: dig_app_core::wallet::overview::BalanceReading::default(),
         account: Some(state),
@@ -77,6 +79,10 @@ fn view_for(state: AccountState) -> TrayView {
         node_facts: None,
         hosted_stores: dig_app_core::hosted_stores::HostedStoresReading::Known(Vec::new()),
         installed_apps: dig_app_core::apps::AppPresence::Known(Vec::new()),
+        // The profile rows are on the WINDOW's Account tab, not on the tray this suite exercises,
+        // so they are pinned to the state every real account is in.
+        profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
+        profile_creation: dig_app_core::profiles::ProfileCreation::default(),
         profile_id: Some("a".repeat(96)),
         did: None,
         // This suite is about the LOCK state, so the second-factor axis is pinned off and covered by
@@ -187,6 +193,7 @@ fn re_unlocking_returns_the_menu_to_unlocked() {
         Arc::clone(&backend),
         typed_password("tray-lock-state"),
         AccountId::new(DEFAULT_ACCOUNT_ID),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
     .expect("an in-memory account enrols");

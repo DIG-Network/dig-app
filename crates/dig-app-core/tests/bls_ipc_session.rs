@@ -40,7 +40,7 @@ fn app_signer() -> ResidencySigner {
         ProfileIx::ROOT,
     )
     .expect("enrol a fresh account");
-    AccountResidency::new(unlocked).signer(ProfileIx::ROOT)
+    AccountResidency::new(unlocked).signer()
 }
 
 /// The engine's DID→published-key backstop. dig-node resolves this from the profile DID's on-chain

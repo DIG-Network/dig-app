@@ -27,6 +27,10 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::live::{
+    belongs_to_active_profile, visible_under_active_profile, ConsentError, ConsentedProfile,
+    LiveDid,
+};
 use crate::sealer::{ProfileSealer, SealError};
 
 /// The length of the channel secret (a pairing token), in bytes — 256 bits of CSPRNG entropy.
@@ -421,6 +425,13 @@ pub struct PairedApp {
 /// One live (in-memory, unsealed) pairing the server authenticates frames against. The sealed record
 /// is the durable form; this is the hot-path copy holding the secret and the monotonic-nonce ledger.
 struct LivePairing {
+    /// The profile this pairing belongs to, as the DID read at the moment it was paired or restored.
+    ///
+    /// Held so the map can be read PER PROFILE. The store is built once at boot and lives on a serving
+    /// thread, so a pairing made under profile A would otherwise keep authenticating frames after the
+    /// user switched to B — and a revoke taken under B would delete B's sealed record while dropping
+    /// A's live one (dig_ecosystem#2398 ADV-A1).
+    profile_did: String,
     ext_id: String,
     label: Option<String>,
     scope: PairingScope,
@@ -441,13 +452,18 @@ struct LivePairing {
 /// connection tasks behind an `Arc`.
 pub struct PairingStore<S: ProfileSealer> {
     sealer: S,
-    profile_did: String,
+    /// The DID this store seals under, read at each seal/open rather than captured — see
+    /// [`LiveDid`]. A captured DID would tag records with the profile that was active when the
+    /// sign-service assembly was built, while `sealer` derived the DEK of the profile active NOW.
+    profile_did: LiveDid,
     live: Mutex<HashMap<String, LivePairing>>,
 }
 
 impl<S: ProfileSealer> PairingStore<S> {
-    /// Build a store that seals pairings under `profile_did`'s DEK via `sealer`.
-    pub fn new(sealer: S, profile_did: impl Into<String>) -> Self {
+    /// Build a store that seals pairings under `profile_did`'s DEK via `sealer`. A `&str`/`String`
+    /// converts to a FIXED DID (a fixture, or a host whose profile cannot move); production passes a
+    /// [`LiveDid::read`] over the residency so the store follows a profile switch.
+    pub fn new(sealer: S, profile_did: impl Into<LiveDid>) -> Self {
         Self {
             sealer,
             profile_did: profile_did.into(),
@@ -455,19 +471,41 @@ impl<S: ProfileSealer> PairingStore<S> {
         }
     }
 
+    /// The DID to seal under right now, or a fail-closed [`SealError`] when no profile is active —
+    /// which is what a locked account reads as. Refusing is the only honest answer: a placeholder
+    /// would tag a real record with a name no profile owns, and that record could never be opened by
+    /// the profile that wrote it.
+    fn seal_as(&self) -> Result<String, SealError> {
+        self.profile_did
+            .get()
+            .ok_or_else(|| SealError::Seal("no active profile — the account is locked".to_string()))
+    }
+
+    /// Read the profile a pairing confirm is about to be answered under. Take this BEFORE raising the
+    /// confirm and hand it to [`pair`](Self::pair); see [`ConsentedProfile`].
+    pub fn consent_now(&self) -> ConsentedProfile {
+        ConsentedProfile::reading(&self.profile_did)
+    }
+
     /// Pair `ext_id`: mint a fresh 32-byte CSPRNG channel secret, register it live, and seal the
     /// [`PairingRecord`] at rest under the active profile's DEK. Returns the handle for the extension
     /// plus the sealed bytes to persist. The caller invokes the native pairing confirm (§5.6.3)
     /// BEFORE calling this — the store mints a secret only for an already-approved pairing.
     ///
+    /// `consent`, taken before that confirm, is what binds the minted authority to the profile whose
+    /// owner approved it: a switch landing in between is refused rather than granted a channel token.
+    ///
     /// # Errors
     ///
-    /// [`SealError`] if the profile is locked or sealing fails; no live entry is registered on error.
+    /// [`ConsentError::ProfileMoved`] if the active profile changed since `consent` was taken;
+    /// [`ConsentError::Seal`] if the profile is locked or sealing fails. No live entry is registered on
+    /// either error.
     pub fn pair(
         &self,
+        consent: &ConsentedProfile,
         request: &NewPairing<'_>,
         created_at: u64,
-    ) -> Result<PairingOutcome, SealError> {
+    ) -> Result<PairingOutcome, ConsentError> {
         let mut channel_secret = Zeroizing::new([0u8; CHANNEL_SECRET_LEN]);
         OsRng.fill_bytes(&mut *channel_secret);
         let pairing_id = Uuid::new_v4().to_string();
@@ -487,11 +525,16 @@ impl<S: ProfileSealer> PairingStore<S> {
         let plaintext = Zeroizing::new(
             serde_json::to_vec(&record).map_err(|e| SealError::Seal(e.to_string()))?,
         );
-        let sealed_record = self.sealer.seal(&self.profile_did, &plaintext)?;
+        let profile_did = self.seal_as()?;
+        if !consent.still_holds(&profile_did) {
+            return Err(ConsentError::ProfileMoved);
+        }
+        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
 
         self.lock().insert(
             pairing_id.clone(),
             LivePairing {
+                profile_did,
                 ext_id: request.ext_id.to_string(),
                 label: request.label.map(str::to_string),
                 scope: request.scope,
@@ -517,7 +560,8 @@ impl<S: ProfileSealer> PairingStore<S> {
     ///
     /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
-        let plaintext = self.sealer.open(&self.profile_did, sealed_record)?;
+        let profile_did = self.seal_as()?;
+        let plaintext = self.sealer.open(&profile_did, sealed_record)?;
         let record: PairingRecord =
             serde_json::from_slice(&plaintext).map_err(|_| SealError::Open)?;
         let channel_secret = record.channel_secret()?;
@@ -525,6 +569,7 @@ impl<S: ProfileSealer> PairingStore<S> {
         self.lock().insert(
             pairing_id.clone(),
             LivePairing {
+                profile_did,
                 ext_id: record.ext_id.clone(),
                 label: record.label.clone(),
                 scope: record.scope,
@@ -549,7 +594,8 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// The seed only ever RAISES the mark (`max`): a stale/rolled-back persisted value can never lower
     /// a mark the live session has already advanced past, so seeding is safe to call unconditionally.
     pub fn seed_last_nonce(&self, pairing_id: &str, last_nonce: u64) {
-        if let Some(pairing) = self.lock().get_mut(pairing_id) {
+        let mut live = self.lock();
+        if let Some(pairing) = self.of_active_mut(&mut live, pairing_id) {
             let seeded = pairing
                 .last_nonce
                 .map_or(last_nonce, |cur| cur.max(last_nonce));
@@ -572,8 +618,12 @@ impl<S: ProfileSealer> PairingStore<S> {
         params: &serde_json::Value,
         mac_b64: &str,
     ) -> Result<(), AuthFailure> {
+        let active = self.profile_did.get();
         let mut live = self.lock();
-        let pairing = live.get_mut(pairing_id).ok_or(AuthFailure::NotPaired)?;
+        let pairing = live
+            .get_mut(pairing_id)
+            .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
+            .ok_or(AuthFailure::NotPaired)?;
 
         let provided_mac = BASE64
             .decode(mac_b64.as_bytes())
@@ -592,22 +642,38 @@ impl<S: ProfileSealer> PairingStore<S> {
         Ok(())
     }
 
-    /// Remove a live pairing (the "unpair" surface, §5.6.3). Returns whether a pairing was present.
-    /// After unpairing, every frame from that `pairing_id` fails [`AuthFailure::NotPaired`]. The
-    /// caller separately deletes the sealed at-rest record.
+    /// Remove a live pairing (the "unpair" surface, §5.6.3). Returns whether a pairing FOR THE ACTIVE
+    /// PROFILE was present. After unpairing, every frame from that `pairing_id` fails
+    /// [`AuthFailure::NotPaired`]. The caller separately deletes the sealed at-rest record.
+    ///
+    /// Another profile's pairing is left alone, for the reason
+    /// [`WhitelistStore::revoke`](crate::whitelist::WhitelistStore::revoke) gives: the durable half of
+    /// this revoke is written to the ACTIVE profile's directory, so dropping a foreign live entry here
+    /// would revoke only until the next start.
+    ///
+    /// Scoped to the VISIBLE set rather than the authorized one, so that what a person can see in the
+    /// tray is what they can remove: a locked account lists its pairings ([`list`](Self::list)), and a
+    /// remove that silently reported "not paired" against a row still on the screen would read as the
+    /// app having handled it. Withdrawing access is the safe direction — it hands out no authority —
+    /// which is why this predicate and the authorization one differ here and nowhere else.
     pub fn unpair(&self, pairing_id: &str) -> bool {
-        self.lock().remove(pairing_id).is_some()
+        let mut live = self.lock();
+        if self.visible_mut(&mut live, pairing_id).is_none() {
+            return false;
+        }
+        live.remove(pairing_id).is_some()
     }
 
-    /// Whether a live pairing exists for `pairing_id`.
+    /// Whether a live pairing for the active profile exists for `pairing_id`.
     pub fn is_paired(&self, pairing_id: &str) -> bool {
-        self.lock().contains_key(pairing_id)
+        self.ext_id_of(pairing_id).is_some()
     }
 
     /// The paired extension id for `pairing_id`, if any (for the confirm prompt's "via paired
     /// extension" display).
     pub fn ext_id_of(&self, pairing_id: &str) -> Option<String> {
-        self.lock().get(pairing_id).map(|p| p.ext_id.clone())
+        self.of_active(&self.lock(), pairing_id)
+            .map(|p| p.ext_id.clone())
     }
 
     /// What `pairing_id` is allowed to do, or `None` if it is not paired.
@@ -615,17 +681,18 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// The dispatch layer consults this AFTER authenticating a frame, so a capability check can never
     /// be reached by a caller that failed the MAC.
     pub fn scope_of(&self, pairing_id: &str) -> Option<PairingScope> {
-        self.lock().get(pairing_id).map(|p| p.scope)
+        self.of_active(&self.lock(), pairing_id).map(|p| p.scope)
     }
 
     /// The full authority (money [`PairingScope`] + granted [`CapabilitySet`]) for `pairing_id`, or
     /// `None` if it is not paired. The dispatch layer consults this AFTER authenticating a frame, so
     /// neither the money gate nor the capability check can be reached by a caller that failed the MAC.
     pub fn authority_of(&self, pairing_id: &str) -> Option<PairingAuthority> {
-        self.lock().get(pairing_id).map(|p| PairingAuthority {
-            scope: p.scope,
-            capabilities: p.capabilities.clone(),
-        })
+        self.of_active(&self.lock(), pairing_id)
+            .map(|p| PairingAuthority {
+                scope: p.scope,
+                capabilities: p.capabilities.clone(),
+            })
     }
 
     /// Record that `pairing_id` was heard from at `now` — the "last seen" the management window shows.
@@ -633,7 +700,8 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// Called only after a frame AUTHENTICATES, so an unpaired or badly-MAC'd frame can never move a
     /// paired app's timestamp and make it look active. A no-op for an unknown pairing.
     pub fn note_seen(&self, pairing_id: &str, now: u64) {
-        if let Some(pairing) = self.lock().get_mut(pairing_id) {
+        let mut live = self.lock();
+        if let Some(pairing) = self.of_active_mut(&mut live, pairing_id) {
             pairing.last_seen_at = Some(now);
         }
     }
@@ -643,9 +711,11 @@ impl<S: ProfileSealer> PairingStore<S> {
     ///
     /// Carries no secret: the channel secret stays in `LivePairing` and never reaches a window.
     pub fn list(&self) -> Vec<PairedApp> {
+        let active = self.profile_did.get();
         let mut apps: Vec<PairedApp> = self
             .lock()
             .iter()
+            .filter(|(_, live)| visible_under_active_profile(active.as_deref(), &live.profile_did))
             .map(|(pairing_id, live)| PairedApp {
                 pairing_id: pairing_id.clone(),
                 ext_id: live.ext_id.clone(),
@@ -665,6 +735,43 @@ impl<S: ProfileSealer> PairingStore<S> {
                 .then_with(|| a.pairing_id.cmp(&b.pairing_id))
         });
         apps
+    }
+
+    /// The live pairing under `pairing_id`, but only if the profile now active may ACT on it — the
+    /// lookup behind every authorization read here. A locked account gets `None`
+    /// ([`belongs_to_active_profile`]).
+    fn of_active<'a>(
+        &self,
+        live: &'a HashMap<String, LivePairing>,
+        pairing_id: &str,
+    ) -> Option<&'a LivePairing> {
+        let active = self.profile_did.get();
+        live.get(pairing_id)
+            .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
+    }
+
+    /// [`of_active`](Self::of_active), mutably.
+    fn of_active_mut<'a>(
+        &self,
+        live: &'a mut HashMap<String, LivePairing>,
+        pairing_id: &str,
+    ) -> Option<&'a mut LivePairing> {
+        let active = self.profile_did.get();
+        live.get_mut(pairing_id)
+            .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
+    }
+
+    /// The live pairing under `pairing_id` as the tray SHOWS it — the companion to [`list`](Self::list)
+    /// for the one management action ([`unpair`](Self::unpair)) that removes access rather than
+    /// granting it.
+    fn visible_mut<'a>(
+        &self,
+        live: &'a mut HashMap<String, LivePairing>,
+        pairing_id: &str,
+    ) -> Option<&'a mut LivePairing> {
+        let active = self.profile_did.get();
+        live.get_mut(pairing_id)
+            .filter(|pairing| visible_under_active_profile(active.as_deref(), &pairing.profile_did))
     }
 
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than
@@ -743,7 +850,11 @@ mod tests {
     fn pair_mints_a_token_and_seals_the_record() {
         let store = store();
         let out = store
-            .pair(&NewPairing::pinned(EXT, None), 1_700_000_000)
+            .pair(
+                &store.consent_now(),
+                &NewPairing::pinned(EXT, None),
+                1_700_000_000,
+            )
             .unwrap();
 
         assert!(store.is_paired(&out.pairing_id));
@@ -758,8 +869,12 @@ mod tests {
     #[test]
     fn two_pairings_mint_distinct_secrets_and_ids() {
         let store = store();
-        let a = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
-        let b = store.pair(&NewPairing::pinned(EXT, None), 2).unwrap();
+        let a = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
+        let b = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 2)
+            .unwrap();
         assert_ne!(a.pairing_id, b.pairing_id);
         assert_ne!(a.channel_token_b64, b.channel_token_b64);
     }
@@ -767,7 +882,9 @@ mod tests {
     #[test]
     fn a_sealed_pairing_round_trips_through_restore() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 42).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 42)
+            .unwrap();
         store.unpair(&out.pairing_id);
         assert!(!store.is_paired(&out.pairing_id));
 
@@ -779,7 +896,9 @@ mod tests {
     #[test]
     fn a_valid_frame_authenticates() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({"origin": "https://dapp.example"});
         let mac = client_mac(&out.channel_token_b64, n(1), "connect.request", &params);
         assert!(store
@@ -800,7 +919,9 @@ mod tests {
     #[test]
     fn a_tampered_mac_is_rejected() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({"amount": 5});
         let good = client_mac(&out.channel_token_b64, n(1), "sign.request", &params);
         // Forge by signing DIFFERENT params — the MAC no longer matches the frame.
@@ -820,7 +941,9 @@ mod tests {
     #[test]
     fn a_mac_from_a_foreign_secret_is_rejected() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({});
         let foreign_secret = BASE64.encode([9u8; CHANNEL_SECRET_LEN]);
         let mac = client_mac(&foreign_secret, n(1), "m", &params);
@@ -833,7 +956,9 @@ mod tests {
     #[test]
     fn a_replayed_or_stale_nonce_is_rejected() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({});
         let mac5 = client_mac(&out.channel_token_b64, n(5), "m", &params);
         assert!(store
@@ -861,7 +986,9 @@ mod tests {
     #[test]
     fn a_bad_mac_does_not_advance_the_nonce_ledger() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({});
         // A bad-MAC frame at a high nonce must NOT poison the ledger.
         let bad = client_mac(&BASE64.encode([0u8; 32]), n(100), "m", &params);
@@ -879,7 +1006,9 @@ mod tests {
     #[test]
     fn unpairing_revokes_authentication() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         assert!(store.unpair(&out.pairing_id));
         assert!(!store.unpair(&out.pairing_id));
         let params = json!({});
@@ -887,6 +1016,75 @@ mod tests {
         assert_eq!(
             store.verify_frame(&out.pairing_id, n(1), "m", &params, &mac),
             Err(AuthFailure::NotPaired)
+        );
+    }
+
+    /// **A locked account authenticates no frame, but still SHOWS what is paired.**
+    ///
+    /// The two halves are asserted together because they are the whole design: authorization fails
+    /// closed on a lock (the active profile can be switched while locked, and the sign path's re-auth
+    /// unlocks into whatever that is), while display stays permissive so a person coming back to a
+    /// locked screen sees their own apps rather than an empty list. A test asserting only the refusal
+    /// would be satisfied by dropping the entries entirely.
+    ///
+    /// The control is the same store while unlocked: without it a fixture with a bad MAC would produce
+    /// the same `NotPaired`.
+    #[test]
+    fn a_locked_account_authenticates_no_frame_but_still_lists_its_pairings() {
+        use crate::account::boot::live_profile_did;
+        use crate::account::residency::AccountResidency;
+        use crate::session_lock::SessionKeys;
+        use dig_keystore::KdfParams;
+
+        let residency = crate::test_support::test_residency();
+        let store = PairingStore::new(
+            residency.sealer(KdfParams::FAST_TEST),
+            live_profile_did(&residency),
+        );
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .expect("an unlocked profile pairs");
+        let params = json!({});
+        let frame = |nonce: u64| {
+            (
+                nonce,
+                client_mac(&out.channel_token_b64, nonce, "m", &params),
+            )
+        };
+
+        let (nonce, mac) = frame(n(1));
+        assert!(
+            store
+                .verify_frame(&out.pairing_id, nonce, "m", &params, &mac)
+                .is_ok(),
+            "control: the pairing authenticates while the account is unlocked"
+        );
+
+        AccountResidency::lock_all(&residency);
+
+        let (nonce, mac) = frame(n(2));
+        assert_eq!(
+            Err(AuthFailure::NotPaired),
+            store.verify_frame(&out.pairing_id, nonce, "m", &params, &mac),
+            "a locked account cannot attribute this pairing, so it must authenticate nothing"
+        );
+        assert!(
+            store.authority_of(&out.pairing_id).is_none(),
+            "and it must hand out no capabilities — `permits` is decided from them"
+        );
+        assert_eq!(
+            vec![out.pairing_id.clone()],
+            store
+                .list()
+                .into_iter()
+                .map(|app| app.pairing_id)
+                .collect::<Vec<_>>(),
+            "but the tray must still SHOW it: hiding a person's own apps behind a lock teaches them \
+             the app forgot, and showing a row grants nothing"
+        );
+        assert!(
+            store.unpair(&out.pairing_id),
+            "and what they can see they must be able to remove — a revoke withdraws access"
         );
     }
 
@@ -900,7 +1098,9 @@ mod tests {
         let store_of = || PairingStore::new(test_sealer(DID), DID);
 
         let first = store_of();
-        let out = first.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = first
+            .pair(&first.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({});
         let mac = client_mac(&out.channel_token_b64, n(5), "m", &params);
         assert!(first
@@ -928,7 +1128,9 @@ mod tests {
     #[test]
     fn seeding_never_lowers_an_already_advanced_ledger() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         let params = json!({});
         let mac6 = client_mac(&out.channel_token_b64, n(6), "m", &params);
         assert!(store
@@ -988,11 +1190,14 @@ mod tests {
         let store = store();
         let third = store
             .pair(
+                &store.consent_now(),
                 &NewPairing::third_party("com.example.tool", Some("Tool")),
                 1,
             )
             .unwrap();
-        let pinned = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let pinned = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
 
         assert_eq!(
             store.scope_of(&third.pairing_id),
@@ -1010,6 +1215,7 @@ mod tests {
         let store = store();
         let out = store
             .pair(
+                &store.consent_now(),
                 &NewPairing::third_party("com.example.tool", Some("Tool")),
                 1,
             )
@@ -1032,10 +1238,18 @@ mod tests {
     fn the_list_is_oldest_first_and_carries_no_secret() {
         let store = store();
         let older = store
-            .pair(&NewPairing::third_party("com.example.b", Some("B")), 100)
+            .pair(
+                &store.consent_now(),
+                &NewPairing::third_party("com.example.b", Some("B")),
+                100,
+            )
             .unwrap();
         let newer = store
-            .pair(&NewPairing::pinned(EXT, Some("DIG for Chrome")), 200)
+            .pair(
+                &store.consent_now(),
+                &NewPairing::pinned(EXT, Some("DIG for Chrome")),
+                200,
+            )
             .unwrap();
 
         let apps = store.list();
@@ -1059,7 +1273,9 @@ mod tests {
         // timestamp that moved for an unpaired or badly-authenticated caller would be a lie about a
         // program the user is deciding whether to revoke.
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
         assert_eq!(store.list()[0].last_seen_at, None);
 
         store.note_seen(&out.pairing_id, 1_700_000_500);
@@ -1077,10 +1293,18 @@ mod tests {
         // shown AND its token stops working. Only the second is the security property.
         let store = store();
         let kept = store
-            .pair(&NewPairing::pinned(EXT, Some("keep me")), 1)
+            .pair(
+                &store.consent_now(),
+                &NewPairing::pinned(EXT, Some("keep me")),
+                1,
+            )
             .unwrap();
         let doomed = store
-            .pair(&NewPairing::third_party("com.example.tool", None), 2)
+            .pair(
+                &store.consent_now(),
+                &NewPairing::third_party("com.example.tool", None),
+                2,
+            )
             .unwrap();
         assert_eq!(store.list().len(), 2);
 
@@ -1108,7 +1332,9 @@ mod tests {
     fn a_foreign_profile_cannot_restore_a_sealed_pairing() {
         // The sealed record is bound to the sealing profile's DEK (NC-2 cross-profile isolation).
         let store_a = store();
-        let out = store_a.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store_a
+            .pair(&store_a.consent_now(), &NewPairing::pinned(EXT, None), 1)
+            .unwrap();
 
         // A DISTINCT profile DEK (a different label) cannot open A's sealed pairing.
         let store_b = PairingStore::new(test_sealer("did:chia:other"), "did:chia:other");

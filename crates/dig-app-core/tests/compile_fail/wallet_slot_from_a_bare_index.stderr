@@ -1,0 +1,27 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/compile_fail/wallet_slot_from_a_bare_index.rs:25:18
+   |
+25 |     let _tuple = WalletSlot(ProfileIx(1));
+   |                  ^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/account/active_profile.rs
+   |
+   | pub struct WalletSlot(ProfileIx);
+   |                       ^^^^^^^^^ private field
+help: you might have meant to use an associated function to build this type
+   |
+25 -     let _tuple = WalletSlot(ProfileIx(1));
+25 +     let _tuple = WalletSlot::unprofiled();
+   |
+25 -     let _tuple = WalletSlot(ProfileIx(1));
+25 +     let _tuple = WalletSlot::from_active(_);
+   |
+
+error[E0277]: the trait bound `WalletSlot: From<ProfileIx>` is not satisfied
+  --> tests/compile_fail/wallet_slot_from_a_bare_index.rs:26:47
+   |
+26 |     let _converted: WalletSlot = ProfileIx(1).into();
+   |                                               ^^^^ the trait `From<ProfileIx>` is not implemented for `WalletSlot`
+   |
+   = note: required for `ProfileIx` to implement `Into<WalletSlot>`

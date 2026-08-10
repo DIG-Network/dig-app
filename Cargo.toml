@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "9.1.1"
+version = "9.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -91,7 +91,7 @@ dig-session = "0.5"
 # so the crate's own `PolicyAuthorizer` is now mechanically the only thing that can permit a spend.
 # Consumed as the published crates.io release (release-first, §4.1), never a git source (§3.6
 # all-crates rule).
-dig-account = "0.6.0"
+dig-account = "0.8"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account
@@ -112,10 +112,17 @@ dig-wallet-backend = "0.16"
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
 # copy dig-session's `derive_symmetric_key` already sources from the same crate (§5.1 back-compat).
-# Pinned to the 0.9 line dig-account resolves so there is ONE dig-constants in the graph — the
-# same crate that owns the frozen `PROFILE_SEALING_X25519_LABEL` dig-account derives the sealing
-# key from.
-dig-constants = "0.9"
+# Pinned to the line dig-account 0.8 itself depends on, so dig-app-core's DIRECT usage unifies with
+# dig-account's DIRECT usage — the two crates derive the profile DEK and the sealing key from one
+# shared copy of the frozen labels, which is the property that actually matters at the seam we cross.
+#
+# Be precise about what this pin does NOT buy, because the previous wording claimed more than was
+# true: the graph carries SEVERAL dig-constants (and dig-identity) versions, reached through
+# dig-account 0.8's own published tree (dig-social-profile, dig-wallet-backend, dig-session). Those
+# copies are internal to those facades and never appear in a public signature dig-app names, so they
+# cannot drift a byte contract we participate in — but "there is ONE dig-constants in the graph" is
+# false and would fail a `cargo tree -d` gate. The de-duplication is tracked as dig_ecosystem#2497.
+dig-constants = "0.10"
 # The BIP-39 recovery phrase (dig_ecosystem#1752, the #1500 derived account model): the 24-word
 # mnemonic that IS an account's portable custody root. Standard, audited wordlist + checksum + PBKDF2
 # implementation — never hand-rolled. `zeroize` wipes the crate's own internal buffers; `rand` supplies
@@ -175,12 +182,19 @@ keyring = { version = "3", default-features = false, features = [
 # the additive sparse-merkle-tree of profile slots. dig-app CONSUMES this format for profile
 # metadata (never reinvents the SMT/slots) AND its BLS12-381 G1/G2 identity-key primitives (the v2
 # key model — one slot-`0x0010` G1 key for sign + seal, X25519 slot `0x0011` retired). Sourced from
-# crates.io per the ecosystem crates.io policy (#681) and — critically — from the SAME source
-# dig-session pins (`"0.5"`), so the whole dependency graph resolves to ONE dig-identity (no
-# duplicate-crate byte-drift). 0.5 adds the per-profile-index derivation (`derive_identity_sk_at`)
-# the master-HD multi-profile model (#997) needs. The default-on `bls` feature carries the key
-# primitives dig-app's session signs with.
-dig-identity = { version = "0.5", features = ["bls"] }
+# crates.io per the ecosystem crates.io policy (#681), on the line dig-account 0.8 depends on, so
+# dig-app-core's direct usage unifies with dig-account's. As with `dig-constants` below, the graph
+# does carry other dig-identity copies behind dig-account's facade crates; they never surface in a
+# signature dig-app names (dig_ecosystem#2497). 0.6 carries the per-profile-index derivation
+# (`derive_identity_sk_at`) the master-HD multi-profile model (#997) needs, and the default-on `bls`
+# feature carries the key primitives dig-app's session signs with.
+dig-identity = { version = "0.6", features = ["bls"] }
+# The canonical `did:chia:` bech32m encoding of a singleton launcher id. dig-app names it in ONE
+# place: the profile-registry test fixtures, which must produce the same DID string dig-account's own
+# `ProfileAnchor` validator recomputes — a hand-written literal there is refused, correctly, because a
+# DID that does not belong to its launcher id is exactly the forgery that check exists to catch.
+# Pinned to the line dig-account 0.8 depends on so both sides encode identically.
+dig-did = "0.4"
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.

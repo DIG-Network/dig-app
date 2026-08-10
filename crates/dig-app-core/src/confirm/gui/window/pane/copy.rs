@@ -392,6 +392,107 @@ pub(crate) mod protection {
     }
 }
 
+/// The profile half of the Account pane — which identity this account is presenting
+/// (dig_ecosystem#2403).
+///
+/// # The one word this module may never use
+///
+/// **Delete.** A minted profile is a DID singleton and a store on the Chia blockchain, both
+/// permanent; hiding one is a preference about THIS computer's lists and nothing else. Copy that
+/// implies otherwise would be describing an act the app cannot perform and the chain would not
+/// honour, and a person who believed it would think they had removed an identity that is still there
+/// for anyone to resolve. [`no_profile_copy_implies_a_profile_can_be_deleted`](super::tests) is that
+/// rule as an assertion.
+pub(crate) mod profiles {
+    use crate::profiles::CreationBlocked;
+
+    /// The card holding the list and its controls.
+    pub(crate) const CARD: &str = "Profiles on this account";
+    /// The panel holding what a profile is and why one cannot be created yet.
+    pub(crate) const CREATE_PANEL: &str = "Creating a profile";
+
+    /// The badge on the profile the account is deriving at.
+    pub(crate) const ACTIVE_BADGE: &str = "In use";
+    /// The badge on a profile the user has taken out of this computer's lists.
+    pub(crate) const HIDDEN_BADGE: &str = "Hidden here";
+    /// The readout naming a profile's on-chain identity.
+    pub(crate) const DID_LABEL: &str = "DID";
+
+    /// Said while the profile list is still being read.
+    ///
+    /// Names the read rather than the answer: an account with several profiles and one with none
+    /// look identical during this moment, and claiming either would be a claim no read supports.
+    pub(crate) const PENDING: &str =
+        "DIG is still reading which profiles this account has. Nothing here is settled until it has.";
+
+    /// Said when the registry ANSWERED and the account holds no profile.
+    ///
+    /// # Why this sentence is long, and why the length is the point
+    ///
+    /// It is the state every real user is in, so it is not an edge case being apologised for — it is
+    /// the pane's ordinary content, and it has three jobs: say what a profile IS, say that the
+    /// account works without one, and say why there is no button. The third matters most: an empty
+    /// list with no explanation reads as a fault, and a person who thinks their profiles failed to
+    /// load will go looking for a way to reload them.
+    ///
+    /// The wallet half is not decoration. This pane sits inches below a real, fundable receive
+    /// address, and an empty profile list that said nothing would read as the account being
+    /// unusable.
+    pub(crate) const EMPTY: &str =
+        "This account has no profiles yet. A profile is an on-chain identity — a DID and a store — \
+         that lets you publish, sign for an app and be found by other people.\n\n\
+         Your account already holds funds, receives at the address on the Wallet tab, and reads \
+         everything on the DIG Network without one.";
+
+    /// Said when the registry could not be read at all.
+    ///
+    /// Deliberately NOT [`EMPTY`]: an account whose registry will not load may well hold several
+    /// profiles, and telling that person they have none is a claim about their identity that no read
+    /// supports. Carries the loader's own words, because a hand-edited file and a permissions fault
+    /// need different things done about them.
+    pub(crate) fn unreadable(why: &str) -> String {
+        format!(
+            "DIG could not read this account's profile list, so it cannot say which profiles you \
+             have. Your account, its funds and its recovery phrase are unaffected — they come from \
+             your recovery phrase, not from this list. The log folder has the detail: {why}"
+        )
+    }
+
+    /// Why a profile cannot be created on this build — the ecosystem's one wording for it.
+    ///
+    /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
+    /// because the shell says the same thing in a native notice and two constants stating one fact
+    /// is how the account state machine came to have two sentence sets that drifted (#2357).
+    pub(crate) fn cannot_create(blocked: CreationBlocked) -> &'static str {
+        crate::profiles::copy::cannot_create(blocked)
+    }
+
+    /// Said above the switch controls, BEFORE anything is pressed.
+    ///
+    /// # Why it is on the card and not only in the confirmation
+    ///
+    /// "Say so before it happens" means before the decision, not between the decision and the act. A
+    /// person scanning this card is choosing which profile to use, and the cost of that choice — a
+    /// different receive address, a different signing key — belongs where they are choosing, not in
+    /// a dialog that appears once they already have. The confirmation repeats it with the two
+    /// profiles named ([`crate::profiles::copy::switching`]); this is the standing statement.
+    pub(crate) const SWITCH_CAUTION: &str =
+        "Switching profiles changes the address money arrives at and the key that signs for you. \
+         Anything already sent to your current address stays where it is, and switching back \
+         restores it.";
+
+    /// Said beside the hide controls, so the word "hide" cannot be read as "delete".
+    ///
+    /// The ecosystem's one wording, shared verbatim with the shell's own notices: a profile is
+    /// permanent on chain, and this control changes one computer's list.
+    pub(crate) const HIDE_NOTE: &str = crate::profiles::copy::HIDE_NOTE;
+
+    /// Said where the profile in use has no hide control, so its absence is not read as a fault.
+    pub(crate) const ACTIVE_CANNOT_HIDE: &str =
+        "The profile in use is always listed. Switch to another profile first if you want to hide \
+         this one.";
+}
+
 /// The words for the agent's two states, chosen by an exhaustive match rather than a boolean.
 pub(crate) fn agent_state(running: bool) -> &'static str {
     match running {
@@ -688,7 +789,25 @@ mod tests {
             account::DESTRUCTIVE_CAVEAT,
             account::DIG_ID_UNKNOWN,
             apps::INSTALL_NOTE,
+            profiles::PENDING,
+            profiles::EMPTY,
+            profiles::SWITCH_CAUTION,
+            profiles::HIDE_NOTE,
+            profiles::ACTIVE_CANNOT_HIDE,
+            crate::profiles::copy::WHAT_A_PROFILE_IS,
+            crate::profiles::copy::ABOUT_HEADING,
         ];
+        // Both arms of the create explainer, enumerated rather than sampled: the two missing pieces
+        // get two sentences and a sweep that visits one of them is a sweep for one of them. The
+        // indentation guard below found a real defect in exactly these two the day they were
+        // written, which is why they are here rather than trusted.
+        all.extend(
+            [
+                crate::profiles::CreationBlocked::NoChainTransport,
+                crate::profiles::CreationBlocked::NoProfileMinter,
+            ]
+            .map(profiles::cannot_create),
+        );
         all.extend(TabId::all().into_iter().map(lead));
         all.extend(
             super::super::facts::AccountKind::ALL
@@ -713,6 +832,9 @@ mod tests {
         said.push(content::store_contents(0, "0 B"));
         said.push(content::store_contents(1, "12 MiB"));
         said.push(content::store_contents(4, "407 MiB"));
+        // The two profile sentences that are built rather than constant.
+        said.push(profiles::unreadable("the stored registry is not JSON"));
+        said.push(crate::profiles::copy::switching("“home”", "“work”"));
         said
     }
 

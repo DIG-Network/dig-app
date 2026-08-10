@@ -136,6 +136,24 @@ impl AccountState {
     }
 }
 
+/// Why an UNLOCKED account still reported no receive address.
+///
+/// Distinguished from "no address yet" because the remedy differs and, in both cases, "unlock your
+/// account" is a remedy the user has already performed — advice that names a step already taken is
+/// worse than none. Carried on [`TrayView::address_fault`] and mapped to the sentence a person reads
+/// by [`crate::wallet::overview::WalletOverview::of_tray`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFault {
+    /// The account was unlocked and the derivation itself failed — a genuine defect
+    /// (dig_ecosystem#2059).
+    DerivationFailed,
+    /// The account was unlocked, but its wallet derives at a different profile than the one now
+    /// active, so the only address available belongs to the profile the user just left
+    /// (dig_ecosystem#2496). Nothing is broken; the wallet simply cannot move until the account is
+    /// re-opened.
+    WalletBehindActiveProfile,
+}
+
 /// Everything the tray is rendered from — one snapshot, read once per repaint.
 #[derive(Debug, Clone, Default)]
 pub struct TrayView {
@@ -161,19 +179,23 @@ pub struct TrayView {
     /// only the identity key was on hand. A `Copy my receive address` wired to that would hand out a
     /// string that receives nothing.
     pub receive_address: Option<String>,
-    /// Whether the SAME observation that produced [`receive_address`](Self::receive_address) found the
-    /// residency unlocked yet unable to derive an address — a genuine defect, not the ordinary "not
-    /// unlocked" case (dig_ecosystem#2059).
+    /// Why the SAME observation that produced [`receive_address`](Self::receive_address) found the
+    /// residency unlocked and STILL reported no address, or `None` when that is not what happened
+    /// (dig_ecosystem#2059, #2496).
     ///
     /// Only meaningful when `receive_address` is `None`: it is what tells
-    /// `wallet::overview::WalletOverview::of_tray` apart the two reasons a `None` can mean — an account
+    /// `wallet::overview::WalletOverview::of_tray` apart the reasons a `None` can mean — an account
     /// that is simply not unlocked (say "unlock it"), versus one that WAS unlocked at the moment of
-    /// observation and still failed to derive (saying "unlock it" would name a remedy the user already
-    /// performed). The shell fills both fields from a single call to
+    /// observation and still produced nothing, where saying "unlock it" would name a remedy the user
+    /// already performed. The shell fills both fields from a single call to
     /// `AccountResidency::observe_receiving_address` so the two facts describe the SAME instant —
     /// reading unlock-state and the address as two separate calls lets an idle relock or `Lock now` land
-    /// between them and misreport an ordinary lock as this fault.
-    pub address_derivation_failed: bool,
+    /// between them and misreport an ordinary lock as a fault.
+    ///
+    /// An enum rather than a flag per cause: the faults are alternatives, and two booleans would make
+    /// "derivation failed AND the wallet is behind" expressible when it is not a state the residency
+    /// can report.
+    pub address_fault: Option<AddressFault>,
     /// The account's balance as the node last reported it, or why it is not known
     /// (dig_ecosystem#2206).
     ///
@@ -284,6 +306,24 @@ pub struct TrayView {
     /// [`AppPresence::Unknown`](crate::apps::AppPresence::Unknown) is the default and means exactly
     /// that nobody looked; see that type for why it is not an empty list.
     pub installed_apps: crate::apps::AppPresence,
+    /// This account's dig-profiles, or why they are not known (dig_ecosystem#2403).
+    ///
+    /// Filled from the app's live [`ProfileSession`](crate::account::profile_session::ProfileSession),
+    /// which is the ONE place the active profile is stored — so the list a person picks from and the
+    /// index the wallet derives at cannot disagree.
+    ///
+    /// The default — [`ProfilesReading::Pending`](crate::profiles::ProfilesReading::Pending) — is the
+    /// truth before boot has reported, and is deliberately not an empty list. Every real user's
+    /// answer today is `Known(vec![])`, because nothing can mint a profile; that is a reading, and
+    /// the surface says so in its own words.
+    pub profiles: crate::profiles::ProfilesReading,
+    /// Whether a profile can be CREATED on this build, and which missing piece stops it.
+    ///
+    /// Derived by the shell from the same [`MintSeams`](crate::account::chain_mint::MintSeams) value
+    /// it hands the start-up wizard, through [`ProfileCreation::of`](crate::profiles::ProfileCreation::of).
+    /// That single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
+    /// surface comes to advertise a create control whose implementation refuses.
+    pub profile_creation: crate::profiles::ProfileCreation,
 }
 
 impl TrayView {
@@ -296,7 +336,7 @@ impl TrayView {
     /// # Why it destructures instead of listing fields
     ///
     /// This began as a hand-spelled `a.x == b.x && …` chain in the shell binary, and it silently fell
-    /// three fields behind [`TrayView`]: `window_host`, `hotkey` and `address_derivation_failed`. The
+    /// three fields behind [`TrayView`]: `window_host`, `hotkey` and the address fault. The
     /// `window_host` omission was the expensive one — when a window fails to open, `window_host`
     /// degrades to [`WindowHost::Unavailable`] so the tray can re-expand from four rows to the full
     /// menu, and that is the ONLY thing standing between a failed open and a user with no route to
@@ -316,7 +356,7 @@ impl TrayView {
             account,
             profile_id,
             receive_address,
-            address_derivation_failed,
+            address_fault,
             balance,
             did,
             second_factor,
@@ -328,6 +368,8 @@ impl TrayView {
             node_facts,
             hosted_stores,
             installed_apps,
+            profiles,
+            profile_creation,
         } = self;
 
         running == &other.running
@@ -338,9 +380,9 @@ impl TrayView {
             // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
             // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
             && receive_address == &other.receive_address
-            // A failed derivation changes what the Wallet row SAYS, so it must repaint even though the
-            // address itself is `None` in both snapshots.
-            && address_derivation_failed == &other.address_derivation_failed
+            // A fault changes what the Wallet row SAYS, so it must repaint even though the address
+            // itself is `None` in both snapshots.
+            && address_fault == &other.address_fault
             // The Wallet row RENDERS the balance, so a reading that changed must repaint — without
             // this the first real figure would never replace "Balance not known" until something
             // else in the menu happened to move (dig_ecosystem#2206).
@@ -387,6 +429,16 @@ impl TrayView {
             // while the window was open must repaint. It changes only when a sibling binary appears
             // or disappears — an event, not a tick.
             && installed_apps == &other.installed_apps
+            // The Account pane RENDERS this list, and every one of its controls changes it: a
+            // switch moves the active row, hiding moves a visibility. Without this arm a person
+            // would press "Use this profile" and watch nothing move until some unrelated field
+            // happened to tick — the freeze `balance` and `hosted_stores` both needed this same arm
+            // to avoid (dig_ecosystem#2206).
+            && profiles == &other.profiles
+            // It changes only when the build does, which is never within a session — carried so a
+            // field the pane draws from cannot escape this comparison, which destructures with no
+            // `..` precisely so that it cannot.
+            && profile_creation == &other.profile_creation
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -708,6 +760,52 @@ pub enum TrayAction {
     /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
     /// of one `enabled: false`.
     AboutDid,
+    /// Make one of this account's dig-profiles the active one (dig_ecosystem#2403).
+    ///
+    /// Carries the HD index rather than "the next one" for the reason
+    /// [`SetCacheCap`](Self::SetCacheCap) carries its bytes: a click must resolve the same way
+    /// however stale the list it was drawn from is. The shell DISCLOSES what the switch changes
+    /// before applying it ([`SwitchPlan`](crate::profiles::SwitchPlan)), because the receive address,
+    /// the per-profile DEK and the identity signing key all derive at this index — being told
+    /// afterwards means the first a person knows of it is money arriving somewhere they were not
+    /// shown.
+    ///
+    /// Offered only for a profile that is NOT already active: a row that reads "use this profile"
+    /// beside the profile in use is a control whose only effect is to raise a warning about a change
+    /// that is not happening.
+    SetActiveProfile {
+        /// The profile's HD index, as `ProfileIx`'s inner `u32`. A plain integer so the whole action
+        /// stays `Copy` and comparable, exactly as the cache preset's byte count is.
+        ix: u32,
+    },
+    /// Show a dig-profile in this host's lists, or stop showing it (dig_ecosystem#2403).
+    ///
+    /// Carries the visibility being MOVED TO, not "toggle", for the reason
+    /// [`SetAutoUpdate`](Self::SetAutoUpdate) does: a list that moved between the repaint and the
+    /// click then resolves to what the row said rather than to the opposite of a state that changed.
+    ///
+    /// **This is a local view preference and nothing more.** A minted profile is permanent on chain
+    /// — hiding one does not delete it, does not stop it deriving, and does not stop it spending —
+    /// so the row's label says *hide from this list*, never *remove* or *delete*. dig-account
+    /// refuses to hide the ACTIVE profile, and `set_active` un-hides its target, so there is no
+    /// state in which a person can hide their way out of their own account.
+    SetProfileVisibility {
+        /// The profile's HD index, as `ProfileIx`'s inner `u32`.
+        ix: u32,
+        /// `true` to hide it from this host's lists, `false` to show it again.
+        hidden: bool,
+    },
+    /// EXPLAIN what a dig-profile is, what creating one would cost, and why this version cannot
+    /// create one (dig_ecosystem#2403).
+    ///
+    /// There is deliberately **no `CreateProfile` action**, for exactly the reason
+    /// [`AboutDid`](Self::AboutDid) records: creating a profile is a mint, dig-account 0.8's
+    /// `ProfileMinter::mint` is `todo!()`, and an action that mints does not exist and therefore is
+    /// not offered — not even disabled. Because no [`TrayAction`] can create a profile, "this build
+    /// cannot mint one" is STRUCTURAL rather than one `enabled: true` away from being wrong.
+    ///
+    /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
+    AboutProfiles,
     /// Copy the account's `xch1…` receive address to the clipboard (dig_ecosystem#1850).
     ///
     /// The address comes from [`TrayView::receive_address`], which the shell fills from the account's own
@@ -1383,6 +1481,77 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
     rows
 }
 
+/// **Profiles** — the account's dig-profiles: which one is in use, and which are shown here
+/// (dig_ecosystem#2403).
+///
+/// # What this builder decides, and what it deliberately does not
+///
+/// It decides which of the two per-profile verbs each row gets, and it never emits a THIRD verb for
+/// creating one. That absence is structural: see [`TrayAction::AboutProfiles`] for why no action in
+/// this shell can mint a profile, which is what makes "this build cannot create one" a property of
+/// the code rather than of an `enabled: false` somebody could flip.
+///
+/// It does NOT decide how the list is drawn, or which profile a row is ABOUT beyond the index it
+/// carries. The pane reads the profiles themselves from
+/// [`TrayView::profiles`] and matches each verb to its row by that index, exactly as the Content
+/// tab matches a cache preset by its byte count.
+///
+/// # The two verbs, and the states each is withheld in
+///
+/// * **Use this profile** is emitted for every profile that is not already active. Withheld from the
+///   active one because there is nothing for it to change; the list says which one that is.
+/// * **Hide / show** is emitted for every profile EXCEPT the active one, because dig-account refuses
+///   to hide the active profile (`AccountError::ActiveProfileCannotBeHidden`). A row offered there
+///   would be a control that reports a refusal from the crate underneath, which is the dead end
+///   #1800 removed — and the way to hide that profile, switching away from it first, is the row
+///   directly beside it.
+///
+/// Nothing is emitted at all until the list has been READ. A verb built from
+/// [`ProfilesReading::Pending`](crate::profiles::ProfilesReading::Pending) would be a control acting
+/// on a profile nobody has confirmed exists.
+pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
+    let mut rows: Vec<MenuRow> = view
+        .profiles
+        .rows()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|profile| match profile.active {
+            true => Vec::new(),
+            false => vec![
+                MenuRow::action(
+                    TrayAction::SetActiveProfile { ix: profile.ix.0 },
+                    format!("Use {} for this account…", profile.display_name()),
+                    true,
+                ),
+                MenuRow::action(
+                    TrayAction::SetProfileVisibility {
+                        ix: profile.ix.0,
+                        hidden: !profile.hidden,
+                    },
+                    match profile.hidden {
+                        true => format!("Show {} in this list", profile.display_name()),
+                        false => format!("Hide {} from this list", profile.display_name()),
+                    },
+                    true,
+                ),
+            ],
+        })
+        .collect();
+    if !rows.is_empty() {
+        rows.push(MenuRow::Separator);
+    }
+    rows.push(MenuRow::action(
+        TrayAction::AboutProfiles,
+        PROFILES_LABEL,
+        true,
+    ));
+    rows
+}
+
+/// The explainer row's label. Names the concept a person is about to read about, and — per rule 3 —
+/// promises an explanation rather than an act.
+pub const PROFILES_LABEL: &str = "About DIG profiles…";
+
 /// **Wallet** — what the account can do with money, which today is receive and understand.
 ///
 /// # The address row
@@ -1995,8 +2164,8 @@ mod tests {
             ("receive_address", |v| {
                 v.receive_address = Some("xch1x".to_string())
             }),
-            ("address_derivation_failed", |v| {
-                v.address_derivation_failed = true
+            ("address_fault", |v| {
+                v.address_fault = Some(AddressFault::DerivationFailed)
             }),
             ("balance", |v| {
                 v.balance = crate::wallet::overview::BalanceReading::Known(
@@ -2224,7 +2393,7 @@ mod tests {
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
             account: Some(account),
             receive_address,
-            address_derivation_failed: false,
+            address_fault: None,
             // Not yet polled — the honest pre-first-read state, and NOT a zero. Tests that care
             // about a figure set it explicitly.
             balance: crate::wallet::overview::BalanceReading::default(),
@@ -2253,6 +2422,12 @@ mod tests {
             node_facts: Some(fixture_node_facts()),
             hosted_stores: crate::hosted_stores::HostedStoresReading::Known(Vec::new()),
             installed_apps: crate::apps::AppPresence::Known(Vec::new()),
+            // The registry ANSWERED and this account holds no profile — which is every real
+            // account's state, because nothing in this build can mint one. Tests that need a list
+            // build one from a registry fixture explicitly.
+            profiles: crate::profiles::ProfilesReading::Known(Vec::new()),
+            // What `mint_seams()` returns in the shipped binary.
+            profile_creation: crate::profiles::ProfileCreation::default(),
             // A beacon that answered: auto-update on, following stable — the ordinary success case.
             // The tests that describe the absent beacon and the nightly channel null this out or
             // replace it explicitly.

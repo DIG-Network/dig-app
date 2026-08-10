@@ -19,6 +19,10 @@ authors.workspace = true
 description = "The DIG user-app identity-agent core: key management, DID/profiles, wallet, per-user encrypted AppData, identity-authenticated engine IPC, and the CLI/RPC gateway. The identity half of the engine/identity split (dig_ecosystem#908)."
 
 [features]
+# Exposes `account::profile_session::test_support` (registry fixtures) to the integration suite. NEVER
+# enabled by a consumer: it builds registries from JSON, which production reaches only by loading a
+# file the user's own mints wrote.
+profile-test-support = ["dep:dig-did"]
 # The branded prompt GUI (dig_ecosystem#2038). ON by default, because drawing consent is what the
 # app does; a `--no-default-features` build is the HEADLESS agent, which cannot prompt at all and
 # therefore fails closed on every prompt (`HeadlessConfirmer`).
@@ -105,6 +109,8 @@ base64.workspace = true
 # encoding for the human-readable registry.
 dig-identity.workspace = true
 hex.workspace = true
+# Only reachable from the profile-registry test fixtures (see the workspace manifest).
+dig-did = { workspace = true, optional = true }
 
 # Wallet host (U8) — the canonical chip35 DIG spend builder + the Chia types it works in. NO spend
 # bundle is hand-rolled; the DIG treasury constant is reused from chip35 (see the `canonical` skill).
@@ -165,6 +171,14 @@ block2.workspace = true
 dispatch2.workspace = true
 
 [dev-dependencies]
+# A self dev-dependency, so the INTEGRATION suite (a separate crate) can reach the profile-registry
+# fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
+# alternative — hand-writing the same registry JSON in each integration test — would be several
+# independent chances to drift from the shape dig-account actually accepts.
+dig-app-core = { path = ".", features = ["profile-test-support"] }
+# Drives the compile-fail case that pins `WalletSlot`'s missing bare-index constructor. A property
+# that is the ABSENCE of an API has no runtime witness, so the compiler has to be the assertion.
+trybuild = "1"
 png.workspace = true
 tempfile.workspace = true
 rand_chacha.workspace = true

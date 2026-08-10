@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::live::{belongs_to_active_profile, ConsentError, ConsentedProfile, LiveDid};
 use crate::sealer::{ProfileSealer, SealError};
 
 /// One authorized dapp origin, as persisted DIGOP1-sealed per profile (§5.6.4). Records what the user
@@ -47,13 +48,17 @@ pub struct GrantOutcome {
 /// Interior-mutable ([`Mutex`]) so the loopback server can share one store behind an `Arc`.
 pub struct WhitelistStore<S: ProfileSealer> {
     sealer: S,
-    profile_did: String,
+    /// The DID this store seals under, read at each grant/restore rather than captured — see
+    /// [`LiveDid`], and [`PairingStore`](crate::pairing::PairingStore) for the same field and the
+    /// same reason.
+    profile_did: LiveDid,
     live: Mutex<HashMap<String, WhitelistEntry>>,
 }
 
 impl<S: ProfileSealer> WhitelistStore<S> {
-    /// Build a store that seals grants under `profile_did`'s DEK via `sealer`.
-    pub fn new(sealer: S, profile_did: impl Into<String>) -> Self {
+    /// Build a store that seals grants under `profile_did`'s DEK via `sealer`. A `&str`/`String`
+    /// converts to a FIXED DID; production passes a [`LiveDid::read`] so the store follows a switch.
+    pub fn new(sealer: S, profile_did: impl Into<LiveDid>) -> Self {
         Self {
             sealer,
             profile_did: profile_did.into(),
@@ -61,30 +66,55 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         }
     }
 
+    /// The DID to seal under right now, or a fail-closed [`SealError`] when no profile is active.
+    /// See [`PairingStore::seal_as`](crate::pairing::PairingStore) for why refusing beats a
+    /// placeholder.
+    fn seal_as(&self) -> Result<String, SealError> {
+        self.profile_did
+            .get()
+            .ok_or_else(|| SealError::Seal("no active profile — the account is locked".to_string()))
+    }
+
+    /// Read the profile a connect confirm is about to be answered under. Take this BEFORE raising the
+    /// confirm and hand it to [`grant`](Self::grant); see [`ConsentedProfile`].
+    pub fn consent_now(&self) -> ConsentedProfile {
+        ConsentedProfile::reading(&self.profile_did)
+    }
+
     /// Whitelist `origin` with `permissions`: register it live and seal the [`WhitelistEntry`] at rest
     /// under the active profile's DEK. The caller invokes the native connect confirm (§5.6.4) BEFORE
     /// calling this — the store records only an already-approved grant. A re-grant of the same origin
     /// replaces the prior entry.
     ///
+    /// `consent`, taken before that confirm, is what makes the grant belong to the profile whose owner
+    /// approved it: a switch landing in between is refused rather than recorded under whoever arrived.
+    ///
     /// # Errors
     ///
-    /// [`SealError`] if the profile is locked or sealing fails; no live entry is registered on error.
+    /// [`ConsentError::ProfileMoved`] if the active profile changed since `consent` was taken;
+    /// [`ConsentError::Seal`] if the profile is locked or sealing fails. No live entry is registered on
+    /// either error.
     pub fn grant(
         &self,
+        consent: &ConsentedProfile,
         origin: &str,
         permissions: Vec<String>,
         connected_at: u64,
-    ) -> Result<GrantOutcome, SealError> {
+    ) -> Result<GrantOutcome, ConsentError> {
+        let profile_did = self.seal_as()?;
+        if !consent.still_holds(&profile_did) {
+            return Err(ConsentError::ProfileMoved);
+        }
         let entry = WhitelistEntry {
             origin: origin.to_string(),
-            profile_did: self.profile_did.clone(),
+            profile_did: profile_did.clone(),
             granted_permissions: permissions,
             connected_at,
         };
         // Seal FIRST: if sealing fails (locked profile) we register nothing, so a live grant never
         // exists without a durable at-rest counterpart (parity with the pairing store).
         let plaintext = serde_json::to_vec(&entry).map_err(|e| SealError::Seal(e.to_string()))?;
-        let sealed_record = self.sealer.seal(&self.profile_did, &plaintext)?;
+        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
 
         self.lock().insert(origin.to_string(), entry.clone());
         Ok(GrantOutcome {
@@ -100,7 +130,7 @@ impl<S: ProfileSealer> WhitelistStore<S> {
     ///
     /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
-        let plaintext = self.sealer.open(&self.profile_did, sealed_record)?;
+        let plaintext = self.sealer.open(&self.seal_as()?, sealed_record)?;
         let entry: WhitelistEntry =
             serde_json::from_slice(&plaintext).map_err(|_| SealError::Open)?;
         let origin = entry.origin.clone();
@@ -108,21 +138,45 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         Ok(origin)
     }
 
-    /// Whether `origin` is connected for the active profile — the `sign.request` connect gate.
+    /// Whether `origin` is connected FOR THE PROFILE NOW ACTIVE — the `sign.request` connect gate.
     pub fn is_whitelisted(&self, origin: &str) -> bool {
-        self.lock().contains_key(origin)
+        self.get(origin).is_some()
     }
 
-    /// The live entry for `origin`, if connected (for the connect-response handle).
+    /// The live entry for `origin` if it is connected for the profile now active (for the
+    /// connect-response handle).
     pub fn get(&self, origin: &str) -> Option<WhitelistEntry> {
-        self.lock().get(origin).cloned()
+        self.lock()
+            .get(origin)
+            .filter(|entry| self.belongs_to_active(&entry.profile_did))
+            .cloned()
     }
 
-    /// Revoke `origin` (the `connect.revoke` surface, §5.6.4). Returns whether an entry was present;
-    /// afterward that origin returns to `CONNECT_REQUIRED`. The caller separately deletes the sealed
-    /// at-rest record.
+    /// Revoke `origin` (the `connect.revoke` surface, §5.6.4). Returns whether an entry for the active
+    /// profile was present; afterward that origin returns to `CONNECT_REQUIRED`. The caller separately
+    /// deletes the sealed at-rest record.
+    ///
+    /// A grant belonging to a DIFFERENT profile is left alone rather than removed: the at-rest half of
+    /// this revoke goes to the ACTIVE profile's directory, so deleting another profile's live entry here
+    /// would drop access that the next boot restores anyway — a revoke that reads as done and is not.
+    /// A LOCKED account is the same case for the same reason, and its caller
+    /// (`handle_connect_revoke`) refuses `LOCKED` on the durable half regardless.
     pub fn revoke(&self, origin: &str) -> bool {
-        self.lock().remove(origin).is_some()
+        let mut live = self.lock();
+        match live.get(origin) {
+            Some(entry) if self.belongs_to_active(&entry.profile_did) => {
+                live.remove(origin);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a recorded grant tagged `entry_did` is one the profile NOW ACTIVE may act on — the
+    /// predicate that stops a grant surviving a profile switch, and stops a LOCKED account honouring
+    /// one at all. See [`belongs_to_active_profile`](crate::live::belongs_to_active_profile).
+    fn belongs_to_active(&self, entry_did: &str) -> bool {
+        belongs_to_active_profile(self.profile_did.get().as_deref(), entry_did)
     }
 
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than gate a sign
@@ -155,7 +209,12 @@ mod tests {
     fn granting_an_origin_whitelists_it_and_seals_the_record() {
         let store = store();
         let out = store
-            .grant(ORIGIN, vec!["addresses".to_string()], 1_700_000_000)
+            .grant(
+                &store.consent_now(),
+                ORIGIN,
+                vec!["addresses".to_string()],
+                1_700_000_000,
+            )
             .unwrap();
 
         assert!(store.is_whitelisted(ORIGIN));
@@ -170,7 +229,9 @@ mod tests {
     #[test]
     fn a_sealed_grant_round_trips_through_restore() {
         let store = store();
-        let out = store.grant(ORIGIN, vec![], 42).unwrap();
+        let out = store
+            .grant(&store.consent_now(), ORIGIN, vec![], 42)
+            .unwrap();
         store.revoke(ORIGIN);
         assert!(!store.is_whitelisted(ORIGIN));
 
@@ -182,7 +243,9 @@ mod tests {
     #[test]
     fn revoking_returns_the_origin_to_unconnected() {
         let store = store();
-        store.grant(ORIGIN, vec![], 1).unwrap();
+        store
+            .grant(&store.consent_now(), ORIGIN, vec![], 1)
+            .unwrap();
         assert!(store.revoke(ORIGIN));
         assert!(!store.revoke(ORIGIN));
         assert!(!store.is_whitelisted(ORIGIN));
@@ -192,7 +255,9 @@ mod tests {
     fn a_foreign_profile_cannot_restore_a_sealed_grant() {
         // NC-2 cross-profile isolation: the sealed grant is bound to the sealing profile's DEK.
         let store_a = store();
-        let out = store_a.grant(ORIGIN, vec![], 1).unwrap();
+        let out = store_a
+            .grant(&store_a.consent_now(), ORIGIN, vec![], 1)
+            .unwrap();
 
         // A DISTINCT profile DEK (a different label) cannot open A's sealed grant — isolation is
         // cryptographic (the AEAD tag), not by DID string.
@@ -203,21 +268,106 @@ mod tests {
         ));
     }
 
+    /// **Locking the account withdraws every grant's authority, not just its key.**
+    ///
+    /// A lock is not a quiet moment on the same profile: `SetActiveProfile` reads the registry from
+    /// disk and switches deliberately while locked, and the sign path's re-auth gate then unlocks into
+    /// whatever is active by then. So a grant that still answered "yes" here would be one profile's
+    /// consent honoured by another profile's key.
+    ///
+    /// The control is the same store one line earlier, while unlocked: without it a store that never
+    /// registered the grant at all would produce the same refusal.
+    #[test]
+    fn a_locked_account_authorizes_no_origin_it_granted_while_unlocked() {
+        use crate::account::boot::live_profile_did;
+        use crate::account::residency::AccountResidency;
+        use crate::session_lock::SessionKeys;
+        use dig_keystore::KdfParams;
+
+        let residency = crate::test_support::test_residency();
+        let store = WhitelistStore::new(
+            residency.sealer(KdfParams::FAST_TEST),
+            live_profile_did(&residency),
+        );
+        store
+            .grant(&store.consent_now(), ORIGIN, vec![], 1)
+            .expect("an unlocked profile grants");
+        assert!(
+            store.is_whitelisted(ORIGIN),
+            "control: the grant authorizes while the account is unlocked"
+        );
+
+        AccountResidency::lock_all(&residency);
+
+        assert!(
+            !store.is_whitelisted(ORIGIN),
+            "a locked account cannot say whose consent this is, so it must honour none of it"
+        );
+        assert!(
+            store.get(ORIGIN).is_none(),
+            "and the entry itself must not be handed out — the connect handle is built from it"
+        );
+    }
+
+    /// **A grant is refused when the profile moved between the consent and the write.**
+    ///
+    /// The store is the enforcement point, so it is asserted here as well as through the router: a
+    /// consent read under A, presented while B is active, must record nothing — not under B, whose
+    /// owner never saw the modal, and not under A, which is no longer the profile being written for.
+    ///
+    /// The control is the SAME consent presented while A is still active, which must grant: without it
+    /// a store that refused every grant would look identical.
+    #[test]
+    fn a_grant_is_refused_when_the_profile_moved_since_the_consent() {
+        use crate::live::Live;
+        use std::sync::Arc;
+
+        let active = Arc::new(Mutex::new("did:chia:consenting".to_string()));
+        let source = Arc::clone(&active);
+        let store = WhitelistStore::new(
+            test_sealer(DID),
+            Live::read(move || Some(source.lock().expect("test mutex").clone())),
+        );
+
+        let consent = store.consent_now();
+        *active.lock().expect("test mutex") = "did:chia:arrived-after".to_string();
+
+        let moved = store.grant(&consent, ORIGIN, vec![], 1).err();
+        assert!(
+            matches!(moved, Some(ConsentError::ProfileMoved)),
+            "a grant written for a profile nobody consented for must be refused: {moved:?}"
+        );
+        assert!(
+            !store.is_whitelisted(ORIGIN),
+            "and a refused grant registers nothing for the profile that arrived"
+        );
+
+        *active.lock().expect("test mutex") = "did:chia:consenting".to_string();
+        assert!(
+            !store.is_whitelisted(ORIGIN),
+            "nor for the profile that consented — the grant did not half-land"
+        );
+        assert!(
+            store.grant(&consent, ORIGIN, vec![], 2).is_ok(),
+            "control: the same consent grants once its own profile is active again"
+        );
+        assert!(store.is_whitelisted(ORIGIN));
+    }
+
     #[test]
     fn a_locked_profile_fails_closed_on_grant() {
         use crate::account::residency::AccountResidency;
         use crate::session_lock::SessionKeys;
-        use dig_account::ProfileIx;
         use dig_keystore::KdfParams;
 
         // A live-view sealer over a LOCKED residency must fail closed on seal.
         let residency = crate::test_support::test_residency();
-        let sealer = residency.sealer(ProfileIx::ROOT, KdfParams::FAST_TEST);
+        let sealer = residency.sealer(KdfParams::FAST_TEST);
         AccountResidency::lock_all(&residency);
         let store = WhitelistStore::new(sealer, DID);
         assert!(matches!(
-            store.grant(ORIGIN, vec![], 1),
-            Err(SealError::Seal(_))
+            store.grant(&store.consent_now(), ORIGIN, vec![], 1),
+            Err(ConsentError::Seal(SealError::Seal(_)))
         ));
         assert!(
             !store.is_whitelisted(ORIGIN),

@@ -88,6 +88,7 @@ pub(crate) mod field;
 pub(crate) mod flow;
 pub(crate) mod home;
 pub(crate) mod identity;
+pub(crate) mod profiles;
 pub(crate) mod select;
 pub(crate) mod settings;
 pub(crate) mod state;

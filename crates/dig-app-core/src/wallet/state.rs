@@ -182,6 +182,12 @@ impl<S: ProfileSealer> WalletStore<S> {
         }
     }
 
+    /// Where `did`'s sealed wallet-state blob lives. Exposed so a caller that wants to know whether the
+    /// state has CHANGED can look at the file without opening it — opening costs a full key derivation.
+    pub fn state_path(&self, did: &str) -> PathBuf {
+        self.dir_for(did).join(STATE_SEAL_FILE)
+    }
+
     // --- sealing plumbing -----------------------------------------------------------------------
 
     /// Seal `plaintext` under `did`'s DEK and write it to `file` in the profile's directory,
@@ -416,13 +422,12 @@ mod tests {
     fn a_locked_profile_cannot_seal_its_wallet() {
         use crate::account::residency::AccountResidency;
         use crate::session_lock::SessionKeys;
-        use dig_account::ProfileIx;
         use dig_keystore::KdfParams;
 
         // A live-view sealer over a LOCKED residency must fail closed on seal.
         let dir = tempfile::tempdir().unwrap();
         let residency = crate::test_support::test_residency();
-        let sealer = residency.sealer(ProfileIx::ROOT, KdfParams::FAST_TEST);
+        let sealer = residency.sealer(KdfParams::FAST_TEST);
         AccountResidency::lock_all(&residency);
         let store = WalletStore::new(dir.path(), sealer);
         let err = store

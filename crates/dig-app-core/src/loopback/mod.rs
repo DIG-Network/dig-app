@@ -35,8 +35,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::sealer::ProfileSealer;
 
 pub use dispatch::{
-    FrameRouter, OpenSignGate, PairedAppsControl, ProfileConnectInfo, RequestFrame, SignErrorCode,
-    SignReauthGate,
+    FrameRouter, OpenSignGate, PairedAppsControl, ProfileConnectInfo, RequestFrame, RevokeOutcome,
+    SignErrorCode, SignReauthGate,
 };
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
 pub use persist::{FileSealedStore, NullSealedStore, PersistedSignState, SealedRecordStore};
@@ -251,18 +251,13 @@ mod tests {
 
     fn router() -> FrameRouter<AccountSealer> {
         use crate::loopback::dispatch::ProfileConnectInfo;
-        use crate::session::SessionSigner;
         use crate::whitelist::WhitelistStore;
         use std::sync::Arc;
 
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let signer = test_residency().signer();
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -569,7 +564,7 @@ mod tests {
         );
 
         // … until the user removes it, on the SAME open connection.
-        assert!(server.control.revoke(&listed[0].pairing_id));
+        assert!(server.control.revoke(&listed[0].pairing_id).lost_access());
         let after = client
             .authed(
                 "connect.request",

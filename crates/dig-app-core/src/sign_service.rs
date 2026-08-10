@@ -27,10 +27,13 @@
 //! lives in the shell, which only calls [`build_router`] once it has an unlocked account on a desktop
 //! session.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use sha2::{Digest, Sha256};
 
 use crate::confirm::NativeConfirmer;
+use crate::live::{Live, LiveDid, LiveProfileDir};
 use crate::loopback::{
     ConnectionGuard, FileSealedStore, FrameRouter, LoopbackServer, ProfileConnectInfo,
     SealedRecordStore, SignReauthGate, PINNED_EXTENSION_IDS,
@@ -105,27 +108,37 @@ impl SignReauthGate for SessionReauthGate {
 /// (production default vs the cheap test cost), so the assembly no longer threads a `KdfParams`.
 pub fn build_router<S>(
     sealer: S,
-    profile_did: &str,
-    profile_dir: &Path,
+    profile_did: LiveDid,
+    profile_dir: LiveProfileDir,
     confirmer: Arc<dyn NativeConfirmer>,
     signer: Box<dyn SessionSigner + Send + Sync>,
 ) -> FrameRouter<S>
 where
     S: ProfileSealer + Clone + Send + Sync + 'static,
 {
-    let pairings = PairingStore::new(sealer.clone(), profile_did);
-    let whitelist = WhitelistStore::new(sealer.clone(), profile_did);
-    // Load the active profile's wallet receive addresses so the connect handle can advertise them
-    // alongside the identity signing pubkey (#961).
-    let addresses = active_wallet_addresses(sealer, profile_did, profile_dir);
+    let pairings = PairingStore::new(sealer.clone(), profile_did.clone());
+    let whitelist = WhitelistStore::new(sealer.clone(), profile_did.clone());
 
     // The connect handle advertises the active identity's signing public key AND the wallet's
     // receive addresses (#961), so a connected dapp can display / send to the wallet. Only public
     // data crosses this handle — the private key stays sealed in the injected `signer`.
+    //
+    // Every field is a live read, so none of them can go stale at the profile that was active when
+    // this assembly ran. The advertised signing key is not a field at all — the router reads it from
+    // the signer it will actually sign with. That removes the STALENESS; the DID and the addresses
+    // remain separate reads from the key, so a switch landing between them still yields a mismatched
+    // handle. `connect_handle` says so where the three are read.
+    let addresses = {
+        let cache = Arc::new(ConnectAddresses::new(
+            sealer.clone(),
+            profile_did.clone(),
+            profile_dir.clone(),
+        ));
+        Live::read(move || cache.read())
+    };
     let connect_info = ProfileConnectInfo {
-        profile_did: profile_did.to_string(),
+        profile_did: profile_did.clone(),
         addresses,
-        pubkeys: vec![signer.signing_public_key_hex()],
     };
     let store: Arc<dyn SealedRecordStore> = Arc::new(FileSealedStore::new(profile_dir));
 
@@ -142,28 +155,123 @@ where
     router
 }
 
-/// Read the active profile's wallet receive addresses (`xch1…`) for the connect handle (#961).
+/// The connect handle's wallet receive addresses, derived once per distinct wallet state rather than
+/// once per frame (dig_ecosystem#2398 SEC-F2).
 ///
-/// The wallet state is sealed per profile under the SAME DEK the router's stores use, so this opens
-/// it through a [`WalletStore`] over the same injected `sealer`. The store is rooted at the brand
-/// directory, which is the grandparent of `profile_dir` (`<brand>/profiles/<did-hash>/`); a profile
-/// with no saved wallet state yet — or one whose sealed state cannot be opened — yields no addresses
-/// rather than failing the assembly, since the signing channel is still fully usable without them
-/// (they only enrich the connect handle).
-fn active_wallet_addresses<S>(sealer: S, profile_did: &str, profile_dir: &Path) -> Vec<String>
+/// # Why this is not just a cache
+///
+/// Opening the sealed wallet state runs a production Argon2id — ~118 ms and 64 MiB on one core. The
+/// connect handle is answered by EVERY `connect.request`, and an already-whitelisted origin reaches it
+/// with no native confirm and no rate limiter in front of it, on a single-threaded runtime. Deriving
+/// per frame therefore lets one connected origin pin the signing thread and queue the user's own
+/// `sign.request` behind its frames — so the derivation has to be conditional on something.
+///
+/// # What it is conditional on, and why that keeps the value LIVE
+///
+/// The addresses are a pure function of the active profile's DID, its directory, and the CONTENT of its
+/// sealed wallet blob, so those three are the whole fingerprint. Hashing the blob costs a small read and
+/// a SHA-256 — microseconds against the derivation it decides — and unlike a timestamp it cannot miss a
+/// change that lands inside a clock tick. A profile switch moves the DID and the directory, a lock reads
+/// both as `None`, and a wallet save rewrites the blob: each of those invalidates, which is the liveness
+/// the [`Live`] seam exists for (#2398), kept rather than traded away.
+struct ConnectAddresses<S> {
+    sealer: S,
+    profile_did: LiveDid,
+    profile_dir: LiveProfileDir,
+    /// The last fingerprint and the addresses derived under it. The lock is held across a derivation
+    /// deliberately: concurrent readers of the same state should wait for one Argon2id, not run several.
+    memo: Mutex<Option<(WalletFingerprint, Vec<String>)>>,
+}
+
+/// Everything the derived addresses depend on: the active DID, its directory, and a digest of the
+/// sealed wallet blob (`None` when there is no readable blob, which is itself a state — a profile with
+/// no wallet yet has no addresses).
+type WalletFingerprint = (Option<String>, Option<PathBuf>, Option<[u8; 32]>);
+
+impl<S> ConnectAddresses<S>
+where
+    S: ProfileSealer + Clone + Send + Sync + 'static,
+{
+    /// Build the seam over the same sealer + live profile sources the router's stores use.
+    fn new(sealer: S, profile_did: LiveDid, profile_dir: LiveProfileDir) -> Self {
+        Self {
+            sealer,
+            profile_did,
+            profile_dir,
+            memo: Mutex::new(None),
+        }
+    }
+
+    /// The active profile's receive addresses as they are NOW — re-derived only when the fingerprint
+    /// says the answer could have changed.
+    fn read(&self) -> Vec<String> {
+        let (did, dir) = (self.profile_did.get(), self.profile_dir.get());
+        let fingerprint = (
+            did.clone(),
+            dir.clone(),
+            self.sealed_wallet_digest(did.as_deref(), dir.as_deref()),
+        );
+
+        let mut memo = self.memo.lock().expect("connect-address memo poisoned");
+        if let Some((remembered, addresses)) = memo.as_ref() {
+            if *remembered == fingerprint {
+                return addresses.clone();
+            }
+        }
+        let addresses = match (did.as_deref(), dir.as_deref()) {
+            (Some(did), Some(dir)) => wallet_addresses_at(self.sealer.clone(), did, dir),
+            _ => Vec::new(),
+        };
+        *memo = Some((fingerprint, addresses.clone()));
+        addresses
+    }
+
+    /// A digest of the profile's sealed wallet blob, or `None` when there is none to read.
+    fn sealed_wallet_digest(&self, did: Option<&str>, dir: Option<&Path>) -> Option<[u8; 32]> {
+        let store = wallet_store_at(dir?, self.sealer.clone())?;
+        let sealed = std::fs::read(store.state_path(did?)).ok()?;
+        Some(Sha256::digest(&sealed).into())
+    }
+}
+
+/// Read the wallet receive addresses (`xch1…`) sealed for `did` under the profile directory `dir`
+/// (#961).
+///
+/// The wallet state is sealed per profile under the SAME DEK the router's stores use, so this opens it
+/// through a [`WalletStore`] over the same injected `sealer`. A profile with no saved wallet state yet,
+/// or one whose sealed state cannot be opened, yields no addresses rather than a wrong one — the signing
+/// channel is fully usable without them, and an address is the one field here a person might send money
+/// to.
+fn wallet_addresses_at<S>(sealer: S, did: &str, dir: &Path) -> Vec<String>
 where
     S: ProfileSealer + Send + Sync + 'static,
 {
-    let Some(brand_dir) = profile_dir.parent().and_then(Path::parent) else {
-        tracing::warn!("could not derive the brand dir from the profile dir — no wallet addresses");
+    let Some(store) = wallet_store_at(dir, sealer) else {
         return Vec::new();
     };
-    let store = WalletStore::new(brand_dir, sealer);
-    match store.load_state(profile_did) {
+    match store.load_state(did) {
         Ok(state) => state.addresses,
         Err(e) => {
             tracing::warn!(error = %e, "could not load wallet state — connect handle carries no addresses");
             Vec::new()
+        }
+    }
+}
+
+/// The [`WalletStore`] whose profile directory is `profile_dir`. The store is rooted at the brand
+/// directory, which is the grandparent (`<brand>/profiles/<did-hash>/`); a directory too shallow to have
+/// one yields `None`.
+fn wallet_store_at<S>(profile_dir: &Path, sealer: S) -> Option<WalletStore<S>>
+where
+    S: ProfileSealer,
+{
+    match profile_dir.parent().and_then(Path::parent) {
+        Some(brand_dir) => Some(WalletStore::new(brand_dir, sealer)),
+        None => {
+            tracing::warn!(
+                "could not derive the brand dir from the profile dir — no wallet addresses"
+            );
+            None
         }
     }
 }
@@ -208,11 +316,11 @@ mod tests {
     /// service): the identity signer reads the residency's default profile and the stores seal under a
     /// deterministic per-profile DEK (so a re-assembled service over the SAME `DID` re-opens its blobs).
     fn assemble(dir: &Path) -> FrameRouter<AccountSealer> {
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         build_router(
             test_sealer(DID),
-            DID,
-            dir,
+            DID.into(),
+            dir.into(),
             Arc::new(HeadlessConfirmer),
             Box::new(signer),
         )
@@ -326,7 +434,7 @@ mod tests {
 
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
         // The SAME per-profile DEK (same label) re-opens the sealed state.
-        let addresses = active_wallet_addresses(test_sealer(DID), DID, &profile_dir);
+        let addresses = wallet_addresses_at(test_sealer(DID), DID, &profile_dir);
         assert_eq!(addresses, vec!["xch1receive", "xch1change"]);
     }
 
@@ -336,7 +444,7 @@ mod tests {
         // signing channel is still fully usable), never a failure.
         let brand = tempfile::tempdir().unwrap();
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
-        let addresses = active_wallet_addresses(test_sealer(DID), DID, &profile_dir);
+        let addresses = wallet_addresses_at(test_sealer(DID), DID, &profile_dir);
         assert!(addresses.is_empty());
     }
 
@@ -360,7 +468,7 @@ mod tests {
 
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
         // A DISTINCT DEK (a different label) cannot open the sealed state — the AEAD tag rejects it.
-        let addresses = active_wallet_addresses(test_sealer("another-profile"), DID, &profile_dir);
+        let addresses = wallet_addresses_at(test_sealer("another-profile"), DID, &profile_dir);
         assert!(addresses.is_empty());
     }
 
@@ -368,8 +476,132 @@ mod tests {
     fn a_profile_dir_with_no_derivable_brand_dir_yields_no_addresses() {
         // A profile dir shallow enough to have no grandparent cannot locate a brand dir — the
         // helper must fall back to no addresses rather than panic.
-        let addresses = active_wallet_addresses(test_sealer(DID), DID, Path::new("solo"));
+        let addresses = wallet_addresses_at(test_sealer(DID), DID, Path::new("solo"));
         assert!(addresses.is_empty());
+    }
+
+    /// A sealer that COUNTS how many times it was asked to open something.
+    ///
+    /// The count is the assertion: SEC-F2 is about how often a production Argon2id runs, and an
+    /// implementation that re-derived on every frame returns exactly the same addresses as one that
+    /// does not. Only the count separates them.
+    #[derive(Clone)]
+    struct CountingSealer {
+        inner: AccountSealer,
+        opens: Arc<AtomicUsize>,
+    }
+
+    impl crate::sealer::ProfileSealer for CountingSealer {
+        fn seal(
+            &self,
+            profile_did: &str,
+            plaintext: &[u8],
+        ) -> Result<Vec<u8>, crate::sealer::SealError> {
+            self.inner.seal(profile_did, plaintext)
+        }
+        fn open(
+            &self,
+            profile_did: &str,
+            ciphertext: &[u8],
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::sealer::SealError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            self.inner.open(profile_did, ciphertext)
+        }
+    }
+
+    /// Save `addresses` as `did`'s wallet state under `brand`, and hand back the profile directory.
+    fn save_wallet(brand: &Path, did: &str, addresses: &[&str]) -> std::path::PathBuf {
+        use crate::wallet::state::{WalletState, WalletStore};
+        WalletStore::new(brand, test_sealer(did))
+            .save_state(
+                did,
+                &WalletState {
+                    addresses: addresses.iter().map(|a| (*a).to_string()).collect(),
+                    ..WalletState::default()
+                },
+            )
+            .expect("the fixture wallet state seals");
+        crate::storage::profile_dir(brand, &crate::storage::did_hash(did))
+    }
+
+    /// **The connect handle derives its addresses once per wallet state, not once per frame.**
+    ///
+    /// Every `connect.request` answers this handle, and a whitelisted origin reaches it with no confirm
+    /// and no rate limit — so a per-frame Argon2id lets one origin pin the signing thread and queue the
+    /// user's own `sign.request` behind it (dig_ecosystem#2398 SEC-F2).
+    ///
+    /// The fixture varies ONE thing at a time and keeps the honest control in every case: repeated
+    /// reads of unchanged state (must not re-derive), then a REWRITTEN wallet (must re-derive, or the
+    /// cache has traded liveness away), then a profile switch, then a lock. A test asserting only the
+    /// first would be satisfied by a handle that cached forever and went stale — the exact bug the
+    /// `Live` seam was introduced to fix.
+    #[test]
+    fn the_connect_handle_derives_its_addresses_once_per_wallet_state_not_once_per_frame() {
+        let brand = tempfile::tempdir().unwrap();
+        let dir = save_wallet(brand.path(), DID, &["xch1receive"]);
+
+        let opens = Arc::new(AtomicUsize::new(0));
+        let sealer = CountingSealer {
+            inner: test_sealer(DID),
+            opens: Arc::clone(&opens),
+        };
+        // Both sources are live, exactly as production builds them — a fixed pair would make the
+        // switch and lock halves below unreachable.
+        let active: Arc<Mutex<Option<(String, std::path::PathBuf)>>> =
+            Arc::new(Mutex::new(Some((DID.to_owned(), dir))));
+        let profile_did = {
+            let active = Arc::clone(&active);
+            Live::read(move || active.lock().unwrap().clone().map(|(did, _)| did))
+        };
+        let profile_dir = {
+            let active = Arc::clone(&active);
+            Live::read(move || active.lock().unwrap().clone().map(|(_, dir)| dir))
+        };
+        let addresses = ConnectAddresses::new(sealer, profile_did, profile_dir);
+
+        assert_eq!(vec!["xch1receive"], addresses.read());
+        let after_first = opens.load(Ordering::SeqCst);
+        assert!(after_first > 0, "the first read must actually derive");
+
+        for _ in 0..20 {
+            assert_eq!(vec!["xch1receive"], addresses.read());
+        }
+        assert_eq!(
+            after_first,
+            opens.load(Ordering::SeqCst),
+            "twenty further frames against unchanged state must not re-derive even once"
+        );
+
+        // Liveness, half one: the SAME profile saves new addresses. A cache keyed on the profile alone
+        // would keep answering with the old ones.
+        save_wallet(brand.path(), DID, &["xch1moved", "xch1change"]);
+        assert_eq!(
+            vec!["xch1moved", "xch1change"],
+            addresses.read(),
+            "a rewritten wallet must be seen — the memo may not cost liveness"
+        );
+        assert!(opens.load(Ordering::SeqCst) > after_first, "and re-derived");
+
+        // Liveness, half two: a switch to a profile with its own wallet.
+        const OTHER: &str = "did:chia:sign-service-other";
+        let other_dir = save_wallet(brand.path(), OTHER, &["xch1other"]);
+        *active.lock().unwrap() = Some((OTHER.to_owned(), other_dir));
+        assert_eq!(
+            Vec::<String>::new(),
+            addresses.read(),
+            "the other profile's state is sealed under ITS DEK, which this sealer cannot open — so no \
+             addresses, never the previous profile's"
+        );
+
+        // Liveness, half three: a lock removes both sources, and no memo may answer for it.
+        *active.lock().unwrap() = None;
+        let before_lock = opens.load(Ordering::SeqCst);
+        assert_eq!(Vec::<String>::new(), addresses.read());
+        assert_eq!(
+            before_lock,
+            opens.load(Ordering::SeqCst),
+            "a locked account has nothing to open, so it must not even try"
+        );
     }
 
     #[test]
@@ -382,6 +614,7 @@ mod tests {
             let pairings = PairingStore::new(test_sealer(DID), DID);
             let outcome = pairings
                 .pair(
+                    &pairings.consent_now(),
                     &crate::pairing::NewPairing::pinned("mlibddmbhlgogepnjdienclhnkfpkfah", None),
                     1,
                 )

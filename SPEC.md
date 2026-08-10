@@ -1495,18 +1495,155 @@ prefs) }`. Every profile's identity key AND its DEK are DERIVED from the single 
 the profile's index (§3.1) — a profile holds no independently-stored secret. `ProfileIx::ROOT` is the
 default profile the boot opens.
 
-**The wallet is ACTIVE on exactly one derivation index (MUST).** The set of indices the wallet
-operates on is declared once, as `account::active_profile::ACTIVE_PROFILES`, and is today the single
-element `ProfileIx::ROOT`. The account-open funnel `account::lifecycle::open_or_enroll` MUST take an
-`ActiveProfile` — a `ProfileIx` checked against that set — so a wallet-bearing account CANNOT be
-opened at an index the app does not watch. Consumers that need to know which addresses the app uses
-(the node subscription set, request routing) MUST read `ACTIVE_PROFILES` rather than re-deriving the
-question.
+**Exactly one profile is ACTIVE, and the app stores no copy of which (MUST).** The single storage
+location is `dig_account::ProfileRegistry`, whose scalar `active: Option<ProfileIx>` cannot represent
+a set of size two — so "exactly one" is structural rather than asserted. dig-app holds ONE
+`account::profile_session::ProfileSession` over it (`Arc<RwLock<..>>`), and every derivation seam
+re-reads the index PER OPERATION. A handle that stored the index MUST NOT exist: `ResidencySigner`
+and `ResidencySealer` carry no index field, so a switch cannot half-land across a handle the
+switching code cannot reach.
 
-HD derivation itself is **deactivated, not removed**: the unhardened wallet path, `ProfileIx`, and the
-per-profile signer / DEK / sealing-key plumbing remain whole and MUST keep deriving correctly at any
-index. Multi-address support is restored by widening `ACTIVE_PROFILES`, never by restoring deleted
-code.
+`ActiveSlot` is the reading — `Unprofiled` when nothing is minted (deriving at `ProfileIx::ROOT`), or
+the active profile's index, DID and label. An account with no confirmed profile has NO DID, and every
+identity surface MUST say so rather than render the root signing public key as an identity.
+
+**An index crosses an API boundary only as a vouched-for type (MUST).** `account::lifecycle::open_or_enroll`
+takes a `WalletSlot`, constructible only as the bootstrap or from the registry's own `ActiveProfile`
+borrow; a new mint takes a `MintTarget`, constructible only from `ProfileRegistry::next_free_ix`. A
+bare `ProfileIx` MUST NOT typecheck at either, so a wallet cannot be opened, nor a profile minted, at
+an index nothing vouched for.
+
+**Funding and target are distinct indices (MUST).** A mint is paid for by one profile's wallet and
+creates a profile at another index. They coincide only for an account's first profile, and a host
+that collapses them funds a mint from the new profile's empty wallet.
+
+**A switch MUST be disclosed and MUST NOT half-land.** Every profile-scoped derivation seam MUST
+re-read the active index per operation rather than capture it — the identity signer, the per-profile
+sealer, the DID the sealed stores tag records with, the directory those records are written to, and
+the DID the connect handle advertises. No DERIVATION seam is rebuilt on a switch, because none holds a
+copy to rebuild: the sign-service router is moved onto a serving thread for the process lifetime and no
+switching code can reach it, so "rebuild it" is not a contract any consumer could satisfy. The one kind
+of state that unavoidably IS a copy — the live authorization maps — is scoped per profile instead (see
+below), which needs no reach. A switch
+that cannot be PERSISTED MUST be rolled back in memory, or the receive address silently reverts at
+the next start.
+
+**The advertised signing key MUST be read from the signer that will sign.** The connect handle's
+`pubkeys` is derived from the router's own identity signer at the moment it answers, not carried
+alongside it, so the key advertised is the key that will sign. The DID beside it is a separate read,
+so the two naming one profile is a property of reading them adjacently, not an invariant a switch
+cannot break; a single acquisition serving both is what would make it one.
+
+**A profile-scoped seam with no active profile MUST fail closed, never substitute a placeholder.** A
+locked account has no DID and no directory: the sealed stores refuse to seal, the connect handle is
+refused with `LOCKED` rather than returned with a null DID, and the at-rest store persists nothing.
+
+**Skipping a WRITE fails closed; skipping a REMOVAL does not, and MUST be reported.** The two
+directions of at-rest persistence are not symmetric. A write that no directory can receive is
+dropped, and the user simply ends up with less access than they granted. A REMOVAL that no directory
+can receive leaves the sealed record in place, restore re-reads it at the next start, and the caller
+has already been told the grant is gone — so `connect.revoke` MUST refuse with `LOCKED` rather than
+answer `revoked: true`, and the tray MUST NOT promise a revoke lasts past a restart unless the record
+was actually deleted.
+
+**The authorization maps MUST answer for the profile now active, not the one that granted.** The
+pairing store and the connect whitelist are built once and read by a router on a serving thread no
+switching code reaches, so each record carries the DID it was granted under and every lookup — the
+connect gate, the sign gate, the tray's list, and both revokes — MUST ignore a record belonging to
+another profile. A grant made under one profile that still authorizes under another would skip the
+connect ceremony and hand the caller the NEW profile's DID, addresses and signing key; and a revoke
+taken under the wrong profile would delete a record in the active profile's directory while dropping
+another profile's live entry, which lasts only until the next start.
+
+**`ProfileSwitched` is `#[must_use]` to force DISCLOSURE, not a rebuild.** A switch changes what a
+person's identity is and where their money will arrive, so a consumer MUST tell them; the attribute
+is what stops that being dropped silently.
+
+**The receive address MUST NOT be claimed to move with the switch.** `dig-account` fixes an unlock's
+wallet index at open time and exposes no `wallet_ops_at` (dig_ecosystem#2496), so after a switch the
+wallet can only answer for the profile just left. Every money accessor — including
+`observe_receiving_address`, the one the tray renders — MUST refuse rather than answer, the surface
+MUST show no address rather than the previous profile's, and the disclosure MUST say the address has
+not moved yet.
+
+**Two artifacts are account-scoped and MUST NOT follow the switch:** the 24-word recovery phrase and
+the second factor. The phrase is the account's custody root and the second factor gates unlock, which
+happens before any profile is active; sealing either under a per-profile DEK would make it unreadable
+exactly when it is needed. The profile DIRECTORY, by contrast, MUST follow the switch — sharing one
+directory across profiles puts one profile's sealed stores beside another's under a DEK that cannot
+open them.
+
+**A spend confirmed under one profile MUST NOT be signed under another.** The confirm ceremony names
+a profile; the active slot MUST be re-checked immediately before signing and the spend failed closed
+if it moved.
+
+#### 3.2-m The profile-management surface (normative, dig_ecosystem#2403)
+
+The Account tab carries the account's profile list and its controls. Four controls are specified, and
+one of them is specified as ABSENT.
+
+**The list is a three-state READING, never a `Vec` (MUST).** `profiles::ProfilesReading` separates
+*nobody has read the registry yet* (`Pending`) from *the registry answered and holds nothing*
+(`Known(vec![])`) from *the registry would not load* (`Unknown`). Every production account today
+answers `Known(vec![])`, because nothing can mint — so a surface that collapsed these would state the
+common case about all three. A session that failed to LOAD MUST report `Unknown`, not the empty
+registry it fell back to: an account whose registry will not load may hold several profiles, and
+telling that person they hold none is a claim no read supports.
+
+**Hidden profiles MUST be listed by this surface.** Visibility is a LOCAL preference and the surface
+that sets it is the surface that must be able to unset it. `registry.shown()` is for pickers.
+
+**Creating a profile MUST NOT be offered while no code path can mint one, and the absence MUST be
+structural.** No `TrayAction` in this shell creates a profile, so "this build cannot create one" is a
+property of the code rather than of an `enabled` flag. `profiles::ProfileCreation` is a FUNCTION of
+the `MintAvailability` the start-up wizard's gate reads (§3.1b) — never a second opinion about it —
+and it has no *possible* arm while `dig-account`'s `ProfileMinter::mint` is `todo!()`. The surface
+states which piece is missing, in the §3.1b wording: the profile is REQUIRED and creating one is
+*not available in this version*, never "optional".
+
+**Creation MUST become real, and the type is shaped for it (normative sequencing).** The absence
+above is a statement about this build, not a design position: creating a profile is required product
+functionality, blocked on `dig-account` publishing its mint. Consumers therefore MUST ask
+`ProfileCreation::blocked()` — an `Option` whose `None` already means *creation is possible* — and
+MUST NOT match the enum exhaustively, so adding the `Possible` arm is a change of bodies rather than
+of shapes. Two rules bind whoever adds it:
+
+- **The create step MUST be the same ceremony first run drives (§3.2b).** One implementation, reached
+  from both places. A second implementation of a flow that spends real XCH is how the two drift.
+- **A pushed mint is NOT a created profile.** `mint_status` distinguishes confirmed from awaiting
+  from failed, and the surface MUST carry all three; a profile is recorded ONLY from evidence of an
+  actual on-chain mint (§3.1b). Reporting success from a submission rather than a confirmation makes
+  every identity surface assert a falsehood about the chain.
+
+**Hiding MUST NOT be described as deleting.** A minted profile is a `did:chia:` singleton and a store
+on chain, both permanent. Copy on this surface MUST NOT say delete, remove, erase or destroy, MUST
+state that a hidden profile remains on chain, and MUST leave a way back to it.
+
+**A switch MUST be disclosed BEFORE it is applied, naming both ends.** The per-profile DEK and the
+identity signing key change immediately at the switch; the disclosure names the profile being LEFT
+as well as the one arrived at. The receive address does NOT move at switch time — `dig-account` fixes
+the wallet index at open time and exposes no `wallet_ops_at` (dig_ecosystem#2496), so after a switch
+the wallet can only answer for the profile just left; DIG MUST show no address in the meantime rather
+than the previous profile's. The standing statement is drawn where the choice is made; the
+confirmation repeats it with both profiles named, and refusal is the default answer.
+
+**The active profile MUST NOT be offered a hide control**, because `dig-account` refuses to hide it
+(`ActiveProfileCannotBeHidden`), and `set_active` on a hidden profile un-hides it. Together these
+make "a hidden active profile shows an empty list while the wallet derives there" unrepresentable
+rather than merely guarded against; the surface states why the control is absent and names the way
+round it.
+
+**A LOCKED account MUST still list its profiles.** The registry holds no key material — which is why
+it is stored in plaintext — so reporting `Pending` while sealed would leave the list saying "still
+reading" for as long as the account stayed locked.
+
+**Persistence.** The registry is stored at `<brand_dir>/profiles/registry.json` in PLAINTEXT, written
+through the crash-safe temp-write→fsync→rename idiom. It holds no secret, and sealing it would make
+an account's profile list unreadable while LOCKED — defeating the property the registry exists for.
+
+HD derivation is **active and dynamic**: the unhardened wallet path, the hardened identity path,
+`ProfileIx`, and the per-profile signer / DEK / sealing-key plumbing MUST keep deriving correctly and
+DISTINCTLY at every index.
 
 **The on-chain DID is a later phase.** A profile's public on-chain identity is a `did:chia:` singleton
 paired with a chip35 DataLayer store (via `dig-identity` [dig_ecosystem#771]); minting it is owned by
@@ -2367,6 +2504,11 @@ confirm, never silent.
      32-byte secret; `may_sign` states the granted scope, §5.6.3a).
    On deny/timeout ⇒ `PAIR_DENIED` / `PAIR_TIMEOUT` and no record.
 
+   The active profile MUST be read BEFORE the confirm is raised and MUST still be active when the
+   record is written; if it changed in between, the node MUST mint no token and answer `PAIR_DENIED`.
+   The confirm names the app and not a profile, so its answer authorizes only the profile whose owner
+   read it.
+
    The sealed record additionally carries `label` (the caller's self-declared `ext_label`, UNTRUSTED and
    display-only) and `scope` (§5.6.3a). Both are OPTIONAL in the sealed form: a record written before
    they existed MUST still open, and MUST restore with `scope = dig-extension`.
@@ -2506,7 +2648,9 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   primary/change), loaded from the sealed wallet state; `pubkeys[]` is the profile's identity signing
   public key. Only this public data crosses the handle — never key material. A profile with no saved
   wallet state yet returns an empty `addresses[]` (the channel is still fully usable). On Deny/timeout
-  ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`. The sealed whitelist entry persists
+  ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`, as is a profile switch landing between the confirm and
+  the grant (the consent belongs to the profile that was active when the modal was read, so no entry
+  is recorded for either profile). The sealed whitelist entry persists
   to the profile's AppData and is restored on boot (a connected dapp survives a restart); `connect.revoke`
   deletes the at-rest record, so the revocation is durable too.
 - **Sign gating.** A `sign.request` whose `origin` is NOT whitelisted for the active profile ⇒

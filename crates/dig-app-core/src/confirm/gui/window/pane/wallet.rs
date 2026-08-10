@@ -419,6 +419,7 @@ mod tests {
             BalanceUnknown::NoAddress(AddressUnavailable::Locked),
             BalanceUnknown::NoAddress(AddressUnavailable::Unopenable),
             BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed),
+            BalanceUnknown::NoAddress(AddressUnavailable::WalletBehindActiveProfile),
             BalanceUnknown::NoNode,
             BalanceUnknown::NodeTimedOut,
             BalanceUnknown::NodeCannotRead,
@@ -599,12 +600,13 @@ mod tests {
                 BalanceUnknown::NoAddress(AddressUnavailable::Locked) => 3,
                 BalanceUnknown::NoAddress(AddressUnavailable::Unopenable) => 4,
                 BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => 5,
-                BalanceUnknown::NoNode => 6,
-                BalanceUnknown::NodeTimedOut => 7,
-                BalanceUnknown::NodeCannotRead => 8,
-                BalanceUnknown::NoChainSource => 9,
-                BalanceUnknown::NotSynced => 10,
-                BalanceUnknown::ReadFailed(_) => 11,
+                BalanceUnknown::NoAddress(AddressUnavailable::WalletBehindActiveProfile) => 6,
+                BalanceUnknown::NoNode => 7,
+                BalanceUnknown::NodeTimedOut => 8,
+                BalanceUnknown::NodeCannotRead => 9,
+                BalanceUnknown::NoChainSource => 10,
+                BalanceUnknown::NotSynced => 11,
+                BalanceUnknown::ReadFailed(_) => 12,
             }
         }
         let mut arms: Vec<u8> = every_unknown_reason().iter().map(arm).collect();
@@ -612,7 +614,7 @@ mod tests {
         arms.dedup();
         assert_eq!(
             arms,
-            (0..12).collect::<Vec<u8>>(),
+            (0..13).collect::<Vec<u8>>(),
             "the guard's reason list is not the whole enum"
         );
     }

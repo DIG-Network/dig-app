@@ -48,7 +48,6 @@
 //! [`crate::wallet::engine`]). No key material ever crosses that wire (asserted at the wire level by
 //! the `no_user_key_on_wire` integration test).
 
-use crate::account::active_profile::ActiveProfile;
 use chia_protocol::{CoinSpend, SpendBundle};
 use dig_account::{
     AccountError, AccountId, AuthProvider, AutoSendPolicy, Clock, CustodyPolicy, MoneySigner,
@@ -87,6 +86,22 @@ pub enum MoneyPathError {
     /// Signing the approved spend failed inside dig-account's money signer.
     #[error("spend signing failed: {0}")]
     Sign(String),
+
+    /// The active profile moved between the confirm ceremony and the signature — nothing is signed.
+    ///
+    /// The ceremony names a profile, and a human agreed to a spend from THAT profile. Signing under a
+    /// different one afterwards would take the user's consent for one identity's money and apply it to
+    /// another's, so this fails closed and the user is asked again under the profile now in force.
+    #[error("the active profile changed during the confirmation — the spend was not signed")]
+    ProfileSwitched,
+
+    /// Vault custody is configured, and this app cannot honour it. See
+    /// [`MoneyPath::new`](MoneyPath::new).
+    #[error("vault custody needs a second derivation index, and this app has only one: the vault \
+             and the hot wallet would be the same key, so every payment out of the vault would be \
+             classified as change and refused. Use hot-wallet custody until per-profile vaults ship \
+             (dig_ecosystem#2373).")]
+    VaultNeedsASecondIndex,
 }
 
 impl MoneyPathError {
@@ -147,18 +162,24 @@ where
         auto_send: AutoSendPolicy,
         clock: Arc<dyn Clock>,
     ) -> Result<Self, MoneyPathError> {
+        // REFUSE Vault custody here, by name, rather than let it fail silently at every spend
+        // (dig_ecosystem#2373). dig-account's `Vault` is legitimately usable by a host with two
+        // derivation indices — the vault's outflow rule compares a payment's destination against the
+        // HOT wallet's address, and permits only a move to it — but this app derives one wallet, so
+        // the vault and the hot wallet are the same key and every outbound payment reads as change to
+        // itself. That refusal is correct; what was wrong was that it was anonymous. This breaks no
+        // working behaviour: a Vault user cannot pay anyone today, so this converts a silent
+        // always-refuse into a named one the settings surface can act on.
+        if matches!(custody, CustodyPolicy::Vault(_)) {
+            return Err(MoneyPathError::VaultNeedsASecondIndex);
+        }
         let address = residency
             .receiving_address()
             .ok_or(MoneyPathError::Locked)?
             .map_err(|e| MoneyPathError::Unauthorized(e.to_string()))?;
-        let authorizer = PolicyAuthorizer::new(
-            ActiveProfile::SOLE.ix(),
-            custody,
-            auto_send,
-            &address,
-            clock,
-        )
-        .map_err(MoneyPathError::from_gate)?;
+        let profile = residency.profiles().active_ix();
+        let authorizer = PolicyAuthorizer::new(profile, custody, auto_send, &address, clock)
+            .map_err(MoneyPathError::from_gate)?;
         Ok(Self {
             residency,
             authorizer,
@@ -183,6 +204,9 @@ where
     ) -> Result<SpendBundle, MoneyPathError> {
         // 1. The gate re-derives the spend from these very bytes and rules on it. A structural
         //    refusal returns here and no ceremony can overturn it.
+        // The profile the gate was built for, and the profile the ceremony will name. Read once here
+        // so the SAME value is shown to the user and re-checked below.
+        let confirming_profile = self.residency.profiles().active_ix();
         let approval = match self
             .authorizer
             .authorize_op(&coin_spends, op_class)
@@ -196,13 +220,24 @@ where
                 .confirm_with(
                     &self.auth_provider,
                     self.account_id.clone(),
-                    // The wallet signs at exactly one derivation index (dig_ecosystem#2236), so the
-                    // profile named in the confirm dialog is that same sole active one.
-                    ActiveProfile::SOLE.ix(),
+                    confirming_profile,
                 )
                 .await
                 .map_err(MoneyPathError::from_gate)?,
         };
+
+        // FAIL CLOSED if the profile moved while the human was deciding (dig_ecosystem#2398). This is
+        // the one seam a live re-read cannot protect on its own: a person looked at a dialog naming
+        // one identity and agreed to a spend from it, and a switch landing in that window would apply
+        // that consent to a different identity's money. A design that captured the index once and
+        // signed blind returns `Ok` here, which is what the ceremony test drives.
+        //
+        // dig-account's `CustodyScope::assert_signable_by` backstops this inside the signer, and this
+        // check exists ahead of it so the refusal names the real reason rather than surfacing as a
+        // generic signing failure.
+        if self.residency.profiles().active_ix() != confirming_profile {
+            return Err(MoneyPathError::ProfileSwitched);
+        }
 
         // 3. Build the signer LAST. Reading the residency here rather than at construction means a
         //    lock that landed during the confirm ceremony fails the sign closed, instead of signing a
@@ -220,6 +255,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::active_profile::WalletSlot;
+    use crate::account::profile_session::test_support::registry_json;
+    use crate::account::profile_session::{MemoryRegistryStore, ProfileSession};
     use crate::account::residency::AccountResidency;
     use crate::session_lock::SessionKeys;
     use async_trait::async_trait;
@@ -316,13 +354,7 @@ mod tests {
         send_to(A_STRANGER, native_out, fee)
     }
 
-    /// A spend paying nobody but this wallet itself, so the vault's outflow rule has nothing to
-    /// refuse. `native_out` still leaves the spent coin, so the spend is a real one with a real total.
-    fn send_to_ourselves(native_out: u64, fee: u64) -> Vec<CoinSpend> {
-        send_to(wallet_key().puzzle_hash(), native_out, fee)
-    }
-
-    /// What [`send_to_a_stranger`] / [`send_to_ourselves`] with these arguments totals to under the
+    /// What [`send_to_a_stranger`] with these arguments totals to under the
     /// gate's accounting: the native amounts that leave, plus the fee.
     const SPEND_TOTAL: u64 = 610;
 
@@ -364,6 +396,9 @@ mod tests {
         /// Locked from INSIDE the ceremony when set, to reproduce a user locking their account while
         /// the confirm window is open.
         lock_during_the_ceremony: Option<AccountResidency>,
+        /// Switched from INSIDE the ceremony when set, to reproduce the active profile moving while
+        /// the confirm window is open.
+        switch_during_the_ceremony: Option<(ProfileSession, ProfileIx)>,
     }
 
     impl RecordingProvider {
@@ -373,6 +408,7 @@ mod tests {
                 confirms: AtomicUsize::new(0),
                 requests: Mutex::new(Vec::new()),
                 lock_during_the_ceremony: None,
+                switch_during_the_ceremony: None,
             }
         }
 
@@ -387,6 +423,15 @@ mod tests {
         fn approving_but_locks(residency: AccountResidency) -> Self {
             Self {
                 lock_during_the_ceremony: Some(residency),
+                ..Self::new(SpendDecision::Approve)
+            }
+        }
+
+        /// A ceremony that approves the spend and switches `session` to `ix` before returning —
+        /// the user agreeing under one identity while the app moves to another.
+        fn approving_but_switches(session: ProfileSession, ix: ProfileIx) -> Self {
+            Self {
+                switch_during_the_ceremony: Some((session, ix)),
                 ..Self::new(SpendDecision::Approve)
             }
         }
@@ -406,6 +451,11 @@ mod tests {
             self.requests.lock().expect("not poisoned").push(request);
             if let Some(residency) = &self.lock_during_the_ceremony {
                 residency.lock_all();
+            }
+            if let Some((session, ix)) = &self.switch_during_the_ceremony {
+                let _switched = session
+                    .switch_to(*ix)
+                    .expect("the target profile is confirmed");
             }
             Ok(self.decision.clone())
         }
@@ -456,66 +506,149 @@ mod tests {
     // The gate is REAL — the property the dig-account 0.5.0 adoption exists to establish.
     // -----------------------------------------------------------------------------------------
 
-    /// **A vault outflow to a third party is refused by the gate, before any ceremony — while the
-    /// same spend to nobody but ourselves reaches one.**
+    /// **Vault custody is refused BY NAME at construction, and the refusal costs the user nothing
+    /// else** (dig_ecosystem#2373).
     ///
-    /// The two halves differ in exactly ONE thing: who is paid. That pairing is what makes the test
-    /// load-bearing, and it is aimed at a specific wrong implementation — the one dig-app actually
-    /// shipped. Under the old injectable seam, `AlwaysConfirmAuthorizer::authorize` returned `Ok(())`
-    /// for every summary, so BOTH halves reached the ceremony and BOTH signed on approval. Asserting
-    /// only the refusal would not have distinguished the real gate from a gate that refuses every
-    /// vault spend, which is why the second half is here and why it must genuinely get through.
+    /// dig-account's `Vault` is legitimately usable by a host with two derivation indices: its
+    /// outflow rule permits a move to the HOT wallet's address and nothing else. dig-app derives one
+    /// wallet, so the vault and the hot wallet are the same key, every outbound payment reads as
+    /// change to itself, and a Vault user cannot pay anybody at all. That refusal was already the
+    /// behaviour — what was wrong is that it was anonymous, surfacing per spend as a generic
+    /// `Unauthorized` with no remedy in it.
     ///
-    /// A note so the second half is not read as more than it is: dig-app's wallet is pinned to one
-    /// derivation index, so a payment to its own puzzle hash is classified as CHANGE and never enters
-    /// `summary.recipients` at all. The hot-wallet half therefore passes the outflow rule vacuously,
-    /// over an empty recipient list. It is an honest control for "the gate does not refuse all vault
-    /// spends"; the address COMPARISON itself is dig-account's own property and is tested there.
+    /// Three assertions, and the second and third are what make this more than a transcription of the
+    /// `if`:
     ///
-    /// What the FIRST half additionally pins, measured rather than assumed: rebuilding the gate with
-    /// the stranger's own address as the configured hot wallet makes this spend authorize and SIGN —
-    /// a real signature paying a third party out of a vault. So the refusal is not merely "vaults
-    /// refuse strangers"; it discriminates the address `MoneyPath::new` hands the gate from the one
-    /// wrong value that matters most. Any OTHER foreign address leaves both halves passing here, and
-    /// is caught elsewhere: under `CustodyPolicy::Hot` the gate's scope carries the configured wallet
-    /// and the signer compares it against the puzzle hash it derives live from the seed, so every
-    /// hot-path test in this module fails on a substituted address. Between them the input is pinned;
-    /// neither alone would be enough.
+    /// 1. the refusal is the NAMED variant, whose message states the remedy;
+    /// 2. the SAME residency still builds a money path under hot-wallet custody — without this, a
+    ///    `MoneyPath::new` that refused everything would pass identically;
+    /// 3. the refusal leaves the residency untouched: the receive address still derives, so a Vault
+    ///    user keeps a fundable address and a settings surface to change custody from. A refusal that
+    ///    blanked the money surface with no way out would be worse than the silent failure it
+    ///    replaces.
+    ///
+    /// What this canNOT yet assert, stated rather than implied: no production code calls
+    /// `MoneyPath::new` (the money path is not wired into a pane), so there is no surface here whose
+    /// four async states could be checked. The pane that wires it MUST render this variant as a
+    /// recoverable setting rather than a dead end; assertion 3 is the strongest form available today.
     #[tokio::test]
-    async fn a_vault_spend_to_a_stranger_is_refused_outright_but_one_to_ourselves_is_not() {
-        let to_a_stranger = money_path(
+    async fn vault_custody_is_refused_by_name_and_leaves_the_account_usable() {
+        let residency = residency_at_seed();
+        let vault = MoneyPath::new(
+            residency.clone(),
             RecordingProvider::new(SpendDecision::Approve),
+            account_id(),
+            Network::Mainnet,
             CustodyPolicy::Vault(Vault::default()),
             AutoSendPolicy::default(),
+            frozen_clock(),
         );
-        let refused = to_a_stranger
+
+        let Err(MoneyPathError::VaultNeedsASecondIndex) = vault else {
+            panic!("vault custody must be refused by name, not silently accepted");
+        };
+
+        // The control: the same residency, the same everything, hot-wallet custody. Without it a
+        // constructor that refused every policy would satisfy the assertion above.
+        MoneyPath::new(
+            residency.clone(),
+            RecordingProvider::new(SpendDecision::Approve),
+            account_id(),
+            Network::Mainnet,
+            CustodyPolicy::Hot(HotWallet::default()),
+            AutoSendPolicy::default(),
+            frozen_clock(),
+        )
+        .expect("hot-wallet custody still builds a money path over the same residency");
+
+        // The account is not collateral damage: the address a Vault user funds still derives, so the
+        // remedy (switch custody) is reachable rather than behind the very thing that refused.
+        assert!(matches!(
+            residency.observe_receiving_address(),
+            crate::account::residency::AddressObservation::Derived(_)
+        ));
+    }
+
+    /// **A profile switch DURING the confirm ceremony fails the spend closed** (dig_ecosystem#2398).
+    ///
+    /// This is the one seam a live per-call re-read cannot protect on its own, because a human is in
+    /// the middle of it. The confirm dialog names a profile; a person looks at that name and agrees to
+    /// a spend from THAT identity. If the active profile moves before the signature, signing anyway
+    /// takes consent given for one identity's money and applies it to another's.
+    ///
+    /// The fixture varies exactly one actor — the ceremony switches the session and otherwise behaves
+    /// identically to every other approving provider here.
+    ///
+    /// # What the exact variant is doing here, measured
+    ///
+    /// Deleting the re-check does NOT make this spend sign: the wallet seam refuses too, because
+    /// dig-account 0.8 pins an unlock's wallet index and a switch puts it out of step
+    /// (dig_ecosystem#2496). So the two guards overlap today, and asserting merely "no `SpendBundle`"
+    /// would be satisfied by either — and would stay green with the re-check deleted. Measured: with
+    /// the re-check removed this returns `Err(Locked)`.
+    ///
+    /// Pinning the exact variant is therefore pinning ORDER: the profile re-check must run BEFORE the
+    /// money-signer read. That is not pedantry about error types. `Locked` tells a user their account
+    /// is locked and sends them to re-enter a password, which cannot fix a profile switch — so the
+    /// wrong order reports a cause that is false and offers a remedy that does not work.
+    ///
+    /// When `wallet_ops_at` lands, the wallet guard stops firing and this becomes the only thing
+    /// standing between a consent given under one identity and a signature made under another.
+    #[tokio::test]
+    async fn a_profile_switch_during_the_ceremony_signs_nothing() {
+        let session = ProfileSession::load(Arc::new(MemoryRegistryStore::seeded(registry_json(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
+            ProfileIx::ROOT,
+        ))))
+        .expect("the fixture registry loads");
+
+        let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
+        let unlocked = AccountSession::enroll(
+            store,
+            account_id(),
+            Password::new("pw"),
+            &SEED,
+            session.wallet_slot().ix(),
+        )
+        .unwrap();
+        let residency =
+            AccountResidency::with_profiles(unlocked, WalletSlot::unprofiled(), session.clone());
+
+        let path = MoneyPath::new(
+            residency,
+            RecordingProvider::approving_but_switches(session.clone(), ProfileIx(1)),
+            account_id(),
+            Network::Mainnet,
+            CustodyPolicy::Hot(HotWallet::default()),
+            AutoSendPolicy::default(),
+            frozen_clock(),
+        )
+        .expect("an unlocked residency yields a money path");
+
+        let outcome = path
             .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::Undeclared)
             .await;
 
         assert!(
-            matches!(refused, Err(MoneyPathError::Unauthorized(_))),
-            "a vault spend leaving to a third party must be refused by the gate: {refused:?}"
+            matches!(outcome, Err(MoneyPathError::ProfileSwitched)),
+            "a spend confirmed under one profile must not be signed under another: {outcome:?}"
+        );
+        assert!(
+            outcome.is_err(),
+            "NO SpendBundle may be produced — an implementation that captured the index once and              signed blind returns Ok here"
         );
         assert_eq!(
-            ceremonies(&to_a_stranger),
-            0,
-            "the refusal is structural, so the user is never asked to approve it"
-        );
-
-        let to_ourselves = money_path(
-            RecordingProvider::new(SpendDecision::Approve),
-            CustodyPolicy::Vault(Vault::default()),
-            AutoSendPolicy::default(),
-        );
-        to_ourselves
-            .authorize_and_sign(send_to_ourselves(600, 10), SpendOpClass::Undeclared)
-            .await
-            .expect("a vault spend that leaves nothing to a third party still signs, with consent");
-
-        assert_eq!(
-            ceremonies(&to_ourselves),
+            ceremonies(&path),
             1,
-            "the control spend reached the ceremony — the gate is not refusing every vault spend"
+            "the ceremony DID run, so this is a refusal after consent rather than one before it"
+        );
+        assert_eq!(
+            ProfileIx(1),
+            session.active_ix(),
+            "and the switch itself genuinely landed — otherwise the fixture proves nothing"
         );
     }
 
@@ -761,7 +894,7 @@ mod tests {
             .expect("unlocked")
             .expect("an address encodes");
         let authorizer = PolicyAuthorizer::new(
-            ActiveProfile::SOLE.ix(),
+            residency.profiles().active_ix(),
             hot_wallet_that_tiers_our_fixture_as_auto_send(),
             small_sends_up_to(SPEND_TOTAL, SPEND_TOTAL * 10),
             &address,

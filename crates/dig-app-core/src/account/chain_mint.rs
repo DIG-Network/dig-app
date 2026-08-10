@@ -27,14 +27,17 @@
 //! confirmation, and `control.wallet.broadcast` pushes the signed bundle
 //! ([`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) speaks all three).
 //!
-//! The fourth is **a coin read BY COIN ID**, and it does not exist. `mint_status` asks the chain for
+//! The fourth is **a coin read BY COIN ID**, and it is not available to dig-app. It now EXISTS
+//! upstream — `control.wallet.coinById`, "read ONE coin record by coin id, spent or unspent" — but
+//! the workspace pins `dig-node-control-interface` 0.6, which predates it, so no code here can name
+//! it. `mint_status` asks the chain for
 //! the DID coin's record — that is the confirmation — and for the funding coin's, to tell a mint that
 //! is merely slow from one that can never confirm because its input was spent elsewhere. The coins
 //! method answers for an ADDRESS and reports only UNSPENT coins, so it can see neither.
 //!
 //! A mint on that transport could be pushed — real XCH, gone — and then never observed, and a DID is
 //! recorded only from evidence of a confirmation. So the binary supplies
-//! [`MintSeams::NoChainTransport`] until the node grows that read (dig_ecosystem#2376), and the
+//! [`MintSeams::NoChainTransport`] until dig-app can reach that read (dig_ecosystem#2376), and the
 //! startup gate asks whether a mint is POSSIBLE before it shows anybody a wizard: see
 //! [`crate::account::journey::startup_wizard`].
 
@@ -46,7 +49,7 @@ use dig_account::mint::{
 };
 use dig_chainsource_interface::ChainSource;
 
-use crate::account::active_profile::ActiveProfile;
+use crate::account::active_profile::{MintTarget, WalletSlot};
 use crate::account::did::MintEvidence;
 use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission, UnavailableMinter};
 use crate::account::residency::AccountResidency;
@@ -143,8 +146,14 @@ impl MintObserver for UnreachableChain {
 pub struct ChainMint<'a, C: ?Sized, P: ?Sized> {
     /// The live account. A minter is derived from it per call and never retained (module docs).
     residency: &'a AccountResidency,
-    /// The profile whose wallet funds the mint.
-    profile: ActiveProfile,
+    /// The profile whose wallet PAYS for the mint.
+    funding: WalletSlot,
+    /// The index the new profile's keys will derive at.
+    ///
+    /// Separate from [`funding`](Self::funding) deliberately: they are the same only while an account
+    /// has at most one profile, and collapsing them makes the first second-profile mint try to fund
+    /// itself from the brand-new profile's empty wallet. See [`MintTarget`].
+    target: MintTarget,
     /// Reads coins, spends and the peak. Cannot broadcast, by construction.
     chain: &'a C,
     /// Pushes the signed bundle. Never sees a key.
@@ -162,14 +171,16 @@ where
     C: ChainSource + ?Sized,
     P: SpendPublisher + ?Sized,
 {
-    /// A minter for `profile`'s wallet, reading through `chain` and pushing through `publisher`.
+    /// A minter that pays from `funding`'s wallet and creates the profile at `target`, reading
+    /// through `chain` and pushing through `publisher`.
     ///
     /// # Money
     ///
     /// With [`MintNetwork::mainnet`] this spends real XCH the moment [`DidMinter::submit`] is called.
     pub fn new(
         residency: &'a AccountResidency,
-        profile: ActiveProfile,
+        funding: WalletSlot,
+        target: MintTarget,
         chain: &'a C,
         publisher: &'a P,
         network: MintNetwork,
@@ -177,7 +188,8 @@ where
     ) -> Self {
         Self {
             residency,
-            profile,
+            funding,
+            target,
             chain,
             publisher,
             network,
@@ -228,8 +240,24 @@ where
             };
         };
 
+        // dig-account 0.8's `begin_did_mint` mints at `ix` AND funds from that same index's wallet,
+        // so it cannot express a mint paid for by one profile and created at another. That is fine
+        // for the FIRST profile, where the two indices coincide at ROOT, and it is the only mint
+        // reachable today. Refuse the divergent case loudly rather than paying from a wallet the user
+        // did not intend or minting at the wrong index (dig_ecosystem#2496 tracks the upstream API).
+        if self.funding.ix() != self.target.ix() {
+            return Submission::Refused {
+                reason: format!(
+                    "This mint would pay from profile {} but create profile {}, and DIG cannot yet \
+                     fund one profile's mint from another's wallet. Move funds to profile {}'s \
+                     address first.",
+                    self.funding, self.target, self.target
+                ),
+            };
+        }
+
         match minter.begin_did_mint(
-            self.profile.ix(),
+            self.target.ix(),
             self.chain,
             self.publisher,
             &self.network,
@@ -387,6 +415,13 @@ mod tests {
         }
     }
 
+    impl RecordingPublisher {
+        /// How many bundles reached the network — the count a refusal must leave at zero.
+        fn pushes(&self) -> usize {
+            self.pushed.borrow().len()
+        }
+    }
+
     /// A publisher whose network answered "no".
     struct RejectingPublisher;
 
@@ -455,7 +490,8 @@ mod tests {
         ) -> ChainMint<'a, C, P> {
             ChainMint::new(
                 &self.residency,
-                ActiveProfile::SOLE,
+                WalletSlot::unprofiled(),
+                MintTarget::next_free(&dig_account::registry::ProfileRegistry::empty()),
                 chain,
                 publisher,
                 // A pinned test network rather than mainnet: the signatures are checked against these
@@ -468,6 +504,82 @@ mod tests {
                 options(),
             )
         }
+
+        /// A minter whose funding and target indices DISAGREE — the second-profile mint.
+        fn mint_funded_by_another_profile<
+            'a,
+            C: ChainSource + ?Sized,
+            P: SpendPublisher + ?Sized,
+        >(
+            &'a self,
+            chain: &'a C,
+            publisher: &'a P,
+        ) -> ChainMint<'a, C, P> {
+            let registry = crate::account::profile_session::test_support::registry_with(&[(
+                dig_account::ProfileIx::ROOT,
+                None,
+            )]);
+            ChainMint::new(
+                &self.residency,
+                WalletSlot::from_active(
+                    registry
+                        .active()
+                        .expect("the fixture has an active profile"),
+                ),
+                MintTarget::next_free(&registry),
+                chain,
+                publisher,
+                MintNetwork::from_constants(chia_sdk_signer::AggSigConstants::from(
+                    &*chia_wallet_sdk::prelude::TESTNET11_CONSTANTS,
+                )),
+                options(),
+            )
+        }
+    }
+
+    /// **A mint whose funding and target indices differ is REFUSED, and pushes nothing**
+    /// (dig_ecosystem#2398).
+    ///
+    /// dig-account 0.8's `begin_did_mint` mints at an index AND funds from that same index's wallet,
+    /// so it cannot express a mint paid for by one profile and created at another
+    /// (dig_ecosystem#2496). Passing the target index anyway would silently spend from a brand-new
+    /// profile's empty wallet; passing the funding index would mint the second profile at the FIRST
+    /// profile's index, which the registry cannot even represent.
+    ///
+    /// The control is what makes this load-bearing: the SAME residency and the SAME chain, with the
+    /// two indices coinciding, submits for real. Without it a `submit` that refused everything would
+    /// satisfy the refusal identically. `mint_status` is asserted afterwards because a refusal that
+    /// had already pushed would leave real XCH spent and unobservable.
+    #[test]
+    fn a_mint_funded_by_a_different_profile_than_it_creates_is_refused() {
+        let fixture = Bench::funded();
+        let publisher = RecordingPublisher::default();
+
+        let refused = fixture
+            .mint_funded_by_another_profile(&fixture.chain(), &publisher)
+            .submit();
+
+        let Submission::Refused { reason } = refused else {
+            panic!("a divergent funding/target mint must be refused: {refused:?}");
+        };
+        assert!(
+            reason.contains("profile 0") && reason.contains("profile 1"),
+            "the refusal must name BOTH indices so the remedy is actionable: {reason}"
+        );
+        assert_eq!(
+            0,
+            publisher.pushes(),
+            "a refusal must push NOTHING — a pushed bundle is real XCH spent"
+        );
+
+        // Control: the same fixture, the same chain, indices coinciding — this really does submit.
+        assert!(
+            matches!(
+                fixture.mint(&fixture.chain(), &publisher).submit(),
+                Submission::Submitted { .. }
+            ),
+            "the control must genuinely submit, or the refusal above proves nothing"
+        );
     }
 
     /// **A REAL mint runs end to end, validated by Chia consensus: a coin is selected, a bundle is

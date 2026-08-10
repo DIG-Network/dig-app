@@ -19,6 +19,7 @@ use dig_app_core::account::boot::{
 use dig_app_core::account::ceremony::PreCollectedPassword;
 use dig_app_core::account::journey::{reveal_phrase, WindowedPresenter};
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::recovery::RecoveryPhrase;
 use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::confirm::{
@@ -123,6 +124,7 @@ fn boot(backend: Arc<dyn KeychainBackend>) -> (AccountResidency, Option<Recovery
         backend,
         PreCollectedPassword::new(sentinel_password()),
         account(),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&SilentlyKeeps),
     )
     .unwrap()
@@ -271,6 +273,7 @@ fn the_recovery_phrase_never_reaches_a_log_record() {
             fresh,
             PreCollectedPassword::new(sentinel_password()),
             AccountId::new("restored"),
+            ProfileSession::unprofiled(),
             Seeding::Restore(&restored_from),
         );
         assert!(restored.is_ok(), "the restore leg must actually run");
