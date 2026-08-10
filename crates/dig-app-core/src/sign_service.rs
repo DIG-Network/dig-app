@@ -208,7 +208,7 @@ mod tests {
     /// service): the identity signer reads the residency's default profile and the stores seal under a
     /// deterministic per-profile DEK (so a re-assembled service over the SAME `DID` re-opens its blobs).
     fn assemble(dir: &Path) -> FrameRouter<AccountSealer> {
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         build_router(
             test_sealer(DID),
             DID,

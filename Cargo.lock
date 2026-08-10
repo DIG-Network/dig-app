@@ -1994,6 +1994,7 @@ dependencies = [
  "clvm-traits 0.26.0",
  "clvmr 0.14.0",
  "dig-account",
+ "dig-app-core",
  "dig-chainsource-interface",
  "dig-constants 0.10.0",
  "dig-events-protocol",

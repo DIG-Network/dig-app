@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use crate::account::active_profile::ActiveProfile;
+use crate::account::active_profile::WalletSlot;
 use crate::account::recovery::RecoveryPhrase;
 use dig_account::{AccountError, AccountStore};
 use dig_account::{
@@ -103,19 +103,21 @@ impl Opened {
 /// in production, keyed by `account`). `provider` collects the unlock factors through the OS-native
 /// ceremony the harness injects; `policy` gates them (fail-closed on refusal). `default_profile_ix` is
 /// the profile the returned handle's [`signer`](UnlockedAccount::signer) / [`dek`](UnlockedAccount::dek)
-/// default to — always [`ActiveProfile::SOLE`] while the app is single-address.
+/// default to — the account's active profile, or [`WalletSlot::unprofiled`] while nothing is minted.
 ///
 /// A first run NEVER invents an unwritable-down seed: per the #1500 derived model the seed is the
 /// entropy of a 24-word BIP-39 phrase, which is either shown-and-confirmed
 /// ([`Seeding::NewPhrase`]) or supplied by the user ([`Seeding::Restore`]).
 ///
-/// # The index is an [`ActiveProfile`], deliberately (dig_ecosystem#2236)
+/// # The index is a [`WalletSlot`], deliberately (dig_ecosystem#2236, #2398)
 ///
 /// The opened handle's [`wallet_ops`](dig_account::UnlockedAccount::wallet_ops) — and therefore the
-/// receive address the tray shows and the key that signs spends — derives at `default_profile_ix`.
-/// Taking an [`ActiveProfile`] rather than a bare [`ProfileIx`](dig_account::ProfileIx) means this funnel CANNOT open a
-/// wallet at an index the app does not watch. **Add multi-address support in
-/// [`ACTIVE_PROFILES`](crate::account::active_profile::ACTIVE_PROFILES), not here.**
+/// receive address the tray shows and the key that signs spends — derives at `default_profile_ix`,
+/// and `UnlockedAccount` fixes it for the handle's whole lifetime. Taking a [`WalletSlot`] rather
+/// than a bare [`ProfileIx`](dig_account::ProfileIx) means this funnel cannot open a wallet at an
+/// index nobody vouched for: the only slots that exist are the bootstrap and one built from the
+/// registry's own active profile. A bare index does not typecheck here, and a `trybuild` case pins
+/// that there is no constructor that would let it.
 ///
 /// # Errors
 ///
@@ -128,7 +130,7 @@ pub async fn open_or_enroll(
     account: AccountId,
     provider: &dyn AuthProvider,
     policy: &dyn AuthPolicy,
-    default_profile_ix: ActiveProfile,
+    default_profile_ix: WalletSlot,
     seeding: Seeding<'_>,
 ) -> AccountResult<Opened> {
     let default_profile_ix = default_profile_ix.ix();
@@ -286,7 +288,7 @@ mod tests {
             account.clone(),
             &provider,
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -329,7 +331,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("pw-a"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await;
@@ -354,7 +356,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("pw-a"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await;
@@ -379,7 +381,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("machine-one-password"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -399,7 +401,7 @@ mod tests {
             account,
             &FixedProvider::new("machine-two-password"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::Restore(&phrase),
         )
         .await
@@ -424,7 +426,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("pw"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::Restore(&RecoveryPhrase::generate()),
         )
         .await
@@ -435,7 +437,7 @@ mod tests {
             account,
             &FixedProvider::new("pw"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::Restore(&RecoveryPhrase::generate()),
         )
         .await
@@ -460,7 +462,7 @@ mod tests {
             account.clone(),
             &provider,
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -479,7 +481,7 @@ mod tests {
             account,
             &provider,
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&returning),
         )
         .await
@@ -507,7 +509,7 @@ mod tests {
             account.clone(),
             &FixedProvider::new("right"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await
@@ -518,7 +520,7 @@ mod tests {
             account,
             &FixedProvider::new("wrong"),
             &PasswordOnlyPolicy,
-            ActiveProfile::SOLE,
+            WalletSlot::unprofiled(),
             Seeding::NewPhrase(&presenter),
         )
         .await;

@@ -28,11 +28,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::account::active_profile::ActiveProfile;
 use dig_account::{AccountId, AccountSession};
 use dig_session::{KeychainBackend, Password};
 
-use crate::account::boot::{assemble_residency, vault_for, DEFAULT_ACCOUNT_ID};
+use crate::account::boot::{assemble_residency, profiles_for, vault_for, DEFAULT_ACCOUNT_ID};
 use crate::account::ceremony::{machine_password_key, PreCollectedPassword};
 use crate::account::lifecycle::{account_store, PhrasePresenter, RetentionDecision, Seeding};
 use crate::account::recovery::RecoveryPhrase;
@@ -110,10 +109,15 @@ pub fn reseal_under<C: CredentialStore>(
 
     // Open with the old password and read the seed back out of the account's own phrase vault. Both
     // happen before anything is deleted.
+    // The wallet must come back on the profile the user was actually on, so the receive address
+    // survives a password change (dig_ecosystem#2236, #2398). Read it from the registry rather than
+    // assuming ROOT: assuming would silently move the address of anyone with a second profile.
+    let wallet_slot = profiles_for(brand_dir).wallet_slot();
     let opened = assemble_residency(
         backend.clone(),
         PreCollectedPassword::new(old.as_bytes()),
         account.clone(),
+        profiles_for(brand_dir),
         Seeding::NewPhrase(&NeverEnrols),
     );
     let (residency, _) = match opened {
@@ -145,14 +149,13 @@ pub fn reseal_under<C: CredentialStore>(
     if let Err(e) = store.delete(account) {
         return MigrationOutcome::Failed(format!("the old seal could not be removed: {e}"));
     }
-    // Re-enrolment must land the wallet back on the SAME index it was on, so the user's receive
-    // address survives a password change (dig_ecosystem#2236).
+    // Re-enrolment must land the wallet back on the SAME index it was on (see `wallet_slot` above).
     if let Err(e) = AccountSession::enroll(
         store.clone(),
         account.clone(),
         chosen,
         &seed,
-        ActiveProfile::SOLE.ix(),
+        wallet_slot.ix(),
     ) {
         // Put it back exactly as it was. The seed is still in hand, so this restores a working account
         // rather than leaving the user with none.
@@ -161,7 +164,7 @@ pub fn reseal_under<C: CredentialStore>(
             account.clone(),
             old_password,
             &seed,
-            ActiveProfile::SOLE.ix(),
+            wallet_slot.ix(),
         );
         return MigrationOutcome::Failed(match restored {
             Ok(_) => format!("the new password could not be applied ({e}); nothing was changed"),
@@ -349,7 +352,7 @@ mod tests {
             Seeding::NewPhrase(&NeverEnrols),
         )
         .ok()?;
-        let id = opened.0.signing_public_key_hex(ProfileIx::ROOT);
+        let id = opened.0.signing_public_key_hex_at(ProfileIx::ROOT);
         opened.0.lock_all();
         id
     }
@@ -434,7 +437,7 @@ mod tests {
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
-        let before = residency.signing_public_key_hex(ProfileIx::ROOT).unwrap();
+        let before = residency.signing_public_key_hex_at(ProfileIx::ROOT).unwrap();
         finish_boot(dir.path(), residency, phrase)
             .residency
             .lock_all();
@@ -472,7 +475,7 @@ mod tests {
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
-        let before = residency.signing_public_key_hex(ProfileIx::ROOT).unwrap();
+        let before = residency.signing_public_key_hex_at(ProfileIx::ROOT).unwrap();
         residency.lock_all();
         let machine_password = cred
             .get(&machine_password_key(&account()))
@@ -563,7 +566,7 @@ mod tests {
         )
         .unwrap();
         assert!(residency
-            .signer(ProfileIx::ROOT)
+            .signer()
             .try_sign(b"challenge")
             .is_some());
     }

@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 
 use chia_protocol::CoinSpend;
 use dig_account::{
-    CustodyPolicy, LocalMoneySigner, ProfileIx, ProfileMinter, Result as AccountResult,
-    SpendSummary, UnlockedAccount,
+    AccountError, CustodyPolicy, LocalMoneySigner, ProfileIx, ProfileMinter,
+    Result as AccountResult, SpendSummary, UnlockedAccount,
 };
 use dig_ipc_protocol::domain::{Signature, SigningPublicKey};
 use dig_ipc_protocol::signer::SessionSigner;
@@ -37,6 +37,8 @@ use dig_keystore::KdfParams;
 use dig_wallet_backend::types::Network;
 use zeroize::Zeroizing;
 
+use crate::account::active_profile::{ActiveSlot, WalletSlot};
+use crate::account::profile_session::ProfileSession;
 use crate::account::sealer::AccountSealer;
 use crate::sealer::{ProfileSealer, SealError};
 use crate::session_lock::SessionKeys;
@@ -44,9 +46,27 @@ use crate::session_lock::SessionKeys;
 /// The single unlocked account the app currently holds, behind a shared lock so the tray, the sign
 /// path, and the seal path all see the SAME lock state. Cheap to clone (an `Arc`); locking any clone
 /// locks them all.
+///
+/// # It holds no copy of the active profile index
+///
+/// The index every derivation uses is read LIVE from [`ProfileSession`] on each call
+/// (dig_ecosystem#2398). The capabilities this residency issues therefore have no `ix` field to go
+/// stale, which is what makes a half-landed profile switch unrepresentable rather than merely
+/// detectable — including for the signer and sealer the sign-service router moves onto a serving
+/// thread for the whole process lifetime, which no switching code can reach.
+///
+/// The one index it DOES remember is [`wallet_slot`](Self::wallet_slot): the index this unlock's
+/// `dig_account::WalletOps` derives at. That is not a copy of a mutable fact — it is fixed for the
+/// handle's lifetime by `UnlockedAccount`, which takes it at unlock and exposes no way to change it.
+/// See [`money_signer`](Self::money_signer) for why remembering it is what keeps the money path
+/// honest.
 #[derive(Clone)]
 pub struct AccountResidency {
     inner: Arc<Mutex<Option<UnlockedAccount>>>,
+    /// The live profile registry — the ONE place the active index is stored.
+    profiles: ProfileSession,
+    /// The slot the housed unlock's wallet derives at, fixed when the account was opened.
+    wallet_slot: WalletSlot,
 }
 
 /// The outcome of [`AccountResidency::observe_receiving_address`] — the residency's unlock state and
@@ -65,10 +85,25 @@ pub enum AddressObservation {
 }
 
 impl AccountResidency {
-    /// House a freshly-unlocked `account`.
+    /// House a freshly-unlocked `account` for an UNPROFILED session — nothing minted, deriving at
+    /// [`ProfileIx::ROOT`]. The bootstrap, and what every test that does not exercise profiles wants.
     pub fn new(account: UnlockedAccount) -> Self {
+        Self::with_profiles(account, WalletSlot::unprofiled(), ProfileSession::unprofiled())
+    }
+
+    /// House `account`, which was opened at `wallet_slot`, against the live `profiles` registry.
+    ///
+    /// `wallet_slot` must be the slot the account was actually opened at — it is what the money path
+    /// compares the live active index against.
+    pub fn with_profiles(
+        account: UnlockedAccount,
+        wallet_slot: WalletSlot,
+        profiles: ProfileSession,
+    ) -> Self {
         Self {
             inner: Arc::new(Mutex::new(Some(account))),
+            profiles,
+            wallet_slot,
         }
     }
 
@@ -76,7 +111,51 @@ impl AccountResidency {
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
+            profiles: ProfileSession::unprofiled(),
+            wallet_slot: WalletSlot::unprofiled(),
         }
+    }
+
+    /// The live profile registry this residency derives against.
+    pub fn profiles(&self) -> &ProfileSession {
+        &self.profiles
+    }
+
+    /// The active profile, read live at this instant.
+    pub fn slot(&self) -> ActiveSlot {
+        self.profiles.slot()
+    }
+
+    /// The slot the housed unlock's WALLET derives at — fixed at unlock, not the live active index.
+    /// A re-unlock must re-open at exactly this slot.
+    pub fn wallet_slot(&self) -> WalletSlot {
+        self.wallet_slot
+    }
+
+    /// The live active index, read from the registry. Takes and releases the registry lock before
+    /// returning, so a caller may take the account mutex next without ever nesting the two (the lock
+    /// ordering stated in [`ProfileSession`]'s docs).
+    fn active_ix(&self) -> ProfileIx {
+        self.profiles.active_ix()
+    }
+
+    /// Fail closed unless the live active profile is the one this unlock's wallet derives at.
+    ///
+    /// `UnlockedAccount::wallet_ops` derives at the index the account was OPENED at and dig-account
+    /// 0.8 exposes no `wallet_ops_at(ix)` (tracked as dig_ecosystem#2496), so after a switch the
+    /// wallet seam can only answer for the OLD profile. Answering anyway would show the previous
+    /// profile's receive address under the new profile's name — the money-lie class — so every money
+    /// accessor refuses instead, and says which two indices disagree.
+    fn wallet_agrees_with_the_active_profile(&self) -> AccountResult<()> {
+        let active = self.active_ix();
+        if active == self.wallet_slot.ix() {
+            return Ok(());
+        }
+        Err(AccountError::DefaultProfileInvariant(format!(
+            "the wallet was opened at profile {} but profile {active} is now active; re-open the \
+             account to move the wallet (dig_ecosystem#2496)",
+            self.wallet_slot
+        )))
     }
 
     /// Install `account` as the current unlocked account, replacing any prior one. Used by the
@@ -85,30 +164,52 @@ impl AccountResidency {
         *self.guard() = Some(account);
     }
 
-    /// A live-view identity signer for profile `ix` — signs through the current account, or returns
-    /// `None`/a non-verifying signature once the residency is locked (never a forgery).
-    pub fn signer(&self, ix: ProfileIx) -> ResidencySigner {
+    /// A live-view identity signer for the ACTIVE profile — signs through the current account, or
+    /// returns `None`/a non-verifying signature once the residency is locked (never a forgery).
+    ///
+    /// It takes no index, deliberately: the profile is re-read on every call, so a signer handed to a
+    /// serving thread at boot follows a later profile switch instead of signing as the old identity.
+    pub fn signer(&self) -> ResidencySigner {
         ResidencySigner {
             residency: self.clone(),
-            ix,
         }
     }
 
-    /// A live-view per-profile sealer for profile `ix` at the given KDF cost — seals/opens under the
-    /// current account's DEK, or fails closed once the residency is locked. Production passes
-    /// [`KdfParams::DEFAULT`]; tests pass [`KdfParams::FAST_TEST`].
-    pub fn sealer(&self, ix: ProfileIx, kdf: KdfParams) -> ResidencySealer {
+    /// A live-view per-profile sealer for the ACTIVE profile at the given KDF cost — seals/opens
+    /// under the current account's DEK, or fails closed once the residency is locked. Production
+    /// passes [`KdfParams::DEFAULT`]; tests pass [`KdfParams::FAST_TEST`].
+    ///
+    /// Like [`signer`](Self::signer) it holds no index. That is what makes the DEK follow a switch:
+    /// a retained sealer stops being able to open blobs sealed under the previous profile, which is
+    /// exactly the isolation the per-profile DEK exists for.
+    pub fn sealer(&self, kdf: KdfParams) -> ResidencySealer {
         ResidencySealer {
             residency: self.clone(),
-            ix,
             kdf,
+            scope: SealScope::ActiveProfile,
         }
     }
 
-    /// The production live-view sealer for profile `ix` — [`sealer`](Self::sealer) at the default
-    /// (production Argon2) KDF cost. A convenience so the tray shell need not name [`KdfParams`].
-    pub fn production_sealer(&self, ix: ProfileIx) -> ResidencySealer {
-        self.sealer(ix, KdfParams::DEFAULT)
+    /// A live-view sealer pinned to the ACCOUNT rather than to a profile — [`ProfileIx::ROOT`]'s DEK,
+    /// whatever profile is active.
+    ///
+    /// For the two artifacts that belong to the master seed and not to any profile: the 24-word
+    /// recovery phrase and the second factor. See
+    /// [`vault_for`](crate::account::boot::vault_for) for why sealing either per-profile would make
+    /// it unreadable exactly when it is needed. `ROOT` here is a CONSTANT, not a cached reading of a
+    /// value that can move.
+    pub fn account_scoped_sealer(&self) -> ResidencySealer {
+        ResidencySealer {
+            residency: self.clone(),
+            kdf: KdfParams::DEFAULT,
+            scope: SealScope::Account,
+        }
+    }
+
+    /// The production live-view sealer — [`sealer`](Self::sealer) at the default (production Argon2)
+    /// KDF cost. A convenience so the tray shell need not name [`KdfParams`].
+    pub fn production_sealer(&self) -> ResidencySealer {
+        self.sealer(KdfParams::DEFAULT)
     }
 
     /// Re-derive + tier a [`SpendSummary`] for `coin_spends` under `policy`, through the CURRENT
@@ -124,6 +225,9 @@ impl AccountResidency {
         coin_spends: &[CoinSpend],
         policy: &CustodyPolicy,
     ) -> Option<AccountResult<SpendSummary>> {
+        if let Err(disagreement) = self.wallet_agrees_with_the_active_profile() {
+            return self.guard().as_ref().map(|_| Err(disagreement));
+        }
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().summarize(coin_spends, policy))
@@ -138,6 +242,12 @@ impl AccountResidency {
     /// exposes signing only — the seed never crosses this boundary. Since `dig-account` 0.5.0 building
     /// the signer is infallible, so `None` means one thing and one thing only: the account is locked.
     pub fn money_signer(&self, network: Network) -> Option<LocalMoneySigner> {
+        if let Err(disagreement) = self.wallet_agrees_with_the_active_profile() {
+            // NOT a lock, so it is logged rather than silent — but it still yields no signer, because
+            // signing here would spend from the profile the user just switched away from.
+            tracing::warn!(error = %disagreement, "no money signer: the wallet is pinned behind the active profile");
+            return None;
+        }
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().money_signer(network))
@@ -162,6 +272,9 @@ impl AccountResidency {
     /// residency was still holding key material after a lock, which is the invariant that matters here.
     /// The inner `Result` is dig-account's own (an address-encoding failure).
     pub fn receiving_address(&self) -> Option<AccountResult<String>> {
+        if let Err(disagreement) = self.wallet_agrees_with_the_active_profile() {
+            return self.guard().as_ref().map(|_| Err(disagreement));
+        }
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().address())
@@ -192,9 +305,17 @@ impl AccountResidency {
         }
     }
 
-    /// The 48-byte identity signing public key of profile `ix`, as hex — for the connect-handle
+    /// The 48-byte identity signing public key of the ACTIVE profile, as hex — for the connect-handle
     /// advertisement at assembly time (read while unlocked). `None` if the residency is locked.
-    pub fn signing_public_key_hex(&self, ix: ProfileIx) -> Option<String> {
+    pub fn signing_public_key_hex(&self) -> Option<String> {
+        self.signing_public_key_hex_at(self.active_ix())
+    }
+
+    /// The signing public key of a NAMED profile — the account-scoped read
+    /// ([`account_scoped_id`](crate::account::boot::account_scoped_id)) and the tests that pin
+    /// per-index derivation. Production identity surfaces want
+    /// [`signing_public_key_hex`](Self::signing_public_key_hex), which follows the active profile.
+    pub fn signing_public_key_hex_at(&self, ix: ProfileIx) -> Option<String> {
         self.guard()
             .as_ref()
             .map(|acct| hex::encode(acct.profile_signer(ix).signing_public_key().as_bytes()))
@@ -234,13 +355,13 @@ impl SessionKeys for AccountResidency {
 /// [`sign`](SessionSigner::sign) — never a forgery.
 pub struct ResidencySigner {
     residency: AccountResidency,
-    ix: ProfileIx,
 }
 
 impl SessionSigner for ResidencySigner {
     fn signing_public_key(&self) -> SigningPublicKey {
+        let ix = self.residency.active_ix();
         match self.residency.guard().as_ref() {
-            Some(acct) => acct.profile_signer(self.ix).signing_public_key(),
+            Some(acct) => acct.profile_signer(ix).signing_public_key(),
             // Locked: advertise the all-zero key rather than panic (fail-closed, never a forgery).
             None => SigningPublicKey::new([0u8; 48]),
         }
@@ -257,10 +378,13 @@ impl SessionSigner for ResidencySigner {
     }
 
     fn try_sign(&self, message: &[u8]) -> Option<Signature> {
+        // Read the profile FIRST, then the account — never the other way round (the lock ordering in
+        // `ProfileSession`'s docs). The scalar is all this needs, which is what makes that possible.
+        let ix = self.residency.active_ix();
         self.residency
             .guard()
             .as_ref()
-            .and_then(|acct| acct.profile_signer(self.ix).try_sign(message))
+            .and_then(|acct| acct.profile_signer(ix).try_sign(message))
     }
 }
 
@@ -270,8 +394,22 @@ impl SessionSigner for ResidencySigner {
 #[derive(Clone)]
 pub struct ResidencySealer {
     residency: AccountResidency,
-    ix: ProfileIx,
     kdf: KdfParams,
+    scope: SealScope,
+}
+
+/// Whose DEK a [`ResidencySealer`] seals under.
+///
+/// Not a stored index: [`Account`](SealScope::Account) is the CONSTANT [`ProfileIx::ROOT`] and
+/// [`ActiveProfile`](SealScope::ActiveProfile) stores nothing at all, so neither variant can hold a
+/// reading that has since moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SealScope {
+    /// Whatever profile is active at the instant of each call.
+    ActiveProfile,
+    /// The account itself — always [`ProfileIx::ROOT`], because the sealed artifact belongs to the
+    /// master seed rather than to any profile.
+    Account,
 }
 
 impl ResidencySealer {
@@ -281,11 +419,16 @@ impl ResidencySealer {
         &self,
         f: impl FnOnce(&AccountSealer) -> Result<T, SealError>,
     ) -> Result<T, SealError> {
+        // Profile lock first, then the account lock — see `ResidencySigner::try_sign`.
+        let ix = match self.scope {
+            SealScope::ActiveProfile => self.residency.active_ix(),
+            SealScope::Account => ProfileIx::ROOT,
+        };
         let guard = self.residency.guard();
         let Some(acct) = guard.as_ref() else {
             return Err(SealError::Seal("account residency is locked".to_string()));
         };
-        let dek = Zeroizing::new(acct.dek(self.ix));
+        let dek = Zeroizing::new(acct.dek(ix));
         f(&AccountSealer::with_kdf(*dek, self.kdf))
     }
 }
@@ -533,7 +676,7 @@ mod tests {
     #[test]
     fn an_unlocked_residency_signs_and_a_lock_relocks_the_live_signer() {
         let residency = residency();
-        let signer = residency.signer(ProfileIx::ROOT);
+        let signer = residency.signer();
 
         assert!(
             signer.try_sign(b"challenge").is_some(),
@@ -554,7 +697,7 @@ mod tests {
     fn a_locked_signer_never_forges_via_the_infallible_path() {
         use crate::session::verify_signature;
         let residency = residency();
-        let signer = residency.signer(ProfileIx::ROOT);
+        let signer = residency.signer();
         residency.lock_all();
 
         let pubkey = signer.signing_public_key();
@@ -568,7 +711,7 @@ mod tests {
     #[test]
     fn the_sealer_round_trips_while_unlocked_and_fails_closed_once_locked() {
         let residency = residency();
-        let sealer = residency.sealer(ProfileIx::ROOT, KdfParams::FAST_TEST);
+        let sealer = residency.sealer(KdfParams::FAST_TEST);
 
         let blob = sealer.seal(DID, b"subscriptions").unwrap();
         assert_eq!(&sealer.open(DID, &blob).unwrap()[..], b"subscriptions");
@@ -589,7 +732,7 @@ mod tests {
         // Models the sign-path re-auth: after a lock, refilling the residency makes the live signer
         // work again (a zero-prompt re-unlock on Windows/macOS).
         let resident = residency();
-        let signer = resident.signer(ProfileIx::ROOT);
+        let signer = resident.signer();
         resident.lock_all();
         assert!(signer.try_sign(b"m").is_none());
 
@@ -645,9 +788,9 @@ mod tests {
     #[test]
     fn signing_public_key_hex_is_present_while_unlocked_and_absent_once_locked() {
         let residency = residency();
-        assert!(residency.signing_public_key_hex(ProfileIx::ROOT).is_some());
+        assert!(residency.signing_public_key_hex_at(ProfileIx::ROOT).is_some());
         residency.lock_all();
-        assert!(residency.signing_public_key_hex(ProfileIx::ROOT).is_none());
+        assert!(residency.signing_public_key_hex_at(ProfileIx::ROOT).is_none());
     }
 
     impl AccountResidency {

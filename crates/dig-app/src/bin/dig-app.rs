@@ -412,8 +412,8 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     // the residency's live-view AccountSealer over the profile's master-seed DEK — both relock the
     // instant the residency is locked.
     let signer: Box<dyn dig_app_core::session::SessionSigner + Send + Sync> =
-        Box::new(residency.signer(ProfileIx::ROOT));
-    let sealer = residency.production_sealer(ProfileIx::ROOT);
+        Box::new(residency.signer());
+    let sealer = residency.production_sealer();
     let router = sign_service::build_router(sealer, &profile_id, &profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate);
     // Take the paired-app handle before the router is moved onto the serving thread.

@@ -240,7 +240,7 @@ async fn the_identity_sign_path_puts_only_a_signature_on_the_wire_never_the_key(
     // wire is the signature over the caller's bytes — never the signing key or the seed it derives
     // from.
     let residency = residency_at_seed();
-    let signer = residency.signer(ProfileIx::ROOT);
+    let signer = residency.signer();
 
     let message = b"dig-app IPC session challenge";
     let signature = signer

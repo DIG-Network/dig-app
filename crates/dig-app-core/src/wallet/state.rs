@@ -422,7 +422,7 @@ mod tests {
         // A live-view sealer over a LOCKED residency must fail closed on seal.
         let dir = tempfile::tempdir().unwrap();
         let residency = crate::test_support::test_residency();
-        let sealer = residency.sealer(ProfileIx::ROOT, KdfParams::FAST_TEST);
+        let sealer = residency.sealer(KdfParams::FAST_TEST);
         AccountResidency::lock_all(&residency);
         let store = WalletStore::new(dir.path(), sealer);
         let err = store

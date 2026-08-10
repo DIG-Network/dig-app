@@ -257,7 +257,7 @@ mod tests {
 
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec!["xch1testaddress".to_string()],

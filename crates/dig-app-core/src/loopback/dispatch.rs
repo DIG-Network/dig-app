@@ -1071,7 +1071,7 @@ mod tests {
     fn router_with(confirmer: impl NativeConfirmer + 'static) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec!["xch1testaddress".to_string()],
@@ -1927,7 +1927,7 @@ mod tests {
     ) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = residency.signer(dig_account::ProfileIx::ROOT);
+        let signer = residency.signer();
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec!["xch1testaddress".to_string()],
@@ -2067,7 +2067,7 @@ mod tests {
 
         let residency = test_residency();
         let pubkey = residency
-            .signer(dig_account::ProfileIx::ROOT)
+            .signer()
             .signing_public_key();
         let router = router_persisting(&residency, Arc::new(NullSealedStore));
 
@@ -2161,7 +2161,7 @@ mod tests {
     ) {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         let signer_pubkey = SessionSigner::signing_public_key(&signer);
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
@@ -2493,7 +2493,7 @@ mod tests {
         // A locked sealing seam yields no key → LOCKED, never a bogus attestation over an absent key.
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec![],
@@ -2583,7 +2583,7 @@ mod tests {
         let bob_secret = StaticSecret::from([0xb0u8; 32]);
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let signer = test_residency().signer(dig_account::ProfileIx::ROOT);
+        let signer = test_residency().signer();
         let connect_info = ProfileConnectInfo {
             profile_did: DID.to_string(),
             addresses: vec![],

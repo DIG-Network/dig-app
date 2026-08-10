@@ -31,7 +31,8 @@
 
 use std::sync::Arc;
 
-use crate::account::active_profile::ActiveProfile;
+use crate::account::active_profile::WalletSlot;
+use crate::account::profile_session::{FileRegistryStore, ProfileSession};
 use dig_account::{AccountId, PasswordOnlyPolicy, ProfileIx, Result as AccountResult};
 
 /// A [`PhrasePresenter`] that can never approve an enrolment — used on paths where enrolment is
@@ -76,6 +77,7 @@ pub fn unlock_account<A>(
     backend: Arc<dyn KeychainBackend>,
     ceremony: A,
     account: AccountId,
+    wallet_slot: WalletSlot,
     seeding: Seeding<'_>,
 ) -> AccountResult<Opened>
 where
@@ -88,10 +90,7 @@ where
         account,
         &provider,
         &PasswordOnlyPolicy,
-        // The wallet is pinned to ONE derivation index (dig_ecosystem#2236). HD is deactivated, not
-        // removed: to make the app multi-address again, widen `ACTIVE_PROFILES` — do not pass a bare
-        // index here.
-        ActiveProfile::SOLE,
+        wallet_slot,
         seeding,
     ))
 }
@@ -101,32 +100,75 @@ where
 /// The second element is the enrolment phrase, present ONLY on a first run. The caller must vault it
 /// (see [`vault_for`]) so the account can show its phrase again later; dropping it instead leaves an
 /// account that works but can never re-display its words.
+/// The wallet is opened at `profiles`' ACTIVE slot, so the address it derives is the address the
+/// profile the user is on actually receives at. An account with nothing minted opens at
+/// [`WalletSlot::unprofiled`].
 pub fn assemble_residency<A>(
     backend: Arc<dyn KeychainBackend>,
     ceremony: A,
     account: AccountId,
+    profiles: ProfileSession,
     seeding: Seeding<'_>,
 ) -> AccountResult<(AccountResidency, Option<RecoveryPhrase>)>
 where
     A: AuthCeremony + 'static,
 {
-    match unlock_account(backend, ceremony, account, seeding)? {
-        Opened::Existing(unlocked) => Ok((AccountResidency::new(unlocked), None)),
-        Opened::Enrolled { account, phrase } => Ok((AccountResidency::new(account), Some(phrase))),
+    let wallet_slot = profiles.wallet_slot();
+    let house = |unlocked| AccountResidency::with_profiles(unlocked, wallet_slot, profiles.clone());
+    match unlock_account(backend, ceremony, account, wallet_slot, seeding)? {
+        Opened::Existing(unlocked) => Ok((house(unlocked), None)),
+        Opened::Enrolled { account, phrase } => Ok((house(account), Some(phrase))),
     }
 }
 
-/// The root profile's stable id for a live `residency` — the handle the per-profile directories, the
-/// connect advertisement, and the phrase vault are all keyed by.
+/// The profile registry for the account under `brand_dir`, or an unprofiled session when it cannot be
+/// read.
 ///
-/// It is the seed-derived identity public key in hex, because there is no on-chain DID mint yet (see
-/// [`crate::tray_menu`] for what the user is told about that). Returns `None` when the account is
-/// locked.
-pub fn root_profile_id(residency: &AccountResidency) -> Option<String> {
-    residency.signing_public_key_hex(ProfileIx::ROOT)
+/// A registry that will not load must not stop a user reaching their account: their money and their
+/// recovery phrase are reachable from the seed alone, and the registry holds no secret. It is logged
+/// loudly and the app comes up unprofiled, which is the honest rendering of "this host does not know
+/// which profiles you have" — every identity surface then says it has no DID rather than naming one.
+pub fn profiles_for(brand_dir: &std::path::Path) -> ProfileSession {
+    match ProfileSession::load(Arc::new(FileRegistryStore::under(brand_dir))) {
+        Ok(session) => session,
+        Err(e) => {
+            tracing::error!(error = %e, "the profile registry could not be read — booting unprofiled");
+            ProfileSession::unprofiled()
+        }
+    }
 }
 
-/// The phrase vault for the root profile of a live `residency`, or `None` when it is locked.
+/// The ACCOUNT's stable id for a live `residency` — pinned at [`ProfileIx::ROOT`] forever, whatever
+/// profile is active. `None` when the account is locked.
+///
+/// It is the seed-derived identity public key in hex, because there is no on-chain DID mint yet (see
+/// [`crate::tray_menu`] for what the user is told about that). That is precisely why it is
+/// **account-scoped and not profile-scoped**: it identifies the master seed, so it must not move when
+/// the active profile does, or an account would appear to become a different account on every switch.
+/// Use [`active_profile_id`] for anything keyed to the profile in force.
+pub fn account_scoped_id(residency: &AccountResidency) -> Option<String> {
+    residency.signing_public_key_hex_at(ProfileIx::ROOT)
+}
+
+/// The ACTIVE profile's stable id for a live `residency` — the key
+/// [`profile_dir`](crate::storage::profile_dir) and the connect advertisement use. `None` when the
+/// account is locked.
+///
+/// This one MUST follow the active slot. Sharing one directory across profiles would put profile B's
+/// sealed stores beside A's under a DEK that cannot open them, and would leak each profile's metadata
+/// into the other's directory listing.
+pub fn active_profile_id(residency: &AccountResidency) -> Option<String> {
+    residency.signing_public_key_hex()
+}
+
+/// The phrase vault for a live `residency`, or `None` when it is locked.
+///
+/// # Always account-scoped, never per-profile
+///
+/// The 24 words are the **account's** custody root: every profile derives from them, so they belong
+/// to no single profile. Sealing them under a per-profile DEK would make a user's own recovery words
+/// unreadable the moment they switched profiles — losing the one artifact that recovers everything.
+/// Hence [`account_scoped_id`] and a ROOT-pinned sealer, deliberately, not the active slot.
 ///
 /// The vault seals through the residency's LIVE-view sealer, so it fails closed the instant the account
 /// locks — a reveal can never outlive an unlock.
@@ -134,27 +176,30 @@ pub fn vault_for(
     brand_dir: &std::path::Path,
     residency: &AccountResidency,
 ) -> Option<PhraseVault<ResidencySealer>> {
-    let profile_id = root_profile_id(residency)?;
+    let profile_id = account_scoped_id(residency)?;
     Some(PhraseVault::new(
-        residency.production_sealer(ProfileIx::ROOT),
+        residency.account_scoped_sealer(),
         brand_dir,
         &profile_id,
     ))
 }
 
-/// The second-factor vault for the root profile of a live `residency`, or `None` when it is locked
+/// The second-factor vault for a live `residency`, or `None` when it is locked
 /// (dig_ecosystem#1840).
 ///
-/// Deliberately the same shape as [`vault_for`], down to the live-view sealer: both vaults live in the
-/// same profile directory under the same DEK, so two different construction paths would be two places
-/// for the at-rest rules to drift apart.
+/// Account-scoped for the same class of reason as [`vault_for`], and a different one specifically:
+/// **2FA gates UNLOCK**, which happens before any profile is active, so a second factor sealed
+/// per-profile could not be read at the moment it is needed. Deliberately the same shape as
+/// [`vault_for`], down to the live-view sealer: both vaults live in the same account directory under
+/// the same DEK, so two different construction paths would be two places for the at-rest rules to
+/// drift apart.
 pub fn second_factor_vault_for(
     brand_dir: &std::path::Path,
     residency: &AccountResidency,
 ) -> Option<SecondFactorVault<ResidencySealer>> {
-    let profile_id = root_profile_id(residency)?;
+    let profile_id = account_scoped_id(residency)?;
     Some(SecondFactorVault::new(
-        residency.production_sealer(ProfileIx::ROOT),
+        residency.account_scoped_sealer(),
         brand_dir,
         &profile_id,
     ))
@@ -179,7 +224,15 @@ where
     // seeding arm is unreachable. `NeverEnrols` makes that a type-level guarantee rather than a comment
     // — if the invariant ever broke, this path would refuse rather than silently mint a second account
     // with a phrase nobody saw.
-    match unlock_account(backend, ceremony, account, Seeding::NewPhrase(&NeverEnrols)) {
+    match unlock_account(
+        backend,
+        ceremony,
+        account,
+        // Re-open at EXACTLY the slot this residency's wallet already derives at. Re-opening
+        // elsewhere would silently move the receive address behind a lock/unlock cycle.
+        residency.wallet_slot(),
+        Seeding::NewPhrase(&NeverEnrols),
+    ) {
         Ok(opened) => {
             residency.install(opened.into_account());
             true
@@ -251,7 +304,7 @@ pub fn classify_unlock_failure(error: &dig_account::AccountError) -> UnlockFailu
 pub struct BootedAccount {
     /// The live, unlocked account.
     pub residency: AccountResidency,
-    /// The root profile's stable id (see [`root_profile_id`]).
+    /// The ACTIVE profile's stable id (see [`active_profile_id`]) — what `profile_dir` is keyed by.
     pub profile_id: String,
     /// Whether this account has a recovery phrase stored. `false` means it was enrolled before recovery
     /// phrases existed and **cannot be recovered from words** — the tray says so plainly rather than
@@ -497,6 +550,7 @@ where
         backend,
         ceremony,
         AccountId::new(DEFAULT_ACCOUNT_ID),
+        profiles_for(brand_dir),
         seeding,
     );
     let (residency, fresh_phrase) = match assembled {
@@ -562,7 +616,7 @@ pub fn finish_boot(
     residency: AccountResidency,
     fresh_phrase: Option<RecoveryPhrase>,
 ) -> BootedAccount {
-    let profile_id = root_profile_id(&residency).unwrap_or_default();
+    let profile_id = active_profile_id(&residency).unwrap_or_default();
     let vault = vault_for(brand_dir, &residency);
 
     if let (Some(phrase), Some(vault)) = (&fresh_phrase, &vault) {
@@ -764,7 +818,7 @@ mod tests {
 
         let (first, first_phrase) = assemble(backend.clone(), cred.clone());
         let first_pk = first
-            .signing_public_key_hex(ProfileIx::ROOT)
+            .signing_public_key_hex_at(ProfileIx::ROOT)
             .expect("unlocked");
         assert!(
             first_phrase.is_some(),
@@ -773,7 +827,7 @@ mod tests {
 
         let (second, second_phrase) = assemble(backend, cred);
         assert_eq!(
-            second.signing_public_key_hex(ProfileIx::ROOT),
+            second.signing_public_key_hex_at(ProfileIx::ROOT),
             Some(first_pk),
             "a returning boot must recover the enrolled seed's identity"
         );
@@ -831,7 +885,7 @@ mod tests {
         let backend: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());
         let (first, _) = assemble(backend.clone(), typed());
         let enrolled_pk = first
-            .signing_public_key_hex(ProfileIx::ROOT)
+            .signing_public_key_hex_at(ProfileIx::ROOT)
             .expect("unlocked");
 
         let wrong = assemble_residency(
@@ -849,7 +903,7 @@ mod tests {
         // password and not some incidental breakage of the store.
         let (right, _) = assemble(backend, typed());
         assert_eq!(
-            right.signing_public_key_hex(ProfileIx::ROOT),
+            right.signing_public_key_hex_at(ProfileIx::ROOT),
             Some(enrolled_pk)
         );
     }
@@ -949,8 +1003,8 @@ mod tests {
         let (first, _) = assemble(backend.clone(), cred.clone());
         let (second, _) = assemble(backend, cred);
 
-        assert_eq!(root_profile_id(&first), root_profile_id(&second));
-        assert!(root_profile_id(&first).is_some());
+        assert_eq!(account_scoped_id(&first), account_scoped_id(&second));
+        assert!(account_scoped_id(&first).is_some());
     }
 
     #[test]
@@ -960,7 +1014,7 @@ mod tests {
         let (residency, _) = assemble(backend, typed());
         residency.lock_all();
 
-        assert!(root_profile_id(&residency).is_none());
+        assert!(account_scoped_id(&residency).is_none());
         assert!(
             vault_for(dir.path(), &residency).is_none(),
             "a locked account exposes no phrase vault"
@@ -973,7 +1027,7 @@ mod tests {
         let cred = typed();
 
         let (residency, _) = assemble(backend.clone(), cred.clone());
-        let signer = residency.signer(ProfileIx::ROOT);
+        let signer = residency.signer();
         residency.lock_all();
         assert!(signer.try_sign(b"m").is_none(), "locked");
 

@@ -46,7 +46,7 @@ use dig_account::mint::{
 };
 use dig_chainsource_interface::ChainSource;
 
-use crate::account::active_profile::ActiveProfile;
+use crate::account::active_profile::{MintTarget, WalletSlot};
 use crate::account::did::MintEvidence;
 use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission, UnavailableMinter};
 use crate::account::residency::AccountResidency;
@@ -143,8 +143,14 @@ impl MintObserver for UnreachableChain {
 pub struct ChainMint<'a, C: ?Sized, P: ?Sized> {
     /// The live account. A minter is derived from it per call and never retained (module docs).
     residency: &'a AccountResidency,
-    /// The profile whose wallet funds the mint.
-    profile: ActiveProfile,
+    /// The profile whose wallet PAYS for the mint.
+    funding: WalletSlot,
+    /// The index the new profile's keys will derive at.
+    ///
+    /// Separate from [`funding`](Self::funding) deliberately: they are the same only while an account
+    /// has at most one profile, and collapsing them makes the first second-profile mint try to fund
+    /// itself from the brand-new profile's empty wallet. See [`MintTarget`].
+    target: MintTarget,
     /// Reads coins, spends and the peak. Cannot broadcast, by construction.
     chain: &'a C,
     /// Pushes the signed bundle. Never sees a key.
@@ -162,14 +168,16 @@ where
     C: ChainSource + ?Sized,
     P: SpendPublisher + ?Sized,
 {
-    /// A minter for `profile`'s wallet, reading through `chain` and pushing through `publisher`.
+    /// A minter that pays from `funding`'s wallet and creates the profile at `target`, reading
+    /// through `chain` and pushing through `publisher`.
     ///
     /// # Money
     ///
     /// With [`MintNetwork::mainnet`] this spends real XCH the moment [`DidMinter::submit`] is called.
     pub fn new(
         residency: &'a AccountResidency,
-        profile: ActiveProfile,
+        funding: WalletSlot,
+        target: MintTarget,
         chain: &'a C,
         publisher: &'a P,
         network: MintNetwork,
@@ -177,7 +185,8 @@ where
     ) -> Self {
         Self {
             residency,
-            profile,
+            funding,
+            target,
             chain,
             publisher,
             network,
@@ -228,8 +237,22 @@ where
             };
         };
 
+        // dig-account 0.8's `begin_did_mint` mints at `ix` AND funds from that same index's wallet,
+        // so it cannot express a mint paid for by one profile and created at another. That is fine
+        // for the FIRST profile, where the two indices coincide at ROOT, and it is the only mint
+        // reachable today. Refuse the divergent case loudly rather than paying from a wallet the user
+        // did not intend or minting at the wrong index (dig_ecosystem#2496 tracks the upstream API).
+        if self.funding.ix() != self.target.ix() {
+            return Submission::Refused {
+                reason: format!(
+                    "This mint would pay from profile {} but create profile {}, and DIG cannot yet                      fund one profile's mint from another's wallet. Move funds to profile {}'s                      address first.",
+                    self.funding, self.target, self.target
+                ),
+            };
+        }
+
         match minter.begin_did_mint(
-            self.profile.ix(),
+            self.target.ix(),
             self.chain,
             self.publisher,
             &self.network,
@@ -455,7 +478,8 @@ mod tests {
         ) -> ChainMint<'a, C, P> {
             ChainMint::new(
                 &self.residency,
-                ActiveProfile::SOLE,
+                WalletSlot::unprofiled(),
+                MintTarget::next_free(&dig_account::registry::ProfileRegistry::empty()),
                 chain,
                 publisher,
                 // A pinned test network rather than mainnet: the signatures are checked against these

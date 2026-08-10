@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dig_app_core::account::boot::{
-    account_exists, assemble_residency, root_profile_id, DEFAULT_ACCOUNT_ID,
+    account_exists, assemble_residency, account_scoped_id, DEFAULT_ACCOUNT_ID,
 };
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
 use dig_app_core::account::recovery::RecoveryPhrase;
@@ -66,7 +66,7 @@ fn open_under(account_dir: &Path) -> Option<String> {
         Seeding::NewPhrase(&AlwaysKeeps),
     )
     .ok()?;
-    root_profile_id(&residency)
+    account_scoped_id(&residency)
 }
 
 /// The state the tray reports for a host that holds this account and has not been asked to unlock it —

@@ -8,7 +8,7 @@
 //!   built from the SAME label share a DEK (so a "restart" round-trips a sealed blob); DISTINCT labels
 //!   derive DISTINCT DEKs, which is exactly the model's cross-profile isolation (isolation rests on the
 //!   DEK, not on the advisory DID argument — see [`crate::account::sealer`]).
-//! - [`test_residency`] — a freshly-enrolled, unlocked residency; call `.signer(ProfileIx::ROOT)` for
+//! - [`test_residency`] — a freshly-enrolled, unlocked residency; call `.signer()` for
 //!   its live-view [`SessionSigner`], which fails closed the instant the residency is locked
 //!   ([`lock_all`](crate::session_lock::SessionKeys::lock_all)).
 
