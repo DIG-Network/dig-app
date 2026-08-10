@@ -392,6 +392,143 @@ pub(crate) mod protection {
     }
 }
 
+/// The profile half of the Account pane — which identity this account is presenting
+/// (dig_ecosystem#2403).
+///
+/// # The one word this module may never use
+///
+/// **Delete.** A minted profile is a DID singleton and a store on the Chia blockchain, both
+/// permanent; hiding one is a preference about THIS computer's lists and nothing else. Copy that
+/// implies otherwise would be describing an act the app cannot perform and the chain would not
+/// honour, and a person who believed it would think they had removed an identity that is still there
+/// for anyone to resolve. [`no_profile_copy_implies_a_profile_can_be_deleted`](super::tests) is that
+/// rule as an assertion.
+pub(crate) mod profiles {
+    use crate::profiles::ProfileCreation;
+
+    /// The card holding the list and its controls.
+    pub(crate) const CARD: &str = "Profiles on this account";
+    /// The panel holding what a profile is and why one cannot be created yet.
+    pub(crate) const CREATE_PANEL: &str = "Creating a profile";
+
+    /// The badge on the profile the account is deriving at.
+    pub(crate) const ACTIVE_BADGE: &str = "In use";
+    /// The badge on a profile the user has taken out of this computer's lists.
+    pub(crate) const HIDDEN_BADGE: &str = "Hidden here";
+    /// The readout naming a profile's on-chain identity.
+    pub(crate) const DID_LABEL: &str = "DID";
+
+    /// Said while the profile list is still being read.
+    ///
+    /// Names the read rather than the answer: an account with several profiles and one with none
+    /// look identical during this moment, and claiming either would be a claim no read supports.
+    pub(crate) const PENDING: &str =
+        "DIG is still reading which profiles this account has. Nothing here is settled until it has.";
+
+    /// Said when the registry ANSWERED and the account holds no profile.
+    ///
+    /// # Why this sentence is long, and why the length is the point
+    ///
+    /// It is the state every real user is in, so it is not an edge case being apologised for — it is
+    /// the pane's ordinary content, and it has three jobs: say what a profile IS, say that the
+    /// account works without one, and say why there is no button. The third matters most: an empty
+    /// list with no explanation reads as a fault, and a person who thinks their profiles failed to
+    /// load will go looking for a way to reload them.
+    ///
+    /// The wallet half is not decoration. This pane sits inches below a real, fundable receive
+    /// address, and an empty profile list that said nothing would read as the account being
+    /// unusable.
+    pub(crate) const EMPTY: &str =
+        "This account has no profiles yet. A profile is an on-chain identity — a DID and a store — \
+         that lets you publish, sign for an app and be found by other people.\n\n\
+         Your account already holds funds, receives at the address on the Wallet tab, and reads \
+         everything on the DIG Network without one.";
+
+    /// Said when the registry could not be read at all.
+    ///
+    /// Deliberately NOT [`EMPTY`]: an account whose registry will not load may well hold several
+    /// profiles, and telling that person they have none is a claim about their identity that no read
+    /// supports. Carries the loader's own words, because a hand-edited file and a permissions fault
+    /// need different things done about them.
+    pub(crate) fn unreadable(why: &str) -> String {
+        format!(
+            "DIG could not read this account's profile list, so it cannot say which profiles you \
+             have. Your account, its funds and its recovery phrase are unaffected — they come from \
+             your recovery phrase, not from this list. The log folder has the detail: {why}"
+        )
+    }
+
+    /// Why a profile cannot be created on this build, one sentence per missing piece.
+    ///
+    /// An EXHAUSTIVE match on [`ProfileCreation`], whose own constructor derives it from the mint
+    /// seam the start-up wizard reads — so this pane and that wizard cannot come to disagree about
+    /// whether a mint is possible.
+    ///
+    /// # The wording is #1820's, and "optional" is the word it settled against
+    ///
+    /// A profile is REQUIRED for publishing, signing and messaging, and creating one is *not
+    /// available in this version*. Calling it optional would tell a person they had chosen to go
+    /// without something they have simply not been offered.
+    pub(crate) fn cannot_create(creation: ProfileCreation) -> &'static str {
+        match creation {
+            ProfileCreation::NoChainTransport => {
+                "Creating a profile mints a DID and a store on the Chia blockchain, and this \
+                 version of DIG has no way to reach the chain to do it. It is required for \
+                 publishing, signing for an app and messaging, and it is not available in this \
+                 version. Nothing is missing from your setup and there is nothing for you to do — \
+                 when it arrives, this card will offer it."
+            }
+            ProfileCreation::NoProfileMinter => {
+                "This copy of DIG can reach the chain, and the step that mints a profile is not \
+                 built yet. It is required for publishing, signing for an app and messaging, and it \
+                 is not available in this version. Nothing is missing from your setup and there is \
+                 nothing for you to do — when it arrives, this card will offer it."
+            }
+        }
+    }
+
+    /// Said above the switch controls, BEFORE anything is pressed.
+    ///
+    /// # Why it is on the card and not only in the confirmation
+    ///
+    /// "Say so before it happens" means before the decision, not between the decision and the act. A
+    /// person scanning this card is choosing which profile to use, and the cost of that choice — a
+    /// different receive address, a different signing key — belongs where they are choosing, not in
+    /// a dialog that appears once they already have. The confirmation repeats it with the two
+    /// profiles named ([`switching`]); this is the standing statement.
+    pub(crate) const SWITCH_CAUTION: &str =
+        "Switching profiles changes the address money arrives at and the key that signs for you. \
+         Anything already sent to your current address stays where it is, and switching back \
+         restores it.";
+
+    /// The confirmation body shown before a switch is applied, naming both ends.
+    ///
+    /// Both are named because the disclosure a person needs says which identity they are LEAVING as
+    /// well as which they are arriving at — the one they are leaving is the one holding the address
+    /// they have been handing out.
+    pub(crate) fn switching(from: &str, to: &str) -> String {
+        format!(
+            "DIG will stop using {from} and start using {to}.\n\n\
+             Your receive address and your signing key both change with it. Money already sent to \
+             {from}'s address stays there, and switching back to {from} brings that address back. \
+             Nothing is spent and nothing is deleted."
+        )
+    }
+
+    /// Said beside the hide controls, so the word "hide" cannot be read as "delete".
+    ///
+    /// The card's whole risk in one sentence. A profile is permanent on chain; this control changes
+    /// one computer's list.
+    pub(crate) const HIDE_NOTE: &str =
+        "Hiding a profile only takes it out of this computer's lists. It stays on the blockchain, \
+         keeps its address and its funds, and you can show it here again at any time.";
+
+    /// Said where the profile in use has no hide control, so its absence is not read as a fault.
+    pub(crate) const ACTIVE_CANNOT_HIDE: &str =
+        "The profile in use is always listed. Switch to another profile first if you want to hide \
+         this one.";
+}
+
 /// The words for the agent's two states, chosen by an exhaustive match rather than a boolean.
 pub(crate) fn agent_state(running: bool) -> &'static str {
     match running {

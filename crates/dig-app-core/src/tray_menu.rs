@@ -284,6 +284,24 @@ pub struct TrayView {
     /// [`AppPresence::Unknown`](crate::apps::AppPresence::Unknown) is the default and means exactly
     /// that nobody looked; see that type for why it is not an empty list.
     pub installed_apps: crate::apps::AppPresence,
+    /// This account's dig-profiles, or why they are not known (dig_ecosystem#2403).
+    ///
+    /// Filled from the app's live [`ProfileSession`](crate::account::profile_session::ProfileSession),
+    /// which is the ONE place the active profile is stored — so the list a person picks from and the
+    /// index the wallet derives at cannot disagree.
+    ///
+    /// The default — [`ProfilesReading::Pending`](crate::profiles::ProfilesReading::Pending) — is the
+    /// truth before boot has reported, and is deliberately not an empty list. Every real user's
+    /// answer today is `Known(vec![])`, because nothing can mint a profile; that is a reading, and
+    /// the surface says so in its own words.
+    pub profiles: crate::profiles::ProfilesReading,
+    /// Whether a profile can be CREATED on this build, and which missing piece stops it.
+    ///
+    /// Derived by the shell from the same [`MintSeams`](crate::account::chain_mint::MintSeams) value
+    /// it hands the start-up wizard, through [`ProfileCreation::of`](crate::profiles::ProfileCreation::of).
+    /// That single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
+    /// surface comes to advertise a create control whose implementation refuses.
+    pub profile_creation: crate::profiles::ProfileCreation,
 }
 
 impl TrayView {
@@ -328,6 +346,8 @@ impl TrayView {
             node_facts,
             hosted_stores,
             installed_apps,
+            profiles,
+            profile_creation,
         } = self;
 
         running == &other.running
@@ -387,6 +407,16 @@ impl TrayView {
             // while the window was open must repaint. It changes only when a sibling binary appears
             // or disappears — an event, not a tick.
             && installed_apps == &other.installed_apps
+            // The Account pane RENDERS this list, and every one of its controls changes it: a
+            // switch moves the active row, hiding moves a visibility. Without this arm a person
+            // would press "Use this profile" and watch nothing move until some unrelated field
+            // happened to tick — the freeze `balance` and `hosted_stores` both needed this same arm
+            // to avoid (dig_ecosystem#2206).
+            && profiles == &other.profiles
+            // It changes only when the build does, which is never within a session — carried so a
+            // field the pane draws from cannot escape this comparison, which destructures with no
+            // `..` precisely so that it cannot.
+            && profile_creation == &other.profile_creation
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -708,6 +738,52 @@ pub enum TrayAction {
     /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
     /// of one `enabled: false`.
     AboutDid,
+    /// Make one of this account's dig-profiles the active one (dig_ecosystem#2403).
+    ///
+    /// Carries the HD index rather than "the next one" for the reason
+    /// [`SetCacheCap`](Self::SetCacheCap) carries its bytes: a click must resolve the same way
+    /// however stale the list it was drawn from is. The shell DISCLOSES what the switch changes
+    /// before applying it ([`SwitchPlan`](crate::profiles::SwitchPlan)), because the receive address,
+    /// the per-profile DEK and the identity signing key all derive at this index — being told
+    /// afterwards means the first a person knows of it is money arriving somewhere they were not
+    /// shown.
+    ///
+    /// Offered only for a profile that is NOT already active: a row that reads "use this profile"
+    /// beside the profile in use is a control whose only effect is to raise a warning about a change
+    /// that is not happening.
+    SetActiveProfile {
+        /// The profile's HD index, as `ProfileIx`'s inner `u32`. A plain integer so the whole action
+        /// stays `Copy` and comparable, exactly as the cache preset's byte count is.
+        ix: u32,
+    },
+    /// Show a dig-profile in this host's lists, or stop showing it (dig_ecosystem#2403).
+    ///
+    /// Carries the visibility being MOVED TO, not "toggle", for the reason
+    /// [`SetAutoUpdate`](Self::SetAutoUpdate) does: a list that moved between the repaint and the
+    /// click then resolves to what the row said rather than to the opposite of a state that changed.
+    ///
+    /// **This is a local view preference and nothing more.** A minted profile is permanent on chain
+    /// — hiding one does not delete it, does not stop it deriving, and does not stop it spending —
+    /// so the row's label says *hide from this list*, never *remove* or *delete*. dig-account
+    /// refuses to hide the ACTIVE profile, and `set_active` un-hides its target, so there is no
+    /// state in which a person can hide their way out of their own account.
+    SetProfileVisibility {
+        /// The profile's HD index, as `ProfileIx`'s inner `u32`.
+        ix: u32,
+        /// `true` to hide it from this host's lists, `false` to show it again.
+        hidden: bool,
+    },
+    /// EXPLAIN what a dig-profile is, what creating one would cost, and why this version cannot
+    /// create one (dig_ecosystem#2403).
+    ///
+    /// There is deliberately **no `CreateProfile` action**, for exactly the reason
+    /// [`AboutDid`](Self::AboutDid) records: creating a profile is a mint, dig-account 0.8's
+    /// `ProfileMinter::mint` is `todo!()`, and an action that mints does not exist and therefore is
+    /// not offered — not even disabled. Because no [`TrayAction`] can create a profile, "this build
+    /// cannot mint one" is STRUCTURAL rather than one `enabled: true` away from being wrong.
+    ///
+    /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
+    AboutProfiles,
     /// Copy the account's `xch1…` receive address to the clipboard (dig_ecosystem#1850).
     ///
     /// The address comes from [`TrayView::receive_address`], which the shell fills from the account's own
@@ -1381,6 +1457,94 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
     rows.push(MenuRow::Separator);
     rows.push(MenuRow::action(TrayAction::AboutDid, DID_LABEL, true));
     rows
+}
+
+/// **Profiles** — the account's dig-profiles: which one is in use, and which are shown here
+/// (dig_ecosystem#2403).
+///
+/// # What this builder decides, and what it deliberately does not
+///
+/// It decides which of the two per-profile verbs each row gets, and it never emits a THIRD verb for
+/// creating one. That absence is structural: see [`TrayAction::AboutProfiles`] for why no action in
+/// this shell can mint a profile, which is what makes "this build cannot create one" a property of
+/// the code rather than of an `enabled: false` somebody could flip.
+///
+/// It does NOT decide how the list is drawn, or which profile a row is ABOUT beyond the index it
+/// carries. The pane reads the profiles themselves from
+/// [`TrayView::profiles`] and matches each verb to its row by that index, exactly as the Content
+/// tab matches a cache preset by its byte count.
+///
+/// # The two verbs, and the states each is withheld in
+///
+/// * **Use this profile** is emitted for every profile that is not already active. Withheld from the
+///   active one because there is nothing for it to change; the list says which one that is.
+/// * **Hide / show** is emitted for every profile EXCEPT the active one, because dig-account refuses
+///   to hide the active profile (`AccountError::ActiveProfileCannotBeHidden`). A row offered there
+///   would be a control that reports a refusal from the crate underneath, which is the dead end
+///   #1800 removed — and the way to hide that profile, switching away from it first, is the row
+///   directly beside it.
+///
+/// Nothing is emitted at all until the list has been READ. A verb built from
+/// [`ProfilesReading::Pending`](crate::profiles::ProfilesReading::Pending) would be a control acting
+/// on a profile nobody has confirmed exists.
+pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
+    let mut rows: Vec<MenuRow> = view
+        .profiles
+        .rows()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|profile| {
+            match profile.active {
+                true => Vec::new(),
+                false => vec![
+                    MenuRow::action(
+                        TrayAction::SetActiveProfile { ix: profile.ix.0 },
+                        format!("Use {} for this account…", profile_display_name(profile)),
+                        true,
+                    ),
+                    MenuRow::action(
+                        TrayAction::SetProfileVisibility {
+                            ix: profile.ix.0,
+                            hidden: !profile.hidden,
+                        },
+                        match profile.hidden {
+                            true => format!("Show {} in this list", profile_display_name(profile)),
+                            false => format!("Hide {} from this list", profile_display_name(profile)),
+                        },
+                        true,
+                    ),
+                ],
+            }
+        })
+        .collect();
+    if !rows.is_empty() {
+        rows.push(MenuRow::Separator);
+    }
+    rows.push(MenuRow::action(
+        TrayAction::AboutProfiles,
+        PROFILES_LABEL,
+        true,
+    ));
+    rows
+}
+
+/// The explainer row's label. Names the concept a person is about to read about, and — per rule 3 —
+/// promises an explanation rather than an act.
+pub const PROFILES_LABEL: &str = "About DIG profiles…";
+
+/// How a profile is named in a row LABEL: the user's own name for it, or its index.
+///
+/// Never the DID. A `did:chia:…` string is 60-odd characters and would make every row on this list
+/// unreadable at the width the window actually opens at; the DID is drawn in the list itself, in the
+/// identifier face, beside a copy control — which is where a value nobody transcribes belongs.
+pub(crate) fn profile_display_name(profile: &crate::profiles::ProfileRow) -> String {
+    match profile.label.as_deref() {
+        Some(label) => format!("“{label}”"),
+        // Not "profile 0": the index is an implementation detail a person has never been shown, and
+        // an unlabelled profile is ordinary — the mint does not ask for a name. Ordinal counting
+        // from one is what a list of unlabelled things reads as.
+        None => format!("profile {}", profile.ix.0.saturating_add(1)),
+    }
 }
 
 /// **Wallet** — what the account can do with money, which today is receive and understand.
@@ -2253,6 +2417,12 @@ mod tests {
             node_facts: Some(fixture_node_facts()),
             hosted_stores: crate::hosted_stores::HostedStoresReading::Known(Vec::new()),
             installed_apps: crate::apps::AppPresence::Known(Vec::new()),
+            // The registry ANSWERED and this account holds no profile — which is every real
+            // account's state, because nothing in this build can mint one. Tests that need a list
+            // build one from a registry fixture explicitly.
+            profiles: crate::profiles::ProfilesReading::Known(Vec::new()),
+            // What `mint_seams()` returns in the shipped binary.
+            profile_creation: crate::profiles::ProfileCreation::NoChainTransport,
             // A beacon that answered: auto-update on, following stable — the ordinary success case.
             // The tests that describe the absent beacon and the nightly channel null this out or
             // replace it explicitly.

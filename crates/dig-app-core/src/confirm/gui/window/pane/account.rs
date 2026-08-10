@@ -74,6 +74,11 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     identity_card(flow, t, facts);
     flow.gap(space::S4);
+    // Third beat, between "who you are" and "whether it is protected": a profile is WHICH identity
+    // this account is presenting, so a person who has just read their DIG ID is in the right place
+    // to be told which profile it belongs to (dig_ecosystem#2403).
+    pressed = pressed.or(super::profiles::card(flow, t, tab, facts));
+    flow.gap(space::S4);
     pressed = pressed.or(second_factor_card(flow, t, facts, &protection));
     flow.gap(space::S4);
     pressed = pressed.or(paired_apps_card(flow, t, &protection));
@@ -481,9 +486,14 @@ fn grouped(tab: &Tab, drew_copy_control: bool) -> (Vec<Group>, Vec<Group>) {
                 super::actions_in(section.rows.iter().cloned(), &mut seen),
                 drew_copy_control,
             );
-            // The protection section is already drawn — as the state card and the two cards under
-            // it — so a group for it here would put every one of its verbs on the pane twice.
-            if section.heading.as_deref() == Some(crate::window_model::PROTECTION_HEADING) {
+            // The protection and profile sections are already drawn — protection as the state card
+            // and the two cards under it, profiles as the list card — so a group for either here
+            // would put every one of its verbs on the pane twice.
+            if matches!(
+                section.heading.as_deref(),
+                Some(crate::window_model::PROTECTION_HEADING)
+                    | Some(crate::window_model::PROFILES_HEADING)
+            ) {
                 return None;
             }
             Some(Group {
@@ -506,13 +516,18 @@ mod tests {
     use crate::window_model::{Section, TabId};
 
     /// The Account tab as the real model builds it for `account`.
-    fn tab_for(account: AccountState) -> Tab {
-        let view = TrayView {
+    fn view_for(account: AccountState) -> TrayView {
+        TrayView {
             running: true,
             account: Some(account),
             profile_id: Some("a".repeat(64)),
             ..TrayView::default()
-        };
+        }
+    }
+
+    /// The Account tab as the real model builds it for `account`.
+    fn tab_for(account: AccountState) -> Tab {
+        let view = view_for(account);
         crate::window_model::build(&view)
             .tab(TabId::Account)
             .cloned()
@@ -686,6 +701,10 @@ mod tests {
             let tab = tab_for(account.clone());
             let (safe, destroying) = grouped(&tab, false);
             let protection = Protection::of(&tab);
+            // The profiles card is the fourth renderer on this pane, and `grouped` skips its
+            // section for the same reason it skips protection's — so its verbs have to be summed in
+            // here, or a row falling down the gap between the two would read as the pane simply
+            // having fewer verbs than the model.
             let mut rendered: Vec<TrayAction> = safe
                 .iter()
                 .chain(destroying.iter())
@@ -693,6 +712,12 @@ mod tests {
                 .chain(protection.lead.iter().map(|a| a.id))
                 .chain(protection.second_factor.iter().map(|a| a.id))
                 .chain(protection.paired_apps.iter().map(|a| a.id))
+                .chain(
+                    super::super::profiles::drawn_actions(&tab, &PaneFacts::of_tray(&view_for(
+                        account.clone(),
+                    )))
+                    .into_iter(),
+                )
                 .collect();
             let mut expected = tab.actions();
             assert!(
@@ -963,6 +988,20 @@ mod tests {
         copy::account::DESTRUCTIVE_CAVEAT,
         copy::clipboard::COPY,
         copy::clipboard::COPIED,
+        // The profiles card. Every one of these is a `const` or is keyed on a fact that is held
+        // FIXED across the six account states — `cannot_create` varies with the BUILD's mint seam,
+        // not with the account — so none of them can be a per-state sentence set laundered through
+        // this list.
+        copy::profiles::CARD,
+        copy::profiles::CREATE_PANEL,
+        copy::profiles::PENDING,
+        copy::profiles::EMPTY,
+        copy::profiles::ACTIVE_BADGE,
+        copy::profiles::HIDDEN_BADGE,
+        copy::profiles::DID_LABEL,
+        copy::profiles::SWITCH_CAUTION,
+        copy::profiles::HIDE_NOTE,
+        copy::profiles::ACTIVE_CANNOT_HIDE,
     ];
 
     /// Every string the pane is accounted for painting in `account`'s state.
@@ -980,6 +1019,17 @@ mod tests {
         let mut allowed: Vec<String> = FIXED_WORDS.iter().map(|word| word.to_string()).collect();
         allowed.push(copy::account::summary(kind).to_string());
         allowed.push(kind.word().to_string());
+        // Keyed on the BUILD's mint seam rather than on the account's state — the same string in
+        // all six — so this is not a second per-state sentence set; both arms are listed because
+        // the fixture holds the seam fixed and either could be the one drawn.
+        allowed.push(
+            copy::profiles::cannot_create(crate::profiles::ProfileCreation::NoChainTransport)
+                .to_string(),
+        );
+        allowed.push(
+            copy::profiles::cannot_create(crate::profiles::ProfileCreation::NoProfileMinter)
+                .to_string(),
+        );
         allowed.push(copy::protection::second_factor_needs(&lead));
         allowed.push(copy::protection::pairing_needs(&lead));
         allowed.push(tab.label.clone());

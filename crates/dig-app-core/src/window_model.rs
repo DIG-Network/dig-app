@@ -32,8 +32,8 @@
 
 use crate::tray_menu::{
     apps_actions, auto_update_actions, auto_update_label, cache_actions, cache_label,
-    management_actions, security_actions, view_account_actions, wallet_actions, MenuRow,
-    TrayAction, TrayView,
+    management_actions, profile_actions, security_actions, view_account_actions, wallet_actions,
+    MenuRow, TrayAction, TrayView,
 };
 
 /// One tab of the app window — five destinations, in the order a person meets them.
@@ -297,6 +297,15 @@ pub const PROTECTION_HEADING: &str = "How this account is protected";
 /// [`PROTECTION_HEADING`].
 pub const APPS_HEADING: &str = "Other DIG apps";
 
+/// The heading over the Account tab's profile rows, shared for the same reason as
+/// [`PROTECTION_HEADING`] (dig_ecosystem#2403).
+///
+/// The Account pane draws these rows as a LIST — one row per profile, with its DID and its state —
+/// rather than as a run of buttons, so it has to find the section. Finding it by position would make
+/// the pane's layout depend on the order this module happens to list sections in, which is exactly
+/// the coupling the merged Account pane exists to avoid.
+pub const PROFILES_HEADING: &str = "Profiles on this account";
+
 /// The note for a tab whose whole content is a statement about the account.
 ///
 /// `view.account` is `None` until the first boot report arrives — NOT "there is no account". The
@@ -380,6 +389,14 @@ pub fn build(view: &TrayView) -> WindowModel {
                 Section {
                     heading: Some("What this account is".to_string()),
                     rows: view_account_actions(view, &account),
+                },
+                // Between "what this account is" and "how it is protected", because that is where
+                // it reads: a profile is WHICH identity this account is presenting, so a person
+                // who has just read their DIG ID is in exactly the right place to be told which
+                // profile that ID belongs to (dig_ecosystem#2403).
+                Section {
+                    heading: Some(PROFILES_HEADING.to_string()),
+                    rows: profile_actions(view),
                 },
                 Section {
                     heading: Some(PROTECTION_HEADING.to_string()),
@@ -656,6 +673,7 @@ mod tests {
             TrayAction::ManagePairedApps,
             TrayAction::CopyDigId,
             TrayAction::AboutDid,
+            TrayAction::AboutProfiles,
             TrayAction::CopyReceiveAddress,
             TrayAction::AboutWallet,
             TrayAction::SetCustomCacheCap,
@@ -670,6 +688,15 @@ mod tests {
         all.extend([true, false].map(|enabled| TrayAction::SetAutoUpdate { enabled }));
         all.push(TrayAction::RearmUpdateSchedule);
         all.extend(UpdateChannel::ALL.map(TrayAction::SetUpdateChannel));
+        // Two distinct indices, and both visibilities of each: the id of a payload-carrying variant
+        // has to separate every value that can reach a menu, and `hidden` is part of the payload —
+        // an id derived from the index alone would give one profile's "hide" and "show" rows one id,
+        // which egui reports as a duplicate and which leaves one of them unclickable.
+        all.extend([0_u32, 1].map(|ix| TrayAction::SetActiveProfile { ix }));
+        all.extend(
+            [(0_u32, true), (0, false), (1, true), (1, false)]
+                .map(|(ix, hidden)| TrayAction::SetProfileVisibility { ix, hidden }),
+        );
         all
     }
 
@@ -699,6 +726,9 @@ mod tests {
             | TrayAction::ManagePairedApps
             | TrayAction::CopyDigId
             | TrayAction::AboutDid
+            | TrayAction::SetActiveProfile { .. }
+            | TrayAction::SetProfileVisibility { .. }
+            | TrayAction::AboutProfiles
             | TrayAction::CopyReceiveAddress
             | TrayAction::AboutWallet
             | TrayAction::SetCacheCap { .. }
@@ -1710,11 +1740,12 @@ mod tests {
             expect(TabId::Content, cache_actions(view.cache.as_ref()));
             expect(TabId::Wallet, wallet_actions(&view, &account));
             expect(TabId::Settings, auto_update_actions(view.update.as_ref()));
-            // The Account tab composes THREE builders onto a single pane, so it is the one where a
+            // The Account tab composes FOUR builders onto a single pane, so it is the one where a
             // label can repeat across a section boundary — `AboutDid` ends two of them. The de-dupe
             // runs across the whole tab, so `seen` is shared here rather than per-section.
             let mut seen = Vec::new();
             let mut account_rows = drop_repeats(view_account_actions(&view, &account), &mut seen);
+            account_rows.extend(drop_repeats(profile_actions(&view), &mut seen));
             account_rows.extend(drop_repeats(
                 security_actions(&account, view.second_factor),
                 &mut seen,

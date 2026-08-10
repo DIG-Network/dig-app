@@ -128,12 +128,16 @@ where
 /// recovery phrase are reachable from the seed alone, and the registry holds no secret. It is logged
 /// loudly and the app comes up unprofiled, which is the honest rendering of "this host does not know
 /// which profiles you have" — every identity surface then says it has no DID rather than naming one.
+///
+/// The failure is CARRIED on the session ([`ProfileSession::unreadable`]) rather than only logged,
+/// because "unprofiled" and "unreadable" look identical from a list surface and only one of them is
+/// a statement a person's own profiles support (dig_ecosystem#2403).
 pub fn profiles_for(brand_dir: &std::path::Path) -> ProfileSession {
     match ProfileSession::load(Arc::new(FileRegistryStore::under(brand_dir))) {
         Ok(session) => session,
         Err(e) => {
             tracing::error!(error = %e, "the profile registry could not be read — booting unprofiled");
-            ProfileSession::unprofiled()
+            ProfileSession::unreadable(e.to_string())
         }
     }
 }

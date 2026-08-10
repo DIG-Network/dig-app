@@ -79,6 +79,7 @@ pub mod notify;
 pub mod paired_apps;
 pub mod pairing;
 pub mod pairing_code;
+pub mod profiles;
 pub mod sealer;
 pub mod secret_file;
 pub mod session;

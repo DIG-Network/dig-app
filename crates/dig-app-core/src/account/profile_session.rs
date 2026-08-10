@@ -241,6 +241,14 @@ impl ProfileSwitched {
 pub struct ProfileSession {
     registry: Arc<RwLock<ProfileRegistry>>,
     store: Arc<dyn RegistryStore>,
+    /// Why this session's registry could not be LOADED, when that is what happened.
+    ///
+    /// A session that failed to load falls back to an empty registry so the user still reaches their
+    /// money and their recovery phrase — both of which come from the seed alone. But an empty
+    /// registry and an unreadable one are different facts, and a list surface that could not tell
+    /// them apart would tell somebody who may hold several profiles that they hold none. Carried
+    /// here so [`ProfilesReading`](crate::profiles::ProfilesReading) can say which one this is.
+    unreadable: Option<Arc<str>>,
 }
 
 impl ProfileSession {
@@ -251,6 +259,7 @@ impl ProfileSession {
         Ok(Self {
             registry: Arc::new(RwLock::new(registry)),
             store,
+            unreadable: None,
         })
     }
 
@@ -260,7 +269,26 @@ impl ProfileSession {
         Self {
             registry: Arc::new(RwLock::new(ProfileRegistry::empty())),
             store: Arc::new(MemoryRegistryStore::empty()),
+            unreadable: None,
         }
+    }
+
+    /// The session an account boots into when its registry file would not LOAD.
+    ///
+    /// Behaves exactly like [`unprofiled`](Self::unprofiled) — nothing derives at anything but
+    /// [`ProfileIx::ROOT`], and the user's money and recovery phrase stay reachable — while
+    /// remembering `why`, so a list surface reports *the registry could not be read* rather than
+    /// *this account has no profiles*. The two are different claims and only one of them is true.
+    pub fn unreadable(why: impl Into<Arc<str>>) -> Self {
+        Self {
+            unreadable: Some(why.into()),
+            ..Self::unprofiled()
+        }
+    }
+
+    /// Why this session's registry could not be loaded, or `None` when it loaded.
+    pub fn unreadable_reason(&self) -> Option<&str> {
+        self.unreadable.as_deref()
     }
 
     /// The index every key derivation should use, read live.
@@ -379,11 +407,20 @@ impl std::fmt::Debug for ProfileSession {
 pub mod test_support {
     use super::*;
 
-    /// A distinct, stable 32-byte id per `(tag, salt)`.
-    fn id(tag: u8, salt: u8) -> chia_protocol::Bytes32 {
+    /// A distinct, stable 32-byte id per `(profile, slot)`.
+    ///
+    /// # Neither argument is cryptographic, and the second one's name used to say otherwise
+    ///
+    /// `slot` selects WHICH of a profile's three ids this is — its launcher, its DID coin, or its
+    /// store — and `profile` distinguishes one profile's set from another's. Nothing here is a
+    /// secret, a key or a salt: these are placeholder chain ids for fixtures, and the values they
+    /// produce are recomputed by dig-account's own invariant checks before a fixture is accepted.
+    /// The parameter was called `salt`, which is what made a static analyser read a deterministic
+    /// test id as a hard-coded cryptographic value (dig_ecosystem#2403).
+    fn id(profile: u8, slot: u8) -> chia_protocol::Bytes32 {
         let mut bytes = [0u8; 32];
-        bytes[0] = tag;
-        bytes[31] = salt;
+        bytes[0] = profile;
+        bytes[31] = slot;
         chia_protocol::Bytes32::new(bytes)
     }
 
