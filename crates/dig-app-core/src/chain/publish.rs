@@ -186,7 +186,22 @@ impl ControlSpendPublisher {
         .map_err(publish_failure_from)?;
 
         Ok(match (answer.accepted, answer.rejection) {
-            (true, _) => PushOutcome::Accepted,
+            // Accepted, and the node kept quiet about a refusal -- the only shape the contract
+            // allows for an acceptance (`rejection` is "null on acceptance").
+            (true, None) => PushOutcome::Accepted,
+            (true, Some(reason)) if reason.trim().is_empty() => PushOutcome::Accepted,
+            // Accepted AND refused at once. The wire shape cannot forbid this, and the mirror-image
+            // contradiction below is already refused on the same reasoning -- but this one resolves
+            // optimistically ("your money moved") if believed, which is the worse of the two
+            // directions to guess in. So it is not believed.
+            (true, Some(reason)) => {
+                return Err(PublishFailure::NodeCouldNotAnswer {
+                    detail: format!(
+                        "the node reported the bundle both accepted and refused ({reason}), so \
+                         what the mempool did with it is unknown"
+                    ),
+                })
+            }
             (false, Some(reason)) if already_in_mempool(&reason) => PushOutcome::AlreadyInMempool,
             (false, Some(reason)) => PushOutcome::Rejected { reason },
             // Not accepted and no reason given. The node has said the bundle is not in a mempool
@@ -206,10 +221,38 @@ impl ControlSpendPublisher {
 ///
 /// A duplicate is the same success arrived at twice — the bundle IS in a mempool — so reporting it
 /// as a rejection would have a caller rebuild a spend that is already in flight, and possibly spend
-/// twice. Matched case-insensitively on the mempool's own status token.
+/// twice. This is the ONLY refusal that means that: chia's error enum names it
+/// `ALREADY_INCLUDING_TRANSACTION` (109), and its neighbours in the same family —
+/// `MEMPOOL_CONFLICT` (19, *another* item spends one of these coins), `DOUBLE_SPEND` (5) and
+/// `DOUBLE_SPEND_IN_FORK` (122) — are genuine refusals of THIS bundle and must stay
+/// [`PushOutcome::Rejected`], because the remedy for them is a rebuild.
+///
+/// # This is a best-effort match over prose the contract does not pin
+///
+/// [`WalletBroadcastResult::rejection`](dig_node_control_interface::results::WalletBroadcastResult::rejection)
+/// is documented as free-form prose explaining why the mempool refused — not a status token — so no
+/// exhaustive classification of it is possible from here. The match is therefore deliberately the
+/// NARROWEST one that recognises the duplicate: the whole trimmed reason, compared without case,
+/// and nothing else.
+///
+/// A substring match would be the defect. `rejection` reaches this function from the node, and a
+/// COMPROMISED node is attacker-controlled by definition: with `contains`, such a node could embed
+/// the token inside other prose and have its REFUSAL reported as [`PushOutcome::AlreadyInMempool`],
+/// which dig-account folds into `Ok(())` — telling the user a mint is in flight that was in fact
+/// refused. An exact match makes that string unreachable from any refusal that is not literally the
+/// duplicate token.
+///
+/// # Which direction the residual uncertainty fails in, chosen deliberately
+///
+/// An honest duplicate whose wording differs from the bare token is classified as `Rejected`, and
+/// the caller rebuilds. That direction was chosen over widening the match because the mempool
+/// itself refuses the rebuilt bundle for the same reason the original was a duplicate, so the error
+/// is self-correcting; widening it fails the other way, silently converting refusals into reported
+/// successes, which has no such backstop.
 fn already_in_mempool(reason: &str) -> bool {
-    let reason = reason.to_ascii_uppercase();
-    reason.contains("ALREADY_INCLUDING_TRANSACTION") || reason.contains("DOUBLE_SPEND_IN_MEMPOOL")
+    reason
+        .trim()
+        .eq_ignore_ascii_case("ALREADY_INCLUDING_TRANSACTION")
 }
 
 /// Map a failed push onto the arm whose remedy is the right one.
