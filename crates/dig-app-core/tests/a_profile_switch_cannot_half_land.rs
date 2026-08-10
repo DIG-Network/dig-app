@@ -26,7 +26,15 @@
 //! | `ResidencySigner` reads a captured `ProfileIx::ROOT` | `a_retained_identity_signer_follows_the_switch` |
 //! | `ResidencySealer` reads a captured `ProfileIx::ROOT` | `a_retained_sealer_follows_the_switch_and_can_no_longer_open_the_old_profiles_blob` |
 //! | `active_profile_id` pinned back to ROOT | `the_profile_directory_moves_but_the_account_scoped_id_does_not` |
+//! | `build_router` captures the DID/dir as `String`/`PathBuf` | `a_retained_sealed_store_writes_into_the_directory_of_the_profile_now_active` + `a_retained_whitelist_store_records_the_profile_now_active` |
 //!
+//! # Re-fetching is not retaining, and one test here used to do it
+//!
+//! `the_profile_directory_moves_but_the_account_scoped_id_does_not` calls `active_profile_id` afresh
+//! on both sides of the switch and retains no directory, so it can only prove that the FUNCTION
+//! follows the active slot. It cannot see the assembly that had already copied its answer into a
+//! `PathBuf` on the serving thread — which is exactly what shipped. The two tests added below retain
+//! the store handles themselves, which is the only way to observe that layer.
 //! The fourth mechanism — the fail-closed re-check inside the confirm ceremony — lives with the money
 //! path and is proved the same way by
 //! `account::money::tests::a_profile_switch_during_the_ceremony_signs_nothing`.
@@ -230,6 +238,134 @@ fn the_profile_directory_moves_but_the_account_scoped_id_does_not() {
         account_scoped_id(&residency).expect("unlocked"),
         "the ACCOUNT id must NOT move: the recovery phrase and the second factor are sealed under it, \
          and a switch that moved it would make a user's own recovery words unreadable"
+    );
+}
+
+/// **A RETAINED sealed-record store writes into the directory of the profile now active.**
+///
+/// The nearest wrong implementation is the one that shipped: `build_router` resolved the profile
+/// directory to a `PathBuf` at boot and handed it to a store that was then moved onto the sign-service
+/// thread. Every assertion about `profile_dir` the function elsewhere in this file makes stays green
+/// under it, because that function is not what went stale — the copy of its answer was.
+///
+/// So the fixture uses TWO directories and one retained handle. A record persisted before the switch
+/// must land under the first profile's directory and a record persisted after it under the second's,
+/// with neither directory holding the other's file. A single-directory fixture could not tell a store
+/// that followed from one that never moved, and asserting only "the new file exists" would pass on an
+/// implementation that wrote to both.
+#[test]
+fn a_retained_sealed_store_writes_into_the_directory_of_the_profile_now_active() {
+    use dig_app_core::account::boot::{active_profile_id, live_profile_dir};
+    use dig_app_core::loopback::{FileSealedStore, SealedRecordStore};
+    use dig_app_core::storage::{did_hash, profile_dir};
+
+    let (residency, session) = two_profile_account();
+    let brand = tempfile::tempdir().expect("a temp brand dir");
+    let dir_of = |residency: &AccountResidency| {
+        profile_dir(
+            brand.path(),
+            &did_hash(&active_profile_id(residency).expect("unlocked")),
+        )
+    };
+
+    // Retained for the whole test, exactly as the serving thread retains it.
+    let store = FileSealedStore::new(live_profile_dir(&residency, brand.path()));
+
+    let first_dir = dir_of(&residency);
+    store.persist_pairing("pairing-under-first", b"sealed-bytes-A");
+    assert_eq!(
+        1,
+        store.load().pairings.len(),
+        "control: the store persists and restores at all"
+    );
+
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
+    let second_dir = dir_of(&residency);
+    assert_ne!(
+        first_dir, second_dir,
+        "the fixture needs two distinct directories, or it cannot observe a move"
+    );
+
+    store.persist_pairing("pairing-under-second", b"sealed-bytes-B");
+
+    let sealed_files = |dir: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir.join("app-sign").join("pairings"))
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+            .collect();
+        names.sort();
+        names
+    };
+
+    assert_eq!(
+        vec!["pairing-under-first.seal".to_owned()],
+        sealed_files(&first_dir),
+        "the record written AFTER the switch landed in the previous profile's directory"
+    );
+    assert_eq!(
+        vec!["pairing-under-second.seal".to_owned()],
+        sealed_files(&second_dir),
+        "the retained store did not follow the switch — it is still writing where it was built"
+    );
+    assert_eq!(
+        1,
+        store.load().pairings.len(),
+        "and the store must now RESTORE from the new directory, not the old one"
+    );
+}
+
+/// **A RETAINED whitelist store records the grant against the profile now active.**
+///
+/// `WhitelistEntry::profile_did` names which profile a grant belongs to, and it is the one observable
+/// that isolates the captured DID from the DEK that moves with it. Asserting instead that a
+/// pre-switch record fails to reopen would prove nothing here: the DEK has already moved, so that
+/// refusal happens with a stale DID too — the outcome is identical and the placement is what differs.
+///
+/// The control is the pre-switch grant: without it, a store that recorded an empty or garbage DID
+/// would satisfy the "not the old one" half exactly as a correct one does.
+#[test]
+fn a_retained_whitelist_store_records_the_profile_now_active() {
+    use dig_app_core::account::boot::live_profile_did;
+    use dig_app_core::whitelist::WhitelistStore;
+
+    let (residency, session) = two_profile_account();
+    // One handle, built before the switch and never rebuilt.
+    let whitelist = WhitelistStore::new(
+        residency.sealer(KdfParams::FAST_TEST),
+        live_profile_did(&residency),
+    );
+
+    let before = whitelist
+        .grant("https://dapp.example", vec![], 1)
+        .expect("an unlocked profile grants")
+        .entry
+        .profile_did;
+    assert_eq!(
+        residency.signing_public_key_hex().expect("unlocked"),
+        before,
+        "control: before any switch the grant must name the profile actually in force"
+    );
+
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
+
+    let after = whitelist
+        .grant("https://other.example", vec![], 2)
+        .expect("the retained store still grants after the switch")
+        .entry
+        .profile_did;
+    assert_ne!(
+        before, after,
+        "the retained store recorded the grant against the profile the user switched AWAY from"
+    );
+    assert_eq!(
+        residency.signing_public_key_hex().expect("unlocked"),
+        after,
+        "merely different is not enough — the grant must name the profile now active"
     );
 }
 

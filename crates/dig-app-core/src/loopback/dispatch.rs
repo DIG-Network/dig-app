@@ -1724,6 +1724,101 @@ mod tests {
         assert_eq!(resp["result"]["addresses"][0], "xch1testaddress");
     }
 
+    /// **A RETAINED router advertises the profile that is active NOW, not the one it was built with.**
+    ///
+    /// The router is moved onto the sign-service thread at boot and never rebuilt, so a connect handle
+    /// built from a captured DID goes on naming the boot-time profile while the signer beside it signs
+    /// with the current profile's key — a DID-to-key binding published to every connected dapp that is
+    /// false about one half or the other.
+    ///
+    /// The fixture moves ONE thing: the DID its source answers with. The pairing, the signer, the
+    /// addresses and the origin are all held constant, so a handle that reported the new DID for any
+    /// reason other than re-reading its source would have to invent it. Two connects through the SAME
+    /// router are what make it a retention test rather than a construction test.
+    #[test]
+    fn a_retained_connect_handle_reports_the_profile_active_at_the_moment_it_answers() {
+        const AFTER: &str = "did:chia:the-profile-switched-to";
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let router = {
+            let moved = Arc::clone(&moved);
+            let signer = test_residency().signer();
+            FrameRouter::new(
+                PairingStore::new(test_sealer(DID), DID),
+                WhitelistStore::new(test_sealer(DID), DID),
+                Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+                Box::new(signer),
+                ProfileConnectInfo {
+                    profile_did: LiveDid::read(move || {
+                        Some(match moved.load(std::sync::atomic::Ordering::SeqCst) {
+                            true => AFTER.to_owned(),
+                            false => DID.to_owned(),
+                        })
+                    }),
+                    addresses: Live::fixed(vec!["xch1testaddress".to_string()]),
+                },
+                [EXT.to_string()],
+            )
+        };
+
+        let (pairing_id, token) = pair(&router);
+        let connect = |nonce: u64| {
+            let params = json!({ "origin": "https://dapp.example" });
+            let auth = signed_auth(&token, &pairing_id, n(nonce), "connect.request", &params);
+            router.handle(&request("connect.request", params, Some(auth)))
+        };
+
+        let before = connect(1);
+        assert_eq!(
+            before["result"]["profile_did"], DID,
+            "control: the handle names the profile in force when it was asked"
+        );
+
+        moved.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let after = connect(2);
+        assert_eq!(
+            after["result"]["profile_did"], AFTER,
+            "the retained router advertised the profile it was BUILT with, not the one now active"
+        );
+        assert_eq!(
+            before["result"]["pubkeys"], after["result"]["pubkeys"],
+            "the advertised key is read from the signer, so an unchanged signer must advertise an              unchanged key — otherwise this test could pass on a handle that changed at random"
+        );
+    }
+
+    /// **A connect handle with no active profile is refused, never advertised as a null DID.**
+    ///
+    /// A locked account has no DID. Emitting `"profile_did": null` would hand a dapp a connect handle
+    /// that names no identity while reporting `granted: true`; `LOCKED` is the honest answer, and it
+    /// is the one the rest of this channel already gives for the same condition.
+    #[test]
+    fn a_connect_with_no_active_profile_is_locked_rather_than_a_null_handle() {
+        let signer = test_residency().signer();
+        let router = FrameRouter::new(
+            PairingStore::new(test_sealer(DID), DID),
+            WhitelistStore::new(test_sealer(DID), DID),
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(signer),
+            ProfileConnectInfo {
+                profile_did: LiveDid::read(|| None),
+                addresses: Live::fixed(vec![]),
+            },
+            [EXT.to_string()],
+        );
+
+        let (pairing_id, token) = pair(&router);
+        let params = json!({ "origin": "https://dapp.example" });
+        let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+        let resp = router.handle(&request("connect.request", params, Some(auth)));
+
+        assert_eq!(resp["error"]["message"], "LOCKED");
+        assert!(
+            resp["result"].is_null(),
+            "a refused connect must carry no handle at all: {resp}"
+        );
+    }
+
     #[test]
     fn a_denied_connect_is_connect_denied() {
         let router = router_with(PerPromptConfirmer {
