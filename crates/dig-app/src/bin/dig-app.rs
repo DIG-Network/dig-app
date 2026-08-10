@@ -3373,16 +3373,6 @@ mod tray {
         }
     }
 
-    /// Apply a validated cap `bytes` to the node, warning first if it would evict cached content.
-    ///
-    /// The single flow shared by every entry (a preset row and the custom input): resolve the live
-    /// node, decide whether the new cap evicts ([`dig_app_core::cache::plan_cap_change`]) and gate that
-    /// on an explicit confirmation, then persist through the node's `control.cache.setCap` — never by
-    /// writing the node's config directly (the node holds that lock). Every outcome the user did NOT
-    /// directly choose ends in a visible notice: a node that is down, a node that refused, and a success
-    /// all say so, so the row is never a silent no-op (requirement 5). Declining the eviction
-    /// confirmation returns quietly — the dialog already named the consequence and the user chose not to
-    /// proceed, consistent with every other cancel path in the app (SPEC §3.1c-ii).
     /// Make a profile active, after telling the person what that changes.
     ///
     /// # The disclosure comes BEFORE the act, and it is not optional
@@ -3456,7 +3446,8 @@ mod tray {
                     confirmer,
                     copy::SWITCHING_TITLE,
                     "DIG could not ask you to confirm the switch.",
-                    "Nothing was changed. A profile switch changes your receive address and your                      signing key, so DIG will not do it without asking.",
+                    "Nothing was changed. A profile switch changes your receive address and your \
+                     signing key, so DIG will not do it without asking.",
                 );
                 return;
             }
@@ -3588,6 +3579,16 @@ mod tray {
         );
     }
 
+    /// Apply a validated cap `bytes` to the node, warning first if it would evict cached content.
+    ///
+    /// The single flow shared by every entry (a preset row and the custom input): resolve the live
+    /// node, decide whether the new cap evicts ([`dig_app_core::cache::plan_cap_change`]) and gate that
+    /// on an explicit confirmation, then persist through the node's `control.cache.setCap` — never by
+    /// writing the node's config directly (the node holds that lock). Every outcome the user did NOT
+    /// directly choose ends in a visible notice: a node that is down, a node that refused, and a success
+    /// all say so, so the row is never a silent no-op (requirement 5). Declining the eviction
+    /// confirmation returns quietly — the dialog already named the consequence and the user chose not to
+    /// proceed, consistent with every other cancel path in the app (SPEC §3.1c-ii).
     fn change_cache_cap(status: &SharedStatus, confirmer: &dyn NativeConfirmer, bytes: u64) {
         use dig_app_core::cache::{self, CapChange};
         use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};

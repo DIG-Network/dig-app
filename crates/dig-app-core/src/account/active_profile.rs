@@ -45,7 +45,7 @@ pub enum ActiveSlot {
     ///
     /// The wallet derives at [`ProfileIx::ROOT`] so that the address a person funds BEFORE minting is
     /// the address their first profile inherits (`ProfileRegistry::next_free_ix` returns `ROOT` on an
-    /// empty registry; `next_free_ix_of_an_empty_registry_is_root` pins it). Identity surfaces have no
+    /// empty registry; `the_mint_target_is_the_next_free_index_and_starts_at_root` pins it). Identity surfaces have no
     /// DID in this state and **must say so** rather than fall back to showing the root signing pubkey
     /// as an identity — `boot::account_scoped_id` records that the account id is the seed-derived key
     /// precisely *because* nothing is minted.

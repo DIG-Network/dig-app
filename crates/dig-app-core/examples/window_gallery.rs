@@ -361,10 +361,27 @@ fn main() {
     // Flags are taken out before the positionals are read, so `--second-factor` cannot shift the
     // output path along by one. It did exactly that once, and the picture landed in a file named
     // for the flag -- a gallery is only as trustworthy as the name on each file.
-    let args: Vec<&String> = all
-        .iter()
-        .filter(|argument| !argument.starts_with("--"))
-        .collect();
+    //
+    // Flags that take a VALUE (currently `--profiles`) must also remove their value from the
+    // positional list; leaving only the flag itself out while keeping the value shifts the output
+    // path along by one and writes the fixture name as an extra file in the working directory.
+    let args: Vec<&String> = {
+        let value_flags: &[&str] = &["--profiles"];
+        let mut skip_next = false;
+        all.iter()
+            .filter(|argument| {
+                if skip_next {
+                    skip_next = false;
+                    return false;
+                }
+                if value_flags.contains(&argument.as_str()) {
+                    skip_next = true;
+                    return false;
+                }
+                !argument.starts_with("--")
+            })
+            .collect()
+    };
     let Some(tab) = args.first().map(|a| a.as_str()).and_then(tab) else {
         refuse("no tab named");
     };

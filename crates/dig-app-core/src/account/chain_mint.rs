@@ -248,7 +248,9 @@ where
         if self.funding.ix() != self.target.ix() {
             return Submission::Refused {
                 reason: format!(
-                    "This mint would pay from profile {} but create profile {}, and DIG cannot yet                      fund one profile's mint from another's wallet. Move funds to profile {}'s                      address first.",
+                    "This mint would pay from profile {} but create profile {}, and DIG cannot yet \
+                     fund one profile's mint from another's wallet. Move funds to profile {}'s \
+                     address first.",
                     self.funding, self.target, self.target
                 ),
             };

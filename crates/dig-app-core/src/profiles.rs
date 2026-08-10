@@ -95,6 +95,7 @@ impl ProfileRow {
 /// One variant per REMEDY, the rule [`HostedStoresUnknown`](crate::hosted_stores::HostedStoresUnknown)
 /// states: the reason is the only thing that tells a person what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProfilesUnknown {
     /// The stored registry would not load — unparseable, or violating one of the four invariants
     /// dig-account re-checks on deserialize. Carries the loader's own words.
@@ -194,6 +195,7 @@ impl ProfilesReading {
 /// answer. That split is what makes the day this build can mint a change of BODIES rather than of
 /// shapes — see [`ProfileCreation`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CreationBlocked {
     /// This build cannot read coins or push a bundle at all, so nothing here reaches the chain. The
     /// same fact the start-up wizard's gate reads, arrived at from the same value.
@@ -229,6 +231,7 @@ pub enum CreationBlocked {
 /// implementation refuses — the dead end dig_ecosystem#1800 removed once already, and the drift
 /// dig_ecosystem#2377 removed a second time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProfileCreation {
     /// Creation cannot be attempted, and this is the piece that is missing.
     Blocked(CreationBlocked),
