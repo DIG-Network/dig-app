@@ -25,6 +25,7 @@ use crate::account::mint::{
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::second_factor::journey::Clock;
+use crate::profiles::CreationBlocked;
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, DestroyPrompt, InputOutcome, InputPrompt, InputStyle,
     NativeConfirmer, NoticePrompt, QrArt, RevealPrompt,
@@ -1301,7 +1302,7 @@ fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &MintingStep<'_>) -> O
             confirmer,
             copy::did::UNAVAILABLE_TITLE,
             copy::did::UNAVAILABLE_HEADING,
-            copy::did::UNAVAILABLE_BODY,
+            &copy::did::unavailable_body(CreationBlocked::NoChainTransport),
         );
         return None;
     };
@@ -1329,7 +1330,7 @@ fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &MintingStep<'_>) -> O
                 confirmer,
                 copy::did::UNAVAILABLE_TITLE,
                 copy::did::UNAVAILABLE_HEADING,
-                copy::did::UNAVAILABLE_BODY,
+                &copy::did::unavailable_body(CreationBlocked::NoChainTransport),
             );
             return None;
         }
@@ -1427,7 +1428,7 @@ pub fn did_explainer() -> WizardNotice {
     WizardNotice {
         title: copy::did::EXPLAINER_TITLE,
         heading: copy::did::EXPLAINER_HEADING,
-        body: copy::did::EXPLAINER_BODY.to_owned(),
+        body: copy::did::explainer_body(CreationBlocked::NoChainTransport),
         identifier: None,
     }
 }
@@ -1695,6 +1696,8 @@ mod copy {
 
     /// The DID step, from the offer through every way the wait can end.
     pub(super) mod did {
+        use crate::profiles::CreationBlocked;
+
         /// The offer window's title.
         pub const OFFER_TITLE: &str = "DIG — Create your on-chain DID";
         /// Its heading.
@@ -1769,15 +1772,56 @@ mod copy {
         pub const UNAVAILABLE_TITLE: &str = "DIG — One step still to come";
         /// Its heading.
         pub const UNAVAILABLE_HEADING: &str = "Your wallet is set up. Your DID is not.";
-        /// Its body. The #1820 wording: REQUIRED, and not available in this version — never "optional",
-        /// and never the retired claim that the account fully works without one.
-        pub const UNAVAILABLE_BODY: &str =
-            "A DID is what publishes your identity on the Chia blockchain so others can find and verify \
-             it, and it is the step that turns this wallet into a full DIG Account.\n\n\
-             Minting one is not available in this version of DIG. Nothing is missing from your setup and \
-             there is nothing for you to do — when minting arrives, DIG will offer it here.\n\n\
-             Until then your account reads content, holds funds, pairs with other programs and signs \
-             for them normally.";
+        /// What a DID is FOR, said once because both unavailable screens open with it.
+        pub const WHAT_A_DID_IS_FOR: &str = concat!(
+            "A DID is what publishes your identity on the Chia blockchain so others can find and ",
+            "verify it, and it is the step that turns this wallet into a full DIG Account.",
+        );
+        /// Why minting is unavailable when this build cannot reach the chain AT ALL.
+        ///
+        /// The #1820 wording: REQUIRED, and not available in this version — never "optional", and
+        /// never the retired claim that the account fully works without one.
+        pub const MINTING_UNAVAILABLE_NO_TRANSPORT: &str = concat!(
+            "Minting one is not available in this version of DIG. Nothing is missing from your ",
+            "setup and there is nothing for you to do — when minting arrives, DIG will offer it ",
+            "here.",
+        );
+        /// Why minting is unavailable when this build can reach the chain and cannot FINISH.
+        ///
+        /// # Why this is a different sentence and not the same one
+        ///
+        /// The two builds fail differently and one of them can take a person's money. A build with
+        /// no transport cannot start; a build with no singleton lineage walk can START a mint and
+        /// can never launch the store half, stranding the user with real XCH spent and no profile
+        /// (dig_ecosystem#2572). Telling somebody "there is no way to reach the chain" on a machine
+        /// whose chain is plainly working sends them to debug a network that is fine.
+        pub const MINTING_UNAVAILABLE_NO_LINEAGE: &str = concat!(
+            "This version of DIG can reach the blockchain and cannot yet finish the second half of ",
+            "creating one, so it will not start one at all — paying for a half-made identity would ",
+            "be worse than waiting. Nothing is missing from your setup and there is nothing for you ",
+            "to do — when it arrives, DIG will offer it here.",
+        );
+        /// What an account without a DID still does, on either unavailable build.
+        pub const UNTIL_THEN_EVERYTHING_ELSE: &str = concat!(
+            "Until then your account reads content, holds funds, pairs with other programs and ",
+            "signs for them normally.",
+        );
+
+        /// The unavailable screen's body, selected by WHY this build cannot mint.
+        ///
+        /// Composed from the named fragments above rather than typed out per reason, exactly as
+        /// [`later_body`] is: the shared two-thirds cannot then drift between the two screens, and
+        /// the one-third that genuinely differs is the only thing the match chooses.
+        ///
+        /// The match is EXHAUSTIVE, so the day a new blocker is named the compiler asks for its
+        /// sentence rather than letting a screen fall back to a reason that is not the true one.
+        pub fn unavailable_body(why: CreationBlocked) -> String {
+            let because = match why {
+                CreationBlocked::NoChainTransport => MINTING_UNAVAILABLE_NO_TRANSPORT,
+                CreationBlocked::NoLineageWalk => MINTING_UNAVAILABLE_NO_LINEAGE,
+            };
+            format!("{WHAT_A_DID_IS_FOR}\n\n{because}\n\n{UNTIL_THEN_EVERYTHING_ELSE}")
+        }
         /// The title when the wallet cannot pay for the mint.
         pub const UNAFFORDABLE_TITLE: &str = "DIG — Not enough XCH yet";
         /// Its heading.
@@ -1820,20 +1864,46 @@ mod copy {
         /// Its heading.
         pub const EXPLAINER_HEADING: &str =
             "An on-chain DID is the remaining step, and it costs XCH.";
-        /// Its body.
+        /// The explainer's opening, shared by every build.
+        pub const EXPLAINER_OPENING: &str = concat!(
+            "A DID publishes your identity on the Chia blockchain so others can find and verify ",
+            "it. Creating one is a real transaction that spends real XCH from your DIG Account, so ",
+            "DIG will never create one without you asking.",
+        );
+        /// The explainer's closing, shared by every build.
         ///
-        /// The last paragraph describes what WILL happen rather than what a future version might do,
-        /// because the wizard it points at already exists and already works this way: the window that
-        /// asks IS the approval. Promising a separate cost screen described a flow that was never
-        /// built (dig_ecosystem#2377).
-        pub const EXPLAINER_BODY: &str =
-            "A DID publishes your identity on the Chia blockchain so others can find and verify it. \
-             Creating one is a real transaction that spends real XCH from your DIG Account, so DIG \
-             will never create one without you asking.\n\n\
-             It is what turns the wallet on this computer into a full DIG Account. \
-             On-chain minting is not available in this version — when it arrives, this is where you \
-             will start it. The window that asks will state the cost and sending it is the approval, \
-             so nothing is spent unless you choose it there.";
+        /// It describes what WILL happen rather than what a future version might do, because the
+        /// wizard it points at already exists and already works this way: the window that asks IS
+        /// the approval. Promising a separate cost screen described a flow that was never built
+        /// (dig_ecosystem#2377).
+        pub const EXPLAINER_CLOSING: &str = concat!(
+            "The window that asks will state the cost and sending it is the approval, so nothing ",
+            "is spent unless you choose it there.",
+        );
+        /// The middle sentence when this build cannot reach the chain at all.
+        pub const EXPLAINER_NO_TRANSPORT: &str = concat!(
+            "It is what turns the wallet on this computer into a full DIG Account. On-chain ",
+            "minting is not available in this version — when it arrives, this is where you will ",
+            "start it.",
+        );
+        /// The middle sentence when this build can reach the chain and cannot finish a mint.
+        pub const EXPLAINER_NO_LINEAGE: &str = concat!(
+            "It is what turns the wallet on this computer into a full DIG Account. This version ",
+            "can reach the blockchain and cannot yet finish creating one, so it will not start ",
+            "one — when it can, this is where you will start it.",
+        );
+
+        /// The tray explainer's body, selected by WHY this build cannot mint.
+        ///
+        /// Composed rather than written twice, for the reason [`unavailable_body`] is: only the
+        /// middle sentence differs, and it is the only thing the exhaustive match chooses.
+        pub fn explainer_body(why: CreationBlocked) -> String {
+            let middle = match why {
+                CreationBlocked::NoChainTransport => EXPLAINER_NO_TRANSPORT,
+                CreationBlocked::NoLineageWalk => EXPLAINER_NO_LINEAGE,
+            };
+            format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
+        }
         /// The title of the ONE success screen in this flow.
         pub const CONFIRMED_TITLE: &str = "DIG — Your DID is live";
         /// Its heading.
@@ -2100,13 +2170,24 @@ mod tests {
         // `src/bin`, where nothing could read it. A rule enforced over a hand-written list is only
         // as wide as the list, so the fix was to move the words somewhere the list can name them
         // (dig_ecosystem#2560).
-        for (name, body) in [
-            ("the mint offer", copy::did::OFFER_BODY),
-            ("the unavailable notice", copy::did::UNAVAILABLE_BODY),
-            ("the tray's DID explainer", copy::did::EXPLAINER_BODY),
-            ("the funding screen", copy::fund::BODY_WITH_A_CODE),
-            ("the funding screen (text only)", copy::fund::BODY_TEXT_ONLY),
-        ] {
+        let mut bodies: Vec<(&str, String)> = vec![
+            ("the mint offer", copy::did::OFFER_BODY.to_owned()),
+            ("the funding screen", copy::fund::BODY_WITH_A_CODE.to_owned()),
+            (
+                "the funding screen (text only)",
+                copy::fund::BODY_TEXT_ONLY.to_owned(),
+            ),
+        ];
+        // Both reasons, not just the shipped one: a rule is only as wide as its list, and the
+        // second arm exists precisely so that a future build selects it.
+        bodies.extend(CreationBlocked::EVERY.into_iter().flat_map(|why| {
+            [
+                ("the unavailable notice", copy::did::unavailable_body(why)),
+                ("the tray's DID explainer", copy::did::explainer_body(why)),
+            ]
+        }));
+
+        for (name, body) in bodies {
             for promise in [
                 "before anything is spent",
                 "showing you exactly what it is spending first",
@@ -2132,11 +2213,19 @@ mod tests {
             ("the mint offer", copy::did::OFFER_BODY.to_owned()),
             (
                 "the unavailable notice",
-                copy::did::UNAVAILABLE_BODY.to_owned(),
+                copy::did::unavailable_body(CreationBlocked::NoChainTransport),
+            ),
+            (
+                "the unavailable notice (no lineage walk)",
+                copy::did::unavailable_body(CreationBlocked::NoLineageWalk),
             ),
             (
                 "the tray's DID explainer",
-                copy::did::EXPLAINER_BODY.to_owned(),
+                copy::did::explainer_body(CreationBlocked::NoChainTransport),
+            ),
+            (
+                "the tray's DID explainer (no lineage walk)",
+                copy::did::explainer_body(CreationBlocked::NoLineageWalk),
             ),
             ("the decline screen", copy::did::later_body()),
             (

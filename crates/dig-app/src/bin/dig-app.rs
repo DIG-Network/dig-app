@@ -3619,11 +3619,11 @@ mod tray {
     ) {
         use dig_app_core::profiles::{copy, ProfileCreation, ProfilesReading};
 
+        // Read ONCE. A second, shadowing read of the same registry survived a merge here
+        // and left this function asking twice on the blocked path (dig_ecosystem#2582).
         let held = match profiles_reading(env, session) {
             ProfilesReading::Known(rows) if !rows.is_empty() => format!(
-                "This account holds {} profile(s), and the Account tab lists them.
-
-",
+                "This account holds {} profile(s), and the Account tab lists them.\n\n",
                 rows.len()
             ),
             // Says nothing about a count in every other state, because in every other state there is
@@ -3641,25 +3641,13 @@ mod tray {
                 copy::ABOUT_TITLE,
                 copy::ABOUT_HEADING,
                 &format!(
-                    "{}
-
-{held}{}",
+                    "{}\n\n{held}{}",
                     copy::WHAT_A_PROFILE_IS,
                     copy::HIDE_NOTE
                 ),
             );
             return;
         };
-        let held = match profiles_reading(env, session) {
-            ProfilesReading::Known(rows) if !rows.is_empty() => format!(
-                "This account holds {} profile(s), and the Account tab lists them.\n\n",
-                rows.len()
-            ),
-            // Says nothing about a count in every other state, because in every other state there is
-            // no count to say — including the one where the registry would not load.
-            _ => String::new(),
-        };
-
         notify(
             confirmer,
             copy::ABOUT_TITLE,

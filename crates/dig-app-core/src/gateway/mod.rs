@@ -132,7 +132,10 @@ mod tests {
                 active: true,
             }])
         }
-        fn create_profile(&self, _: &str) -> Result<ProfileSummary, GatewayError> {
+        fn begin_profile_creation(
+            &self,
+            _: local::ProfileSeedRequest,
+        ) -> Result<local::PendingProfileCreation, GatewayError> {
             unreachable!("not exercised")
         }
         fn select_profile(&self, _: &str) -> Result<(), GatewayError> {

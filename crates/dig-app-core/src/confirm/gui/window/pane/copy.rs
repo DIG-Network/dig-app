@@ -833,11 +833,7 @@ mod tests {
         // indentation guard below found a real defect in exactly these two the day they were
         // written, which is why they are here rather than trusted.
         all.extend(
-            [
-                crate::profiles::CreationBlocked::NoChainTransport,
-                crate::profiles::CreationBlocked::NoProfileMinter,
-            ]
-            .map(profiles::cannot_create),
+            crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create),
         );
         all.extend(TabId::all().into_iter().map(lead));
         all.extend(

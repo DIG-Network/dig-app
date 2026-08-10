@@ -22,11 +22,13 @@
 //! surface comes to advertise a capability whose implementation refuses, which is the dead end
 //! dig_ecosystem#1800 removed once already.
 //!
-//! [`ProfileCreation`] has no *possible* arm. That is not pessimism, it is the build: dig-account
-//! 0.8's `ProfileMinter::mint` is `todo!()`, so no code path anywhere can mint a profile even on a
-//! host whose chain transport is wired. An arm claiming otherwise would be a state nothing can
-//! reach, which this crate has already decided is worse than no state at all
-//! (`pane::state`'s epitaph for `Unwired`).
+//! [`ProfileCreation`] has no *possible* arm. That is not pessimism, it is the build: this
+//! workspace pins dig-account **0.11.3**, whose profile-mint ceremony is real, but the store half of
+//! that ceremony walks a singleton lineage and
+//! [`ControlChainSource`](crate::chain::ControlChainSource) cannot serve that read yet
+//! (dig_ecosystem#2572). So a mint started on this build could be paid for and never finished. An
+//! arm claiming otherwise would be a state nothing can reach, which this crate has already decided
+//! is worse than no state at all (`pane::state`'s epitaph for `Unwired`).
 
 use dig_account::registry::{ProfileEntry, ProfileRegistry, ProfileVisibility};
 use dig_account::ProfileIx;
@@ -212,19 +214,36 @@ pub enum CreationBlocked {
     /// This build cannot read coins or push a bundle at all, so nothing here reaches the chain. The
     /// same fact the start-up wizard's gate reads, arrived at from the same value.
     NoChainTransport,
-    /// The chain transport is wired and this build still has no profile mint to drive.
+    /// The chain answers ordinary reads and cannot walk a singleton lineage, so a mint started here
+    /// could never be finished.
     ///
-    /// Locally true, for a reason that has MOVED (dig_ecosystem#2560). This used to read
-    /// "dig-account 0.8's `ProfileMinter::mint` is `todo!()` (`profile_mint.rs:89`)". Upstream that
-    /// is no longer so: dig-account **0.10.0** ships a real
-    /// `begin_profile_mint`/`advance_profile_mint`/`profile_mint_status` ceremony, and a profile was
-    /// minted through it on Chia mainnet. The statement survives here only because this workspace
-    /// still pins dig-account **0.8**, whose minter mints a DID and cannot mint a profile at all.
+    /// # The reason, stated against the code rather than against the previous comment
     ///
-    /// Adopting 0.10 is a whole-workspace chia migration (0.26/sdk-0.30 → 0.36.1/sdk-0.34) and is
-    /// not the last blocker anyway; see [`CreationBlocked::NoChainTransport`] and
-    /// [`crate::account::chain_mint`] for the reads dig-node does not yet serve.
-    NoProfileMinter,
+    /// The mint itself exists: this workspace pins dig-account **0.11.3**, whose
+    /// `begin_profile_mint` / `advance_profile_mint` / `profile_mint_status` ceremony is real and has
+    /// minted a profile on Chia mainnet. What is missing is one READ. Phase B
+    /// (`advance_profile_mint` → `launch_store`) calls `dig_did::walk_did_lineage_to_tip`, whose
+    /// first operation is `ChainSource::resolve_singleton_lineage`, and
+    /// [`ControlChainSource`](crate::chain::ControlChainSource) answers that with `Unsupported`
+    /// pending `dig-chainsource-interface` 0.4.0 (dig_ecosystem#2572).
+    ///
+    /// So a build in this state can PUSH the DID half and can never launch the store — every user
+    /// stranded at `ProfileMintStatus::DidConfirmedStoreNotLaunched`, which dig-account itself calls
+    /// the state that costs money to get wrong. Withholding the offer is the cheaper error.
+    ///
+    /// Named to match [`ProfileMintSeams::NoLineageWalk`](crate::account::profile_mint::ProfileMintSeams::NoLineageWalk),
+    /// which is where the fact is measured.
+    NoLineageWalk,
+}
+
+impl CreationBlocked {
+    /// Every reason, in one place.
+    ///
+    /// Surfaces that must be checked against ALL of them — the copy guards, the pane's rendering
+    /// tests — read this rather than keeping their own array, because an array copied into three
+    /// files is three places to forget a new variant. Adding one here is what makes those checks
+    /// widen with it.
+    pub const EVERY: [Self; 2] = [Self::NoChainTransport, Self::NoLineageWalk];
 }
 
 /// Whether this build can create a profile.
@@ -232,21 +251,22 @@ pub enum CreationBlocked {
 /// # There is no `Possible` arm YET, and this type is shaped so that adding one is a body change
 ///
 /// The user's standing direction is that creating a profile MUST become real. It cannot be made real
-/// here YET, and the reason has changed since this was written (dig_ecosystem#2560): dig-account's
-/// mint IS published now (0.10.0, proven on mainnet), so the remaining blockers are this workspace's
-/// chia-0.26 pin and — the one no dig-app change can clear — the two chain reads dig-node's control
-/// surface does not serve, which a profile's STORE half needs. Until those land, a `Possible` arm
-/// would be a claim this crate cannot honour — and dig_ecosystem#2377 measured
-/// exactly what that costs: flipping one availability constant early opened an undismissible dead
-/// end AND a start-up password window, **neither catchable by a test**, because both live in the
-/// binary.
+/// here YET, and exactly ONE thing is now in the way (dig_ecosystem#2398): this workspace pins
+/// dig-account **0.11.3**, whose profile-mint ceremony is real and mainnet-proven, and the store
+/// half of that ceremony walks a singleton lineage that
+/// [`ControlChainSource`](crate::chain::ControlChainSource) answers with `Unsupported` pending
+/// `dig-chainsource-interface` 0.4.0 (dig_ecosystem#2572). Until that read lands, a `Possible` arm
+/// would be a claim this crate cannot honour — and dig_ecosystem#2377 measured exactly what that
+/// costs: flipping one availability constant early opened an undismissible dead end AND a start-up
+/// password window, **neither catchable by a test**, because both live in the binary.
 ///
 /// So the arm is absent and the SHAPE is ready for it. Consumers ask
 /// [`blocked`](Self::blocked) — an `Option`, whose `None` is already spelled *creation is possible* —
 /// and render [`copy::cannot_create`] from the REASON. Nothing matches this enum exhaustively. The
-/// day dig-node serves the store half's reads, the work is: add `Possible`, return it from
-/// [`of`](Self::of) where the seams are wired, and give the one surface that draws a control its new
-/// branch. No consumer's shape moves, and no sentence is rewritten.
+/// day the lineage walk lands, the work is: add `Possible`, derive it from
+/// [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams) — the three-armed gate that
+/// already measures the fact — and give the one surface that draws a control its new branch. No
+/// consumer's shape moves, and no sentence is rewritten.
 ///
 /// # Why it is derived from the mint seam rather than asserted beside it
 ///
@@ -276,11 +296,16 @@ impl ProfileCreation {
     /// Derive creation's availability from the mint seam the wizard's gate reads.
     ///
     /// With no transport the transport is the honest answer, because it is the blocker a person
-    /// would hit first; with one, the profile minter is what is still missing.
+    /// would hit first; with one, the singleton lineage walk is what is still missing.
+    ///
+    /// Takes the DID-only [`MintAvailability`] because that is what the shipped binary's
+    /// `mint_seams()` produces. The three-armed
+    /// [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams) measures the same facts
+    /// more precisely and is what this will read from once a create control exists to gate.
     pub fn of(mint: MintAvailability) -> Self {
         Self::Blocked(match mint {
             MintAvailability::NoChainTransport => CreationBlocked::NoChainTransport,
-            MintAvailability::Possible => CreationBlocked::NoProfileMinter,
+            MintAvailability::Possible => CreationBlocked::NoLineageWalk,
         })
     }
 
@@ -401,9 +426,10 @@ pub mod copy {
                  version. Nothing is missing from your setup and there is nothing for you to do — \
                  when it arrives, this card will offer it."
             }
-            CreationBlocked::NoProfileMinter => {
-                "This copy of DIG can reach the chain, and the step that mints a profile is not \
-                 built yet. It is required for publishing, signing for an app and messaging, and it \
+            CreationBlocked::NoLineageWalk => {
+                "This copy of DIG can reach the chain, and it cannot yet finish the second half of \
+                 creating a profile — so starting one would spend XCH on something it could not \
+                 complete. It is required for publishing, signing for an app and messaging, and it \
                  is not available in this version. Nothing is missing from your setup and there is \
                  nothing for you to do — when it arrives, this card will offer it."
             }
@@ -578,7 +604,7 @@ mod tests {
         );
         assert_eq!(
             ProfileCreation::of(MintAvailability::Possible).blocked(),
-            Some(CreationBlocked::NoProfileMinter),
+            Some(CreationBlocked::NoLineageWalk),
             "a wired chain transport was read as a profile this build can mint, which no code path \
              in dig-account 0.8 can do"
         );

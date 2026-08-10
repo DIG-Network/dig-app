@@ -1025,7 +1025,7 @@ mod tests {
                 .to_string(),
         );
         allowed.push(
-            copy::profiles::cannot_create(crate::profiles::CreationBlocked::NoProfileMinter)
+            copy::profiles::cannot_create(crate::profiles::CreationBlocked::NoLineageWalk)
                 .to_string(),
         );
         allowed.push(copy::protection::second_factor_needs(&lead));
