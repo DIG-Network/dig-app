@@ -367,6 +367,78 @@ fn a_retained_whitelist_store_records_the_profile_now_active() {
         after,
         "merely different is not enough — the grant must name the profile now active"
     );
+
+    // Tagging the NEW grant correctly is only half of it. The map is the authorization state the
+    // connect gate reads, so the OLD profile's grant must stop answering for it: a consent given
+    // under `FIRST` that still passes under `SECOND` skips the connect modal and hands the dapp
+    // SECOND's DID, addresses and signing key (dig_ecosystem#2398 ADV-A1).
+    assert!(
+        !whitelist.is_whitelisted("https://dapp.example"),
+        "the grant made under the previous profile must not authorize anything under this one"
+    );
+    assert!(
+        whitelist.is_whitelisted("https://other.example"),
+        "control: the grant made under THIS profile must still authorize — the map is scoped, not emptied"
+    );
+}
+
+/// **A RETAINED pairing store stops authenticating the previous profile's pairings.**
+///
+/// The whitelist gates which origins may act; the pairing store gates which local app may speak at
+/// all, and it is read by the same router on the same unreachable thread. An app paired under
+/// `FIRST` that keeps authenticating under `SECOND` is a channel the second profile never approved —
+/// and revoking it from the tray while on `SECOND` deletes `SECOND`'s sealed record, so the pairing
+/// returns at the next boot into `FIRST`.
+///
+/// The control is the pairing made AFTER the switch: without it, a store that had simply dropped
+/// every pairing on any read would satisfy the first assertion exactly as a correctly-scoped one does.
+#[test]
+fn a_retained_pairing_store_stops_authenticating_the_previous_profiles_pairings() {
+    use dig_app_core::account::boot::live_profile_did;
+    use dig_app_core::pairing::{NewPairing, PairingStore};
+
+    let (residency, session) = two_profile_account();
+    let pairings = PairingStore::new(
+        residency.sealer(KdfParams::FAST_TEST),
+        live_profile_did(&residency),
+    );
+
+    let under_first = pairings
+        .pair(&NewPairing::pinned("app.under.first", None), 1)
+        .expect("an unlocked profile pairs")
+        .pairing_id;
+    assert!(
+        pairings.is_paired(&under_first),
+        "control: before any switch the pairing must authenticate"
+    );
+
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
+
+    let under_second = pairings
+        .pair(&NewPairing::pinned("app.under.second", None), 2)
+        .expect("the retained store still pairs after the switch")
+        .pairing_id;
+
+    assert!(
+        !pairings.is_paired(&under_first),
+        "the pairing made under the previous profile must not authenticate under this one"
+    );
+    assert!(
+        pairings.is_paired(&under_second),
+        "control: the pairing made under THIS profile must still authenticate"
+    );
+    assert_eq!(
+        vec![under_second],
+        pairings
+            .list()
+            .into_iter()
+            .map(|app| app.pairing_id)
+            .collect::<Vec<_>>(),
+        "and the tray must not offer to revoke a pairing whose record lives in another profile's \
+         directory — that revoke could only last until the next start"
+    );
 }
 
 /// **The wallet seam fails CLOSED rather than answering for the profile the user just left.**

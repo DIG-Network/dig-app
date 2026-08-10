@@ -422,6 +422,13 @@ pub struct PairedApp {
 /// One live (in-memory, unsealed) pairing the server authenticates frames against. The sealed record
 /// is the durable form; this is the hot-path copy holding the secret and the monotonic-nonce ledger.
 struct LivePairing {
+    /// The profile this pairing belongs to, as the DID read at the moment it was paired or restored.
+    ///
+    /// Held so the map can be read PER PROFILE. The store is built once at boot and lives on a serving
+    /// thread, so a pairing made under profile A would otherwise keep authenticating frames after the
+    /// user switched to B — and a revoke taken under B would delete B's sealed record while dropping
+    /// A's live one (dig_ecosystem#2398 ADV-A1).
+    profile_did: String,
     ext_id: String,
     label: Option<String>,
     scope: PairingScope,
@@ -503,11 +510,13 @@ impl<S: ProfileSealer> PairingStore<S> {
         let plaintext = Zeroizing::new(
             serde_json::to_vec(&record).map_err(|e| SealError::Seal(e.to_string()))?,
         );
-        let sealed_record = self.sealer.seal(&self.seal_as()?, &plaintext)?;
+        let profile_did = self.seal_as()?;
+        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
 
         self.lock().insert(
             pairing_id.clone(),
             LivePairing {
+                profile_did,
                 ext_id: request.ext_id.to_string(),
                 label: request.label.map(str::to_string),
                 scope: request.scope,
@@ -533,7 +542,8 @@ impl<S: ProfileSealer> PairingStore<S> {
     ///
     /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
-        let plaintext = self.sealer.open(&self.seal_as()?, sealed_record)?;
+        let profile_did = self.seal_as()?;
+        let plaintext = self.sealer.open(&profile_did, sealed_record)?;
         let record: PairingRecord =
             serde_json::from_slice(&plaintext).map_err(|_| SealError::Open)?;
         let channel_secret = record.channel_secret()?;
@@ -541,6 +551,7 @@ impl<S: ProfileSealer> PairingStore<S> {
         self.lock().insert(
             pairing_id.clone(),
             LivePairing {
+                profile_did,
                 ext_id: record.ext_id.clone(),
                 label: record.label.clone(),
                 scope: record.scope,
@@ -565,7 +576,8 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// The seed only ever RAISES the mark (`max`): a stale/rolled-back persisted value can never lower
     /// a mark the live session has already advanced past, so seeding is safe to call unconditionally.
     pub fn seed_last_nonce(&self, pairing_id: &str, last_nonce: u64) {
-        if let Some(pairing) = self.lock().get_mut(pairing_id) {
+        let mut live = self.lock();
+        if let Some(pairing) = self.of_active_mut(&mut live, pairing_id) {
             let seeded = pairing
                 .last_nonce
                 .map_or(last_nonce, |cur| cur.max(last_nonce));
@@ -588,8 +600,12 @@ impl<S: ProfileSealer> PairingStore<S> {
         params: &serde_json::Value,
         mac_b64: &str,
     ) -> Result<(), AuthFailure> {
+        let active = self.profile_did.get();
         let mut live = self.lock();
-        let pairing = live.get_mut(pairing_id).ok_or(AuthFailure::NotPaired)?;
+        let pairing = live
+            .get_mut(pairing_id)
+            .filter(|pairing| belongs_to(active.as_deref(), &pairing.profile_did))
+            .ok_or(AuthFailure::NotPaired)?;
 
         let provided_mac = BASE64
             .decode(mac_b64.as_bytes())
@@ -608,22 +624,32 @@ impl<S: ProfileSealer> PairingStore<S> {
         Ok(())
     }
 
-    /// Remove a live pairing (the "unpair" surface, §5.6.3). Returns whether a pairing was present.
-    /// After unpairing, every frame from that `pairing_id` fails [`AuthFailure::NotPaired`]. The
-    /// caller separately deletes the sealed at-rest record.
+    /// Remove a live pairing (the "unpair" surface, §5.6.3). Returns whether a pairing FOR THE ACTIVE
+    /// PROFILE was present. After unpairing, every frame from that `pairing_id` fails
+    /// [`AuthFailure::NotPaired`]. The caller separately deletes the sealed at-rest record.
+    ///
+    /// Another profile's pairing is left alone, for the reason
+    /// [`WhitelistStore::revoke`](crate::whitelist::WhitelistStore::revoke) gives: the durable half of
+    /// this revoke is written to the ACTIVE profile's directory, so dropping a foreign live entry here
+    /// would revoke only until the next start.
     pub fn unpair(&self, pairing_id: &str) -> bool {
-        self.lock().remove(pairing_id).is_some()
+        let mut live = self.lock();
+        if self.of_active_mut(&mut live, pairing_id).is_none() {
+            return false;
+        }
+        live.remove(pairing_id).is_some()
     }
 
-    /// Whether a live pairing exists for `pairing_id`.
+    /// Whether a live pairing for the active profile exists for `pairing_id`.
     pub fn is_paired(&self, pairing_id: &str) -> bool {
-        self.lock().contains_key(pairing_id)
+        self.ext_id_of(pairing_id).is_some()
     }
 
     /// The paired extension id for `pairing_id`, if any (for the confirm prompt's "via paired
     /// extension" display).
     pub fn ext_id_of(&self, pairing_id: &str) -> Option<String> {
-        self.lock().get(pairing_id).map(|p| p.ext_id.clone())
+        self.of_active(&self.lock(), pairing_id)
+            .map(|p| p.ext_id.clone())
     }
 
     /// What `pairing_id` is allowed to do, or `None` if it is not paired.
@@ -631,17 +657,18 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// The dispatch layer consults this AFTER authenticating a frame, so a capability check can never
     /// be reached by a caller that failed the MAC.
     pub fn scope_of(&self, pairing_id: &str) -> Option<PairingScope> {
-        self.lock().get(pairing_id).map(|p| p.scope)
+        self.of_active(&self.lock(), pairing_id).map(|p| p.scope)
     }
 
     /// The full authority (money [`PairingScope`] + granted [`CapabilitySet`]) for `pairing_id`, or
     /// `None` if it is not paired. The dispatch layer consults this AFTER authenticating a frame, so
     /// neither the money gate nor the capability check can be reached by a caller that failed the MAC.
     pub fn authority_of(&self, pairing_id: &str) -> Option<PairingAuthority> {
-        self.lock().get(pairing_id).map(|p| PairingAuthority {
-            scope: p.scope,
-            capabilities: p.capabilities.clone(),
-        })
+        self.of_active(&self.lock(), pairing_id)
+            .map(|p| PairingAuthority {
+                scope: p.scope,
+                capabilities: p.capabilities.clone(),
+            })
     }
 
     /// Record that `pairing_id` was heard from at `now` — the "last seen" the management window shows.
@@ -649,7 +676,8 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// Called only after a frame AUTHENTICATES, so an unpaired or badly-MAC'd frame can never move a
     /// paired app's timestamp and make it look active. A no-op for an unknown pairing.
     pub fn note_seen(&self, pairing_id: &str, now: u64) {
-        if let Some(pairing) = self.lock().get_mut(pairing_id) {
+        let mut live = self.lock();
+        if let Some(pairing) = self.of_active_mut(&mut live, pairing_id) {
             pairing.last_seen_at = Some(now);
         }
     }
@@ -659,9 +687,11 @@ impl<S: ProfileSealer> PairingStore<S> {
     ///
     /// Carries no secret: the channel secret stays in `LivePairing` and never reaches a window.
     pub fn list(&self) -> Vec<PairedApp> {
+        let active = self.profile_did.get();
         let mut apps: Vec<PairedApp> = self
             .lock()
             .iter()
+            .filter(|(_, live)| belongs_to(active.as_deref(), &live.profile_did))
             .map(|(pairing_id, live)| PairedApp {
                 pairing_id: pairing_id.clone(),
                 ext_id: live.ext_id.clone(),
@@ -683,11 +713,43 @@ impl<S: ProfileSealer> PairingStore<S> {
         apps
     }
 
+    /// The live pairing under `pairing_id`, but only if it belongs to the profile now active.
+    fn of_active<'a>(
+        &self,
+        live: &'a HashMap<String, LivePairing>,
+        pairing_id: &str,
+    ) -> Option<&'a LivePairing> {
+        let active = self.profile_did.get();
+        live.get(pairing_id)
+            .filter(|pairing| belongs_to(active.as_deref(), &pairing.profile_did))
+    }
+
+    /// [`of_active`](Self::of_active), mutably.
+    fn of_active_mut<'a>(
+        &self,
+        live: &'a mut HashMap<String, LivePairing>,
+        pairing_id: &str,
+    ) -> Option<&'a mut LivePairing> {
+        let active = self.profile_did.get();
+        live.get_mut(pairing_id)
+            .filter(|pairing| belongs_to(active.as_deref(), &pairing.profile_did))
+    }
+
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than
     /// authenticate against half-updated pairing state.
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, LivePairing>> {
         self.live.lock().expect("pairing-store mutex poisoned")
     }
+}
+
+/// Whether a record tagged `entry_did` is one the profile named by `active` may act on.
+///
+/// This is what stops a pairing surviving a profile SWITCH — see [`LivePairing::profile_did`]. A LOCKED
+/// account (`active` is `None`) has no DID to disagree with, so records stay visible and every operation
+/// that needs the key refuses on its own; widening this to the lock would change which error a locked
+/// caller gets, and the property being enforced here is about a switch.
+fn belongs_to(active: Option<&str>, entry_did: &str) -> bool {
+    active.is_none_or(|active| active == entry_did)
 }
 
 #[cfg(test)]

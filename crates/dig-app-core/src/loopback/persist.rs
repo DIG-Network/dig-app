@@ -50,11 +50,23 @@ pub struct PersistedSignState {
 
 /// The seam the [`FrameRouter`](super::FrameRouter) persists sealed records + nonces through.
 ///
-/// Every method is best-effort and infallible to the caller: a persistence failure is logged inside
-/// the implementation and never aborts a pairing/connect/sign that already succeeded in memory (the
-/// in-session state still protects the channel; the only cost of a lost write is that one record does
-/// not survive the next restart). The production implementation is [`FileSealedStore`]; tests and the
-/// headless/no-persistence path use [`NullSealedStore`].
+/// # A skipped WRITE is safe; a skipped REMOVAL is not
+///
+/// The two directions are NOT symmetric, and treating them as one is the bug this asymmetry exists to
+/// prevent (dig_ecosystem#2398 SEC-F1):
+///
+/// - **Writes** (`persist_*`) are best-effort and infallible to the caller. A failure is logged and
+///   never aborts a pairing/connect/sign that already succeeded in memory — the in-session state still
+///   protects the channel, and the only cost is that one record does not survive the next restart. That
+///   direction FAILS CLOSED: the user ends up with less access than they granted.
+/// - **Removals** (`remove_*`) REPORT whether the record is actually gone. A removal that silently did
+///   nothing leaves the sealed record at rest, [`FrameRouter::restore`](super::FrameRouter::restore)
+///   re-reads it at the next boot, and the caller has already been told the grant was revoked. That
+///   direction fails OPEN, so it may never be swallowed: a caller told `revoked: true` must never see
+///   that grant come back.
+///
+/// The production implementation is [`FileSealedStore`]; tests and the headless/no-persistence path use
+/// [`NullSealedStore`].
 ///
 /// `Send + Sync` because the loopback server shares one store across connection tasks behind an `Arc`.
 pub trait SealedRecordStore: Send + Sync {
@@ -68,16 +80,22 @@ pub trait SealedRecordStore: Send + Sync {
     fn persist_nonce(&self, pairing_id: &str, nonce: u64);
 
     /// Drop the persisted whitelist entry for `origin` (on `connect.revoke`). Idempotent.
-    fn remove_whitelist(&self, origin: &str);
+    ///
+    /// Returns whether NO record for `origin` remains at rest — `true` when one was deleted and `true`
+    /// when there was none to delete, `false` when one may still be there. See the trait docs: the
+    /// caller MUST NOT report a revoke as done on `false`.
+    #[must_use]
+    fn remove_whitelist(&self, origin: &str) -> bool;
 
     /// Drop the persisted pairing record for `pairing_id` (on a user revoke, dig_ecosystem#1848).
-    /// Idempotent.
+    /// Idempotent, and returns durability exactly as [`remove_whitelist`](Self::remove_whitelist) does.
     ///
     /// This is the DURABLE half of a revoke; the immediate half is the live unpair, which the
     /// [`PairedAppsControl`](crate::loopback::PairedAppsControl) does first. Both are needed — without
     /// this one the app is refused now and restored at the next boot, which is a revocation that
     /// undoes itself.
-    fn remove_pairing(&self, pairing_id: &str);
+    #[must_use]
+    fn remove_pairing(&self, pairing_id: &str) -> bool;
 
     /// Load every persisted sealed record + the nonce ledger for restore on boot.
     fn load(&self) -> PersistedSignState;
@@ -93,8 +111,14 @@ impl SealedRecordStore for NullSealedStore {
     fn persist_pairing(&self, _pairing_id: &str, _sealed: &[u8]) {}
     fn persist_whitelist(&self, _origin: &str, _sealed: &[u8]) {}
     fn persist_nonce(&self, _pairing_id: &str, _nonce: u64) {}
-    fn remove_whitelist(&self, _origin: &str) {}
-    fn remove_pairing(&self, _pairing_id: &str) {}
+    /// Trivially durable: this store never wrote anything, so nothing can survive to be restored.
+    fn remove_whitelist(&self, _origin: &str) -> bool {
+        true
+    }
+    /// Trivially durable, for the same reason as [`remove_whitelist`](Self::remove_whitelist).
+    fn remove_pairing(&self, _pairing_id: &str) -> bool {
+        true
+    }
     fn load(&self) -> PersistedSignState {
         PersistedSignState::default()
     }
@@ -113,7 +137,8 @@ pub struct FileSealedStore {
     ///
     /// It reads as `None` while no profile is active (a locked account), in which case this store
     /// persists nothing and restores nothing — the same best-effort outcome a failed write already
-    /// has, and the only alternative to inventing a directory that belongs to no profile.
+    /// has, and the only alternative to inventing a directory that belongs to no profile. A REMOVAL in
+    /// that state is not best-effort and is reported to the caller instead; see [`SealedRecordStore`].
     profile_dir: LiveProfileDir,
 }
 
@@ -192,42 +217,56 @@ impl FileSealedStore {
             .unwrap_or_default()
     }
 
-    /// Delete `path`, treating "it was not there" as success — a revoke is idempotent, and a record
-    /// that never reached disk is one the user still wants gone.
-    fn remove(path: &Path, what: &str) {
-        if let Err(e) = std::fs::remove_file(path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
+    /// Delete `path`, returning whether nothing remains there — "it was not there" is success, since a
+    /// revoke is idempotent and a record that never reached disk is one the user still wants gone.
+    fn remove(path: &Path, what: &str) -> bool {
+        match std::fs::remove_file(path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
                 tracing::warn!(error = %e, what, "failed to remove a revoked APP-SIGN record");
+                false
             }
         }
     }
 
-    /// Drop `pairing_id` from the nonce ledger, rewriting what remains.
-    fn forget_nonce(&self, pairing_id: &str) {
+    /// Drop `pairing_id` from the nonce ledger, rewriting what remains. Returns whether the ledger now
+    /// reflects that — vacuously true when the mark was not there to begin with.
+    fn forget_nonce(&self, pairing_id: &str) -> bool {
         let mut marks = self.read_nonce_ledger();
         if marks.remove(pairing_id).is_none() {
-            return;
+            return true;
         }
-        self.write_nonce_ledger(marks);
+        self.write_nonce_ledger(marks)
     }
 
     /// Serialize and durably write `marks`, or skip with a warning when no profile is active. The one
-    /// place the ledger is written, so the two callers cannot drift on the no-profile case.
-    fn write_nonce_ledger(&self, marks: HashMap<String, u64>) {
+    /// place the ledger is written, so the two callers cannot drift on the no-profile case. Returns
+    /// whether the write actually happened.
+    fn write_nonce_ledger(&self, marks: HashMap<String, u64>) -> bool {
         let Some(path) = self.nonce_ledger_path() else {
-            return Self::skipped("nonce-ledger");
+            Self::skipped("nonce-ledger");
+            return false;
         };
         match serde_json::to_vec(&NonceLedger { marks }) {
-            Ok(bytes) => Self::write(&path, "nonce-ledger", &bytes),
-            Err(e) => tracing::warn!(error = %e, "failed to serialize the APP-SIGN nonce ledger"),
+            Ok(bytes) => {
+                Self::write(&path, "nonce-ledger", &bytes);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize the APP-SIGN nonce ledger");
+                false
+            }
         }
     }
 
     /// Note that an at-rest operation was skipped because no profile is active.
     ///
-    /// Persistence here is best-effort by contract (see [`SealedRecordStore`]), and a locked account
-    /// has no directory of its own to write into. Inventing one would file a record under a profile
-    /// that does not own it, which is the very confusion the per-profile directory prevents.
+    /// A locked account has no directory of its own, and inventing one would file a record under a
+    /// profile that does not own it — the very confusion the per-profile directory prevents. Skipping a
+    /// WRITE is therefore the right answer, and best-effort by contract (see [`SealedRecordStore`]).
+    /// Skipping a REMOVAL is not: the two removal methods report the skip to their caller rather than
+    /// swallowing it here.
     fn skipped(what: &str) {
         tracing::warn!(what, "no active profile — APP-SIGN state was not persisted");
     }
@@ -278,24 +317,31 @@ impl SealedRecordStore for FileSealedStore {
         self.write_nonce_ledger(marks);
     }
 
-    fn remove_whitelist(&self, origin: &str) {
+    fn remove_whitelist(&self, origin: &str) -> bool {
         let Some(dir) = self.whitelist_dir() else {
-            return Self::skipped("whitelist");
+            // No active profile, so the sealed grant is somewhere this store cannot reach. Say so:
+            // pretending otherwise revokes for this run and restores the grant at the next boot.
+            Self::skipped("whitelist");
+            return false;
         };
-        Self::remove(&dir.join(Self::origin_file_name(origin)), "whitelist");
+        Self::remove(&dir.join(Self::origin_file_name(origin)), "whitelist")
     }
 
-    fn remove_pairing(&self, pairing_id: &str) {
+    fn remove_pairing(&self, pairing_id: &str) -> bool {
         // A pairing id is a UUID this app minted, never caller input, so it cannot carry a path
         // separator. The file name is still built from it through `pairing_file_name`, which is the
         // one place that assumption is stated and checked.
         let Some(dir) = self.pairings_dir() else {
-            return Self::skipped("pairing");
+            Self::skipped("pairing");
+            return false;
         };
-        Self::remove(&dir.join(Self::pairing_file_name(pairing_id)), "pairing");
+        let removed = Self::remove(&dir.join(Self::pairing_file_name(pairing_id)), "pairing");
         // The nonce high-water mark goes with it: leaving an orphan mark behind would seed a future
         // pairing that happened to reuse the id, and it is state about an app the user just removed.
-        self.forget_nonce(pairing_id);
+        // Both halves are attempted before the verdict is formed — a `&&` here would skip the ledger
+        // whenever the record itself failed to go, which is the case that most needs the tidy-up.
+        let forgotten = self.forget_nonce(pairing_id);
+        removed && forgotten
     }
 
     fn load(&self) -> PersistedSignState {
@@ -380,10 +426,10 @@ mod tests {
         s.persist_whitelist("https://dapp.example", b"sealed");
         assert_eq!(s.load().whitelist.len(), 1);
 
-        s.remove_whitelist("https://dapp.example");
+        assert!(s.remove_whitelist("https://dapp.example"));
         assert!(s.load().whitelist.is_empty());
-        // Revoking again is idempotent (no panic, no error surfaced).
-        s.remove_whitelist("https://dapp.example");
+        // Revoking again is idempotent, and "there was nothing there" is still a durable outcome.
+        assert!(s.remove_whitelist("https://dapp.example"));
     }
 
     #[test]

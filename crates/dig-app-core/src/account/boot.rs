@@ -181,8 +181,12 @@ pub fn live_profile_did(residency: &AccountResidency) -> LiveDid {
 }
 
 /// The ACTIVE profile's directory under `brand_dir`, re-read on every use — the companion to
-/// [`live_profile_did`], and derived from the same DID, so the directory and the identity sealing
-/// into it can never name two different profiles.
+/// [`live_profile_did`], derived from the same function — so neither can go stale, and each answers for
+/// the profile active when it is asked.
+///
+/// They are two INDEPENDENT reads, not one: a caller that resolves the DID and then the directory can
+/// have a switch land between them and get a matched-looking pair that names two profiles. Nothing here
+/// can prevent that; only handing both out from a single acquisition could.
 ///
 /// Reads as `None` while the account is locked, because the directory is keyed by the DID and a
 /// locked account has none. See [`FileSealedStore`](crate::loopback::FileSealedStore) for what that

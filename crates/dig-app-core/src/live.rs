@@ -17,8 +17,18 @@
 //! ([`crate::account::boot::active_profile_id`]).
 //!
 //! `Live<T>` is the seam that closes it. A handle holds the *source* of the value rather than the
-//! value, so "the DID this store seals under" is answered at seal time — the same instant the DEK is
-//! derived — and cannot disagree with it.
+//! value, so "the DID this store seals under" is answered at seal time rather than at boot, and a
+//! switch that happened in between is reflected instead of ignored.
+//!
+//! # What this seam does NOT make impossible
+//!
+//! It removes the STALENESS, not the interleaving. The DID and the DEK remain two separate reads —
+//! `seal_as` consults the live DID, and the sealer independently resolves the active profile index and
+//! derives that profile's key — so a switch landing between them still seals under one profile's DEK
+//! tagged with the other's DID. The window is the width of two reads rather than the life of the
+//! process, and the sealer is addressed by a raw DEK that never sees a DID, so nothing downstream can
+//! detect the mismatch. Closing it for good needs the pair handed out from ONE acquisition; until then
+//! this is a narrowing, and the doc-comments here say so rather than claiming an invariant.
 //!
 //! # Fixed is not a loophole
 //!

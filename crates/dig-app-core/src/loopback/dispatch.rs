@@ -661,14 +661,18 @@ impl<S: ProfileSealer> FrameRouter<S> {
 
     /// The `connect.revoke` handler (§5.6.4): drop the origin's whitelist entry, returning it to
     /// `CONNECT_REQUIRED`. Idempotent — revoking an unknown origin still succeeds.
+    ///
+    /// A revoke succeeds only when it is DURABLE. The at-rest removal is attempted unconditionally,
+    /// because it is idempotent and because the live entry may already be gone from an earlier attempt
+    /// that could not reach disk; if it still cannot, the caller is refused `LOCKED` rather than told
+    /// `revoked: true` about a grant that `restore` would hand back at the next boot (#2398 SEC-F1).
     fn handle_connect_revoke(&self, id: &Value, params: &Value) -> Value {
         let Ok(params) = serde_json::from_value::<ConnectRevokeParams>(params.clone()) else {
             return error(id, SignErrorCode::ConnectDenied);
         };
         let revoked = self.whitelist.revoke(&params.origin);
-        if revoked {
-            // Drop the at-rest record too, so the revocation survives a restart (#958).
-            self.persist.remove_whitelist(&params.origin);
+        if !self.persist.remove_whitelist(&params.origin) {
+            return error(id, SignErrorCode::Locked);
         }
         ok(id, json!({ "revoked": revoked }))
     }
@@ -755,8 +759,11 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, SignErrorCode::Locked);
         };
 
-        // The DID is read HERE, beside the signature, so an attestation can never bind the previous
-        // profile's DID to the current profile's key. No active profile ⇒ LOCKED, not a null DID.
+        // The DID is read HERE, beside the signature, rather than captured at boot — so an attestation
+        // binds the DID of the profile active at signing time, not the one active when this router was
+        // assembled. The two are still separate reads: a switch landing between them binds the previous
+        // profile's DID to the new profile's key, and only a single acquisition serving both could rule
+        // that out. No active profile ⇒ LOCKED, not a null DID.
         let Some(did) = self.connect_info.profile_did.get() else {
             return error(id, SignErrorCode::Locked);
         };
@@ -853,8 +860,11 @@ impl<S: ProfileSealer> FrameRouter<S> {
     /// connect, read from the profile active at THIS instant — or `None` when no profile is active,
     /// which the caller surfaces as `LOCKED`.
     ///
-    /// The three values are read together so a dapp can never be handed one profile's DID beside
-    /// another's receive address.
+    /// The three values are read together — adjacently, at the moment the handle is built — so the
+    /// window in which a profile switch could land between them is as narrow as this code can make it.
+    /// They remain three independent reads, so it is a narrowing and not an invariant: a switch that
+    /// interleaves them still yields a handle naming one profile's DID beside another's address. The
+    /// fix for that is one acquisition serving all three, which the residency does not yet offer.
     fn connect_handle(&self) -> Option<Value> {
         let profile_did = self.connect_info.profile_did.get()?;
         Some(json!({
@@ -989,17 +999,48 @@ impl<S: ProfileSealer> PairedAppsControl<S> {
     }
 
     /// Revoke `pairing_id`: drop the live pairing FIRST so the next frame from that app fails
-    /// immediately, then delete its at-rest record so the revocation survives a restart. Returns
-    /// whether an app was actually paired under that id.
+    /// immediately, then delete its at-rest record so the revocation survives a restart.
     ///
     /// The order matters. Deleting the record first would leave a window — however short — in which
     /// the app is still authenticated on a channel the user has been told is closed.
-    pub fn revoke(&self, pairing_id: &str) -> bool {
+    ///
+    /// The at-rest removal is attempted whether or not a live pairing was found, because it is
+    /// idempotent and an earlier attempt may have dropped the live entry without reaching disk. Its
+    /// result is reported rather than swallowed, so the tray can only promise what actually happened
+    /// (#2398 SEC-F1).
+    pub fn revoke(&self, pairing_id: &str) -> RevokeOutcome {
         let was_paired = self.pairings.unpair(pairing_id);
-        if was_paired {
-            self.persist.remove_pairing(pairing_id);
+        let durable = self.persist.remove_pairing(pairing_id);
+        match (was_paired, durable) {
+            (false, _) => RevokeOutcome::NotPaired,
+            (true, true) => RevokeOutcome::Revoked,
+            (true, false) => RevokeOutcome::RevokedForThisRunOnly,
         }
-        was_paired
+    }
+}
+
+/// What came of revoking a paired app — whether anything was paired, and whether the revocation
+/// reached disk.
+///
+/// The durability distinction is user-visible on purpose. The tray tells a person their app "will lose
+/// access immediately - not at the next restart", and that sentence is only true when the sealed record
+/// is gone; a revoke taken while the account is locked cannot reach the profile's directory, so it must
+/// say so instead of quietly meaning the opposite (dig_ecosystem#2398 SEC-F1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    /// No app was paired under that id. Nothing live to drop and nothing at rest to return.
+    NotPaired,
+    /// Gone now and gone after a restart: the live pairing was dropped and its sealed record deleted.
+    Revoked,
+    /// The live pairing was dropped — the app is refused from its very next frame — but the sealed
+    /// record could not be deleted, so it would be restored at the next start.
+    RevokedForThisRunOnly,
+}
+
+impl RevokeOutcome {
+    /// Whether an app was paired and has now lost access, durably or not.
+    pub fn lost_access(self) -> bool {
+        matches!(self, Self::Revoked | Self::RevokedForThisRunOnly)
     }
 }
 
@@ -1590,7 +1631,7 @@ mod tests {
         ));
         assert_eq!(before["result"]["granted"], true);
 
-        assert!(control.revoke(&doomed_id));
+        assert_eq!(RevokeOutcome::Revoked, control.revoke(&doomed_id));
 
         let after = router.handle(&authed_request(
             "connect.request",
@@ -1615,7 +1656,11 @@ mod tests {
             untouched["result"]["granted"], true,
             "revoking one app must not disturb another"
         );
-        assert!(!control.revoke(&doomed_id), "revoking twice is idempotent");
+        assert_eq!(
+            RevokeOutcome::NotPaired,
+            control.revoke(&doomed_id),
+            "revoking twice is idempotent"
+        );
     }
 
     #[test]
@@ -2069,6 +2114,104 @@ mod tests {
             [EXT.to_string()],
         )
         .with_persistence(store)
+    }
+
+    /// A store that accepts every write and cannot complete a single removal — a locked account, whose
+    /// profile directory the store can no longer reach.
+    ///
+    /// The write half is deliberately left WORKING. A store that failed everything would make the
+    /// revoke tests below pass for the wrong reason: it is precisely the asymmetry (writes fine,
+    /// removals not) that the caller has to notice.
+    #[derive(Default)]
+    struct StoreThatCannotRemove;
+
+    impl SealedRecordStore for StoreThatCannotRemove {
+        fn persist_pairing(&self, _pairing_id: &str, _sealed: &[u8]) {}
+        fn persist_whitelist(&self, _origin: &str, _sealed: &[u8]) {}
+        fn persist_nonce(&self, _pairing_id: &str, _nonce: u64) {}
+        fn remove_whitelist(&self, _origin: &str) -> bool {
+            false
+        }
+        fn remove_pairing(&self, _pairing_id: &str) -> bool {
+            false
+        }
+        fn load(&self) -> crate::loopback::PersistedSignState {
+            crate::loopback::PersistedSignState::default()
+        }
+    }
+
+    /// **`connect.revoke` must not answer `revoked: true` for a grant it could not delete.**
+    ///
+    /// The sealed record outlives a removal the store could not perform, and `restore` hands it back at
+    /// the next boot — so a caller told the site was disconnected would find it connected again, having
+    /// been given no reason to look (dig_ecosystem#2398 SEC-F1).
+    ///
+    /// The control is the SAME frame against a store that CAN remove. Asserting only the refusal would
+    /// be satisfied by a handler that refused every revoke.
+    #[test]
+    fn a_revoke_that_cannot_be_written_down_is_refused_rather_than_reported_as_done() {
+        let residency = test_residency();
+        let origin = "https://dapp.example";
+
+        let revoke = |store: Arc<dyn SealedRecordStore>| {
+            let router = router_persisting(&residency, store);
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            router.handle(&authed_request(
+                "connect.revoke",
+                json!({ "origin": origin }),
+                &pairing_id,
+                &token,
+                n(2),
+            ))
+        };
+
+        let refused = revoke(Arc::new(StoreThatCannotRemove));
+        assert_eq!(
+            "LOCKED", refused["error"]["message"],
+            "a revoke that cannot reach disk must surface, not report success: {refused}"
+        );
+        assert!(
+            refused["result"].is_null(),
+            "and must carry no `revoked` verdict at all: {refused}"
+        );
+
+        let done = revoke(Arc::new(NullSealedStore));
+        assert_eq!(
+            true, done["result"]["revoked"],
+            "control: a revoke that IS durable still reports success: {done}"
+        );
+    }
+
+    /// **The tray's revoke reports whether it was written down.**
+    ///
+    /// The confirmation the user just answered promises the app loses access "not at the next
+    /// restart". That is only true when the sealed record is gone, so the durability has to reach the
+    /// journey rather than being swallowed in the store.
+    #[test]
+    fn the_tray_revoke_distinguishes_a_durable_removal_from_a_temporary_one() {
+        let residency = test_residency();
+
+        let revoke = |store: Arc<dyn SealedRecordStore>| {
+            let router = router_persisting(&residency, store);
+            let control = router.control();
+            let (pairing_id, _token) = pair(&router);
+            (control.revoke(&pairing_id), control.revoke("never-paired"))
+        };
+
+        let (temporary, unknown) = revoke(Arc::new(StoreThatCannotRemove));
+        assert_eq!(RevokeOutcome::RevokedForThisRunOnly, temporary);
+        assert_eq!(
+            RevokeOutcome::NotPaired,
+            unknown,
+            "an id that was never paired has nothing at rest either, whatever the store says"
+        );
+
+        let (durable, _) = revoke(Arc::new(NullSealedStore));
+        assert_eq!(
+            RevokeOutcome::Revoked,
+            durable,
+            "control: a revoke that IS durable must not be reported as temporary"
+        );
     }
 
     #[test]

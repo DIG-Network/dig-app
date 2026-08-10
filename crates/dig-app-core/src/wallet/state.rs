@@ -182,6 +182,12 @@ impl<S: ProfileSealer> WalletStore<S> {
         }
     }
 
+    /// Where `did`'s sealed wallet-state blob lives. Exposed so a caller that wants to know whether the
+    /// state has CHANGED can look at the file without opening it — opening costs a full key derivation.
+    pub fn state_path(&self, did: &str) -> PathBuf {
+        self.dir_for(did).join(STATE_SEAL_FILE)
+    }
+
     // --- sealing plumbing -----------------------------------------------------------------------
 
     /// Seal `plaintext` under `did`'s DEK and write it to `file` in the profile's directory,

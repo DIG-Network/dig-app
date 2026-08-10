@@ -35,8 +35,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::sealer::ProfileSealer;
 
 pub use dispatch::{
-    FrameRouter, OpenSignGate, PairedAppsControl, ProfileConnectInfo, RequestFrame, SignErrorCode,
-    SignReauthGate,
+    FrameRouter, OpenSignGate, PairedAppsControl, ProfileConnectInfo, RequestFrame, RevokeOutcome,
+    SignErrorCode, SignReauthGate,
 };
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
 pub use persist::{FileSealedStore, NullSealedStore, PersistedSignState, SealedRecordStore};
@@ -564,7 +564,7 @@ mod tests {
         );
 
         // … until the user removes it, on the SAME open connection.
-        assert!(server.control.revoke(&listed[0].pairing_id));
+        assert!(server.control.revoke(&listed[0].pairing_id).lost_access());
         let after = client
             .authed(
                 "connect.request",

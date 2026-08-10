@@ -123,21 +123,52 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         Ok(origin)
     }
 
-    /// Whether `origin` is connected for the active profile — the `sign.request` connect gate.
+    /// Whether `origin` is connected FOR THE PROFILE NOW ACTIVE — the `sign.request` connect gate.
     pub fn is_whitelisted(&self, origin: &str) -> bool {
-        self.lock().contains_key(origin)
+        self.get(origin).is_some()
     }
 
-    /// The live entry for `origin`, if connected (for the connect-response handle).
+    /// The live entry for `origin` if it is connected for the profile now active (for the
+    /// connect-response handle).
     pub fn get(&self, origin: &str) -> Option<WhitelistEntry> {
-        self.lock().get(origin).cloned()
+        self.lock()
+            .get(origin)
+            .filter(|entry| self.belongs_to_active(&entry.profile_did))
+            .cloned()
     }
 
-    /// Revoke `origin` (the `connect.revoke` surface, §5.6.4). Returns whether an entry was present;
-    /// afterward that origin returns to `CONNECT_REQUIRED`. The caller separately deletes the sealed
-    /// at-rest record.
+    /// Revoke `origin` (the `connect.revoke` surface, §5.6.4). Returns whether an entry for the active
+    /// profile was present; afterward that origin returns to `CONNECT_REQUIRED`. The caller separately
+    /// deletes the sealed at-rest record.
+    ///
+    /// A grant belonging to a DIFFERENT profile is left alone rather than removed: the at-rest half of
+    /// this revoke goes to the ACTIVE profile's directory, so deleting another profile's live entry here
+    /// would drop access that the next boot restores anyway — a revoke that reads as done and is not.
     pub fn revoke(&self, origin: &str) -> bool {
-        self.lock().remove(origin).is_some()
+        let mut live = self.lock();
+        match live.get(origin) {
+            Some(entry) if self.belongs_to_active(&entry.profile_did) => {
+                live.remove(origin);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a recorded grant tagged `entry_did` is one the profile now active may act on.
+    ///
+    /// This is what stops a grant surviving a profile SWITCH. The live map is built once, at boot, and
+    /// the router that reads it is on a serving thread no switching code can reach — so without this
+    /// predicate a consent given under profile A would skip the connect modal under profile B and hand
+    /// the dapp B's DID, B's addresses and B's signing key (dig_ecosystem#2398 ADV-A1).
+    ///
+    /// A LOCKED account (no active DID) has nothing to disagree with, so entries stay visible and every
+    /// downstream operation refuses `LOCKED` on its own — the property enforced here is about a switch,
+    /// not about the lock, and widening it to the lock would change which error a locked connect gets.
+    fn belongs_to_active(&self, entry_did: &str) -> bool {
+        self.profile_did
+            .get()
+            .is_none_or(|active| active == entry_did)
     }
 
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than gate a sign

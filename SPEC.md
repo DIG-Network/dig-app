@@ -1520,19 +1520,40 @@ that collapses them funds a mint from the new profile's empty wallet.
 **A switch MUST be disclosed and MUST NOT half-land.** Every profile-scoped derivation seam MUST
 re-read the active index per operation rather than capture it — the identity signer, the per-profile
 sealer, the DID the sealed stores tag records with, the directory those records are written to, and
-the DID the connect handle advertises. Nothing is rebuilt on a switch, because nothing holds a copy
-to rebuild: the sign-service router is moved onto a serving thread for the process lifetime and no
-switching code can reach it, so "rebuild it" is not a contract any consumer could satisfy. A switch
+the DID the connect handle advertises. No DERIVATION seam is rebuilt on a switch, because none holds a
+copy to rebuild: the sign-service router is moved onto a serving thread for the process lifetime and no
+switching code can reach it, so "rebuild it" is not a contract any consumer could satisfy. The one kind
+of state that unavoidably IS a copy — the live authorization maps — is scoped per profile instead (see
+below), which needs no reach. A switch
 that cannot be PERSISTED MUST be rolled back in memory, or the receive address silently reverts at
 the next start.
 
 **The advertised signing key MUST be read from the signer that will sign.** The connect handle's
 `pubkeys` is derived from the router's own identity signer at the moment it answers, not carried
-alongside it, so a DID→key binding published to a dapp cannot name two different profiles.
+alongside it, so the key advertised is the key that will sign. The DID beside it is a separate read,
+so the two naming one profile is a property of reading them adjacently, not an invariant a switch
+cannot break; a single acquisition serving both is what would make it one.
 
 **A profile-scoped seam with no active profile MUST fail closed, never substitute a placeholder.** A
 locked account has no DID and no directory: the sealed stores refuse to seal, the connect handle is
 refused with `LOCKED` rather than returned with a null DID, and the at-rest store persists nothing.
+
+**Skipping a WRITE fails closed; skipping a REMOVAL does not, and MUST be reported.** The two
+directions of at-rest persistence are not symmetric. A write that no directory can receive is
+dropped, and the user simply ends up with less access than they granted. A REMOVAL that no directory
+can receive leaves the sealed record in place, restore re-reads it at the next start, and the caller
+has already been told the grant is gone — so `connect.revoke` MUST refuse with `LOCKED` rather than
+answer `revoked: true`, and the tray MUST NOT promise a revoke lasts past a restart unless the record
+was actually deleted.
+
+**The authorization maps MUST answer for the profile now active, not the one that granted.** The
+pairing store and the connect whitelist are built once and read by a router on a serving thread no
+switching code reaches, so each record carries the DID it was granted under and every lookup — the
+connect gate, the sign gate, the tray's list, and both revokes — MUST ignore a record belonging to
+another profile. A grant made under one profile that still authorizes under another would skip the
+connect ceremony and hand the caller the NEW profile's DID, addresses and signing key; and a revoke
+taken under the wrong profile would delete a record in the active profile's directory while dropping
+another profile's live entry, which lasts only until the next start.
 
 **`ProfileSwitched` is `#[must_use]` to force DISCLOSURE, not a rebuild.** A switch changes what a
 person's identity is and where their money will arrive, so a consumer MUST tell them; the attribute
