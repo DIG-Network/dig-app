@@ -554,16 +554,23 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
 /// The DID-minting seams this build has (dig_ecosystem#2359, #2377).
 ///
 /// **There are none yet, and the reason is a missing TRANSPORT rather than a missing mint.**
-/// `dig-account` 0.6.0's minter is real and dig-app drives it end to end through a Chia consensus
-/// validator ([`dig_app_core::account::chain_mint`]). What dig-app still has no way to do is WATCH a
-/// mint confirm: `dig_account`'s `mint_status` needs a coin read BY COIN ID — for the DID coin, and
-/// for the funding coin including whether it was spent elsewhere — and
-/// `dig-node-control-interface` 0.6.0 has no such method. Its `control.wallet.coins` reads the
-/// unspent coins at an ADDRESS, which selects the funding coin and cannot see either confirmation.
 ///
-/// A mint offered on that transport could be PUSHED — real XCH, gone — and never confirmed, and a
-/// DID is recorded only from evidence of a confirmation. So this stays [`MintSeams::NoChainTransport`]
-/// until the node grows a coin-by-id read (dig_ecosystem#2376).
+/// The coin-by-id blocker this doc used to name is GONE: the workspace pins
+/// `dig-node-control-interface` 0.9, `control.wallet.coinById` exists, and a running dig-node
+/// 0.109.0 answers it as an open read (dig_ecosystem#2560). Do not plan work from the old text.
+///
+/// The gap that remains is in the SECOND half of a profile mint. A DID is never minted alone: a
+/// profile is a DID plus a dig-store launched from that DID's coin, and dig-account resolves the
+/// store half by walking the DID's singleton lineage back from chain. That walk needs
+/// `ChainSource::resolve_singleton_lineage` and `ChainSource::coin_spend`, and dig-node's control
+/// surface has neither — verified with a control token, which is what distinguishes `-32601 method
+/// not found` from the `-32030 UNAUTHORIZED` an unknown name returns without one.
+///
+/// So a seam built on today's node could push the DID, watch it confirm, and then fail every store
+/// launch — stranding the user with real XCH spent, an identity on chain, and no profile. That is
+/// the one outcome worse than no seam at all, so this stays [`MintSeams::NoChainTransport`] until
+/// dig-node serves those two reads (the full read table is in
+/// [`dig_app_core::account::chain_mint`]).
 ///
 /// Returned as the SEAMS rather than as an availability flag, deliberately: the wizard's gate reads
 /// its answer off this same value, so there is no line here that could report a mint as possible
@@ -629,8 +636,14 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     let outcome = first_run_wizard(
         confirmer,
         // The wizard is gated on the DID, not on the account, but this entry point is reached only
-        // when there is no account at all — a wallet that exists but has no DID enters through the
-        // tray's own DID row.
+        // when there is no account at all.
+        //
+        // A wallet that EXISTS with no DID has exactly one route today: the start-up gate in
+        // `show_the_did_wizard_if_needed`, which is currently closed because `mint_seams()` reports
+        // no transport. This comment used to say such a wallet "enters through the tray's own DID
+        // row"; there is no such row. `TrayAction::AboutDid` reaches `explain_did`, a notice-only
+        // explainer that cannot call `first_run_wizard` (dig_ecosystem#2560). Re-opening the gate
+        // without adding a menu route leaves those users with no way in at all.
         AccountPresence::Absent,
         || {
             let presenter = WindowedPresenter::new(confirmer);
@@ -2941,18 +2954,20 @@ mod tray {
     /// [`tray_menu::TrayAction::AboutDid`]). It offers this
     /// explanation instead, which is something it can actually deliver — the honest alternative both to a
     /// button that fails obscurely and to a permanently-greyed row (§3.7).
+    ///
+    /// # The words come from the core, and that is the point
+    ///
+    /// They used to be literals right here, and this file is `src/bin` — the one target no test
+    /// reads. That is how this window went on promising *"you will see the exact cost before
+    /// anything is spent"* for three releases after dig_ecosystem#2377 struck the same sentence
+    /// from the wizard's own offer: the guard that struck it enumerates copy bodies by name, and
+    /// could not name one that lived here. [`journey::did_explainer`] holds them now, inside that
+    /// enumeration. Do not reintroduce a literal in this function.
+    ///
+    /// [`journey::did_explainer`]: dig_app_core::account::journey::did_explainer
     fn explain_did(confirmer: &dyn NativeConfirmer) {
-        notify(
-            confirmer,
-            "DIG — On-chain DID",
-            "An on-chain DID is the remaining step, and it costs XCH.",
-            "A DID publishes your identity on the Chia blockchain so others can find and verify it. \
-             Creating one is a real transaction that spends real XCH from your DIG Account, so DIG \
-             will never create one without you asking.\n\n\
-             It is what turns the wallet on this computer into a full DIG Account. \
-             On-chain minting is not available in this version — when it arrives, this is where you \
-             will start it, and you will see the exact cost before anything is spent.",
-        );
+        let notice = dig_app_core::account::journey::did_explainer();
+        notify(confirmer, notice.title, notice.heading, &notice.body);
     }
 
     /// Show the wallet: where money arrives, what is held, and what the wallet still cannot do

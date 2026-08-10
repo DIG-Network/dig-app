@@ -212,8 +212,18 @@ pub enum CreationBlocked {
     /// This build cannot read coins or push a bundle at all, so nothing here reaches the chain. The
     /// same fact the start-up wizard's gate reads, arrived at from the same value.
     NoChainTransport,
-    /// The chain transport is wired and the profile MINT is still not implemented — dig-account
-    /// 0.8's `ProfileMinter::mint` is `todo!()` (`profile_mint.rs:89`).
+    /// The chain transport is wired and this build still has no profile mint to drive.
+    ///
+    /// Locally true, for a reason that has MOVED (dig_ecosystem#2560). This used to read
+    /// "dig-account 0.8's `ProfileMinter::mint` is `todo!()` (`profile_mint.rs:89`)". Upstream that
+    /// is no longer so: dig-account **0.10.0** ships a real
+    /// `begin_profile_mint`/`advance_profile_mint`/`profile_mint_status` ceremony, and a profile was
+    /// minted through it on Chia mainnet. The statement survives here only because this workspace
+    /// still pins dig-account **0.8**, whose minter mints a DID and cannot mint a profile at all.
+    ///
+    /// Adopting 0.10 is a whole-workspace chia migration (0.26/sdk-0.30 → 0.36.1/sdk-0.34) and is
+    /// not the last blocker anyway; see [`CreationBlocked::NoChainTransport`] and
+    /// [`crate::account::chain_mint`] for the reads dig-node does not yet serve.
     NoProfileMinter,
 }
 
@@ -222,9 +232,11 @@ pub enum CreationBlocked {
 /// # There is no `Possible` arm YET, and this type is shaped so that adding one is a body change
 ///
 /// The user's standing direction is that creating a profile MUST become real. It cannot be made real
-/// here: `dig-account`'s `ProfileMinter::mint` is `todo!()`, and the chain to fix it runs through
-/// dig-account's chia-0.36 migration and then its mint, neither of which is published. Until they
-/// are, a `Possible` arm would be a claim this crate cannot honour — and dig_ecosystem#2377 measured
+/// here YET, and the reason has changed since this was written (dig_ecosystem#2560): dig-account's
+/// mint IS published now (0.10.0, proven on mainnet), so the remaining blockers are this workspace's
+/// chia-0.26 pin and — the one no dig-app change can clear — the two chain reads dig-node's control
+/// surface does not serve, which a profile's STORE half needs. Until those land, a `Possible` arm
+/// would be a claim this crate cannot honour — and dig_ecosystem#2377 measured
 /// exactly what that costs: flipping one availability constant early opened an undismissible dead
 /// end AND a start-up password window, **neither catchable by a test**, because both live in the
 /// binary.
@@ -232,9 +244,9 @@ pub enum CreationBlocked {
 /// So the arm is absent and the SHAPE is ready for it. Consumers ask
 /// [`blocked`](Self::blocked) — an `Option`, whose `None` is already spelled *creation is possible* —
 /// and render [`copy::cannot_create`] from the REASON. Nothing matches this enum exhaustively. The
-/// day the mint publishes, the work is: add `Possible`, return it from [`of`](Self::of) where the
-/// seams are wired, and give the one surface that draws a control its new branch. No consumer's
-/// shape moves, and no sentence is rewritten.
+/// day dig-node serves the store half's reads, the work is: add `Possible`, return it from
+/// [`of`](Self::of) where the seams are wired, and give the one surface that draws a control its new
+/// branch. No consumer's shape moves, and no sentence is rewritten.
 ///
 /// # Why it is derived from the mint seam rather than asserted beside it
 ///
