@@ -56,6 +56,28 @@ pub struct ProfileRow {
 }
 
 impl ProfileRow {
+    /// How this profile is NAMED to a person — its own label, or its ordinal.
+    ///
+    /// # Never the DID, and never the raw index
+    ///
+    /// A `did:chia:…` string is 60-odd characters and would make every row label unreadable at the
+    /// width the window actually opens at; the DID is drawn in the list itself, in the identifier
+    /// face, beside a copy control, which is where a value nobody transcribes belongs.
+    ///
+    /// The fallback counts from ONE. `profile 0` is an HD index — an implementation detail a person
+    /// has never been shown — and an unlabelled profile is entirely ordinary, because minting one
+    /// does not ask for a name.
+    ///
+    /// One derivation for three surfaces: the row heading on the card, the verb labels the model
+    /// builds, and the shell's switch confirmation. A row headed *"work"* above a button reading
+    /// *"Use “home” for this account…"* is two names for one thing on one line.
+    pub fn display_name(&self) -> String {
+        match self.label.as_deref() {
+            Some(label) => format!("“{label}”"),
+            None => format!("profile {}", self.ix.0.saturating_add(1)),
+        }
+    }
+
     /// The row for `entry`, given which index the registry says is active.
     fn of_entry(entry: &ProfileEntry, active: Option<ProfileIx>) -> Self {
         Self {
@@ -255,10 +277,93 @@ impl SwitchPlan {
     }
 }
 
+/// The sentences BOTH the window's profiles card and the shell's own notices say.
+///
+/// # Why these live here and not in the pane's copy module
+///
+/// The pane draws them on a card; the shell says them in a native notice when a person picks
+/// `About DIG profiles…` from the tray, and again in the confirmation before a switch. Two surfaces
+/// stating the same fact from two constants is exactly how the account state machine came to have
+/// two sentence sets that drifted (dig_ecosystem#2357), and `copy::profiles` cannot be reached from
+/// the binary anyway. Card titles, badge words and captions stay in the pane's copy module, because
+/// only the pane has cards.
+pub mod copy {
+    use super::ProfileCreation;
+
+    /// The title of the notice the explainer row opens.
+    pub const ABOUT_TITLE: &str = "DIG — Profiles";
+    /// Its heading.
+    pub const ABOUT_HEADING: &str = "A profile is an on-chain identity for this account.";
+    /// What a profile IS, said once, for every surface that has to explain it.
+    pub const WHAT_A_PROFILE_IS: &str =
+        "A profile is an on-chain identity — a DID and a store — that lets you publish, sign for an \
+         app and be found by other people. One account can hold several and use one at a time.";
+
+    /// Why a profile cannot be created on this build, one sentence per missing piece.
+    ///
+    /// An EXHAUSTIVE match on [`ProfileCreation`], whose own constructor derives it from the mint
+    /// seam the start-up wizard reads — so a card, a notice and that wizard cannot come to disagree
+    /// about whether a mint is possible.
+    ///
+    /// # The wording is #1820's, and "optional" is the word it settled against
+    ///
+    /// A profile is REQUIRED for publishing, signing and messaging, and creating one is *not
+    /// available in this version*. Calling it optional would tell a person they had chosen to go
+    /// without something they have simply not been offered.
+    pub fn cannot_create(creation: ProfileCreation) -> &'static str {
+        match creation {
+            ProfileCreation::NoChainTransport => {
+                "Creating a profile mints a DID and a store on the Chia blockchain, and this \
+                 version of DIG has no way to reach the chain to do it. It is required for \
+                 publishing, signing for an app and messaging, and it is not available in this \
+                 version. Nothing is missing from your setup and there is nothing for you to do — \
+                 when it arrives, this card will offer it."
+            }
+            ProfileCreation::NoProfileMinter => {
+                "This copy of DIG can reach the chain, and the step that mints a profile is not \
+                 built yet. It is required for publishing, signing for an app and messaging, and it \
+                 is not available in this version. Nothing is missing from your setup and there is \
+                 nothing for you to do — when it arrives, this card will offer it."
+            }
+        }
+    }
+
+    /// The confirmation title shown before a switch is applied.
+    pub const SWITCHING_TITLE: &str = "DIG — Switch profile";
+    /// The affirming control. Names what it does.
+    pub const SWITCHING_AFFIRM: &str = "Switch profile";
+    /// The declining control.
+    pub const SWITCHING_DECLINE: &str = "Stay on this one";
+
+    /// The confirmation body shown before a switch is applied, naming both ends.
+    ///
+    /// Both are named because the disclosure a person needs says which identity they are LEAVING as
+    /// well as which they are arriving at — the one they are leaving holds the address they have
+    /// been handing out.
+    pub fn switching(from: &str, to: &str) -> String {
+        format!(
+            "DIG will stop using {from} and start using {to}.\n\n\
+             Your receive address and your signing key both change with it. Money already sent to \
+             {from}'s address stays there, and switching back to {from} brings that address back. \
+             Nothing is spent and nothing is deleted."
+        )
+    }
+
+    /// Said wherever a hide control appears, so the word "hide" cannot be read as "delete".
+    ///
+    /// The whole risk of the visibility control in one sentence. A profile is permanent on chain;
+    /// this changes one computer's list.
+    pub const HIDE_NOTE: &str =
+        "Hiding a profile only takes it out of this computer's lists. It stays on the blockchain, \
+         keeps its address and its funds, and you can show it here again at any time.";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::profile_session::test_support::{expected_did, registry_with, session_with};
+    use crate::account::profile_session::test_support::{
+        expected_did, registry_with, session_with,
+    };
 
     /// **A registry that could not be read is never reported as an account with no profiles.**
     ///
@@ -271,9 +376,13 @@ mod tests {
     /// profiles: without it, a reading that reported every state as unreadable would pass.
     #[test]
     fn an_unreadable_registry_is_not_an_account_with_no_profiles() {
-        let broken = ProfilesReading::of_session(&ProfileSession::unreadable("the file is not JSON"));
+        let broken =
+            ProfilesReading::of_session(&ProfileSession::unreadable("the file is not JSON"));
         assert!(
-            matches!(broken, ProfilesReading::Unknown(ProfilesUnknown::Unreadable(_))),
+            matches!(
+                broken,
+                ProfilesReading::Unknown(ProfilesUnknown::Unreadable(_))
+            ),
             "a registry that would not load came back as a list: {broken:?}"
         );
         assert_eq!(
@@ -348,8 +457,13 @@ mod tests {
     /// `rows[0]` active agrees with the registry on an untouched fixture and disagrees here.
     #[test]
     fn the_active_row_is_the_registrys_and_not_the_first_one() {
-        let session = session_with(&[(ProfileIx::ROOT, Some("home")), (ProfileIx(3), Some("work"))]);
-        let _ = session.switch_to(ProfileIx(3)).expect("a confirmed profile");
+        let session = session_with(&[
+            (ProfileIx::ROOT, Some("home")),
+            (ProfileIx(3), Some("work")),
+        ]);
+        let _ = session
+            .switch_to(ProfileIx(3))
+            .expect("a confirmed profile");
 
         let reading = ProfilesReading::of_session(&session);
         let active: Vec<ProfileIx> = reading
@@ -400,7 +514,10 @@ mod tests {
     /// half that carries the receive address their money currently arrives at.
     #[test]
     fn a_switch_names_the_profile_being_left_as_well_as_the_one_arrived_at() {
-        let session = session_with(&[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), Some("work"))]);
+        let session = session_with(&[
+            (ProfileIx::ROOT, Some("home")),
+            (ProfileIx(1), Some("work")),
+        ]);
         let reading = ProfilesReading::of_session(&session);
 
         let SwitchPlan::Disclose { from, to } = SwitchPlan::of(&reading, ProfileIx(1)) else {

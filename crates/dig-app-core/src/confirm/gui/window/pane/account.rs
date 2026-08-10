@@ -712,12 +712,10 @@ mod tests {
                 .chain(protection.lead.iter().map(|a| a.id))
                 .chain(protection.second_factor.iter().map(|a| a.id))
                 .chain(protection.paired_apps.iter().map(|a| a.id))
-                .chain(
-                    super::super::profiles::drawn_actions(&tab, &PaneFacts::of_tray(&view_for(
-                        account.clone(),
-                    )))
-                    .into_iter(),
-                )
+                .chain(super::super::profiles::drawn_actions(
+                    &tab,
+                    &PaneFacts::of_tray(&view_for(account.clone())),
+                ))
                 .collect();
             let mut expected = tab.actions();
             assert!(

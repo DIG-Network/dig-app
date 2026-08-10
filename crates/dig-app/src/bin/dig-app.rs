@@ -1504,6 +1504,67 @@ mod tray {
                 Some(locator) => dig_app_core::apps::AppPresence::observe(&locator),
                 None => dig_app_core::apps::AppPresence::Unknown,
             },
+            // This account's profiles (dig_ecosystem#2403). Every decision about what the reading
+            // MEANS lives in `dig_app_core::profiles`, because a binary is a test-free zone.
+            profiles: profiles_reading(env, session),
+            // Derived from the SAME `mint_seams()` the start-up wizard's gate reads, so there is no
+            // line here that could report a profile as creatable while every minter refuses
+            // (dig_ecosystem#2377).
+            profile_creation: dig_app_core::profiles::ProfileCreation::of(
+                super::mint_seams().availability(),
+            ),
+        }
+    }
+
+    /// The live profile registry for this snapshot.
+    ///
+    /// # Why a locked account still lists its profiles
+    ///
+    /// The registry holds no secret — an HD index, a `did:chia:` string, coin ids, heights, a label
+    /// — which is exactly why dig-account keeps it in plaintext, and why
+    /// `ProfileSession`'s own docs make listing profiles on the first frame, before any unlock
+    /// ceremony, a property of the design. So with no live session this reads the file directly
+    /// rather than reporting `Pending` forever, which would leave a locked account's profile card
+    /// stuck on "still reading" for as long as it stayed locked.
+    ///
+    /// The per-tick file read is the cost `second_factor` above already pays in this same function,
+    /// and for the same reason: a cached answer would go stale exactly when a control changed it.
+    /// With a live session there is no read at all — the registry is already in memory behind the
+    /// one `Arc<RwLock<..>>` every derivation seam shares.
+    fn profiles_reading(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+    ) -> dig_app_core::profiles::ProfilesReading {
+        use dig_app_core::profiles::ProfilesReading;
+
+        match session {
+            Some(live) => ProfilesReading::of_session(live.residency.profiles()),
+            None => match super::brand_dir(env) {
+                Some(dir) => {
+                    ProfilesReading::of_session(&dig_app_core::account::boot::profiles_for(&dir))
+                }
+                // No brand directory means nothing has been examined, which is not the same as an
+                // account with no profiles.
+                None => ProfilesReading::Pending,
+            },
+        }
+    }
+
+    /// The profile registry a profile CONTROL should act on — the live session's when there is one,
+    /// and the file's otherwise.
+    ///
+    /// Deliberately the same resolution [`profiles_reading`] uses, so a control always mutates the
+    /// registry the card was drawn from. Two resolutions here would be a click that took effect on
+    /// a registry the person was not looking at.
+    fn profiles_to_act_on(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+    ) -> Option<dig_app_core::account::ProfileSession> {
+        match session {
+            Some(live) => Some(live.residency.profiles().clone()),
+            None => {
+                super::brand_dir(env).map(|dir| dig_app_core::account::boot::profiles_for(&dir))
+            }
         }
     }
 
@@ -2346,6 +2407,16 @@ mod tray {
             TrayAction::ManagePairedApps => manage_paired_apps(session.as_ref(), confirmer),
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             TrayAction::AboutDid => explain_did(confirmer),
+            // The three profile arms (dig_ecosystem#2403). Each re-reads the registry LIVE for the
+            // reason the wallet arms re-snapshot: the row was drawn from a view up to a tick old,
+            // and a list that moved in between must decide the outcome rather than the picture.
+            TrayAction::SetActiveProfile { ix } => {
+                switch_profile(env, session.as_ref(), confirmer, ix)
+            }
+            TrayAction::SetProfileVisibility { ix, hidden } => {
+                set_profile_visibility(env, session.as_ref(), confirmer, ix, hidden)
+            }
+            TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
             // Both wallet arms re-snapshot LIVE for the same reason `show_status` does: a node that came
             // up — or a lock that dropped the keys — while the menu sat open must be reflected, not
             // replayed from the model the row was drawn from.
@@ -3312,6 +3383,181 @@ mod tray {
     /// all say so, so the row is never a silent no-op (requirement 5). Declining the eviction
     /// confirmation returns quietly — the dialog already named the consequence and the user chose not to
     /// proceed, consistent with every other cancel path in the app (SPEC §3.1c-ii).
+    /// Make a profile active, after telling the person what that changes.
+    ///
+    /// # The disclosure comes BEFORE the act, and it is not optional
+    ///
+    /// A switch changes the receive address, the per-profile DEK and the identity signing key,
+    /// because all three derive at the profile's HD index. Told afterwards, the first a person knows
+    /// of it is money arriving at an address they were never shown — so this is a CLAIM (two
+    /// choices, no biometric), because refusing changes the outcome. The sentence is
+    /// [`profiles::copy::switching`](dig_app_core::profiles::copy::switching), the same one the
+    /// window's standing caution points at.
+    ///
+    /// Every branch that cannot proceed SAYS so. A silent no-op is the dead end #1800 removed.
+    fn switch_profile(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+        ix: u32,
+    ) {
+        use dig_app_core::account::ProfileIx;
+        use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
+        use dig_app_core::profiles::{copy, ProfilesReading, SwitchPlan};
+
+        let Some(profiles) = profiles_to_act_on(env, session) else {
+            notify(
+                confirmer,
+                copy::SWITCHING_TITLE,
+                "DIG could not find this computer's profile list.",
+                "Nothing was changed. The log folder has the detail.",
+            );
+            return;
+        };
+
+        // Re-read rather than trusting the click's payload against a stale picture: the PLAN decides
+        // what to say, and it is built from the registry as it is now.
+        let reading = ProfilesReading::of_session(&profiles);
+        let (from, to) = match SwitchPlan::of(&reading, ProfileIx(ix)) {
+            SwitchPlan::Disclose { from, to } => (from, to),
+            // Not an error and not worth a dialog: the person pressed the profile they are already
+            // on, and the list beside the row already says so.
+            SwitchPlan::AlreadyActive => return,
+            SwitchPlan::NotFound => {
+                notify(
+                    confirmer,
+                    copy::SWITCHING_TITLE,
+                    "That profile is no longer on this account's list.",
+                    "Nothing was changed. Close and reopen this window to see the current list.",
+                );
+                return;
+            }
+        };
+
+        let (from_name, to_name) = (from.display_name(), to.display_name());
+        match confirmer.confirm_claim(&ClaimPrompt {
+            title: copy::SWITCHING_TITLE,
+            heading: &format!("Switch to {to_name}?"),
+            body: &copy::switching(&from_name, &to_name),
+            affirm: copy::SWITCHING_AFFIRM,
+            decline: Some(copy::SWITCHING_DECLINE),
+            // Enter REFUSES. Affirming moves the address a person's money arrives at, and the safe
+            // direction on a claim is a property of what each answer DOES (`SPEC.md` §3.2).
+            refusal_is_default: true,
+            scannable: None,
+            identifier: None,
+        }) {
+            ConfirmDecision::Approve => {}
+            // Declined, closed or timed out: the dialog named the consequence and the person said
+            // no. Nothing is changed and nothing more is said, exactly as the channel switch does.
+            ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
+            ConfirmDecision::Unavailable => {
+                notify(
+                    confirmer,
+                    copy::SWITCHING_TITLE,
+                    "DIG could not ask you to confirm the switch.",
+                    "Nothing was changed. A profile switch changes your receive address and your                      signing key, so DIG will not do it without asking.",
+                );
+                return;
+            }
+        }
+
+        match profiles.switch_to(ProfileIx(ix)) {
+            // The value is deliberately dropped HERE and nowhere else. Every derivation seam
+            // re-reads the active index per operation (`ProfileSession`'s own contract), so there is
+            // no profile-scoped assembly left for this shell to rebuild — which is the property
+            // slice A built, and the reason a drop here is honest rather than the half-landed switch
+            // `#[must_use]` exists to prevent.
+            Ok(switched) => {
+                let _ = switched;
+                notify(
+                    confirmer,
+                    copy::SWITCHING_TITLE,
+                    &format!("DIG is now using {to_name}."),
+                    "Your receive address and signing key have changed with it. Switch back at any \
+                     time from the Account tab.",
+                );
+            }
+            Err(why) => notify(
+                confirmer,
+                copy::SWITCHING_TITLE,
+                "DIG did not switch profile.",
+                &format!("Nothing was changed and you are still using {from_name}.\n\n{why}"),
+            ),
+        }
+    }
+
+    /// Show a profile in this computer's lists, or stop showing it.
+    ///
+    /// No confirmation: this changes one computer's list and nothing else — not the chain, not the
+    /// keys, not the address. A dialog here would teach people to click through the one on the
+    /// switch, which does change all three.
+    fn set_profile_visibility(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+        ix: u32,
+        hidden: bool,
+    ) {
+        use dig_app_core::account::ProfileIx;
+        use dig_app_core::profiles::copy;
+
+        let title = "DIG - Profiles";
+        let Some(profiles) = profiles_to_act_on(env, session) else {
+            notify(
+                confirmer,
+                title,
+                "DIG could not find this computer's profile list.",
+                "Nothing was changed. The log folder has the detail.",
+            );
+            return;
+        };
+
+        if let Err(why) = profiles.set_visibility(ProfileIx(ix), hidden) {
+            notify(
+                confirmer,
+                title,
+                "DIG did not change which profiles are listed here.",
+                &format!("Nothing was changed.\n\n{why}\n\n{}", copy::HIDE_NOTE),
+            );
+        }
+    }
+
+    /// Explain what a profile is and why this version cannot create one.
+    ///
+    /// Both sentences come from `dig_app_core::profiles::copy`, which is also where the window's
+    /// card reads them — so the notice and the card cannot come to describe different builds.
+    fn explain_profiles(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+    ) {
+        use dig_app_core::profiles::{copy, ProfileCreation, ProfilesReading};
+
+        let creation = ProfileCreation::of(super::mint_seams().availability());
+        let held = match profiles_reading(env, session) {
+            ProfilesReading::Known(rows) if !rows.is_empty() => format!(
+                "This account holds {} profile(s), and the Account tab lists them.\n\n",
+                rows.len()
+            ),
+            // Says nothing about a count in every other state, because in every other state there is
+            // no count to say — including the one where the registry would not load.
+            _ => String::new(),
+        };
+
+        notify(
+            confirmer,
+            copy::ABOUT_TITLE,
+            copy::ABOUT_HEADING,
+            &format!(
+                "{}\n\n{held}{}\n\n{}",
+                copy::WHAT_A_PROFILE_IS,
+                copy::cannot_create(creation),
+                copy::HIDE_NOTE
+            ),
+        );
+    }
+
     fn change_cache_cap(status: &SharedStatus, confirmer: &dyn NativeConfirmer, bytes: u64) {
         use dig_app_core::cache::{self, CapChange};
         use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};

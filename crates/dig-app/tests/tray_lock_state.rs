@@ -79,6 +79,10 @@ fn view_for(state: AccountState) -> TrayView {
         node_facts: None,
         hosted_stores: dig_app_core::hosted_stores::HostedStoresReading::Known(Vec::new()),
         installed_apps: dig_app_core::apps::AppPresence::Known(Vec::new()),
+        // The profile rows are on the WINDOW's Account tab, not on the tray this suite exercises,
+        // so they are pinned to the state every real account is in.
+        profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
+        profile_creation: dig_app_core::profiles::ProfileCreation::NoChainTransport,
         profile_id: Some("a".repeat(96)),
         did: None,
         // This suite is about the LOCK state, so the second-factor axis is pinned off and covered by

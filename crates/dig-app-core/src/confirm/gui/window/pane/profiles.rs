@@ -59,8 +59,8 @@ pub(crate) fn card(
                 create_panel(inner, t, creation);
                 if !verbs.about.is_empty() {
                     inner.gap(space::S3);
-                    hit = hit.or(inner
-                        .place(|ui, at| action::buttons(ui, at, t, live, &verbs.about)));
+                    hit = hit
+                        .or(inner.place(|ui, at| action::buttons(ui, at, t, live, &verbs.about)));
                 }
                 hit
             });
@@ -145,7 +145,7 @@ fn profile_row(
     profile: &ProfileRow,
     verbs: &ProfileVerbs,
 ) -> Option<TrayAction> {
-    let name = display_name(profile);
+    let name = profile.display_name();
     let badges = badges_of(profile);
     let did = profile.did.clone();
     let element = did_element(profile);
@@ -213,15 +213,6 @@ fn badges_of(profile: &ProfileRow) -> Vec<(&'static str, Tone)> {
         badges.push((copy::profiles::HIDDEN_BADGE, Tone::Neutral));
     }
     badges
-}
-
-/// How a profile is titled on its row: the user's own name for it, or its ordinal.
-///
-/// The same rule [`crate::tray_menu`]'s row labels use, and deliberately the same function's
-/// output — a row headed *"work"* above a button reading *"Use “home” for this account…"* is two
-/// names for one thing on one line.
-fn display_name(profile: &ProfileRow) -> String {
-    crate::tray_menu::profile_display_name(profile)
 }
 
 /// The element id of a profile's DID copy control.
@@ -561,7 +552,10 @@ mod tests {
     #[test]
     fn the_switch_caution_is_drawn_where_a_switch_is_possible_and_nowhere_else() {
         let two = reading_of(
-            &[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), Some("work"))],
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
             &[],
         );
         let said = card_says(&view_with(two), 960.0);
@@ -742,7 +736,10 @@ mod tests {
     #[test]
     fn no_profile_copy_implies_a_profile_can_be_deleted() {
         let reading = reading_of(
-            &[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), Some("work"))],
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
             &[],
         );
         let view = view_with(reading);
@@ -770,10 +767,7 @@ mod tests {
     /// prevent one level up.
     #[test]
     fn each_profiles_did_control_has_its_own_element_id() {
-        let rows = reading_of(
-            &[(ProfileIx::ROOT, None), (ProfileIx(1), None)],
-            &[],
-        );
+        let rows = reading_of(&[(ProfileIx::ROOT, None), (ProfileIx(1), None)], &[]);
         let rows = rows.rows().expect("a read list").to_vec();
         assert_ne!(did_element(&rows[0]), did_element(&rows[1]));
         assert_eq!(did_element(&rows[0]), did_element(&rows[0].clone()));

@@ -17,8 +17,27 @@ pwsh tools/shoot-gallery.ps1
 | `<tab>-<theme>-<width>.png` | a tab at 960 (the shipping width) or 480 (`SHELL_MIN`, the narrowest the window can be dragged to), on an unlocked account |
 | `account-<state>.png` | the Account pane in one of the account states that is **not** the happy path |
 | `account-second-factor-on.png` | the Account pane with a second factor enrolled — the one control that appears and disappears with a setting rather than with the account's state |
+| `profiles-<fixture>-<width>.png` | the Account tab's profiles card with a list on it — see below |
 | `did-<screen>-<theme>.png` | one screen of the first-run DID wizard |
 | `<tab>-live-<width>.png` | the two node-backed cards filled from a **running local dig-node** rather than from the fixture — the Home tab's sharing card and the Content tab's hosted-store list |
+
+### What `profiles-` means, and why it is a fixture
+
+Every REAL account holds **zero** profiles, because nothing in this build can mint one — so the empty
+state is what a live machine shows, and it is already in every `account-*` capture above. The three
+`profiles-` fixtures are the states a list can only reach once minting exists: two profiles, one of
+them hidden from this computer's lists, and the state a completed switch leaves behind.
+
+They are **fixtures, and they do not show an end-to-end run.** The registries behind them are built
+through `ProfileRegistry::from_json`, which is the same loader production reads a real registry with,
+and dig-account re-checks all four of its invariants on the way in — so a fixture that gets past them
+is one the shipping loader would also accept, and the DIDs in the pictures are recomputed from their
+launcher ids rather than written by hand. What they prove is that the card renders these states
+correctly. What they do not prove is that a profile has ever been minted, because none has.
+
+They are shot to the pane's full height rather than the window's, for the same reason the live
+captures are: the card sits below two others, and a capture that cannot show the controls it is
+evidence for is not evidence.
 
 ### What `-live-` means, and what it costs
 

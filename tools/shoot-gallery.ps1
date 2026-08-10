@@ -49,6 +49,10 @@ $NARROW = 480
 $TALL = 900
 # The live captures alone are shot taller -- see the `-Live` block below for why.
 $LIVE_TALL = 1400
+# The profiles captures are shot to the pane's full height, at each width, so the card's controls and
+# its create explainer are both in frame -- see the profiles block below.
+$PROFILES_TALL = 2000
+$NARROW_PROFILES_TALL = 2400
 
 $shots = @()
 
@@ -79,6 +83,25 @@ foreach ($state in @('unsupported', 'absent', 'locked', 'unopenable', 'needs-pas
 $shots += @{
     file = 'account-second-factor-on.png'
     args = @('account', 'light', "$WIDE", "$TALL", 'unlocked', '--second-factor')
+}
+
+# The profiles card's three interesting states (dig_ecosystem#2403). Every REAL account holds no
+# profiles, so the empty state is already covered by every `account-*` shot above; these three are
+# the states a list can only be in once minting exists, built from registry fixtures that go through
+# `ProfileRegistry::from_json` -- the same loader production uses, with all four of dig-account's
+# invariants re-checked on the way in.
+#
+# Taller than $TALL for the same reason the live shots are: the card sits below two others, and a
+# capture that cannot show the controls it is evidence for is not evidence.
+foreach ($fixture in @('two', 'hidden', 'switched')) {
+    $shots += @{
+        file = "profiles-$fixture-$WIDE.png"
+        args = @('account', 'light', "$WIDE", "$PROFILES_TALL", 'unlocked', '--profiles', $fixture)
+    }
+    $shots += @{
+        file = "profiles-$fixture-$NARROW.png"
+        args = @('account', 'light', "$NARROW", "$NARROW_PROFILES_TALL", 'unlocked', '--profiles', $fixture)
+    }
 }
 
 # The two cards that read the node (dig_ecosystem#2397): the Home tab's sharing card and the Content

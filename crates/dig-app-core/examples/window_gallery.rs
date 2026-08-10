@@ -49,6 +49,7 @@ use dig_app_core::node_facts::NodeFacts;
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::wallet::overview::{BalanceReading, Balances};
 use dig_app_core::window_model::TabId;
+use dig_app_core::profiles::ProfilesReading;
 
 /// The tab named by `argument`, or `None` when it names nothing.
 fn tab(argument: &str) -> Option<TabId> {
@@ -83,6 +84,87 @@ fn account_state(argument: &str) -> Option<AccountState> {
     }
 }
 
+/// The profile fixture a capture is taken with (dig_ecosystem#2403).
+///
+/// # Why this is an ARGUMENT and not something the harness clicks its way into
+///
+/// Same rule as the account state and the tab: every axis that used to need synthetic input is a
+/// command-line argument here, because synthetic input takes the foreground off the window and
+/// photographs whatever was behind it.
+///
+/// # Why these captures are FIXTURES, and the honest statement of it
+///
+/// Every real account holds ZERO profiles, because nothing in this build can mint one. `None` below
+/// is therefore the only state a live machine can be photographed in, and it is the default. The
+/// other three are registries built through `ProfileRegistry::from_json` — which is not a loophole:
+/// it is the SAME path production loads a real registry through, and dig-account re-checks all four
+/// of its invariants on the way in, so a fixture that gets past them is one the production loader
+/// would also accept. A picture taken from one shows the card exactly as it will render the day a
+/// mint exists; it does not show an end-to-end run, and nothing here claims it does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profiles {
+    /// No profiles at all — production reality, and the empty state every real user reads.
+    None,
+    /// Two profiles, both shown, the first in use.
+    Two,
+    /// Two profiles with the SECOND hidden from this computer's lists.
+    Hidden,
+    /// The state AFTER a completed switch: the second profile is the one in use.
+    Switched,
+}
+
+impl Profiles {
+    /// The fixture named by `argument`, or `None` when it names nothing.
+    fn named(argument: &str) -> Option<Self> {
+        match argument {
+            "none" => Some(Self::None),
+            "two" => Some(Self::Two),
+            "hidden" => Some(Self::Hidden),
+            "switched" => Some(Self::Switched),
+            _ => None,
+        }
+    }
+
+    /// The reading this fixture produces, built through the real registry loader.
+    ///
+    /// The two profiles are LABELLED and the labels differ, so a capture shows which row is which —
+    /// an unlabelled pair would render as "profile 1" and "profile 2" and prove nothing about a card
+    /// that had swapped them.
+    fn reading(self) -> ProfilesReading {
+        use dig_account::registry::ProfileVisibility;
+        use dig_account::ProfileIx;
+        use dig_app_core::account::profile_session::test_support::registry_with;
+
+        if self == Self::None {
+            return ProfilesReading::Known(Vec::new());
+        }
+
+        let mut registry = registry_with(&[
+            (ProfileIx::ROOT, Some("Everyday")),
+            (ProfileIx(1), Some("Studio")),
+        ]);
+        match self {
+            Self::None => unreachable!("returned above"),
+            Self::Two => {}
+            // Hidden, not active — dig-account refuses to hide the profile in use, which is what
+            // makes "a hidden active profile shows an empty list while the wallet derives there"
+            // unrepresentable rather than merely guarded against.
+            Self::Hidden => registry
+                .set_visibility(ProfileIx(1), ProfileVisibility::HiddenFromLists)
+                .expect("a non-active profile can be hidden"),
+            // The state a completed switch leaves behind, produced by performing the switch on the
+            // registry rather than by hand-marking a row active — so the picture is of a switch that
+            // dig-account itself carried out.
+            Self::Switched => {
+                let _ = registry
+                    .set_active(ProfileIx(1))
+                    .expect("a confirmed profile can be made active");
+            }
+        }
+        ProfilesReading::of_registry(&registry)
+    }
+}
+
 /// The balance the gallery shows: 12.5 $DIG and 0.25 XCH, in each asset's own base unit.
 ///
 /// Written in base units rather than as decimals, because that is what the type holds and what the
@@ -99,7 +181,7 @@ const HELD: Balances = Balances {
 /// captures is the account and nothing else. A sealed account has no key to derive an address from,
 /// so it gets no address, no profile id and no balance — a gallery that showed them anyway would
 /// photograph figures the application cannot produce in that state.
-fn view_for(account: AccountState, second_factor: bool) -> TrayView {
+fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> TrayView {
     let sealed = !matches!(account, AccountState::Unlocked { .. });
     TrayView {
         running: true,
@@ -116,6 +198,7 @@ fn view_for(account: AccountState, second_factor: bool) -> TrayView {
             false => BalanceReading::Known(HELD),
         },
         second_factor,
+        profiles: profiles.reading(),
         window_host: WindowHost::Available,
         cache: Some(CacheSnapshot {
             cap_bytes: GIB,
@@ -309,6 +392,16 @@ fn main() {
     // it is the case the design brief singles out, and the one an invented disabled button would
     // have hidden.
     let second_factor = all.iter().any(|argument| argument == "--second-factor");
+    // `--profiles X` takes a value, so it is read from the FULL argument list by position after the
+    // flag rather than from the positionals — which the filter above has already had it removed
+    // from, along with its value.
+    let profiles = match all.iter().position(|argument| argument == "--profiles") {
+        None => Profiles::None,
+        Some(at) => match all.get(at + 1).and_then(|named| Profiles::named(named)) {
+            Some(fixture) => fixture,
+            None => refuse("--profiles needs one of: none two hidden switched"),
+        },
+    };
 
     // A live capture takes its readings ONCE, before the window opens, so every frame of the
     // capture shows the same instant — and so a node that is not there stops the run here, with no
@@ -322,7 +415,7 @@ fn main() {
     };
 
     let view = Arc::new(move || {
-        let fixture = view_for(account.clone(), second_factor);
+        let fixture = view_for(account.clone(), second_factor, profiles);
         match &live {
             None => fixture,
             Some(readings) => with_live(fixture, readings),
@@ -436,7 +529,11 @@ mod tests {
     /// starts overwriting cannot escape it, which a hand-written list of assertions could.
     #[test]
     fn live_readings_replace_the_node_fields_and_leave_the_rest_alone() {
-        let base = view_for(AccountState::Unlocked { recoverable: true }, false);
+        let base = view_for(
+            AccountState::Unlocked { recoverable: true },
+            false,
+            Profiles::None,
+        );
         let live = with_live(base.clone(), &readings());
 
         assert_eq!(live.node, readings().summary);
@@ -473,7 +570,11 @@ mod tests {
     /// a summary left untouched leaves the picture stating both.
     #[test]
     fn a_live_capture_does_not_state_the_store_count_twice_and_differently() {
-        let fixture = view_for(AccountState::Unlocked { recoverable: true }, false);
+        let fixture = view_for(
+            AccountState::Unlocked { recoverable: true },
+            false,
+            Profiles::None,
+        );
         assert!(
             fixture.node.contains("1 store(s) hosted"),
             "this test is only meaningful while the fixture states a DIFFERENT count from the \

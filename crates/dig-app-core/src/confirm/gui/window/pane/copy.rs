@@ -458,33 +458,13 @@ pub(crate) mod profiles {
         )
     }
 
-    /// Why a profile cannot be created on this build, one sentence per missing piece.
+    /// Why a profile cannot be created on this build — the ecosystem's one wording for it.
     ///
-    /// An EXHAUSTIVE match on [`ProfileCreation`], whose own constructor derives it from the mint
-    /// seam the start-up wizard reads — so this pane and that wizard cannot come to disagree about
-    /// whether a mint is possible.
-    ///
-    /// # The wording is #1820's, and "optional" is the word it settled against
-    ///
-    /// A profile is REQUIRED for publishing, signing and messaging, and creating one is *not
-    /// available in this version*. Calling it optional would tell a person they had chosen to go
-    /// without something they have simply not been offered.
+    /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
+    /// because the shell says the same thing in a native notice and two constants stating one fact
+    /// is how the account state machine came to have two sentence sets that drifted (#2357).
     pub(crate) fn cannot_create(creation: ProfileCreation) -> &'static str {
-        match creation {
-            ProfileCreation::NoChainTransport => {
-                "Creating a profile mints a DID and a store on the Chia blockchain, and this \
-                 version of DIG has no way to reach the chain to do it. It is required for \
-                 publishing, signing for an app and messaging, and it is not available in this \
-                 version. Nothing is missing from your setup and there is nothing for you to do — \
-                 when it arrives, this card will offer it."
-            }
-            ProfileCreation::NoProfileMinter => {
-                "This copy of DIG can reach the chain, and the step that mints a profile is not \
-                 built yet. It is required for publishing, signing for an app and messaging, and it \
-                 is not available in this version. Nothing is missing from your setup and there is \
-                 nothing for you to do — when it arrives, this card will offer it."
-            }
-        }
+        crate::profiles::copy::cannot_create(creation)
     }
 
     /// Said above the switch controls, BEFORE anything is pressed.
@@ -495,33 +475,17 @@ pub(crate) mod profiles {
     /// person scanning this card is choosing which profile to use, and the cost of that choice — a
     /// different receive address, a different signing key — belongs where they are choosing, not in
     /// a dialog that appears once they already have. The confirmation repeats it with the two
-    /// profiles named ([`switching`]); this is the standing statement.
+    /// profiles named ([`crate::profiles::copy::switching`]); this is the standing statement.
     pub(crate) const SWITCH_CAUTION: &str =
         "Switching profiles changes the address money arrives at and the key that signs for you. \
          Anything already sent to your current address stays where it is, and switching back \
          restores it.";
 
-    /// The confirmation body shown before a switch is applied, naming both ends.
-    ///
-    /// Both are named because the disclosure a person needs says which identity they are LEAVING as
-    /// well as which they are arriving at — the one they are leaving is the one holding the address
-    /// they have been handing out.
-    pub(crate) fn switching(from: &str, to: &str) -> String {
-        format!(
-            "DIG will stop using {from} and start using {to}.\n\n\
-             Your receive address and your signing key both change with it. Money already sent to \
-             {from}'s address stays there, and switching back to {from} brings that address back. \
-             Nothing is spent and nothing is deleted."
-        )
-    }
-
     /// Said beside the hide controls, so the word "hide" cannot be read as "delete".
     ///
-    /// The card's whole risk in one sentence. A profile is permanent on chain; this control changes
-    /// one computer's list.
-    pub(crate) const HIDE_NOTE: &str =
-        "Hiding a profile only takes it out of this computer's lists. It stays on the blockchain, \
-         keeps its address and its funds, and you can show it here again at any time.";
+    /// The ecosystem's one wording, shared verbatim with the shell's own notices: a profile is
+    /// permanent on chain, and this control changes one computer's list.
+    pub(crate) const HIDE_NOTE: &str = crate::profiles::copy::HIDE_NOTE;
 
     /// Said where the profile in use has no hide control, so its absence is not read as a fault.
     pub(crate) const ACTIVE_CANNOT_HIDE: &str =
@@ -825,7 +789,25 @@ mod tests {
             account::DESTRUCTIVE_CAVEAT,
             account::DIG_ID_UNKNOWN,
             apps::INSTALL_NOTE,
+            profiles::PENDING,
+            profiles::EMPTY,
+            profiles::SWITCH_CAUTION,
+            profiles::HIDE_NOTE,
+            profiles::ACTIVE_CANNOT_HIDE,
+            crate::profiles::copy::WHAT_A_PROFILE_IS,
+            crate::profiles::copy::ABOUT_HEADING,
         ];
+        // Both arms of the create explainer, enumerated rather than sampled: the two missing pieces
+        // get two sentences and a sweep that visits one of them is a sweep for one of them. The
+        // indentation guard below found a real defect in exactly these two the day they were
+        // written, which is why they are here rather than trusted.
+        all.extend(
+            [
+                crate::profiles::ProfileCreation::NoChainTransport,
+                crate::profiles::ProfileCreation::NoProfileMinter,
+            ]
+            .map(profiles::cannot_create),
+        );
         all.extend(TabId::all().into_iter().map(lead));
         all.extend(
             super::super::facts::AccountKind::ALL
@@ -850,6 +832,9 @@ mod tests {
         said.push(content::store_contents(0, "0 B"));
         said.push(content::store_contents(1, "12 MiB"));
         said.push(content::store_contents(4, "407 MiB"));
+        // The two profile sentences that are built rather than constant.
+        said.push(profiles::unreadable("the stored registry is not JSON"));
+        said.push(crate::profiles::copy::switching("“home”", "“work”"));
         said
     }
 

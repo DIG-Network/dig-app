@@ -44,7 +44,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use dig_account::registry::ProfileRegistry;
+use dig_account::registry::{ProfileRegistry, ProfileVisibility};
 use dig_account::{AccountError, ActiveSwitch, ProfileIx};
 
 use crate::account::active_profile::{ActiveSlot, MintTarget, WalletSlot};
@@ -376,6 +376,49 @@ impl ProfileSession {
         Ok(ProfileSwitched { switch, slot })
     }
 
+    /// Show `ix` in this host's lists, or stop showing it, and persist the change.
+    ///
+    /// # This is a view preference, and the type is what says so
+    ///
+    /// It returns `()`, not a [`ProfileSwitched`]: nothing derives differently afterwards. The
+    /// active profile, the receive address, the DEK and the identity key are all untouched, and the
+    /// profile itself — a DID singleton and a store on chain — is untouched too. That is the whole
+    /// difference between this and [`switch_to`](Self::switch_to), and it is why this one needs no
+    /// disclosure and no `#[must_use]`.
+    ///
+    /// # Errors
+    ///
+    /// [`ProfileError::Registry`] when `ix` names no confirmed profile, and — the one worth knowing
+    /// about — when `ix` is the ACTIVE profile and `hidden` is true: dig-account refuses that
+    /// (`AccountError::ActiveProfileCannotBeHidden`), which is what makes "a hidden active profile
+    /// shows an empty list while the wallet derives there" unrepresentable rather than merely
+    /// guarded against. [`ProfileError::Io`] / [`ProfileError::Corrupt`] when the change cannot be
+    /// persisted, in which case **the previous visibility is restored in memory** — a preference
+    /// that only half-persisted would come back on the next start with nothing said.
+    pub fn set_visibility(&self, ix: ProfileIx, hidden: bool) -> Result<(), ProfileError> {
+        let visibility = match hidden {
+            true => ProfileVisibility::HiddenFromLists,
+            false => ProfileVisibility::Shown,
+        };
+
+        let mut guard = self.write_guard();
+        let previous = guard.clone();
+        if let Err(why) = guard.set_visibility(ix, visibility) {
+            return Err(ProfileError::Registry(why));
+        }
+
+        match self.store.write(&guard).and_then(|()| self.store.read()) {
+            Ok(persisted) => {
+                *guard = persisted;
+                Ok(())
+            }
+            Err(why) => {
+                *guard = previous;
+                Err(why)
+            }
+        }
+    }
+
     fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, ProfileRegistry> {
         // A poisoned lock means a thread panicked mid-mutation of custody-adjacent state. Fail
         // loudly rather than derive keys from a half-updated registry.
@@ -637,6 +680,142 @@ mod tests {
         .unwrap();
 
         assert!(matches!(store.read(), Err(ProfileError::Corrupt(_))));
+    }
+
+    /// **Hiding a profile persists, survives a reload, and changes nothing about derivation.**
+    ///
+    /// Two properties in one, because a `set_visibility` that quietly moved the active profile would
+    /// satisfy a persistence-only test. The reload is what makes the first half load-bearing: an
+    /// in-memory-only change would put the profile back in the list at the next start, with nothing
+    /// said to the person who hid it.
+    #[test]
+    fn hiding_a_profile_persists_and_leaves_the_wallet_deriving_where_it_was() {
+        let store = Arc::new(MemoryRegistryStore::seeded(registry_json(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
+            ProfileIx::ROOT,
+        )));
+        let session = ProfileSession::load(store.clone()).unwrap();
+
+        session.set_visibility(ProfileIx(1), true).unwrap();
+
+        assert_eq!(
+            ProfileIx::ROOT,
+            session.active_ix(),
+            "hiding a profile moved the index the wallet derives at"
+        );
+        let hidden = |session: &ProfileSession| {
+            session.with_registry(|r| !r.get(ProfileIx(1)).expect("the entry").is_shown())
+        };
+        assert!(hidden(&session), "the profile was not hidden in memory");
+        assert!(
+            hidden(&ProfileSession::load(store.clone()).unwrap()),
+            "a hidden profile came back on the next start, so the preference did not persist"
+        );
+
+        // And back again: hiding must be undoable, because a minted profile is permanent on chain
+        // and a one-way hide would be the closest thing to deleting one this app could do.
+        session.set_visibility(ProfileIx(1), false).unwrap();
+        assert!(!hidden(&session));
+        assert!(!hidden(&ProfileSession::load(store).unwrap()));
+    }
+
+    /// **The ACTIVE profile cannot be hidden, and the refusal changes nothing.**
+    ///
+    /// dig-account's own invariant, asserted here because this is the seam a surface calls: the trap
+    /// it closes is a hidden active profile, which would show an empty list while the wallet went on
+    /// deriving at it. The control is the non-active profile, which hides fine on the same fixture —
+    /// without it, a `set_visibility` that refused everything would pass.
+    #[test]
+    fn the_active_profile_cannot_be_hidden_and_the_refusal_leaves_it_shown() {
+        let session = session_with(&[(ProfileIx::ROOT, None), (ProfileIx(1), None)]);
+
+        let refusal = session.set_visibility(ProfileIx::ROOT, true).unwrap_err();
+
+        assert!(
+            matches!(refusal, ProfileError::Registry(_)),
+            "expected a registry refusal, got {refusal:?}"
+        );
+        assert!(
+            session.with_registry(|r| r.get(ProfileIx::ROOT).expect("the entry").is_shown()),
+            "the active profile was hidden anyway, so a list could show nothing while the wallet              derives there"
+        );
+        session
+            .set_visibility(ProfileIx(1), true)
+            .expect("a non-active profile hides, so the refusal above is about being active");
+    }
+
+    /// **Making a HIDDEN profile active un-hides it.**
+    ///
+    /// The other half of the trap, and it belongs to dig-account rather than to this type — pinned
+    /// here because this session is what a surface calls, and a surface that had to defend against
+    /// the trap itself would be re-implementing an invariant it cannot see.
+    #[test]
+    fn switching_to_a_hidden_profile_brings_it_back_into_the_list() {
+        let session = session_with(&[(ProfileIx::ROOT, None), (ProfileIx(1), None)]);
+        session.set_visibility(ProfileIx(1), true).unwrap();
+
+        let _ = session.switch_to(ProfileIx(1)).unwrap();
+
+        assert!(
+            session.with_registry(|r| r.get(ProfileIx(1)).expect("the entry").is_shown()),
+            "the profile now in use is hidden from the list that manages it"
+        );
+    }
+
+    /// **A visibility change that cannot be persisted is rolled back.**
+    ///
+    /// The same property `a_switch_that_cannot_be_persisted_is_rolled_back` pins for a switch, and
+    /// for the same reason: a preference that took effect in memory and not on disk would come back
+    /// at the next start, having silently un-hidden a profile the person hid.
+    #[test]
+    fn a_visibility_change_that_cannot_be_persisted_is_rolled_back() {
+        struct RefusesToWrite(String);
+        impl RegistryStore for RefusesToWrite {
+            fn read(&self) -> Result<ProfileRegistry, ProfileError> {
+                ProfileRegistry::from_json(&self.0)
+                    .map_err(|why| ProfileError::Corrupt(why.to_string()))
+            }
+            fn write(&self, _registry: &ProfileRegistry) -> Result<(), ProfileError> {
+                Err(ProfileError::Io {
+                    action: "written",
+                    source: std::io::Error::other("the disk is full"),
+                })
+            }
+        }
+
+        let session = ProfileSession::load(Arc::new(RefusesToWrite(registry_json(
+            &[(ProfileIx::ROOT, None), (ProfileIx(1), None)],
+            ProfileIx::ROOT,
+        ))))
+        .unwrap();
+
+        let refusal = session.set_visibility(ProfileIx(1), true).unwrap_err();
+
+        assert!(matches!(refusal, ProfileError::Io { .. }), "{refusal:?}");
+        assert!(
+            session.with_registry(|r| r.get(ProfileIx(1)).expect("the entry").is_shown()),
+            "a hide that could not be written took effect in memory anyway"
+        );
+    }
+
+    /// A session that failed to LOAD says so, and one that loaded says nothing.
+    ///
+    /// Both sides, because a `unreadable_reason` that always answered `Some` would make every
+    /// account's profile list read as unreadable — which is the opposite lie.
+    #[test]
+    fn only_a_session_that_failed_to_load_reports_a_reason() {
+        assert_eq!(None, ProfileSession::unprofiled().unreadable_reason());
+        assert_eq!(
+            None,
+            session_with(&[(ProfileIx::ROOT, None)]).unreadable_reason()
+        );
+        assert_eq!(
+            Some("the file is not JSON"),
+            ProfileSession::unreadable("the file is not JSON").unreadable_reason()
+        );
     }
 
     /// The switch value cannot be silently dropped: `#[must_use]` is the mechanism that forces the

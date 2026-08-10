@@ -1493,28 +1493,26 @@ pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
         .rows()
         .unwrap_or_default()
         .iter()
-        .flat_map(|profile| {
-            match profile.active {
-                true => Vec::new(),
-                false => vec![
-                    MenuRow::action(
-                        TrayAction::SetActiveProfile { ix: profile.ix.0 },
-                        format!("Use {} for this account…", profile_display_name(profile)),
-                        true,
-                    ),
-                    MenuRow::action(
-                        TrayAction::SetProfileVisibility {
-                            ix: profile.ix.0,
-                            hidden: !profile.hidden,
-                        },
-                        match profile.hidden {
-                            true => format!("Show {} in this list", profile_display_name(profile)),
-                            false => format!("Hide {} from this list", profile_display_name(profile)),
-                        },
-                        true,
-                    ),
-                ],
-            }
+        .flat_map(|profile| match profile.active {
+            true => Vec::new(),
+            false => vec![
+                MenuRow::action(
+                    TrayAction::SetActiveProfile { ix: profile.ix.0 },
+                    format!("Use {} for this account…", profile.display_name()),
+                    true,
+                ),
+                MenuRow::action(
+                    TrayAction::SetProfileVisibility {
+                        ix: profile.ix.0,
+                        hidden: !profile.hidden,
+                    },
+                    match profile.hidden {
+                        true => format!("Show {} in this list", profile.display_name()),
+                        false => format!("Hide {} from this list", profile.display_name()),
+                    },
+                    true,
+                ),
+            ],
         })
         .collect();
     if !rows.is_empty() {
@@ -1531,21 +1529,6 @@ pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
 /// The explainer row's label. Names the concept a person is about to read about, and — per rule 3 —
 /// promises an explanation rather than an act.
 pub const PROFILES_LABEL: &str = "About DIG profiles…";
-
-/// How a profile is named in a row LABEL: the user's own name for it, or its index.
-///
-/// Never the DID. A `did:chia:…` string is 60-odd characters and would make every row on this list
-/// unreadable at the width the window actually opens at; the DID is drawn in the list itself, in the
-/// identifier face, beside a copy control — which is where a value nobody transcribes belongs.
-pub(crate) fn profile_display_name(profile: &crate::profiles::ProfileRow) -> String {
-    match profile.label.as_deref() {
-        Some(label) => format!("“{label}”"),
-        // Not "profile 0": the index is an implementation detail a person has never been shown, and
-        // an unlabelled profile is ordinary — the mint does not ask for a name. Ordinal counting
-        // from one is what a list of unlabelled things reads as.
-        None => format!("profile {}", profile.ix.0.saturating_add(1)),
-    }
-}
 
 /// **Wallet** — what the account can do with money, which today is receive and understand.
 ///
