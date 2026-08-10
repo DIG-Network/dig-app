@@ -82,6 +82,12 @@ pub enum AddressObservation {
     /// The residency was unlocked at the moment of observation, and address derivation itself failed —
     /// a genuine defect: unlocking is NOT the way back, because unlocking is not what is missing.
     DerivationFailed,
+    /// The residency was unlocked, but this unlock's wallet derives at a different profile than the
+    /// one now active, so it can only answer for the profile the user just left
+    /// (dig_ecosystem#2496). No address is reported, because the only one available belongs to
+    /// somebody else's name — see
+    /// [`wallet_agrees_with_the_active_profile`](AccountResidency::wallet_agrees_with_the_active_profile).
+    WalletBehindActiveProfile,
 }
 
 impl AccountResidency {
@@ -294,8 +300,20 @@ impl AccountResidency {
     /// account. This method closes that gap by taking the lock exactly once, so
     /// [`AddressObservation::DerivationFailed`] can only ever mean a genuine defect.
     pub fn observe_receiving_address(&self) -> AddressObservation {
+        // The SAME refusal every other money accessor applies, and it comes FIRST for two reasons: the
+        // registry lock is always taken before the account mutex and never inside it
+        // (`ProfileSession`'s lock ordering), and this is the accessor the tray reads — without it a
+        // switch leaves the previous profile's `xch1…` on screen under the new profile's name, and
+        // `Copy my receive address` hands it out.
+        //
+        // It does not weaken the single-observation property (dig_ecosystem#2059): the disagreement is
+        // between the live active index and a slot fixed at unlock, so it cannot be created or healed
+        // by a lock landing between the two reads. Unlock-state and the address still come from ONE
+        // acquisition below.
+        let wallet_is_behind = self.wallet_agrees_with_the_active_profile().is_err();
         match self.guard().as_ref() {
             None => AddressObservation::Locked,
+            Some(_) if wallet_is_behind => AddressObservation::WalletBehindActiveProfile,
             Some(acct) => match acct.wallet_ops().address() {
                 Ok(address) => AddressObservation::Derived(address),
                 Err(e) => {

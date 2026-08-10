@@ -405,6 +405,81 @@ fn the_wallet_refuses_to_answer_for_a_profile_it_was_not_opened_at() {
     );
 }
 
+/// **The ONE address accessor the tray reads refuses too, and says WHY.**
+///
+/// `observe_receiving_address` is the accessor `TrayView.receive_address` is filled from, and it was
+/// the only one of the four money accessors with no agreement check. Its three siblings all had one,
+/// so a test that asserted "some accessor refuses" would have passed on the broken version — this
+/// names the accessor, and distinguishes the refusal from an ordinary lock, which is the outcome a
+/// wrong fix would produce.
+///
+/// The control is the pre-switch read: a residency that never derived an address would satisfy the
+/// refusal identically.
+#[test]
+fn the_tray_address_accessor_reports_the_wallet_is_behind_rather_than_the_old_address() {
+    use dig_app_core::account::residency::AddressObservation;
+
+    let (residency, session) = two_profile_account();
+
+    let AddressObservation::Derived(before) = residency.observe_receiving_address() else {
+        panic!("control: an unlocked residency on its own profile must derive an address");
+    };
+    assert!(before.starts_with("xch1"), "{before}");
+
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
+
+    let after = residency.observe_receiving_address();
+    assert_ne!(
+        AddressObservation::Derived(before),
+        after,
+        "the tray would have shown the PREVIOUS profile's address under the new profile's name, and          `Copy my receive address` would have handed it out"
+    );
+    assert_eq!(
+        AddressObservation::WalletBehindActiveProfile,
+        after,
+        "and it must say the wallet is behind, not report an ordinary lock — a person told to          unlock an account that is already unlocked is told to do nothing"
+    );
+}
+
+/// **What the user is TOLD about a switch matches what the code then does.**
+///
+/// The disclosure and the success notice both used to state that the receive address changes. It
+/// does not: `wallet_ops_at` does not exist (dig_ecosystem#2496), so after a switch the wallet can
+/// only answer for the profile just left and every accessor refuses — including the one the test
+/// above pins. Promising a new address sends somebody looking for one that is not there, and invites
+/// them to keep handing out the old one believing it belongs to the profile they are now on.
+///
+/// This asserts the two halves TOGETHER — the sentence and the behaviour — because either alone is
+/// satisfiable by a lie: copy can promise anything, and a refusal proves nothing about what the user
+/// was told.
+#[test]
+fn the_switch_disclosure_does_not_promise_an_address_that_will_not_move() {
+    use dig_app_core::account::residency::AddressObservation;
+    use dig_app_core::profiles::copy;
+
+    let disclosure = copy::switching("home", "work");
+    assert!(
+        disclosure.contains("does NOT change yet"),
+        "the disclosure must say the address does not move yet: {disclosure}"
+    );
+    assert!(
+        disclosure.contains("signing key changes with it"),
+        "and it must still disclose what DOES change: {disclosure}"
+    );
+
+    let (residency, session) = two_profile_account();
+    let _switched = session
+        .switch_to(SECOND)
+        .expect("the second profile is confirmed");
+    assert_eq!(
+        AddressObservation::WalletBehindActiveProfile,
+        residency.observe_receiving_address(),
+        "the disclosure and the behaviour must describe the same app: if the wallet DOES follow a          switch, this sentence is the one that is now wrong"
+    );
+}
+
 /// **The slot itself, read live, is what moved** — the floor the other three tests stand on.
 #[test]
 fn the_live_slot_reports_the_profile_switched_to() {

@@ -21,11 +21,13 @@
 //! # Why it is a registry and not a preference
 //!
 //! The registry is what the CHAIN confirmed, so a switch is not a display setting: it changes the
-//! receive address, the per-profile DEK, and the identity signing key
-//! (`dig_account::ActiveSwitch`). [`ProfileSwitched`] is `#[must_use]` for the same reason
-//! dig-account's own switch value is — its only consumer rebuilds the profile-scoped assembly (the
-//! profile directory, the sealed stores, the sign-service router, the money path), because those are
-//! wired once at boot and cannot re-read anything.
+//! per-profile DEK and the identity signing key at once, and moves where money will arrive as soon
+//! as the wallet can follow (`dig_account::ActiveSwitch`). [`ProfileSwitched`] is `#[must_use]` for
+//! the same reason dig-account's own switch value is — but the obligation it carries is
+//! **disclosure**, not a rebuild. Nothing is rebuilt on a switch because nothing holds a copy to
+//! rebuild: every profile-scoped seam re-reads the active index per operation (the rule above), and
+//! the sign-service router lives on a serving thread no switching code can reach, so a rebuild
+//! contract would be one no consumer could satisfy.
 //!
 //! # Persistence
 //!
@@ -198,16 +200,19 @@ impl MemoryRegistryStore {
     }
 }
 
-/// What a completed switch changed, and what the app must now rebuild.
+/// What a completed switch changed, and what the app must now DISCLOSE.
 ///
-/// `#[must_use]` because the seams listed in the module docs are wired ONCE and cannot re-read
-/// anything: the profile directory, the sealed stores under it, the sign-service router and the money
-/// path all have to be torn down and rebuilt around the new slot. Dropping this value silently is
-/// exactly the half-landed switch this ticket exists to make impossible, so a caller that means to
-/// drop it has to say so in code.
+/// `#[must_use]` because a switch changes who the person is to every dapp they are connected to, and
+/// changes where their money will arrive as soon as their wallet can follow. That is a fact they have
+/// to be told, so a caller that means to say nothing has to say so in code.
+///
+/// It is deliberately NOT a rebuild obligation. Every profile-scoped seam re-reads the active index
+/// per operation ([module docs](self)), so there is no captured assembly left to tear down — and the
+/// one that could not have been reached to rebuild anyway is the sign-service router, which lives on
+/// a serving thread for the process lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use = "a switch changes the receive address, the DEK and the identity key — the profile-scoped \
-              assembly MUST be rebuilt and the change disclosed to the user"]
+#[must_use = "a switch changes the identity key, the at-rest DEK, and where money will arrive — the \
+              change MUST be disclosed to the user"]
 pub struct ProfileSwitched {
     /// Which index the app moved from and to, as dig-account reported it.
     switch: ActiveSwitch,
@@ -338,6 +343,47 @@ impl ProfileSession {
     /// back from the registry **after** the mutation (never assembled from `ix`, which would report
     /// the request rather than the result); the registry is persisted and re-read, so the returned
     /// value is evidence rather than an assumption.
+    ///
+    /// # The switch cannot be dropped in silence
+    ///
+    /// [`ProfileSwitched`] is `#[must_use]`, so a caller that discards one is refused under
+    /// `deny(unused_must_use)` — which is what makes the disclosure obligation a compiler rule
+    /// rather than a convention. This example exists to FAIL to compile; deleting the attribute
+    /// makes it compile and the doctest goes red.
+    ///
+    /// The `Result` is unwrapped FIRST, deliberately. Writing `session.switch_to(..);` would fail to
+    /// compile whatever this type is annotated with, because `Result` carries its own `#[must_use]` —
+    /// so it would pin nothing here while looking exactly like a guard that did. What is discarded
+    /// below is a bare [`ProfileSwitched`].
+    ///
+    /// ```compile_fail
+    /// #![deny(unused_must_use)]
+    /// use dig_app_core::account::profile_session::ProfileSession;
+    /// use dig_app_core::account::ProfileIx;
+    ///
+    /// let session = ProfileSession::unprofiled();
+    /// match session.switch_to(ProfileIx::ROOT) {
+    ///     Ok(switched) => switched,
+    ///     Err(why) => panic!("{why}"),
+    /// };
+    /// ```
+    ///
+    /// Saying so in code is still allowed, and is the control for the case above: the two differ by
+    /// the `let _ =` alone, so the refusal cannot be blamed on anything else in the snippet. Neither
+    /// is RUN — an unprofiled session has no confirmed profile to switch to, and what is under test
+    /// here is what the compiler accepts, not what the switch returns.
+    ///
+    /// ```no_run
+    /// #![deny(unused_must_use)]
+    /// use dig_app_core::account::profile_session::ProfileSession;
+    /// use dig_app_core::account::ProfileIx;
+    ///
+    /// let session = ProfileSession::unprofiled();
+    /// let _ = match session.switch_to(ProfileIx::ROOT) {
+    ///     Ok(switched) => switched,
+    ///     Err(why) => panic!("{why}"),
+    /// };
+    /// ```
     ///
     /// # Errors
     ///
@@ -818,9 +864,14 @@ mod tests {
         );
     }
 
-    /// The switch value cannot be silently dropped: `#[must_use]` is the mechanism that forces the
-    /// caller to rebuild the profile-scoped assembly. Pinned here so removing the attribute fails a
-    /// test rather than passing review.
+    /// The switch value carries the slot it LANDED on, read back from the registry rather than
+    /// assembled from the request — so a caller disclosing the change names the profile actually in
+    /// force, not the one that was asked for.
+    ///
+    /// The `#[must_use]` attribute itself is pinned by the `compile_fail` doctest on
+    /// [`ProfileSession::switch_to`], not by this test. A runtime test cannot observe an attribute,
+    /// and this doc used to claim it could — a guard that does not exist reads exactly like one that
+    /// does.
     #[test]
     fn the_switch_value_carries_the_slot_it_landed_on() {
         let session = session_with(&[(ProfileIx::ROOT, None), (ProfileIx(1), Some("work"))]);

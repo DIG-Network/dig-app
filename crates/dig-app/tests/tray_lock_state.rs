@@ -70,7 +70,7 @@ fn view_for(state: AccountState) -> TrayView {
         // axis this suite is about, and what makes the Wallet row's copy/(unlock first) flip observable.
         receive_address: matches!(state, AccountState::Unlocked { .. })
             .then(|| "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()),
-        address_derivation_failed: false,
+        address_fault: None,
         // Not yet polled. This suite is about the LOCK axis, so the balance is held constant.
         balance: dig_app_core::wallet::overview::BalanceReading::default(),
         account: Some(state),

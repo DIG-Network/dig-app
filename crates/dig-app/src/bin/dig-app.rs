@@ -1389,21 +1389,28 @@ mod tray {
         use dig_app_core::account::residency::AddressObservation;
         use dig_app_core::engine::EngineState;
         use dig_app_core::node_facts::NodeFacts;
+        use dig_app_core::tray_menu::AddressFault;
 
         let account = account_state(env, session, attempt);
         // ONE observation of the residency, not two separate calls — so "unlocked" and "no address"
         // always describe the SAME instant (dig_ecosystem#2059). Reading `receiving_address()` on its
         // own let an idle relock or `Lock now` land between the account-state read above and this one,
         // making an ordinary lock indistinguishable from a genuine derivation defect.
-        let (receive_address, address_derivation_failed) = match session
+        let (receive_address, address_fault) = match session
             .map(|s| s.residency.observe_receiving_address())
         {
-            Some(AddressObservation::Derived(address)) => (Some(address), false),
+            Some(AddressObservation::Derived(address)) => (Some(address), None),
             Some(AddressObservation::DerivationFailed) => {
                 tracing::warn!("the account's receive address could not be derived while unlocked");
-                (None, true)
+                (None, Some(AddressFault::DerivationFailed))
             }
-            Some(AddressObservation::Locked) | None => (None, false),
+            // The wallet is pinned behind the profile now active (dig_ecosystem#2496), so the
+            // only address it could derive belongs to the profile the user just left. No address
+            // is shown and none is copyable — the alternative is the money lie.
+            Some(AddressObservation::WalletBehindActiveProfile) => {
+                (None, Some(AddressFault::WalletBehindActiveProfile))
+            }
+            Some(AddressObservation::Locked) | None => (None, None),
         };
         let (running, node, node_connected) = match status.read() {
             Ok(status) => (
@@ -1435,7 +1442,7 @@ mod tray {
             // field's docs for why the wallet window must be told which of the two `None` reasons this
             // is.
             receive_address: receive_address.clone(),
-            address_derivation_failed,
+            address_fault,
             // The account's money, as the node last reported it (dig_ecosystem#2206). The poller
             // owns the cadence — this repaint runs twice a second and a balance is a rate-limited
             // chain read — and every decision about what the reading MEANS lives in

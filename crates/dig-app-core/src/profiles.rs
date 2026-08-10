@@ -127,6 +127,18 @@ impl Default for ProfilesReading {
 }
 
 impl ProfilesReading {
+    /// Whether the registry itself could not be READ — distinct from every other reason a list is
+    /// missing, because it is the only one that silently moves where money arrives.
+    ///
+    /// A host that cannot read its registry boots unprofiled and therefore derives at
+    /// [`ProfileIx::ROOT`](dig_account::ProfileIx::ROOT). Everything downstream then agrees with
+    /// itself — the wallet and the active profile are both ROOT, so no accessor refuses — while the
+    /// address on screen is a different one from the profile the person was actually using. The
+    /// Wallet surface reads this to say so.
+    pub fn is_unreadable(&self) -> bool {
+        matches!(self, Self::Unknown(ProfilesUnknown::Unreadable(_)))
+    }
+
     /// Read the list out of the app's live [`ProfileSession`].
     ///
     /// A session that failed to LOAD reports [`ProfilesUnknown::Unreadable`] rather than the empty
@@ -279,10 +291,16 @@ impl ProfileCreation {
 
 /// What making `ix` active would do — decided before anything is applied.
 ///
-/// A switch changes the receive address, the per-profile DEK and the identity signing key, because
-/// every one of those derives at the profile's HD index. That is a consequence a person has to be
-/// told about **before** it happens: told afterwards, the first they know of it is money arriving
-/// at an address they were not shown.
+/// A switch changes the per-profile DEK and the identity signing key at once, because both derive at
+/// the profile's HD index. The receive address is the one that does NOT move with them: dig-account
+/// 0.8 fixes an unlock's wallet index at open time (dig_ecosystem#2496), so the wallet stays on the
+/// profile it was opened at until the account is re-opened, and DIG shows no address at all in the
+/// meantime rather than the previous profile's.
+///
+/// All of that is a consequence a person has to be told about **before** it happens, and told
+/// accurately: a disclosure promising the address changes sends somebody looking for a new one that
+/// is not there, and invites them to keep handing out the old one believing it belongs to the
+/// profile they are now on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwitchPlan {
     /// `ix` is already the active profile, so there is nothing to change and nothing to disclose.
@@ -395,9 +413,10 @@ pub mod copy {
     pub fn switching(from: &str, to: &str) -> String {
         format!(
             "DIG will stop using {from} and start using {to}.\n\n\
-             Your receive address and your signing key both change with it. Money already sent to \
-             {from}'s address stays there, and switching back to {from} brings that address back. \
-             Nothing is spent and nothing is deleted."
+             Your signing key changes with it. Your receive address does NOT change yet: your \
+             wallet stays on {from} until you close DIG and open it again, so until then DIG shows \
+             no receive address rather than {from}'s. Money already sent to {from}'s address stays \
+             there. Nothing is spent and nothing is deleted."
         )
     }
 

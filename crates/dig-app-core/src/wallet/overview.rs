@@ -69,6 +69,12 @@ pub enum AddressUnavailable {
     /// The account is unlocked but the address could not be encoded — a genuine defect, surfaced
     /// rather than swallowed, because the alternative is showing something wrong.
     DerivationFailed,
+    /// The account is unlocked, but its wallet was opened at a different profile than the one now
+    /// active, so the only address it can derive belongs to the profile the user just left
+    /// (dig_ecosystem#2496). NOT [`Locked`](Self::Locked) and NOT
+    /// [`DerivationFailed`](Self::DerivationFailed): nothing is broken and unlocking is not the
+    /// remedy — re-opening the account is.
+    WalletBehindActiveProfile,
 }
 
 impl AddressReading {
@@ -178,6 +184,16 @@ pub struct WalletOverview {
     pub address: AddressReading,
     /// The balance, or why it is unknown.
     pub balance: BalanceReading,
+    /// Whether this host could not READ its profile registry, in which case the address above is the
+    /// account's root address rather than the active profile's (dig_ecosystem#2398).
+    ///
+    /// An unreadable registry boots the app unprofiled, and unprofiled derives at
+    /// [`ProfileIx::ROOT`](dig_account::ProfileIx::ROOT). Everything is then internally consistent —
+    /// the wallet and the active profile agree, so no money accessor refuses — and the address on
+    /// screen is nonetheless a DIFFERENT address from the one a person on profile 3 was handing out.
+    /// That is the silent address move this whole area exists to prevent, so it is stated rather
+    /// than left to be inferred from the profile list.
+    pub profiles_unreadable: bool,
 }
 
 impl WalletOverview {
@@ -195,7 +211,13 @@ impl WalletOverview {
                 read_balances(address, *engine)
             }
         };
-        Self { address, balance }
+        // `read` is the direct-address path (the shell has an address in hand and wants a balance),
+        // which never consults a registry. The caveat belongs to `of_tray`, which does.
+        Self {
+            address,
+            balance,
+            profiles_unreadable: false,
+        }
     }
 
     /// The overview the tray's Wallet window renders, derived from the snapshot the menu was built from.
@@ -204,7 +226,7 @@ impl WalletOverview {
     /// mapping is exactly where an unknown could quietly become a zero: it decides which reason the
     /// window states.
     pub fn of_tray(view: &crate::tray_menu::TrayView) -> Self {
-        use crate::tray_menu::AccountState;
+        use crate::tray_menu::{AccountState, AddressFault};
 
         // One arm per account state, because each has a different way forward and the surface states it
         // verbatim. The three that used to fall through to `Locked` were each told to unlock: a host that
@@ -228,8 +250,18 @@ impl WalletOverview {
             // Unlocked at the moment of observation, yet the derivation itself failed: unlocking is NOT
             // the way back, because unlocking is not what is missing (dig_ecosystem#2059). Checked
             // before the plain `Locked` arm below so this — the narrower, rarer case — wins.
-            (None, Some(AccountState::Unlocked { .. })) if view.address_derivation_failed => {
+            (None, Some(AccountState::Unlocked { .. }))
+                if view.address_fault == Some(AddressFault::DerivationFailed) =>
+            {
                 AddressReading::Unavailable(AddressUnavailable::DerivationFailed)
+            }
+            // Unlocked, and the wallet is pinned behind the profile now active. Checked beside the
+            // arm above and before the plain `Locked` one, for the same reason: unlocking is a remedy
+            // that cannot work here, and the address that DOES exist is the wrong profile's.
+            (None, Some(AccountState::Unlocked { .. }))
+                if view.address_fault == Some(AddressFault::WalletBehindActiveProfile) =>
+            {
+                AddressReading::Unavailable(AddressUnavailable::WalletBehindActiveProfile)
             }
             // Locked, or unlocked-but-address-not-yet-derived for an ordinary reason (e.g. the shell
             // simply hasn't read it this repaint): the key material is sealed and unlocking is genuinely
@@ -250,7 +282,11 @@ impl WalletOverview {
             }
             AddressReading::Known(_) => view.balance.clone(),
         };
-        Self { address, balance }
+        Self {
+            address,
+            balance,
+            profiles_unreadable: view.profiles.is_unreadable(),
+        }
     }
 }
 
@@ -258,13 +294,31 @@ impl WalletOverview {
 /// do.
 pub fn window_body(overview: &WalletOverview) -> String {
     format!(
-        "{}\n\n{}\n\nSending is not available yet — DIG will not offer a button that moves money until \
+        "{}{}\n\n{}\n\nSending is not available yet — DIG will not offer a button that moves money until \
          the path behind it is finished. Receiving works now: anything sent to the address above \
          arrives in this account, and your recovery phrase restores it.\n\n\
          Reading DIG content never needs an account or a wallet.",
         address_line(&overview.address),
+        unreadable_registry_caveat(overview.profiles_unreadable),
         balance_line(&overview.balance),
     )
+}
+
+/// The sentence appended to the address line when this host could not READ its profile registry.
+///
+/// A caveat on an address that derived perfectly well, not a fault instead of one: the app is running
+/// at the account root, so nothing refuses and nothing looks wrong — which is exactly why somebody
+/// who was using another profile has to be told, rather than left to notice that their address
+/// changed.
+fn unreadable_registry_caveat(unreadable: bool) -> &'static str {
+    match unreadable {
+        false => "",
+        true => {
+            "\n\nDIG could not read your list of profiles on this computer, so it is using your \
+             account's main address. If you were using a different profile, this is NOT that \
+             profile's address — the Account tab explains what could not be read."
+        }
+    }
 }
 
 /// Read both assets for `address`. A failure in EITHER makes the whole reading unknown — a window
@@ -345,6 +399,12 @@ pub fn address_line(address: &AddressReading) -> String {
              please report it from the tray's log folder rather than using any address shown elsewhere."
                 .to_string()
         }
+        AddressReading::Unavailable(AddressUnavailable::WalletBehindActiveProfile) => {
+            "Your address is not shown because your wallet is still on the profile you switched \
+             away from, and DIG will not show you an address belonging to a different profile. \
+             Close DIG and open it again to move your wallet to the profile you are now using."
+                .to_string()
+        }
     }
 }
 
@@ -414,6 +474,9 @@ fn menu_reason(why: &BalanceUnknown) -> &'static str {
         BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => {
             "your address could not be derived"
         }
+        BalanceUnknown::NoAddress(AddressUnavailable::WalletBehindActiveProfile) => {
+            "your wallet is still on the profile you switched away from"
+        }
         BalanceUnknown::NoNode => "DIG could not reach a node",
         BalanceUnknown::NodeTimedOut => "your node did not answer in time",
         BalanceUnknown::NodeCannotRead => "this node cannot read balances yet",
@@ -455,6 +518,10 @@ pub fn unknown_reason(why: &BalanceUnknown) -> String {
         BalanceUnknown::NoAddress(AddressUnavailable::DerivationFailed) => {
             "your address could not be derived, so there is nothing to read a balance for.".to_string()
         }
+        BalanceUnknown::NoAddress(AddressUnavailable::WalletBehindActiveProfile) => {
+            "your wallet is still on the profile you switched away from, and DIG will not read a              balance for an address belonging to a different profile. Close DIG and open it again to              move your wallet across."
+                .to_string()
+        }
         BalanceUnknown::NoNode => {
             "DIG could not reach a node on this computer, and reading a balance needs one. Status \
              shows where DIG looked; if your node is running somewhere else, name it there."
@@ -490,6 +557,7 @@ pub fn unknown_reason(why: &BalanceUnknown) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tray_menu::AddressFault;
     use crate::wallet::engine::test_support::FakeWalletEngine;
     use crate::wallet::engine::{BroadcastRequest, BroadcastResponse, CoinsRequest, CoinsResponse};
     use crate::wallet::state::CoinRecord;
@@ -833,6 +901,7 @@ mod tests {
             window_body(&WalletOverview {
                 address: known(),
                 balance: timed_out.clone(),
+                profiles_unreadable: false,
             }),
         ];
         for text in surfaces {
@@ -1172,14 +1241,97 @@ mod tests {
     /// Before this fix, `Unlocked { .. }` + `receive_address: None` fell through to the SAME `Locked`
     /// arm as an ordinary lock — naming a remedy ("unlock it") the user is not in a position to need,
     /// because they are already unlocked. This is the load-bearing assertion: it fails against the old
-    /// collapse-to-`Locked` mapping and passes only once `address_derivation_failed` is threaded through
+    /// collapse-to-`Locked` mapping and passes only once the address FAULT is threaded through
     /// to a distinct `DerivationFailed` reading.
+    /// **An unlocked account whose wallet is behind the active profile is told THAT, not told to
+    /// unlock** (dig_ecosystem#2496).
+    ///
+    /// The nearest wrong mapping is the `Locked` arm this would otherwise fall through to, which
+    /// names a remedy the person has already performed. The second assertion is what makes it more
+    /// than a "some words appear" test: the sentence must not send them to unlock, and it must not
+    /// call a normal consequence of switching a fault.
+    #[test]
+    fn an_unlocked_account_whose_wallet_is_behind_is_told_that_rather_than_to_unlock() {
+        let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: None,
+            address_fault: Some(AddressFault::WalletBehindActiveProfile),
+            ..Default::default()
+        }));
+
+        assert!(
+            body.contains("still on the profile you switched away from"),
+            "the reason must name the switch: {body}"
+        );
+        assert!(
+            body.contains("open it again"),
+            "and it must name the remedy that works: {body}"
+        );
+        for wrong in [
+            "Unlock it to see",
+            "unlock your account first",
+            "This is a fault",
+        ] {
+            assert!(
+                !body.contains(wrong),
+                "a wallet behind the active profile is neither locked nor broken, yet the body says \
+                 {wrong:?}: {body}"
+            );
+        }
+    }
+
+    /// **A host that could not read its profile registry says so on the WALLET surface.**
+    ///
+    /// This is the one address move that produces no fault anywhere: an unreadable registry boots the
+    /// app unprofiled, so the wallet and the active profile are both ROOT, they agree, every accessor
+    /// answers happily, and a person who was on another profile is shown a different address with
+    /// nothing said (dig_ecosystem#2398).
+    ///
+    /// The control is the SAME view with a readable registry: without it, a caveat printed
+    /// unconditionally would satisfy the first assertion while telling every user their address might
+    /// be wrong.
+    #[test]
+    fn an_unreadable_profile_registry_is_disclosed_beside_the_address_it_changed() {
+        let view = |profiles| crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: Some("xch1example".to_string()),
+            profiles,
+            ..Default::default()
+        };
+
+        let unreadable = window_body(&WalletOverview::of_tray(&view(
+            crate::profiles::ProfilesReading::Unknown(
+                crate::profiles::ProfilesUnknown::Unreadable("the file is not JSON".to_string()),
+            ),
+        )));
+        assert!(
+            unreadable.contains("could not read your list of profiles"),
+            "an address silently derived at the account root must be disclosed: {unreadable}"
+        );
+        assert!(
+            unreadable.contains("NOT that profile's address"),
+            "and the disclosure must say what the address is not: {unreadable}"
+        );
+
+        let readable = window_body(&WalletOverview::of_tray(&view(
+            crate::profiles::ProfilesReading::Known(vec![]),
+        )));
+        assert!(
+            !readable.contains("could not read your list of profiles"),
+            "control: a host that CAN read its registry must not be warned about one: {readable}"
+        );
+        assert!(
+            readable.contains("xch1example"),
+            "control: the address itself still renders either way: {readable}"
+        );
+    }
+
     #[test]
     fn an_unlocked_account_with_a_failed_derivation_is_told_the_truth_not_told_to_unlock() {
         let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
             account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
             receive_address: None,
-            address_derivation_failed: true,
+            address_fault: Some(AddressFault::DerivationFailed),
             ..Default::default()
         }));
 
@@ -1201,7 +1353,7 @@ mod tests {
         let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
             account: Some(crate::tray_menu::AccountState::Locked),
             receive_address: None,
-            address_derivation_failed: false,
+            address_fault: None,
             ..Default::default()
         }));
 
@@ -1212,14 +1364,14 @@ mod tests {
     /// **The race the atomic read closes:** an account observed unlocked this repaint but with NO
     /// derivation-failure signal (the ordinary in-between state — e.g. a lock landed between the tray's
     /// last read and this one) must NOT be alarmed into `DerivationFailed`. Only the atomic
-    /// `address_derivation_failed` flag — set from ONE observation, never from `Unlocked` alone — may
+    /// address fault — set from ONE observation, never from `Unlocked` alone — may
     /// route there.
     #[test]
     fn unlocked_with_no_address_and_no_failure_signal_reads_as_an_ordinary_lock() {
         let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
             account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
             receive_address: None,
-            address_derivation_failed: false,
+            address_fault: None,
             ..Default::default()
         }));
 

@@ -1517,11 +1517,33 @@ an index nothing vouched for.
 creates a profile at another index. They coincide only for an account's first profile, and a host
 that collapses them funds a mint from the new profile's empty wallet.
 
-**A switch MUST be disclosed and MUST NOT half-land.** `ProfileSession::switch_to` returns a
-`#[must_use] ProfileSwitched`; its consumer MUST rebuild the profile-scoped assembly (the profile
-directory, the sealed stores under it, the sign-service router, the money path), because those are
-wired once and cannot re-read anything. A switch that cannot be PERSISTED MUST be rolled back in
-memory, or the receive address silently reverts at the next start.
+**A switch MUST be disclosed and MUST NOT half-land.** Every profile-scoped derivation seam MUST
+re-read the active index per operation rather than capture it — the identity signer, the per-profile
+sealer, the DID the sealed stores tag records with, the directory those records are written to, and
+the DID the connect handle advertises. Nothing is rebuilt on a switch, because nothing holds a copy
+to rebuild: the sign-service router is moved onto a serving thread for the process lifetime and no
+switching code can reach it, so "rebuild it" is not a contract any consumer could satisfy. A switch
+that cannot be PERSISTED MUST be rolled back in memory, or the receive address silently reverts at
+the next start.
+
+**The advertised signing key MUST be read from the signer that will sign.** The connect handle's
+`pubkeys` is derived from the router's own identity signer at the moment it answers, not carried
+alongside it, so a DID→key binding published to a dapp cannot name two different profiles.
+
+**A profile-scoped seam with no active profile MUST fail closed, never substitute a placeholder.** A
+locked account has no DID and no directory: the sealed stores refuse to seal, the connect handle is
+refused with `LOCKED` rather than returned with a null DID, and the at-rest store persists nothing.
+
+**`ProfileSwitched` is `#[must_use]` to force DISCLOSURE, not a rebuild.** A switch changes what a
+person's identity is and where their money will arrive, so a consumer MUST tell them; the attribute
+is what stops that being dropped silently.
+
+**The receive address MUST NOT be claimed to move with the switch.** `dig-account` fixes an unlock's
+wallet index at open time and exposes no `wallet_ops_at` (dig_ecosystem#2496), so after a switch the
+wallet can only answer for the profile just left. Every money accessor — including
+`observe_receiving_address`, the one the tray renders — MUST refuse rather than answer, the surface
+MUST show no address rather than the previous profile's, and the disclosure MUST say the address has
+not moved yet.
 
 **Two artifacts are account-scoped and MUST NOT follow the switch:** the 24-word recovery phrase and
 the second factor. The phrase is the account's custody root and the second factor gates unlock, which

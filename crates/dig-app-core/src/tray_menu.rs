@@ -136,6 +136,24 @@ impl AccountState {
     }
 }
 
+/// Why an UNLOCKED account still reported no receive address.
+///
+/// Distinguished from "no address yet" because the remedy differs and, in both cases, "unlock your
+/// account" is a remedy the user has already performed — advice that names a step already taken is
+/// worse than none. Carried on [`TrayView::address_fault`] and mapped to the sentence a person reads
+/// by [`crate::wallet::overview::WalletOverview::of_tray`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFault {
+    /// The account was unlocked and the derivation itself failed — a genuine defect
+    /// (dig_ecosystem#2059).
+    DerivationFailed,
+    /// The account was unlocked, but its wallet derives at a different profile than the one now
+    /// active, so the only address available belongs to the profile the user just left
+    /// (dig_ecosystem#2496). Nothing is broken; the wallet simply cannot move until the account is
+    /// re-opened.
+    WalletBehindActiveProfile,
+}
+
 /// Everything the tray is rendered from — one snapshot, read once per repaint.
 #[derive(Debug, Clone, Default)]
 pub struct TrayView {
@@ -161,19 +179,23 @@ pub struct TrayView {
     /// only the identity key was on hand. A `Copy my receive address` wired to that would hand out a
     /// string that receives nothing.
     pub receive_address: Option<String>,
-    /// Whether the SAME observation that produced [`receive_address`](Self::receive_address) found the
-    /// residency unlocked yet unable to derive an address — a genuine defect, not the ordinary "not
-    /// unlocked" case (dig_ecosystem#2059).
+    /// Why the SAME observation that produced [`receive_address`](Self::receive_address) found the
+    /// residency unlocked and STILL reported no address, or `None` when that is not what happened
+    /// (dig_ecosystem#2059, #2496).
     ///
     /// Only meaningful when `receive_address` is `None`: it is what tells
-    /// `wallet::overview::WalletOverview::of_tray` apart the two reasons a `None` can mean — an account
+    /// `wallet::overview::WalletOverview::of_tray` apart the reasons a `None` can mean — an account
     /// that is simply not unlocked (say "unlock it"), versus one that WAS unlocked at the moment of
-    /// observation and still failed to derive (saying "unlock it" would name a remedy the user already
-    /// performed). The shell fills both fields from a single call to
+    /// observation and still produced nothing, where saying "unlock it" would name a remedy the user
+    /// already performed. The shell fills both fields from a single call to
     /// `AccountResidency::observe_receiving_address` so the two facts describe the SAME instant —
     /// reading unlock-state and the address as two separate calls lets an idle relock or `Lock now` land
-    /// between them and misreport an ordinary lock as this fault.
-    pub address_derivation_failed: bool,
+    /// between them and misreport an ordinary lock as a fault.
+    ///
+    /// An enum rather than a flag per cause: the faults are alternatives, and two booleans would make
+    /// "derivation failed AND the wallet is behind" expressible when it is not a state the residency
+    /// can report.
+    pub address_fault: Option<AddressFault>,
     /// The account's balance as the node last reported it, or why it is not known
     /// (dig_ecosystem#2206).
     ///
@@ -314,7 +336,7 @@ impl TrayView {
     /// # Why it destructures instead of listing fields
     ///
     /// This began as a hand-spelled `a.x == b.x && …` chain in the shell binary, and it silently fell
-    /// three fields behind [`TrayView`]: `window_host`, `hotkey` and `address_derivation_failed`. The
+    /// three fields behind [`TrayView`]: `window_host`, `hotkey` and the address fault. The
     /// `window_host` omission was the expensive one — when a window fails to open, `window_host`
     /// degrades to [`WindowHost::Unavailable`] so the tray can re-expand from four rows to the full
     /// menu, and that is the ONLY thing standing between a failed open and a user with no route to
@@ -334,7 +356,7 @@ impl TrayView {
             account,
             profile_id,
             receive_address,
-            address_derivation_failed,
+            address_fault,
             balance,
             did,
             second_factor,
@@ -358,9 +380,9 @@ impl TrayView {
             // The Wallet row flips between "Copy my receive address" and "(unlock first)" on this
             // field alone, so a menu that ignored it could offer a copy the shell can no longer serve.
             && receive_address == &other.receive_address
-            // A failed derivation changes what the Wallet row SAYS, so it must repaint even though the
-            // address itself is `None` in both snapshots.
-            && address_derivation_failed == &other.address_derivation_failed
+            // A fault changes what the Wallet row SAYS, so it must repaint even though the address
+            // itself is `None` in both snapshots.
+            && address_fault == &other.address_fault
             // The Wallet row RENDERS the balance, so a reading that changed must repaint — without
             // this the first real figure would never replace "Balance not known" until something
             // else in the menu happened to move (dig_ecosystem#2206).
@@ -2142,8 +2164,8 @@ mod tests {
             ("receive_address", |v| {
                 v.receive_address = Some("xch1x".to_string())
             }),
-            ("address_derivation_failed", |v| {
-                v.address_derivation_failed = true
+            ("address_fault", |v| {
+                v.address_fault = Some(AddressFault::DerivationFailed)
             }),
             ("balance", |v| {
                 v.balance = crate::wallet::overview::BalanceReading::Known(
@@ -2371,7 +2393,7 @@ mod tests {
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
             account: Some(account),
             receive_address,
-            address_derivation_failed: false,
+            address_fault: None,
             // Not yet polled — the honest pre-first-read state, and NOT a zero. Tests that care
             // about a figure set it explicitly.
             balance: crate::wallet::overview::BalanceReading::default(),
