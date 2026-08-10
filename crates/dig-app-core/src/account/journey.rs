@@ -25,11 +25,11 @@ use crate::account::mint::{
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::second_factor::journey::Clock;
-use crate::profiles::CreationBlocked;
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, DestroyPrompt, InputOutcome, InputPrompt, InputStyle,
     NativeConfirmer, NoticePrompt, QrArt, RevealPrompt,
 };
+use crate::profiles::CreationBlocked;
 use crate::sealer::ProfileSealer;
 use zeroize::Zeroizing;
 
@@ -2172,7 +2172,10 @@ mod tests {
         // (dig_ecosystem#2560).
         let mut bodies: Vec<(&str, String)> = vec![
             ("the mint offer", copy::did::OFFER_BODY.to_owned()),
-            ("the funding screen", copy::fund::BODY_WITH_A_CODE.to_owned()),
+            (
+                "the funding screen",
+                copy::fund::BODY_WITH_A_CODE.to_owned(),
+            ),
             (
                 "the funding screen (text only)",
                 copy::fund::BODY_TEXT_ONLY.to_owned(),
@@ -2199,6 +2202,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Every reason a build cannot mint gets its OWN non-empty sentence, on both screens.**
+    ///
+    /// Makes impossible: a new blocker silently inheriting another one's explanation. Telling
+    /// somebody whose chain is plainly working that DIG "has no way to reach the chain" sends them
+    /// to debug a network that is fine.
+    ///
+    /// Distinctness is asserted PAIRWISE over the whole set rather than between two named arms, so
+    /// the check widens with `CreationBlocked::EVERY` instead of needing a new assertion per
+    /// variant. The composed bodies are compared, not the fragments: two reasons could differ in
+    /// their fragment and still compose to the same paragraph.
+    #[test]
+    fn every_blocked_reason_has_its_own_unavailable_sentence() {
+        for compose in [
+            copy::did::unavailable_body as fn(CreationBlocked) -> String,
+            copy::did::explainer_body as fn(CreationBlocked) -> String,
+        ] {
+            let bodies: Vec<String> = CreationBlocked::EVERY.into_iter().map(compose).collect();
+            for body in &bodies {
+                assert!(!body.trim().is_empty(), "every reason needs a sentence");
+                assert!(
+                    body.contains(copy::did::WHAT_A_DID_IS_FOR)
+                        || body.contains(copy::did::EXPLAINER_OPENING),
+                    "the shared opening must be composed in, not retyped: {body}"
+                );
+            }
+            for (i, one) in bodies.iter().enumerate() {
+                for other in &bodies[i + 1..] {
+                    assert_ne!(
+                        one, other,
+                        "two reasons share a body, so one of them is being explained wrongly"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The binary contains no sentence about whether minting is available.**
+    ///
+    /// Makes impossible: the dig_ecosystem#2560 defect returning. The tray explainer lived as a
+    /// literal in `src/bin`, which no test can read, and kept a promise the wizard had already
+    /// dropped for three releases — a rule is only ever as wide as the text it can see.
+    ///
+    /// Reads the SOURCE rather than the rendered output deliberately: the point is not that the
+    /// current bin renders the right words, it is that the bin has no words of its own to get wrong.
+    #[test]
+    fn the_binary_states_nothing_about_minting_availability() {
+        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("dig-app")
+            .join("src")
+            .join("bin");
+        let mut checked = 0usize;
+
+        for entry in std::fs::read_dir(&bin).expect("the binary crate's bin directory") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("a readable source file");
+            checked += 1;
+            for claim in [
+                "not available in this version",
+                "when minting arrives",
+                "Minting one is",
+            ] {
+                assert!(
+                    !source.contains(claim),
+                    "{} states \"{claim}\" itself; copy belongs in dig-app-core where a test can                      read it",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "the guard read no files at all, so it proves nothing about the binary"
+        );
     }
 
     /// Every sentence of every screen the DID step can show, named so a rule can be held over all of

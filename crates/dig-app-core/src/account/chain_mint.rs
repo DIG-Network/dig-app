@@ -46,7 +46,7 @@
 //!
 //! **The ONE remaining gap is the lineage walk, and it is deliberate.** A coin's puzzle hash is
 //! attacker-chosen, so authenticating a singleton means walking real recreation spends — and
-//! `dig-chainsource-interface` 0.4.0 ships exactly one hardened `walk_singleton_lineage` for the
+//! `dig-chainsource-interface` ships exactly one hardened `walk_singleton_lineage` for the
 //! whole ecosystem to share. Until it publishes, [`crate::chain::ControlChainSource`] returns a
 //! marked `Unsupported` there (dig_ecosystem#2572) rather than a second hand-rolled walk.
 //!

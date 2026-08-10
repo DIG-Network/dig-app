@@ -3640,11 +3640,7 @@ mod tray {
                 confirmer,
                 copy::ABOUT_TITLE,
                 copy::ABOUT_HEADING,
-                &format!(
-                    "{}\n\n{held}{}",
-                    copy::WHAT_A_PROFILE_IS,
-                    copy::HIDE_NOTE
-                ),
+                &format!("{}\n\n{held}{}", copy::WHAT_A_PROFILE_IS, copy::HIDE_NOTE),
             );
             return;
         };

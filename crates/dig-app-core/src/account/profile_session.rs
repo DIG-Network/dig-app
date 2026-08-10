@@ -715,6 +715,161 @@ mod tests {
     use super::test_support::{registry_json, session_with};
     use super::*;
 
+    /// The fee a mint fixture journals. A plausible real figure (0.01 XCH), so nothing passes
+    /// because the number is zero.
+    const FEE: u64 = 10_000_000;
+
+    /// A mint reservation at `ix`, shaped exactly as `begin_profile_mint` writes one: pushed, with
+    /// nothing yet proven.
+    fn reserve(registry: &mut ProfileRegistry, ix: ProfileIx) -> Result<(), MintError> {
+        use dig_account::registry::journal::{MintStage, PendingMintRecord};
+        registry
+            .begin_seeded_mint(
+                ix,
+                MintStage::DidPushed {
+                    pending: PendingMintRecord {
+                        launcher_id: chia_protocol::Bytes32::new([0x11; 32]),
+                        did_coin_id: chia_protocol::Bytes32::new([0x22; 32]),
+                        source_coin_id: chia_protocol::Bytes32::new([0x33; 32]),
+                        pushed_at_height: 5_412_009,
+                    },
+                },
+                [0x44; 32],
+                FEE,
+            )
+            .map_err(|why| MintError::Journal(why.to_string()))
+    }
+
+    /// A store that reads an account with nothing minted and refuses every write — a full disk, or
+    /// a directory the user cannot write to.
+    struct WriteRefusingStore;
+
+    impl RegistryStore for WriteRefusingStore {
+        fn read(&self) -> Result<ProfileRegistry, ProfileError> {
+            Ok(ProfileRegistry::empty())
+        }
+        fn write(&self, _registry: &ProfileRegistry) -> Result<(), ProfileError> {
+            Err(ProfileError::Io {
+                action: "written",
+                source: std::io::Error::other("the disk is full"),
+            })
+        }
+    }
+
+    /// **A mint whose chain could not be reached STILL persists its reservation — provably, by
+    /// reloading a fresh session from the same store.**
+    ///
+    /// Makes impossible: the `?`-discards-the-journal defect. `begin_profile_mint` writes its entry
+    /// BEFORE pushing and keeps it on `ChainUnreachable`, because the bundle may yet be included; a
+    /// caller that returned early would throw away the only record naming a DID the user may already
+    /// have paid for. A real mainnet harness hit exactly that.
+    ///
+    /// The proof is the RELOAD, not the in-memory registry. Asserting on the live session would be
+    /// satisfied by an implementation that never wrote at all — which is the very failure under
+    /// test. A second [`ProfileSession`] over the same store can only see what actually landed.
+    #[test]
+    fn a_mint_that_could_not_reach_the_chain_still_leaves_a_reservation_on_disk() {
+        let store = Arc::new(MemoryRegistryStore::empty());
+        let session = ProfileSession::load(store.clone()).expect("an empty store loads");
+
+        let failed = session
+            .with_journal(|registry| {
+                reserve(registry, ProfileIx::ROOT)?;
+                // What a push against a dead network returns. The entry above must stay.
+                Err::<(), _>(MintError::ChainUnreachable("connection refused".into()))
+            })
+            .expect_err("an unreachable chain is a failed mint");
+
+        assert!(
+            matches!(failed.mint, Some(MintError::ChainUnreachable(_))),
+            "the mint's own failure is reported as itself: {failed:?}"
+        );
+        assert!(
+            !failed.may_be_forgotten(),
+            "the write succeeded, so nothing here may claim the mint could be forgotten"
+        );
+
+        let reloaded = ProfileSession::load(store).expect("the store still parses");
+        assert_eq!(
+            reloaded.with_registry(|registry| registry.in_progress().len()),
+            1,
+            "a fresh session must see the reservation, or it never reached the store"
+        );
+    }
+
+    /// **A reserved index is STILL reserved after a restart, and a second mint at it is refused.**
+    ///
+    /// Makes impossible: paying twice for one profile by closing and reopening the app.
+    /// [`ChainMint`](crate::account::chain_mint::ChainMint)'s second-push guard is a
+    /// process-lifetime `Mutex`, which a restart resets; this one is the persisted registry, which a
+    /// restart does not.
+    ///
+    /// The control is the SECOND index: the same reloaded session accepts a mint at an index nobody
+    /// reserved, so the refusal above is about the reservation rather than about the session being
+    /// unable to mint at all.
+    #[test]
+    fn a_reserved_index_survives_a_reload_and_refuses_a_second_mint() {
+        let store = Arc::new(MemoryRegistryStore::empty());
+        let session = ProfileSession::load(store.clone()).expect("an empty store loads");
+        session
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect("the first reservation goes through");
+
+        let restarted = ProfileSession::load(store).expect("the store still parses");
+
+        let refused = restarted
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect_err("an index already reserved must not be reserved again");
+        assert!(
+            matches!(refused.mint, Some(MintError::Journal(_))),
+            "the registry itself refuses it: {refused:?}"
+        );
+
+        // Control: a DIFFERENT index is still mintable, so the refusal is about the reservation.
+        restarted
+            .with_journal(|registry| reserve(registry, ProfileIx(1)))
+            .expect("an unreserved index is still available after a reload");
+    }
+
+    /// **A mint that SUCCEEDED against a store that would not write is its own, distinct, louder
+    /// outcome.**
+    ///
+    /// Makes impossible: flattening *you may have paid for a DID this computer cannot remember* into
+    /// an ordinary mint failure — after which a surface would sensibly invite a retry, and the
+    /// retry pays again.
+    ///
+    /// The load-bearing assertion is the first: `mint` is `None`, so nothing here can be mistaken
+    /// for the mint having failed. The control runs the SAME closure against a store that writes and
+    /// requires an `Ok`, so an implementation that failed every mint cannot pass.
+    #[test]
+    fn a_successful_mint_that_could_not_be_saved_is_not_reported_as_a_failed_mint() {
+        let refusing =
+            ProfileSession::load(Arc::new(WriteRefusingStore)).expect("the fixture store reads");
+
+        let unsaved = refusing
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect_err("a write that did not land cannot be reported as success");
+
+        assert!(
+            unsaved.mint.is_none(),
+            "the MINT succeeded; only the write did not: {unsaved:?}"
+        );
+        assert!(
+            unsaved.may_be_forgotten(),
+            "the one question a surface must be able to ask, and it must answer yes here"
+        );
+        assert!(
+            unsaved.to_string().contains("do NOT start another one"),
+            "the message must warn against the retry that would pay twice: {unsaved}"
+        );
+
+        // Control: the identical closure over a store that writes really does succeed.
+        ProfileSession::load(Arc::new(MemoryRegistryStore::empty()))
+            .expect("an empty store loads")
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect("the same mint against a working store must succeed");
+    }
+
     /// A session over a store that has never been written is unprofiled at ROOT — and says so,
     /// rather than inventing a profile.
     #[test]

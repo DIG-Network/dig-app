@@ -225,7 +225,8 @@ pub enum CreationBlocked {
     /// (`advance_profile_mint` → `launch_store`) calls `dig_did::walk_did_lineage_to_tip`, whose
     /// first operation is `ChainSource::resolve_singleton_lineage`, and
     /// [`ControlChainSource`](crate::chain::ControlChainSource) answers that with `Unsupported`
-    /// pending `dig-chainsource-interface` 0.4.0 (dig_ecosystem#2572).
+    /// pending the canonical walk in a forthcoming `dig-chainsource-interface` release
+    /// (dig_ecosystem#2572).
     ///
     /// So a build in this state can PUSH the DID half and can never launch the store — every user
     /// stranded at `ProfileMintStatus::DidConfirmedStoreNotLaunched`, which dig-account itself calls
@@ -255,7 +256,8 @@ impl CreationBlocked {
 /// dig-account **0.11.3**, whose profile-mint ceremony is real and mainnet-proven, and the store
 /// half of that ceremony walks a singleton lineage that
 /// [`ControlChainSource`](crate::chain::ControlChainSource) answers with `Unsupported` pending
-/// `dig-chainsource-interface` 0.4.0 (dig_ecosystem#2572). Until that read lands, a `Possible` arm
+/// a forthcoming `dig-chainsource-interface` release (dig_ecosystem#2572). Until that read lands,
+/// a `Possible` arm
 /// would be a claim this crate cannot honour — and dig_ecosystem#2377 measured exactly what that
 /// costs: flipping one availability constant early opened an undismissible dead end AND a start-up
 /// password window, **neither catchable by a test**, because both live in the binary.
@@ -606,7 +608,7 @@ mod tests {
             ProfileCreation::of(MintAvailability::Possible).blocked(),
             Some(CreationBlocked::NoLineageWalk),
             "a wired chain transport was read as a profile this build can mint, which no code path \
-             in dig-account 0.8 can do"
+             in this build can finish, because the store half cannot walk a singleton lineage"
         );
         assert_ne!(
             ProfileCreation::of(MintAvailability::NoChainTransport),

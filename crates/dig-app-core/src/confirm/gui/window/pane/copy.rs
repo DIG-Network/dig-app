@@ -832,9 +832,7 @@ mod tests {
         // get two sentences and a sweep that visits one of them is a sweep for one of them. The
         // indentation guard below found a real defect in exactly these two the day they were
         // written, which is why they are here rather than trusted.
-        all.extend(
-            crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create),
-        );
+        all.extend(crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create));
         all.extend(TabId::all().into_iter().map(lead));
         all.extend(
             super::super::facts::AccountKind::ALL

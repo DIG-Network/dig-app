@@ -70,8 +70,8 @@ pub use active_profile::{ActiveSlot, MintTarget, WalletSlot};
 
 /// The live profile registry the whole app reads its active index from.
 pub use profile_mint::{
-    liveness_of, DeathEvidence, MintLiveness, ProfileMint, ProfileMintAvailability, ProfileMintDoor,
-    ProfileMintSeams,
+    liveness_of, DeathEvidence, MintLiveness, ProfileMint, ProfileMintAvailability,
+    ProfileMintDoor, ProfileMintSeams,
 };
 pub use profile_session::{
     MintDoorError, PersistOutcome, ProfileError, ProfileSession, ProfileSwitched,

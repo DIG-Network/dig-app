@@ -358,7 +358,7 @@ impl ChainSource for ControlChainSource {
     /// An authenticated launcher-to-tip walk is the single most money-critical read in the trait: a
     /// coin's puzzle hash is attacker-chosen, so membership of a lineage may only be established by
     /// walking real recreation spends, and a walk that gets this subtly wrong authenticates a
-    /// forgery. `dig-chainsource-interface` 0.4.0 ships `walk_singleton_lineage`, built exactly
+    /// forgery. `dig-chainsource-interface` ships `walk_singleton_lineage`, built exactly
     /// once and hardened over four rounds of security review, and this method will delegate to it.
     ///
     /// Until that publishes, this returns [`ChainReadError::Unsupported`] — a stated absence with a

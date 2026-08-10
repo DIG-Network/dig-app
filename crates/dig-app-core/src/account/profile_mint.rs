@@ -27,7 +27,8 @@
 //! Phase B (`launch_store`) re-derives the DID's puzzle material with
 //! `dig_did::walk_did_lineage_to_tip`, whose first operation is
 //! [`ChainSource::resolve_singleton_lineage`]. [`ControlChainSource`](crate::chain::ControlChainSource)
-//! answers that with `Unsupported`, pending `dig-chainsource-interface` 0.4.0
+//! answers that with `Unsupported`, pending the canonical `walk_singleton_lineage` in a forthcoming
+//! `dig-chainsource-interface` release
 //! (dig_ecosystem#2572). A build in that state can PUSH the DID half and can never finish the store
 //! half — every user stranded at `DidConfirmedStoreNotLaunched` with money spent.
 //!
@@ -40,9 +41,9 @@
 use std::sync::Arc;
 
 use chia_protocol::Bytes32;
+use dig_account::mint::SpendPublisher;
 use dig_account::mint::{MintError, MintNetwork, MintOptions, ProfileMintStatus, ProfileSeed};
 use dig_account::registry::journal::MintStage;
-use dig_account::mint::SpendPublisher;
 use dig_chainsource_interface::ChainSource;
 
 use crate::account::active_profile::{MintTarget, WalletSlot};
@@ -127,7 +128,7 @@ impl<'a> ProfileMintSeams<'a> {
     /// Only `Ok(_)` is accepted; `Unsupported`, a transport failure and a parse failure all yield
     /// [`NoLineageWalk`](Self::NoLineageWalk). A source that SERVICES the call and answers *wrongly*
     /// would pass — no probe can see that, and the honest walk in
-    /// `dig-chainsource-interface` 0.4.0 is what will make it moot.
+    /// `dig-chainsource-interface` is what will make it moot.
     ///
     /// Every other way to be wrong fails in the SAFE direction: a chain that is merely unreachable
     /// reads as `NoLineageWalk`, which WITHHOLDS the offer. The failure mode this excludes is the
@@ -488,8 +489,9 @@ where
         // `&self` over a `&`-registry: there is no argument that makes this move money, which is
         // what lets a "Check again" control exist in the waiting state at all.
         let minter = self.minter()?;
-        self.session
-            .with_registry(|registry| minter.profile_mint_status(registry, self.target.ix(), self.chain))
+        self.session.with_registry(|registry| {
+            minter.profile_mint_status(registry, self.target.ix(), self.chain)
+        })
     }
 
     fn liveness(&self) -> Option<MintLiveness> {
@@ -500,7 +502,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dig_chainsource_interface::{ChainSourceError, CoinRecord, MockChainSource, SingletonLineage};
+    use dig_chainsource_interface::{
+        ChainSourceError, CoinRecord, MockChainSource, SingletonLineage,
+    };
 
     /// A plausible mainnet height, so nothing passes because the numbers are small.
     const PEAK: u32 = 5_412_009;

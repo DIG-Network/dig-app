@@ -492,7 +492,7 @@ fn include_spent_is_refused_rather_than_answered_with_the_unspent_set() {
 ///
 /// A coin's puzzle hash is attacker-chosen, so authenticating a singleton means walking real
 /// recreation spends — and a second implementation of that walk is precisely what
-/// `dig-chainsource-interface` 0.4.0's `walk_singleton_lineage` exists to prevent. Until it
+/// `dig-chainsource-interface`'s `walk_singleton_lineage` exists to prevent. Until it
 /// publishes, the honest answer is `Unsupported`.
 ///
 /// The nearest wrong implementation is `Ok(None)`, which reads as *the launcher never existed or the
