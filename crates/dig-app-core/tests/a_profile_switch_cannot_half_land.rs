@@ -19,8 +19,17 @@
 //!
 //! # Each mechanism is separately falsifiable
 //!
-//! The three mechanisms are exercised by three separate tests, and reverting any ONE of them turns
-//! exactly one of them red — see the module `PROOF` note at the bottom for how that was measured.
+//! Measured, not assumed. Each mechanism was reverted on its own and exactly one test went red:
+//!
+//! | reverted | red |
+//! |---|---|
+//! | `ResidencySigner` reads a captured `ProfileIx::ROOT` | `a_retained_identity_signer_follows_the_switch` |
+//! | `ResidencySealer` reads a captured `ProfileIx::ROOT` | `a_retained_sealer_follows_the_switch_and_can_no_longer_open_the_old_profiles_blob` |
+//! | `active_profile_id` pinned back to ROOT | `the_profile_directory_moves_but_the_account_scoped_id_does_not` |
+//!
+//! The fourth mechanism — the fail-closed re-check inside the confirm ceremony — lives with the money
+//! path and is proved the same way by
+//! `account::money::tests::a_profile_switch_during_the_ceremony_signs_nothing`.
 
 use std::sync::Arc;
 

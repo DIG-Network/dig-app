@@ -575,11 +575,23 @@ mod tests {
     /// takes consent given for one identity's money and applies it to another's.
     ///
     /// The fixture varies exactly one actor — the ceremony switches the session and otherwise behaves
-    /// identically to every other approving provider here. The wrong implementation it is aimed at is
-    /// the one that captures the index once and signs blind: that version returns `Ok(bundle)` here,
-    /// which is why the assertion is on the ABSENCE of a `SpendBundle` and not merely on an error
-    /// type. The ceremony is asserted to have RUN, so a refusal that happened before the ceremony —
-    /// which would satisfy "no bundle" identically — cannot be mistaken for this one.
+    /// identically to every other approving provider here.
+    ///
+    /// # What the exact variant is doing here, measured
+    ///
+    /// Deleting the re-check does NOT make this spend sign: the wallet seam refuses too, because
+    /// dig-account 0.8 pins an unlock's wallet index and a switch puts it out of step
+    /// (dig_ecosystem#2496). So the two guards overlap today, and asserting merely "no `SpendBundle`"
+    /// would be satisfied by either — and would stay green with the re-check deleted. Measured: with
+    /// the re-check removed this returns `Err(Locked)`.
+    ///
+    /// Pinning the exact variant is therefore pinning ORDER: the profile re-check must run BEFORE the
+    /// money-signer read. That is not pedantry about error types. `Locked` tells a user their account
+    /// is locked and sends them to re-enter a password, which cannot fix a profile switch — so the
+    /// wrong order reports a cause that is false and offers a remedy that does not work.
+    ///
+    /// When `wallet_ops_at` lands, the wallet guard stops firing and this becomes the only thing
+    /// standing between a consent given under one identity and a signature made under another.
     #[tokio::test]
     async fn a_profile_switch_during_the_ceremony_signs_nothing() {
         let session = ProfileSession::load(Arc::new(MemoryRegistryStore::seeded(registry_json(

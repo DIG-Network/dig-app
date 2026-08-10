@@ -1,0 +1,33 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/compile_fail/wallet_slot_from_a_bare_index.rs:12:18
+   |
+12 |     let _tuple = WalletSlot(ProfileIx(1));
+   |                  ^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/account/active_profile.rs
+   |
+   | pub struct WalletSlot(ProfileIx);
+   |                       ^^^^^^^^^ private field
+help: you might have meant to use an associated function to build this type
+   |
+12 -     let _tuple = WalletSlot(ProfileIx(1));
+12 +     let _tuple = WalletSlot::unprofiled();
+   |
+12 -     let _tuple = WalletSlot(ProfileIx(1));
+12 +     let _tuple = WalletSlot::from_active(_);
+   |
+
+error[E0308]: mismatched types
+  --> tests/compile_fail/wallet_slot_from_a_bare_index.rs:13:39
+   |
+13 |     let _converted = WalletSlot::from(ProfileIx(1));
+   |                      ---------------- ^^^^^^^^^^^^ expected `WalletSlot`, found `ProfileIx`
+   |                      |
+   |                      arguments to this function are incorrect
+   |
+note: associated function defined here
+  --> $RUST/core/src/convert/mod.rs
+   |
+   |     fn from(value: T) -> Self;
+   |        ^^^^
