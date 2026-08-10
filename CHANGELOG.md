@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [10.0.0] - 2026-08-10
+
+### Features
+- Notify on wallet arrivals by consuming the node's arrival cursor (#148)
+
 ## [9.2.1] - 2026-08-10
 
 ### Bug Fixes
