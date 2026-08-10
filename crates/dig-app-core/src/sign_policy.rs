@@ -147,7 +147,7 @@ mod tests {
     use chia_sdk_types::conditions::CreateCoin;
     use chia_sdk_types::Conditions;
     use chia_traits::Streamable;
-    use chip35_dl_coin::master_to_wallet_unhardened;
+    use chia_bls::master_to_wallet_unhardened;
 
     /// A confirmer scripted to return a fixed decision for every prompt (the SIGN-3 confirmer double).
     struct ScriptedConfirmer(ConfirmDecision);

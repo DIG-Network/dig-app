@@ -853,13 +853,13 @@ mod tests {
             );
             assert_eq!(
                 request.summary.recipients,
-                vec![SpendRecipient {
-                    address: Address::new(A_STRANGER, "xch".to_string())
+                vec![SpendRecipient::to_address(
+                    Address::new(A_STRANGER, "xch".to_string())
                         .encode()
                         .expect("a puzzle hash encodes"),
-                    amount_mojos: 600,
-                    asset_id: None,
-                }],
+                    600,
+                    None::<String>,
+                )],
                 "the dialog must show who is paid, and how much"
             );
             assert_eq!(

@@ -23,7 +23,7 @@ use chia_protocol::{Bytes32, Coin, CoinSpend};
 use chia_puzzle_types::{DeriveSynthetic, Memos};
 use chia_sdk_driver::{SpendContext, StandardLayer};
 use chia_sdk_types::Conditions;
-use chip35_dl_coin::master_to_wallet_unhardened;
+use chia_bls::master_to_wallet_unhardened;
 
 use dig_account::WalletKey;
 use dig_app_core::account::money::MoneyPath;

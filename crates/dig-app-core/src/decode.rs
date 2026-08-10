@@ -232,7 +232,7 @@ mod tests {
     use chia_sdk_driver::{Layer, SpendContext, StandardLayer};
     use chia_sdk_types::conditions::CreateCoin;
     use chia_sdk_types::Conditions;
-    use chip35_dl_coin::master_to_wallet_unhardened;
+    use chia_bls::master_to_wallet_unhardened;
 
     /// A synthetic standard-layer public key from a seed — the on-chain spending key of a wallet.
     fn synthetic_pk(seed: u8) -> PublicKey {

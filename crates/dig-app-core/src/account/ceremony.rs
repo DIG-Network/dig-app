@@ -476,11 +476,7 @@ mod tests {
         use dig_account::{SpendRecipient, SpendTier};
         SpendSummary::new(
             SpendTier::Vault,
-            vec![SpendRecipient {
-                address: "xch1recipient".into(),
-                amount_mojos: 5_000_000,
-                asset_id: None,
-            }],
+            vec![SpendRecipient::to_address("xch1recipient", 5_000_000, None::<String>)],
             10,
         )
     }
