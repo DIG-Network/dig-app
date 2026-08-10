@@ -3388,10 +3388,12 @@ mod tray {
     ///
     /// # The disclosure comes BEFORE the act, and it is not optional
     ///
-    /// A switch changes the receive address, the per-profile DEK and the identity signing key,
-    /// because all three derive at the profile's HD index. Told afterwards, the first a person knows
-    /// of it is money arriving at an address they were never shown — so this is a CLAIM (two
-    /// choices, no biometric), because refusing changes the outcome. The sentence is
+    /// A switch changes the per-profile DEK and the identity signing key at once, and moves where
+    /// money will arrive as soon as the wallet can follow — the address itself stays put until the
+    /// account is re-opened (dig_ecosystem#2496), and DIG shows none in the meantime rather than the
+    /// previous profile's. Told afterwards, the first a person knows of it is their address gone
+    /// from the Wallet tab — so this is a CLAIM (two choices, no biometric), because refusing
+    /// changes the outcome. The sentence is
     /// [`profiles::copy::switching`](dig_app_core::profiles::copy::switching), the same one the
     /// window's standing caution points at.
     ///
@@ -3457,27 +3459,30 @@ mod tray {
                     confirmer,
                     copy::SWITCHING_TITLE,
                     "DIG could not ask you to confirm the switch.",
-                    "Nothing was changed. A profile switch changes your receive address and your \
-                     signing key, so DIG will not do it without asking.",
+                    "Nothing was changed. A profile switch changes your signing key and where your \
+                     money will arrive, so DIG will not do it without asking.",
                 );
                 return;
             }
         }
 
         match profiles.switch_to(ProfileIx(ix)) {
-            // The value is deliberately dropped HERE and nowhere else. Every derivation seam
-            // re-reads the active index per operation (`ProfileSession`'s own contract), so there is
-            // no profile-scoped assembly left for this shell to rebuild — which is the property
-            // slice A built, and the reason a drop here is honest rather than the half-landed switch
-            // `#[must_use]` exists to prevent.
+            // The value is deliberately dropped HERE and nowhere else, and the `notify` below is the
+            // reason it may be: `#[must_use]` on a switch is a DISCLOSURE obligation, and this
+            // discharges it. There is nothing to rebuild — every profile-scoped seam re-reads the
+            // active index per operation, including the four the sign-service assembly holds
+            // (dig_ecosystem#2398), and that assembly is on a serving thread this shell could not
+            // reach in any case.
             Ok(switched) => {
                 let _ = switched;
                 notify(
                     confirmer,
                     copy::SWITCHING_TITLE,
                     &format!("DIG is now using {to_name}."),
-                    "Your receive address and signing key have changed with it. Switch back at any \
-                     time from the Account tab.",
+                    "Your signing key has changed with it. Your receive address has NOT moved yet: \
+                     your wallet follows when you close DIG and open it again, and until then DIG \
+                     shows no address rather than the previous profile's. Switch back at any time \
+                     from the Account tab.",
                 );
             }
             Err(why) => notify(
