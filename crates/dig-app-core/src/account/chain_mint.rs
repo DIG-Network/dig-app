@@ -20,26 +20,51 @@
 //! keeps them apart: the canonical read trait deliberately cannot broadcast. This module takes one of
 //! each, so a host can supply a reader with no way to spend.
 //!
-//! # What this module still cannot do, and exactly which method is missing
+//! # What this module still cannot do, and exactly which reads are missing
 //!
-//! `dig-node-control-interface` 0.6.0 gave dig-app three of the four reads a mint needs:
-//! `control.wallet.coins` selects the funding coin, `control.wallet.peak` bounds a claimed
-//! confirmation, and `control.wallet.broadcast` pushes the signed bundle
-//! ([`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) speaks all three).
+//! **The coin-by-id blocker recorded here through 9.x is GONE, and the text that described it was
+//! wrong from the 0.9 bump onward.** It said the workspace pinned `dig-node-control-interface` 0.6,
+//! "which predates `coinById`, so no code here can name it". The workspace pins **0.9**
+//! (`Cargo.toml`), `Cargo.lock` resolves 0.9.0, and that version declares both
+//! `control.wallet.coinById` and `control.wallet.peak` as OPEN reads needing no token. Both were
+//! probed against a running dig-node 0.109.0 on 2026-08-10 and both answered. Anybody planning
+//! work from the old paragraph was planning against a blocker that no longer existed
+//! (dig_ecosystem#2560).
 //!
-//! The fourth is **a coin read BY COIN ID**, and it is not available to dig-app. It now EXISTS
-//! upstream — `control.wallet.coinById`, "read ONE coin record by coin id, spent or unspent" — but
-//! the workspace pins `dig-node-control-interface` 0.6, which predates it, so no code here can name
-//! it. `mint_status` asks the chain for
-//! the DID coin's record — that is the confirmation — and for the funding coin's, to tell a mint that
-//! is merely slow from one that can never confirm because its input was spent elsewhere. The coins
-//! method answers for an ADDRESS and reports only UNSPENT coins, so it can see neither.
+//! What actually stops a PROFILE mint is a different and larger gap, and it is in phase B.
 //!
-//! A mint on that transport could be pushed — real XCH, gone — and then never observed, and a DID is
-//! recorded only from evidence of a confirmation. So the binary supplies
-//! [`MintSeams::NoChainTransport`] until dig-app can reach that read (dig_ecosystem#2376), and the
-//! startup gate asks whether a mint is POSSIBLE before it shows anybody a wizard: see
+//! A profile is a DID **plus** a dig-store launched from that DID's coin; a DID is never minted
+//! alone. `dig_account::ProfileMinter::advance_profile_mint` resolves the second half through
+//! `launch_store`, which re-derives the DID's puzzle material from chain with
+//! `dig_did::walk_did_lineage_to_tip`. That walk calls `ChainSource::resolve_singleton_lineage`
+//! and then `ChainSource::parent_spend`, which composes `coin_record` with `coin_spend`. So the
+//! reads a whole profile needs are five, not four:
+//!
+//! | Read | Control method | Node 0.109.0 |
+//! |---|---|---|
+//! | `peak_height` | `control.wallet.peak` | answers |
+//! | `coin_record` | `control.wallet.coinById` | answers |
+//! | `coin_records_by_puzzle_hash(ph, false)` | `control.wallet.coins` | answers (address-scoped, unspent-only) |
+//! | `coin_spend` | — | **absent** |
+//! | `resolve_singleton_lineage` | — | **absent** (derivable from a `coinsByParent` the node also lacks) |
+//!
+//! The two absences were confirmed WITH a control token, which is the only way to tell them from an
+//! auth refusal: a method dig-node does not know answers `-32601 method not found`, while an
+//! unknown name presented without a token answers `-32030 UNAUTHORIZED` because auth is checked
+//! before the name is resolved. Token-authenticated, `control.wallet.coinSpend`,
+//! `control.wallet.coinsByParent` and `control.wallet.singletonLineage` all answer `-32601`.
+//!
+//! **Why that is a STOP and not a degradation.** The three reads the node does serve are exactly
+//! enough to push the DID half and watch it confirm. Phase B would then fail on every attempt with
+//! `ChainUnreachable`, leaving the user at `ProfileMintStatus::DidConfirmedStoreNotLaunched` —
+//! which dig-account itself calls "the state that costs money to get wrong": funds committed, an
+//! identity on chain, and no profile, permanently. Shipping a seam that reaches that state is worse
+//! than shipping none, so the binary keeps [`MintSeams::NoChainTransport`] and the startup gate
+//! asks whether a mint is POSSIBLE before it shows anybody a wizard: see
 //! [`crate::account::journey::startup_wizard`].
+//!
+//! The remedy is two new control methods in dig-node (a coin's spend, and a coin's children) — both
+//! reads its own light-client layer already performs — not a workaround in dig-app.
 
 use std::sync::Mutex;
 

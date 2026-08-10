@@ -1341,6 +1341,29 @@ pub fn waiting_screen(progress: &WaitProgress) -> WizardNotice {
     }
 }
 
+/// The tray's DID explainer (`TrayAction::AboutDid`), as a notice the shell renders.
+///
+/// The tray offers an EXPLANATION rather than a control because nothing in this build can mint, and
+/// a greyed row explains nothing (§3.7). What the explanation may say is bounded by the same rule
+/// every pre-spend screen obeys: it may not promise a cost screen the flow does not have
+/// (dig_ecosystem#2377).
+///
+/// # Why this is a function in the core rather than three literals in the shell
+///
+/// The shell is `src/bin`, which no test can reach — the same blind spot that let an inverted
+/// authorization check ship green elsewhere in this ecosystem. Returning the notice from here puts
+/// its words inside
+/// `nothing_shown_before_a_spend_may_promise_a_cost_screen_that_does_not_exist`, so the promise this
+/// screen used to make is now unmakeable rather than merely removed (dig_ecosystem#2560).
+pub fn did_explainer() -> WizardNotice {
+    WizardNotice {
+        title: copy::did::EXPLAINER_TITLE,
+        heading: copy::did::EXPLAINER_HEADING,
+        body: copy::did::EXPLAINER_BODY.to_owned(),
+        identifier: None,
+    }
+}
+
 /// The production [`WaitSurface`]: an OS-owned window that reports the wait and offers to stop it.
 ///
 /// # Why the window is a CLAIM and not a notice
@@ -1662,6 +1685,37 @@ mod copy {
         pub const REFUSED_BODY: &str =
             "Nothing was spent and nothing on your account changed. You can start again from the DIG \
              menu whenever you are ready.";
+        /// The tray's DID explainer title (`TrayAction::AboutDid`).
+        ///
+        /// # Why the tray's explainer lives beside the wizard's copy
+        ///
+        /// It used to live inline in `src/bin/dig-app.rs`, where no test can read it — and it spent
+        /// three releases promising *"you will see the exact cost before anything is spent"*, the
+        /// exact sentence dig_ecosystem#2377 removed from [`OFFER_BODY`]. The guard that removed it
+        /// enumerates copy bodies by name, so a body the guard could not name was a body the guard
+        /// could not check: the rule was fixed in one place and left standing in the other.
+        ///
+        /// Naming it here is what puts it inside that enumeration. The bin now renders these
+        /// constants rather than literals of its own, so the promise cannot be re-made in the one
+        /// file whose contents no test can see (dig_ecosystem#2560).
+        pub const EXPLAINER_TITLE: &str = "DIG — On-chain DID";
+        /// Its heading.
+        pub const EXPLAINER_HEADING: &str =
+            "An on-chain DID is the remaining step, and it costs XCH.";
+        /// Its body.
+        ///
+        /// The last paragraph describes what WILL happen rather than what a future version might do,
+        /// because the wizard it points at already exists and already works this way: the window that
+        /// asks IS the approval. Promising a separate cost screen described a flow that was never
+        /// built (dig_ecosystem#2377).
+        pub const EXPLAINER_BODY: &str =
+            "A DID publishes your identity on the Chia blockchain so others can find and verify it. \
+             Creating one is a real transaction that spends real XCH from your DIG Account, so DIG \
+             will never create one without you asking.\n\n\
+             It is what turns the wallet on this computer into a full DIG Account. \
+             On-chain minting is not available in this version — when it arrives, this is where you \
+             will start it. The window that asks will state the cost and sending it is the approval, \
+             so nothing is spent unless you choose it there.";
         /// The title of the ONE success screen in this flow.
         pub const CONFIRMED_TITLE: &str = "DIG — Your DID is live";
         /// Its heading.
@@ -1914,9 +1968,16 @@ mod tests {
         );
 
         // So no screen a person sees before that spend may defer the approval to a later one.
+        //
+        // The tray explainer is in this list because it was NOT, and that is the whole reason it
+        // kept the promise for three releases after the offer lost it: it lived as a literal in
+        // `src/bin`, where nothing could read it. A rule enforced over a hand-written list is only
+        // as wide as the list, so the fix was to move the words somewhere the list can name them
+        // (dig_ecosystem#2560).
         for (name, body) in [
             ("the mint offer", copy::did::OFFER_BODY),
             ("the unavailable notice", copy::did::UNAVAILABLE_BODY),
+            ("the tray's DID explainer", copy::did::EXPLAINER_BODY),
             ("the funding screen", copy::fund::BODY_WITH_A_CODE),
             ("the funding screen (text only)", copy::fund::BODY_TEXT_ONLY),
         ] {
