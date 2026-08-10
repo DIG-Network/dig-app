@@ -172,6 +172,14 @@ impl ControlChainSource {
     }
 
     /// Record the freshness an answer disclosed.
+    ///
+    /// # Called only once the reply has been BELIEVED
+    ///
+    /// Every caller of this runs after the reply it came with has passed validation — after the
+    /// coin fields decoded, after the asset was checked, after the walk completed. That ordering
+    /// is the whole meaning of the field: it answers *is this coin really unspent, or is that a
+    /// stale replica*, so freshness taken from a reply the client went on to refuse would answer a
+    /// spend question out of an error. A read that returns `Err` leaves the previous value alone.
     fn note_freshness(&self, freshness: Freshness) {
         *self.last_freshness.lock().expect("freshness mutex") = Some(freshness);
     }
@@ -199,16 +207,17 @@ impl ChainSource for ControlChainSource {
                 coin_id: hex::encode(coin_id),
             },
         )?;
+        let record = answer
+            .coin
+            .as_ref()
+            .map(|c| coin_record_from(method::COIN_BY_ID, c))
+            .transpose()?;
         self.note_freshness(Freshness {
             source: answer.source,
             synced: answer.synced,
             peak_height: answer.peak_height,
         });
-        answer
-            .coin
-            .as_ref()
-            .map(|c| coin_record_from(method::COIN_BY_ID, c))
-            .transpose()
+        Ok(record)
     }
 
     /// # `include_spent` is REFUSED, not quietly ignored
@@ -263,12 +272,7 @@ impl ChainSource for ControlChainSource {
                 asset: Asset::Xch,
             },
         )?;
-        self.note_freshness(Freshness {
-            source: answer.source,
-            synced: answer.synced,
-            peak_height: answer.peak_height,
-        });
-        answer
+        let records: Vec<CoinRecord> = answer
             .coins
             .iter()
             .map(|c| {
@@ -289,7 +293,13 @@ impl ChainSource for ControlChainSource {
                 }
                 coin_record_from(method::COINS, c)
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        self.note_freshness(Freshness {
+            source: answer.source,
+            synced: answer.synced,
+            peak_height: answer.peak_height,
+        });
+        Ok(records)
     }
 
     /// # Paged to exhaustion, or refused
@@ -382,12 +392,14 @@ impl ChainSource for ControlChainSource {
                 coin_id: hex::encode(coin_id),
             },
         )?;
-        self.note_freshness(Freshness {
+        let freshness = Freshness {
             source: answer.source,
             synced: answer.synced,
             peak_height: answer.peak_height,
-        });
+        };
         let Some(spend) = answer.spend else {
+            // An absence IS a believed answer here, so it carries freshness like any other.
+            self.note_freshness(freshness);
             return Ok(None);
         };
         // The contract requires a spend's coin to carry a spent height — a spend reporting an
@@ -399,11 +411,13 @@ impl ChainSource for ControlChainSource {
                 "the node returned a spend whose coin reports no spent height",
             ));
         }
-        Ok(Some(CoinSpend::new(
+        let decoded = CoinSpend::new(
             coin_from(method::COIN_SPEND, &spend.coin)?,
             program_from(method::COIN_SPEND, "puzzle_reveal", &spend.puzzle_reveal)?,
             program_from(method::COIN_SPEND, "solution", &spend.solution)?,
-        )))
+        );
+        self.note_freshness(freshness);
+        Ok(Some(decoded))
     }
 
     /// Delegates to the ecosystem's ONE hardened singleton walk (dig_ecosystem#2572).

@@ -604,6 +604,68 @@ fn a_failed_walk_records_no_freshness() {
     );
 }
 
+/// **A reply the client REFUSED leaves no freshness behind, on any read.**
+///
+/// `last_freshness` answers a spend question — *is this coin really unspent, or is that a stale
+/// replica* — so a value taken from a reply the client went on to declare unbelievable answers that
+/// question out of an error. The nearest wrong implementation records freshness the moment bytes
+/// arrive, BEFORE validating them, which is what all four reads did: each one is only one line
+/// apart from the correct version, and every other test in this file stays green either way.
+///
+/// All three non-paged reads are exercised in one test because the defect is an ORDERING that each
+/// method spells out for itself — fixing one and leaving the siblings is exactly the state this
+/// test exists to make impossible. Each case uses the fixture that already proves that method's
+/// refusal, so a case cannot be passing because nothing was read: the node answers, the client
+/// refuses, and the question is only what it kept. `coin_records_by_parent` has its own test above.
+#[test]
+fn a_refused_reply_leaves_no_freshness_on_any_read() {
+    let mut bad_coin = FakeCoin::confirmed("xch", 61);
+    let bad_coin_id = bad_coin.coin_id.clone();
+    bad_coin.parent_coin_info = "deadbeef".into();
+    let by_id = FakeNode::serving_chain(ChainReply::of(
+        FakeChain::synced_at(PEAK).with_coin(bad_coin),
+    ));
+    let by_id_source = source(&by_id);
+    assert!(by_id_source.coin_record(bytes32(&bad_coin_id)).is_err());
+    assert_eq!(
+        by_id_source.last_freshness(),
+        None,
+        "coin_record kept freshness from a coin it refused to decode"
+    );
+
+    let mislabelled = FakeNode::serving_chain(ChainReply::of(FakeChain {
+        address_coins: vec![FakeCoin::confirmed("dig", 900)],
+        ..FakeChain::synced_at(PEAK)
+    }));
+    let coins_source = source(&mislabelled);
+    assert!(coins_source
+        .coin_records_by_puzzle_hash(id(3), false)
+        .is_err());
+    assert_eq!(
+        coins_source.last_freshness(),
+        None,
+        "coin_records_by_puzzle_hash kept freshness from a coin it refused as the wrong asset"
+    );
+
+    let mut unspent = FakeCoin::confirmed("xch", 31);
+    unspent.spent_height = None;
+    let spent_coin_id = unspent.coin_id.clone();
+    let contradictory = FakeNode::serving_chain(ChainReply::of(
+        FakeChain::synced_at(PEAK).with_spend(FakeSpend {
+            coin: unspent,
+            puzzle_reveal: "ff01ff8080".into(),
+            solution: "ff8203e880".into(),
+        }),
+    ));
+    let spend_source = source(&contradictory);
+    assert!(spend_source.coin_spend(bytes32(&spent_coin_id)).is_err());
+    assert_eq!(
+        spend_source.last_freshness(),
+        None,
+        "coin_spend kept freshness from a spend it refused as self-contradicting"
+    );
+}
+
 /// **A launcher the chain does not have is a genuine `Ok(None)` — proving the walk is SERVED.**
 ///
 /// Through 10.3.0 this method was a stated `Unsupported` placeholder, so the nearest wrong
@@ -1007,6 +1069,21 @@ fn a_reply_both_accepted_and_refused_is_not_an_acceptance() {
     assert!(
         matches!(error, PublishFailure::NodeCouldNotAnswer { .. }),
         "{error:?}"
+    );
+
+    // An acceptance carrying an EMPTY rejection string is a node spelling `null` as `""`, not a
+    // refusal -- there is no reason in it to act on. Kept beside the case above so the tolerance is
+    // covered rather than assumed, and so its boundary against a real refusal is visible in one
+    // place.
+    let sloppy = FakeNode::serving_broadcast(
+        crate::test_support::node::BroadcastReply::AcceptedAndRefused {
+            reason: "   ".into(),
+        },
+    );
+    assert_eq!(
+        ControlSpendPublisher::with_token_reader(sloppy.endpoint(), good_token, TEST_TIMEOUT)
+            .push_detailed(&a_bundle()),
+        Ok(PushOutcome::Accepted)
     );
 }
 
