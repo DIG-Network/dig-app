@@ -42,7 +42,7 @@ use dig_app_core::account::did::{DidFile, DidLedger, DidRecord};
 #[cfg(feature = "tray")]
 use dig_app_core::account::journey::{
     self, ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier,
-    DidMinting, FirstRunOutcome, Replacement, WindowedPresenter, WindowedWait,
+    FirstRunOutcome, Replacement, WindowedPresenter, WindowedWait,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
@@ -593,13 +593,11 @@ fn run_the_did_step(
     address: &str,
     seams: &MintSeams<'_>,
 ) {
-    let minting = DidMinting {
-        minter: seams.minter(),
-        observer: seams.observer(),
-        surface: &WindowedWait::new(confirmer),
-        clock: &WallClock,
-        ledger: &DidFile::new(dir),
-    };
+    // The step the SEAMS permit, never a bundle assembled beside them: a build with no chain
+    // transport yields `MintingStep::NotInThisVersion`, and the mint offer -- which states that a
+    // real, irrevocable XCH transaction will be sent -- is unreachable from that value
+    // (dig_ecosystem#2560).
+    let minting = seams.minting_step(&WindowedWait::new(confirmer), &WallClock, &DidFile::new(dir));
     first_run_wizard(
         confirmer,
         AccountPresence::Wallet { address },
@@ -626,13 +624,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // transport they hand the wizard a minter that refuses honestly, rather than one that fabricates
     // a spend for the wait to watch.
     let seams = mint_seams();
-    let minting = DidMinting {
-        minter: seams.minter(),
-        observer: seams.observer(),
-        surface: &WindowedWait::new(confirmer),
-        clock: &WallClock,
-        ledger: &DidFile::new(&dir),
-    };
+    let minting = seams.minting_step(&WindowedWait::new(confirmer), &WallClock, &DidFile::new(&dir));
     let outcome = first_run_wizard(
         confirmer,
         // The wizard is gated on the DID, not on the account, but this entry point is reached only
