@@ -402,7 +402,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         s.persist_pairing("pairing-1", b"sealed");
-        let mode = std::fs::metadata(s.pairings_dir())
+        let pairings = s
+            .pairings_dir()
+            .expect("the fixture store has a root, so persist_pairing above succeeded");
+        let mode = std::fs::metadata(pairings)
             .unwrap()
             .permissions()
             .mode()
