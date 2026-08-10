@@ -1170,12 +1170,16 @@ mod tests {
             EndpointTrust::UserConfigured,
         );
 
-        let (mut stream, _) = listener.accept().expect("the configured node must be dialled");
+        let (mut stream, _) = listener
+            .accept()
+            .expect("the configured node must be dialled");
         let mut request = Vec::new();
         stream.read_to_end(&mut request).expect("read the request");
         let request = String::from_utf8_lossy(&request);
         assert!(
-            request.contains(&format!("{CONTROL_TOKEN_HEADER}: super-secret-control-token")),
+            request.contains(&format!(
+                "{CONTROL_TOKEN_HEADER}: super-secret-control-token"
+            )),
             "a node the user named must still be authorized; got:
 {request}"
         );
@@ -1196,7 +1200,10 @@ mod tests {
             EndpointTrust::AutoDiscovered,
         )
         .expect_err("an unroutable LAN address is not the local node");
-        assert!(matches!(err, ControlCallError::Unreachable(_)), "got {err:?}");
+        assert!(
+            matches!(err, ControlCallError::Unreachable(_)),
+            "got {err:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "no dial may be attempted; took {:?}",
@@ -1209,7 +1216,13 @@ mod tests {
     /// same name here too.
     #[test]
     fn only_the_guessed_ladder_names_are_auto_discovered() {
-        for guessed in ["dig.local", "DIG.Local", "dig.local.", "localhost", "LOCALHOST"] {
+        for guessed in [
+            "dig.local",
+            "DIG.Local",
+            "dig.local.",
+            "localhost",
+            "LOCALHOST",
+        ] {
             assert_eq!(
                 trust_for(guessed),
                 EndpointTrust::AutoDiscovered,
