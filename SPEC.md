@@ -841,6 +841,25 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   and a person MUST NOT have to change tabs to learn it. The strip states each in a glance, MUST NOT sense
   a click (a reading that responds to one is a control), and MUST take its readings from the same
   projection the panes read, so the strip and a pane can never describe one machine differently.
+- **The strip states the chain replica and a SEPARATE peer count per network (MUST).** dig-node belongs to
+  two networks — the DIG content network and the Chia network — and the strip MUST report a count for each,
+  each labelled with the network it is about. It MUST NOT report one combined figure and MUST NOT add the
+  two together: a person shown a single count cannot tell which network is healthy, and the two answers
+  routinely differ.
+- **A reading nobody could take MUST be drawn as nothing, never as a zero (MUST).** A peer count is
+  rendered only from a node's own answer. An unasked node, an unreachable one, and a node that cannot
+  observe the count are three states that MUST be distinguishable from an observed `0`, and none of them
+  may be rendered as one — a fabricated zero is a fault report shaped exactly like a real outage.
+- **A chain replica that has reached no height MUST NOT be described as syncing (MUST).** The node's phase
+  alone does not license the claim: on a default install the phase is `syncing` permanently, because
+  discovered peers are denied write authority and the replica's peak stays null (dig_ecosystem#2568). The
+  surface MUST therefore derive its word from the phase AND the height together, and MUST say only what is
+  true of both a permanently-stuck replica and one in its first seconds — it MUST NOT guess between them,
+  because the wire cannot distinguish them.
+- **The strip MUST drop readings it cannot fit rather than overflow or clip (MUST).** It stays one line at
+  every width down to the window's minimum. Readings are ordered most-explanatory-first and the strip stops
+  at the first that will not fit; the agent and node readings MUST always survive. This is permitted only
+  because nothing in the strip is a control and every fact it carries is also reachable in full on a tab.
 - **The declared tab set and the emitted tab set MUST agree (MUST).** Every declared tab is emitted in
   every view, and the enumeration the guards sweep MUST be derived from the tab type rather than
   hand-written: a hand-written list admits a tab that compiles, is absent from the list, and so escapes
@@ -901,6 +920,18 @@ so no rule about which rows exist or whether they are enabled is decided twice.
 - **While a prompt is up the rest of the window MUST be inert (MUST).** Dimmed, taking no clicks anywhere
   in it including the chrome, not resizable, and the modal MUST be the only thing that can be interacted
   with. Exactly one prompt MAY be up at a time, so a second can never obscure what is being authorised.
+- **An undecorated window MUST draw every window control it denies the platform (MUST).** The app window
+  has no OS titlebar, so minimize, maximize and close exist only if the window draws them. All three MUST
+  be present and reachable, the maximize control MUST also RESTORE — labelled with the action it will
+  perform, never with the state it is in — and the header MUST answer a double-click by toggling maximize.
+  A window that can be maximized and not un-maximized, or moved and not minimized, is the trap the
+  never-trap rule forbids in a smaller shape. Each control's slot MUST be measured from the label it
+  carries, and the drag strip MUST be derived so that it cannot overlap a control's hit area: a strip that
+  swallows Close leaves a window with no way out.
+- **Text the window displays MUST be selectable (MUST).** Addresses, DIDs, coin ids, store ids and error
+  text are useless uncopied and dangerous retyped, so selectability MUST be a property of the drawing path
+  every readout goes through rather than an annotation on individual call sites — a per-site opt-in leaves
+  the next readout dead. Where a copy control already exists it MUST remain: selection is the floor.
 - **An in-window prompt MUST NOT address the host's viewport itself.** It MUST NOT ask to close, focus,
   move or resize the app window, and closing the app window MUST NOT be read as the person's answer.
   In particular it MUST offer no drag handle: the viewport a drag moves is the app window, and the shell
