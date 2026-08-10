@@ -155,6 +155,13 @@ pub mod node {
         /// from the contract rather than from its own list, so a push served tokenless here would
         /// be a contract change and not a fixture liberty.
         WalletBroadcast(BroadcastReply),
+        /// A healthy node that also answers `control.wallet.syncStatus` per the given
+        /// [`SyncReply`] (dig_ecosystem#2569).
+        ///
+        /// Served TOKENLESS, because the contract declares this an open read — so a client that
+        /// only worked while holding a control token fails here rather than passing on a fixture
+        /// more generous than the real node.
+        WalletSync(SyncReply),
         /// A healthy node that also answers `control.hostedStores.list` per the given
         /// [`StoresReply`] (dig_ecosystem#2330).
         ///
@@ -171,6 +178,38 @@ pub mod node {
             reply: StoresReply,
             /// How long the node takes to give it.
             delay: Duration,
+        },
+    }
+
+    /// How a [`FakeNode`] should answer `control.wallet.syncStatus`.
+    ///
+    /// The phase is a raw wire STRING rather than the contract's enum on purpose: a fixture that
+    /// could only express the three tokens the client already understands could never present the
+    /// unknown phase a newer node might send.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SyncReply {
+        /// Answer both `control.wallet.syncStatus` and `control.peerCounts` from these fields.
+        ///
+        /// One reply for both methods because a conforming node MUST serve `chia_peer_count` from
+        /// one source: a fixture with two independent knobs could express a node that contradicts
+        /// itself, and a client tested against it would be tested against a node that cannot exist.
+        Status {
+            /// The `phase` token, as it goes on the wire.
+            phase: String,
+            /// The replica's peak height, or `None` for a JSON `null`.
+            peak_height: Option<u32>,
+            /// The DIG content-network peer count, or `None` for a JSON `null`.
+            dig_peer_count: Option<u32>,
+            /// The Chia peer count, or `None` for a JSON `null`.
+            chia_peer_count: Option<u32>,
+        },
+        /// Refuse, in the node's error envelope: a numeric wire code plus the stable UPPER_SNAKE
+        /// `data.code` symbol a client is contractually required to branch on.
+        Rejected {
+            /// The numeric JSON-RPC error code.
+            code: i64,
+            /// The stable `data.code` symbol.
+            symbol: String,
         },
     }
 
@@ -455,6 +494,11 @@ pub mod node {
             Self::with_behaviour(Behaviour::WalletBroadcast(reply))
         }
 
+        /// A fake that answers `control.wallet.syncStatus` with `reply` (dig_ecosystem#2569).
+        pub fn serving_sync(reply: SyncReply) -> Self {
+            Self::with_behaviour(Behaviour::WalletSync(reply))
+        }
+
         /// A fake that answers `control.hostedStores.list` with `reply` (dig_ecosystem#2330).
         pub fn serving_stores(reply: StoresReply) -> Self {
             Self::with_behaviour(Behaviour::HostedStores(reply))
@@ -555,6 +599,8 @@ pub mod node {
             let method_is_arrivals = is(ControlMethod::WalletArrivals);
             let method_is_broadcast = is(ControlMethod::WalletBroadcast);
             let method_is_hosted_list = is(ControlMethod::HostedStoresList);
+            let method_is_sync = is(ControlMethod::WalletSyncStatus);
+            let method_is_peer_counts = is(ControlMethod::PeerCounts);
             let asset = if request.contains("\"asset\":\"dig\"") {
                 Asset::Dig
             } else {
@@ -596,6 +642,15 @@ pub mod node {
                 }
                 // Every other `control.*` method is gated exactly as the real node gates it,
                 // otherwise a client that forgot the header would still see a green test.
+                // `control.wallet.syncStatus` is an open read too — the node's own chain position
+                // names no address at all — so the fake serves it tokenless, taking the openness
+                // from the CONTRACT rather than from a list of its own.
+                Behaviour::WalletSync(reply) if method_is_sync && method_is_open_read => {
+                    (200, sync_result(reply))
+                }
+                Behaviour::WalletSync(reply) if method_is_peer_counts && method_is_open_read => {
+                    (200, peer_counts_result(reply))
+                }
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),
                 // Authorized, and asking for the hosted-store list: answer it. Any OTHER method
                 // falls through to the status body below, so a fake set up for stores still
@@ -617,6 +672,7 @@ pub mod node {
                 | Behaviour::WalletCoins(_)
                 | Behaviour::WalletArrivals(_)
                 | Behaviour::WalletBroadcast(_)
+                | Behaviour::WalletSync(_)
                 | Behaviour::HostedStores(_)
                 | Behaviour::SlowHostedStores { .. } => (200, status_result()),
                 Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
@@ -828,6 +884,69 @@ pub mod node {
                 "error": {
                     "code": code,
                     "message": "the node refused this hosted-store read",
+                    "data": { "code": symbol, "origin": "node" }
+                }
+            })
+            .to_string(),
+        }
+    }
+
+    /// The `control.wallet.syncStatus` reply, field-for-field as dig-node emits it.
+    ///
+    /// `null` is written for an absent height or peer count rather than the field being omitted,
+    /// because that is what the node sends and the difference is exactly what the client branches on.
+    fn sync_result(reply: &SyncReply) -> String {
+        match reply {
+            SyncReply::Status {
+                phase,
+                peak_height,
+                chia_peer_count,
+                ..
+            } => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "phase": phase,
+                    "peak_height": peak_height,
+                    "chia_peer_count": chia_peer_count,
+                }
+            })
+            .to_string(),
+            SyncReply::Rejected { code, symbol } => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": code,
+                    "message": "the node refused this sync read",
+                    "data": { "code": symbol, "origin": "node" }
+                }
+            })
+            .to_string(),
+        }
+    }
+
+    /// The `control.peerCounts` reply, from the same fixture the sync reply comes from.
+    fn peer_counts_result(reply: &SyncReply) -> String {
+        match reply {
+            SyncReply::Status {
+                dig_peer_count,
+                chia_peer_count,
+                ..
+            } => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "dig_peer_count": dig_peer_count,
+                    "chia_peer_count": chia_peer_count,
+                }
+            })
+            .to_string(),
+            SyncReply::Rejected { code, symbol } => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": code,
+                    "message": "the node refused this peer-count read",
                     "data": { "code": symbol, "origin": "node" }
                 }
             })

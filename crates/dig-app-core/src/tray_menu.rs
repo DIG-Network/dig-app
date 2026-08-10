@@ -324,6 +324,15 @@ pub struct TrayView {
     /// That single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
     /// surface comes to advertise a create control whose implementation refuses.
     pub profile_creation: crate::profiles::ProfileCreation,
+    /// Where this node stands on the DIG and Chia networks (dig_ecosystem#2569).
+    ///
+    /// Polled on its own cadence by [`NodeNetworkStanding`](crate::network::NodeNetworkStanding), for
+    /// the reason the balance is: this snapshot is taken twice a second and the reading is two node
+    /// round trips.
+    ///
+    /// The default — every reading `Pending` — is the truth before the first poll, and is
+    /// deliberately not "synced with zero peers". See [`crate::network`].
+    pub network: crate::network::NetworkStanding,
 }
 
 impl TrayView {
@@ -370,6 +379,7 @@ impl TrayView {
             installed_apps,
             profiles,
             profile_creation,
+            network,
         } = self;
 
         running == &other.running
@@ -439,6 +449,12 @@ impl TrayView {
             // field the pane draws from cannot escape this comparison, which destructures with no
             // `..` precisely so that it cannot.
             && profile_creation == &other.profile_creation
+            // The header strip RENDERS all three of these, on every tab. Without this arm the first
+            // real peer count would never replace nothing at all until some unrelated field moved —
+            // the freeze `balance`, `hosted_stores` and `profiles` each needed this same arm to
+            // avoid (dig_ecosystem#2206). It cannot change per tick: the poller returns a CACHED
+            // reading for a whole `REFRESH_INTERVAL`.
+            && network == &other.network
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -2209,6 +2225,9 @@ mod tests {
             ("installed_apps", |v| {
                 v.installed_apps = crate::apps::AppPresence::Known(Vec::new())
             }),
+            ("network", |v| {
+                v.network.dig_peers = crate::network::PeerCount::Known(6)
+            }),
         ];
 
         for (field, mutate) in &cases {
@@ -2229,7 +2248,7 @@ mod tests {
         // The table is only a guard if it is complete. `renders_same_as` destructures exhaustively, so
         // the field count is fixed at compile time; this pins the table to it.
         assert_eq!(
-            18,
+            19,
             cases.len(),
             "TrayView gained or lost a field — add or remove its case above"
         );
@@ -2391,6 +2410,10 @@ mod tests {
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
+            // The strip's readings are the window's, not the tray's, so this suite pins them to the
+            // pre-first-poll default rather than varying them. `network::tests` and the header's own
+            // suite exercise the states.
+            network: crate::network::NetworkStanding::default(),
             account: Some(account),
             receive_address,
             address_fault: None,

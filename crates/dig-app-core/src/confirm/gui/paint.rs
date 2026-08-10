@@ -398,6 +398,21 @@ pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
     text_control(ui, label, t, ControlAlign::Centred)
 }
 
+/// How wide a [`theme_toggle`] has to be for `label`.
+///
+/// Exposed for the same reason [`button_width`] is: a caller placing chrome controls absolutely has
+/// to know a control's real extent BEFORE it places the next one. A constant per control was what
+/// the chrome used before, and a constant is a guess that is wrong the first time a label is
+/// re-worded or translated — a slot narrower than its label leaves the control's hit area
+/// overlapping its neighbour's, which on a chrome row means Close and Maximize sharing pixels.
+pub fn text_control_width(ui: &Ui, label: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), regular(size::SM), Color32::WHITE)
+        .size()
+        .x
+        + CONTROL_PAD.x
+}
+
 /// A text control sitting INSIDE the body's text column — the reveal-while-typing switch.
 ///
 /// Left-aligned rather than centred so its label starts on the same x as the field label and the

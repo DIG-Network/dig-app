@@ -76,6 +76,7 @@ pub mod keystore;
 pub mod link;
 pub mod live;
 pub mod loopback;
+pub mod network;
 pub mod node_facts;
 pub mod notifications;
 pub mod notify;
