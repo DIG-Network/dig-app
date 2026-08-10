@@ -39,6 +39,7 @@ use dig_app_core::account::boot::{
 use dig_app_core::account::chain_mint::MintSeams;
 #[cfg(feature = "tray")]
 use dig_app_core::account::did::{DidFile, DidLedger, DidRecord};
+#[cfg(feature = "tray")]
 use dig_app_core::account::journey::{
     self, ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier,
     DidMinting, FirstRunOutcome, Replacement, WindowedPresenter, WindowedWait,
@@ -51,8 +52,10 @@ use dig_app_core::account::migration;
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::ResidencySealer;
-use dig_app_core::account::second_factor::journey::SystemClock as WallClock;
 #[cfg(feature = "tray")]
+use dig_app_core::account::second_factor::journey::SystemClock as WallClock;
+// Ungated: the agent IS the app in both configurations — the tray only decorates it, and the
+// headless build runs the very same `Agent` directly (see `run_tray_or_headless`).
 use dig_app_core::agent::Agent;
 #[cfg(feature = "tray")]
 use dig_app_core::confirm::{native_confirmer, NativeConfirmer, NoticePrompt};
