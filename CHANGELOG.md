@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [9.2.0] - 2026-08-10
+
+### Features
+- **profiles:** The dig-profile system — list, hide, and a settable active slot (#145)
+
 ## [9.1.1] - 2026-08-09
 
 ### Bug Fixes
