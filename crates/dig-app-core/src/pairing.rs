@@ -27,7 +27,9 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::live::{belongs_to_active_profile, visible_under_active_profile, LiveDid};
+use crate::live::{
+    belongs_to_active_profile, visible_under_active_profile, ConsentError, ConsentedProfile, LiveDid,
+};
 use crate::sealer::{ProfileSealer, SealError};
 
 /// The length of the channel secret (a pairing token), in bytes — 256 bits of CSPRNG entropy.
@@ -478,19 +480,31 @@ impl<S: ProfileSealer> PairingStore<S> {
             .ok_or_else(|| SealError::Seal("no active profile — the account is locked".to_string()))
     }
 
+    /// Read the profile a pairing confirm is about to be answered under. Take this BEFORE raising the
+    /// confirm and hand it to [`pair`](Self::pair); see [`ConsentedProfile`].
+    pub fn consent_now(&self) -> ConsentedProfile {
+        ConsentedProfile::reading(&self.profile_did)
+    }
+
     /// Pair `ext_id`: mint a fresh 32-byte CSPRNG channel secret, register it live, and seal the
     /// [`PairingRecord`] at rest under the active profile's DEK. Returns the handle for the extension
     /// plus the sealed bytes to persist. The caller invokes the native pairing confirm (§5.6.3)
     /// BEFORE calling this — the store mints a secret only for an already-approved pairing.
     ///
+    /// `consent`, taken before that confirm, is what binds the minted authority to the profile whose
+    /// owner approved it: a switch landing in between is refused rather than granted a channel token.
+    ///
     /// # Errors
     ///
-    /// [`SealError`] if the profile is locked or sealing fails; no live entry is registered on error.
+    /// [`ConsentError::ProfileMoved`] if the active profile changed since `consent` was taken;
+    /// [`ConsentError::Seal`] if the profile is locked or sealing fails. No live entry is registered on
+    /// either error.
     pub fn pair(
         &self,
+        consent: &ConsentedProfile,
         request: &NewPairing<'_>,
         created_at: u64,
-    ) -> Result<PairingOutcome, SealError> {
+    ) -> Result<PairingOutcome, ConsentError> {
         let mut channel_secret = Zeroizing::new([0u8; CHANNEL_SECRET_LEN]);
         OsRng.fill_bytes(&mut *channel_secret);
         let pairing_id = Uuid::new_v4().to_string();
@@ -511,6 +525,9 @@ impl<S: ProfileSealer> PairingStore<S> {
             serde_json::to_vec(&record).map_err(|e| SealError::Seal(e.to_string()))?,
         );
         let profile_did = self.seal_as()?;
+        if !consent.still_holds(&profile_did) {
+            return Err(ConsentError::ProfileMoved);
+        }
         let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
 
         self.lock().insert(
@@ -832,7 +849,7 @@ mod tests {
     fn pair_mints_a_token_and_seals_the_record() {
         let store = store();
         let out = store
-            .pair(&NewPairing::pinned(EXT, None), 1_700_000_000)
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1_700_000_000)
             .unwrap();
 
         assert!(store.is_paired(&out.pairing_id));
@@ -847,8 +864,8 @@ mod tests {
     #[test]
     fn two_pairings_mint_distinct_secrets_and_ids() {
         let store = store();
-        let a = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
-        let b = store.pair(&NewPairing::pinned(EXT, None), 2).unwrap();
+        let a = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
+        let b = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 2).unwrap();
         assert_ne!(a.pairing_id, b.pairing_id);
         assert_ne!(a.channel_token_b64, b.channel_token_b64);
     }
@@ -856,7 +873,7 @@ mod tests {
     #[test]
     fn a_sealed_pairing_round_trips_through_restore() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 42).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 42).unwrap();
         store.unpair(&out.pairing_id);
         assert!(!store.is_paired(&out.pairing_id));
 
@@ -868,7 +885,7 @@ mod tests {
     #[test]
     fn a_valid_frame_authenticates() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({"origin": "https://dapp.example"});
         let mac = client_mac(&out.channel_token_b64, n(1), "connect.request", &params);
         assert!(store
@@ -889,7 +906,7 @@ mod tests {
     #[test]
     fn a_tampered_mac_is_rejected() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({"amount": 5});
         let good = client_mac(&out.channel_token_b64, n(1), "sign.request", &params);
         // Forge by signing DIFFERENT params — the MAC no longer matches the frame.
@@ -909,7 +926,7 @@ mod tests {
     #[test]
     fn a_mac_from_a_foreign_secret_is_rejected() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let foreign_secret = BASE64.encode([9u8; CHANNEL_SECRET_LEN]);
         let mac = client_mac(&foreign_secret, n(1), "m", &params);
@@ -922,7 +939,7 @@ mod tests {
     #[test]
     fn a_replayed_or_stale_nonce_is_rejected() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let mac5 = client_mac(&out.channel_token_b64, n(5), "m", &params);
         assert!(store
@@ -950,7 +967,7 @@ mod tests {
     #[test]
     fn a_bad_mac_does_not_advance_the_nonce_ledger() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         // A bad-MAC frame at a high nonce must NOT poison the ledger.
         let bad = client_mac(&BASE64.encode([0u8; 32]), n(100), "m", &params);
@@ -968,7 +985,7 @@ mod tests {
     #[test]
     fn unpairing_revokes_authentication() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         assert!(store.unpair(&out.pairing_id));
         assert!(!store.unpair(&out.pairing_id));
         let params = json!({});
@@ -1002,7 +1019,7 @@ mod tests {
             live_profile_did(&residency),
         );
         let out = store
-            .pair(&NewPairing::pinned(EXT, None), 1)
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1)
             .expect("an unlocked profile pairs");
         let params = json!({});
         let frame = |nonce: u64| {
@@ -1058,7 +1075,7 @@ mod tests {
         let store_of = || PairingStore::new(test_sealer(DID), DID);
 
         let first = store_of();
-        let out = first.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = first.pair(&first.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let mac = client_mac(&out.channel_token_b64, n(5), "m", &params);
         assert!(first
@@ -1086,7 +1103,7 @@ mod tests {
     #[test]
     fn seeding_never_lowers_an_already_advanced_ledger() {
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         let params = json!({});
         let mac6 = client_mac(&out.channel_token_b64, n(6), "m", &params);
         assert!(store
@@ -1145,12 +1162,12 @@ mod tests {
         // third-party assertion alone and quietly break DIG's own extension.
         let store = store();
         let third = store
-            .pair(
+            .pair(&store.consent_now(), 
                 &NewPairing::third_party("com.example.tool", Some("Tool")),
                 1,
             )
             .unwrap();
-        let pinned = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let pinned = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
 
         assert_eq!(
             store.scope_of(&third.pairing_id),
@@ -1167,7 +1184,7 @@ mod tests {
         // whole distinction cosmetic.
         let store = store();
         let out = store
-            .pair(
+            .pair(&store.consent_now(), 
                 &NewPairing::third_party("com.example.tool", Some("Tool")),
                 1,
             )
@@ -1190,10 +1207,10 @@ mod tests {
     fn the_list_is_oldest_first_and_carries_no_secret() {
         let store = store();
         let older = store
-            .pair(&NewPairing::third_party("com.example.b", Some("B")), 100)
+            .pair(&store.consent_now(), &NewPairing::third_party("com.example.b", Some("B")), 100)
             .unwrap();
         let newer = store
-            .pair(&NewPairing::pinned(EXT, Some("DIG for Chrome")), 200)
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, Some("DIG for Chrome")), 200)
             .unwrap();
 
         let apps = store.list();
@@ -1217,7 +1234,7 @@ mod tests {
         // timestamp that moved for an unpaired or badly-authenticated caller would be a lie about a
         // program the user is deciding whether to revoke.
         let store = store();
-        let out = store.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store.pair(&store.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
         assert_eq!(store.list()[0].last_seen_at, None);
 
         store.note_seen(&out.pairing_id, 1_700_000_500);
@@ -1235,10 +1252,10 @@ mod tests {
         // shown AND its token stops working. Only the second is the security property.
         let store = store();
         let kept = store
-            .pair(&NewPairing::pinned(EXT, Some("keep me")), 1)
+            .pair(&store.consent_now(), &NewPairing::pinned(EXT, Some("keep me")), 1)
             .unwrap();
         let doomed = store
-            .pair(&NewPairing::third_party("com.example.tool", None), 2)
+            .pair(&store.consent_now(), &NewPairing::third_party("com.example.tool", None), 2)
             .unwrap();
         assert_eq!(store.list().len(), 2);
 
@@ -1266,7 +1283,7 @@ mod tests {
     fn a_foreign_profile_cannot_restore_a_sealed_pairing() {
         // The sealed record is bound to the sealing profile's DEK (NC-2 cross-profile isolation).
         let store_a = store();
-        let out = store_a.pair(&NewPairing::pinned(EXT, None), 1).unwrap();
+        let out = store_a.pair(&store_a.consent_now(), &NewPairing::pinned(EXT, None), 1).unwrap();
 
         // A DISTINCT profile DEK (a different label) cannot open A's sealed pairing.
         let store_b = PairingStore::new(test_sealer("did:chia:other"), "did:chia:other");

@@ -339,7 +339,7 @@ fn a_retained_whitelist_store_records_the_profile_now_active() {
     );
 
     let before = whitelist
-        .grant("https://dapp.example", vec![], 1)
+        .grant(&whitelist.consent_now(), "https://dapp.example", vec![], 1)
         .expect("an unlocked profile grants")
         .entry
         .profile_did;
@@ -354,7 +354,7 @@ fn a_retained_whitelist_store_records_the_profile_now_active() {
         .expect("the second profile is confirmed");
 
     let after = whitelist
-        .grant("https://other.example", vec![], 2)
+        .grant(&whitelist.consent_now(), "https://other.example", vec![], 2)
         .expect("the retained store still grants after the switch")
         .entry
         .profile_did;
@@ -404,7 +404,7 @@ fn a_retained_pairing_store_stops_authenticating_the_previous_profiles_pairings(
     );
 
     let under_first = pairings
-        .pair(&NewPairing::pinned("app.under.first", None), 1)
+        .pair(&pairings.consent_now(), &NewPairing::pinned("app.under.first", None), 1)
         .expect("an unlocked profile pairs")
         .pairing_id;
     assert!(
@@ -417,7 +417,7 @@ fn a_retained_pairing_store_stops_authenticating_the_previous_profiles_pairings(
         .expect("the second profile is confirmed");
 
     let under_second = pairings
-        .pair(&NewPairing::pinned("app.under.second", None), 2)
+        .pair(&pairings.consent_now(), &NewPairing::pinned("app.under.second", None), 2)
         .expect("the retained store still pairs after the switch")
         .pairing_id;
 

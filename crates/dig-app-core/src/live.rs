@@ -131,6 +131,54 @@ impl From<PathBuf> for LiveProfileDir {
     }
 }
 
+/// The profile a user's consent was given under, captured BEFORE the prompt that asks for it and
+/// presented again when the durable authority it authorizes is written (dig_ecosystem#2398).
+///
+/// # Why the write needs a witness of its own
+///
+/// A native confirm names the origin and the app, never a profile ([`SignPrompt`](crate::sign_policy)),
+/// so the person answering it is consenting about whichever profile is active as they read it. The
+/// record is written afterwards, under whichever profile is active by then. Those are the same profile
+/// almost always and not by construction: `SetActiveProfile` reads the registry from disk and needs no
+/// unlock, so it can land in between. What is written then is DURABLE authority — a whitelist grant, or
+/// a pairing minting a channel token — created under B from consent given under A, while A, whose owner
+/// actually said yes, is granted nothing.
+///
+/// The sign path re-asks its gate after the equivalent gap
+/// ([`FrameRouter::handle_sign`](crate::loopback::FrameRouter)); this is the same check on the creating
+/// side, and it is a PARAMETER rather than a remembered line so a call site added later cannot omit it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsentedProfile(Option<String>);
+
+impl ConsentedProfile {
+    /// Read the profile now active, to be presented to the write that follows. Take this BEFORE
+    /// raising the confirm — taken after, it witnesses nothing.
+    pub(crate) fn reading(did: &LiveDid) -> Self {
+        Self(did.get())
+    }
+
+    /// Whether `writing_as` is still the profile the consent was given under. A consent captured while
+    /// LOCKED (`None`) matches nothing: no profile was named, so none can be said to have agreed.
+    pub(crate) fn still_holds(&self, writing_as: &str) -> bool {
+        self.0.as_deref() == Some(writing_as)
+    }
+}
+
+/// Why a durable grant was not recorded.
+///
+/// Kept distinct from a bare [`SealError`] because the two mean opposite things to a caller: sealing
+/// failed because there is no unlocked profile (retry after unlocking), whereas the profile MOVED, so
+/// the consent that was given does not apply to whoever is here now and must be asked for again.
+#[derive(Debug, thiserror::Error)]
+pub enum ConsentError {
+    /// The active profile changed between the confirm and the write. See [`ConsentedProfile`].
+    #[error("the active profile changed between consent and the record it authorizes")]
+    ProfileMoved,
+    /// The record could not be sealed — in practice, a locked profile.
+    #[error(transparent)]
+    Seal(#[from] crate::sealer::SealError),
+}
+
 /// Whether a stored record tagged `entry_did` is one the profile named by `active` may ACT ON — the
 /// question every authorization read asks before honouring a grant.
 ///

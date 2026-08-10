@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
-use crate::live::{Live, LiveDid};
+use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{
     AuthFailure, Capability, CapabilitySet, NewPairing, PairedApp, PairingAuthority, PairingStore,
@@ -554,6 +554,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
         };
         let request = base.with_capabilities(granted.clone());
 
+        // Whose consent this is, read BEFORE the prompt: the confirm names the app and not a profile,
+        // so the answer belongs to whoever is active as it is read, not to whoever is active when the
+        // token is minted. See `ConsentedProfile`.
+        let consent = self.pairings.consent_now();
         let decision = self.confirmer.confirm_pair(&PairPrompt {
             ext_id: &params.ext_id,
             ext_label: params.ext_label.as_deref(),
@@ -562,7 +566,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, code);
         }
 
-        match self.pairings.pair(&request, now_epoch_secs()) {
+        match self.pairings.pair(&consent, &request, now_epoch_secs()) {
             Ok(outcome) => {
                 // Persist the sealed record so the pairing survives a restart (#958). Best-effort:
                 // a failed write is logged inside the store and never fails the pairing.
@@ -584,8 +588,12 @@ impl<S: ProfileSealer> FrameRouter<S> {
                     }),
                 )
             }
+            // A profile switch landed between the confirm and the mint, so nobody here has agreed to
+            // this pairing: report it as not granted, which is what tells a well-behaved caller to ask
+            // again rather than to retry an unlock it does not need.
+            Err(ConsentError::ProfileMoved) => error(id, SignErrorCode::PairDenied),
             // Sealing fails only when the active profile is locked — surface it as LOCKED.
-            Err(_) => error(id, SignErrorCode::Locked),
+            Err(ConsentError::Seal(_)) => error(id, SignErrorCode::Locked),
         }
     }
 
@@ -629,6 +637,9 @@ impl<S: ProfileSealer> FrameRouter<S> {
             };
         }
 
+        // Read before the prompt, for the reason `handle_pair` gives: the grant this returns is durable
+        // authority, and it must belong to the profile whose owner approved it.
+        let consent = self.whitelist.consent_now();
         let decision = self.confirmer.confirm_connect(&ConnectPrompt {
             origin: &params.origin,
             dapp_name: params.dapp_name.as_deref(),
@@ -636,6 +647,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         match decision {
             ConfirmDecision::Approve => {
                 match self.whitelist.grant(
+                    &consent,
                     &params.origin,
                     params.requested_permissions,
                     now_epoch_secs(),
@@ -649,8 +661,11 @@ impl<S: ProfileSealer> FrameRouter<S> {
                             None => error(id, SignErrorCode::Locked),
                         }
                     }
+                    // A switch landed between the confirm and the grant: the consent given does not
+                    // belong to the profile now here, so nothing is recorded under either.
+                    Err(ConsentError::ProfileMoved) => error(id, SignErrorCode::ConnectDenied),
                     // Sealing fails only when the active profile is locked — surface it as LOCKED.
-                    Err(_) => error(id, SignErrorCode::Locked),
+                    Err(ConsentError::Seal(_)) => error(id, SignErrorCode::Locked),
                 }
             }
             ConfirmDecision::Deny => error(id, SignErrorCode::ConnectDenied),
@@ -905,12 +920,14 @@ impl<S: ProfileSealer> FrameRouter<S> {
                 AuthFailure::Replay => SignErrorCode::AuthReplay,
             })?;
         // The nonce advanced — persist the new high-water mark so a frame captured before a restart
-        // cannot replay into the next session (#956). Best-effort, and the size of "best" is worth
-        // stating honestly: the ledger is not written at all while the account is locked (there is no
-        // profile directory to write it to — `FileSealedStore::write_nonce_ledger`), so a restart
-        // rewinds the high-water mark to the last write and EVERY frame sent during the lock becomes
-        // replayable, not one. Tracked as dig_ecosystem#2546. Every sign still re-gates on the native
-        // confirm, which is what keeps this a hardening gap rather than a signing bypass.
+        // cannot replay into the next session (#956). Best-effort, and the size of "best" stated
+        // exactly: `write_nonce_ledger` skips when no profile is active, but a locked account never
+        // reaches here at all (`verify_frame` refuses every frame as `NotPaired` before the mark
+        // moves), so no accepted frame's mark is lost to a lock. What remains is a write that fails or
+        // is never made durable — a full disk, a crash before flush — after which a restart rewinds the
+        // mark to the last successful write and the frames accepted since it become replayable.
+        // Tracked as dig_ecosystem#2546. Every sign still re-gates on the native confirm, which is what
+        // keeps this a hardening gap rather than a signing bypass.
         self.persist.persist_nonce(&auth.pairing_id, auth.nonce);
         // Only an AUTHENTICATED frame moves "last seen", so the management window cannot be made to
         // show a revoked or impersonated app as recently active.

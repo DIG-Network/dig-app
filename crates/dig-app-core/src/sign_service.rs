@@ -613,7 +613,7 @@ mod tests {
         let sealed = {
             let pairings = PairingStore::new(test_sealer(DID), DID);
             let outcome = pairings
-                .pair(
+                .pair(&pairings.consent_now(), 
                     &crate::pairing::NewPairing::pinned("mlibddmbhlgogepnjdienclhnkfpkfah", None),
                     1,
                 )
