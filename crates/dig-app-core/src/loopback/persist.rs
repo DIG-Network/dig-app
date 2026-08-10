@@ -405,11 +405,7 @@ mod tests {
         let pairings = s
             .pairings_dir()
             .expect("the fixture store has a root, so persist_pairing above succeeded");
-        let mode = std::fs::metadata(pairings)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
+        let mode = std::fs::metadata(pairings).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "the app-sign pairing dir must be owner-only");
     }
 
