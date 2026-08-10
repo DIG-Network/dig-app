@@ -4213,13 +4213,13 @@ mod tests {
         }
     }
 
-    /// **The drag strip stops short of the controls, and there is still somewhere to drag.**
+    /// **Each slot holds its control, the slots are disjoint, and the drag strip clears them all.**
     ///
     /// Derived from the leftmost control rather than declared, so it cannot come to overlap one. On
     /// an undecorated window a strip laid over Close is how Close stops working — and the converse,
     /// a strip of zero width, is a window that cannot be moved.
     #[test]
-    fn the_drag_strip_leaves_every_control_reachable_and_still_has_room() {
+    fn every_chrome_slot_fits_its_control_and_the_drag_strip_clears_them_all() {
         let ctx = egui::Context::default();
         install_fonts(&ctx);
         let bar = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, CHROME_HEIGHT));
@@ -4232,6 +4232,53 @@ mod tests {
             });
         }
         let slots = slots.expect("the layout must have run");
+
+        // Every slot must be at least as wide as the control it holds, and the slots must be
+        // disjoint. Those two together are what make the HIT AREAS disjoint — which is the property
+        // that matters and the one drawn glyphs cannot show, because a text control allocates from
+        // its label and merely starts at its slot, so an under-sized slot puts one control's
+        // clickable area on top of its neighbour while the two words still look fine.
+        //
+        // The required width is re-measured from the label here rather than taken from the layout,
+        // so this is an independent check and not the arithmetic agreeing with itself.
+        let required = |label: &str| {
+            let mut width = 0.0;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("chrome-width-test")).show(ctx, |ui| {
+                    width = paint::text_control_width(ui, label);
+                });
+            });
+            width
+        };
+        for (name, label) in [
+            ("theme", "Dark theme"),
+            ("minimize", "Minimize"),
+            ("maximize", "Maximize"),
+            ("close", "Close"),
+        ] {
+            let slot = slots
+                .controls()
+                .into_iter()
+                .find(|(named, _)| *named == name)
+                .expect("every named slot exists")
+                .1;
+            assert!(
+                slot.width() >= required(label),
+                "the {name} slot is {} px but {label:?} needs {} px, so the control spills over its                  neighbour's hit area",
+                slot.width(),
+                required(label)
+            );
+        }
+        let controls = slots.controls();
+        for (i, (name, rect)) in controls.iter().enumerate() {
+            for (other, other_rect) in &controls[i + 1..] {
+                assert!(
+                    !rect.intersects(*other_rect),
+                    "the {name} slot {rect:?} overlaps the {other} slot {other_rect:?}"
+                );
+            }
+        }
+
         for (name, rect) in slots.controls() {
             assert!(
                 !slots.drag.intersects(rect),
