@@ -28,7 +28,7 @@ pub use render::{native_notifier, LoggingNotifier};
 
 /// This application's Windows AppUserModelID — the identity every DIG toast is filed under, and the
 /// value the Start Menu shortcut must carry for a toast to appear at all. See
-/// [`render`]'s Windows backend.
+/// The Windows backend's application user-model id.
 #[cfg(target_os = "windows")]
 pub use render::AUMID;
 

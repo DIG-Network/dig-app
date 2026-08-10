@@ -279,7 +279,7 @@ fn notifications_wanted(config_path: Option<&std::path::Path>) -> bool {
 /// One drain → account → announce cycle, with no threading and no clock.
 ///
 /// Split out so the whole behaviour is testable against a scripted source and a recording notifier.
-/// The cursor is loaded, pages are drained until the node has nothing more (or [`MAX_PAGES_PER_SWEEP`]
+/// The cursor is loaded, pages are drained until the node has nothing more (or the per-sweep page cap
 /// is reached), the cursor is written back, and only then is anything shown.
 ///
 /// # Two orderings that are deliberate
