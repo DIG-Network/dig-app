@@ -17,7 +17,7 @@ use crate::confirm::gui::render::{regular, rgba, semibold, size};
 use crate::confirm::gui::theme::Tokens;
 
 /// The pane's own name, at the top. Exactly one per pane.
-pub(crate) fn title(ui: &Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
+pub(crate) fn title(ui: &mut Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
     paragraph(ui, at, text, semibold(size::HEADING), rgba(t.text))
 }
 
@@ -26,12 +26,12 @@ pub(crate) fn title(ui: &Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
 /// One step under [`title`], and in the primary text colour rather than the muted one: a heading a
 /// person is meant to navigate by has to win against the body under it, and hub's `--muted` at 13 px
 /// loses that contest on both themes.
-pub(crate) fn heading(ui: &Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
+pub(crate) fn heading(ui: &mut Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
     paragraph(ui, at, text, semibold(size::LG), rgba(t.text))
 }
 
 /// An explanatory sentence. The default for anything that is prose rather than a value.
-pub(crate) fn body(ui: &Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
+pub(crate) fn body(ui: &mut Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
     paragraph(ui, at, text, regular(size::BASE), rgba(t.muted))
 }
 
@@ -40,22 +40,25 @@ pub(crate) fn body(ui: &Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
 /// `--muted`, never `--faint`: a caption is text a person is expected to READ, so it takes AA's
 /// 4.5:1 bar. `--faint` is 3.34:1 on hub's light surface and is reserved for content that is
 /// deliberately unavailable rather than merely secondary.
-pub(crate) fn caption(ui: &Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
+pub(crate) fn caption(ui: &mut Ui, at: Rect, t: &Tokens, text: &str) -> f32 {
     paragraph(ui, at, text, regular(size::SM), rgba(t.muted))
 }
 
-/// Lay `text` out wrapped to `at`'s width, draw it at the top of `at`, and report its height.
+/// Lay `text` out wrapped to `at`'s width, draw it SELECTABLE at the top of `at`, and report its
+/// height.
 ///
 /// Wrapped, never truncated: a pane's prose is the explanation of what the person is looking at, and
 /// half a sentence with an ellipsis is worse than a taller block. Truncation belongs to the tab strip,
 /// where a chip must stay one control wide.
-fn paragraph(ui: &Ui, at: Rect, text: &str, font: egui::FontId, colour: egui::Color32) -> f32 {
+///
+/// Selectable for the reason [`super::selectable`] gives, and prose earns it as much as a value
+/// does: the sentence a person most needs to hand to somebody else is the one explaining what went
+/// wrong (dig_ecosystem#2569).
+fn paragraph(ui: &mut Ui, at: Rect, text: &str, font: egui::FontId, colour: egui::Color32) -> f32 {
     let galley = ui
         .painter()
         .layout(text.to_owned(), font, colour, measure(at.width()));
-    ui.painter()
-        .galley(at.left_top(), galley.clone(), egui::Color32::PLACEHOLDER);
-    galley.size().y
+    super::selectable::text(ui, at.left_top(), galley)
 }
 
 /// The widest a line of prose is allowed to get, in pixels.

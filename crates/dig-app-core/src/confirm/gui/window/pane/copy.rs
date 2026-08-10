@@ -63,6 +63,11 @@ pub(crate) mod header {
     pub(crate) const AGENT_LABEL: &str = "DIG";
     /// The label before the node's state.
     pub(crate) const NODE_LABEL: &str = "Node";
+    /// The label before the wallet chain replica's state.
+    ///
+    /// "Chain", not "Sync": the badge beside it is frequently a statement that no syncing is
+    /// happening, and a label promising a sync would contradict its own value.
+    pub(crate) const CHAIN_LABEL: &str = "Chain";
 }
 
 /// The Home pane.

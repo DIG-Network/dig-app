@@ -97,6 +97,13 @@ pub(crate) struct PaneFacts {
     /// It decides no verb, because there is no verb to decide — nothing in this shell can mint a
     /// profile (see [`crate::tray_menu::TrayAction::AboutProfiles`]).
     pub(crate) profile_creation: crate::profiles::ProfileCreation,
+    /// Where this node stands on the DIG and Chia networks — the header strip's three right-hand
+    /// readings (dig_ecosystem#2569).
+    ///
+    /// A whole [`NetworkStanding`](crate::network::NetworkStanding) rather than three numbers,
+    /// because every one of its readings distinguishes *nobody asked* from *the node answered* —
+    /// which is what keeps an unknown peer count from being drawn as a zero.
+    pub(crate) network: crate::network::NetworkStanding,
 }
 
 impl PaneFacts {
@@ -123,6 +130,7 @@ impl PaneFacts {
             update: view.update,
             profiles: view.profiles.clone(),
             profile_creation: view.profile_creation,
+            network: view.network.clone(),
         }
     }
 

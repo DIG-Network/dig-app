@@ -90,6 +90,7 @@ pub(crate) mod home;
 pub(crate) mod identity;
 pub(crate) mod profiles;
 pub(crate) mod select;
+pub(crate) mod selectable;
 pub(crate) mod settings;
 pub(crate) mod state;
 pub(crate) mod text;

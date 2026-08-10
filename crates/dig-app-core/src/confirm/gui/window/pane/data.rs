@@ -133,7 +133,7 @@ fn grid_within(at: Rect) -> Rect {
 /// Draw a run of readouts, in two columns where there is room and one where there is not.
 ///
 /// Returns the height used.
-pub(crate) fn readouts(ui: &Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
+pub(crate) fn readouts(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
     if items.is_empty() {
         return 0.0;
     }
@@ -145,7 +145,7 @@ pub(crate) fn readouts(ui: &Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 
 }
 
 /// Every readout stacked, full width. The narrow-window layout, and the fallback.
-fn one_column(ui: &Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
+fn one_column(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
     let mut y = at.top();
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
@@ -166,7 +166,7 @@ fn one_column(ui: &Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
 
 /// Readouts paired left and right. Each ROW is as tall as its taller half, so the two columns stay
 /// on a shared baseline grid rather than drifting apart down the card.
-fn two_columns(ui: &Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
+fn two_columns(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
     let gutter = space::S5;
     let column = (at.width() - gutter) / 2.0;
     let mut y = at.top();
@@ -203,7 +203,7 @@ fn two_columns(ui: &Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
 /// [`Value::Measure`] that FITS goes inline, and identifiers, absences and anything too wide stack.
 /// The inline test is a real measurement of the laid-out text, not a length in characters — a
 /// guess in characters is wrong the first time a translation is longer than its English.
-pub(crate) fn readout(ui: &Ui, at: Rect, t: &Tokens, item: &Readout) -> f32 {
+pub(crate) fn readout(ui: &mut Ui, at: Rect, t: &Tokens, item: &Readout) -> f32 {
     let label = ui.painter().layout(
         item.label.clone(),
         regular(size::SM),
@@ -215,28 +215,22 @@ pub(crate) fn readout(ui: &Ui, at: Rect, t: &Tokens, item: &Readout) -> f32 {
         let fits = label.size().x + space::S4 + width <= at.width();
         if fits && label.rows.len() == 1 {
             let baseline = at.top();
-            ui.painter().galley(
-                egui::Pos2::new(at.left(), baseline),
-                label.clone(),
-                egui::Color32::PLACEHOLDER,
-            );
+            let label_size = label.size();
+            super::selectable::text(ui, egui::Pos2::new(at.left(), baseline), label);
             // Right-aligned, so a column of values shares one edge and can be compared by scanning
             // straight down rather than by reading each label first.
             let slot = Rect::from_min_size(
                 egui::Pos2::new(at.right() - width, baseline),
                 Vec2::new(width, (at.bottom() - baseline).max(0.0)),
             );
-            return value(ui, slot, t, &item.value).max(label.size().y);
+            return value(ui, slot, t, &item.value).max(label_size.y);
         }
     }
 
     let mut y = at.top();
-    ui.painter().galley(
-        egui::Pos2::new(at.left(), y),
-        label.clone(),
-        egui::Color32::PLACEHOLDER,
-    );
-    y += label.size().y + LABEL_GAP;
+    let label_height = label.size().y;
+    super::selectable::text(ui, egui::Pos2::new(at.left(), y), label);
+    y += label_height + LABEL_GAP;
 
     let slot = Rect::from_min_size(
         egui::Pos2::new(at.left(), y),
@@ -276,7 +270,7 @@ fn inline_width(ui: &Ui, t: &Tokens, value: &Value) -> Option<f32> {
 }
 
 /// Draw a value at the top of `at`, in the treatment its variant calls for. Returns its height.
-pub(crate) fn value(ui: &Ui, at: Rect, t: &Tokens, value: &Value) -> f32 {
+pub(crate) fn value(ui: &mut Ui, at: Rect, t: &Tokens, value: &Value) -> f32 {
     match value {
         Value::Word(word) => wrapped(ui, at, word, semibold(size::BASE), rgba(t.text)),
         Value::Identifier(id) => wrapped(ui, at, id, mono(size::SM), rgba(t.text)),
@@ -288,14 +282,14 @@ pub(crate) fn value(ui: &Ui, at: Rect, t: &Tokens, value: &Value) -> f32 {
 }
 
 /// A number and its unit on one line, the number weighted and the unit muted.
-fn measure(ui: &Ui, at: Rect, t: &Tokens, amount: &str, unit: &str) -> f32 {
+fn measure(ui: &mut Ui, at: Rect, t: &Tokens, amount: &str, unit: &str) -> f32 {
     let number = ui
         .painter()
         .layout_no_wrap(amount.to_owned(), semibold(size::BASE), rgba(t.text));
-    ui.painter()
-        .galley(at.left_top(), number.clone(), egui::Color32::PLACEHOLDER);
+    let number_size = number.size();
+    super::selectable::text(ui, at.left_top(), number);
 
-    let unit_at = at.left() + number.size().x + space::S1;
+    let unit_at = at.left() + number_size.x + space::S1;
     let unit_galley = text::one_line(
         ui,
         unit,
@@ -305,22 +299,21 @@ fn measure(ui: &Ui, at: Rect, t: &Tokens, amount: &str, unit: &str) -> f32 {
     );
     // Baseline-aligned by bottom edge rather than top: a 13 px unit hung off a 15 px number's top
     // reads as a superscript.
-    ui.painter().galley(
-        egui::Pos2::new(unit_at, at.top() + number.size().y - unit_galley.size().y),
-        unit_galley,
-        egui::Color32::PLACEHOLDER,
-    );
-    number.size().y
+    let unit_top = at.top() + number_size.y - unit_galley.size().y;
+    super::selectable::text(ui, egui::Pos2::new(unit_at, unit_top), unit_galley);
+    number_size.y
 }
 
-/// Lay `text` out wrapped to `at`, draw it, and report its height.
-fn wrapped(ui: &Ui, at: Rect, text: &str, font: egui::FontId, colour: egui::Color32) -> f32 {
+/// Lay `text` out wrapped to `at`, draw it SELECTABLE, and report its height.
+///
+/// Through [`super::selectable`] rather than the painter, which is what makes every value in the
+/// window copyable by default — an address or a store id that cannot be selected has to be retyped
+/// (dig_ecosystem#2569).
+fn wrapped(ui: &mut Ui, at: Rect, text: &str, font: egui::FontId, colour: egui::Color32) -> f32 {
     let galley = ui
         .painter()
         .layout(text.to_owned(), font, colour, at.width().max(1.0));
-    ui.painter()
-        .galley(at.left_top(), galley.clone(), egui::Color32::PLACEHOLDER);
-    galley.size().y
+    super::selectable::text(ui, at.left_top(), galley)
 }
 
 /// The height of a meter's bar.
@@ -338,7 +331,7 @@ const PRESSURE: f64 = 0.8;
 /// Returns the height used. Use it where a number's meaning is its RATIO to a limit: cache used
 /// against the cache cap. Do not use it for an unbounded count — a meter with no cap is a bar chart
 /// with one bar, and it implies a ceiling that does not exist.
-pub(crate) fn meter(ui: &Ui, at: Rect, t: &Tokens, label: &str, used: u64, cap: u64) -> f32 {
+pub(crate) fn meter(ui: &mut Ui, at: Rect, t: &Tokens, label: &str, used: u64, cap: u64) -> f32 {
     let mut y = at.top();
     let heading = ui.painter().layout(
         label.to_owned(),
@@ -346,12 +339,9 @@ pub(crate) fn meter(ui: &Ui, at: Rect, t: &Tokens, label: &str, used: u64, cap: 
         rgba(t.muted),
         at.width(),
     );
-    ui.painter().galley(
-        egui::Pos2::new(at.left(), y),
-        heading.clone(),
-        egui::Color32::PLACEHOLDER,
-    );
-    y += heading.size().y + LABEL_GAP;
+    let heading_height = heading.size().y;
+    super::selectable::text(ui, egui::Pos2::new(at.left(), y), heading);
+    y += heading_height + LABEL_GAP;
 
     // The figure leads, then the bar, then the words. A bar with no number above it makes a reader
     // estimate a quantity they could have simply been told.
@@ -741,5 +731,95 @@ mod tests {
             });
         });
         assert_eq!(height.get(), 0.0);
+    }
+
+    /// **Every KIND of value a readout can hold is selectable, in the real readout layout**
+    /// (dig_ecosystem#2569).
+    ///
+    /// [`super::selectable`] proves the mechanism on one galley. This proves the mechanism is
+    /// actually REACHED by the code panes call, and reached for every variant — which is the half a
+    /// mechanism test cannot see. The old defect was a placement (paint instead of widget), and a
+    /// placement is only visible from the layer above it.
+    ///
+    /// Four values in one run, each a different [`Value`] variant and each with distinct text: an
+    /// implementation that routed one variant through the widget and left the other three painted
+    /// would pass any single-variant test. The identifier is a real `xch1…` address and a real
+    /// 64-hex store id — the two a person cannot retype — and the `Unknown` arm is included because
+    /// a reason a person needs to quote is exactly the text that used to be dead.
+    #[test]
+    fn every_kind_of_value_in_a_readout_can_be_selected_and_copied() {
+        const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+        const STORE_ID: &str = "3f9a1c0b7e2d48561a0c9f3b8d47e25610fa3c9b2e5d704816af39c2b0d5e871";
+        const REASON: &str = "The node did not answer in time.";
+        const WORD: &str = "Unlocked";
+
+        let items = [
+            Readout::new("Receive address", Value::Identifier(ADDRESS.to_string())),
+            Readout::new("Store", Value::Identifier(STORE_ID.to_string())),
+            Readout::new("Account", Value::Word(WORD.to_string())),
+            Readout::new("Balance", Value::Unknown(REASON.to_string())),
+        ];
+
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        // Under `TWO_COLUMN_AT`, so the run stacks into ONE column: every readout then lies in a
+        // single top-to-bottom band, which is what lets one drag cover the whole run. It is also
+        // the layout a real 480 px window produces, so the identifiers stack under their labels
+        // rather than sitting inline — the cramped case, not the roomy one.
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 600.0));
+
+        // A drag from above the first line to far past the last selects the whole run; Ctrl+C then
+        // reports what a person would actually have on their clipboard.
+        let events = [
+            vec![],
+            vec![],
+            vec![egui::Event::PointerMoved(egui::Pos2::new(1.0, 1.0))],
+            vec![egui::Event::PointerButton {
+                pos: egui::Pos2::new(1.0, 1.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            vec![egui::Event::PointerMoved(egui::Pos2::new(399.0, 599.0))],
+            vec![egui::Event::PointerButton {
+                pos: egui::Pos2::new(399.0, 599.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            vec![egui::Event::Copy],
+        ];
+        let mut copied = String::new();
+        for batch in events {
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events: batch,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("selectable-readouts"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            readouts(ui, screen, &t, &items);
+                        });
+                },
+            );
+            for command in output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(said) = command {
+                    copied.push_str(&said);
+                    copied.push('\n');
+                }
+            }
+        }
+
+        for expected in [ADDRESS, STORE_ID, WORD, REASON] {
+            assert!(
+                copied.contains(expected),
+                "selecting the whole run did not copy {expected:?}, so that value is dead text — \
+                 got {copied:?}"
+            );
+        }
     }
 }

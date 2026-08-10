@@ -62,6 +62,9 @@ fn main() {
             // the state every real account is in rather than varying them.
             profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
             profile_creation: dig_app_core::profiles::ProfileCreation::default(),
+            // The network strip is a WINDOW surface; this gallery photographs the tray menu, so the
+            // reading is pinned to its pre-poll default rather than varied.
+            network: dig_app_core::network::NetworkStanding::default(),
             // Present exactly while unlocked, as the shell's live derivation off the residency is.
             receive_address: matches!(account, AccountState::Unlocked { .. }).then(|| {
                 "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()

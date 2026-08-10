@@ -1565,6 +1565,14 @@ mod tray {
             profile_creation: dig_app_core::profiles::ProfileCreation::of(
                 super::mint_seams().availability(),
             ),
+            // Where this node stands on BOTH networks (dig_ecosystem#2569). The poller owns the
+            // cadence, and every decision about what the readings MEAN lives in
+            // `dig_app_core::network`, because a binary is a test-free zone.
+            network: match status.read() {
+                Ok(status) => network_poller().observe(&status.engine),
+                // A poisoned lock says nothing about either network, and "nothing" is not zero.
+                Err(_) => dig_app_core::network::NetworkStanding::default(),
+            },
         }
     }
 
@@ -1629,6 +1637,17 @@ mod tray {
         static POLLER: std::sync::OnceLock<dig_app_core::hosted_stores::NodeHostedStores> =
             std::sync::OnceLock::new();
         POLLER.get_or_init(dig_app_core::hosted_stores::NodeHostedStores::default)
+    }
+
+    /// The process-wide network-standing poller (dig_ecosystem#2569).
+    ///
+    /// A single instance for the same reason [`balance_poller`] is one: a per-snapshot poller would
+    /// have an empty cache every time and turn the twice-a-second repaint into twice-a-second node
+    /// reads.
+    fn network_poller() -> &'static dig_app_core::network::NodeNetworkStanding {
+        static POLLER: std::sync::OnceLock<dig_app_core::network::NodeNetworkStanding> =
+            std::sync::OnceLock::new();
+        POLLER.get_or_init(dig_app_core::network::NodeNetworkStanding::default)
     }
 
     /// The process-wide beacon-status cache (dig_ecosystem#2311).

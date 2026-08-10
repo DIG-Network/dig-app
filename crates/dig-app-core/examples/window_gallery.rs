@@ -45,6 +45,7 @@ use dig_app_core::hosted_stores::{
     HostedStoresReading, HostedStoresUnknown, NodeHostedStores, REFRESH_INTERVAL,
     STORES_READ_TIMEOUT,
 };
+use dig_app_core::network::{ChainSync, NetworkStanding, NodeNetworkStanding, PeerCount};
 use dig_app_core::node_facts::NodeFacts;
 use dig_app_core::profiles::ProfilesReading;
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
@@ -204,6 +205,16 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
             cap_bytes: GIB,
             used_bytes: 350 * MIB,
         }),
+        // The fixture's networks: a chain replica that has reached a block, six DIG peers and four
+        // Chia peers. Three DIFFERENT figures, because a fixture whose counts agree is a picture in
+        // which a strip that drew one number twice would look correct.
+        network: NetworkStanding {
+            sync: ChainSync::Synced {
+                peak_height: 6_012_345,
+            },
+            dig_peers: PeerCount::Known(6),
+            chia_peers: PeerCount::Known(4),
+        },
         ..TrayView::default()
     }
 }
@@ -230,6 +241,8 @@ struct NodeReadings {
     facts: Option<NodeFacts>,
     /// The stores it holds.
     stores: HostedStoresReading,
+    /// Where it stands on both networks (dig_ecosystem#2569).
+    standing: NetworkStanding,
 }
 
 /// `view` with every field the node supplies replaced, and every other field untouched.
@@ -247,6 +260,7 @@ fn with_live(view: TrayView, readings: &NodeReadings) -> TrayView {
         cache: readings.cache,
         node_facts: readings.facts.clone(),
         hosted_stores: readings.stores.clone(),
+        network: readings.standing.clone(),
         ..view
     }
 }
@@ -308,15 +322,22 @@ fn live_readings() -> Result<NodeReadings, String> {
     let summary = link.summary();
 
     let poller = NodeHostedStores::new(REFRESH_INTERVAL, STORES_READ_TIMEOUT);
+    // Started alongside the store read so both are in flight during the one wait below.
+    let standing_poller = NodeNetworkStanding::default();
+    let _ = standing_poller.observe(&link);
     let deadline = Instant::now() + LIVE_WAIT;
     loop {
         let reading = poller.observe(&link);
         if answered(&reading) {
+            // Read from the SAME running node, in the same wait, so a live picture's badges and
+            // its cards describe one machine at one moment.
+            let standing = standing_poller.observe(&link);
             return Ok(NodeReadings {
                 summary,
                 cache,
                 facts: Some(facts),
                 stores: reading,
+                standing,
             });
         }
         if Instant::now() >= deadline {
@@ -534,6 +555,13 @@ mod tests {
             }),
             facts: Some(some_facts()),
             stores: HostedStoresReading::Known(one_store()),
+            standing: NetworkStanding {
+                sync: ChainSync::Syncing {
+                    peak_height: 5_999_001,
+                },
+                dig_peers: PeerCount::Known(2),
+                chia_peers: PeerCount::Known(3),
+            },
         }
     }
 
@@ -561,6 +589,15 @@ mod tests {
             HostedStoresReading::Known(one_store()),
             "the node's list must reach the view it is photographed from"
         );
+        assert_eq!(
+            live.network,
+            readings().standing,
+            "the node's own peer counts must reach the strip the picture shows"
+        );
+        assert_ne!(
+            live.network, base.network,
+            "the fixture and the live standing are identical, so this proves nothing"
+        );
         // The control: with the base's own readings restored, nothing else moved.
         let restored = with_live(
             live,
@@ -569,6 +606,7 @@ mod tests {
                 cache: base.cache,
                 facts: base.node_facts.clone(),
                 stores: base.hosted_stores.clone(),
+                standing: base.network.clone(),
             },
         );
         assert!(
