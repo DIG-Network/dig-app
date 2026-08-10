@@ -1889,11 +1889,19 @@ mod copy {
         /// Its heading.
         pub const OFFLINE_HEADING: &str = "DIG cannot reach the blockchain right now.";
         /// Its body, shown beneath the spend id.
-        pub const OFFLINE_BODY: &str =
-            "Your transaction was sent and is probably fine — what stopped is this computer's ability \
-             to watch for it. Do NOT create a second DID; that would spend again.\n\n\
-             Check this computer's internet connection, then open the DIG menu to see whether the DID \
-             confirmed. This is the transaction:";
+        ///
+        /// It used to end *"then open the DIG menu to see whether the DID confirmed"*. Nothing there
+        /// can answer that: the watch has ended, no part of this build looks again, and the DID reaches
+        /// the menu only once a CONFIRMED mint has been recorded — which is precisely the fact this
+        /// person does not have. Same false route as the decline screen's, on the screen shown to
+        /// someone who has already spent (dig_ecosystem#2560).
+        pub const OFFLINE_BODY: &str = concat!(
+            "Your transaction was sent and is probably fine — what stopped is this computer's ability ",
+            "to watch for it. Do NOT create a second DID; that would spend again.\n\n",
+            "Check this computer's internet connection. DIG has stopped watching and does not check ",
+            "again on its own in this version, so any Chia block explorer is what can tell you how ",
+            "this one went. This is the transaction:",
+        );
     }
 }
 
@@ -1923,6 +1931,7 @@ mod tests {
     use crate::account::recovery::PHRASE_WORDS;
     use crate::confirm::{ConnectPrompt, PairPrompt, SignPrompt};
     use crate::sealer::SealError;
+    use crate::tray_menu::TrayAction;
     use std::sync::Mutex;
     use zeroize::Zeroizing;
 
@@ -2108,6 +2117,153 @@ mod tests {
                     !body.contains(promise),
                     "{name} promises \"{promise}\", and no such screen exists"
                 );
+            }
+        }
+    }
+
+    /// Every sentence of every screen the DID step can show, named so a rule can be held over all of
+    /// them at once.
+    ///
+    /// The enumeration is the point. A rule is only ever as wide as the list it runs over, and the copy
+    /// this module ships was wrong for three releases in the one place the list could not reach — a
+    /// literal in `src/bin`, where no test can read it (dig_ecosystem#2560). Anything a person reads on
+    /// this step belongs here, so a new screen is checked by every rule below the day it is written.
+    fn every_did_screen() -> Vec<(&'static str, String)> {
+        vec![
+            ("the mint offer", copy::did::OFFER_BODY.to_owned()),
+            ("the unavailable notice", copy::did::UNAVAILABLE_BODY.to_owned()),
+            ("the tray's DID explainer", copy::did::EXPLAINER_BODY.to_owned()),
+            ("the decline screen", copy::did::later_body()),
+            (
+                "the not-enough-XCH screen",
+                copy::did::UNAFFORDABLE_AFTER_COST.to_owned(),
+            ),
+            ("the refused screen", copy::did::REFUSED_BODY.to_owned()),
+            ("the success screen", copy::did::CONFIRMED_BODY.to_owned()),
+            (
+                "the success-but-unrecorded screen",
+                copy::did::CONFIRMED_BUT_UNRECORDED_BODY.to_owned(),
+            ),
+            ("the rejected screen", copy::did::REJECTED_BODY.to_owned()),
+            ("the still-pending screen", copy::did::PENDING_BODY.to_owned()),
+            ("the lost-contact screen", copy::did::OFFLINE_BODY.to_owned()),
+        ]
+    }
+
+    /// Sentences, near enough for a copy rule: the unit a claim is made in.
+    fn sentences(body: &str) -> impl Iterator<Item = &str> {
+        body.split(['.', '\n']).map(str::trim).filter(|s| !s.is_empty())
+    }
+
+    /// **A DID screen may name the DIG menu only for something the menu actually does.**
+    ///
+    /// The decline screen used to end *"You can also start it any time from the DIG menu."* There is no
+    /// such row — [`TrayAction::AboutDid`] is a notice that cannot call the wizard, and the rows nearest
+    /// it (`ReplaceWithNewAccount`, `ReplaceFromPhrase`, `RemoveAccount`) DESTROY the account. The one
+    /// sentence telling a hesitant person how to come back pointed them at losing their custody.
+    ///
+    /// # Why the rule is an allow-list and not a list of banned phrases
+    ///
+    /// Banned phrases only catch the wording that has already been wrong once; the next invented route
+    /// will be worded differently and sail through. Here a sentence that names the menu must match a
+    /// claim paired with the [`TrayAction`] that makes it true, so NEW copy is refused until its author
+    /// finds the row — and if the row is later removed, the pairing stops compiling.
+    #[test]
+    fn a_did_screen_may_name_the_dig_menu_only_for_a_row_the_menu_has() {
+        // The claim a sentence may make, and the row that makes it true. Denials need no row: telling
+        // somebody the menu will NOT do a thing cannot send them anywhere.
+        let justified: [(&str, Option<TrayAction>); 4] = [
+            ("no row that starts this", None),
+            ("log folder", Some(TrayAction::OpenLogs)),
+            ("shows it and copies it", Some(TrayAction::CopyReceiveAddress)),
+            ("your DID is in the DIG menu", Some(TrayAction::CopyDigId)),
+        ];
+
+        for (screen, body) in every_did_screen() {
+            for sentence in sentences(&body) {
+                if !sentence.contains("DIG menu") {
+                    continue;
+                }
+                assert!(
+                    justified.iter().any(|(claim, _)| sentence.contains(claim)),
+                    "{screen} sends the user to the DIG menu — \"{sentence}\" — and no row there does \
+                     that. The menu has no way to start the DID step; the rows nearest it destroy the \
+                     account."
+                );
+            }
+        }
+    }
+
+    /// **The decline screen may promise a way back only because the start-up gate is one.**
+    ///
+    /// Having removed the invented menu route, the copy names the route that does exist: DIG opens this
+    /// step itself on every launch while the account has no DID. That is a claim about
+    /// [`startup_wizard`], so it is held against [`startup_wizard`] rather than believed.
+    ///
+    /// # The fixture, and what it is able to see
+    ///
+    /// Both seams are exercised, because the property is an implication and a single case cannot show
+    /// one. `Wired` is where the decline screen is reachable at all — [`MintingStep::NotInThisVersion`]
+    /// never draws the offer, so nobody can decline it — and it is exactly there that the gate must
+    /// open. `NoChainTransport` is the honest control: the gate stays shut, and so does the screen that
+    /// would have promised anything. A gate narrowed by some further condition (funds, a flag, a second
+    /// launch) fails the first case rather than passing quietly.
+    #[test]
+    fn the_decline_screen_promises_a_return_only_where_the_startup_gate_provides_one() {
+        assert!(
+            copy::did::later_body().contains(copy::did::OFFERED_AGAIN),
+            "the decline screen is what makes this promise"
+        );
+
+        let bench = Bench::minting_successfully(Sighting::Pending);
+        let clock = TestClock::default();
+        let surface = PatientWait(&clock);
+        let ledger = MemoryLedger::default();
+
+        for (host, seams) in [
+            ("a host that can mint", bench.seams()),
+            ("a host with no chain transport", MintSeams::NoChainTransport),
+        ] {
+            let offer_is_reachable = matches!(
+                seams.minting_step(&surface, &clock, &ledger),
+                MintingStep::Possible(_)
+            );
+            let opens_at_the_did_step = startup_wizard(
+                StartupAccount::Enrolled(AccountCompleteness::WalletOnly),
+                &seams,
+            ) == StartupWizard::AtTheDidStep;
+
+            assert_eq!(
+                offer_is_reachable, opens_at_the_did_step,
+                "on {host} the decline screen is reachable={offer_is_reachable} while the start-up \
+                 gate it points at opens={opens_at_the_did_step}; the promise is only true when the \
+                 two agree"
+            );
+        }
+    }
+
+    /// **No DID screen may say a DID is needed for something that works without one.**
+    ///
+    /// The decline screen used to say *"Publishing, signing for an app and messaging need a DID"*.
+    /// Signing does not need one: [`Allowance::of`](crate::account::did::Allowance::of) is the app's
+    /// only DID capability gate and no production surface consults it, so pairing another program with
+    /// this account and signing for it work today on a wallet that has never minted. Reading content
+    /// and holding funds are not identity-bearing at all
+    /// ([`Capability`](crate::account::did::Capability)), so no screen may gate those on a DID either.
+    #[test]
+    fn a_screen_may_not_say_a_did_is_needed_for_something_that_works_without_one() {
+        for (screen, body) in every_did_screen() {
+            for sentence in sentences(&body) {
+                if !sentence.contains("need a DID") && !sentence.contains("needs a DID") {
+                    continue;
+                }
+                for works_anyway in ["read", "Read", "fund", "pair", "Pair", "sign", "Sign"] {
+                    assert!(
+                        !sentence.contains(works_anyway),
+                        "{screen} says \"{sentence}\", which tells the user something they can do \
+                         today needs a DID first"
+                    );
+                }
             }
         }
     }
