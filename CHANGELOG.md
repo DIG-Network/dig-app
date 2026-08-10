@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [9.2.1] - 2026-08-10
+
+### Bug Fixes
+- **build:** Compile the headless dig-app shell and gate it in CI (#146)
+
 ## [9.2.0] - 2026-08-10
 
 ### Features
