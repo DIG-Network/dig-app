@@ -4163,19 +4163,65 @@ mod tests {
 
     /// **Every chrome control keeps its own pixels at the narrowest width the window allows.**
     ///
-    /// Four text controls in a 480 px bar is where a slot that is narrower than its label stops
-    /// being hypothetical: the control still draws and still senses, it simply does so on top of
-    /// its neighbour, and the person aiming at Close presses Maximize.
+    /// Four text controls in a 480 px bar is where a slot narrower than its label stops being
+    /// hypothetical: the control still draws and still senses, it simply does so on top of its
+    /// neighbour, and the person aiming at Close presses Maximize.
     ///
-    /// The drag strip is held to the same rule. It is derived from the leftmost control, so a strip
-    /// that overlapped one would swallow that control's hit area — on an undecorated window, that
-    /// is how Close stops working.
+    /// # Asserted on DRAWN INK, not on the slot rectangles
+    ///
+    /// An earlier version of this test compared the rectangles [`ChromeSlots`] returns. It passed
+    /// with every slot pinned to a fixed 72 px — the arithmetic this layout replaced — because a
+    /// text control allocates its OWN size from its label and merely STARTS at its slot. Four
+    /// disjoint 72 px slots therefore produce four controls that overlap, and a test that only reads
+    /// the slots cannot see it. So this drives the real chrome and measures the pixels it painted.
     #[test]
     fn no_two_chrome_controls_share_pixels_at_the_narrowest_width() {
+        let mut shelf = Shelf::open();
+        shelf.size = Vec2::new(SHELL_MIN, SHELL_HEIGHT);
+        shelf.settle();
+
+        let painted = shelf.words();
+        // The chrome is the top band; everything below it belongs to the strip and the panes.
+        let in_chrome = |at: &Rect| at.top() < CHROME_HEIGHT;
+        let placed = |word: &str| {
+            painted
+                .iter()
+                .find(|(said, at)| said == word && in_chrome(at))
+                .unwrap_or_else(|| {
+                    panic!("the chrome drew no {word:?} at {SHELL_MIN} px: {painted:?}")
+                })
+                .1
+        };
+
+        let controls = [
+            ("Dark theme", placed("Dark theme")),
+            ("Minimize", placed("Minimize")),
+            ("Maximize", placed("Maximize")),
+            ("Close", placed("Close")),
+        ];
+        for (i, (name, rect)) in controls.iter().enumerate() {
+            assert!(
+                rect.right() <= SHELL_MIN && rect.left() >= 0.0,
+                "the {name} control at {rect:?} is drawn outside the {SHELL_MIN} px bar"
+            );
+            for (other, other_rect) in &controls[i + 1..] {
+                assert!(
+                    !rect.intersects(*other_rect),
+                    "{name} at {rect:?} overlaps {other} at {other_rect:?}"
+                );
+            }
+        }
+    }
+
+    /// **The drag strip stops short of the controls, and there is still somewhere to drag.**
+    ///
+    /// Derived from the leftmost control rather than declared, so it cannot come to overlap one. On
+    /// an undecorated window a strip laid over Close is how Close stops working — and the converse,
+    /// a strip of zero width, is a window that cannot be moved.
+    #[test]
+    fn the_drag_strip_leaves_every_control_reachable_and_still_has_room() {
         let ctx = egui::Context::default();
         install_fonts(&ctx);
-        // The longest label each slot can be asked to carry, so the measurement is of the worst
-        // case rather than of whichever state the window happens to open in.
         let bar = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, CHROME_HEIGHT));
         let mut slots = None;
         for _ in 0..2 {
@@ -4186,21 +4232,9 @@ mod tests {
             });
         }
         let slots = slots.expect("the layout must have run");
-
-        let controls = slots.controls();
-        for (i, (name, rect)) in controls.iter().enumerate() {
+        for (name, rect) in slots.controls() {
             assert!(
-                bar.contains_rect(*rect),
-                "the {name} control at {rect:?} is drawn outside the {SHELL_MIN} px bar {bar:?}"
-            );
-            for (other, other_rect) in &controls[i + 1..] {
-                assert!(
-                    !rect.intersects(*other_rect),
-                    "{name} at {rect:?} overlaps {other} at {other_rect:?}"
-                );
-            }
-            assert!(
-                !slots.drag.intersects(*rect),
+                !slots.drag.intersects(rect),
                 "the drag strip {:?} swallows the {name} control's hit area at {rect:?}",
                 slots.drag
             );
