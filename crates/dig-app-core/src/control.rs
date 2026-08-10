@@ -418,7 +418,24 @@ fn post_json(
     timeout: Duration,
 ) -> Result<Vec<u8>, ControlCallError> {
     let (host, port) = split_host_port(endpoint)?;
-    let stream = connect(&host, port, timeout)?;
+    let trust = trust_for(&host);
+    post_json_to(&host, port, body, token, timeout, trust)
+}
+
+/// [`post_json`] with the endpoint already split and its [`EndpointTrust`] stated outright.
+///
+/// The trust is a parameter rather than something re-derived down here so that the one rule that
+/// decides whether this machine's control token may leave the machine — [`trust_for`] — lives in
+/// exactly one place and is directly exercisable by a test.
+fn post_json_to(
+    host: &str,
+    port: u16,
+    body: &[u8],
+    token: Option<&str>,
+    timeout: Duration,
+    trust: EndpointTrust,
+) -> Result<Vec<u8>, ControlCallError> {
+    let stream = connect(host, port, timeout, trust)?;
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
@@ -465,16 +482,66 @@ fn stalled_or(error: &std::io::Error, detail: String) -> ControlCallError {
     }
 }
 
+/// Who chose an endpoint, which decides whether this machine's control token may travel to it.
+///
+/// The distinction is not cosmetic: the token authorizes every `control.*` mutation on the local
+/// node, so it may only ever be handed to a peer the *user* named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointTrust {
+    /// A host dig-app guessed at on the user's behalf — the `dig.local` / `localhost` ladder tiers.
+    /// Nobody vouched for whoever answers to that name, so the address it resolves to MUST be
+    /// loopback (dig_ecosystem#2471).
+    AutoDiscovered,
+    /// A host the user typed into settings. It may legitimately be a node on another machine, and
+    /// §5.3 says a configured node always wins — so no address filter applies.
+    UserConfigured,
+}
+
+/// Classify a host by whether dig-app guessed it or the user named it.
+///
+/// The two ladder names are the whole auto-discovered set ([`endpoint_ladder`]), and neither is
+/// authoritatively owned on a stock machine: `dig.local` is answered by mDNS/LLMNR when the
+/// installer's hosts entry is absent, so any same-LAN responder can claim it. A user who types one
+/// of those two names by hand is pointing at their own machine anyway, so requiring loopback of them
+/// costs a correctly-installed user nothing while closing the impersonation entirely.
+fn trust_for(host: &str) -> EndpointTrust {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host == dig_constants::DIG_LOCAL_HOST || host == "localhost" {
+        EndpointTrust::AutoDiscovered
+    } else {
+        EndpointTrust::UserConfigured
+    }
+}
+
 /// Dial `host:port`, preferring IPv6 (§5.2) among the resolved addresses.
 ///
 /// `localhost` resolves to both loopback families and the node's IPv6 listener is best-effort — so
 /// we try each resolved address in IPv6-first order and take the first that connects, rather than
 /// betting the whole probe on whichever address the resolver happened to list first.
-fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, ControlCallError> {
+///
+/// An [`EndpointTrust::AutoDiscovered`] host is additionally held to resolving *only* to loopback,
+/// and the filter is applied HERE — before any socket is opened — so that a name hijacked on the
+/// LAN never receives so much as a connection, let alone the control token
+/// (dig_ecosystem#2471).
+fn connect(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    trust: EndpointTrust,
+) -> Result<TcpStream, ControlCallError> {
     let mut addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))?
         .collect();
+    if trust == EndpointTrust::AutoDiscovered {
+        addrs.retain(|a| a.ip().is_loopback());
+        if addrs.is_empty() {
+            return Err(ControlCallError::Unreachable(format!(
+                "{host} did not resolve to this machine, so it is not the local node; \
+                 set an explicit node address in settings to reach a node elsewhere"
+            )));
+        }
+    }
     addrs.sort_by_key(|a| !a.is_ipv6());
     if addrs.is_empty() {
         return Err(ControlCallError::BadEndpoint(format!(
@@ -1039,5 +1106,153 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    /// The control token authorizes every `control.*` mutation on this machine's node, so an
+    /// auto-discovered ladder name that resolves OFF loopback must receive **no bytes at all** —
+    /// not a refused call, not an empty request, nothing (dig_ecosystem#2471).
+    ///
+    /// `dig.local` is answered by mDNS/LLMNR when the installer's hosts entry is missing, so a
+    /// same-LAN responder can hold that name. The fixture is a listener on a NON-loopback local
+    /// address, which is the property under test; asserting from the SERVER's accept queue (rather
+    /// than from an internal predicate) is what makes the test blind to no path — a guard placed
+    /// after the dial, or a second code path that still sent the header, would both be caught here.
+    #[test]
+    fn an_auto_discovered_host_off_loopback_receives_nothing() {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        listener.set_nonblocking(true).expect("nonblocking");
+        assert!(
+            !std::net::Ipv4Addr::UNSPECIFIED.is_loopback(),
+            "the fixture is only meaningful if its address is genuinely not loopback"
+        );
+
+        let err = post_json_to(
+            "0.0.0.0",
+            port,
+            b"{}",
+            Some("super-secret-control-token"),
+            quick(),
+            EndpointTrust::AutoDiscovered,
+        )
+        .expect_err("a non-loopback answer to an auto-discovered name is not the local node");
+
+        assert!(
+            matches!(err, ControlCallError::Unreachable(ref m) if m.contains("not the local node")),
+            "the person must be told this is not their node, and how to reach one elsewhere; got {err:?}"
+        );
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok((stream, peer)) => panic!(
+                "a connection reached {peer} — the token may already be in its buffer: {stream:?}"
+            ),
+            Err(e) => panic!("unexpected accept error: {e}"),
+        }
+    }
+
+    /// The same fixture with exactly ONE field varied — the trust — still reaches a non-loopback
+    /// address and still carries the token.
+    ///
+    /// This is the direction that would make an over-strict fix a worse regression than the bug:
+    /// §5.3 says an explicitly configured node always wins, so a user pointing dig-app at their own
+    /// node on another machine must keep working. Its control is the test above.
+    #[test]
+    fn a_user_configured_host_off_loopback_still_receives_the_token() {
+        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+
+        let _ = post_json_to(
+            "0.0.0.0",
+            port,
+            b"{}",
+            Some("super-secret-control-token"),
+            Duration::from_millis(300),
+            EndpointTrust::UserConfigured,
+        );
+
+        let (mut stream, _) = listener
+            .accept()
+            .expect("the configured node must be dialled");
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).expect("read the request");
+        let request = String::from_utf8_lossy(&request);
+        assert!(
+            request.contains(&format!(
+                "{CONTROL_TOKEN_HEADER}: super-secret-control-token"
+            )),
+            "a node the user named must still be authorized; got:
+{request}"
+        );
+    }
+
+    /// The refusal happens on the RESOLVED address, before any dial — so an auto-discovered name
+    /// pointing at an unroutable LAN address costs no connect timeout.
+    ///
+    /// The elapsed bound is the assertion that matters: a filter applied after `connect_timeout`
+    /// would satisfy the error check and blow this budget.
+    #[test]
+    fn an_auto_discovered_host_off_loopback_is_refused_without_dialling() {
+        let started = std::time::Instant::now();
+        let err = connect(
+            "10.255.255.1",
+            9778,
+            Duration::from_secs(20),
+            EndpointTrust::AutoDiscovered,
+        )
+        .expect_err("an unroutable LAN address is not the local node");
+        assert!(
+            matches!(err, ControlCallError::Unreachable(_)),
+            "got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "no dial may be attempted; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Only the two names dig-app guesses at are held to loopback; everything else is the user's
+    /// choice. Case and a trailing root dot are the same name to a resolver, so they must be the
+    /// same name here too.
+    #[test]
+    fn only_the_guessed_ladder_names_are_auto_discovered() {
+        for guessed in [
+            "dig.local",
+            "DIG.Local",
+            "dig.local.",
+            "localhost",
+            "LOCALHOST",
+        ] {
+            assert_eq!(
+                trust_for(guessed),
+                EndpointTrust::AutoDiscovered,
+                "{guessed} is a name dig-app guessed at"
+            );
+        }
+        for named in ["10.0.0.5", "my-node.lan", "node.example.com", "127.0.0.1"] {
+            assert_eq!(
+                trust_for(named),
+                EndpointTrust::UserConfigured,
+                "{named} can only have come from the user"
+            );
+        }
+    }
+
+    /// Both loopback families answer to `localhost`, and the ladder must keep reaching them — the
+    /// filter is about non-loopback answers, never about narrowing the local node to IPv4.
+    #[test]
+    fn the_localhost_tier_still_reaches_a_real_loopback_node() {
+        let node = FakeNode::serving_status();
+        let (host, port) = split_host_port(&node.endpoint()).expect("split");
+        let body = post_json_to(
+            &host,
+            port,
+            br#"{"jsonrpc":"2.0","id":1,"method":"control.status","params":{}}"#,
+            Some(node.token()),
+            quick(),
+            EndpointTrust::AutoDiscovered,
+        )
+        .expect("a loopback node must still be reachable from an auto-discovered tier");
+        assert!(!body.is_empty());
     }
 }
