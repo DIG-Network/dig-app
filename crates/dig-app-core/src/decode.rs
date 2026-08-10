@@ -224,7 +224,7 @@ fn render_recipient(puzzle_hash: chia_protocol::Bytes32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chia_bls::{PublicKey, SecretKey, Signature};
+    use chia_bls::{master_to_wallet_unhardened, PublicKey, SecretKey, Signature};
     use chia_protocol::{Bytes32, Coin, CoinSpend};
     use chia_puzzle_types::cat::CatArgs;
     use chia_puzzle_types::standard::StandardArgs;
@@ -232,7 +232,6 @@ mod tests {
     use chia_sdk_driver::{Layer, SpendContext, StandardLayer};
     use chia_sdk_types::conditions::CreateCoin;
     use chia_sdk_types::Conditions;
-    use chia_bls::master_to_wallet_unhardened;
 
     /// A synthetic standard-layer public key from a seed — the on-chain spending key of a wallet.
     fn synthetic_pk(seed: u8) -> PublicKey {

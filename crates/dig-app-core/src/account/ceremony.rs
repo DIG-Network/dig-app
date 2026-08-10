@@ -476,7 +476,11 @@ mod tests {
         use dig_account::{SpendRecipient, SpendTier};
         SpendSummary::new(
             SpendTier::Vault,
-            vec![SpendRecipient::to_address("xch1recipient", 5_000_000, None::<String>)],
+            vec![SpendRecipient::to_address(
+                "xch1recipient",
+                5_000_000,
+                None::<String>,
+            )],
             10,
         )
     }
