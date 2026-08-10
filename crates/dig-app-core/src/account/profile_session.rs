@@ -79,7 +79,7 @@ pub enum ProfileError {
 
 /// Where a [`ProfileSession`] reads and writes its registry.
 ///
-/// A trait — modelled on [`ConfigStore`](crate::confirm::gui::window::pane::settings::prefs) — so
+/// A trait — modelled on the settings pane's `ConfigStore` — so
 /// the session's behaviour around a write, **including a write that does not land**, is testable
 /// without a filesystem. That is not a convenience: the rollback path is the one that protects a
 /// user's receive address, and a test that could not lose a write could not exercise it.
