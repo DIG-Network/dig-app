@@ -999,7 +999,7 @@ pub struct DidMinting<'a> {
 /// [`Submission::NotAvailable`], and nothing happened. An app that says money will move and then moves
 /// none is the one class this ecosystem does not defer.
 ///
-/// A runtime check in [`mint_the_did`] would have fixed the symptom and could be dropped by any later
+/// A runtime check in `mint_the_did` would have fixed the symptom and could be dropped by any later
 /// refactor. This carries it in the type instead: the offer is drawn inside the ONE arm that holds a
 /// [`DidMinting`], and the only way to obtain one is [`MintSeams::minting_step`] on a
 /// [`MintSeams::Wired`] value. A build with no transport has no `Wired` to name, so there is no
@@ -1783,15 +1783,14 @@ mod copy {
         /// The sentence before the cost figure.
         pub const UNAFFORDABLE_BEFORE_COST: &str = "Creating a DID costs about ";
         /// The sentence after it.
-        pub const UNAFFORDABLE_AFTER_COST: &str =
-            concat!(
-                " XCH, and your account does not hold that yet. Nothing was sent and nothing was ",
-                "spent.\n\n",
-                "Send XCH to your DIG address — the DIG menu shows it and copies it. Reading ",
-                "content needs no funds at all.\n\n",
-                "The DIG menu has no row that starts this. DIG offers this step itself, each time ",
-                "it starts, for as long as your account has no DID.",
-            );
+        pub const UNAFFORDABLE_AFTER_COST: &str = concat!(
+            " XCH, and your account does not hold that yet. Nothing was sent and nothing was ",
+            "spent.\n\n",
+            "Send XCH to your DIG address — the DIG menu shows it and copies it. Reading ",
+            "content needs no funds at all.\n\n",
+            "The DIG menu has no row that starts this. DIG offers this step itself, each time ",
+            "it starts, for as long as your account has no DID.",
+        );
         /// The title when the spend never left this computer.
         pub const REFUSED_TITLE: &str = "DIG — Nothing was sent";
         /// Its heading.
@@ -1853,13 +1852,12 @@ mod copy {
         /// The label the chain's own words are put under.
         pub const REJECTED_REASON_LABEL: &str = "The blockchain's reason:";
         /// Its body, shown above the reason the chain gave.
-        pub const REJECTED_BODY: &str =
-            concat!(
-                "No DID was created. A rejected transaction does not spend the amount it was for, ",
-                "though a fee may have been used.\n\n",
-                "DIG offers this step itself, each time it starts, for as long as your account has ",
-                "no DID. If it keeps happening, the log folder in the DIG menu has the details.",
-            );
+        pub const REJECTED_BODY: &str = concat!(
+            "No DID was created. A rejected transaction does not spend the amount it was for, ",
+            "though a fee may have been used.\n\n",
+            "DIG offers this step itself, each time it starts, for as long as your account has ",
+            "no DID. If it keeps happening, the log folder in the DIG menu has the details.",
+        );
         /// The title when the watch ended with no answer.
         pub const PENDING_TITLE: &str = "DIG — Still waiting on the blockchain";
         /// Its heading.
@@ -1873,15 +1871,14 @@ mod copy {
         pub const PENDING_AFTER_WAITED: &str = " and the blockchain has not confirmed it yet.";
         /// The rest of the body. It ends by introducing the spend id, which the window draws beneath
         /// the prose as its one mono identifier.
-        pub const PENDING_BODY: &str =
-            concat!(
-                "Nothing has gone wrong — a busy blockchain can take longer than this, and your ",
-                "transaction is still out there. Do NOT create a second DID; that would spend ",
-                "again.\n\n",
-                "DIG has stopped watching and does not check again on its own in this version. It ",
-                "offers this step again each time it starts, so decline it until you know how this ",
-                "one went — any Chia block explorer can tell you, from this transaction:",
-            );
+        pub const PENDING_BODY: &str = concat!(
+            "Nothing has gone wrong — a busy blockchain can take longer than this, and your ",
+            "transaction is still out there. Do NOT create a second DID; that would spend ",
+            "again.\n\n",
+            "DIG has stopped watching and does not check again on its own in this version. It ",
+            "offers this step again each time it starts, so decline it until you know how this ",
+            "one went — any Chia block explorer can tell you, from this transaction:",
+        );
         /// How a sub-minute wait is described.
         pub const LESS_THAN_A_MINUTE: &str = "less than a minute";
         /// The title when the chain could not be reached.
@@ -2131,8 +2128,14 @@ mod tests {
     fn every_did_screen() -> Vec<(&'static str, String)> {
         vec![
             ("the mint offer", copy::did::OFFER_BODY.to_owned()),
-            ("the unavailable notice", copy::did::UNAVAILABLE_BODY.to_owned()),
-            ("the tray's DID explainer", copy::did::EXPLAINER_BODY.to_owned()),
+            (
+                "the unavailable notice",
+                copy::did::UNAVAILABLE_BODY.to_owned(),
+            ),
+            (
+                "the tray's DID explainer",
+                copy::did::EXPLAINER_BODY.to_owned(),
+            ),
             ("the decline screen", copy::did::later_body()),
             (
                 "the not-enough-XCH screen",
@@ -2145,14 +2148,22 @@ mod tests {
                 copy::did::CONFIRMED_BUT_UNRECORDED_BODY.to_owned(),
             ),
             ("the rejected screen", copy::did::REJECTED_BODY.to_owned()),
-            ("the still-pending screen", copy::did::PENDING_BODY.to_owned()),
-            ("the lost-contact screen", copy::did::OFFLINE_BODY.to_owned()),
+            (
+                "the still-pending screen",
+                copy::did::PENDING_BODY.to_owned(),
+            ),
+            (
+                "the lost-contact screen",
+                copy::did::OFFLINE_BODY.to_owned(),
+            ),
         ]
     }
 
     /// Sentences, near enough for a copy rule: the unit a claim is made in.
     fn sentences(body: &str) -> impl Iterator<Item = &str> {
-        body.split(['.', '\n']).map(str::trim).filter(|s| !s.is_empty())
+        body.split(['.', '\n'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
     /// **A DID screen may name the DIG menu only for something the menu actually does.**
@@ -2175,7 +2186,10 @@ mod tests {
         let justified: [(&str, Option<TrayAction>); 4] = [
             ("no row that starts this", None),
             ("log folder", Some(TrayAction::OpenLogs)),
-            ("shows it and copies it", Some(TrayAction::CopyReceiveAddress)),
+            (
+                "shows it and copies it",
+                Some(TrayAction::CopyReceiveAddress),
+            ),
             ("your DID is in the DIG menu", Some(TrayAction::CopyDigId)),
         ];
 
@@ -2222,7 +2236,10 @@ mod tests {
 
         for (host, seams) in [
             ("a host that can mint", bench.seams()),
-            ("a host with no chain transport", MintSeams::NoChainTransport),
+            (
+                "a host with no chain transport",
+                MintSeams::NoChainTransport,
+            ),
         ] {
             let offer_is_reachable = matches!(
                 seams.minting_step(&surface, &clock, &ledger),
@@ -2367,7 +2384,8 @@ mod tests {
         }
 
         fn wiring<'a>(&'a self, surface: &'a PatientWait<'a>) -> MintingStep<'a> {
-            self.seams().minting_step(surface, &self.clock, &self.ledger)
+            self.seams()
+                .minting_step(surface, &self.clock, &self.ledger)
         }
     }
 
