@@ -31,6 +31,62 @@ pub struct ProfileSummary {
     pub active: bool,
 }
 
+/// What a person asked their new profile to CONTAIN — the only part of a profile a caller supplies.
+///
+/// A profile's identity is derived on chain; everything a user can choose about it is content, and
+/// this is that content. It is deliberately not a `&str` name: the seed's commitment root is a pure
+/// function of its slots, so naming them here is what lets a resumed mint rebuild the same
+/// commitment without having journalled it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileSeedRequest {
+    /// The display name for the new profile, when the person gave one. Minting does not require it.
+    pub display_name: Option<String>,
+}
+
+/// A profile mint that has been STARTED. **It is not a profile, and it has no DID.**
+///
+/// # Why this type exists, and why it has no `did` field (dig_ecosystem#2523)
+///
+/// The seam this replaces was `create_profile(&self, name: &str) -> Result<ProfileSummary, _>`, and
+/// **every honest implementation of that signature is impossible**: a real DID exists only after an
+/// on-chain mint derived from its launcher coin, and that mint takes five to ten minutes. So the
+/// signature could only ever be satisfied by inventing one — which is exactly what the test double
+/// did, with `did: format!("did:chia:{name}")` over arbitrary user text.
+///
+/// The fix is not a rule against fabricating; it is having nowhere to put a fabrication. This type
+/// carries the reserved index and the DID **coin id** — 32 bytes THIS host computed from the bundle
+/// it built — and has no string field and no constructor that accepts one. A double cannot invent a
+/// DID here because there is no field for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingProfileCreation {
+    /// The HD index the registry reserved for this mint. Reserved means reserved: it survives a
+    /// restart, so a second attempt at the same index is refused rather than paid for twice.
+    ix: dig_account::ProfileIx,
+    /// The coin whose confirmation will BE the DID. Computed locally from the bundle; it is a
+    /// commitment, not evidence.
+    did_coin_id: chia_protocol::Bytes32,
+}
+
+impl PendingProfileCreation {
+    /// The mint reserved at `ix`, whose DID coin is `did_coin_id`.
+    ///
+    /// The only constructor, and neither argument can hold a `did:chia:` string.
+    pub fn reserved(ix: dig_account::ProfileIx, did_coin_id: chia_protocol::Bytes32) -> Self {
+        Self { ix, did_coin_id }
+    }
+
+    /// The reserved profile index.
+    pub fn ix(&self) -> dig_account::ProfileIx {
+        self.ix
+    }
+
+    /// The DID coin id, as the `0x…` hex every Chia explorer accepts — so a person can watch their
+    /// own mint confirm rather than being told to trust this program.
+    pub fn did_coin_id_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.did_coin_id))
+    }
+}
+
 /// The held user identity the gateway serves local commands against.
 ///
 /// The real implementation is backed by the U4 keystore (sign), the U5 profile store (profiles),
@@ -39,8 +95,16 @@ pub struct ProfileSummary {
 pub trait LocalIdentity {
     /// Every profile known to the user app, active flag set on the current one.
     fn profiles(&self) -> Result<Vec<ProfileSummary>, GatewayError>;
-    /// Create a new profile with `name`, returning its summary (its freshly minted DID).
-    fn create_profile(&self, name: &str) -> Result<ProfileSummary, GatewayError>;
+    /// START creating a profile: reserve an index, build and push the DID half, and return what was
+    /// reserved.
+    ///
+    /// It does NOT return a profile, and it does not wait for one. The mint takes minutes of real
+    /// chain time, so a caller gets the reservation and comes back — see [`PendingProfileCreation`]
+    /// for why no honest implementation could return a DID here.
+    fn begin_profile_creation(
+        &self,
+        seed: ProfileSeedRequest,
+    ) -> Result<PendingProfileCreation, GatewayError>;
     /// Make the profile identified by `did` the active one.
     fn select_profile(&self, did: &str) -> Result<(), GatewayError>;
     /// The DID of the configured default profile (the identity presented by default), if any profile
@@ -102,10 +166,27 @@ fn handle_profiles(
             ))
         }
         ProfilesAction::Create { name } => {
-            let created = identity.create_profile(name)?;
+            let started = identity.begin_profile_creation(ProfileSeedRequest {
+                display_name: Some(name.clone()),
+            })?;
+            // Deliberately returns immediately, and deliberately says no DID. Blocking here would
+            // hold a CLI for the five to ten minutes a mint takes, and printing a DID would print
+            // one nothing has confirmed.
             Ok(Outcome::new(
-                format!("created profile \"{}\" ({})", created.name, created.did),
-                json!({ "profile": profile_to_json(&created) }),
+                format!(
+                    "started creating profile \"{name}\" at index {}; its DID coin is {}. \
+                     It is not a profile until the blockchain confirms it — run \
+                     `dign profiles list` again in a few minutes.",
+                    started.ix(),
+                    started.did_coin_id_hex()
+                ),
+                json!({
+                    "pending_profile": {
+                        "ix": started.ix().0,
+                        "did_coin_id": started.did_coin_id_hex(),
+                        "confirmed": false,
+                    }
+                }),
             ))
         }
         ProfilesAction::Select { did } => {
@@ -244,6 +325,8 @@ mod tests {
     #[derive(Default)]
     struct FakeIdentity {
         profiles: Vec<ProfileSummary>,
+        /// The seed the last `begin_profile_creation` was handed.
+        requested: RefCell<Option<ProfileSeedRequest>>,
         selected: RefCell<Option<String>>,
         default: RefCell<Option<String>>,
         locked: bool,
@@ -253,12 +336,18 @@ mod tests {
         fn profiles(&self) -> Result<Vec<ProfileSummary>, GatewayError> {
             Ok(self.profiles.clone())
         }
-        fn create_profile(&self, name: &str) -> Result<ProfileSummary, GatewayError> {
-            Ok(ProfileSummary {
-                did: format!("did:chia:{name}"),
-                name: name.into(),
-                active: true,
-            })
+        fn begin_profile_creation(
+            &self,
+            seed: ProfileSeedRequest,
+        ) -> Result<PendingProfileCreation, GatewayError> {
+            // The double can no longer invent a DID from the name, because there is no field for
+            // one. It reports the reservation and the coin id, which is all a real host has at this
+            // point too (dig_ecosystem#2523).
+            *self.requested.borrow_mut() = Some(seed);
+            Ok(PendingProfileCreation::reserved(
+                dig_account::ProfileIx(7),
+                chia_protocol::Bytes32::new([0xAB; 32]),
+            ))
         }
         fn select_profile(&self, did: &str) -> Result<(), GatewayError> {
             *self.selected.borrow_mut() = Some(did.into());
@@ -466,8 +555,18 @@ mod tests {
         assert_eq!(bal.result["balance_mojos"], json!(1_234));
     }
 
+    /// **`profiles create` STARTS a mint and reports NO DID, on either channel**
+    /// (dig_ecosystem#2523).
+    ///
+    /// Makes impossible: printing a `did:chia:` string that no chain has confirmed. The old seam
+    /// returned a `ProfileSummary` whose `did` the double fabricated from the user's own text, so
+    /// the CLI printed an identifier that existed nowhere.
+    ///
+    /// The assertion is over the WHOLE rendered outcome — summary and JSON both — rather than over
+    /// one field, because a fabricated DID could reappear in either half. The name is passed through
+    /// as seed content and checked, so this cannot pass by the command having done nothing at all.
     #[test]
-    fn create_mints_and_returns_the_new_profile() {
+    fn create_starts_a_mint_and_never_reports_a_did() {
         let identity = FakeIdentity::default();
         let out = handle_local(
             &Command::Profiles(ProfilesAction::Create {
@@ -477,7 +576,23 @@ mod tests {
             &approving(),
         )
         .unwrap();
-        assert_eq!(out.result["profile"]["name"], json!("carol"));
+
+        let rendered = format!("{}{}", out.summary, out.result);
+        assert!(
+            !rendered.contains("did:chia:"),
+            "the create path may not report a DID nothing has confirmed: {rendered}"
+        );
+        assert_eq!(out.result["pending_profile"]["confirmed"], json!(false));
+        assert_eq!(
+            out.result["pending_profile"]["did_coin_id"],
+            json!(format!("0x{}", "ab".repeat(32))),
+            "what it CAN report is the coin id this host computed"
+        );
+        assert_eq!(
+            identity.requested.borrow().as_ref().unwrap().display_name,
+            Some("carol".to_owned()),
+            "the name the person typed is seed content, and must actually reach the mint"
+        );
     }
 
     #[test]

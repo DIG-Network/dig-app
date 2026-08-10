@@ -40,6 +40,7 @@ pub mod mint;
 pub mod money;
 pub mod password;
 pub mod phrase_vault;
+pub mod profile_mint;
 pub mod profile_session;
 pub mod recovery;
 pub mod registry;
@@ -68,4 +69,10 @@ pub use dig_account::ProfileIx;
 pub use active_profile::{ActiveSlot, MintTarget, WalletSlot};
 
 /// The live profile registry the whole app reads its active index from.
-pub use profile_session::{ProfileError, ProfileSession, ProfileSwitched};
+pub use profile_mint::{
+    liveness_of, DeathEvidence, MintLiveness, ProfileMint, ProfileMintAvailability,
+    ProfileMintDoor, ProfileMintSeams,
+};
+pub use profile_session::{
+    MintDoorError, PersistOutcome, ProfileError, ProfileSession, ProfileSwitched,
+};

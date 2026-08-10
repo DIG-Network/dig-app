@@ -46,6 +46,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use dig_account::mint::MintError;
 use dig_account::registry::{ProfileRegistry, ProfileVisibility};
 use dig_account::{AccountError, ActiveSwitch, ProfileIx};
 
@@ -77,6 +78,72 @@ pub enum ProfileError {
     /// invariants dig-account re-checks on deserialize (a hand-edited file is untrusted input).
     #[error("the stored profile registry is unusable: {0}")]
     Corrupt(String),
+}
+
+/// Whether the registry reached the disk. Carried BESIDE a mint's own outcome, never folded into it.
+#[derive(Debug)]
+pub enum PersistOutcome {
+    /// The store accepted the write. This host will remember the mint across a restart.
+    Written,
+    /// The store refused it. The registry in memory is still correct and the next start will not
+    /// know about it.
+    NotWritten(ProfileError),
+}
+
+/// What went wrong inside [`ProfileSession::with_journal`] — the mint, the persist, or both.
+///
+/// # Why this is not simply a [`MintError`]
+///
+/// A mint that SUCCEEDED against a store that refused the write is not a mint failure, and it is
+/// not a success either: the user may have paid for a DID this computer will not remember. Returning
+/// `MintError` would have no way to say that, so a caller would either lose the fact or have to
+/// remember to ask a second question. Here the persist result is a field, so there is nothing to
+/// forget — reading the error at all puts it in front of the reader.
+#[derive(Debug)]
+pub struct MintDoorError {
+    /// The mint's own failure, or `None` when the mint SUCCEEDED and only the write did not.
+    pub mint: Option<MintError>,
+    /// Whether the registry reached the disk, whatever the mint did.
+    pub persisted: PersistOutcome,
+}
+
+impl MintDoorError {
+    /// Whether this host may have paid for a mint it will not remember after a restart.
+    ///
+    /// The one question a surface must ask before telling anybody to try again.
+    pub fn may_be_forgotten(&self) -> bool {
+        matches!(self.persisted, PersistOutcome::NotWritten(_))
+    }
+}
+
+impl std::fmt::Display for MintDoorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.mint, &self.persisted) {
+            (Some(mint), PersistOutcome::Written) => write!(f, "the profile mint failed: {mint}"),
+            (Some(mint), PersistOutcome::NotWritten(io)) => write!(
+                f,
+                "the profile mint failed ({mint}) AND its record could not be saved ({io}); \
+                 a bundle may already have been pushed"
+            ),
+            (None, PersistOutcome::NotWritten(io)) => write!(
+                f,
+                "the profile mint went ahead and its record could not be saved ({io}); \
+                 do NOT start another one"
+            ),
+            // Unreachable by construction: `with_journal` returns `Ok` for this pair.
+            (None, PersistOutcome::Written) => write!(f, "the profile mint door reported no fault"),
+        }
+    }
+}
+
+impl std::error::Error for MintDoorError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match (&self.mint, &self.persisted) {
+            (Some(mint), _) => Some(mint),
+            (None, PersistOutcome::NotWritten(io)) => Some(io),
+            (None, PersistOutcome::Written) => None,
+        }
+    }
 }
 
 /// Where a [`ProfileSession`] reads and writes its registry.
@@ -465,6 +532,73 @@ impl ProfileSession {
         }
     }
 
+    /// Run a MINT step over the registry and persist the result — the one door through which a
+    /// profile mint may touch the journal (dig_ecosystem#2398).
+    ///
+    /// # Why the persist is inside, and not the caller's to remember
+    ///
+    /// `dig_account::ProfileMinter::begin_profile_mint` inserts its journal entry **before** it
+    /// pushes, and deliberately KEEPS that entry when the push ends in
+    /// [`MintError::ChainUnreachable`] — the bundle may yet be included, so the reservation is the
+    /// only record naming a DID the user may already have paid for. A call site written as
+    /// `minter.begin_profile_mint(&mut registry, ..)?` therefore discards that record on exactly the
+    /// path where it matters most, and a real mainnet harness hit precisely that.
+    ///
+    /// Putting the write between the mutation and the return makes the omission unexpressible: there
+    /// is no arrangement of `?` that returns from here without the store having been asked.
+    ///
+    /// # Why it departs from [`switch_to`](Self::switch_to) and
+    /// [`set_visibility`](Self::set_visibility): **there is no rollback**
+    ///
+    /// Those two restore the previous registry when a write fails, and that is right for them — they
+    /// change a view preference or a derivation index, both of which are recoverable by repeating
+    /// the action. This one is not: `act` may have PUSHED A BUNDLE, and a journal entry naming a
+    /// pushed bundle must never be un-written. Rolling back here would delete the app's only memory
+    /// of a spend that is already on the network. They are the pattern somebody will copy; this
+    /// paragraph is why they must not copy it here.
+    ///
+    /// The in-memory registry is likewise kept as `act` left it rather than replaced with a re-read,
+    /// so a store that round-trips lossily cannot silently drop the reservation either.
+    ///
+    /// # Lock ordering
+    ///
+    /// This holds the registry WRITE lock for the whole of `act`, so `act` MUST NOT take
+    /// [`AccountResidency`](crate::account::residency::AccountResidency)'s account mutex — see the
+    /// [module docs](self). Callers derive their `ProfileMinter` **before** calling in, which is
+    /// exactly what [`crate::account::profile_mint::ProfileMint`] does.
+    ///
+    /// # Errors
+    ///
+    /// [`MintDoorError`], which reports the mint and the persist SEPARATELY — including the case
+    /// where the mint succeeded and the write did not, which is the loudest outcome here and cannot
+    /// be flattened into a mint failure.
+    pub fn with_journal<T>(
+        &self,
+        act: impl FnOnce(&mut ProfileRegistry) -> Result<T, MintError>,
+    ) -> Result<T, MintDoorError> {
+        let mut guard = self.write_guard();
+        let acted = act(&mut guard);
+
+        // Unconditional, and BEFORE the mint's own outcome is inspected: a failed mint may still
+        // have left a reservation naming a pushed bundle.
+        let persisted = match self.store.write(&guard) {
+            Ok(()) => PersistOutcome::Written,
+            Err(why) => PersistOutcome::NotWritten(why),
+        };
+
+        match (acted, persisted) {
+            (Ok(value), PersistOutcome::Written) => Ok(value),
+            (Ok(_), persisted) => Err(MintDoorError {
+                mint: None,
+                persisted,
+            }),
+            (Err(mint), persisted) => Err(MintDoorError {
+                mint: Some(mint),
+                persisted,
+            }),
+        }
+    }
+
     fn read_guard(&self) -> std::sync::RwLockReadGuard<'_, ProfileRegistry> {
         // A poisoned lock means a thread panicked mid-mutation of custody-adjacent state. Fail
         // loudly rather than derive keys from a half-updated registry.
@@ -580,6 +714,161 @@ pub mod test_support {
 mod tests {
     use super::test_support::{registry_json, session_with};
     use super::*;
+
+    /// The fee a mint fixture journals. A plausible real figure (0.01 XCH), so nothing passes
+    /// because the number is zero.
+    const FEE: u64 = 10_000_000;
+
+    /// A mint reservation at `ix`, shaped exactly as `begin_profile_mint` writes one: pushed, with
+    /// nothing yet proven.
+    fn reserve(registry: &mut ProfileRegistry, ix: ProfileIx) -> Result<(), MintError> {
+        use dig_account::registry::journal::{MintStage, PendingMintRecord};
+        registry
+            .begin_seeded_mint(
+                ix,
+                MintStage::DidPushed {
+                    pending: PendingMintRecord {
+                        launcher_id: chia_protocol::Bytes32::new([0x11; 32]),
+                        did_coin_id: chia_protocol::Bytes32::new([0x22; 32]),
+                        source_coin_id: chia_protocol::Bytes32::new([0x33; 32]),
+                        pushed_at_height: 5_412_009,
+                    },
+                },
+                [0x44; 32],
+                FEE,
+            )
+            .map_err(|why| MintError::Journal(why.to_string()))
+    }
+
+    /// A store that reads an account with nothing minted and refuses every write — a full disk, or
+    /// a directory the user cannot write to.
+    struct WriteRefusingStore;
+
+    impl RegistryStore for WriteRefusingStore {
+        fn read(&self) -> Result<ProfileRegistry, ProfileError> {
+            Ok(ProfileRegistry::empty())
+        }
+        fn write(&self, _registry: &ProfileRegistry) -> Result<(), ProfileError> {
+            Err(ProfileError::Io {
+                action: "written",
+                source: std::io::Error::other("the disk is full"),
+            })
+        }
+    }
+
+    /// **A mint whose chain could not be reached STILL persists its reservation — provably, by
+    /// reloading a fresh session from the same store.**
+    ///
+    /// Makes impossible: the `?`-discards-the-journal defect. `begin_profile_mint` writes its entry
+    /// BEFORE pushing and keeps it on `ChainUnreachable`, because the bundle may yet be included; a
+    /// caller that returned early would throw away the only record naming a DID the user may already
+    /// have paid for. A real mainnet harness hit exactly that.
+    ///
+    /// The proof is the RELOAD, not the in-memory registry. Asserting on the live session would be
+    /// satisfied by an implementation that never wrote at all — which is the very failure under
+    /// test. A second [`ProfileSession`] over the same store can only see what actually landed.
+    #[test]
+    fn a_mint_that_could_not_reach_the_chain_still_leaves_a_reservation_on_disk() {
+        let store = Arc::new(MemoryRegistryStore::empty());
+        let session = ProfileSession::load(store.clone()).expect("an empty store loads");
+
+        let failed = session
+            .with_journal(|registry| {
+                reserve(registry, ProfileIx::ROOT)?;
+                // What a push against a dead network returns. The entry above must stay.
+                Err::<(), _>(MintError::ChainUnreachable("connection refused".into()))
+            })
+            .expect_err("an unreachable chain is a failed mint");
+
+        assert!(
+            matches!(failed.mint, Some(MintError::ChainUnreachable(_))),
+            "the mint's own failure is reported as itself: {failed:?}"
+        );
+        assert!(
+            !failed.may_be_forgotten(),
+            "the write succeeded, so nothing here may claim the mint could be forgotten"
+        );
+
+        let reloaded = ProfileSession::load(store).expect("the store still parses");
+        assert_eq!(
+            reloaded.with_registry(|registry| registry.in_progress().len()),
+            1,
+            "a fresh session must see the reservation, or it never reached the store"
+        );
+    }
+
+    /// **A reserved index is STILL reserved after a restart, and a second mint at it is refused.**
+    ///
+    /// Makes impossible: paying twice for one profile by closing and reopening the app.
+    /// [`ChainMint`](crate::account::chain_mint::ChainMint)'s second-push guard is a
+    /// process-lifetime `Mutex`, which a restart resets; this one is the persisted registry, which a
+    /// restart does not.
+    ///
+    /// The control is the SECOND index: the same reloaded session accepts a mint at an index nobody
+    /// reserved, so the refusal above is about the reservation rather than about the session being
+    /// unable to mint at all.
+    #[test]
+    fn a_reserved_index_survives_a_reload_and_refuses_a_second_mint() {
+        let store = Arc::new(MemoryRegistryStore::empty());
+        let session = ProfileSession::load(store.clone()).expect("an empty store loads");
+        session
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect("the first reservation goes through");
+
+        let restarted = ProfileSession::load(store).expect("the store still parses");
+
+        let refused = restarted
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect_err("an index already reserved must not be reserved again");
+        assert!(
+            matches!(refused.mint, Some(MintError::Journal(_))),
+            "the registry itself refuses it: {refused:?}"
+        );
+
+        // Control: a DIFFERENT index is still mintable, so the refusal is about the reservation.
+        restarted
+            .with_journal(|registry| reserve(registry, ProfileIx(1)))
+            .expect("an unreserved index is still available after a reload");
+    }
+
+    /// **A mint that SUCCEEDED against a store that would not write is its own, distinct, louder
+    /// outcome.**
+    ///
+    /// Makes impossible: flattening *you may have paid for a DID this computer cannot remember* into
+    /// an ordinary mint failure — after which a surface would sensibly invite a retry, and the
+    /// retry pays again.
+    ///
+    /// The load-bearing assertion is the first: `mint` is `None`, so nothing here can be mistaken
+    /// for the mint having failed. The control runs the SAME closure against a store that writes and
+    /// requires an `Ok`, so an implementation that failed every mint cannot pass.
+    #[test]
+    fn a_successful_mint_that_could_not_be_saved_is_not_reported_as_a_failed_mint() {
+        let refusing =
+            ProfileSession::load(Arc::new(WriteRefusingStore)).expect("the fixture store reads");
+
+        let unsaved = refusing
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect_err("a write that did not land cannot be reported as success");
+
+        assert!(
+            unsaved.mint.is_none(),
+            "the MINT succeeded; only the write did not: {unsaved:?}"
+        );
+        assert!(
+            unsaved.may_be_forgotten(),
+            "the one question a surface must be able to ask, and it must answer yes here"
+        );
+        assert!(
+            unsaved.to_string().contains("do NOT start another one"),
+            "the message must warn against the retry that would pay twice: {unsaved}"
+        );
+
+        // Control: the identical closure over a store that writes really does succeed.
+        ProfileSession::load(Arc::new(MemoryRegistryStore::empty()))
+            .expect("an empty store loads")
+            .with_journal(|registry| reserve(registry, ProfileIx::ROOT))
+            .expect("the same mint against a working store must succeed");
+    }
 
     /// A session over a store that has never been written is unprofiled at ROOT — and says so,
     /// rather than inventing a profile.

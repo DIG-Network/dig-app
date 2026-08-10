@@ -294,13 +294,59 @@ the token-gated push, dig-node 0.110.0 serves them, and `chain::ControlChainSour
 in particular a failed read MUST NOT become `Ok(None)` or an empty `Vec`, because on `coin_spend`
 an absence means *unspent or unknown*, which a caller reads as safe to spend.
 
+### 3.1d Whole-profile minting (normative)
+
+A DID is never minted alone. A **dig-profile** is a DID singleton PLUS a dig-store launched from that
+DID's coin, and an implementation MUST treat the pair as one ceremony: the state in which the DID is
+confirmed and the store is not (`dig_account::mint::ProfileMintStatus::DidConfirmedStoreNotLaunched`)
+is funds committed, an identity on chain, and no profile.
+
+**The capability gate has three states, not two.** An implementation MUST distinguish *cannot reach
+the chain* from *can reach the chain and cannot finish the ceremony*, and MUST offer profile creation
+only in the third state, where both halves are reachable
+(`account::profile_mint::ProfileMintSeams`). The second state is reached whenever
+`ChainSource::resolve_singleton_lineage` cannot be serviced, because the store half re-derives the
+DID's puzzle material by walking that lineage. Offering a mint there spends real XCH on a ceremony
+that cannot complete, which is worse than offering nothing.
+
+Availability MUST be READ OFF the seams rather than asserted beside them: obtaining a mint and
+reporting that minting is possible MUST be the same value, so the two cannot drift. The check MUST be
+a live probe of the source, and every failure of that probe — unsupported, timeout, depth bound,
+reveal-size bound, transport — MUST withhold the offer. **No lineage-walk failure may be reported as
+an absent lineage**, because on a mint path "the lineage ends here" reads as *safe to spend*.
+
+**The journal write is not optional.** `begin_profile_mint` records its reservation BEFORE pushing and
+retains it when the chain is unreachable, since the bundle may yet be included. An implementation
+MUST persist the registry between the mutation and its return
+(`account::profile_session::ProfileSession::with_journal`) and MUST NOT roll the registry back when
+that write fails: a journal entry naming a pushed bundle is the only local record of a spend that is
+already on the network. A mint that succeeded against a failed write MUST be reported as its own
+outcome, distinct from a failed mint, because the remedy differs — the second invites a retry and the
+first must forbid one.
+
+A reserved profile index MUST remain reserved across a restart, so a second mint at that index is
+refused rather than paid for twice.
+
+**An implementation MUST NOT declare a mint dead on elapsed time.** It MAY report how many blocks have
+passed since the push, and MUST NOT derive a verdict from that number. Death MAY be reported only on
+chain evidence — the funding coin observably consumed by another spend while the coin this bundle
+would have created does not exist — and a chain that could not answer MUST read as unknown, never as
+dead and never as waiting (`account::profile_mint::MintLiveness`). The asymmetry is the reason: a mint
+wrongly called dead leads the user to mint again, after which the original confirms and they have paid
+twice and own an orphan DID.
+
+**No API may return a DID it has not seen confirmed.** A create entry point MUST return what was
+reserved — the profile index and the DID coin id this host computed — and MUST NOT return, print or
+otherwise report a `did:chia:` string before an on-chain confirmation
+(`gateway::local::PendingProfileCreation`). A CLI create path MUST NOT block for the mint's duration.
+
 `chain::ControlChainSource::coin_records_by_parent` MUST page `control.wallet.coinsByParent` to
 exhaustion, resuming only from the `cursor` the previous page returned, terminating only on
 `complete: true` — never on a short page — and MUST fail rather than return a prefix when its own page
 bound (`chain::MAX_CHILD_PAGES`) is reached.
 
 What is missing is one READ: `resolve_singleton_lineage`. It MUST delegate to
-`dig_chainsource_interface::walk_singleton_lineage` (0.4.0, unpublished) and MUST NOT be hand-rolled
+`dig_chainsource_interface::walk_singleton_lineage` (unpublished) and MUST NOT be hand-rolled
 here — a coin's puzzle hash is attacker-chosen, so a second implementation of singleton
 authentication is a second forgery surface. `dig_did::walk_did_lineage_to_tip` calls it, and
 `ProfileMinter::advance_profile_mint` calls that to launch the profile's store, so a profile mint

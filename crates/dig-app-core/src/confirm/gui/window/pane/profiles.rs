@@ -693,10 +693,7 @@ mod tests {
     #[test]
     fn the_card_explains_why_it_offers_no_way_to_create_a_profile() {
         let mut said = Vec::new();
-        for blocked in [
-            CreationBlocked::NoChainTransport,
-            CreationBlocked::NoProfileMinter,
-        ] {
+        for blocked in CreationBlocked::EVERY {
             let creation = ProfileCreation::Blocked(blocked);
             assert!(
                 !creation.is_possible(),

@@ -939,3 +939,42 @@ ITSELF — lock, then request a new signer, then assert `None` — and the acces
 the suite was green and blind. A lock's whole job is to defeat a capability already handed out, so a
 test that never holds one across the transition cannot see it. `dig-account` shipped this same class
 in `UnlockGate` and its own suite missed it for the same reason.
+
+## A journal entry naming a pushed bundle must never be un-written
+
+`switch_to` and `set_visibility` both restore the previous registry when their write fails, and that
+is right for them: a view preference and a derivation index are recoverable by repeating the action.
+Copying that pattern onto a mint would be catastrophic, and it is the obvious thing to copy — they
+sit three methods apart in the same file.
+
+`dig_account::ProfileMinter::begin_profile_mint` inserts its journal entry BEFORE it pushes, and
+deliberately KEEPS the entry when the push ends in `ChainUnreachable`, because the bundle may yet be
+included. So the reservation is the only local record naming a DID the user may already have paid
+for. Rolling it back on a write failure deletes the app's memory of a spend that is already on the
+network; returning early with `?` throws it away before the write is even attempted, which a real
+mainnet harness hit.
+
+`ProfileSession::with_journal` discharges both structurally rather than by convention: the persist
+happens between the mutation and the return, so no arrangement of `?` can skip it, and the error type
+carries the mint outcome and the persist outcome as separate fields. A mint that SUCCEEDED against a
+store that refused the write is neither a success nor a mint failure — it is *you may have paid for a
+DID this computer will not remember*, and it is the one case where a surface must forbid the retry
+rather than invite it. An error type that could only say `MintError` had nowhere to put that.
+
+## A mint is provably dead only via a lookup by COIN ID, and elapsed time proves nothing
+
+Two ways to be wrong, and they are not symmetric. Reporting a live mint as failed leads the user to
+mint again; the original then confirms and they have paid twice and own an orphan DID. Reporting a
+dead mint as still waiting costs patience. So no elapsed-block threshold is worth writing, and
+`MintLiveness::Waiting` reports the number without drawing a conclusion from it.
+
+Death is observable, which is what makes the no-threshold rule affordable. The funding coin
+consumed by some other spend, while the coin this bundle would have created does not exist, is
+proof — and BOTH halves are required, because a bundle spends its own funding coin, so a spent
+funding coin alone is exactly what success looks like.
+
+Reaching that proof needs `ChainSource::coin_record`, which maps to `control.wallet.coinById` and
+answers about SPENT coins. `control.wallet.coins` cannot: it is address-scoped and unspent-only, so
+`include_spent: true` is unserviceable on the control plane and `ControlChainSource` refuses the
+widening as `Unsupported`. Anything hunting a spent coin goes through `coinById` or it does not
+happen.

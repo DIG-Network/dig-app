@@ -31,7 +31,9 @@ pub use command::{
     ProfilesAction, Route, StoresAction, SubscriptionsAction, SyncAction, WalletAction,
 };
 pub use engine::{engine_call, EngineCall, EngineProxy};
-pub use local::{handle_local, LocalIdentity, ProfileSummary};
+pub use local::{
+    handle_local, LocalIdentity, PendingProfileCreation, ProfileSeedRequest, ProfileSummary,
+};
 pub use outcome::{error_envelope, success_envelope, ErrorCode, GatewayError, Outcome};
 
 /// Resolves + opens a validated DIG link. The gateway validates the scheme (the security boundary)
@@ -132,7 +134,10 @@ mod tests {
                 active: true,
             }])
         }
-        fn create_profile(&self, _: &str) -> Result<ProfileSummary, GatewayError> {
+        fn begin_profile_creation(
+            &self,
+            _: local::ProfileSeedRequest,
+        ) -> Result<local::PendingProfileCreation, GatewayError> {
             unreachable!("not exercised")
         }
         fn select_profile(&self, _: &str) -> Result<(), GatewayError> {

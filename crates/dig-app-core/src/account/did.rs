@@ -112,11 +112,17 @@ const LEDGER_FILE: &str = "did.json";
 ///
 /// # Why it is scoped to the ACCOUNT and not to a profile
 ///
-/// The wallet is pinned to one derivation index ([`ActiveProfile::SOLE`](crate::account::active_profile),
-/// dig_ecosystem#2236), so an account has one identity and one DID. It is also written at a moment when
-/// no profile id exists yet — the wizard runs before the account is unlocked. Widening this to
-/// per-profile is part of making the app multi-address again, and belongs with that change rather than
-/// ahead of it.
+/// It is written at a moment when no profile index exists yet: the first-run wizard mints before the
+/// account has a registry entry to hang a DID on, so there is nothing to scope it TO.
+///
+/// It is **not** because an account has only one identity. It does not: an account owns many
+/// profiles, each with its own DID, and exactly one is active — the registry's active slot is
+/// [`ProfileSession::active_ix`](crate::account::profile_session::ProfileSession::active_ix), a
+/// scalar read live from `active: Option<ProfileIx>`. A previous version of this comment asserted a
+/// pinned-to-one-profile invariant and cited an `ActiveProfile::SOLE` constant, and neither survives
+/// (dig_ecosystem#2582): the constant was removed in dig_ecosystem#2236 and the invariant was never
+/// true afterwards. Widening this ledger to per-profile belongs with the profile mint
+/// (dig_ecosystem#2398), whose registry journal is where a per-profile DID is already recorded.
 #[derive(Debug, Clone)]
 pub struct DidFile {
     /// The file the record lives in.
