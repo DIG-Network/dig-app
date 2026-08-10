@@ -1495,18 +1495,52 @@ prefs) }`. Every profile's identity key AND its DEK are DERIVED from the single 
 the profile's index (§3.1) — a profile holds no independently-stored secret. `ProfileIx::ROOT` is the
 default profile the boot opens.
 
-**The wallet is ACTIVE on exactly one derivation index (MUST).** The set of indices the wallet
-operates on is declared once, as `account::active_profile::ACTIVE_PROFILES`, and is today the single
-element `ProfileIx::ROOT`. The account-open funnel `account::lifecycle::open_or_enroll` MUST take an
-`ActiveProfile` — a `ProfileIx` checked against that set — so a wallet-bearing account CANNOT be
-opened at an index the app does not watch. Consumers that need to know which addresses the app uses
-(the node subscription set, request routing) MUST read `ACTIVE_PROFILES` rather than re-deriving the
-question.
+**Exactly one profile is ACTIVE, and the app stores no copy of which (MUST).** The single storage
+location is `dig_account::ProfileRegistry`, whose scalar `active: Option<ProfileIx>` cannot represent
+a set of size two — so "exactly one" is structural rather than asserted. dig-app holds ONE
+`account::profile_session::ProfileSession` over it (`Arc<RwLock<..>>`), and every derivation seam
+re-reads the index PER OPERATION. A handle that stored the index MUST NOT exist: `ResidencySigner`
+and `ResidencySealer` carry no index field, so a switch cannot half-land across a handle the
+switching code cannot reach.
 
-HD derivation itself is **deactivated, not removed**: the unhardened wallet path, `ProfileIx`, and the
-per-profile signer / DEK / sealing-key plumbing remain whole and MUST keep deriving correctly at any
-index. Multi-address support is restored by widening `ACTIVE_PROFILES`, never by restoring deleted
-code.
+`ActiveSlot` is the reading — `Unprofiled` when nothing is minted (deriving at `ProfileIx::ROOT`), or
+the active profile's index, DID and label. An account with no confirmed profile has NO DID, and every
+identity surface MUST say so rather than render the root signing public key as an identity.
+
+**An index crosses an API boundary only as a vouched-for type (MUST).** `account::lifecycle::open_or_enroll`
+takes a `WalletSlot`, constructible only as the bootstrap or from the registry's own `ActiveProfile`
+borrow; a new mint takes a `MintTarget`, constructible only from `ProfileRegistry::next_free_ix`. A
+bare `ProfileIx` MUST NOT typecheck at either, so a wallet cannot be opened, nor a profile minted, at
+an index nothing vouched for.
+
+**Funding and target are distinct indices (MUST).** A mint is paid for by one profile's wallet and
+creates a profile at another index. They coincide only for an account's first profile, and a host
+that collapses them funds a mint from the new profile's empty wallet.
+
+**A switch MUST be disclosed and MUST NOT half-land.** `ProfileSession::switch_to` returns a
+`#[must_use] ProfileSwitched`; its consumer MUST rebuild the profile-scoped assembly (the profile
+directory, the sealed stores under it, the sign-service router, the money path), because those are
+wired once and cannot re-read anything. A switch that cannot be PERSISTED MUST be rolled back in
+memory, or the receive address silently reverts at the next start.
+
+**Two artifacts are account-scoped and MUST NOT follow the switch:** the 24-word recovery phrase and
+the second factor. The phrase is the account's custody root and the second factor gates unlock, which
+happens before any profile is active; sealing either under a per-profile DEK would make it unreadable
+exactly when it is needed. The profile DIRECTORY, by contrast, MUST follow the switch — sharing one
+directory across profiles puts one profile's sealed stores beside another's under a DEK that cannot
+open them.
+
+**A spend confirmed under one profile MUST NOT be signed under another.** The confirm ceremony names
+a profile; the active slot MUST be re-checked immediately before signing and the spend failed closed
+if it moved.
+
+**Persistence.** The registry is stored at `<brand_dir>/profiles/registry.json` in PLAINTEXT, written
+through the crash-safe temp-write→fsync→rename idiom. It holds no secret, and sealing it would make
+an account's profile list unreadable while LOCKED — defeating the property the registry exists for.
+
+HD derivation is **active and dynamic**: the unhardened wallet path, the hardened identity path,
+`ProfileIx`, and the per-profile signer / DEK / sealing-key plumbing MUST keep deriving correctly and
+DISTINCTLY at every index.
 
 **The on-chain DID is a later phase.** A profile's public on-chain identity is a `did:chia:` singleton
 paired with a chip35 DataLayer store (via `dig-identity` [dig_ecosystem#771]); minting it is owned by
