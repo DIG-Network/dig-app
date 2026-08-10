@@ -21,6 +21,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::boot::{
     account_exists, assemble_residency, account_scoped_id, DEFAULT_ACCOUNT_ID,
 };
@@ -63,6 +64,7 @@ fn open_under(account_dir: &Path) -> Option<String> {
         backend,
         dig_app_core::account::ceremony::PreCollectedPassword::new(typed_password()),
         AccountId::new(DEFAULT_ACCOUNT_ID),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
     .ok()?;

@@ -799,6 +799,7 @@ mod tests {
             backend,
             password,
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap()
@@ -892,6 +893,7 @@ mod tests {
             backend.clone(),
             Types::password("not-the-password-they-chose"),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysKeeps),
         );
         assert!(
@@ -919,6 +921,7 @@ mod tests {
             backend.clone(),
             Refuses,
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .is_err());
@@ -943,6 +946,7 @@ mod tests {
             backend.clone(),
             typed(),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysDeclines),
         )
         .is_err());

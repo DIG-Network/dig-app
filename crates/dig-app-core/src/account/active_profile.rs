@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn a_populated_registry_reads_the_active_entrys_index_and_did() {
         let mut registry = registry_with(&[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), None)]);
-        registry.set_active(ProfileIx(1)).unwrap();
+        let _ = registry.set_active(ProfileIx(1)).unwrap();
 
         let slot = ActiveSlot::read(&registry);
         assert!(slot.is_profiled());
@@ -225,7 +225,7 @@ mod tests {
             "the DID must come from the ACTIVE entry, not from whichever entry is first"
         );
 
-        registry.set_active(ProfileIx::ROOT).unwrap();
+        let _ = registry.set_active(ProfileIx::ROOT).unwrap();
         let back = ActiveSlot::read(&registry);
         assert_eq!(ProfileIx::ROOT, back.ix());
         assert_eq!(Some("home"), back.label());
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(ProfileIx::ROOT, WalletSlot::unprofiled().ix());
 
         let mut registry = registry_with(&[(ProfileIx::ROOT, None), (ProfileIx(4), None)]);
-        registry.set_active(ProfileIx(4)).unwrap();
+        let _ = registry.set_active(ProfileIx(4)).unwrap();
         let slot = WalletSlot::from_active(registry.active().unwrap());
 
         assert_eq!(ProfileIx(4), slot.ix());

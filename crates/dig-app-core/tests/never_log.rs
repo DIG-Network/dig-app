@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::fmt::MakeWriter;
 
 use dig_account::AccountId;
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::boot::{
     assemble_residency, finish_boot, reunlock_into, DEFAULT_ACCOUNT_ID,
 };
@@ -123,6 +124,7 @@ fn boot(backend: Arc<dyn KeychainBackend>) -> (AccountResidency, Option<Recovery
         backend,
         PreCollectedPassword::new(sentinel_password()),
         account(),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&SilentlyKeeps),
     )
     .unwrap()
@@ -271,6 +273,7 @@ fn the_recovery_phrase_never_reaches_a_log_record() {
             fresh,
             PreCollectedPassword::new(sentinel_password()),
             AccountId::new("restored"),
+            ProfileSession::unprofiled(),
             Seeding::Restore(&restored_from),
         );
         assert!(restored.is_ok(), "the restore leg must actually run");

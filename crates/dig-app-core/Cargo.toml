@@ -174,6 +174,9 @@ dispatch2.workspace = true
 # alternative — hand-writing the same registry JSON in each integration test — would be several
 # independent chances to drift from the shape dig-account actually accepts.
 dig-app-core = { path = ".", features = ["profile-test-support"] }
+# Drives the compile-fail case that pins `WalletSlot`'s missing bare-index constructor. A property
+# that is the ABSENCE of an API has no runtime witness, so the compiler has to be the assertion.
+trybuild = "1"
 png.workspace = true
 tempfile.workspace = true
 rand_chacha.workspace = true

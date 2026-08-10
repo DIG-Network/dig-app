@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use dig_app_core::account::profile_session::ProfileSession;
 use dig_app_core::account::boot::{assemble_residency, reunlock_into, DEFAULT_ACCOUNT_ID};
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
 use dig_app_core::account::recovery::RecoveryPhrase;
@@ -44,6 +45,7 @@ fn live_residency() -> AccountResidency {
         backend,
         typed_password("tray-lock-state"),
         AccountId::new(DEFAULT_ACCOUNT_ID),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
     .expect("an in-memory account enrols");
@@ -187,6 +189,7 @@ fn re_unlocking_returns_the_menu_to_unlocked() {
         Arc::clone(&backend),
         typed_password("tray-lock-state"),
         AccountId::new(DEFAULT_ACCOUNT_ID),
+        ProfileSession::unprofiled(),
         Seeding::NewPhrase(&AlwaysKeeps),
     )
     .expect("an in-memory account enrols");

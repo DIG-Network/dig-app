@@ -416,7 +416,6 @@ mod tests {
     fn a_locked_profile_cannot_seal_its_wallet() {
         use crate::account::residency::AccountResidency;
         use crate::session_lock::SessionKeys;
-        use dig_account::ProfileIx;
         use dig_keystore::KdfParams;
 
         // A live-view sealer over a LOCKED residency must fail closed on seal.

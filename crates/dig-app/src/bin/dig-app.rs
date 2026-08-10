@@ -52,7 +52,6 @@ use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::account::residency::ResidencySealer;
 use dig_app_core::account::second_factor::journey::SystemClock as WallClock;
 #[cfg(feature = "tray")]
-use dig_app_core::account::ProfileIx;
 use dig_app_core::agent::Agent;
 #[cfg(feature = "tray")]
 use dig_app_core::confirm::{native_confirmer, NativeConfirmer, NoticePrompt};

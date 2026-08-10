@@ -237,6 +237,7 @@ pub fn default_account() -> AccountId {
 mod tests {
     use super::*;
     use crate::account::boot::finish_boot;
+    use crate::account::profile_session::ProfileSession;
     use crate::account::ceremony::CredentialCeremony;
     use crate::account::lifecycle::PhrasePresenter;
     use crate::keystore::KeystoreError;
@@ -308,6 +309,7 @@ mod tests {
             backend.clone(),
             CredentialCeremony::new(cred.clone()),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
@@ -349,6 +351,7 @@ mod tests {
             backend,
             Fixed(password.as_bytes().to_vec()),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&NeverEnrols),
         )
         .ok()?;
@@ -410,6 +413,7 @@ mod tests {
             backend,
             fixed_ceremony(chosen()),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&NeverEnrols),
         )
         .expect("the migrated account opens");
@@ -434,6 +438,7 @@ mod tests {
             backend.clone(),
             fixed_ceremony(user_sealed.clone()),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
@@ -472,6 +477,7 @@ mod tests {
             backend.clone(),
             CredentialCeremony::new(cred.clone()),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&AlwaysKeeps),
         )
         .unwrap();
@@ -562,6 +568,7 @@ mod tests {
             backend,
             fixed_ceremony(chosen()),
             account(),
+            ProfileSession::unprofiled(),
             Seeding::NewPhrase(&NeverEnrols),
         )
         .unwrap();

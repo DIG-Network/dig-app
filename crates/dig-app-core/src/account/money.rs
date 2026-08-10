@@ -796,7 +796,7 @@ mod tests {
             .expect("unlocked")
             .expect("an address encodes");
         let authorizer = PolicyAuthorizer::new(
-            ActiveProfile::SOLE.ix(),
+            residency.profiles().active_ix(),
             hot_wallet_that_tiers_our_fixture_as_auto_send(),
             small_sends_up_to(SPEND_TOTAL, SPEND_TOTAL * 10),
             &address,
