@@ -1118,13 +1118,7 @@ impl ShellApp {
     }
 
     /// One chrome control, drawn in the slot [`ChromeSlots`] measured for it.
-    fn control(
-        &self,
-        ui: &mut egui::Ui,
-        slot: Rect,
-        label: &str,
-        t: &Tokens,
-    ) -> egui::Response {
+    fn control(&self, ui: &mut egui::Ui, slot: Rect, label: &str, t: &Tokens) -> egui::Response {
         let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(slot));
         paint::theme_toggle(&mut slot_ui, label, t)
     }

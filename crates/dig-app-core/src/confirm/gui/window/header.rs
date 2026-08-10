@@ -119,7 +119,11 @@ fn readings(facts: &PaneFacts) -> Vec<Reading> {
         Reading::new(copy::header::NODE_LABEL, node_word, node_tone),
     ];
     if let Some((word, severity)) = facts.network.sync.badge() {
-        items.push(Reading::new(copy::header::CHAIN_LABEL, word, tone(severity)));
+        items.push(Reading::new(
+            copy::header::CHAIN_LABEL,
+            word,
+            tone(severity),
+        ));
     }
     // Both networks, each named. Never one "peers" figure: a person told `1` cannot tell whether
     // their content network or their chain connection is the healthy one, and on a default install
@@ -159,7 +163,10 @@ fn reading_width(ui: &Ui, t: &Tokens, item: &Reading) -> f32 {
     };
     // The word is measured in the badge's OWN font (`data::badge` uses semibold), not the label's:
     // semibold is the wider of the two, and measuring a badge with the label's font under-reports it.
-    text(&item.label, regular(size::XS)) + space::S2 + text(&item.word, semibold(size::XS)) + space::S3
+    text(&item.label, regular(size::XS))
+        + space::S2
+        + text(&item.word, semibold(size::XS))
+        + space::S3
 }
 
 /// How worried to be about the agent's own state.
@@ -409,8 +416,14 @@ mod tests {
                 .filter(|(said, _)| said == digit)
                 .any(|(_, at)| at.left() >= label.right() && at.left() - label.right() < 40.0)
         };
-        assert!(after(dig, "0"), "the DIG label is not followed by its 0: {laid:?}");
-        assert!(after(chia, "1"), "the Chia label is not followed by its 1: {laid:?}");
+        assert!(
+            after(dig, "0"),
+            "the DIG label is not followed by its 0: {laid:?}"
+        );
+        assert!(
+            after(chia, "1"),
+            "the Chia label is not followed by its 1: {laid:?}"
+        );
 
         // And the chain badge beside them, saying the honest thing about a replica at no height.
         assert!(
@@ -434,7 +447,9 @@ mod tests {
     /// drives a node which answered.
     #[test]
     fn an_unread_count_is_not_drawn_as_a_zero() {
-        use crate::network::{ChainSync, PeerCount, SyncUnknown, CHIA_PEERS_LABEL, DIG_PEERS_LABEL};
+        use crate::network::{
+            ChainSync, PeerCount, SyncUnknown, CHIA_PEERS_LABEL, DIG_PEERS_LABEL,
+        };
         let said = painted(
             &on_the_networks(
                 ChainSync::Unknown(SyncUnknown::NoNode),
@@ -525,12 +540,14 @@ mod tests {
                 );
             }
             assert!(
-                laid.iter().any(|(said, _)| said == copy::header::AGENT_LABEL),
+                laid.iter()
+                    .any(|(said, _)| said == copy::header::AGENT_LABEL),
                 "the agent reading was dropped at {width} px, and it is the one that explains the \
                  rest of the window: {laid:?}"
             );
             assert!(
-                laid.iter().any(|(said, _)| said == copy::header::NODE_LABEL),
+                laid.iter()
+                    .any(|(said, _)| said == copy::header::NODE_LABEL),
                 "the node reading was dropped at {width} px: {laid:?}"
             );
             dropped_any |= !laid

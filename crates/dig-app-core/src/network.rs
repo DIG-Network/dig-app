@@ -47,7 +47,7 @@
 //!
 //! # Why a poller and not a read at paint time
 //!
-//! The window snapshot is taken twice a second and this is a node round trip. [`NodeChainSync`] owns
+//! The window snapshot is taken twice a second and this is a node round trip. [`NodeNetworkStanding`] owns
 //! the cadence exactly as [`NodeHostedStores`](crate::hosted_stores::NodeHostedStores) does: it
 //! answers from cache immediately, refreshes on a worker thread, and de-duplicates so a slow node is
 //! asked once however many repaints happen while it thinks.
@@ -244,9 +244,10 @@ pub enum ChainSyncTone {
 /// to connectivity, and for the same reason: **an unknown count is not zero.** Drawing `0 peers`
 /// because a node could not be asked is the money-lie pattern pointed at the network — it reports a
 /// fault that may not exist, and it reports it in exactly the shape of a real one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PeerCount {
     /// Nobody has asked yet.
+    #[default]
     Pending,
     /// The node answered with a count. `0` is an OBSERVED zero — a real finding, and usually the
     /// interesting one.
@@ -256,12 +257,6 @@ pub enum PeerCount {
     Unobservable,
     /// Nobody could be asked, and why.
     Unknown(SyncUnknown),
-}
-
-impl Default for PeerCount {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 impl PeerCount {
@@ -396,11 +391,11 @@ fn classify(failure: ControlFailure) -> SyncUnknown {
 /// Separated from the poller so the derivation and the classification above are testable against a
 /// real socket without a cadence in the way.
 fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkStanding {
-    let sync = match control::call_control_result(endpoint, &WalletSyncStatusParams {}, token, timeout)
-    {
-        Ok(result) => ChainSync::of_status(&result),
-        Err(failure) => ChainSync::Unknown(classify(failure)),
-    };
+    let sync =
+        match control::call_control_result(endpoint, &WalletSyncStatusParams {}, token, timeout) {
+            Ok(result) => ChainSync::of_status(&result),
+            Err(failure) => ChainSync::Unknown(classify(failure)),
+        };
     let (dig_peers, chia_peers) =
         match control::call_control_result(endpoint, &PeerCountsParams {}, token, timeout) {
             Ok(PeerCountsResult {
@@ -603,7 +598,8 @@ mod tests {
             "a replica that has reached no block is being told it is making progress"
         );
 
-        let moving = ChainSync::of_status(&wire(WalletSyncPhase::Syncing, Some(6_000_123), Some(1)));
+        let moving =
+            ChainSync::of_status(&wire(WalletSyncPhase::Syncing, Some(6_000_123), Some(1)));
         assert_eq!(
             moving,
             ChainSync::Syncing {
@@ -708,7 +704,11 @@ mod tests {
             };
             assert!(all.iter().any(named), "{reason:?} is missing from all()");
         }
-        assert_eq!(all.len(), 5, "all() has grown a duplicate or lost a variant");
+        assert_eq!(
+            all.len(),
+            5,
+            "all() has grown a duplicate or lost a variant"
+        );
     }
 
     /// **An older node's refusal points at an upgrade, never at a token.**
@@ -883,7 +883,11 @@ mod tests {
             reading.chia_peers,
             PeerCount::Unknown(SyncUnknown::NodeCannotRead)
         );
-        assert_eq!(reading.dig_peers.badge(), None, "a refusal was drawn as a count");
+        assert_eq!(
+            reading.dig_peers.badge(),
+            None,
+            "a refusal was drawn as a count"
+        );
         assert_eq!(reading.sync.badge(), None);
     }
 

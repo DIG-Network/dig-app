@@ -134,17 +134,17 @@ fn input_box(ui: &mut Ui, at: Rect, t: &Tokens, live: bool, field: &Field<'_>, v
 /// error attached to a control is not prose — it is part of the control. `danger_text` rather than
 /// `danger`, because the bright accent fails AA as small text on a light surface (that is precisely
 /// why the theme carries both).
-fn error_text(ui: &Ui, at: Rect, t: &Tokens, problem: &str) -> f32 {
+fn error_text(ui: &mut Ui, at: Rect, t: &Tokens, problem: &str) -> f32 {
     let galley = ui.painter().layout(
         problem.to_string(),
         regular(size::SM),
         rgba(t.danger_text),
         at.width(),
     );
-    let height = galley.size().y;
-    ui.painter()
-        .galley(at.left_top(), galley, rgba(t.danger_text));
-    height
+    // Selectable, like every other piece of text a pane draws (dig_ecosystem#2569). An error is the
+    // sentence a person is most likely to need to hand to somebody else, and it is frequently the
+    // one they cannot paraphrase.
+    super::selectable::text(ui, at.left_top(), galley)
 }
 
 #[cfg(test)]
