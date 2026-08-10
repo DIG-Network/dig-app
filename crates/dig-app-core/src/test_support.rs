@@ -179,6 +179,150 @@ pub mod node {
             /// How long the node takes to give it.
             delay: Duration,
         },
+        /// A healthy node that also answers the four OPEN chain reads a
+        /// [`ChainSource`](dig_chainsource_interface::ChainSource) needs —
+        /// `control.wallet.coinById`, `control.wallet.coinSpend`, `control.wallet.coinsByParent`
+        /// and `control.wallet.peak` — from the scripted [`ChainReply`] (dig_ecosystem#2560).
+        ///
+        /// Served TOKENLESS, and the openness is read from [`ControlMethod::is_open_read`] rather
+        /// than from a list here: a fixture more generous than the real node would let a client
+        /// that only worked while holding a token pass, and a fixture stricter than it would fail a
+        /// correct one.
+        Chain(ChainReply),
+    }
+
+    /// How a [`FakeNode`] should answer the four OPEN chain reads.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ChainReply {
+        /// Answer every chain read from this scripted chain.
+        Chain(Box<FakeChain>),
+        /// Refuse every chain read, in the node's error envelope: a numeric wire code plus the
+        /// stable UPPER_SNAKE `data.code` symbol a client is contractually required to branch on.
+        Rejected {
+            /// The numeric JSON-RPC error code.
+            code: i64,
+            /// The stable `data.code` symbol.
+            symbol: String,
+        },
+    }
+
+    impl ChainReply {
+        /// A refusal carrying `code` + its stable `symbol`.
+        pub fn rejected(code: i64, symbol: &str) -> Self {
+            ChainReply::Rejected {
+                code,
+                symbol: symbol.to_string(),
+            }
+        }
+
+        /// Answer from `chain`.
+        pub fn of(chain: FakeChain) -> Self {
+            ChainReply::Chain(Box::new(chain))
+        }
+    }
+
+    /// A scripted chain a [`FakeNode`] answers the four OPEN chain reads from.
+    ///
+    /// It is a small chain rather than a list of canned replies on purpose: the properties under
+    /// test are all about what the client ASKS FOR NEXT, and a fixture that ignored `after_coin_id`
+    /// would answer a correctly-paging client and a cursor-blind one identically.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct FakeChain {
+        /// The coins `control.wallet.coinById` can find, by their own ids.
+        pub coins: Vec<FakeCoin>,
+        /// The UNSPENT coins `control.wallet.coins` reports for any address it is asked about.
+        ///
+        /// A separate list from [`coins`](Self::coins) because the two reads answer different
+        /// questions — one by coin id including spent coins, one by address excluding them — and a
+        /// single list would let a client that asked the wrong method pass.
+        pub address_coins: Vec<FakeCoin>,
+        /// The spends `control.wallet.coinSpend` can find, keyed by the SPENT coin.
+        pub spends: Vec<FakeSpend>,
+        /// Each parent coin id and the direct children its spend created, in the ASCENDING
+        /// `coin_id` order the contract fixes.
+        pub children: Vec<(String, Vec<FakeCoin>)>,
+        /// How many children this node puts in ONE page, whatever `limit` was asked for.
+        ///
+        /// A node is explicitly free to return a short page for its own reasons, and that freedom
+        /// is the whole reason `complete` exists — so the fixture exercises it. `0` means "the
+        /// whole child set in one page".
+        pub child_page_size: usize,
+        /// The peak `control.wallet.peak` reports, or `None` for a JSON `null`.
+        pub peak_height: Option<u32>,
+        /// The `synced` flag every answer carries.
+        pub synced: bool,
+        /// The `source` token every answer carries — `"db"` or `"fallback"`.
+        pub source: &'static str,
+        /// A node that NEVER says `complete`, always handing back an advancing cursor.
+        ///
+        /// Not a malformed node: each page is individually well-formed. It is the hostile shape the
+        /// client's own page bound exists for, and it cannot be expressed by a child list alone
+        /// because any finite list eventually completes.
+        pub endless_children: bool,
+        /// A node that answers `complete: false` with `cursor: null` — a self-contradiction the
+        /// wire shape cannot forbid, and one that would spin a client re-asking the same page.
+        pub incomplete_without_cursor: bool,
+    }
+
+    impl FakeChain {
+        /// A synced chain answering from the node's own replica at `peak`, one page per child set.
+        pub fn synced_at(peak: u32) -> Self {
+            Self {
+                peak_height: Some(peak),
+                synced: true,
+                source: "db",
+                ..Self::default()
+            }
+        }
+
+        /// Add a coin `control.wallet.coinById` can find.
+        pub fn with_coin(mut self, coin: FakeCoin) -> Self {
+            self.coins.push(coin);
+            self
+        }
+
+        /// Add a spend `control.wallet.coinSpend` can find.
+        pub fn with_spend(mut self, spend: FakeSpend) -> Self {
+            self.spends.push(spend);
+            self
+        }
+
+        /// Give `parent` these direct children, served `page_size` at a time.
+        pub fn with_children(
+            mut self,
+            parent: &str,
+            children: Vec<FakeCoin>,
+            page_size: usize,
+        ) -> Self {
+            self.children.push((parent.to_string(), children));
+            self.child_page_size = page_size;
+            self
+        }
+    }
+
+    /// One spend a [`FakeNode`] reports from `control.wallet.coinSpend`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FakeSpend {
+        /// The coin this spend consumed. Its `spent_height` decides whether the reply obeys the
+        /// contract's rule that a spend's coin is never unspent.
+        pub coin: FakeCoin,
+        /// The puzzle reveal, lowercase hex of serialized CLVM.
+        pub puzzle_reveal: String,
+        /// The solution, lowercase hex of serialized CLVM.
+        pub solution: String,
+    }
+
+    impl FakeSpend {
+        /// A well-formed spend of `coin` at `height`, with distinguishable reveal and solution
+        /// bytes so a client that swapped the two cannot pass.
+        pub fn of(mut coin: FakeCoin, height: u32) -> Self {
+            coin.spent_height = Some(height);
+            Self {
+                coin,
+                puzzle_reveal: "ff01ff8080".into(),
+                solution: "ff8203e880".into(),
+            }
+        }
     }
 
     /// How a [`FakeNode`] should answer `control.wallet.syncStatus`.
@@ -433,6 +577,14 @@ pub mod node {
             /// The stable `data.code` symbol.
             symbol: String,
         },
+        /// `accepted: false` with NO rejection reason — the node declining to say what judged the
+        /// bundle.
+        ///
+        /// A contract violation, and one the wire shape cannot forbid, which is why a client must
+        /// handle it: the reply asserts the bundle is not in a mempool while supplying nothing that
+        /// judged it. A fixture that could only express a REASONED refusal could not tell a client
+        /// which reads this as a mempool rejection from one which does not.
+        NeitherAcceptedNorRejected,
     }
 
     impl BroadcastReply {
@@ -507,6 +659,11 @@ pub mod node {
         /// A fake that answers `control.hostedStores.list` with `reply`, but only after `delay`.
         pub fn serving_stores_slowly(reply: StoresReply, delay: Duration) -> Self {
             Self::with_behaviour(Behaviour::SlowHostedStores { reply, delay })
+        }
+
+        /// A fake that answers the four OPEN chain reads with `reply` (dig_ecosystem#2560).
+        pub fn serving_chain(reply: ChainReply) -> Self {
+            Self::with_behaviour(Behaviour::Chain(reply))
         }
 
         /// A fake with an explicit [`Behaviour`], bound to an ephemeral loopback port.
@@ -601,6 +758,15 @@ pub mod node {
             let method_is_hosted_list = is(ControlMethod::HostedStoresList);
             let method_is_sync = is(ControlMethod::WalletSyncStatus);
             let method_is_peer_counts = is(ControlMethod::PeerCounts);
+            let chain_method = [
+                ControlMethod::WalletCoins,
+                ControlMethod::WalletCoinById,
+                ControlMethod::WalletCoinSpend,
+                ControlMethod::WalletCoinsByParent,
+                ControlMethod::WalletPeak,
+            ]
+            .into_iter()
+            .find(|m| method == Some(*m));
             let asset = if request.contains("\"asset\":\"dig\"") {
                 Asset::Dig
             } else {
@@ -651,6 +817,13 @@ pub mod node {
                 Behaviour::WalletSync(reply) if method_is_peer_counts && method_is_open_read => {
                     (200, peer_counts_result(reply))
                 }
+                // The four chain reads, served TOKENLESS because the contract declares them open.
+                // A client that only worked while presenting a token fails here rather than being
+                // rescued by a fixture more generous than the real node.
+                Behaviour::Chain(reply) if chain_method.is_some() && method_is_open_read => (
+                    200,
+                    chain_result(reply, chain_method.expect("checked above"), &request),
+                ),
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),
                 // Authorized, and asking for the hosted-store list: answer it. Any OTHER method
                 // falls through to the status body below, so a fake set up for stores still
@@ -674,7 +847,8 @@ pub mod node {
                 | Behaviour::WalletBroadcast(_)
                 | Behaviour::WalletSync(_)
                 | Behaviour::HostedStores(_)
-                | Behaviour::SlowHostedStores { .. } => (200, status_result()),
+                | Behaviour::SlowHostedStores { .. }
+                | Behaviour::Chain(_) => (200, status_result()),
                 Behaviour::JsonRpcError(message) => (200, json_rpc_error(message)),
                 Behaviour::Http(code, body) => (*code, body.clone()),
             };
@@ -845,9 +1019,168 @@ pub mod node {
                 "transaction_id": serde_json::Value::Null,
                 "rejection": reason,
             }),
+            BroadcastReply::NeitherAcceptedNorRejected => serde_json::json!({
+                "accepted": false,
+                "transaction_id": serde_json::Value::Null,
+                "rejection": serde_json::Value::Null,
+            }),
             BroadcastReply::Rejected { code, symbol } => return rejection(*code, symbol, "push"),
         };
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
+    }
+
+    /// The reply to one of the four OPEN chain reads, field-for-field as the 0.10 contract defines
+    /// it — including the `source` / `synced` / `peak_height` freshness trio every wallet result
+    /// carries, and the required-but-nullable keys (`coin`, `spend`, `cursor`) written as explicit
+    /// `null`s rather than omitted, because the contract makes an ABSENT key a decode error and the
+    /// difference is exactly what a client must not paper over.
+    fn chain_result(reply: &ChainReply, method: ControlMethod, request: &str) -> String {
+        let chain = match reply {
+            ChainReply::Chain(chain) => chain,
+            ChainReply::Rejected { code, symbol } => return rejection(*code, symbol, "chain read"),
+        };
+        let result = match method {
+            ControlMethod::WalletPeak => serde_json::json!({
+                "peak_height": chain.peak_height,
+                "synced": chain.synced,
+            }),
+            ControlMethod::WalletCoinById => {
+                let wanted = string_param(request, "coin_id").unwrap_or_default();
+                let coin = chain.coins.iter().find(|c| c.coin_id == wanted);
+                serde_json::json!({
+                    "coin": coin.map(chain_coin_json),
+                    "source": chain.source,
+                    "synced": chain.synced,
+                    "peak_height": chain.peak_height,
+                })
+            }
+            ControlMethod::WalletCoinSpend => {
+                let wanted = string_param(request, "coin_id").unwrap_or_default();
+                let spend = chain.spends.iter().find(|s| s.coin.coin_id == wanted);
+                serde_json::json!({
+                    "spend": spend.map(|s| serde_json::json!({
+                        "coin": chain_coin_json(&s.coin),
+                        "puzzle_reveal": s.puzzle_reveal,
+                        "solution": s.solution,
+                    })),
+                    "source": chain.source,
+                    "synced": chain.synced,
+                    "peak_height": chain.peak_height,
+                })
+            }
+            ControlMethod::WalletCoinsByParent => coins_by_parent_json(chain, request),
+            // `control.wallet.coins` is the ONE read that MUST report a concrete asset: it was
+            // scoped to one, so a `null` there would be a different (and contract-breaking) reply
+            // than the by-id reads give.
+            ControlMethod::WalletCoins => serde_json::json!({
+                "coins": chain
+                    .address_coins
+                    .iter()
+                    .map(|c| {
+                        let mut json = chain_coin_json(c);
+                        json["asset"] = serde_json::Value::String(c.asset.to_string());
+                        json
+                    })
+                    .collect::<Vec<_>>(),
+                "source": chain.source,
+                "synced": chain.synced,
+                "peak_height": chain.peak_height,
+            }),
+            other => return rejection(-32601, "METHOD_NOT_FOUND", other.name()),
+        };
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
+    }
+
+    /// One page of `control.wallet.coinsByParent`, resumed HONESTLY from `after_coin_id`.
+    ///
+    /// The page is derived from the scripted child list rather than canned, and `complete` is set
+    /// only when this page genuinely exhausts that list — never from the page's length. A fixture
+    /// that answered the whole child set regardless of the cursor would let a client which never
+    /// paged pass, and one that inferred `complete` from a length would encode into the fixture the
+    /// very mistake the client must not make.
+    fn coins_by_parent_json(chain: &FakeChain, request: &str) -> serde_json::Value {
+        let parent = string_param(request, "parent_coin_id").unwrap_or_default();
+        let after = string_param(request, "after_coin_id");
+        let all: &[FakeCoin] = chain
+            .children
+            .iter()
+            .find(|(id, _)| *id == parent)
+            .map_or(&[], |(_, kids)| kids.as_slice());
+
+        let start = after.as_ref().map_or(0, |cursor| {
+            all.iter()
+                .position(|c| c.coin_id == *cursor)
+                .map_or(0, |i| i + 1)
+        });
+        let remaining = &all[start.min(all.len())..];
+        let page_size = if chain.child_page_size == 0 {
+            remaining.len()
+        } else {
+            chain.child_page_size
+        };
+        let page = &remaining[..page_size.min(remaining.len())];
+
+        // An endless node keeps handing back an ADVANCING cursor and never says `complete`. It
+        // advances from the cursor the CLIENT sent rather than from any child index, so the value
+        // is genuinely new on every page — a client that detected the loop by spotting a repeated
+        // cursor would never be exercised, and the only thing that can stop this node is the
+        // client's own page bound.
+        let (coins, complete, cursor) = if chain.endless_children {
+            let seen = after
+                .as_ref()
+                .and_then(|c| u64::from_str_radix(c.trim_start_matches('0'), 16).ok())
+                .unwrap_or(0);
+            (
+                vec![FakeCoin::confirmed("xch", seen + 1)],
+                false,
+                Some(format!("{:064x}", seen + 1)),
+            )
+        } else if chain.incomplete_without_cursor {
+            (page.to_vec(), false, None)
+        } else {
+            let complete = start + page.len() >= all.len();
+            let cursor = page.last().map(|c| c.coin_id.clone());
+            (page.to_vec(), complete, cursor)
+        };
+
+        serde_json::json!({
+            "coins": coins.iter().map(chain_coin_json).collect::<Vec<_>>(),
+            "complete": complete,
+            "cursor": cursor,
+            "source": chain.source,
+            "synced": chain.synced,
+            "peak_height": chain.peak_height,
+        })
+    }
+
+    /// One coin in a chain-read reply.
+    ///
+    /// `asset` is `null` on every chain read, because the contract requires it: a coin id alone
+    /// classifies nothing, so a node emitting a concrete asset would be asserting something it never
+    /// verified. A client that read the asset off one of these would be reading the fixture's
+    /// helpfulness rather than the node's answer.
+    fn chain_coin_json(coin: &FakeCoin) -> serde_json::Value {
+        serde_json::json!({
+            "coin_id": coin.coin_id,
+            "asset": serde_json::Value::Null,
+            "amount": coin.amount,
+            "parent_coin_info": coin.parent_coin_info,
+            "puzzle_hash": coin.puzzle_hash,
+            "created_height": coin.created_height,
+            "spent_height": coin.spent_height,
+        })
+    }
+
+    /// A string parameter's value, read back out of the raw request body.
+    ///
+    /// Read from the WIRE rather than from a structure the fake shares with the client, so a client
+    /// that sent the right value under the wrong key cannot be rescued by a helpful fixture.
+    fn string_param(request: &str, key: &str) -> Option<String> {
+        request
+            .split(&format!("\"{key}\":\""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .map(str::to_string)
     }
 
     /// The node's error envelope: a numeric wire code plus the stable `data.code` symbol.

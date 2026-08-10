@@ -287,18 +287,27 @@ neither may be relaxed:
 per call and never retained, so a mint observes lock-now, the idle timeout and the OS screen lock
 exactly as the money signer does.
 
-What is missing is one READ. `dig-node-control-interface` 0.6.0 gave dig-app three of the four the
-mint needs, and `wallet::node::NodeWalletEngine` speaks all three: `control.wallet.coins` selects the
-funding coin, `control.wallet.peak` bounds a claimed confirmation, and `control.wallet.broadcast`
-pushes the signed bundle.
+The chain TRANSPORT now exists. `dig-node-control-interface` 0.10 declares five OPEN chain reads plus
+the token-gated push, dig-node 0.110.0 serves them, and `chain::ControlChainSource` /
+`chain::ControlSpendPublisher` implement `dig_chainsource_interface::ChainSource` and
+`dig_account::mint::SpendPublisher` over them. Those two types MUST obey the three-valued rule below;
+in particular a failed read MUST NOT become `Ok(None)` or an empty `Vec`, because on `coin_spend`
+an absence means *unspent or unknown*, which a caller reads as safe to spend.
 
-The fourth is a coin read **by coin id**, and no control method provides it. `mint_status` asks the
-chain for the DID coin's record — that IS the confirmation — and for the funding coin's, to tell a slow
-mint from one that can never confirm because its input was spent elsewhere. `control.wallet.coins`
-answers for an ADDRESS and reports only UNSPENT coins, so it can see neither. A mint on that transport
-could be pushed — real XCH, gone — and never observed, and §3.1b's evidence rule permits recording a
-DID only from a confirmation. So the shell supplies `account::chain_mint::MintSeams::NoChainTransport`
-on this build, the startup gate correctly draws nothing, and no `TrayAction` mints.
+`chain::ControlChainSource::coin_records_by_parent` MUST page `control.wallet.coinsByParent` to
+exhaustion, resuming only from the `cursor` the previous page returned, terminating only on
+`complete: true` — never on a short page — and MUST fail rather than return a prefix when its own page
+bound (`chain::MAX_CHILD_PAGES`) is reached.
+
+What is missing is one READ: `resolve_singleton_lineage`. It MUST delegate to
+`dig_chainsource_interface::walk_singleton_lineage` (0.4.0, unpublished) and MUST NOT be hand-rolled
+here — a coin's puzzle hash is attacker-chosen, so a second implementation of singleton
+authentication is a second forgery surface. `dig_did::walk_did_lineage_to_tip` calls it, and
+`ProfileMinter::advance_profile_mint` calls that to launch the profile's store, so a profile mint
+cannot complete without it. A mint pushed on a transport that cannot finish phase B leaves funds
+committed, an identity on chain, and no profile, permanently. So the shell still supplies
+`account::chain_mint::MintSeams::NoChainTransport` on this build, the startup gate correctly draws
+nothing, and no `TrayAction` mints.
 
 **The gate and the minter MUST be one value (MUST).** Availability is READ OFF `MintSeams`
 (`MintSeams::availability`), never asserted beside it. A build that reports a mint as possible
