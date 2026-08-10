@@ -966,19 +966,27 @@ pub trait AddressCopier {
 ///
 /// Grouped into one struct so the wizard's signature states one dependency rather than five, and so a
 /// test can swap the whole chain — minter, chain, wait surface, clock, ledger — at once.
+///
+/// # Why the fields are crate-private
+///
+/// They are what makes [`MintingStep::Possible`] unwritable outside this crate, and that
+/// unwritability is the whole fix in [`MintingStep`]: with public fields any caller could name
+/// `MintingStep::Possible(DidMinting { .. })` and reach the mint offer with
+/// [`UnavailableMinter`](crate::account::mint::UnavailableMinter) behind it — the exact spend-that-
+/// cannot-happen this type exists to forbid. Callers build one through
+/// [`MintSeams::minting_step`], which cannot produce a minter the seams do not have.
 pub struct DidMinting<'a> {
-    /// Builds, signs and pushes the mint spend. [`UnavailableMinter`](crate::account::mint::UnavailableMinter) until `dig-account`'s minter is
-    /// real; the wizard's copy is honest about that on its own.
-    pub minter: &'a dyn DidMinter,
+    /// Builds, signs and pushes the mint spend.
+    pub(crate) minter: &'a dyn DidMinter,
     /// Watches the chain for the submitted spend.
-    pub observer: &'a dyn MintObserver,
+    pub(crate) observer: &'a dyn MintObserver,
     /// Where the wait is drawn and where "stop watching" comes from.
-    pub surface: &'a dyn WaitSurface,
+    pub(crate) surface: &'a dyn WaitSurface,
     /// The wall clock the wait measures elapsed time against.
-    pub clock: &'a dyn Clock,
+    pub(crate) clock: &'a dyn Clock,
     /// Where a CONFIRMED mint is remembered. Written on exactly one path: the arm of
     /// [`mint_report`] that handles [`MintOutcome::Confirmed`], and nowhere else.
-    pub ledger: &'a dyn DidLedger,
+    pub(crate) ledger: &'a dyn DidLedger,
 }
 
 /// The DID step as the wizard is allowed to reach it: a real mint, or nothing to offer at all.
@@ -2056,16 +2064,11 @@ mod tests {
         let ledger = MemoryLedger::default();
         let chain = ChainDouble(Sighting::Pending);
 
-        mint_the_did(
-            &confirmer,
-            &DidMinting {
-                minter: &minter,
-                observer: &chain,
-                surface: &surface,
-                clock: &clock,
-                ledger: &ledger,
-            },
-        );
+        let seams = MintSeams::Wired {
+            minter: &minter,
+            observer: &chain,
+        };
+        mint_the_did(&confirmer, &seams.minting_step(&surface, &clock, &ledger));
 
         let count = minter
             .windows_at_spend
@@ -2194,14 +2197,21 @@ mod tests {
             )
         }
 
-        fn wiring<'a>(&'a self, surface: &'a PatientWait<'a>) -> DidMinting<'a> {
-            DidMinting {
+        /// The seams a host with this bench's minter would have.
+        ///
+        /// Tests go through [`MintSeams::minting_step`] rather than naming a [`MintingStep`] variant
+        /// so the fixture is assembled the one way production can assemble it. A test allowed to
+        /// hand-build a `Possible` would keep passing after a refactor reopened the very hole
+        /// [`MintingStep`] closes.
+        fn seams(&self) -> MintSeams<'_> {
+            MintSeams::Wired {
                 minter: &self.minter,
                 observer: &self.chain,
-                surface,
-                clock: &self.clock,
-                ledger: &self.ledger,
             }
+        }
+
+        fn wiring<'a>(&'a self, surface: &'a PatientWait<'a>) -> MintingStep<'a> {
+            self.seams().minting_step(surface, &self.clock, &self.ledger)
         }
     }
 
