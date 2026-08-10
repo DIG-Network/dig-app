@@ -721,3 +721,132 @@ fn an_unauthorized_on_the_push_is_a_credential_fault_not_an_old_node() {
 fn bytes32(hex_text: &str) -> Bytes32 {
     Bytes32::new(<[u8; 32]>::try_from(hex::decode(hex_text).unwrap().as_slice()).unwrap())
 }
+
+/// A token reader presenting a token the node does not know.
+fn wrong_token() -> Option<String> {
+    Some("not-the-nodes-token".into())
+}
+
+/// **The push's four remaining failures each keep their own remedy.**
+///
+/// Grouped because they share one shape and differ only in which remedy they name, and the point is
+/// precisely that they stay APART: the nearest wrong implementation collapses them into one
+/// "broadcast failed", after which nobody can tell an old node from a wrong token from a node that
+/// declined to explain itself. Each assertion therefore checks the ARM and the sentence's remedy
+/// word, since an arm alone would still let the message mislead.
+///
+/// The reasonless refusal is the subtle one. `accepted: false` with no reason asserts the bundle is
+/// not in a mempool while supplying nothing that judged it, and the tempting reading is
+/// `PushOutcome::Rejected` — which would send dig-account to rebuild a bundle that may be perfectly
+/// good and is possibly already in flight.
+#[test]
+fn each_push_failure_keeps_its_own_remedy() {
+    use crate::test_support::node::BroadcastReply;
+
+    let old_node =
+        FakeNode::serving_broadcast(BroadcastReply::rejected(-32601, "METHOD_NOT_FOUND"));
+    let outcome =
+        ControlSpendPublisher::with_token_reader(old_node.endpoint(), good_token, TEST_TIMEOUT)
+            .push_detailed(&a_bundle());
+    let Err(error) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        matches!(error, PublishFailure::Unsupported { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("upgrade it"), "{error}");
+
+    // A token the node does not know draws an HTTP 401, before any JSON-RPC body exists. That is a
+    // CREDENTIAL fault here, unlike the identical status on an open read.
+    let node = FakeNode::serving_broadcast(BroadcastReply::Accepted {
+        transaction_id: "ef".repeat(32),
+    });
+    let outcome =
+        ControlSpendPublisher::with_token_reader(node.endpoint(), wrong_token, TEST_TIMEOUT)
+            .push_detailed(&a_bundle());
+    let Err(error) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        matches!(error, PublishFailure::Unauthorized { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("control token"), "{error}");
+    assert!(!error.to_string().contains("upgrade"), "{error}");
+
+    let mute = FakeNode::serving_broadcast(BroadcastReply::NeitherAcceptedNorRejected);
+    let outcome =
+        ControlSpendPublisher::with_token_reader(mute.endpoint(), good_token, TEST_TIMEOUT)
+            .push_detailed(&a_bundle());
+    assert!(
+        matches!(outcome, Err(PublishFailure::NodeCouldNotAnswer { .. })),
+        "an unexplained non-acceptance is not a mempool verdict: {outcome:?}"
+    );
+
+    let broken =
+        FakeNode::serving_broadcast(BroadcastReply::rejected(-32042, "WALLET_READ_FAILED"));
+    let outcome =
+        ControlSpendPublisher::with_token_reader(broken.endpoint(), good_token, TEST_TIMEOUT)
+            .push_detailed(&a_bundle());
+    let Err(error) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        matches!(error, PublishFailure::NodeCouldNotAnswer { .. }),
+        "{error:?}"
+    );
+    assert!(!error.to_string().contains("upgrade"), "{error}");
+}
+
+/// **A coin field that is not 32 bytes of hex is refused, on every read that decodes one.**
+///
+/// The node's ids are attacker-influenced in the sense that matters here: they come off a wire this
+/// client does not control, and a `Coin` built from a truncated or over-long parent id is a coin
+/// that does not exist. The nearest wrong implementation pads or truncates to 32 bytes, silently
+/// fabricating an id — which downstream becomes a lineage hop to a coin nobody ever created.
+///
+/// The fixture varies ONE field on an otherwise well-formed coin, so the failure cannot be blamed on
+/// the rest of the reply.
+#[test]
+fn a_coin_field_that_is_not_thirty_two_bytes_is_refused_rather_than_padded() {
+    let mut bad = FakeCoin::confirmed("xch", 61);
+    let coin_id = bad.coin_id.clone();
+    bad.parent_coin_info = "deadbeef".into();
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_coin(bad)));
+
+    let outcome = source(&node).coin_record(bytes32(&coin_id));
+
+    assert!(
+        matches!(outcome, Err(ChainReadError::Malformed { .. })),
+        "a short parent id must never be padded into a coin that does not exist: {outcome:?}"
+    );
+}
+
+/// **A spend whose programs are not hex is refused rather than decoded to empty CLVM.**
+///
+/// An empty `Program` is a valid value, so the nearest wrong implementation — `unwrap_or_default()`
+/// on the hex decode — produces a structurally fine `CoinSpend` carrying a puzzle that is not the
+/// one that ran. Nothing downstream could detect it, which is why it is refused here.
+#[test]
+fn a_spend_whose_programs_are_not_hex_is_refused_rather_than_emptied() {
+    let coin = FakeCoin::confirmed("xch", 62);
+    let coin_id = coin.coin_id.clone();
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK).with_spend(
+        FakeSpend {
+            coin: FakeCoin {
+                spent_height: Some(PEAK),
+                ..coin
+            },
+            puzzle_reveal: "not-hex".into(),
+            solution: "ff8203e880".into(),
+        },
+    )));
+
+    let outcome = source(&node).coin_spend(bytes32(&coin_id));
+
+    assert!(
+        matches!(outcome, Err(ChainReadError::Malformed { .. })),
+        "got {outcome:?}"
+    );
+}

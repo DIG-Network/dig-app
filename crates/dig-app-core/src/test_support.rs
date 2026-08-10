@@ -577,6 +577,14 @@ pub mod node {
             /// The stable `data.code` symbol.
             symbol: String,
         },
+        /// `accepted: false` with NO rejection reason — the node declining to say what judged the
+        /// bundle.
+        ///
+        /// A contract violation, and one the wire shape cannot forbid, which is why a client must
+        /// handle it: the reply asserts the bundle is not in a mempool while supplying nothing that
+        /// judged it. A fixture that could only express a REASONED refusal could not tell a client
+        /// which reads this as a mempool rejection from one which does not.
+        NeitherAcceptedNorRejected,
     }
 
     impl BroadcastReply {
@@ -1010,6 +1018,11 @@ pub mod node {
                 "accepted": false,
                 "transaction_id": serde_json::Value::Null,
                 "rejection": reason,
+            }),
+            BroadcastReply::NeitherAcceptedNorRejected => serde_json::json!({
+                "accepted": false,
+                "transaction_id": serde_json::Value::Null,
+                "rejection": serde_json::Value::Null,
             }),
             BroadcastReply::Rejected { code, symbol } => return rejection(*code, symbol, "push"),
         };
