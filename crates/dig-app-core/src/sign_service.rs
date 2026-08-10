@@ -123,9 +123,11 @@ where
     // receive addresses (#961), so a connected dapp can display / send to the wallet. Only public
     // data crosses this handle — the private key stays sealed in the injected `signer`.
     //
-    // Every field is a live read. The advertised signing key is not a field at all — the router reads
-    // it from the signer it will actually sign with — so a captured DID beside it is the only thing
-    // that could have desynchronised, and it no longer can.
+    // Every field is a live read, so none of them can go stale at the profile that was active when
+    // this assembly ran. The advertised signing key is not a field at all — the router reads it from
+    // the signer it will actually sign with. That removes the STALENESS; the DID and the addresses
+    // remain separate reads from the key, so a switch landing between them still yields a mismatched
+    // handle. `connect_handle` says so where the three are read.
     let addresses = {
         let cache = Arc::new(ConnectAddresses::new(
             sealer.clone(),
