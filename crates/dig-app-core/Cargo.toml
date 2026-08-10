@@ -112,9 +112,7 @@ hex.workspace = true
 # Only reachable from the profile-registry test fixtures (see the workspace manifest).
 dig-did = { workspace = true, optional = true }
 
-# Wallet host (U8) — the canonical chip35 DIG spend builder + the Chia types it works in. NO spend
-# bundle is hand-rolled; the DIG treasury constant is reused from chip35 (see the `canonical` skill).
-chip35-dl-coin.workspace = true
+
 chia-bls.workspace = true
 chia-protocol.workspace = true
 # The canonical chain-read trait the DID mint is generic over (`account::chain_mint`).

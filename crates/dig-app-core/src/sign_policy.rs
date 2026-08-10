@@ -139,7 +139,7 @@ impl SignPolicy for NativeConfirmSignPolicy {
 mod tests {
     use super::*;
     use crate::confirm::{ConnectPrompt, PairPrompt};
-    use chia_bls::{SecretKey, Signature};
+    use chia_bls::{master_to_wallet_unhardened, SecretKey, Signature};
     use chia_protocol::{Bytes32, Coin, SpendBundle};
     use chia_puzzle_types::standard::StandardArgs;
     use chia_puzzle_types::{DeriveSynthetic, Memos};
@@ -147,7 +147,6 @@ mod tests {
     use chia_sdk_types::conditions::CreateCoin;
     use chia_sdk_types::Conditions;
     use chia_traits::Streamable;
-    use chip35_dl_coin::master_to_wallet_unhardened;
 
     /// A confirmer scripted to return a fixed decision for every prompt (the SIGN-3 confirmer double).
     struct ScriptedConfirmer(ConfirmDecision);

@@ -1292,7 +1292,7 @@ mod tests {
 
     /// A real, decodable spend-bundle payload (base64), for the sign path.
     fn spend_payload_b64() -> String {
-        use chia_bls::{SecretKey, Signature};
+        use chia_bls::{master_to_wallet_unhardened, SecretKey, Signature};
         use chia_protocol::{Bytes32, Coin, SpendBundle};
         use chia_puzzle_types::standard::StandardArgs;
         use chia_puzzle_types::{DeriveSynthetic, Memos};
@@ -1300,7 +1300,6 @@ mod tests {
         use chia_sdk_types::conditions::CreateCoin;
         use chia_sdk_types::Conditions;
         use chia_traits::Streamable;
-        use chip35_dl_coin::master_to_wallet_unhardened;
 
         let master = SecretKey::from_seed(&[3u8; 32]);
         let pk = master_to_wallet_unhardened(&master.public_key(), 0).derive_synthetic();
