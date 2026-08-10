@@ -57,6 +57,7 @@ use crate::account::phrase_vault::PhraseVault;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::residency::{AccountResidency, ResidencySealer};
 use crate::account::second_factor::vault::SecondFactorVault;
+use crate::live::{LiveDid, LiveProfileDir};
 
 /// The single-account id the app boots by default. The account model supports many accounts (the
 /// [`registry`](crate::account::registry)); the tray boot currently opens the one default account, so
@@ -163,6 +164,42 @@ pub fn account_scoped_id(residency: &AccountResidency) -> Option<String> {
 /// into the other's directory listing.
 pub fn active_profile_id(residency: &AccountResidency) -> Option<String> {
     residency.signing_public_key_hex()
+}
+
+/// [`active_profile_id`] as a value the sign-service assembly can HOLD — re-read on every use rather
+/// than sampled once (dig_ecosystem#2398).
+///
+/// The APP-SIGN router is built at boot and moved onto a serving thread for the life of the process,
+/// so nothing that switches profiles can reach it. Handing it a `String` froze the identity it seals,
+/// advertises and persists under at whichever profile was active at boot, while the live signer
+/// beside it followed the switch — publishing profile A's DID against profile B's key, and sealing
+/// B's new grants into A's directory. This is the same fact as [`active_profile_id`], in the one
+/// shape that cannot go stale.
+pub fn live_profile_did(residency: &AccountResidency) -> LiveDid {
+    let residency = residency.clone();
+    LiveDid::read(move || active_profile_id(&residency))
+}
+
+/// The ACTIVE profile's directory under `brand_dir`, re-read on every use — the companion to
+/// [`live_profile_did`], and derived from the same DID, so the directory and the identity sealing
+/// into it can never name two different profiles.
+///
+/// Reads as `None` while the account is locked, because the directory is keyed by the DID and a
+/// locked account has none. See [`FileSealedStore`](crate::loopback::FileSealedStore) for what that
+/// means at the write itself.
+pub fn live_profile_dir(
+    residency: &AccountResidency,
+    brand_dir: &std::path::Path,
+) -> LiveProfileDir {
+    let residency = residency.clone();
+    let brand_dir = brand_dir.to_path_buf();
+    LiveProfileDir::read(move || {
+        let did = active_profile_id(&residency)?;
+        Some(crate::storage::profile_dir(
+            &brand_dir,
+            &crate::storage::did_hash(&did),
+        ))
+    })
 }
 
 /// The phrase vault for a live `residency`, or `None` when it is locked.

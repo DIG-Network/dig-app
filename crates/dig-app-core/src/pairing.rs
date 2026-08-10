@@ -27,6 +27,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::live::LiveDid;
 use crate::sealer::{ProfileSealer, SealError};
 
 /// The length of the channel secret (a pairing token), in bytes — 256 bits of CSPRNG entropy.
@@ -441,18 +442,33 @@ struct LivePairing {
 /// connection tasks behind an `Arc`.
 pub struct PairingStore<S: ProfileSealer> {
     sealer: S,
-    profile_did: String,
+    /// The DID this store seals under, read at each seal/open rather than captured — see
+    /// [`LiveDid`]. A captured DID would tag records with the profile that was active when the
+    /// sign-service assembly was built, while `sealer` derived the DEK of the profile active NOW.
+    profile_did: LiveDid,
     live: Mutex<HashMap<String, LivePairing>>,
 }
 
 impl<S: ProfileSealer> PairingStore<S> {
-    /// Build a store that seals pairings under `profile_did`'s DEK via `sealer`.
-    pub fn new(sealer: S, profile_did: impl Into<String>) -> Self {
+    /// Build a store that seals pairings under `profile_did`'s DEK via `sealer`. A `&str`/`String`
+    /// converts to a FIXED DID (a fixture, or a host whose profile cannot move); production passes a
+    /// [`LiveDid::read`] over the residency so the store follows a profile switch.
+    pub fn new(sealer: S, profile_did: impl Into<LiveDid>) -> Self {
         Self {
             sealer,
             profile_did: profile_did.into(),
             live: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The DID to seal under right now, or a fail-closed [`SealError`] when no profile is active —
+    /// which is what a locked account reads as. Refusing is the only honest answer: a placeholder
+    /// would tag a real record with a name no profile owns, and that record could never be opened by
+    /// the profile that wrote it.
+    fn seal_as(&self) -> Result<String, SealError> {
+        self.profile_did
+            .get()
+            .ok_or_else(|| SealError::Seal("no active profile — the account is locked".to_string()))
     }
 
     /// Pair `ext_id`: mint a fresh 32-byte CSPRNG channel secret, register it live, and seal the
@@ -487,7 +503,7 @@ impl<S: ProfileSealer> PairingStore<S> {
         let plaintext = Zeroizing::new(
             serde_json::to_vec(&record).map_err(|e| SealError::Seal(e.to_string()))?,
         );
-        let sealed_record = self.sealer.seal(&self.profile_did, &plaintext)?;
+        let sealed_record = self.sealer.seal(&self.seal_as()?, &plaintext)?;
 
         self.lock().insert(
             pairing_id.clone(),
@@ -517,7 +533,7 @@ impl<S: ProfileSealer> PairingStore<S> {
     ///
     /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
-        let plaintext = self.sealer.open(&self.profile_did, sealed_record)?;
+        let plaintext = self.sealer.open(&self.seal_as()?, sealed_record)?;
         let record: PairingRecord =
             serde_json::from_slice(&plaintext).map_err(|_| SealError::Open)?;
         let channel_secret = record.channel_secret()?;

@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
+use crate::live::{Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{
     AuthFailure, Capability, CapabilitySet, NewPairing, PairedApp, PairingAuthority, PairingStore,
@@ -244,17 +245,34 @@ struct IdentityUnsealParams {
 }
 
 /// The connect-handle the app returns to a dapp on a successful `connect.request` (§5.6.4): the active
-/// profile plus the addresses/pubkeys the `window.chia` connect contract exposes. Computed once by the
-/// wiring layer (from the active profile's identity + wallet) and handed to the router, so the router
-/// stays decoupled from the wallet.
+/// profile plus the addresses/pubkeys the `window.chia` connect contract exposes. Supplied by the
+/// wiring layer (from the active profile's identity + wallet), so the router stays decoupled from the
+/// wallet.
+///
+/// # Every field is read at the moment it is advertised
+///
+/// This handle names an identity, and the router that holds it is moved onto a serving thread at
+/// boot. Captured values would go on advertising the DID and signing key of whichever profile was
+/// active THEN, while the live signer beside them signed for the profile active NOW — a false
+/// DID→key binding published to every paired dApp. Hence [`Live`]: each field answers for the
+/// current profile, or ([`LiveDid`]) reports that no profile is active at all.
 #[derive(Debug, Clone)]
 pub struct ProfileConnectInfo {
-    /// The active profile's DID.
-    pub profile_did: String,
+    /// The active profile's DID, or `None` once the account is locked.
+    pub profile_did: LiveDid,
     /// The wallet receive addresses (`xch1…`) exposed to a connected dapp.
-    pub addresses: Vec<String>,
-    /// The public keys (hex) exposed to a connected dapp.
-    pub pubkeys: Vec<String>,
+    pub addresses: Live<Vec<String>>,
+}
+
+impl ProfileConnectInfo {
+    /// A handle whose values cannot move — a fixture, or a host with a single fixed profile.
+    /// Production builds the fields with [`Live::read`] instead, so they follow a profile switch.
+    pub fn fixed(profile_did: impl Into<String>, addresses: Vec<String>) -> Self {
+        Self {
+            profile_did: profile_did.into().into(),
+            addresses: Live::fixed(addresses),
+        }
+    }
 }
 
 /// The session-lock re-auth gate the sign path consults immediately before it uses the identity key
@@ -605,7 +623,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
         };
 
         if self.whitelist.is_whitelisted(&params.origin) {
-            return ok(id, self.connect_result());
+            return match self.connect_handle() {
+                Some(handle) => ok(id, handle),
+                None => error(id, SignErrorCode::Locked),
+            };
         }
 
         let decision = self.confirmer.confirm_connect(&ConnectPrompt {
@@ -623,7 +644,10 @@ impl<S: ProfileSealer> FrameRouter<S> {
                         // Persist the sealed grant so the connected origin survives a restart (#958).
                         self.persist
                             .persist_whitelist(&params.origin, &outcome.sealed_record);
-                        ok(id, self.connect_result())
+                        match self.connect_handle() {
+                            Some(handle) => ok(id, handle),
+                            None => error(id, SignErrorCode::Locked),
+                        }
                     }
                     // Sealing fails only when the active profile is locked — surface it as LOCKED.
                     Err(_) => error(id, SignErrorCode::Locked),
@@ -731,10 +755,16 @@ impl<S: ProfileSealer> FrameRouter<S> {
             return error(id, SignErrorCode::Locked);
         };
 
+        // The DID is read HERE, beside the signature, so an attestation can never bind the previous
+        // profile's DID to the current profile's key. No active profile ⇒ LOCKED, not a null DID.
+        let Some(did) = self.connect_info.profile_did.get() else {
+            return error(id, SignErrorCode::Locked);
+        };
+
         ok(
             id,
             json!({
-                "did": self.connect_info.profile_did,
+                "did": did,
                 "sealing_public_key_b64": BASE64.encode(sealing_pubkey),
                 "attestation_b64": BASE64.encode(signature.as_bytes()),
             }),
@@ -768,8 +798,14 @@ impl<S: ProfileSealer> FrameRouter<S> {
         // The plaintext buffer is dropped at the end of this scope — never stored on the router.
         let plaintext = zeroize::Zeroizing::new(plaintext);
 
+        // The sender claim is read at seal time for the same reason the attestation's DID is: it must
+        // name the profile whose key the recipient will see, not the one that was active at boot.
+        let Some(sender_did) = self.connect_info.profile_did.get() else {
+            return error(id, SignErrorCode::Locked);
+        };
+
         match digchat::seal(&SealInputs {
-            sender_did: &self.connect_info.profile_did,
+            sender_did: &sender_did,
             recipient_did: &params.recipient_did,
             recipient_sealing_public_key,
             plaintext: &plaintext,
@@ -813,14 +849,22 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// The `{ granted, profile_did, addresses[], pubkeys[] }` handle returned on a successful connect.
-    fn connect_result(&self) -> Value {
-        json!({
+    /// The `{ granted, profile_did, addresses[], pubkeys[] }` handle returned on a successful
+    /// connect, read from the profile active at THIS instant — or `None` when no profile is active,
+    /// which the caller surfaces as `LOCKED`.
+    ///
+    /// The three values are read together so a dapp can never be handed one profile's DID beside
+    /// another's receive address.
+    fn connect_handle(&self) -> Option<Value> {
+        let profile_did = self.connect_info.profile_did.get()?;
+        Some(json!({
             "granted": true,
-            "profile_did": self.connect_info.profile_did,
-            "addresses": self.connect_info.addresses,
-            "pubkeys": self.connect_info.pubkeys,
-        })
+            "profile_did": profile_did,
+            "addresses": self.connect_info.addresses.get(),
+            // Read from the SIGNER, not from the handle: the key advertised here is then literally
+            // the key that will sign, so the two cannot name different profiles.
+            "pubkeys": [self.signer.signing_public_key_hex()],
+        }))
     }
 
     /// Verify a frame's `auth` object against the pairing store, mapping [`AuthFailure`] to the wire
@@ -1072,11 +1116,7 @@ mod tests {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
         let signer = test_residency().signer();
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -1102,11 +1142,7 @@ mod tests {
     ) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![signer.signing_public_key_hex()],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -1928,11 +1964,7 @@ mod tests {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
         let signer = residency.signer();
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,
@@ -2161,11 +2193,7 @@ mod tests {
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
         let signer = test_residency().signer();
         let signer_pubkey = SessionSigner::signing_public_key(&signer);
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         let sealing = identity_sealing_secret();
         let router = FrameRouter::new(
             pairings,
@@ -2492,11 +2520,7 @@ mod tests {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
         let signer = test_residency().signer();
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec![],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec![]);
         // No `.with_sealing_key` → the fail-closed LockedSealingKey.
         let router = FrameRouter::new(
             pairings,
@@ -2582,11 +2606,7 @@ mod tests {
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
         let signer = test_residency().signer();
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec![],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec![]);
         let router = FrameRouter::new(
             pairings,
             whitelist,

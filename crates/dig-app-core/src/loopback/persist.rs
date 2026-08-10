@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::live::LiveProfileDir;
+
 /// The subdirectory (under the active profile's directory) holding all APP-SIGN at-rest state.
 const APP_SIGN_SUBDIR: &str = "app-sign";
 /// The subdirectory holding one sealed file per pairing (`<pairing_id>.seal`).
@@ -102,31 +104,50 @@ impl SealedRecordStore for NullSealedStore {
 /// `app-sign/` directory inside the active profile's AppData directory (NC-3), through the crash-safe
 /// [`crate::storage::write_durably`] idiom.
 pub struct FileSealedStore {
-    root: PathBuf,
+    /// The active profile's directory, read at the moment of every write/read rather than captured.
+    ///
+    /// The profile directory is per-profile precisely so one profile's sealed records never land
+    /// beside another's ([`crate::account::boot::active_profile_id`]). A captured `PathBuf` on a
+    /// serving thread would keep writing new grants into the directory of the profile that was active
+    /// at boot, which is the isolation this path exists to provide.
+    ///
+    /// It reads as `None` while no profile is active (a locked account), in which case this store
+    /// persists nothing and restores nothing — the same best-effort outcome a failed write already
+    /// has, and the only alternative to inventing a directory that belongs to no profile.
+    profile_dir: LiveProfileDir,
 }
 
 impl FileSealedStore {
     /// Build a store rooted at `app-sign/` under `profile_dir` (the active profile's directory,
-    /// [`crate::storage::profile_dir`]). The directory tree is created lazily on the first write.
-    pub fn new(profile_dir: impl AsRef<Path>) -> Self {
+    /// [`crate::storage::profile_dir`]). A `&Path`/`PathBuf` converts to a FIXED directory (a
+    /// fixture, or a host whose profile cannot move); production passes a
+    /// [`Live::read`](crate::live::Live::read) over the residency so the store follows a profile
+    /// switch. The directory tree is created lazily on the first write.
+    pub fn new(profile_dir: impl Into<LiveProfileDir>) -> Self {
         Self {
-            root: profile_dir.as_ref().join(APP_SIGN_SUBDIR),
+            profile_dir: profile_dir.into(),
         }
     }
 
+    /// The `app-sign/` root under the profile directory as it reads NOW, or `None` when no profile
+    /// is active.
+    fn root(&self) -> Option<PathBuf> {
+        Some(self.profile_dir.get()?.join(APP_SIGN_SUBDIR))
+    }
+
     /// The `pairings/` directory.
-    fn pairings_dir(&self) -> PathBuf {
-        self.root.join(PAIRINGS_SUBDIR)
+    fn pairings_dir(&self) -> Option<PathBuf> {
+        Some(self.root()?.join(PAIRINGS_SUBDIR))
     }
 
     /// The `whitelist/` directory.
-    fn whitelist_dir(&self) -> PathBuf {
-        self.root.join(WHITELIST_SUBDIR)
+    fn whitelist_dir(&self) -> Option<PathBuf> {
+        Some(self.root()?.join(WHITELIST_SUBDIR))
     }
 
     /// The nonce-ledger file path.
-    fn nonce_ledger_path(&self) -> PathBuf {
-        self.root.join(NONCE_LEDGER_FILE)
+    fn nonce_ledger_path(&self) -> Option<PathBuf> {
+        Some(self.root()?.join(NONCE_LEDGER_FILE))
     }
 
     /// Durably write `bytes` to `path`, creating its parent directory. Logs and swallows any error so
@@ -162,10 +183,10 @@ impl FileSealedStore {
             .collect()
     }
 
-    /// Read the plaintext nonce high-water-mark ledger (missing/corrupt ⇒ empty).
+    /// Read the plaintext nonce high-water-mark ledger (missing/corrupt/no active profile ⇒ empty).
     fn read_nonce_ledger(&self) -> HashMap<String, u64> {
-        std::fs::read(self.nonce_ledger_path())
-            .ok()
+        self.nonce_ledger_path()
+            .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<NonceLedger>(&bytes).ok())
             .map(|ledger| ledger.marks)
             .unwrap_or_default()
@@ -187,10 +208,28 @@ impl FileSealedStore {
         if marks.remove(pairing_id).is_none() {
             return;
         }
+        self.write_nonce_ledger(marks);
+    }
+
+    /// Serialize and durably write `marks`, or skip with a warning when no profile is active. The one
+    /// place the ledger is written, so the two callers cannot drift on the no-profile case.
+    fn write_nonce_ledger(&self, marks: HashMap<String, u64>) {
+        let Some(path) = self.nonce_ledger_path() else {
+            return Self::skipped("nonce-ledger");
+        };
         match serde_json::to_vec(&NonceLedger { marks }) {
-            Ok(bytes) => Self::write(&self.nonce_ledger_path(), "nonce-ledger", &bytes),
-            Err(e) => tracing::warn!(error = %e, "failed to rewrite the APP-SIGN nonce ledger"),
+            Ok(bytes) => Self::write(&path, "nonce-ledger", &bytes),
+            Err(e) => tracing::warn!(error = %e, "failed to serialize the APP-SIGN nonce ledger"),
         }
+    }
+
+    /// Note that an at-rest operation was skipped because no profile is active.
+    ///
+    /// Persistence here is best-effort by contract (see [`SealedRecordStore`]), and a locked account
+    /// has no directory of its own to write into. Inventing one would file a record under a profile
+    /// that does not own it, which is the very confusion the per-profile directory prevents.
+    fn skipped(what: &str) {
+        tracing::warn!(what, "no active profile — APP-SIGN state was not persisted");
     }
 
     /// The file name for `pairing_id`'s sealed record. The id is an app-minted UUID, so this is a
@@ -209,15 +248,25 @@ impl FileSealedStore {
 
 impl SealedRecordStore for FileSealedStore {
     fn persist_pairing(&self, pairing_id: &str, sealed: &[u8]) {
-        let path = self
-            .pairings_dir()
-            .join(Self::pairing_file_name(pairing_id));
-        Self::write(&path, "pairing", sealed);
+        let Some(dir) = self.pairings_dir() else {
+            return Self::skipped("pairing");
+        };
+        Self::write(
+            &dir.join(Self::pairing_file_name(pairing_id)),
+            "pairing",
+            sealed,
+        );
     }
 
     fn persist_whitelist(&self, origin: &str, sealed: &[u8]) {
-        let path = self.whitelist_dir().join(Self::origin_file_name(origin));
-        Self::write(&path, "whitelist", sealed);
+        let Some(dir) = self.whitelist_dir() else {
+            return Self::skipped("whitelist");
+        };
+        Self::write(
+            &dir.join(Self::origin_file_name(origin)),
+            "whitelist",
+            sealed,
+        );
     }
 
     fn persist_nonce(&self, pairing_id: &str, nonce: u64) {
@@ -226,34 +275,38 @@ impl SealedRecordStore for FileSealedStore {
         let mut marks = self.read_nonce_ledger();
         let entry = marks.entry(pairing_id.to_string()).or_insert(nonce);
         *entry = (*entry).max(nonce);
-        match serde_json::to_vec(&NonceLedger { marks }) {
-            Ok(bytes) => Self::write(&self.nonce_ledger_path(), "nonce-ledger", &bytes),
-            Err(e) => tracing::warn!(error = %e, "failed to serialize the APP-SIGN nonce ledger"),
-        }
+        self.write_nonce_ledger(marks);
     }
 
     fn remove_whitelist(&self, origin: &str) {
-        let path = self.whitelist_dir().join(Self::origin_file_name(origin));
-        Self::remove(&path, "whitelist");
+        let Some(dir) = self.whitelist_dir() else {
+            return Self::skipped("whitelist");
+        };
+        Self::remove(&dir.join(Self::origin_file_name(origin)), "whitelist");
     }
 
     fn remove_pairing(&self, pairing_id: &str) {
         // A pairing id is a UUID this app minted, never caller input, so it cannot carry a path
         // separator. The file name is still built from it through `pairing_file_name`, which is the
         // one place that assumption is stated and checked.
-        let path = self
-            .pairings_dir()
-            .join(Self::pairing_file_name(pairing_id));
-        Self::remove(&path, "pairing");
+        let Some(dir) = self.pairings_dir() else {
+            return Self::skipped("pairing");
+        };
+        Self::remove(&dir.join(Self::pairing_file_name(pairing_id)), "pairing");
         // The nonce high-water mark goes with it: leaving an orphan mark behind would seed a future
         // pairing that happened to reuse the id, and it is state about an app the user just removed.
         self.forget_nonce(pairing_id);
     }
 
     fn load(&self) -> PersistedSignState {
+        let read = |dir: Option<PathBuf>| {
+            dir.as_deref()
+                .map(Self::read_sealed_dir)
+                .unwrap_or_default()
+        };
         PersistedSignState {
-            pairings: Self::read_sealed_dir(&self.pairings_dir()),
-            whitelist: Self::read_sealed_dir(&self.whitelist_dir()),
+            pairings: read(self.pairings_dir()),
+            whitelist: read(self.whitelist_dir()),
             nonces: self.read_nonce_ledger(),
         }
     }

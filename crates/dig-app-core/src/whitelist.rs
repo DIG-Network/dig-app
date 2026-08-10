@@ -17,6 +17,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::live::LiveDid;
 use crate::sealer::{ProfileSealer, SealError};
 
 /// One authorized dapp origin, as persisted DIGOP1-sealed per profile (§5.6.4). Records what the user
@@ -47,18 +48,31 @@ pub struct GrantOutcome {
 /// Interior-mutable ([`Mutex`]) so the loopback server can share one store behind an `Arc`.
 pub struct WhitelistStore<S: ProfileSealer> {
     sealer: S,
-    profile_did: String,
+    /// The DID this store seals under, read at each grant/restore rather than captured — see
+    /// [`LiveDid`], and [`PairingStore`](crate::pairing::PairingStore) for the same field and the
+    /// same reason.
+    profile_did: LiveDid,
     live: Mutex<HashMap<String, WhitelistEntry>>,
 }
 
 impl<S: ProfileSealer> WhitelistStore<S> {
-    /// Build a store that seals grants under `profile_did`'s DEK via `sealer`.
-    pub fn new(sealer: S, profile_did: impl Into<String>) -> Self {
+    /// Build a store that seals grants under `profile_did`'s DEK via `sealer`. A `&str`/`String`
+    /// converts to a FIXED DID; production passes a [`LiveDid::read`] so the store follows a switch.
+    pub fn new(sealer: S, profile_did: impl Into<LiveDid>) -> Self {
         Self {
             sealer,
             profile_did: profile_did.into(),
             live: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The DID to seal under right now, or a fail-closed [`SealError`] when no profile is active.
+    /// See [`PairingStore::seal_as`](crate::pairing::PairingStore) for why refusing beats a
+    /// placeholder.
+    fn seal_as(&self) -> Result<String, SealError> {
+        self.profile_did
+            .get()
+            .ok_or_else(|| SealError::Seal("no active profile — the account is locked".to_string()))
     }
 
     /// Whitelist `origin` with `permissions`: register it live and seal the [`WhitelistEntry`] at rest
@@ -75,16 +89,17 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         permissions: Vec<String>,
         connected_at: u64,
     ) -> Result<GrantOutcome, SealError> {
+        let profile_did = self.seal_as()?;
         let entry = WhitelistEntry {
             origin: origin.to_string(),
-            profile_did: self.profile_did.clone(),
+            profile_did: profile_did.clone(),
             granted_permissions: permissions,
             connected_at,
         };
         // Seal FIRST: if sealing fails (locked profile) we register nothing, so a live grant never
         // exists without a durable at-rest counterpart (parity with the pairing store).
         let plaintext = serde_json::to_vec(&entry).map_err(|e| SealError::Seal(e.to_string()))?;
-        let sealed_record = self.sealer.seal(&self.profile_did, &plaintext)?;
+        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
 
         self.lock().insert(origin.to_string(), entry.clone());
         Ok(GrantOutcome {
@@ -100,7 +115,7 @@ impl<S: ProfileSealer> WhitelistStore<S> {
     ///
     /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
-        let plaintext = self.sealer.open(&self.profile_did, sealed_record)?;
+        let plaintext = self.sealer.open(&self.seal_as()?, sealed_record)?;
         let entry: WhitelistEntry =
             serde_json::from_slice(&plaintext).map_err(|_| SealError::Open)?;
         let origin = entry.origin.clone();

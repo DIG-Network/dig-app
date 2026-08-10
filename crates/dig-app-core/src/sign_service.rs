@@ -31,6 +31,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::confirm::NativeConfirmer;
+use crate::live::{Live, LiveDid, LiveProfileDir};
 use crate::loopback::{
     ConnectionGuard, FileSealedStore, FrameRouter, LoopbackServer, ProfileConnectInfo,
     SealedRecordStore, SignReauthGate, PINNED_EXTENSION_IDS,
@@ -105,27 +106,31 @@ impl SignReauthGate for SessionReauthGate {
 /// (production default vs the cheap test cost), so the assembly no longer threads a `KdfParams`.
 pub fn build_router<S>(
     sealer: S,
-    profile_did: &str,
-    profile_dir: &Path,
+    profile_did: LiveDid,
+    profile_dir: LiveProfileDir,
     confirmer: Arc<dyn NativeConfirmer>,
     signer: Box<dyn SessionSigner + Send + Sync>,
 ) -> FrameRouter<S>
 where
     S: ProfileSealer + Clone + Send + Sync + 'static,
 {
-    let pairings = PairingStore::new(sealer.clone(), profile_did);
-    let whitelist = WhitelistStore::new(sealer.clone(), profile_did);
-    // Load the active profile's wallet receive addresses so the connect handle can advertise them
-    // alongside the identity signing pubkey (#961).
-    let addresses = active_wallet_addresses(sealer, profile_did, profile_dir);
+    let pairings = PairingStore::new(sealer.clone(), profile_did.clone());
+    let whitelist = WhitelistStore::new(sealer.clone(), profile_did.clone());
 
     // The connect handle advertises the active identity's signing public key AND the wallet's
     // receive addresses (#961), so a connected dapp can display / send to the wallet. Only public
     // data crosses this handle — the private key stays sealed in the injected `signer`.
+    //
+    // Every field is a live read. The advertised signing key is not a field at all — the router reads
+    // it from the signer it will actually sign with — so a captured DID beside it is the only thing
+    // that could have desynchronised, and it no longer can.
+    let addresses = {
+        let (sealer, did, dir) = (sealer.clone(), profile_did.clone(), profile_dir.clone());
+        Live::read(move || active_wallet_addresses(sealer.clone(), &did, &dir))
+    };
     let connect_info = ProfileConnectInfo {
-        profile_did: profile_did.to_string(),
+        profile_did: profile_did.clone(),
         addresses,
-        pubkeys: vec![signer.signing_public_key_hex()],
     };
     let store: Arc<dyn SealedRecordStore> = Arc::new(FileSealedStore::new(profile_dir));
 
@@ -142,24 +147,32 @@ where
     router
 }
 
-/// Read the active profile's wallet receive addresses (`xch1…`) for the connect handle (#961).
+/// Read the ACTIVE profile's wallet receive addresses (`xch1…`) for the connect handle (#961), at
+/// the moment the handle is advertised.
 ///
 /// The wallet state is sealed per profile under the SAME DEK the router's stores use, so this opens
 /// it through a [`WalletStore`] over the same injected `sealer`. The store is rooted at the brand
-/// directory, which is the grandparent of `profile_dir` (`<brand>/profiles/<did-hash>/`); a profile
-/// with no saved wallet state yet — or one whose sealed state cannot be opened — yields no addresses
-/// rather than failing the assembly, since the signing channel is still fully usable without them
-/// (they only enrich the connect handle).
-fn active_wallet_addresses<S>(sealer: S, profile_did: &str, profile_dir: &Path) -> Vec<String>
+/// directory, which is the grandparent of the profile directory (`<brand>/profiles/<did-hash>/`); a
+/// locked account, a profile with no saved wallet state yet, or one whose sealed state cannot be
+/// opened all yield no addresses rather than a wrong one — the signing channel is fully usable
+/// without them, and an address is the one field here a person might send money to.
+fn active_wallet_addresses<S>(
+    sealer: S,
+    profile_did: &LiveDid,
+    profile_dir: &LiveProfileDir,
+) -> Vec<String>
 where
     S: ProfileSealer + Send + Sync + 'static,
 {
-    let Some(brand_dir) = profile_dir.parent().and_then(Path::parent) else {
+    let (Some(did), Some(dir)) = (profile_did.get(), profile_dir.get()) else {
+        return Vec::new();
+    };
+    let Some(brand_dir) = dir.parent().and_then(Path::parent) else {
         tracing::warn!("could not derive the brand dir from the profile dir — no wallet addresses");
         return Vec::new();
     };
     let store = WalletStore::new(brand_dir, sealer);
-    match store.load_state(profile_did) {
+    match store.load_state(&did) {
         Ok(state) => state.addresses,
         Err(e) => {
             tracing::warn!(error = %e, "could not load wallet state — connect handle carries no addresses");
@@ -211,8 +224,8 @@ mod tests {
         let signer = test_residency().signer();
         build_router(
             test_sealer(DID),
-            DID,
-            dir,
+            DID.into(),
+            dir.into(),
             Arc::new(HeadlessConfirmer),
             Box::new(signer),
         )
@@ -326,7 +339,7 @@ mod tests {
 
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
         // The SAME per-profile DEK (same label) re-opens the sealed state.
-        let addresses = active_wallet_addresses(test_sealer(DID), DID, &profile_dir);
+        let addresses = active_wallet_addresses(test_sealer(DID), &DID.into(), &profile_dir.into());
         assert_eq!(addresses, vec!["xch1receive", "xch1change"]);
     }
 
@@ -336,7 +349,7 @@ mod tests {
         // signing channel is still fully usable), never a failure.
         let brand = tempfile::tempdir().unwrap();
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
-        let addresses = active_wallet_addresses(test_sealer(DID), DID, &profile_dir);
+        let addresses = active_wallet_addresses(test_sealer(DID), &DID.into(), &profile_dir.into());
         assert!(addresses.is_empty());
     }
 
@@ -360,7 +373,11 @@ mod tests {
 
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
         // A DISTINCT DEK (a different label) cannot open the sealed state — the AEAD tag rejects it.
-        let addresses = active_wallet_addresses(test_sealer("another-profile"), DID, &profile_dir);
+        let addresses = active_wallet_addresses(
+            test_sealer("another-profile"),
+            &DID.into(),
+            &profile_dir.into(),
+        );
         assert!(addresses.is_empty());
     }
 
@@ -368,7 +385,8 @@ mod tests {
     fn a_profile_dir_with_no_derivable_brand_dir_yields_no_addresses() {
         // A profile dir shallow enough to have no grandparent cannot locate a brand dir — the
         // helper must fall back to no addresses rather than panic.
-        let addresses = active_wallet_addresses(test_sealer(DID), DID, Path::new("solo"));
+        let addresses =
+            active_wallet_addresses(test_sealer(DID), &DID.into(), &Path::new("solo").into());
         assert!(addresses.is_empty());
     }
 

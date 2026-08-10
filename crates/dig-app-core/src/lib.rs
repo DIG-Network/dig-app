@@ -73,6 +73,7 @@ pub mod identity;
 pub mod ipc;
 pub mod keystore;
 pub mod link;
+pub mod live;
 pub mod loopback;
 pub mod node_facts;
 pub mod notify;

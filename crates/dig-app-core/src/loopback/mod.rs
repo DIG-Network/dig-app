@@ -251,18 +251,13 @@ mod tests {
 
     fn router() -> FrameRouter<AccountSealer> {
         use crate::loopback::dispatch::ProfileConnectInfo;
-        use crate::session::SessionSigner;
         use crate::whitelist::WhitelistStore;
         use std::sync::Arc;
 
         let pairings = PairingStore::new(test_sealer(DID), DID);
         let whitelist = WhitelistStore::new(test_sealer(DID), DID);
         let signer = test_residency().signer();
-        let connect_info = ProfileConnectInfo {
-            profile_did: DID.to_string(),
-            addresses: vec!["xch1testaddress".to_string()],
-            pubkeys: vec![SessionSigner::signing_public_key_hex(&signer)],
-        };
+        let connect_info = ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]);
         FrameRouter::new(
             pairings,
             whitelist,

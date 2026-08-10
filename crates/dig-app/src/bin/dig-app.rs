@@ -31,8 +31,9 @@
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, discard_account, open_account, reboot_reunlock,
-    unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome, UnlockFailure,
+    account_exists, discard_account, live_profile_did, live_profile_dir, open_account,
+    reboot_reunlock, unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome,
+    UnlockFailure,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::chain_mint::MintSeams;
@@ -66,16 +67,14 @@ use dig_app_core::session_lock::{
     SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
 };
 #[cfg(feature = "tray")]
+use dig_app_core::sign_service;
+#[cfg(feature = "tray")]
 use dig_app_core::sign_service::{SessionReauthGate, TraySessionLock};
 use dig_app_core::single_instance;
-#[cfg(feature = "tray")]
-use dig_app_core::storage::did_hash;
 #[cfg(feature = "tray")]
 use dig_app_core::tray_menu::{self, AccountState, AtRest, OpenAttempt, SessionFacts};
 #[cfg(feature = "tray")]
 use dig_app_core::Os;
-#[cfg(feature = "tray")]
-use dig_app_core::{sign_service, storage};
 #[cfg(feature = "tray")]
 use std::sync::Arc;
 
@@ -402,7 +401,12 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
         DEFAULT_IDLE_TIMEOUT,
     ));
 
-    let profile_dir = storage::profile_dir(&brand_dir, &did_hash(&profile_id));
+    // The DID and the directory are LIVE sources, not the boot-time snapshot `profile_id` (#2398):
+    // the router below is moved onto a serving thread for the life of the process, so a snapshot
+    // would keep sealing, advertising and persisting as the profile that was active at boot while
+    // the signer beside it followed every later switch.
+    let profile_did = live_profile_did(&residency);
+    let profile_dir = live_profile_dir(&residency, &brand_dir);
     let confirmer: Arc<dyn dig_app_core::confirm::NativeConfirmer> = Arc::from(native_confirmer());
     let reauth_gate = build_reauth_gate(Arc::clone(&lock), brand_dir.clone(), residency.clone());
     // Inject the LIVE unlocked-account identity signer through the sign seam (#1547 flip): the
@@ -413,7 +417,7 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     let signer: Box<dyn dig_app_core::session::SessionSigner + Send + Sync> =
         Box::new(residency.signer());
     let sealer = residency.production_sealer();
-    let router = sign_service::build_router(sealer, &profile_id, &profile_dir, confirmer, signer)
+    let router = sign_service::build_router(sealer, profile_did, profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate);
     // Take the paired-app handle before the router is moved onto the serving thread.
     let paired_apps = router.control();
