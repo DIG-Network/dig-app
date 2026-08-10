@@ -1,7 +1,7 @@
 //! [`ControlChainSource`] — the canonical chain-READ seam, served by the local dig-node.
 //!
 //! dig-account's profile minter is generic over
-//! [`ChainSource`](dig_chainsource_interface::ChainSource) and does not know or care which chain
+//! [`ChainSource`] and does not know or care which chain
 //! answers it. This is the provider that makes the user's OWN node the answer: every read is one
 //! `control.wallet.*` call over the loopback control plane, and nothing here consults a third party
 //! directly (the node may fall back to one, and says so — see [`Freshness`]).
