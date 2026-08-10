@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [10.1.1] - 2026-08-10
+
+### Features
+- **window:** Native controls, a sync badge, and selectable text (#150)
+
+### Bug Fixes
+- **did:** Stop the tray explainer promising a cost screen that does not exist (#149)
+
+### Chores
+- **deps:** Migrate to chia 0.36 line and dig-account 0.10 (#151)
+
 ## [10.0.0] - 2026-08-10
 
 ### Features
