@@ -9,6 +9,7 @@
 //! (`professional-ui`'s screenshot rule).
 
 use dig_app_core::confirm::native_confirmer;
+use dig_app_core::loopback::RevokeOutcome;
 use dig_app_core::paired_apps::{manage_paired_apps, offer_pairing_code, PairedApps};
 use dig_app_core::pairing::{PairedApp, PairingScope};
 use dig_app_core::pairing_code::{now_epoch_secs, PairingCode, PairingCodeIssuer};
@@ -28,11 +29,17 @@ impl PairedApps for SampleApps {
     fn list(&self) -> Vec<PairedApp> {
         self.apps.lock().unwrap().clone()
     }
-    fn revoke(&self, pairing_id: &str) -> bool {
+    /// This sample keeps its list in memory, so a revoke here is always durable — there is no sealed
+    /// record that could outlive it.
+    fn revoke(&self, pairing_id: &str) -> RevokeOutcome {
         let mut apps = self.apps.lock().unwrap();
         let before = apps.len();
         apps.retain(|a| a.pairing_id != pairing_id);
-        apps.len() != before
+        if apps.len() == before {
+            RevokeOutcome::NotPaired
+        } else {
+            RevokeOutcome::Revoked
+        }
     }
     fn cancel_code(&self) {
         self.issuer.cancel();

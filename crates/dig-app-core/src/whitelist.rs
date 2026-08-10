@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::live::LiveDid;
+use crate::live::{belongs_to_active_profile, LiveDid};
 use crate::sealer::{ProfileSealer, SealError};
 
 /// One authorized dapp origin, as persisted DIGOP1-sealed per profile (§5.6.4). Records what the user
@@ -155,20 +155,11 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         }
     }
 
-    /// Whether a recorded grant tagged `entry_did` is one the profile now active may act on.
-    ///
-    /// This is what stops a grant surviving a profile SWITCH. The live map is built once, at boot, and
-    /// the router that reads it is on a serving thread no switching code can reach — so without this
-    /// predicate a consent given under profile A would skip the connect modal under profile B and hand
-    /// the dapp B's DID, B's addresses and B's signing key (dig_ecosystem#2398 ADV-A1).
-    ///
-    /// A LOCKED account (no active DID) has nothing to disagree with, so entries stay visible and every
-    /// downstream operation refuses `LOCKED` on its own — the property enforced here is about a switch,
-    /// not about the lock, and widening it to the lock would change which error a locked connect gets.
+    /// Whether a recorded grant tagged `entry_did` is one the profile NOW ACTIVE may act on — the
+    /// predicate that stops a grant surviving a profile switch. See
+    /// [`belongs_to_active_profile`](crate::live::belongs_to_active_profile).
     fn belongs_to_active(&self, entry_did: &str) -> bool {
-        self.profile_did
-            .get()
-            .is_none_or(|active| active == entry_did)
+        belongs_to_active_profile(self.profile_did.get().as_deref(), entry_did)
     }
 
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than gate a sign

@@ -131,10 +131,35 @@ impl From<PathBuf> for LiveProfileDir {
     }
 }
 
+/// Whether a stored record tagged `entry_did` is one the profile named by `active` may act on.
+///
+/// The companion to [`LiveDid`] for state that is unavoidably a COPY. A live handle keeps a derivation
+/// current, but an in-memory map of granted pairings and connected origins cannot be re-derived — it is
+/// the record of what a person consented to. Tagging each entry with the DID it was granted under, and
+/// asking this before every lookup, is what stops a consent given under one profile authorizing under
+/// the next (dig_ecosystem#2398 ADV-A1).
+///
+/// A LOCKED account (`active` is `None`) has no DID to disagree with, so records stay visible and every
+/// operation that needs a key refuses on its own. The property here is about a SWITCH; widening it to
+/// the lock would change which error a locked caller receives without closing anything.
+pub(crate) fn belongs_to_active_profile(active: Option<&str>, entry_did: &str) -> bool {
+    // `Option::is_none_or` would read better but is stable only since 1.82; this crate's MSRV is 1.75.
+    active.map_or(true, |active| active == entry_did)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A record answers for the profile that granted it, for nobody else, and for a locked account it
+    /// stays visible so the operation that needs a key is the one that refuses.
+    #[test]
+    fn a_record_belongs_only_to_the_profile_that_granted_it_or_to_a_locked_account() {
+        assert!(belongs_to_active_profile(Some("did:chia:a"), "did:chia:a"));
+        assert!(!belongs_to_active_profile(Some("did:chia:b"), "did:chia:a"));
+        assert!(belongs_to_active_profile(None, "did:chia:a"));
+    }
 
     /// A fixed value answers the same thing forever; a live one answers what its source says NOW.
     ///

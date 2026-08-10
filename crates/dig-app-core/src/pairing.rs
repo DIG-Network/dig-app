@@ -27,7 +27,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::live::LiveDid;
+use crate::live::{belongs_to_active_profile, LiveDid};
 use crate::sealer::{ProfileSealer, SealError};
 
 /// The length of the channel secret (a pairing token), in bytes — 256 bits of CSPRNG entropy.
@@ -604,7 +604,7 @@ impl<S: ProfileSealer> PairingStore<S> {
         let mut live = self.lock();
         let pairing = live
             .get_mut(pairing_id)
-            .filter(|pairing| belongs_to(active.as_deref(), &pairing.profile_did))
+            .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
             .ok_or(AuthFailure::NotPaired)?;
 
         let provided_mac = BASE64
@@ -691,7 +691,7 @@ impl<S: ProfileSealer> PairingStore<S> {
         let mut apps: Vec<PairedApp> = self
             .lock()
             .iter()
-            .filter(|(_, live)| belongs_to(active.as_deref(), &live.profile_did))
+            .filter(|(_, live)| belongs_to_active_profile(active.as_deref(), &live.profile_did))
             .map(|(pairing_id, live)| PairedApp {
                 pairing_id: pairing_id.clone(),
                 ext_id: live.ext_id.clone(),
@@ -721,7 +721,7 @@ impl<S: ProfileSealer> PairingStore<S> {
     ) -> Option<&'a LivePairing> {
         let active = self.profile_did.get();
         live.get(pairing_id)
-            .filter(|pairing| belongs_to(active.as_deref(), &pairing.profile_did))
+            .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
     }
 
     /// [`of_active`](Self::of_active), mutably.
@@ -732,7 +732,7 @@ impl<S: ProfileSealer> PairingStore<S> {
     ) -> Option<&'a mut LivePairing> {
         let active = self.profile_did.get();
         live.get_mut(pairing_id)
-            .filter(|pairing| belongs_to(active.as_deref(), &pairing.profile_did))
+            .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
     }
 
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than
@@ -740,16 +740,6 @@ impl<S: ProfileSealer> PairingStore<S> {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, LivePairing>> {
         self.live.lock().expect("pairing-store mutex poisoned")
     }
-}
-
-/// Whether a record tagged `entry_did` is one the profile named by `active` may act on.
-///
-/// This is what stops a pairing surviving a profile SWITCH — see [`LivePairing::profile_did`]. A LOCKED
-/// account (`active` is `None`) has no DID to disagree with, so records stay visible and every operation
-/// that needs the key refuses on its own; widening this to the lock would change which error a locked
-/// caller gets, and the property being enforced here is about a switch.
-fn belongs_to(active: Option<&str>, entry_did: &str) -> bool {
-    active.is_none_or(|active| active == entry_did)
 }
 
 #[cfg(test)]
