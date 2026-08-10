@@ -1997,6 +1997,7 @@ dependencies = [
  "dig-app-core",
  "dig-chainsource-interface",
  "dig-constants 0.10.0",
+ "dig-did",
  "dig-events-protocol",
  "dig-identity 0.6.0",
  "dig-ipc-protocol",

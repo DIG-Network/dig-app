@@ -191,7 +191,7 @@ impl std::fmt::Display for MintTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::profile_session::test_support::registry_with;
+    use crate::account::profile_session::test_support::{expected_did, registry_with};
 
     /// An account with no confirmed profile reads as [`ActiveSlot::Unprofiled`], derives at ROOT, and
     /// says it has no DID.
@@ -223,6 +223,11 @@ mod tests {
             registry.get(ProfileIx(1)).unwrap().anchor().did(),
             slot.did().unwrap(),
             "the DID must come from the ACTIVE entry, not from whichever entry is first"
+        );
+        assert_ne!(
+            expected_did(ProfileIx::ROOT),
+            slot.did().unwrap(),
+            "the two entries must have distinguishable DIDs, or the assertion above proves nothing"
         );
 
         let _ = registry.set_active(ProfileIx::ROOT).unwrap();

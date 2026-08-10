@@ -189,6 +189,12 @@ keyring = { version = "3", default-features = false, features = [
 # (`derive_identity_sk_at`) the master-HD multi-profile model (#997) needs, and the default-on `bls`
 # feature carries the key primitives dig-app's session signs with.
 dig-identity = { version = "0.6", features = ["bls"] }
+# The canonical `did:chia:` bech32m encoding of a singleton launcher id. dig-app names it in ONE
+# place: the profile-registry test fixtures, which must produce the same DID string dig-account's own
+# `ProfileAnchor` validator recomputes — a hand-written literal there is refused, correctly, because a
+# DID that does not belong to its launcher id is exactly the forgery that check exists to catch.
+# Pinned to the line dig-account 0.8 depends on so both sides encode identically.
+dig-did = "0.4"
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.

@@ -375,12 +375,17 @@ impl std::fmt::Debug for ProfileSession {
 pub mod test_support {
     use super::*;
 
-    /// A 32-byte hex identifier derived from `tag`, so every id in a fixture is distinct and stable.
-    fn id(tag: u8, salt: u8) -> String {
+    /// A distinct, stable 32-byte id per `(tag, salt)`.
+    fn id(tag: u8, salt: u8) -> chia_protocol::Bytes32 {
         let mut bytes = [0u8; 32];
         bytes[0] = tag;
         bytes[31] = salt;
-        hex::encode(bytes)
+        chia_protocol::Bytes32::new(bytes)
+    }
+
+    /// The `"0x…"` form `chia_protocol::Bytes32` deserializes from.
+    fn hex_id(bytes: chia_protocol::Bytes32) -> String {
+        format!("0x{}", hex::encode(bytes))
     }
 
     /// JSON for a registry holding one confirmed profile per `(index, label)`, with `active_ix`
@@ -394,12 +399,17 @@ pub mod test_support {
             .map(|(ix, label)| {
                 let tag = u8::try_from(ix.0 % 251).unwrap_or(0).saturating_add(1);
                 let label = label.map_or("null".to_owned(), |l| format!("\"{l}\""));
+                let launcher = id(tag, 1);
                 format!(
-                    r#"{{"ix":{ix},"anchor":{{"did":"did:chia:profile{ix}","launcher_id":"0x{launcher}","did_coin_id":"0x{did_coin}","did_confirmed_height":{height},"store_launcher_id":"0x{store}","store_confirmed_height":{height}}},"label":{label},"visibility":"Shown"}}"#,
+                    r#"{{"ix":{ix},"anchor":{{"did":"{did}","launcher_id":"{launcher}","did_coin_id":"{did_coin}","did_confirmed_height":{height},"store_launcher_id":"{store}","store_confirmed_height":{height}}},"label":{label},"visibility":"Shown"}}"#,
                     ix = ix.0,
-                    launcher = id(tag, 1),
-                    did_coin = id(tag, 2),
-                    store = id(tag, 3),
+                    // Encoded, never written by hand: dig-account recomputes the DID from the launcher
+                    // id and refuses an anchor whose DID does not belong to it — which is exactly the
+                    // forgery that check exists to catch, so a literal here would be refused.
+                    did = dig_did::did_string_from_launcher_id(launcher),
+                    launcher = hex_id(launcher),
+                    did_coin = hex_id(id(tag, 2)),
+                    store = hex_id(id(tag, 3)),
                     height = 1_000 + ix.0,
                 )
             })
@@ -409,6 +419,14 @@ pub mod test_support {
             entries.join(","),
             active_ix.0
         )
+    }
+
+    /// The DID a fixture profile at `ix` will carry — recomputed the same way the fixture and
+    /// dig-account both do, so a test names it without embedding a literal that could drift from the
+    /// launcher id it must belong to.
+    pub fn expected_did(ix: ProfileIx) -> String {
+        let tag = u8::try_from(ix.0 % 251).unwrap_or(0).saturating_add(1);
+        dig_did::did_string_from_launcher_id(id(tag, 1))
     }
 
     /// A registry holding `profiles`, active on the FIRST of them.
@@ -470,7 +488,16 @@ mod tests {
         assert_eq!(Some(ProfileIx::ROOT), switched.from_ix());
         assert_eq!(ProfileIx(1), switched.to_ix());
         assert_eq!(ProfileIx(1), session.active_ix());
-        assert_eq!(Some("did:chia:profile1"), session.slot().did());
+        assert_eq!(
+            Some(super::test_support::expected_did(ProfileIx(1)).as_str()),
+            session.slot().did(),
+            "the slot must name the profile switched TO, not the one switched from"
+        );
+        assert_ne!(
+            session.slot().did(),
+            Some(super::test_support::expected_did(ProfileIx::ROOT).as_str()),
+            "the two fixture profiles must have distinguishable DIDs, or this assertion proves nothing"
+        );
 
         let reloaded = ProfileSession::load(store).unwrap();
         assert_eq!(
@@ -575,6 +602,9 @@ mod tests {
 
         assert!(switched.slot().is_profiled());
         assert_eq!(ProfileIx(1), switched.slot().ix());
-        assert_eq!(Some("did:chia:profile1"), switched.slot().did());
+        assert_eq!(
+            Some(super::test_support::expected_did(ProfileIx(1)).as_str()),
+            switched.slot().did()
+        );
     }
 }

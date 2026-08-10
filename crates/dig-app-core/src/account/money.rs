@@ -491,67 +491,67 @@ mod tests {
     // The gate is REAL — the property the dig-account 0.5.0 adoption exists to establish.
     // -----------------------------------------------------------------------------------------
 
-    /// **A vault outflow to a third party is refused by the gate, before any ceremony — while the
-    /// same spend to nobody but ourselves reaches one.**
+    /// **Vault custody is refused BY NAME at construction, and the refusal costs the user nothing
+    /// else** (dig_ecosystem#2373).
     ///
-    /// The two halves differ in exactly ONE thing: who is paid. That pairing is what makes the test
-    /// load-bearing, and it is aimed at a specific wrong implementation — the one dig-app actually
-    /// shipped. Under the old injectable seam, `AlwaysConfirmAuthorizer::authorize` returned `Ok(())`
-    /// for every summary, so BOTH halves reached the ceremony and BOTH signed on approval. Asserting
-    /// only the refusal would not have distinguished the real gate from a gate that refuses every
-    /// vault spend, which is why the second half is here and why it must genuinely get through.
+    /// dig-account's `Vault` is legitimately usable by a host with two derivation indices: its
+    /// outflow rule permits a move to the HOT wallet's address and nothing else. dig-app derives one
+    /// wallet, so the vault and the hot wallet are the same key, every outbound payment reads as
+    /// change to itself, and a Vault user cannot pay anybody at all. That refusal was already the
+    /// behaviour — what was wrong is that it was anonymous, surfacing per spend as a generic
+    /// `Unauthorized` with no remedy in it.
     ///
-    /// A note so the second half is not read as more than it is: dig-app's wallet is pinned to one
-    /// derivation index, so a payment to its own puzzle hash is classified as CHANGE and never enters
-    /// `summary.recipients` at all. The hot-wallet half therefore passes the outflow rule vacuously,
-    /// over an empty recipient list. It is an honest control for "the gate does not refuse all vault
-    /// spends"; the address COMPARISON itself is dig-account's own property and is tested there.
+    /// Three assertions, and the second and third are what make this more than a transcription of the
+    /// `if`:
     ///
-    /// What the FIRST half additionally pins, measured rather than assumed: rebuilding the gate with
-    /// the stranger's own address as the configured hot wallet makes this spend authorize and SIGN —
-    /// a real signature paying a third party out of a vault. So the refusal is not merely "vaults
-    /// refuse strangers"; it discriminates the address `MoneyPath::new` hands the gate from the one
-    /// wrong value that matters most. Any OTHER foreign address leaves both halves passing here, and
-    /// is caught elsewhere: under `CustodyPolicy::Hot` the gate's scope carries the configured wallet
-    /// and the signer compares it against the puzzle hash it derives live from the seed, so every
-    /// hot-path test in this module fails on a substituted address. Between them the input is pinned;
-    /// neither alone would be enough.
+    /// 1. the refusal is the NAMED variant, whose message states the remedy;
+    /// 2. the SAME residency still builds a money path under hot-wallet custody — without this, a
+    ///    `MoneyPath::new` that refused everything would pass identically;
+    /// 3. the refusal leaves the residency untouched: the receive address still derives, so a Vault
+    ///    user keeps a fundable address and a settings surface to change custody from. A refusal that
+    ///    blanked the money surface with no way out would be worse than the silent failure it
+    ///    replaces.
+    ///
+    /// What this canNOT yet assert, stated rather than implied: no production code calls
+    /// `MoneyPath::new` (the money path is not wired into a pane), so there is no surface here whose
+    /// four async states could be checked. The pane that wires it MUST render this variant as a
+    /// recoverable setting rather than a dead end; assertion 3 is the strongest form available today.
     #[tokio::test]
-    async fn a_vault_spend_to_a_stranger_is_refused_outright_but_one_to_ourselves_is_not() {
-        let to_a_stranger = money_path(
+    async fn vault_custody_is_refused_by_name_and_leaves_the_account_usable() {
+        let residency = residency_at_seed();
+        let vault = MoneyPath::new(
+            residency.clone(),
             RecordingProvider::new(SpendDecision::Approve),
+            account_id(),
+            Network::Mainnet,
             CustodyPolicy::Vault(Vault::default()),
             AutoSendPolicy::default(),
-        );
-        let refused = to_a_stranger
-            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::Undeclared)
-            .await;
-
-        assert!(
-            matches!(refused, Err(MoneyPathError::Unauthorized(_))),
-            "a vault spend leaving to a third party must be refused by the gate: {refused:?}"
-        );
-        assert_eq!(
-            ceremonies(&to_a_stranger),
-            0,
-            "the refusal is structural, so the user is never asked to approve it"
+            frozen_clock(),
         );
 
-        let to_ourselves = money_path(
+        let Err(MoneyPathError::VaultNeedsASecondIndex) = vault else {
+            panic!("vault custody must be refused by name, not silently accepted");
+        };
+
+        // The control: the same residency, the same everything, hot-wallet custody. Without it a
+        // constructor that refused every policy would satisfy the assertion above.
+        MoneyPath::new(
+            residency.clone(),
             RecordingProvider::new(SpendDecision::Approve),
-            CustodyPolicy::Vault(Vault::default()),
+            account_id(),
+            Network::Mainnet,
+            CustodyPolicy::Hot(HotWallet::default()),
             AutoSendPolicy::default(),
-        );
-        to_ourselves
-            .authorize_and_sign(send_to_ourselves(600, 10), SpendOpClass::Undeclared)
-            .await
-            .expect("a vault spend that leaves nothing to a third party still signs, with consent");
+            frozen_clock(),
+        )
+        .expect("hot-wallet custody still builds a money path over the same residency");
 
-        assert_eq!(
-            ceremonies(&to_ourselves),
-            1,
-            "the control spend reached the ceremony — the gate is not refusing every vault spend"
-        );
+        // The account is not collateral damage: the address a Vault user funds still derives, so the
+        // remedy (switch custody) is reachable rather than behind the very thing that refused.
+        assert!(matches!(
+            residency.observe_receiving_address(),
+            crate::account::residency::AddressObservation::Derived(_)
+        ));
     }
 
     /// **The rolling period cap binds ACROSS calls**, which is only true of a gate the host holds for

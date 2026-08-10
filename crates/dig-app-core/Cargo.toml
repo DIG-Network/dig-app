@@ -22,7 +22,7 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 # Exposes `account::profile_session::test_support` (registry fixtures) to the integration suite. NEVER
 # enabled by a consumer: it builds registries from JSON, which production reaches only by loading a
 # file the user's own mints wrote.
-profile-test-support = []
+profile-test-support = ["dep:dig-did"]
 # The branded prompt GUI (dig_ecosystem#2038). ON by default, because drawing consent is what the
 # app does; a `--no-default-features` build is the HEADLESS agent, which cannot prompt at all and
 # therefore fails closed on every prompt (`HeadlessConfirmer`).
@@ -109,6 +109,8 @@ base64.workspace = true
 # encoding for the human-readable registry.
 dig-identity.workspace = true
 hex.workspace = true
+# Only reachable from the profile-registry test fixtures (see the workspace manifest).
+dig-did = { workspace = true, optional = true }
 
 # Wallet host (U8) — the canonical chip35 DIG spend builder + the Chia types it works in. NO spend
 # bundle is hand-rolled; the DIG treasury constant is reused from chip35 (see the `canonical` skill).
