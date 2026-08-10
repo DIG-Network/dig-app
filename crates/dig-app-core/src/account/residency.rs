@@ -86,7 +86,7 @@ pub enum AddressObservation {
     /// one now active, so it can only answer for the profile the user just left
     /// (dig_ecosystem#2496). No address is reported, because the only one available belongs to
     /// somebody else's name — see
-    /// [`wallet_agrees_with_the_active_profile`](AccountResidency::wallet_agrees_with_the_active_profile).
+    /// `wallet_agrees_with_the_active_profile`.
     WalletBehindActiveProfile,
 }
 
