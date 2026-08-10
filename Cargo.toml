@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "9.2.1"
+version = "10.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -343,6 +343,22 @@ windows = { version = "0.58", features = [
     # `RoInitialize` (dig_ecosystem#1926): the thread that raises the Windows Hello prompt is spawned by
     # us and belongs to no apartment, so it joins the MTA before activating a WinRT class.
     "Win32_System_WinRT",
+    # The native funds-received toast (dig_ecosystem#2548). `ToastNotificationManager` +
+    # `ToastNotification` live in `UI_Notifications` and take their payload as an `XmlDocument` from
+    # `Data_Xml_Dom`. This is the ONE platform with no notification command to shell out to, so it is
+    # the one place the notification API is called in-process rather than as a subprocess.
+    "UI_Notifications",
+    "Data_Xml_Dom",
+    # An UNPACKAGED Win32 process has no package identity, so a toast has nothing to be attributed to
+    # and is silently dropped. The documented substitute is an AppUserModelID on a Start Menu
+    # shortcut, which needs `IShellLink` (`Win32_UI_Shell`) plus the property store that carries the
+    # id (`Win32_UI_Shell_PropertiesSystem`), created through COM (`Win32_System_Com`) and written by
+    # `IPersistFile`. `Win32_System_Com_StructuredStorage` is `PropVariantClear`, which returns the
+    # id string's COM-allocated buffer after the store has copied it.
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
 ] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [

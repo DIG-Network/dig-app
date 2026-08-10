@@ -228,6 +228,28 @@ pub(crate) mod settings {
     /// The readout naming the chord in force.
     pub(crate) const SHORTCUT_EFFECTIVE: &str = "In use";
 
+    /// The notifications group (dig_ecosystem#2548).
+    pub(crate) const NOTIFY_CARD: &str = "Notifications";
+    /// What the notifications group controls.
+    pub(crate) const NOTIFY_ABOUT: &str =
+        "Whether DIG tells you when money arrives in your wallet.";
+    /// The limitation, said in the card rather than discovered.
+    ///
+    /// A person who is told "DIG will notify me when I am paid" and then is not, while DIG was
+    /// closed, has been misled by an omission. Saying it here costs one line.
+    pub(crate) const NOTIFY_COST: &str =
+        "DIG only notices payments while it is running, and only once they are confirmed on the \
+         blockchain. A payment that arrives while DIG is closed shows up in your wallet, but you \
+         will not get a notification for it.";
+    /// The label above the on/off chooser.
+    pub(crate) const NOTIFY_FIELD: &str = "When money arrives";
+    /// The readout naming what DIG will actually do.
+    pub(crate) const NOTIFY_EFFECTIVE: &str = "DIG will";
+    /// What the readout says for each choice, in the words of the thing that will happen.
+    pub(crate) const NOTIFY_ON: &str = "Show a notification";
+    /// The other choice.
+    pub(crate) const NOTIFY_OFF: &str = "Say nothing";
+
     /// Said after a setting has been written and read back.
     pub(crate) const SAVED: &str = "Saved.";
     /// Said when the settings file cannot be found or read at all, in place of the controls.

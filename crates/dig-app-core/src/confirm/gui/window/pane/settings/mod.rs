@@ -71,6 +71,8 @@ enum Local {
     SaveShortcut,
     /// Clear the shortcut, back to the shipped chord.
     DefaultShortcut,
+    /// Turn the funds-arrived notification on or off (dig_ecosystem#2548).
+    SetNotifications(bool),
 }
 
 /// Draw the Settings pane's content into `flow`, and report the MODEL action pressed.
@@ -92,6 +94,8 @@ pub(crate) fn draw(
     connection_card(flow, t, &mut session);
     flow.gap(space::S4);
     shortcut_card(flow, t, &mut session);
+    flow.gap(space::S4);
+    notifications_card(flow, t, &mut session);
     flow.place(|ui, _| (0.0, session.store(ui)));
 
     pressed
@@ -375,6 +379,116 @@ fn shortcut_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
     );
 }
 
+/// Whether DIG says anything when money arrives (dig_ecosystem#2548).
+///
+/// # Why a chooser rather than a button
+///
+/// It is a setting with one value in force, which is what [`select`] is for — the same reasoning
+/// that made the update channel a dropdown (user directive, 2026-08-08). A pair of buttons would
+/// read as two things to DO, and the design system has no checkbox to reach for instead.
+///
+/// # Why the limitation is in the card
+///
+/// A notification a person is told to expect and does not get is worse than one they were never
+/// promised. DIG only notices a payment while it is running, so the card says so before the control
+/// rather than leaving it to be discovered — the same rule the other two groups follow with their
+/// costs.
+fn notifications_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
+    let live = flow.live();
+    let unreadable = session.unreadable.clone();
+    let enabled = session.config.notifications.funds_received;
+    let options = [
+        Choice {
+            label: copy::settings::NOTIFY_ON.to_string(),
+            id: Local::SetNotifications(true),
+        },
+        Choice {
+            label: copy::settings::NOTIFY_OFF.to_string(),
+            id: Local::SetNotifications(false),
+        },
+    ];
+    let selected = Some(usize::from(!enabled));
+    let note = session.notifications.saved.then_some(copy::settings::SAVED);
+
+    let hit = flow.place(|ui, at| {
+        let mut hit = None;
+        let height = card::interactive_card(
+            ui,
+            at,
+            t,
+            live,
+            Some(copy::settings::NOTIFY_CARD),
+            |inner| {
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::settings::NOTIFY_ABOUT), ()));
+                inner.gap(space::S3);
+
+                if let Some(why) = &unreadable {
+                    inner.place(|ui, at| {
+                        (
+                            state::banner(ui, at, t, &PaneState::Unreachable(why.clone())),
+                            (),
+                        )
+                    });
+                    return;
+                }
+
+                inner.place(|ui, at| {
+                    (
+                        data::readout(
+                            ui,
+                            at,
+                            t,
+                            &Readout::new(
+                                copy::settings::NOTIFY_EFFECTIVE,
+                                Value::Word(effective_notification(enabled).to_string()),
+                            ),
+                        ),
+                        (),
+                    )
+                });
+                inner.gap(space::S4);
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::settings::NOTIFY_COST), ()));
+                inner.gap(space::S3);
+                hit = inner.place(|ui, at| {
+                    select::select(
+                        ui,
+                        at,
+                        t,
+                        live,
+                        &select::Select {
+                            label: copy::settings::NOTIFY_FIELD,
+                            options: &options,
+                            selected,
+                            unknown: copy::settings::NOTIFY_OFF,
+                            id: egui::Id::new("dig-settings-notifications"),
+                        },
+                    )
+                });
+                if let Some(note) = note {
+                    inner.gap(space::S3);
+                    inner.place(|ui, at| (text::caption(ui, at, t, note), ()));
+                }
+            },
+        )
+        .0;
+        (height, hit)
+    });
+    if let Some(Local::SetNotifications(wanted)) = hit {
+        session.act_locally(Local::SetNotifications(wanted));
+    }
+}
+
+/// What DIG will do when money arrives, in the words of the thing that will happen.
+///
+/// Derived from the stored value rather than from the chooser's own selection, so a save that did
+/// not land shows what the file says (the [`prefs`] read-back rule) instead of what was clicked.
+fn effective_notification(enabled: bool) -> &'static str {
+    match enabled {
+        true => copy::settings::NOTIFY_ON,
+        false => copy::settings::NOTIFY_OFF,
+    }
+}
+
 /// One settings group: what it is, what it costs, the field, its controls, and what happened.
 ///
 /// Both groups are the same shape — a value with a validator, an escape back to the default, and a
@@ -511,6 +625,9 @@ struct Session {
     store: Option<std::sync::Arc<dyn ConfigStore>>,
     node: FieldState,
     shortcut: FieldState,
+    /// The notification switch's own "Saved." state. It has no typed value and no error — a choice
+    /// cannot be malformed — so only the confirmation half of [`FieldState`] is used.
+    notifications: FieldState,
     tester: probe::Tester,
 }
 
@@ -562,6 +679,7 @@ impl Session {
             config,
             unreadable,
             store,
+            notifications: FieldState::default(),
             tester: probe::Tester::default(),
         }
     }
@@ -641,9 +759,31 @@ impl Session {
             Local::AutomaticNode => self.save(Setting::NodeUrl, Some(String::new())),
             Local::SaveShortcut => self.save(Setting::Shortcut, None),
             Local::DefaultShortcut => self.save(Setting::Shortcut, Some(String::new())),
+            Local::SetNotifications(wanted) => self.save_notifications(wanted),
             // Handled by [`act`], which holds the context it needs. An arm rather than a catch-all
             // so a control added later cannot quietly fall through to doing nothing.
             Local::TestNode => {}
+        }
+    }
+
+    /// Turn notifications on or off, and adopt whatever the file says afterwards.
+    ///
+    /// The adopted config is the one [`prefs::save_notifications`] read BACK, so a write that
+    /// silently did not land leaves the chooser showing what is stored — never what was clicked.
+    fn save_notifications(&mut self, wanted: bool) {
+        let Some(store) = self.store.clone() else {
+            self.unreadable = Some(copy::settings::NO_CONFIG.to_string());
+            return;
+        };
+        match prefs::save_notifications(store.as_ref(), wanted) {
+            Ok(config) => {
+                self.config = config;
+                self.notifications.saved = true;
+            }
+            Err(problem) => {
+                self.unreadable = Some(problem);
+                self.notifications.saved = false;
+            }
         }
     }
 

@@ -2114,8 +2114,11 @@ rather than signing on a dropped key. Reads never consult the gate.
 
 ### 3.7 Event-driven wallet UI + funds notifications
 
-dig-app does NOT poll wallet state; it SUBSCRIBES to the engine's wallet event stream and drives its
-UI reactively (the "event-driven, poll only on a gap" contract). The event taxonomy — `WalletEvent`,
+The `events` module below is the SUBSCRIBE half — the "event-driven, poll only on a gap" contract —
+and it is a seam awaiting a producer: no `EventFeed` implementation ships today, because dig-node
+pushes no confirmed funds event. What ships is §3.7a's confirmed-arrival watch, which POLLS. The
+paragraphs here describe the contract the app consumes when that stream exists; they are not a
+description of a running subscription. The event taxonomy — `WalletEvent`,
 `EventKind`, `Cursor`/`EmittedEvent`, and the `CatchUp`/`filter_events` shape — is the CANONICAL
 `dig-events-protocol` contract, imported and never re-declared; the engine (dig-node, via
 `dig-wallet-backend`) emits it and dig-app consumes a FILTERED view (an `EnumSet<EventKind>` chosen
@@ -2149,11 +2152,71 @@ wallet read seam when `balances_dirty` is set.
 
 **Funds notifications (`notify`, #970).** A `NotifyingSink` taps `FundsReceived`/`FundsSent` and feeds
 a debounced coalescer: every funds event within a short trailing window merges into ONE native OS toast
-(a burst of 3 receives → one "Received 3 payments: X total"), rendered through a per-OS `NativeNotifier`
-(Linux `notify-send`, macOS `osascript`; a logging fallback elsewhere — native WinRT toast is a
-follow-up). Amounts + asset labels are honest ($DIG vs XCH vs a short CAT id) and a notification NEVER
-carries a key, seed, or address. It is passive, dismissible, and opt-out — it never gates a read
-(§6.0/§6.1). This path holds no key and touches no custody surface.
+(a burst of 3 receives → one "Received 3 payments: X total"). Amounts + asset labels are honest ($DIG
+vs XCH vs a short CAT id — never a guessed ticker) and a notification NEVER carries a key, seed, or
+address. It is passive, dismissible, and opt-out (§6.0/§6.1) — it never gates a read. This path holds
+no key and touches no custody surface. The sink half awaits the event stream above; the RENDER half
+(`Notification`, `NativeNotifier`, the coalescer) is what §3.7a drives today.
+
+**Native notification backends.** `native_notifier()` selects the host's:
+
+| OS | API |
+|---|---|
+| Linux | `notify-send` (libnotify), args passed separately so text cannot inject a command |
+| macOS | `osascript -e 'display notification …'`, both fields escaped for the AppleScript literal |
+| Windows | `Windows.UI.Notifications.ToastNotificationManager` (WinRT), payload built as escaped `ToastGeneric` XML |
+| other | `LoggingNotifier` |
+
+Windows is the one platform with no notification command to shell out to, so it is the one called
+in-process. An UNPACKAGED Win32 process has no package identity, so a toast has nothing to be
+attributed to and is DROPPED SILENTLY — `Show` still returns success. dig-app therefore registers an
+AppUserModelID, **`DIGNetwork.DIG`**, on a per-user Start Menu shortcut
+(`%APPDATA%\Microsoft\Windows\Start Menu\Programs\DIG.lnk`, carrying `System.AppUserModel.ID`).
+That id is CANONICAL: Windows keys the
+user's per-app notification permissions on it, so changing it discards choices the user has already
+made. Registration happens at start-up (`notify::prepare_host()`), not at the first toast — the shell
+resolves the id through an index over the Start Menu that the creating process does not see, so a
+toast raised in the same run as the shortcut is created does not appear.
+
+### 3.7a Confirmed-arrival notifications (`arrivals`, #2548)
+
+A notification is a CLAIM ABOUT THE USER'S MONEY, so `arrivals` is shaped so the four ways that claim
+can be false are hard to express rather than merely avoided:
+
+| Failure | What forbids it |
+|---|---|
+| the first sync announces the whole address history | `ArrivalLedger` has no baseline until its first observation, and an observation without a baseline ADOPTS silently |
+| a restart / re-sync / reorg re-scan re-announces | the ledger is durable (`arrivals.json`, written whole via a rename) and keyed on coin id |
+| a mempool sighting is announced as money | `ConfirmedCoin.confirmed_height` is a `u32`, and `ChainView` has no constructor that accepts an unsynced read or a null peak |
+| the user's own change is announced as a payment | a coin whose parent is a coin the ledger already holds is a self-spend output, and is suppressed |
+
+**The seam.** `ArrivalSource` yields a `ChainView` — a confirmed, caught-up picture of the watched
+address. `ChainView::of_read(synced, peak_height, coins)` is the ONLY constructor and returns `None`
+unless `synced` is true AND a peak height is present: a null peak is UNKNOWN, never height zero.
+`watch::ControlPlaneSource` implements the seam over `control.wallet.coins` (an OPEN read of a public
+address, one call per asset, combined at the LOWEST peak either leg reported). A dig-node that grows a
+pushed confirmed funds event implements the same trait, and nothing above it changes.
+
+**Accounting.** After adoption, a coin is an arrival only when it is not already in the ledger, was
+confirmed ABOVE the baseline, and has a parent the ledger does not hold. Coins are judged in ascending
+height so a parent in the same batch is recorded first. Every coin is recorded whatever the verdict, so
+a suppressed change coin can itself be the next change coin's parent. The ledger is bounded
+(`LEDGER_CAPACITY`); pruning raises the baseline over what it forgot, so a forgotten coin cannot return
+as new. **Known residual:** change whose PARENT was pruned would be announced once, which needs more
+than `LEDGER_CAPACITY` coins at one address; a node-side producer that sees spends directly removes it.
+
+**Preference.** `AgentConfig.notifications.funds_received`, defaulting to ON — including for an
+`agent.json` written before the field existed. It is turned off in the Settings tab, and it gates the
+TOAST, never the ledger: detection keeps accounting while notifications are off, so turning them back
+on does not replay everything received in between.
+
+**Limitation, stated rather than designed around: nothing is notified while dig-app is not running.**
+Detection lives in the tray process. A payment that lands while the app is closed is not announced when
+it next starts either — that run's ledger adopts it as history, which is the first row of the table
+above. The wallet surface still shows it. Making a closed app speak would need a node-side notifier.
+
+**Custody (§908).** Every input is a public bech32m address or a coin id, over a tokenless read.
+Nothing on this path holds, derives or uses a key, and nothing on it can spend.
 
 ---
 

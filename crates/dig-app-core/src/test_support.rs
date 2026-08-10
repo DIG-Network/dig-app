@@ -256,6 +256,21 @@ pub mod node {
         /// and this address holds nothing" — and the contract is explicit that it is never what a
         /// caller gets from an unreachable chain.
         Coins(Vec<FakeCoin>),
+        /// Answer with these coins AND the node's own honesty fields set explicitly
+        /// (dig_ecosystem#2548).
+        ///
+        /// [`Coins`](Self::Coins) always answers `synced: true` with a real peak, which is the happy
+        /// path and cannot exercise a client's fail-closed behaviour. This variant is how a fixture
+        /// says "the node answered, and told you the answer is stale" or "…and reported no height at
+        /// all" — the two states a caller bounding a claimed confirmation MUST refuse.
+        CoinsAt {
+            /// The coins in the answer.
+            coins: Vec<FakeCoin>,
+            /// The node's `synced` flag: `false` means the figures are STALE or from the oracle tier.
+            synced: bool,
+            /// The peak these coins reflect, or `None` — which is UNKNOWN, never height zero.
+            peak_height: Option<u32>,
+        },
         /// Refuse, in the node's error envelope: a numeric wire code plus the stable UPPER_SNAKE
         /// `data.code` symbol a client is contractually required to branch on.
         Rejected {
@@ -616,36 +631,40 @@ pub mod node {
 
     /// The `control.wallet.coins` reply, field-for-field as the 0.6.0 contract defines it.
     fn coins_result(reply: &CoinsReply) -> String {
-        match reply {
-            CoinsReply::Coins(coins) => {
-                let coins: Vec<serde_json::Value> = coins
-                    .iter()
-                    .map(|coin| {
-                        serde_json::json!({
-                            "coin_id": coin.coin_id,
-                            "asset": coin.asset,
-                            "amount": coin.amount,
-                            "parent_coin_info": coin.parent_coin_info,
-                            "puzzle_hash": coin.puzzle_hash,
-                            "created_height": coin.created_height,
-                            "spent_height": coin.spent_height,
-                        })
-                    })
-                    .collect();
+        let (coins, synced, peak_height) = match reply {
+            CoinsReply::Coins(coins) => (coins, true, Some(5_412_009u32)),
+            CoinsReply::CoinsAt {
+                coins,
+                synced,
+                peak_height,
+            } => (coins, *synced, *peak_height),
+            CoinsReply::Rejected { code, symbol } => return rejection(*code, symbol, "coin read"),
+        };
+        let coins: Vec<serde_json::Value> = coins
+            .iter()
+            .map(|coin| {
                 serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": {
-                        "coins": coins,
-                        "source": "db",
-                        "synced": true,
-                        "peak_height": 5_412_009,
-                    }
+                    "coin_id": coin.coin_id,
+                    "asset": coin.asset,
+                    "amount": coin.amount,
+                    "parent_coin_info": coin.parent_coin_info,
+                    "puzzle_hash": coin.puzzle_hash,
+                    "created_height": coin.created_height,
+                    "spent_height": coin.spent_height,
                 })
-                .to_string()
+            })
+            .collect();
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "coins": coins,
+                "source": "db",
+                "synced": synced,
+                "peak_height": peak_height,
             }
-            CoinsReply::Rejected { code, symbol } => rejection(*code, symbol, "coin read"),
-        }
+        })
+        .to_string()
     }
 
     /// The `control.wallet.broadcast` reply, field-for-field as the 0.6.0 contract defines it.

@@ -26,6 +26,24 @@ use crate::events::EventSink;
 
 pub use render::{native_notifier, LoggingNotifier};
 
+/// This application's Windows AppUserModelID — the identity every DIG toast is filed under, and the
+/// value the Start Menu shortcut must carry for a toast to appear at all. See
+/// [`render`]'s Windows backend.
+#[cfg(target_os = "windows")]
+pub use render::AUMID;
+
+/// Do whatever this host needs done BEFORE a notification can be drawn, and nothing else.
+///
+/// Called once at start-up by the app shell. On Windows it writes the Start Menu identity a toast is
+/// attributed to, because that registration is not visible to the shell within the process that
+/// makes it — see the Windows backend for the measurement. Everywhere else there is nothing to
+/// prepare and this is a no-op, which is why it is a plain function rather than something a caller
+/// has to branch on.
+pub fn prepare_host() {
+    #[cfg(target_os = "windows")]
+    render::prepare();
+}
+
 /// A rendered notification: a short title + a glanceable body. Contains only public activity
 /// facts (amounts, counts, asset labels) — never secret material.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +89,16 @@ impl AssetTotal {
 }
 
 impl PendingActivity {
+    /// Fold one confirmed incoming amount into the tally, in the asset's own base unit.
+    ///
+    /// Separate from [`record`](Self::record) because the two callers hold different things: the
+    /// event pipeline holds a whole [`WalletEvent`], while [`crate::arrivals`] holds a coin and an
+    /// asset and would otherwise have to fabricate a wallet id and a cursor to reach this tally. A
+    /// notification must not be built out of invented fields, so it takes the two that matter.
+    pub fn received(&mut self, asset: Option<AssetId>, base_units: u64) {
+        self.received.entry(asset).or_default().add(base_units);
+    }
+
     /// Fold one funds event into the tally. Non-funds events are ignored (the sink only forwards
     /// funds events, but recording is total-function to keep the model self-contained).
     pub fn record(&mut self, event: &WalletEvent) {
@@ -118,6 +146,53 @@ pub fn summarize(
         (None, None) => return None,
     };
     Some(Notification { title, body })
+}
+
+/// The $DIG CAT's asset id, spelled the way the event contract spells an asset.
+///
+/// Taken from [`dig_constants::DIG_ASSET_ID`] — the ecosystem's single home for the value, declared
+/// byte-identical to `chip35_dl_coin`'s, digstore-chain's and DataLayer-Driver's — rather than typed
+/// out here. A second copy of a token id is how a notification comes to call somebody else's CAT
+/// `$DIG`, which is a lie about which money arrived.
+pub fn dig_asset_id() -> AssetId {
+    AssetId(hex::encode(dig_constants::DIG_ASSET_ID))
+}
+
+/// One honest notification for a batch of confirmed arrivals, or `None` when the batch is empty.
+///
+/// The batch IS the coalescing window: [`crate::arrivals`] hands over everything one confirmed
+/// chain read newly accounted for, so three coins in one block become one toast without a timer.
+/// Rendering goes through [`summarize`], so the amounts carry each asset's own decimals (XCH 12,
+/// CAT 3) and $DIG is named from the canonical id rather than guessed.
+pub fn arrival_notification(arrivals: &[crate::arrivals::Arrival]) -> Option<Notification> {
+    let dig = dig_asset_id();
+    let mut pending = PendingActivity::default();
+    for arrival in arrivals {
+        let asset = match arrival.asset {
+            crate::wallet::state::Asset::Xch => None,
+            crate::wallet::state::Asset::Dig => Some(dig.clone()),
+        };
+        pending.received(asset, arrival.amount);
+    }
+    summarize(&pending, Some(&dig))
+}
+
+/// Show `arrivals` as one notification — unless the user turned notifications off.
+///
+/// The switch is checked HERE, at the one place a toast is drawn, rather than at the detection site:
+/// [`crate::arrivals`] must keep accounting for coins while notifications are off, or turning them
+/// back on would announce everything received in between.
+pub fn announce_arrivals(
+    arrivals: &[crate::arrivals::Arrival],
+    enabled: bool,
+    notifier: &dyn NativeNotifier,
+) {
+    if !enabled {
+        return;
+    }
+    if let Some(notification) = arrival_notification(arrivals) {
+        notifier.show(&notification);
+    }
 }
 
 /// An [`EventSink`] that forwards funds events to the debounced notifier task.
@@ -310,6 +385,85 @@ mod tests {
         let shown = notifier.0.lock().unwrap();
         assert_eq!(shown.len(), 1, "the burst coalesced into one toast");
         assert!(shown[0].body.contains("2 payments"));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Arrival copy (dig_ecosystem#2548)
+    // ------------------------------------------------------------------------------------------
+
+    use crate::arrivals::Arrival;
+    use crate::wallet::state::Asset;
+
+    fn arrival(asset: Asset, amount: u64) -> Arrival {
+        Arrival {
+            coin_id: format!("{amount:064x}"),
+            asset,
+            amount,
+            confirmed_height: 5_412_000,
+        }
+    }
+
+    /// **The $DIG label comes from the canonical asset id, and the amount from the CAT divisor.**
+    ///
+    /// Two independent ways to lie about money in one sentence, so both are pinned: naming the CAT
+    /// (a wrong id renders `$DIG` as a truncated hex string, or worse, calls a stranger's CAT
+    /// `$DIG`), and dividing it ($DIG carries 3 decimals, so 2500 base units is 2.5 — rendering it
+    /// with the XCH divisor would say `0.0000000025`).
+    #[test]
+    fn a_dig_arrival_is_named_and_divided_as_dig() {
+        let note = arrival_notification(&[arrival(Asset::Dig, 2_500)]).expect("one arrival");
+        assert_eq!(note.title, "DIG — Funds received");
+        assert_eq!(note.body, "Received 2.5 $DIG");
+        assert_eq!(
+            dig_asset_id().0,
+            "a406d3a9de984d03c9591c10d917593b434d5263cabe2b42f6b367df16832f81",
+            "the label is only honest if the id is the canonical one"
+        );
+    }
+
+    /// **An XCH arrival is divided by the XCH divisor, which is a different number.**
+    #[test]
+    fn an_xch_arrival_is_named_and_divided_as_xch() {
+        let note = arrival_notification(&[arrival(Asset::Xch, 1_500_000_000_000)]).unwrap();
+        assert_eq!(note.body, "Received 1.5 XCH");
+    }
+
+    /// **A batch of arrivals is ONE notification that totals each asset separately.**
+    #[test]
+    fn a_batch_of_arrivals_is_one_notification_per_asset() {
+        let note = arrival_notification(&[
+            arrival(Asset::Xch, 1_000_000_000_000),
+            arrival(Asset::Xch, 500_000_000_000),
+            arrival(Asset::Dig, 1_000),
+        ])
+        .unwrap();
+        assert!(note.body.contains("3 payments"), "{}", note.body);
+        assert!(note.body.contains("1.5 XCH"), "{}", note.body);
+        assert!(note.body.contains("1 $DIG"), "{}", note.body);
+    }
+
+    /// **An empty batch draws nothing** — a poll that found no arrivals must not toast.
+    #[test]
+    fn an_empty_batch_draws_nothing() {
+        assert_eq!(arrival_notification(&[]), None);
+    }
+
+    /// **The off switch stops the toast, and the control proves the switch is what stopped it.**
+    #[test]
+    fn notifications_turned_off_draw_nothing() {
+        let notifier = RecordingNotifier::default();
+        announce_arrivals(&[arrival(Asset::Xch, 1_000_000_000_000)], false, &notifier);
+        assert!(
+            notifier.0.lock().unwrap().is_empty(),
+            "a toast was drawn with notifications turned off"
+        );
+
+        announce_arrivals(&[arrival(Asset::Xch, 1_000_000_000_000)], true, &notifier);
+        assert_eq!(
+            notifier.0.lock().unwrap().len(),
+            1,
+            "with the switch ON nothing was drawn either, so the assertion above proves nothing"
+        );
     }
 
     /// Wraps an `Arc<RecordingNotifier>` so the test can both hand ownership to the task and still

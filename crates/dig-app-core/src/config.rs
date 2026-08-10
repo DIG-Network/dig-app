@@ -64,6 +64,16 @@ pub struct AgentConfig {
     /// [`AutoUpdate`](crate::auto_update::AutoUpdate).
     #[serde(default)]
     pub auto_update: crate::auto_update::AutoUpdate,
+
+    /// Whether DIG raises an OS notification when money arrives (dig_ecosystem#2548).
+    ///
+    /// A notification interrupts, so it must be refusable somewhere a person can find — this is the
+    /// stored side of that switch, and the Settings tab is where it is turned off. Defaults to ON,
+    /// including for an `agent.json` written before this field existed; see
+    /// [`Notifications`](crate::notifications::Notifications) for why that needs a default function
+    /// rather than `#[serde(default)]` alone.
+    #[serde(default)]
+    pub notifications: crate::notifications::Notifications,
 }
 
 fn default_tick_secs() -> u64 {
@@ -78,6 +88,7 @@ impl Default for AgentConfig {
             tick_secs: DEFAULT_TICK_SECS,
             open_bar_shortcut: None,
             auto_update: crate::auto_update::AutoUpdate::default(),
+            notifications: crate::notifications::Notifications::default(),
         }
     }
 }
@@ -156,6 +167,9 @@ mod tests {
             auto_update: crate::auto_update::AutoUpdate {
                 enabled: false,
                 channel: crate::auto_update::UpdateChannel::Nightly,
+            },
+            notifications: crate::notifications::Notifications {
+                funds_received: false,
             },
         };
         cfg.save(&path).unwrap();
@@ -272,6 +286,43 @@ mod tests {
         .unwrap();
 
         assert_eq!(AgentConfig::load(&path).unwrap().auto_update, chosen);
+    }
+
+    /// **The notification switch survives a restart, and an older file loads as ON.**
+    ///
+    /// Both halves in one test because they are the two ways the setting can be wrong on disk: a
+    /// save that dropped the field (the person turns notifications off, restarts, and is
+    /// interrupted anyway), and a default that reads an absent field as OFF (every existing install
+    /// silently loses the feature on the version that adds it).
+    #[test]
+    fn the_notification_switch_persists_and_older_files_load_as_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = AgentConfig::path_in(dir.path());
+
+        std::fs::write(&path, br#"{"tick_secs":7}"#).unwrap();
+        assert!(
+            AgentConfig::load(&path)
+                .unwrap()
+                .notifications
+                .funds_received,
+            "a config written before this setting existed must keep notifications on"
+        );
+
+        AgentConfig {
+            notifications: crate::notifications::Notifications {
+                funds_received: false,
+            },
+            ..AgentConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+        assert!(
+            !AgentConfig::load(&path)
+                .unwrap()
+                .notifications
+                .funds_received,
+            "the choice to turn notifications off did not survive the write"
+        );
     }
 
     #[test]
