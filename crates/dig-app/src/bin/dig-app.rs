@@ -597,7 +597,11 @@ fn run_the_did_step(
     // transport yields `MintingStep::NotInThisVersion`, and the mint offer -- which states that a
     // real, irrevocable XCH transaction will be sent -- is unreachable from that value
     // (dig_ecosystem#2560).
-    let minting = seams.minting_step(&WindowedWait::new(confirmer), &WallClock, &DidFile::new(dir));
+    // Named rather than passed inline because the step BORROWS them for as long as the wizard runs:
+    // as temporaries they would be dropped at the end of this statement (E0716).
+    let wait = WindowedWait::new(confirmer);
+    let ledger = DidFile::new(dir);
+    let minting = seams.minting_step(&wait, &WallClock, &ledger);
     first_run_wizard(
         confirmer,
         AccountPresence::Wallet { address },
@@ -624,7 +628,10 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     // transport they hand the wizard a minter that refuses honestly, rather than one that fabricates
     // a spend for the wait to watch.
     let seams = mint_seams();
-    let minting = seams.minting_step(&WindowedWait::new(confirmer), &WallClock, &DidFile::new(&dir));
+    // Named for the same reason as in `run_the_did_step`: the step borrows them across the wizard.
+    let wait = WindowedWait::new(confirmer);
+    let ledger = DidFile::new(&dir);
+    let minting = seams.minting_step(&wait, &WallClock, &ledger);
     let outcome = first_run_wizard(
         confirmer,
         // The wizard is gated on the DID, not on the account, but this entry point is reached only
