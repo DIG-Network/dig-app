@@ -166,9 +166,10 @@ impl ConsentedProfile {
 
 /// Why a durable grant was not recorded.
 ///
-/// Kept distinct from a bare [`SealError`] because the two mean opposite things to a caller: sealing
-/// failed because there is no unlocked profile (retry after unlocking), whereas the profile MOVED, so
-/// the consent that was given does not apply to whoever is here now and must be asked for again.
+/// Kept distinct from a bare [`SealError`](crate::sealer::SealError) because the two mean opposite
+/// things to a caller: sealing failed because there is no unlocked profile (retry after unlocking),
+/// whereas the profile MOVED, so the consent that was given does not apply to whoever is here now
+/// and must be asked for again.
 #[derive(Debug, thiserror::Error)]
 pub enum ConsentError {
     /// The active profile changed between the confirm and the write. See [`ConsentedProfile`].
@@ -253,6 +254,29 @@ mod tests {
         assert!(
             !visible_under_active_profile(Some("did:chia:b"), "did:chia:a"),
             "control: visibility is still SCOPED — another profile's records stay hidden"
+        );
+    }
+
+    /// A consent is held by the profile that was active when it was read, and by nobody else — the
+    /// predicate the creating side asks before writing durable authority.
+    ///
+    /// The LOCKED reading is the load-bearing one and is asserted from BOTH sides: a consent taken
+    /// while locked names no profile, so it can never come to hold for the profile that unlocks next.
+    #[test]
+    fn a_consent_holds_only_for_the_profile_it_was_read_under() {
+        let a: LiveDid = "did:chia:a".into();
+        let consent = ConsentedProfile::reading(&a);
+        assert!(consent.still_holds("did:chia:a"));
+        assert!(
+            !consent.still_holds("did:chia:b"),
+            "a switch between the confirm and the write means nobody here agreed to it"
+        );
+
+        let locked: LiveDid = Live::fixed(None);
+        let while_locked = ConsentedProfile::reading(&locked);
+        assert!(
+            !while_locked.still_holds("did:chia:a"),
+            "no profile was named, so none can be said to have consented"
         );
     }
 

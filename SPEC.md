@@ -2504,6 +2504,11 @@ confirm, never silent.
      32-byte secret; `may_sign` states the granted scope, §5.6.3a).
    On deny/timeout ⇒ `PAIR_DENIED` / `PAIR_TIMEOUT` and no record.
 
+   The active profile MUST be read BEFORE the confirm is raised and MUST still be active when the
+   record is written; if it changed in between, the node MUST mint no token and answer `PAIR_DENIED`.
+   The confirm names the app and not a profile, so its answer authorizes only the profile whose owner
+   read it.
+
    The sealed record additionally carries `label` (the caller's self-declared `ext_label`, UNTRUSTED and
    display-only) and `scope` (§5.6.3a). Both are OPTIONAL in the sealed form: a record written before
    they existed MUST still open, and MUST restore with `scope = dig-extension`.
@@ -2643,7 +2648,9 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   primary/change), loaded from the sealed wallet state; `pubkeys[]` is the profile's identity signing
   public key. Only this public data crosses the handle — never key material. A profile with no saved
   wallet state yet returns an empty `addresses[]` (the channel is still fully usable). On Deny/timeout
-  ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`. The sealed whitelist entry persists
+  ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`, as is a profile switch landing between the confirm and
+  the grant (the consent belongs to the profile that was active when the modal was read, so no entry
+  is recorded for either profile). The sealed whitelist entry persists
   to the profile's AppData and is restored on boot (a connected dapp survives a restart); `connect.revoke`
   deletes the at-rest record, so the revocation is durable too.
 - **Sign gating.** A `sign.request` whose `origin` is NOT whitelisted for the active profile ⇒
