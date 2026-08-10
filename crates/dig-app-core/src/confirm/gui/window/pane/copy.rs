@@ -235,12 +235,16 @@ pub(crate) mod settings {
         "Whether DIG tells you when money arrives in your wallet.";
     /// The limitation, said in the card rather than discovered.
     ///
-    /// A person who is told "DIG will notify me when I am paid" and then is not, while DIG was
-    /// closed, has been misled by an omission. Saying it here costs one line.
+    /// A person who is told "DIG will notify me when I am paid" and then is not has been misled by
+    /// an omission, so the real condition is named. It is the BACKGROUND SERVICE that has to be
+    /// running, not this window: the service keeps the record of what arrived, and closing DIG
+    /// delays the notification rather than losing it. An earlier version of this sentence said the
+    /// opposite — that a payment arriving while DIG was closed would never be announced — which was
+    /// never what the code did (dig_ecosystem#2548).
     pub(crate) const NOTIFY_COST: &str =
-        "DIG only notices payments while it is running, and only once they are confirmed on the \
-         blockchain. A payment that arrives while DIG is closed shows up in your wallet, but you \
-         will not get a notification for it.";
+        "DIG tells you about a payment once it is confirmed on the blockchain. Payments that \
+         arrive while this window is closed are still noticed, and you are told the next time you \
+         open DIG. Nothing is noticed while the DIG background service is stopped.";
     /// The label above the on/off chooser.
     pub(crate) const NOTIFY_FIELD: &str = "When money arrives";
     /// The readout naming what DIG will actually do.

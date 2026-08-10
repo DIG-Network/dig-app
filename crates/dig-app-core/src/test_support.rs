@@ -144,6 +144,9 @@ pub mod node {
         /// A healthy node that also answers `control.wallet.coins` per the given [`CoinsReply`],
         /// serving it as the OPEN read the 0.6.0 contract declares it (dig_ecosystem#2378).
         WalletCoins(CoinsReply),
+        /// A healthy node that also answers `control.wallet.arrivals` per the given
+        /// [`ArrivalsReply`] (dig_ecosystem#2548), tokenless as the contract declares it.
+        WalletArrivals(ArrivalsReply),
         /// A healthy node that also answers `control.wallet.broadcast` per the given
         /// [`BroadcastReply`].
         ///
@@ -256,21 +259,6 @@ pub mod node {
         /// and this address holds nothing" — and the contract is explicit that it is never what a
         /// caller gets from an unreachable chain.
         Coins(Vec<FakeCoin>),
-        /// Answer with these coins AND the node's own honesty fields set explicitly
-        /// (dig_ecosystem#2548).
-        ///
-        /// [`Coins`](Self::Coins) always answers `synced: true` with a real peak, which is the happy
-        /// path and cannot exercise a client's fail-closed behaviour. This variant is how a fixture
-        /// says "the node answered, and told you the answer is stale" or "…and reported no height at
-        /// all" — the two states a caller bounding a claimed confirmation MUST refuse.
-        CoinsAt {
-            /// The coins in the answer.
-            coins: Vec<FakeCoin>,
-            /// The node's `synced` flag: `false` means the figures are STALE or from the oracle tier.
-            synced: bool,
-            /// The peak these coins reflect, or `None` — which is UNKNOWN, never height zero.
-            peak_height: Option<u32>,
-        },
         /// Refuse, in the node's error envelope: a numeric wire code plus the stable UPPER_SNAKE
         /// `data.code` symbol a client is contractually required to branch on.
         Rejected {
@@ -287,6 +275,58 @@ pub mod node {
             CoinsReply::Rejected {
                 code,
                 symbol: symbol.to_string(),
+            }
+        }
+    }
+
+    /// How a [`FakeNode`] should answer `control.wallet.arrivals`.
+    ///
+    /// The pages are answered IN ORDER, one per call, so a fixture scripts a whole conversation —
+    /// which is what a cursor client needs, since the interesting properties are all about what the
+    /// SECOND call asks for. Running out repeats the last page, the way a node whose ledger has not
+    /// moved answers the same thing again.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ArrivalsReply {
+        /// Answer these pages, in order.
+        Pages(Vec<FakeArrivalPage>),
+        /// Refuse, in the node's error envelope.
+        Rejected {
+            /// The numeric JSON-RPC error code.
+            code: i64,
+            /// The stable `data.code` symbol.
+            symbol: String,
+        },
+    }
+
+    impl ArrivalsReply {
+        /// A refusal carrying `code` + its stable `symbol`.
+        pub fn rejected(code: i64, symbol: &str) -> Self {
+            ArrivalsReply::Rejected {
+                code,
+                symbol: symbol.to_string(),
+            }
+        }
+    }
+
+    /// One page a [`FakeNode`] serves from `control.wallet.arrivals`.
+    ///
+    /// `latest` is a field rather than derived from the rows precisely so a fixture can express the
+    /// state the contract warns about — a ledger that has moved on past the page it just handed out.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FakeArrivalPage {
+        /// The rows, oldest first: `(seq, amount_base_units, asset_id_hex_or_none)`.
+        pub rows: Vec<(u64, u64, Option<String>)>,
+        /// The ledger head this answer reports.
+        pub latest: u64,
+    }
+
+    impl FakeArrivalPage {
+        /// A page of XCH arrivals whose `latest` is its own last row — the ordinary case.
+        pub fn of(rows: &[(u64, u64)]) -> Self {
+            let latest = rows.last().map_or(0, |(seq, _)| *seq);
+            Self {
+                rows: rows.iter().map(|(s, a)| (*s, *a, None)).collect(),
+                latest,
             }
         }
     }
@@ -405,6 +445,11 @@ pub mod node {
             Self::with_behaviour(Behaviour::WalletCoins(reply))
         }
 
+        /// A fake that answers `control.wallet.arrivals` with `reply` (dig_ecosystem#2548).
+        pub fn serving_arrivals(reply: ArrivalsReply) -> Self {
+            Self::with_behaviour(Behaviour::WalletArrivals(reply))
+        }
+
         /// A fake that answers `control.wallet.broadcast` with `reply` (dig_ecosystem#2378).
         pub fn serving_broadcast(reply: BroadcastReply) -> Self {
             Self::with_behaviour(Behaviour::WalletBroadcast(reply))
@@ -507,6 +552,7 @@ pub mod node {
             let is = |wanted: ControlMethod| method == Some(wanted);
             let method_is_balance = is(ControlMethod::WalletBalance);
             let method_is_coins = is(ControlMethod::WalletCoins);
+            let method_is_arrivals = is(ControlMethod::WalletArrivals);
             let method_is_broadcast = is(ControlMethod::WalletBroadcast);
             let method_is_hosted_list = is(ControlMethod::HostedStoresList);
             let asset = if request.contains("\"asset\":\"dig\"") {
@@ -514,7 +560,7 @@ pub mod node {
             } else {
                 Asset::Xch
             };
-            let _ = tx.send(request);
+            let _ = tx.send(request.clone());
 
             let (code, body) = match &behaviour {
                 Behaviour::Silent => return,
@@ -530,6 +576,17 @@ pub mod node {
                 Behaviour::WalletCoins(reply) if method_is_coins && method_is_open_read => {
                     (200, coins_result(reply))
                 }
+                // `control.wallet.arrivals` is the narrowest OPEN wallet read, served tokenless for
+                // the same reason. The page index comes from the SERVED counter, so successive calls
+                // walk the scripted conversation.
+                Behaviour::WalletArrivals(reply) if method_is_arrivals && method_is_open_read => (
+                    200,
+                    arrivals_result(
+                        reply,
+                        served.load(Ordering::SeqCst).saturating_sub(1),
+                        &request,
+                    ),
+                ),
                 // Every other `control.*` method is gated exactly as the real node gates it,
                 // otherwise a client that forgot the header would still see a green test.
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),
@@ -551,6 +608,7 @@ pub mod node {
                 | Behaviour::Wallet(_)
                 | Behaviour::SlowWallet { .. }
                 | Behaviour::WalletCoins(_)
+                | Behaviour::WalletArrivals(_)
                 | Behaviour::WalletBroadcast(_)
                 | Behaviour::HostedStores(_)
                 | Behaviour::SlowHostedStores { .. } => (200, status_result()),
@@ -629,15 +687,59 @@ pub mod node {
             .find(|method| request.contains(&format!("\"method\":\"{}\"", method.name())))
     }
 
+    /// The `control.wallet.arrivals` reply, field-for-field as the node emits it — `amount` as a
+    /// decimal STRING and `asset_id` as `null` or a hex TAIL.
+    ///
+    /// `cursor` is derived the way the node derives it: the last row served, or the caller's own
+    /// `after_seq` on an empty page. Deriving it here rather than letting the fixture state it is
+    /// what keeps a client that resumes wrongly from being rescued by a helpful fake.
+    fn arrivals_result(reply: &ArrivalsReply, call_index: usize, request: &str) -> String {
+        let pages = match reply {
+            ArrivalsReply::Pages(pages) => pages,
+            ArrivalsReply::Rejected { code, symbol } => {
+                return rejection(*code, symbol, "arrival read")
+            }
+        };
+        let after_seq = request
+            .split("\"after_seq\":")
+            .nth(1)
+            .and_then(|rest| {
+                rest.trim_start()
+                    .split(|c: char| !c.is_ascii_digit())
+                    .find(|t| !t.is_empty())
+            })
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .unwrap_or(0);
+        let Some(page) = pages.get(call_index).or_else(|| pages.last()) else {
+            return rejection(-32004, "WALLET_READ_FAILED", "arrival read");
+        };
+        let rows: Vec<serde_json::Value> = page
+            .rows
+            .iter()
+            .map(|(seq, amount, asset_id)| {
+                serde_json::json!({
+                    "seq": seq,
+                    "coin_id": format!("{seq:064x}"),
+                    "puzzle_hash": "cc".repeat(32),
+                    "amount": amount.to_string(),
+                    "asset_id": asset_id,
+                    "confirmed_height": 5_412_000u32 + *seq as u32,
+                })
+            })
+            .collect();
+        let cursor = page.rows.last().map_or(after_seq, |(seq, _, _)| *seq);
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "arrivals": rows, "cursor": cursor, "latest": page.latest }
+        })
+        .to_string()
+    }
+
     /// The `control.wallet.coins` reply, field-for-field as the 0.6.0 contract defines it.
     fn coins_result(reply: &CoinsReply) -> String {
         let (coins, synced, peak_height) = match reply {
             CoinsReply::Coins(coins) => (coins, true, Some(5_412_009u32)),
-            CoinsReply::CoinsAt {
-                coins,
-                synced,
-                peak_height,
-            } => (coins, *synced, *peak_height),
             CoinsReply::Rejected { code, symbol } => return rejection(*code, symbol, "coin read"),
         };
         let coins: Vec<serde_json::Value> = coins

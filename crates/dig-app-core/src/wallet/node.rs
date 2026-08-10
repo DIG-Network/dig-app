@@ -133,7 +133,7 @@ impl WalletEngine for NodeWalletEngine {
         };
         let result = self.call(&params, ControlMethod::WalletCoins)?;
         Ok(CoinsResponse {
-            coins: result.coins.iter().map(app_coin).collect(),
+            coins: result.coins.iter().filter_map(app_coin).collect(),
         })
     }
 
@@ -176,18 +176,34 @@ impl NodeWalletEngine {
     }
 }
 
-/// One of the node's coin records as dig-app's own [`CoinRecord`].
+/// One of the node's coin records as dig-app's own [`CoinRecord`], or `None` when this record does
+/// not answer the question that was asked.
 ///
 /// The node's record is a SUPERSET: it also carries the parent, the puzzle hash and the two
 /// heights, which is what a spend needs to reconstruct a `Coin`. dig-app's wallet surface needs
 /// only the identity and the amount, so the rest is dropped HERE, visibly, rather than by a
 /// tolerant deserializer — a reader should be able to see that the drop is a decision.
-fn app_coin(record: &WalletCoinRecord) -> CoinRecord {
-    CoinRecord {
+///
+/// # An UNCLASSIFIED record is dropped, never guessed at
+///
+/// The contract's `asset` is optional because `control.wallet.coinById` answers by coin id, which
+/// cannot classify a coin. A by-ADDRESS read names its asset, so a record that came back without
+/// one is the node declining to say which asset it is — and taking the asset from the REQUEST
+/// instead would relabel it. A $DIG figure shown with the XCH divisor is wrong by a factor of a
+/// billion, so silence is the only honest handling.
+fn app_coin(record: &WalletCoinRecord) -> Option<CoinRecord> {
+    let Some(asset) = record.asset else {
+        tracing::debug!(
+            coin_id = %record.coin_id,
+            "the node returned a coin it did not classify; it is not counted"
+        );
+        return None;
+    };
+    Some(CoinRecord {
         coin_id: record.coin_id.clone(),
-        asset: app_asset(record.asset),
+        asset: app_asset(asset),
         amount: record.amount,
-    }
+    })
 }
 
 /// The contract's wire enum as dig-app's [`Asset`] — the inverse of [`wire_asset`].

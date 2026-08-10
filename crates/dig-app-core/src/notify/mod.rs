@@ -160,19 +160,18 @@ pub fn dig_asset_id() -> AssetId {
 
 /// One honest notification for a batch of confirmed arrivals, or `None` when the batch is empty.
 ///
-/// The batch IS the coalescing window: [`crate::arrivals`] hands over everything one confirmed
-/// chain read newly accounted for, so three coins in one block become one toast without a timer.
+/// The batch IS the coalescing window: [`crate::arrivals`] hands over everything one sweep of the
+/// node's ledger newly reached, so three coins in one block become one toast without a timer.
 /// Rendering goes through [`summarize`], so the amounts carry each asset's own decimals (XCH 12,
 /// CAT 3) and $DIG is named from the canonical id rather than guessed.
+///
+/// The asset id is passed through from the node VERBATIM, which is why a CAT dig-app has never
+/// heard of is still announced honestly — by its own short id rather than as XCH or not at all.
 pub fn arrival_notification(arrivals: &[crate::arrivals::Arrival]) -> Option<Notification> {
     let dig = dig_asset_id();
     let mut pending = PendingActivity::default();
     for arrival in arrivals {
-        let asset = match arrival.asset {
-            crate::wallet::state::Asset::Xch => None,
-            crate::wallet::state::Asset::Dig => Some(dig.clone()),
-        };
-        pending.received(asset, arrival.amount);
+        pending.received(arrival.asset_id.clone(), arrival.amount);
     }
     summarize(&pending, Some(&dig))
 }
@@ -392,15 +391,24 @@ mod tests {
     // ------------------------------------------------------------------------------------------
 
     use crate::arrivals::Arrival;
-    use crate::wallet::state::Asset;
-
-    fn arrival(asset: Asset, amount: u64) -> Arrival {
+    fn arrival(asset_id: Option<AssetId>, amount: u64) -> Arrival {
         Arrival {
+            seq: amount,
             coin_id: format!("{amount:064x}"),
-            asset,
+            asset_id,
             amount,
             confirmed_height: 5_412_000,
         }
+    }
+
+    /// An XCH arrival — the native asset carries no id at all.
+    fn xch(amount: u64) -> Arrival {
+        arrival(None, amount)
+    }
+
+    /// A $DIG arrival, named from the canonical id rather than a second copy of the token id.
+    fn dig(amount: u64) -> Arrival {
+        arrival(Some(dig_asset_id()), amount)
     }
 
     /// **The $DIG label comes from the canonical asset id, and the amount from the CAT divisor.**
@@ -411,7 +419,7 @@ mod tests {
     /// with the XCH divisor would say `0.0000000025`).
     #[test]
     fn a_dig_arrival_is_named_and_divided_as_dig() {
-        let note = arrival_notification(&[arrival(Asset::Dig, 2_500)]).expect("one arrival");
+        let note = arrival_notification(&[dig(2_500)]).expect("one arrival");
         assert_eq!(note.title, "DIG — Funds received");
         assert_eq!(note.body, "Received 2.5 $DIG");
         assert_eq!(
@@ -424,19 +432,16 @@ mod tests {
     /// **An XCH arrival is divided by the XCH divisor, which is a different number.**
     #[test]
     fn an_xch_arrival_is_named_and_divided_as_xch() {
-        let note = arrival_notification(&[arrival(Asset::Xch, 1_500_000_000_000)]).unwrap();
+        let note = arrival_notification(&[xch(1_500_000_000_000)]).unwrap();
         assert_eq!(note.body, "Received 1.5 XCH");
     }
 
     /// **A batch of arrivals is ONE notification that totals each asset separately.**
     #[test]
     fn a_batch_of_arrivals_is_one_notification_per_asset() {
-        let note = arrival_notification(&[
-            arrival(Asset::Xch, 1_000_000_000_000),
-            arrival(Asset::Xch, 500_000_000_000),
-            arrival(Asset::Dig, 1_000),
-        ])
-        .unwrap();
+        let note =
+            arrival_notification(&[xch(1_000_000_000_000), xch(500_000_000_000), dig(1_000)])
+                .unwrap();
         assert!(note.body.contains("3 payments"), "{}", note.body);
         assert!(note.body.contains("1.5 XCH"), "{}", note.body);
         assert!(note.body.contains("1 $DIG"), "{}", note.body);
@@ -452,13 +457,13 @@ mod tests {
     #[test]
     fn notifications_turned_off_draw_nothing() {
         let notifier = RecordingNotifier::default();
-        announce_arrivals(&[arrival(Asset::Xch, 1_000_000_000_000)], false, &notifier);
+        announce_arrivals(&[xch(1_000_000_000_000)], false, &notifier);
         assert!(
             notifier.0.lock().unwrap().is_empty(),
             "a toast was drawn with notifications turned off"
         );
 
-        announce_arrivals(&[arrival(Asset::Xch, 1_000_000_000_000)], true, &notifier);
+        announce_arrivals(&[xch(1_000_000_000_000)], true, &notifier);
         assert_eq!(
             notifier.0.lock().unwrap().len(),
             1,

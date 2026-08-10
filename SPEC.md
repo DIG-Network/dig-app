@@ -2180,43 +2180,55 @@ toast raised in the same run as the shortcut is created does not appear.
 
 ### 3.7a Confirmed-arrival notifications (`arrivals`, #2548)
 
-A notification is a CLAIM ABOUT THE USER'S MONEY, so `arrivals` is shaped so the four ways that claim
-can be false are hard to express rather than merely avoided:
+**dig-node decides what an arrival is; dig-app decides what to say and when to stop saying it.** The
+node keeps a durable arrival ledger and serves it on a cursor (`control.wallet.arrivals`); `arrivals`
+is a client of that cursor and forms no opinion of its own about whether money arrived.
+
+That division is normative, not stylistic. Telling a payment from the user's own CHANGE requires the
+coin's PARENT, and a parent is spent the moment it produces change — so `control.wallet.coins`, which
+lists UNSPENT coins only, structurally cannot answer the question. dig-app MUST NOT re-derive the
+judgement from it. An implementation that did was measured announcing `Received 8.999 XCH` for a
+transaction in which the user SENT money.
+
+**The seam.** `ArrivalSource::arrivals_since(after_seq)` yields an `ArrivalPage`
+(`arrivals`, `cursor`, `latest`). `watch::ControlPlaneSource` implements it over
+`control.wallet.arrivals`, an OPEN token-less read of the node's own local replica. A future push
+transport implements the same trait and nothing above it changes.
+
+**What `arrivals` is responsible for.** Exactly one property: *each recorded arrival is announced at
+most once, on this machine*.
 
 | Failure | What forbids it |
 |---|---|
-| the first sync announces the whole address history | `ArrivalLedger` has no baseline until its first observation, and an observation without a baseline ADOPTS silently |
-| a restart / re-sync / reorg re-scan re-announces | the ledger is durable (`arrivals.json`, written whole via a rename) and keyed on coin id |
-| a mempool sighting is announced as money | `ConfirmedCoin.confirmed_height` is a `u32`, and `ChainView` has no constructor that accepts an unsynced read or a null peak |
-| the user's own change is announced as a payment | a coin whose parent is a coin the ledger already holds is a self-spend output, and is suppressed |
+| installing dig-app against a node with a ledger toasts its whole history | an `ArrivalCursor` with no position ADOPTS the node's `latest` in silence |
+| a restart re-announces | the cursor is persisted (`arrival-cursor.json`, written whole via a rename) before anything is drawn |
+| the client resumes past an arrival it never saw | the cursor advances to `page.cursor` — the last row RECEIVED — and never to `latest`, which the node reads after the page |
+| a node whose ledger was rebuilt replays old toasts | the cursor never moves backwards |
+| an amount the client cannot read becomes a wrong figure | `amount` crosses the wire as a decimal string and an unparseable one is refused, never defaulted |
 
-**The seam.** `ArrivalSource` yields a `ChainView` — a confirmed, caught-up picture of the watched
-address. `ChainView::of_read(synced, peak_height, coins)` is the ONLY constructor and returns `None`
-unless `synced` is true AND a peak height is present: a null peak is UNKNOWN, never height zero.
-`watch::ControlPlaneSource` implements the seam over `control.wallet.coins` (an OPEN read of a public
-address, one call per asset, combined at the LOWEST peak either leg reported). A dig-node that grows a
-pushed confirmed funds event implements the same trait, and nothing above it changes.
+A sweep drains pages until the node has nothing more (bounded per sweep; the remainder is picked up by
+the next sweep, because the cursor advanced over exactly what was read), saves the cursor, and only
+then draws ONE coalesced toast. Saving before drawing is deliberate: a crash between them costs a
+toast, and the other order costs a duplicate claim about money.
 
-**Accounting.** After adoption, a coin is an arrival only when it is not already in the ledger, was
-confirmed ABOVE the baseline, and has a parent the ledger does not hold. Coins are judged in ascending
-height so a parent in the same batch is recorded first. Every coin is recorded whatever the verdict, so
-a suppressed change coin can itself be the next change coin's parent. The ledger is bounded
-(`LEDGER_CAPACITY`); pruning raises the baseline over what it forgot, so a forgotten coin cannot return
-as new. **Known residual:** change whose PARENT was pruned would be announced once, which needs more
-than `LEDGER_CAPACITY` coins at one address; a node-side producer that sees spends directly removes it.
+**Assets.** The node's `asset_id` is passed through verbatim, so `$DIG` is named from
+`dig_constants::DIG_ASSET_ID` and any other CAT the node attributed is shown by its own short id —
+never relabelled, and never rendered with another asset's divisor.
 
 **Preference.** `AgentConfig.notifications.funds_received`, defaulting to ON — including for an
 `agent.json` written before the field existed. It is turned off in the Settings tab, and it gates the
-TOAST, never the ledger: detection keeps accounting while notifications are off, so turning them back
+TOAST, never the cursor: the cursor keeps advancing while notifications are off, so turning them back
 on does not replay everything received in between.
 
-**Limitation, stated rather than designed around: nothing is notified while dig-app is not running.**
-Detection lives in the tray process. A payment that lands while the app is closed is not announced when
-it next starts either — that run's ledger adopts it as history, which is the first row of the table
-above. The wallet surface still shows it. Making a closed app speak would need a node-side notifier.
+**A payment that arrives while dig-app is CLOSED is announced when it next opens.** The node records
+it whenever the node is running, so closing the window delays the toast rather than losing it. What is
+genuinely not covered is an arrival while the NODE is stopped: it is recorded by the catch-up that
+follows, and is an arrival unless that catch-up is the wallet's first (see dig-node's
+`sage::arrivals` arrival baseline). The Settings card states this in the user's words.
 
-**Custody (§908).** Every input is a public bech32m address or a coin id, over a tokenless read.
-Nothing on this path holds, derives or uses a key, and nothing on it can spend.
+**Custody (§908).** The one input is a cursor position, over a token-less read of the node's own
+replica. Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no
+oracle leg — polling it discloses nothing off-machine.
 
 ---
 

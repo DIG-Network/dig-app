@@ -1384,9 +1384,10 @@ mod tray {
     /// The process-wide confirmed-arrival watch (dig_ecosystem#2548).
     ///
     /// A single instance for the same reason the balance poller is one: its interval and its
-    /// in-flight guard have to span repaints, and a per-snapshot watch would read the chain twice a
-    /// second. Every decision about what an arrival IS lives in `dig_app_core::arrivals`, because a
-    /// binary is a test-free zone — this is only where the tick comes from.
+    /// in-flight guard have to span repaints, and a per-snapshot watch would call the node twice a
+    /// second. Every decision about what an arrival IS lives in dig-node's own ledger, and every
+    /// decision about what to SAY lives in `dig_app_core::arrivals` — this is only where the tick
+    /// comes from, because a binary is a test-free zone.
     fn arrival_watch() -> &'static dig_app_core::arrivals::watch::ArrivalWatch {
         static WATCH: std::sync::OnceLock<dig_app_core::arrivals::watch::ArrivalWatch> =
             std::sync::OnceLock::new();
@@ -1466,10 +1467,14 @@ mod tray {
                 Ok(status) => {
                     // The same tick also asks whether money ARRIVED, which is a different question
                     // from what the balance is: a figure that went up says nothing about whether it
-                    // was a payment or the user's own change coming back. The watch owns its own
-                    // interval and does its reading on a worker, so this call never blocks and
-                    // contributes nothing to the view.
-                    arrival_watch().observe(&status.engine, receive_address.as_deref());
+                    // was a payment or the user's own change coming back. dig-node answers that
+                    // question -- it is the only side that can, since telling change from a payment
+                    // needs the SPENT parent coin -- and the watch is a reader of its ledger. It
+                    // takes no address for the same reason: the node's ledger already covers every
+                    // address the wallet watches. The watch owns its own interval and does its
+                    // reading on a worker, so this call never blocks and contributes nothing to the
+                    // view.
+                    arrival_watch().observe(&status.engine);
                     balance_poller().observe(&status.engine, receive_address.as_deref())
                 }
                 // A poisoned lock says nothing about the balance, and "nothing" is not zero.

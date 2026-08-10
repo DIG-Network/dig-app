@@ -1,41 +1,41 @@
-//! Driving [`super::ArrivalLedger`] off the node the app is already talking to.
+//! Reading dig-node's arrival ledger from the tray process.
 //!
 //! Two pieces, mirroring [`crate::wallet::node`]:
 //!
-//! - [`ControlPlaneSource`] — the [`ArrivalSource`] over `control.wallet.coins`, an OPEN read of a
-//!   PUBLIC address. It asks for every asset the wallet holds and refuses to build a
-//!   [`ChainView`] out of an answer that did not prove it was caught up.
+//! - [`ControlPlaneSource`] — the [`ArrivalSource`] over `control.wallet.arrivals`, an OPEN,
+//!   token-less read of the node's own local ledger.
 //! - [`ArrivalWatch`] — the throttle that owns *when* that read happens, so the tray's
-//!   twice-a-second repaint does not become twice-a-second chain reads, and so the seconds-long read
-//!   never runs on the caller's thread.
+//!   twice-a-second repaint does not become twice-a-second node calls, and so the read never runs
+//!   on the caller's thread.
+//!
+//! # Why this is a poll and not a subscription
+//!
+//! The control plane is strictly request→response; it has no server-initiated frame. dig-node does
+//! push a `coin_state` doorbell over `/ws`, but that frame carries no coin id, amount, asset or
+//! height — notifying from it would be announcing something whose amount we do not know. The node's
+//! cursor is monotonic and persisted, so polling it loses nothing: whatever was recorded between two
+//! polls is still there at the next one.
 //!
 //! # The custody boundary (§908)
 //!
-//! Everything here is a chain read of a bech32m address the node already serves without a token. No
-//! key, seed or signature is involved, and nothing on this path can spend.
-//!
-//! # Why the node's push stream is not used yet
-//!
-//! dig-node already pushes a `coin_state` frame over its `/ws` surface when it applies a coin-state
-//! update, but that frame carries no coin id, amount, asset or height — it is a doorbell, not a
-//! claim about money. Notifying from it directly would be announcing something whose amount we do
-//! not know. When dig-node grows a real confirmed funds event, it implements [`ArrivalSource`] (or
-//! feeds one) and nothing above this module changes.
+//! Everything here is a token-less read of the node's own replica. No key, seed, address or
+//! signature is involved, nothing on this path can spend, and there is no oracle leg — polling it
+//! discloses nothing off-machine.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dig_node_control_interface::params::{Asset as WireAsset, WalletCoinsParams};
-use dig_node_control_interface::results::{WalletCoinRecord, WalletCoinsResult};
+use dig_events_protocol::AssetId;
+use dig_node_control_interface::params::WalletArrivalsParams;
+use dig_node_control_interface::results::{WalletArrivalRecord, WalletArrivalsResult};
 
 use crate::control::{self, ControlFailure};
 use crate::engine::EngineState;
 use crate::notify::{self, NativeNotifier};
-use crate::wallet::state::Asset;
 
-use super::{ArrivalSource, ArrivalSourceError, ChainView, ConfirmedCoin};
+use super::{Arrival, ArrivalPage, ArrivalSource, ArrivalSourceError};
 
-/// How long between confirmed-arrival reads.
+/// How long between arrival reads.
 ///
 /// Matched to [`crate::wallet::node::REFRESH_INTERVAL`] on purpose: the balance figure and the
 /// "you were paid" toast describe the same event, and a slower notification than the number it
@@ -44,134 +44,104 @@ pub const WATCH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How long ONE arrival read may take before it is abandoned.
 ///
-/// The same budget as a balance read, for the same measured reason: the node may serve a wallet read
-/// from a public HTTPS chain source, and dig_ecosystem#2325 measured that taking six seconds.
-pub const WATCH_READ_TIMEOUT: Duration = Duration::from_secs(20);
+/// Shorter than the balance budget because this read cannot go to chain: it is a bounded query
+/// against a local SQLite ledger, so a node taking seconds over it is a node in trouble, not a node
+/// waiting on a public HTTPS source.
+pub const WATCH_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Every asset the wallet surface knows about, which is the set an arrival can be denominated in.
-const WATCHED_ASSETS: [Asset; 2] = [Asset::Xch, Asset::Dig];
+/// How many pages one sweep will drain before leaving the rest for the next.
+///
+/// A bound rather than a tuned number: the node clamps its own page size, so this only decides how
+/// long a single sweep may hold its worker thread when a machine reconnects to a node that recorded
+/// a great deal while it was away. What is left over is not lost — the cursor advanced over exactly
+/// what was read, so the next sweep continues from there.
+const MAX_PAGES_PER_SWEEP: usize = 20;
 
-/// Reads confirmed coins for one address from a running dig-node over the loopback control plane.
+/// Reads dig-node's arrival ledger over the loopback control plane.
 pub struct ControlPlaneSource {
     endpoint: String,
     token: Option<String>,
     timeout: Duration,
-    address: String,
 }
 
 impl ControlPlaneSource {
-    /// A source reading `address` from the node at `endpoint`, presenting `token` when there is one.
+    /// A source reading the ledger of the node at `endpoint`, presenting `token` when there is one.
     ///
-    /// `token` is optional because `control.wallet.coins` is an OPEN read: a machine whose control
-    /// token this user cannot read still learns when it was paid.
-    pub fn new(
-        endpoint: impl Into<String>,
-        token: Option<String>,
-        timeout: Duration,
-        address: impl Into<String>,
-    ) -> Self {
+    /// `token` is optional because `control.wallet.arrivals` is an OPEN read: a machine whose
+    /// control token this user cannot read still learns when it was paid.
+    pub fn new(endpoint: impl Into<String>, token: Option<String>, timeout: Duration) -> Self {
         Self {
             endpoint: endpoint.into(),
             token,
             timeout,
-            address: address.into(),
         }
-    }
-
-    /// One `control.wallet.coins` call, for one asset.
-    fn read(&self, asset: Asset) -> Result<WalletCoinsResult, ControlFailure> {
-        let params = WalletCoinsParams {
-            address: self.address.clone(),
-            asset: match asset {
-                Asset::Xch => WireAsset::Xch,
-                Asset::Dig => WireAsset::Dig,
-            },
-        };
-        control::call_control_result(&self.endpoint, &params, self.token.as_deref(), self.timeout)
     }
 }
 
 impl ArrivalSource for ControlPlaneSource {
-    /// The confirmed coins at this address across every watched asset.
-    ///
-    /// The per-asset answers are combined at the LOWEST peak either of them reported, because the
-    /// view can only honestly claim to reflect the height BOTH reads had reached. A single asset
-    /// answering from a staler view would otherwise raise the whole view's baseline over coins the
-    /// other read has not seen yet.
-    fn view(&self) -> Result<ChainView, ArrivalSourceError> {
-        let mut coins = Vec::new();
-        let mut peak: Option<u32> = None;
-        let mut synced = true;
-        for asset in WATCHED_ASSETS {
-            let answer = self
-                .read(asset)
-                .map_err(|failure| ArrivalSourceError::Unavailable(failure.to_string()))?;
-            synced &= answer.synced;
-            peak = match (peak, answer.peak_height) {
-                (Some(current), Some(reported)) => Some(current.min(reported)),
-                (None, reported) => reported,
-                (current, None) => {
-                    // A missing peak on ANY leg makes the combined view unheighted: null is
-                    // unknown, never zero, and `ChainView::of_read` will refuse it.
-                    let _ = current;
-                    None
-                }
-            };
-            coins.extend(
-                answer
-                    .coins
-                    .iter()
-                    .filter_map(|record| confirmed(record, asset)),
-            );
-        }
-        ChainView::of_read(synced, peak, coins).ok_or(ArrivalSourceError::NotConfirmable)
+    fn arrivals_since(&self, after_seq: u64) -> Result<ArrivalPage, ArrivalSourceError> {
+        let params = WalletArrivalsParams {
+            after_seq,
+            limit: None,
+        };
+        let answer: WalletArrivalsResult = control::call_control_result(
+            &self.endpoint,
+            &params,
+            self.token.as_deref(),
+            self.timeout,
+        )
+        .map_err(|failure: ControlFailure| ArrivalSourceError::Unavailable(failure.to_string()))?;
+
+        let arrivals = answer
+            .arrivals
+            .iter()
+            .map(arrival_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ArrivalPage {
+            arrivals,
+            cursor: answer.cursor,
+            latest: answer.latest,
+        })
     }
 }
 
-/// One of the node's coin records as a [`ConfirmedCoin`], or `None` when this read may not carry it.
+/// One of the node's ledger rows as an [`Arrival`].
 ///
-/// Three refusals, and each drops a different kind of untrue claim:
-///
-/// - **no `created_height`** — a coin the node has only SEEN. This is the mempool guard in its
-///   structural form: a sighting that later reorgs away must never have been announced as money.
-/// - **a `spent_height`** — money that has already left again, which is not something to tell
-///   somebody they received.
-/// - **an asset other than the one asked for** — the request named ONE asset, so a record under any
-///   other is not an answer to the question that was put. Taking the asset from the RECORD rather
-///   than from the call is what makes that checkable at all; assuming the request's asset would
-///   silently relabel whatever came back, and a $DIG figure rendered with the XCH divisor is wrong
-///   by a factor of a billion.
-fn confirmed(record: &WalletCoinRecord, asked: Asset) -> Option<ConfirmedCoin> {
-    let asset = match record.asset {
-        WireAsset::Xch => Asset::Xch,
-        WireAsset::Dig => Asset::Dig,
-    };
-    match (asset == asked, record.created_height, record.spent_height) {
-        (true, Some(confirmed_height), None) => Some(ConfirmedCoin {
-            coin_id: record.coin_id.clone(),
-            parent_coin_id: record.parent_coin_info.clone(),
-            asset,
-            amount: record.amount,
-            confirmed_height,
-        }),
-        _ => None,
-    }
+/// The only thing that can fail is the amount. The contract carries it as a DECIMAL STRING because
+/// the ledger holds the full `u64` range and a JSON number would round it, so a client has to parse
+/// it — and a value it cannot parse is refused rather than defaulted. A zero or a saturated maximum
+/// standing in for an unreadable figure is a wrong claim about how much money arrived, which is
+/// exactly what this feature must never make.
+fn arrival_from(record: &WalletArrivalRecord) -> Result<Arrival, ArrivalSourceError> {
+    let amount = record.amount.parse::<u64>().map_err(|e| {
+        ArrivalSourceError::Malformed(format!(
+            "arrival {} carries an unreadable amount: {e}",
+            record.seq
+        ))
+    })?;
+    Ok(Arrival {
+        seq: record.seq,
+        coin_id: record.coin_id.clone(),
+        asset_id: record.asset_id.clone().map(AssetId),
+        amount,
+        confirmed_height: record.confirmed_height,
+    })
 }
 
-/// The confirmed-arrival watch: reads no more often than [`WATCH_INTERVAL`], never on the caller's
-/// thread, and draws at most one toast per read.
+/// The arrival watch: reads no more often than [`WATCH_INTERVAL`], never on the caller's thread, and
+/// draws at most one toast per sweep.
 ///
 /// Lives beside the tray's status handle and is poked on every repaint, exactly like
-/// [`crate::wallet::node::NodeBalance`] — and for the same reason: a chain read takes seconds and a
+/// [`crate::wallet::node::NodeBalance`] — and for the same reason: a node call takes time and a
 /// repaint happens twice a second.
 pub struct ArrivalWatch {
     state: Arc<Mutex<WatchState>>,
     refresh: Duration,
     timeout: Duration,
-    /// Where the durable ledger lives. `None` on a host whose brand directory cannot be resolved,
-    /// which disables the watch entirely — a ledger that cannot be persisted cannot promise that a
+    /// Where the durable cursor lives. `None` on a host whose brand directory cannot be resolved,
+    /// which disables the watch entirely — a cursor that cannot be persisted cannot promise that a
     /// restart will not re-announce, and an un-keepable promise is worse than a missing toast.
-    ledger_path: Option<std::path::PathBuf>,
+    cursor_path: Option<std::path::PathBuf>,
     /// Where the user's preference lives. Read on the worker thread at read time, not per repaint,
     /// and not cached: turning notifications off in Settings takes effect on the next read rather
     /// than at the next restart, and this file is touched six times a minute at most.
@@ -183,11 +153,11 @@ pub struct ArrivalWatch {
 /// What the watch knows between reads.
 #[derive(Default)]
 struct WatchState {
-    /// When the last read finished, whichever address it was for.
+    /// When the last read finished.
     last_read: Option<Instant>,
-    /// The address a worker is currently reading for, if any — the de-duplication that keeps a
-    /// repaint during a multi-second read from starting a second one.
-    in_flight: Option<String>,
+    /// Whether a worker is currently reading — the de-duplication that keeps a repaint during a
+    /// read from starting a second one.
+    in_flight: bool,
 }
 
 impl ArrivalWatch {
@@ -195,48 +165,51 @@ impl ArrivalWatch {
     #[cfg(test)]
     fn with_token_reader(
         refresh: Duration,
-        ledger_path: Option<std::path::PathBuf>,
+        cursor_path: Option<std::path::PathBuf>,
         read_token: fn() -> Option<String>,
     ) -> Self {
         Self {
             read_token,
-            ..Self::new(refresh, Duration::from_secs(5), ledger_path, None)
+            ..Self::new(refresh, Duration::from_secs(5), cursor_path, None)
         }
     }
 
     /// A watch reading at most every `refresh`, allowing `timeout` per read, persisting to
-    /// `ledger_path` and honouring the preference in `config_path`.
+    /// `cursor_path` and honouring the preference in `config_path`.
     pub fn new(
         refresh: Duration,
         timeout: Duration,
-        ledger_path: Option<std::path::PathBuf>,
+        cursor_path: Option<std::path::PathBuf>,
         config_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(WatchState::default())),
             refresh,
             timeout,
-            ledger_path,
+            cursor_path,
             config_path,
             read_token: control::load_control_token,
         }
     }
 
-    /// The watch for this host, resolving its ledger beside `agent.json`.
+    /// The watch for this host, resolving its cursor beside `agent.json`.
     pub fn for_host() -> Self {
         let config_path = crate::environment::AppEnvironment::from_host()
             .config_path()
             .ok();
-        let ledger_path = config_path
+        let cursor_path = config_path
             .as_ref()
             .and_then(|config| config.parent().map(super::store::path_in));
-        Self::new(WATCH_INTERVAL, WATCH_READ_TIMEOUT, ledger_path, config_path)
+        Self::new(WATCH_INTERVAL, WATCH_READ_TIMEOUT, cursor_path, config_path)
     }
 
-    /// Notice, at most every `refresh`, whether money has arrived at `address` — and toast if it
-    /// has and the user wants to know. **Never blocks.**
-    pub fn observe(&self, link: &EngineState, address: Option<&str>) {
-        let (Some(address), Some(ledger_path)) = (address, self.ledger_path.clone()) else {
+    /// Notice, at most every `refresh`, whether the node has recorded money arriving — and toast if
+    /// it has and the user wants to know. **Never blocks.**
+    ///
+    /// Takes no address: the node's ledger already covers every address the wallet watches, which is
+    /// strictly more than the one address the tray happens to be displaying.
+    pub fn observe(&self, link: &EngineState) {
+        let Some(cursor_path) = self.cursor_path.clone() else {
             return;
         };
         let EngineState::Connected { endpoint, .. } = link else {
@@ -249,26 +222,25 @@ impl ArrivalWatch {
                 return;
             }
         }
-        if state.in_flight.is_some() {
+        if state.in_flight {
             return;
         }
-        state.in_flight = Some(address.to_string());
+        state.in_flight = true;
         drop(state);
 
-        let source =
-            ControlPlaneSource::new(endpoint.clone(), (self.read_token)(), self.timeout, address);
+        let source = ControlPlaneSource::new(endpoint.clone(), (self.read_token)(), self.timeout);
         let shared = Arc::clone(&self.state);
         let config_path = self.config_path.clone();
         std::thread::spawn(move || {
             sweep(
                 &source,
-                &ledger_path,
+                &cursor_path,
                 notifications_wanted(config_path.as_deref()),
                 notify::native_notifier().as_ref(),
             );
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
             state.last_read = Some(Instant::now());
-            state.in_flight = None;
+            state.in_flight = false;
         });
     }
 
@@ -296,47 +268,60 @@ fn notifications_wanted(config_path: Option<&std::path::Path>) -> bool {
     }
 }
 
-/// One read → account → announce cycle, with no threading and no clock.
+/// One drain → account → announce cycle, with no threading and no clock.
 ///
-/// Split out so the whole behaviour is testable against a scripted source and a recording notifier:
-/// the ledger is loaded, the view is accounted for, the ledger is written back, and only then is
-/// anything shown. Writing BEFORE showing is deliberate — a crash between the two costs a toast,
-/// while the other order costs a duplicate announcement on the next run.
+/// Split out so the whole behaviour is testable against a scripted source and a recording notifier.
+/// The cursor is loaded, pages are drained until the node has nothing more (or [`MAX_PAGES_PER_SWEEP`]
+/// is reached), the cursor is written back, and only then is anything shown.
+///
+/// # Two orderings that are deliberate
+///
+/// **The cursor is saved BEFORE the toast is drawn.** A crash between the two costs a toast; the
+/// other order costs a duplicate announcement on the next run, and a duplicate claim about money is
+/// worse than a missing one.
+///
+/// **A failed save abandons the whole sweep.** Announcing arrivals whose cursor did not persist
+/// means announcing them again next time, so nothing is said at all.
 pub fn sweep(
     source: &dyn ArrivalSource,
-    ledger_path: &std::path::Path,
+    cursor_path: &std::path::Path,
     notifications_enabled: bool,
     notifier: &dyn NativeNotifier,
 ) {
-    let view = match source.view() {
-        Ok(view) => view,
-        // Not an error a surface reports: a node that is still catching up, or briefly unreachable,
-        // is the ordinary case, and the honest response is to say nothing about money.
-        Err(e) => {
-            tracing::debug!(reason = %e, "no confirmed chain view; nothing announced");
-            return;
-        }
-    };
+    let mut cursor = super::store::load(cursor_path);
+    let mut announceable: Vec<Arrival> = Vec::new();
 
-    let mut ledger = super::store::load(ledger_path);
-    let arrivals = ledger.observe(&view);
-    if let Err(e) = super::store::save(ledger_path, &ledger) {
-        // The ledger did not persist, so the next run may re-announce. Say nothing NOW rather than
-        // risk saying it twice: a duplicate claim about money is worse than a missing one.
-        tracing::warn!(error = %e, "the arrival ledger could not be saved; nothing announced");
+    for _ in 0..MAX_PAGES_PER_SWEEP {
+        let page = match source.arrivals_since(cursor.position().unwrap_or(0)) {
+            Ok(page) => page,
+            // Not an error a surface reports: a node that is briefly unreachable is the ordinary
+            // case, and the honest response is to say nothing about money. Whatever was already
+            // drained stays in hand — its cursor is saved below, so it is neither lost nor repeated.
+            Err(e) => {
+                tracing::debug!(reason = %e, "the node's arrival ledger could not be read");
+                break;
+            }
+        };
+        let empty = page.arrivals.is_empty();
+        announceable.extend(cursor.advance(&page));
+        if empty {
+            break;
+        }
+    }
+
+    if let Err(e) = super::store::save(cursor_path, &cursor) {
+        tracing::warn!(error = %e, "the arrival cursor could not be saved; nothing announced");
         return;
     }
-    notify::announce_arrivals(&arrivals, notifications_enabled, notifier);
+    notify::announce_arrivals(&announceable, notifications_enabled, notifier);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::notify::Notification;
-    use crate::test_support::node::{CoinsReply, FakeCoin, FakeNode};
+    use crate::test_support::node::{ArrivalsReply, FakeArrivalPage, FakeNode};
     use std::sync::Mutex as StdMutex;
-
-    const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
 
     /// A notifier that records what it was asked to show.
     #[derive(Default)]
@@ -352,202 +337,164 @@ mod tests {
         }
     }
 
-    /// A source that hands out a scripted sequence of answers, one per call.
-    struct Scripted(StdMutex<std::collections::VecDeque<Result<ChainView, ArrivalSourceError>>>);
-    impl Scripted {
-        fn of(answers: Vec<Result<ChainView, ArrivalSourceError>>) -> Self {
-            Self(StdMutex::new(answers.into()))
+    /// A source that answers from a scripted ledger, honouring `after_seq` the way the node does.
+    ///
+    /// Deliberately NOT a list of canned pages: the property under test is what the client ASKS
+    /// for next, and a source that ignored `after_seq` would answer identically to a correct node
+    /// however wrongly the client resumed.
+    struct Ledger {
+        rows: Vec<Arrival>,
+        page_size: usize,
+        asked: StdMutex<Vec<u64>>,
+    }
+
+    impl Ledger {
+        fn of(seqs: &[u64], page_size: usize) -> Self {
+            Self {
+                rows: seqs
+                    .iter()
+                    .map(|seq| Arrival {
+                        seq: *seq,
+                        coin_id: format!("{seq:064x}"),
+                        asset_id: None,
+                        amount: 1_000_000_000_000,
+                        confirmed_height: 5_412_000 + *seq as u32,
+                    })
+                    .collect(),
+                page_size,
+                asked: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<u64> {
+            self.asked.lock().unwrap().clone()
         }
     }
-    impl ArrivalSource for Scripted {
-        fn view(&self) -> Result<ChainView, ArrivalSourceError> {
-            self.0
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(Err(ArrivalSourceError::NotConfirmable))
+
+    impl ArrivalSource for Ledger {
+        fn arrivals_since(&self, after_seq: u64) -> Result<ArrivalPage, ArrivalSourceError> {
+            self.asked.lock().unwrap().push(after_seq);
+            let arrivals: Vec<Arrival> = self
+                .rows
+                .iter()
+                .filter(|a| a.seq > after_seq)
+                .take(self.page_size)
+                .cloned()
+                .collect();
+            Ok(ArrivalPage {
+                cursor: arrivals.last().map_or(after_seq, |a| a.seq),
+                latest: self.rows.last().map_or(0, |a| a.seq),
+                arrivals,
+            })
         }
     }
 
-    fn coin(id: &str, parent: &str, height: u32, asset: Asset, amount: u64) -> ConfirmedCoin {
-        ConfirmedCoin {
-            coin_id: id.to_string(),
-            parent_coin_id: parent.to_string(),
-            asset,
-            amount,
-            confirmed_height: height,
+    /// A source that always refuses.
+    struct Unreachable;
+    impl ArrivalSource for Unreachable {
+        fn arrivals_since(&self, _after_seq: u64) -> Result<ArrivalPage, ArrivalSourceError> {
+            Err(ArrivalSourceError::Unavailable("no node".into()))
         }
     }
 
-    fn view(peak: u32, coins: Vec<ConfirmedCoin>) -> ChainView {
-        ChainView::of_read(true, Some(peak), coins).expect("synced with a peak")
-    }
+    // ----------------------------------------------------------------------------------------
+    // THE DEFECT THIS ARCHITECTURE REMOVES (dig_ecosystem#2548)
+    // ----------------------------------------------------------------------------------------
 
-    fn source_for(node: &FakeNode) -> ControlPlaneSource {
-        ControlPlaneSource::new(
-            node.endpoint(),
-            Some(FakeNode::TOKEN.to_string()),
-            Duration::from_secs(5),
-            ADDRESS,
-        )
-    }
-
-    // ------------------------------------------------------------------------------------------
-    // The source, over a real socket
-    // ------------------------------------------------------------------------------------------
-
-    /// **A confirmed, unspent coin becomes a `ConfirmedCoin` carrying its parent and its height.**
+    /// **dig-app has no change predicate of its own, so a change coin whose parent it never saw
+    /// cannot be announced.**
     ///
-    /// Over a real loopback socket in the real 0.6.0 wire shape, so a client that dropped the parent
-    /// (the only thing separating a payment from change) fails here.
-    #[test]
-    fn a_confirmed_coin_arrives_with_its_parent_and_height() {
-        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![FakeCoin::confirmed("xch", 7)]));
-        let view = source_for(&node).view().expect("a confirmed view");
-        let coin = view
-            .coins()
-            .iter()
-            .find(|c| c.amount == 7)
-            .expect("the coin travelled");
-        assert_eq!(coin.coin_id, format!("{:064x}", 7));
-        assert_eq!(coin.parent_coin_id, format!("{:064x}", 8));
-        assert_eq!(coin.confirmed_height, 5_412_000);
-    }
-
-    /// **A coin the node has only SEEN is not in the view, and neither is one already spent.**
+    /// The defect: the app used to decide "is this the user's own change?" from
+    /// `control.wallet.coins`, which lists UNSPENT coins only. A parent is spent the instant it
+    /// produces change, so the only way the app could recognise one was to have watched it go by
+    /// while running. Close the app, send money from any client, reopen — and the change coin came
+    /// back with a parent nobody here had ever recorded. A verifier drove the real ledger through
+    /// that sequence and got `Received 8.999 XCH` for a transaction in which the user SENT money.
     ///
-    /// The mempool guard at the wire boundary. The confirmed coin alongside them is the control: it
-    /// proves the read worked and that the two were dropped by their heights rather than by the
-    /// whole answer failing.
+    /// The fixture is that sequence with the app's memory made deliberately empty, which is the
+    /// state a fresh process is in and the state the old implementation could not survive: the node
+    /// reports one arrival (the stranger's payment) and does NOT report the change coin, because the
+    /// node answered the question from a table that holds spent coins. The app announces exactly
+    /// what it was given. There is no code path here that could announce anything else, which is
+    /// the point — a test cannot catch a predicate that no longer exists, so what it pins is that
+    /// the client is a pass-through and never inflates the node's answer.
     #[test]
-    fn an_unconfirmed_or_spent_coin_never_reaches_the_view() {
-        let mempool = FakeCoin {
-            created_height: None,
-            ..FakeCoin::confirmed("xch", 11)
-        };
-        let spent = FakeCoin {
-            spent_height: Some(5_412_005),
-            ..FakeCoin::confirmed("xch", 12)
-        };
-        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![
-            mempool,
-            spent,
-            FakeCoin::confirmed("xch", 13),
-        ]));
-        let view = source_for(&node).view().expect("a confirmed view");
-        let amounts: Vec<u64> = view.coins().iter().map(|c| c.amount).collect();
-        assert_eq!(
-            amounts,
-            vec![13],
-            "a mempool sighting or a spent coin reached the notification path"
-        );
-    }
-
-    /// **A coin listed under an asset this call did not ask for is not taken.**
-    ///
-    /// The fixture answers every asset leg with the same body, which is exactly the shape that
-    /// catches a client labelling coins by the asset it REQUESTED: such a client would take the XCH
-    /// coin twice, once relabelled `Dig`, and render one of the two with the wrong divisor.
-    #[test]
-    fn a_coin_of_another_asset_is_not_relabelled_as_the_one_that_was_asked_for() {
-        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![FakeCoin::confirmed("xch", 31)]));
-        let view = source_for(&node).view().expect("a confirmed view");
-        assert_eq!(
-            view.coins().len(),
-            1,
-            "the XCH coin was counted under both assets"
-        );
-        assert_eq!(view.coins()[0].asset, Asset::Xch);
-    }
-
-    /// **A node that says its answer is stale produces no view at all.**
-    #[test]
-    fn an_unsynced_answer_is_not_confirmable() {
-        let node = FakeNode::serving_coins(CoinsReply::CoinsAt {
-            coins: vec![FakeCoin::confirmed("xch", 21)],
-            synced: false,
-            peak_height: Some(5_412_009),
-        });
-        assert_eq!(
-            source_for(&node).view(),
-            Err(ArrivalSourceError::NotConfirmable)
-        );
-    }
-
-    /// **A node reporting no peak height produces no view — null is unknown, never zero.**
-    #[test]
-    fn an_answer_with_no_peak_height_is_not_confirmable() {
-        let node = FakeNode::serving_coins(CoinsReply::CoinsAt {
-            coins: vec![FakeCoin::confirmed("xch", 22)],
-            synced: true,
-            peak_height: None,
-        });
-        assert_eq!(
-            source_for(&node).view(),
-            Err(ArrivalSourceError::NotConfirmable)
-        );
-    }
-
-    /// **A refusal is an error, never an empty view** — an empty view would raise a baseline over
-    /// coins nobody read, and silently swallow the next real arrival.
-    #[test]
-    fn a_refused_read_is_an_error_not_an_empty_view() {
-        let node = FakeNode::serving_coins(CoinsReply::rejected(-32004, "WALLET_READ_FAILED"));
-        assert!(matches!(
-            source_for(&node).view(),
-            Err(ArrivalSourceError::Unavailable(_))
-        ));
-    }
-
-    // ------------------------------------------------------------------------------------------
-    // The sweep — the whole cycle, end to end
-    // ------------------------------------------------------------------------------------------
-
-    /// **The whole cycle: adopt in silence, then announce the next payment, once.**
-    ///
-    /// This is the four traps composed, driven through the same function the tray runs: the first
-    /// sweep adopts a wallet with history and shows nothing; the second announces exactly the new
-    /// coin, with its own amount and asset; the third — the same view again, as a repeat poll or a
-    /// re-scan would present it — shows nothing more.
-    #[test]
-    fn the_sweep_adopts_in_silence_then_announces_the_next_payment_once() {
+    fn a_change_coin_the_node_did_not_report_is_never_announced() {
         let dir = tempfile::tempdir().unwrap();
         let path = super::super::store::path_in(dir.path());
         let notifier = Recorder::default();
 
-        let history = view(
-            100,
-            vec![
-                coin("old-a", "s", 10, Asset::Xch, 1_000_000_000_000),
-                coin("old-b", "s", 20, Asset::Xch, 2_000_000_000_000),
-            ],
-        );
-        let paid = view(
-            200,
-            vec![
-                coin("old-a", "s", 10, Asset::Xch, 1_000_000_000_000),
-                coin("old-b", "s", 20, Asset::Xch, 2_000_000_000_000),
-                coin("paid", "stranger", 150, Asset::Dig, 2_500),
-            ],
-        );
-        let source = Scripted::of(vec![Ok(history), Ok(paid.clone()), Ok(paid)]);
+        // A fresh process: no cursor, no memory of any coin. It adopts the node's head in silence.
+        let before = Ledger::of(&[1], 50);
+        sweep(&before, &path, true, &notifier);
+        assert!(notifier.shown().is_empty(), "the adoption announced");
 
-        sweep(&source, &path, true, &notifier);
+        // The user now SENDS 1 XCH out of a 9 XCH coin from another client, and a stranger pays
+        // them 0.5 XCH. The node records ONE arrival: the stranger's. The 8.999 XCH of change is
+        // absent, because the node recognised the spent parent as its own.
+        let after = Ledger {
+            rows: vec![
+                Arrival {
+                    seq: 1,
+                    coin_id: "01".repeat(32),
+                    asset_id: None,
+                    amount: 9_000_000_000_000,
+                    confirmed_height: 5_412_001,
+                },
+                Arrival {
+                    seq: 2,
+                    coin_id: "02".repeat(32),
+                    asset_id: None,
+                    amount: 500_000_000_000,
+                    confirmed_height: 5_412_100,
+                },
+            ],
+            page_size: 50,
+            asked: StdMutex::new(Vec::new()),
+        };
+        sweep(&after, &path, true, &notifier);
+
+        let shown = notifier.shown();
+        assert_eq!(shown.len(), 1, "expected one toast, got {shown:?}");
+        assert_eq!(
+            shown[0].body, "Received 0.5 XCH",
+            "the user's own change was reported as money received"
+        );
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // The sweep
+    // ----------------------------------------------------------------------------------------
+
+    /// **The first sweep adopts the node's ledger in silence; the next payment is announced once.**
+    ///
+    /// The fixture is a node that has been running long before dig-app was installed — three
+    /// recorded arrivals — so a client that announced what it was handed would toast three times on
+    /// first launch.
+    #[test]
+    fn the_first_sweep_adopts_then_the_next_payment_is_announced_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = super::super::store::path_in(dir.path());
+        let notifier = Recorder::default();
+
+        sweep(&Ledger::of(&[1, 2, 3], 50), &path, true, &notifier);
         assert!(
             notifier.shown().is_empty(),
             "the first sweep announced history: {:?}",
             notifier.shown()
         );
 
-        sweep(&source, &path, true, &notifier);
+        let paid = Ledger::of(&[1, 2, 3, 4], 50);
+        sweep(&paid, &path, true, &notifier);
+        assert_eq!(notifier.shown().len(), 1, "the payment was not announced");
         assert_eq!(
-            notifier.shown().len(),
-            1,
-            "the payment was not announced once"
+            paid.asked(),
+            vec![3, 4],
+            "the client must resume from its cursor, then confirm the ledger is drained"
         );
-        assert_eq!(notifier.shown()[0].body, "Received 2.5 $DIG");
 
-        sweep(&source, &path, true, &notifier);
+        // A repeat poll against an unchanged ledger.
+        sweep(&Ledger::of(&[1, 2, 3, 4], 50), &path, true, &notifier);
         assert_eq!(
             notifier.shown().len(),
             1,
@@ -555,52 +502,86 @@ mod tests {
         );
     }
 
-    /// **With notifications off nothing is drawn, and the ledger still advances.**
+    /// **A backlog spanning several pages is drained, and every arrival in it is announced once.**
     ///
-    /// The second half is the one a naive off-switch gets wrong: gating the DETECTION rather than
-    /// the toast means turning notifications back on announces everything received in between. The
-    /// control at the end proves the switch, and not the fixture, is what kept it quiet.
+    /// The page size is deliberately smaller than the backlog, because a single-page fixture cannot
+    /// tell a client that drains from one that reads one page and forgets the rest — both would
+    /// look correct. Each page must ALSO be asked for from the previous page's last row, which is
+    /// what `asked` pins: a client resuming from `latest` would ask `[0, 9, 9, …]` and skip rows.
     #[test]
-    fn turning_notifications_off_silences_the_toast_without_stalling_the_ledger() {
+    fn a_backlog_larger_than_one_page_is_drained_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let path = super::super::store::path_in(dir.path());
         let notifier = Recorder::default();
 
-        let empty = view(100, vec![]);
-        let while_off = view(200, vec![coin("quiet", "stranger", 150, Asset::Xch, 1)]);
-        let after_on = view(
-            300,
-            vec![
-                coin("quiet", "stranger", 150, Asset::Xch, 1),
-                coin("loud", "stranger", 250, Asset::Xch, 1_000_000_000_000),
-            ],
-        );
-        let source = Scripted::of(vec![Ok(empty), Ok(while_off), Ok(after_on)]);
+        sweep(&Ledger::of(&[1], 2), &path, true, &notifier);
 
-        sweep(&source, &path, true, &notifier); // adopt
-        sweep(&source, &path, false, &notifier); // arrives while the switch is off
+        let backlog = Ledger::of(&[1, 2, 3, 4, 5, 6, 7], 2);
+        sweep(&backlog, &path, true, &notifier);
+        assert_eq!(
+            backlog.asked(),
+            vec![1, 3, 5, 7],
+            "the pages were not walked from the last row of the previous one"
+        );
+        let shown = notifier.shown();
+        assert_eq!(shown.len(), 1, "one sweep is one toast");
+        assert!(
+            shown[0].body.contains("6 payments"),
+            "the backlog was not fully drained: {}",
+            shown[0].body
+        );
+    }
+
+    /// **With notifications off nothing is drawn, and the cursor still advances.**
+    ///
+    /// The second half is the one a naive off-switch gets wrong: gating the READ rather than the
+    /// toast means turning notifications back on announces everything received in between. The
+    /// control at the end proves the switch, and not the fixture, is what kept it quiet.
+    #[test]
+    fn turning_notifications_off_silences_the_toast_without_stalling_the_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = super::super::store::path_in(dir.path());
+        let notifier = Recorder::default();
+
+        sweep(&Ledger::of(&[1], 50), &path, true, &notifier); // adopt
+        sweep(&Ledger::of(&[1, 2], 50), &path, false, &notifier); // arrives while off
         assert!(
             notifier.shown().is_empty(),
             "a toast was drawn with the switch off"
         );
 
-        sweep(&source, &path, true, &notifier); // switch back on
+        sweep(&Ledger::of(&[1, 2, 3], 50), &path, true, &notifier);
         let shown = notifier.shown();
         assert_eq!(
             shown.len(),
             1,
             "turning notifications back on replayed what happened while they were off"
         );
+        assert!(
+            !shown[0].body.contains("2 payments"),
+            "the arrival from the silent window was replayed: {}",
+            shown[0].body
+        );
+    }
+
+    /// **A node that cannot answer changes nothing** — no toast, and no adopted cursor that would
+    /// swallow the next real arrival.
+    #[test]
+    fn a_node_that_cannot_answer_leaves_no_trace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = super::super::store::path_in(dir.path());
+        let notifier = Recorder::default();
+
+        sweep(&Unreachable, &path, true, &notifier);
+        assert!(notifier.shown().is_empty());
         assert_eq!(
-            shown[0].body, "Received 1 XCH",
-            "the wrong coin was announced"
+            super::super::store::load(&path).position(),
+            None,
+            "an unanswerable read adopted a position nobody measured"
         );
     }
 
     /// **The preference is read from the file, both ways, and an absent file means ON.**
-    ///
-    /// The default matters as much as the read: a machine with no `agent.json` yet is a fresh
-    /// install, and a fresh install must get the feature rather than silently not have it.
     #[test]
     fn the_preference_comes_from_the_config_file() {
         use crate::config::AgentConfig;
@@ -627,9 +608,102 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------------------------------
+    // ----------------------------------------------------------------------------------------
+    // The source, over a real socket
+    // ----------------------------------------------------------------------------------------
+
+    fn source_for(node: &FakeNode) -> ControlPlaneSource {
+        ControlPlaneSource::new(
+            node.endpoint(),
+            Some(FakeNode::TOKEN.to_string()),
+            Duration::from_secs(5),
+        )
+    }
+
+    /// **A ledger row survives the real wire with its position, amount and asset intact.**
+    ///
+    /// Over a loopback socket in the node's own envelope. The amount is beyond `f64`'s exact-integer
+    /// range on purpose: it is carried as a decimal string precisely because a JSON number would
+    /// round it, and a client that parsed it as a float would report a different figure than the one
+    /// that arrived.
+    #[test]
+    fn an_arrival_crosses_the_wire_with_its_full_amount_and_asset() {
+        let node = FakeNode::serving_arrivals(ArrivalsReply::Pages(vec![FakeArrivalPage {
+            rows: vec![(7, u64::MAX, None), (8, 2_500, Some("a406d3".to_string()))],
+            latest: 9,
+        }]));
+        let page = source_for(&node).arrivals_since(6).expect("a page");
+
+        assert_eq!(page.cursor, 8, "the cursor is the last row served");
+        assert_eq!(page.latest, 9, "the ledger head must not be the cursor");
+        assert_eq!(page.arrivals[0].amount, u64::MAX);
+        assert_eq!(page.arrivals[0].asset_id, None);
+        assert_eq!(
+            page.arrivals[1].asset_id,
+            Some(AssetId("a406d3".to_string()))
+        );
+        assert_eq!(page.arrivals[1].confirmed_height, 5_412_008);
+    }
+
+    /// **The client asks for exactly the position it holds, on the wire.**
+    ///
+    /// Read from the request the fake actually received, so a client that sent a hard-coded `0` —
+    /// which would replay the ledger on every poll — fails here rather than being rescued by a
+    /// tolerant fixture.
+    #[test]
+    fn the_requested_cursor_position_travels_in_the_request() {
+        let node = FakeNode::serving_arrivals(ArrivalsReply::Pages(vec![FakeArrivalPage::of(&[])]));
+        let _ = source_for(&node).arrivals_since(41);
+        assert!(
+            node.received().contains("\"after_seq\":41"),
+            "the cursor did not reach the wire: {}",
+            node.received()
+        );
+    }
+
+    /// **A refused read is an error, never an empty page** — an empty page would adopt a position
+    /// nobody measured and silently swallow the next real arrival.
+    #[test]
+    fn a_refused_read_is_an_error_not_an_empty_page() {
+        let node =
+            FakeNode::serving_arrivals(ArrivalsReply::rejected(-32004, "WALLET_READ_FAILED"));
+        assert!(matches!(
+            source_for(&node).arrivals_since(0),
+            Err(ArrivalSourceError::Unavailable(_))
+        ));
+    }
+
+    /// **An amount this client cannot read is refused, not defaulted.**
+    ///
+    /// A `0` or a saturated maximum standing in for an unparseable figure would be a wrong claim
+    /// about how much money arrived — the one thing this feature must never make.
+    #[test]
+    fn an_unreadable_amount_is_refused_rather_than_defaulted() {
+        let broken = WalletArrivalRecord {
+            seq: 3,
+            coin_id: "ab".repeat(32),
+            puzzle_hash: "cc".repeat(32),
+            amount: "not-a-number".into(),
+            asset_id: None,
+            confirmed_height: 5_412_000,
+        };
+        assert!(matches!(
+            arrival_from(&broken),
+            Err(ArrivalSourceError::Malformed(_))
+        ));
+
+        // The control: the same record with a readable amount crosses fine, so the assertion above
+        // is about the amount and not about the mapper refusing everything.
+        let good = WalletArrivalRecord {
+            amount: "42".into(),
+            ..broken
+        };
+        assert_eq!(arrival_from(&good).expect("readable").amount, 42);
+    }
+
+    // ----------------------------------------------------------------------------------------
     // The throttle
-    // ------------------------------------------------------------------------------------------
+    // ----------------------------------------------------------------------------------------
 
     fn connected_to(node: &FakeNode) -> EngineState {
         EngineState::Connected {
@@ -653,104 +727,70 @@ mod tests {
         false
     }
 
-    /// **A repaint does not become a chain read**: the cadence is the watch's, not the caller's.
+    /// **A repaint does not become a node call**: the cadence is the watch's, not the caller's.
     ///
     /// Counted at the SERVER, so this is what actually went out on the wire rather than the client's
-    /// account of it. The wallet holds two assets, so ONE sweep is two calls — the property is that a
-    /// second `observe` inside the interval adds none.
+    /// account of it.
     #[test]
     fn a_second_observe_inside_the_interval_does_not_read_again() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = super::super::store::path_in(dir.path());
-        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![FakeCoin::confirmed("xch", 41)]));
+        let cursor = super::super::store::path_in(dir.path());
+        let node = FakeNode::serving_arrivals(ArrivalsReply::Pages(vec![FakeArrivalPage::of(&[])]));
         let link = connected_to(&node);
         let watch = ArrivalWatch::with_token_reader(
             Duration::from_secs(600),
-            Some(ledger.clone()),
+            Some(cursor.clone()),
             no_token,
         );
 
-        watch.observe(&link, Some(ADDRESS));
-        assert!(settled(&ledger), "the first sweep never finished");
+        watch.observe(&link);
+        assert!(settled(&cursor), "the first sweep never finished");
         let after_first = node.request_count();
-        assert_eq!(
-            after_first,
-            WATCHED_ASSETS.len(),
-            "one sweep asks once per asset"
-        );
+        assert_eq!(after_first, 1, "an empty ledger is one call");
 
         for _ in 0..5 {
-            watch.observe(&link, Some(ADDRESS));
+            watch.observe(&link);
         }
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(
             node.request_count(),
             after_first,
-            "repaints inside the interval turned into chain reads"
+            "repaints inside the interval turned into node calls"
         );
     }
 
-    /// **Nothing is read without a node or without an address.**
-    ///
-    /// Both are states the tray is routinely in — a locked account has no address, and a stopped node
-    /// has no endpoint — and asking anyway would be a read against a node that is not there.
+    /// **Nothing is read without a node.** A stopped node has no endpoint, and asking anyway would
+    /// be a call against something that is not there.
     #[test]
-    fn a_watch_with_no_node_or_no_address_reads_nothing() {
+    fn a_watch_with_no_node_reads_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = super::super::store::path_in(dir.path());
-        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![]));
+        let cursor = super::super::store::path_in(dir.path());
         let watch = ArrivalWatch::with_token_reader(
             Duration::from_millis(1),
-            Some(ledger.clone()),
+            Some(cursor.clone()),
             no_token,
         );
 
-        watch.observe(
-            &EngineState::Disconnected {
-                reason: "no node".to_string(),
-            },
-            Some(ADDRESS),
-        );
-        watch.observe(&connected_to(&node), None);
+        watch.observe(&EngineState::Disconnected {
+            reason: "no node".to_string(),
+        });
         std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(
-            node.request_count(),
-            0,
-            "a read went out with nothing to read"
-        );
         assert!(
-            !ledger.exists(),
-            "a ledger was written without any chain read"
+            !cursor.exists(),
+            "a cursor was written without any node call"
         );
     }
 
     /// **A watch with nowhere to persist reads nothing at all.**
     ///
-    /// A ledger that cannot be written cannot promise a restart will not re-announce, and an
+    /// A cursor that cannot be written cannot promise a restart will not re-announce, and an
     /// un-keepable promise about somebody's money is worse than a missing toast.
     #[test]
     fn a_watch_that_cannot_persist_does_not_read() {
-        let node = FakeNode::serving_coins(CoinsReply::Coins(vec![]));
+        let node = FakeNode::serving_arrivals(ArrivalsReply::Pages(vec![FakeArrivalPage::of(&[])]));
         let watch = ArrivalWatch::with_token_reader(Duration::from_millis(1), None, no_token);
-        watch.observe(&connected_to(&node), Some(ADDRESS));
+        watch.observe(&connected_to(&node));
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(node.request_count(), 0);
-    }
-
-    /// **A source that cannot answer changes nothing** — no toast, and no baseline written that
-    /// would swallow the next real arrival.
-    #[test]
-    fn a_source_that_cannot_answer_leaves_no_trace() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = super::super::store::path_in(dir.path());
-        let notifier = Recorder::default();
-        let source = Scripted::of(vec![Err(ArrivalSourceError::NotConfirmable)]);
-
-        sweep(&source, &path, true, &notifier);
-        assert!(notifier.shown().is_empty());
-        assert!(
-            !path.exists(),
-            "an unanswerable read wrote a ledger, which would adopt a baseline nobody measured"
-        );
     }
 }
