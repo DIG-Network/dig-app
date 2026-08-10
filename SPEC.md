@@ -1534,6 +1534,49 @@ open them.
 a profile; the active slot MUST be re-checked immediately before signing and the spend failed closed
 if it moved.
 
+#### 3.2-m The profile-management surface (normative, dig_ecosystem#2403)
+
+The Account tab carries the account's profile list and its controls. Four controls are specified, and
+one of them is specified as ABSENT.
+
+**The list is a three-state READING, never a `Vec` (MUST).** `profiles::ProfilesReading` separates
+*nobody has read the registry yet* (`Pending`) from *the registry answered and holds nothing*
+(`Known(vec![])`) from *the registry would not load* (`Unknown`). Every production account today
+answers `Known(vec![])`, because nothing can mint — so a surface that collapsed these would state the
+common case about all three. A session that failed to LOAD MUST report `Unknown`, not the empty
+registry it fell back to: an account whose registry will not load may hold several profiles, and
+telling that person they hold none is a claim no read supports.
+
+**Hidden profiles MUST be listed by this surface.** Visibility is a LOCAL preference and the surface
+that sets it is the surface that must be able to unset it. `registry.shown()` is for pickers.
+
+**Creating a profile MUST NOT be offered, and the absence MUST be structural.** No `TrayAction` in
+this shell creates a profile, so "this build cannot create one" is a property of the code rather than
+of an `enabled` flag. `profiles::ProfileCreation` is a FUNCTION of the `MintAvailability` the
+start-up wizard's gate reads (§3.1b) and has no *possible* arm; the surface states which piece is
+missing, in the §3.1b wording — the profile is REQUIRED and creating one is *not available in this
+version*, never "optional".
+
+**Hiding MUST NOT be described as deleting.** A minted profile is a `did:chia:` singleton and a store
+on chain, both permanent. Copy on this surface MUST NOT say delete, remove, erase or destroy, MUST
+state that a hidden profile remains on chain, and MUST leave a way back to it.
+
+**A switch MUST be disclosed BEFORE it is applied, naming both ends.** The receive address, the
+per-profile DEK and the identity signing key all derive at the profile's index, so the disclosure
+names the profile being LEFT as well as the one arrived at — the one being left holds the address the
+person has been handing out. The standing statement is drawn where the choice is made; the
+confirmation repeats it with both profiles named, and refusal is the default answer.
+
+**The active profile MUST NOT be offered a hide control**, because `dig-account` refuses to hide it
+(`ActiveProfileCannotBeHidden`), and `set_active` on a hidden profile un-hides it. Together these
+make "a hidden active profile shows an empty list while the wallet derives there" unrepresentable
+rather than merely guarded against; the surface states why the control is absent and names the way
+round it.
+
+**A LOCKED account MUST still list its profiles.** The registry holds no key material — which is why
+it is stored in plaintext — so reporting `Pending` while sealed would leave the list saying "still
+reading" for as long as the account stayed locked.
+
 **Persistence.** The registry is stored at `<brand_dir>/profiles/registry.json` in PLAINTEXT, written
 through the crash-safe temp-write→fsync→rename idiom. It holds no secret, and sealing it would make
 an account's profile list unreadable while LOCKED — defeating the property the registry exists for.
