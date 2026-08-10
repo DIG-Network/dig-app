@@ -1130,6 +1130,7 @@ mod tests {
     use crate::account::sealer::AccountSealer;
     use crate::confirm::HeadlessConfirmer;
     use crate::pairing::{frame_mac_input, PairingScope, PairingStore};
+    use crate::sealer::SealError;
     use crate::test_support::{test_residency, test_sealer};
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
@@ -1325,8 +1326,8 @@ mod tests {
 
     /// Pair, then connect `origin` through an approving router, returning `(pairing_id, token)` with
     /// the origin now whitelisted. Uses fresh monotonic nonces `n(1)` (pair carries none) + `n(1)`.
-    fn pair_and_connect(
-        router: &FrameRouter<AccountSealer>,
+    fn pair_and_connect<S: ProfileSealer>(
+        router: &FrameRouter<S>,
         origin: &str,
         nonce: u64,
     ) -> (String, String) {
@@ -1348,7 +1349,7 @@ mod tests {
     }
 
     /// Pair through the router (approving confirmer) and return `(pairing_id, channel_token_b64)`.
-    fn pair(router: &FrameRouter<AccountSealer>) -> (String, String) {
+    fn pair<S: ProfileSealer>(router: &FrameRouter<S>) -> (String, String) {
         let resp = router.handle(&request(
             "pair.begin",
             json!({ "ext_id": EXT, "requested_at": 1 }),
@@ -2036,14 +2037,52 @@ mod tests {
         }
     }
 
+    /// A sealer whose DEK follows the ACTIVE profile, as the production
+    /// [`ResidencySealer`](crate::account::residency::AccountResidency::sealer) does: it resolves the
+    /// profile in effect at each call and derives that profile's key, ignoring the advisory DID
+    /// argument the seam passes.
+    ///
+    /// A fixture pinning ONE DEK while feeding the stores a MOVING DID decouples the two halves that
+    /// production keeps together, and a decoupled fixture cannot express the failure this module is
+    /// about: a record sealed under one profile's key being opened while another is active would
+    /// simply succeed, so no test here could ever fail on it.
+    #[derive(Clone)]
+    struct LiveDekSealer(ActiveProfile);
+
+    impl LiveDekSealer {
+        /// The sealer for the profile active RIGHT NOW, or a fail-closed error when the account is
+        /// locked and there is no profile whose key this could be.
+        fn now(&self) -> Result<AccountSealer, SealError> {
+            match self.0 .0.lock().expect("test mutex").as_deref() {
+                Some(did) => Ok(test_sealer(did)),
+                None => Err(SealError::Seal("no active profile".to_string())),
+            }
+        }
+    }
+
+    impl ProfileSealer for LiveDekSealer {
+        fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+            self.now()?.seal(profile_did, plaintext)
+        }
+
+        fn open(
+            &self,
+            profile_did: &str,
+            ciphertext: &[u8],
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, SealError> {
+            self.now()?.open(profile_did, ciphertext)
+        }
+    }
+
     /// An approving router whose pairing + whitelist stores read `active` live, so a lock or a switch
-    /// lands underneath it exactly as it does in the running app.
+    /// lands underneath it exactly as it does in the running app — DID *and* DEK, because
+    /// [`LiveDekSealer`] moves the key with the profile the way production does.
     fn router_on(
         active: &ActiveProfile,
         gate: Arc<dyn SignReauthGate>,
-    ) -> FrameRouter<AccountSealer> {
-        let pairings = PairingStore::new(test_sealer(DID), active.live());
-        let whitelist = WhitelistStore::new(test_sealer(DID), active.live());
+    ) -> FrameRouter<LiveDekSealer> {
+        let pairings = PairingStore::new(LiveDekSealer(active.clone()), active.live());
+        let whitelist = WhitelistStore::new(LiveDekSealer(active.clone()), active.live());
         FrameRouter::new(
             pairings,
             whitelist,
@@ -2081,7 +2120,7 @@ mod tests {
     #[test]
     fn a_locked_account_authorizes_no_sign_even_from_an_origin_it_connected() {
         let origin = "https://dapp.example";
-        let sign = |active: &ActiveProfile, router: &FrameRouter<AccountSealer>| {
+        let sign = |active: &ActiveProfile, router: &FrameRouter<LiveDekSealer>| {
             let (pairing_id, token) = pair_and_connect(router, origin, n(1));
             // The lock lands AFTER the grant, exactly as an idle timeout does.
             active.set(None);
@@ -2169,6 +2208,220 @@ mod tests {
             same["result"]["signature_b64"].is_string(),
             "control: a re-auth that unlocks the SAME profile must still sign — the refusal above is \
              the switch, not the re-check refusing everything: {same}"
+        );
+    }
+
+    /// Approves every prompt, and moves the active profile as it answers ONE of them — the gap between
+    /// a person saying yes and the record being written.
+    ///
+    /// The switch is performed by the CONFIRMER because that is where the real gap is: prompts are
+    /// serialized on one thread, so a switch cannot be approved mid-confirm, but the confirm returns on
+    /// the loopback thread and the write happens after it.
+    struct SwitchesWhileAnswering {
+        active: ActiveProfile,
+        to: String,
+        answering: Answering,
+    }
+
+    /// Which prompt [`SwitchesWhileAnswering`] moves the profile under. Only one, so the other prompt
+    /// in a pair-then-connect flow stays honest and the test measures the one gap it names.
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum Answering {
+        Pair,
+        Connect,
+    }
+
+    impl SwitchesWhileAnswering {
+        fn answer(&self, prompt: Answering) -> ConfirmDecision {
+            if prompt == self.answering {
+                self.active.set(Some(&self.to));
+            }
+            ConfirmDecision::Approve
+        }
+    }
+
+    impl NativeConfirmer for SwitchesWhileAnswering {
+        fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
+            self.answer(Answering::Pair)
+        }
+        fn confirm_connect(&self, _: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            self.answer(Answering::Connect)
+        }
+        fn confirm_sign(&self, _: &crate::confirm::SignPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Approve
+        }
+    }
+
+    /// A router whose stores follow `active` (DID and DEK) and whose confirmer approves while moving
+    /// the profile under `answering` — `switch_to = None` for the honest control.
+    fn router_switching_while_answering(
+        active: &ActiveProfile,
+        answering: Answering,
+        switch_to: Option<&str>,
+    ) -> FrameRouter<LiveDekSealer> {
+        let confirmer: Arc<dyn NativeConfirmer> = match switch_to {
+            Some(to) => Arc::new(SwitchesWhileAnswering {
+                active: active.clone(),
+                to: to.to_owned(),
+                answering,
+            }),
+            None => Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+        };
+        FrameRouter::new(
+            PairingStore::new(LiveDekSealer(active.clone()), active.live()),
+            WhitelistStore::new(LiveDekSealer(active.clone()), active.live()),
+            confirmer,
+            Box::new(test_residency().signer()),
+            ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]),
+            [EXT.to_string()],
+        )
+    }
+
+    /// **A connect approved under one profile grants nothing to the profile that arrives next.**
+    ///
+    /// The connect modal names the origin and the dapp, never a profile, so the consent belongs to
+    /// whoever was active as it was read. A switch landing between that answer and the grant would
+    /// otherwise write DURABLE authority under B — and hand the dapp B's DID, addresses and pubkey —
+    /// from a yes that only A ever gave, leaving A, whose owner actually agreed, unconnected.
+    ///
+    /// The second assertion is made from the SWITCHED-BACK profile deliberately: re-reading state under
+    /// B could not tell a refusal apart from the existing "a grant does not survive a switch" filter,
+    /// whereas A is the profile that consented and so is the one a mis-placed grant would be missing
+    /// from. The control is the identical flow with no switch, which must connect and sign.
+    #[test]
+    fn a_connect_approved_under_one_profile_is_not_recorded_under_the_next() {
+        const OTHER: &str = "did:chia:arrived-after-the-yes";
+        let origin = "https://dapp.example";
+
+        let connect_switching_to = |switch_to: Option<&str>| {
+            let active = ActiveProfile::starting_at(DID);
+            let router = router_switching_while_answering(&active, Answering::Connect, switch_to);
+            // Pair first, under A and with no switch: the pairing must be honest so the frames below
+            // authenticate and the only thing under test is the connect.
+            let (pairing_id, token) = pair(&router);
+            let params = json!({ "origin": origin });
+            let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+            let connect = router.handle(&request("connect.request", params, Some(auth)));
+
+            // Back to the profile whose owner answered the modal, and ask it to sign: only a grant
+            // recorded for A can carry that past the connect gate.
+            active.set(Some(DID));
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            let sign = router.handle(&request("sign.request", params, Some(auth)));
+            (connect, sign)
+        };
+
+        let (connect, sign) = connect_switching_to(Some(OTHER));
+        assert_eq!(
+            SignErrorCode::ConnectDenied.symbol(),
+            connect["error"]["message"],
+            "a connect whose grant would land under a profile nobody consented for must be refused, \
+             not recorded: {connect}"
+        );
+        assert_eq!(
+            SignErrorCode::ConnectRequired.symbol(),
+            sign["error"]["message"],
+            "and the consenting profile must be left UNCONNECTED — a grant written under the profile \
+             that arrived would leave this one asking again while the other one held the authority: \
+             {sign}"
+        );
+
+        let (connect, sign) = connect_switching_to(None);
+        assert_eq!(
+            true, connect["result"]["granted"],
+            "control: with no switch the same flow must connect — the refusal above is the switch, \
+             not a consent check refusing everything: {connect}"
+        );
+        assert!(
+            sign["result"]["signature_b64"].is_string(),
+            "control: and the grant it recorded must authorize a sign: {sign}"
+        );
+    }
+
+    /// **A pairing approved under one profile mints no channel token for the profile that arrives.**
+    ///
+    /// The same gap as the connect above, on the surface that mints AUTHORITY rather than recording it:
+    /// a `pair.begin` yields a channel token whose scope may carry `may_sign`. A switch between the
+    /// confirm and the mint would hand that token out on a yes given about a different profile.
+    ///
+    /// A token is the observable, not a later state read: once minted it is already in the caller's
+    /// hands, so the assertion is that none is issued at all.
+    #[test]
+    fn a_pairing_approved_under_one_profile_mints_no_token_for_the_next() {
+        const OTHER: &str = "did:chia:arrived-after-the-yes";
+
+        let pair_switching_to = |switch_to: Option<&str>| {
+            let active = ActiveProfile::starting_at(DID);
+            let router = router_switching_while_answering(&active, Answering::Pair, switch_to);
+            router.handle(&request(
+                "pair.begin",
+                json!({ "ext_id": EXT, "requested_at": 1 }),
+                None,
+            ))
+        };
+
+        let switched = pair_switching_to(Some(OTHER));
+        assert!(
+            switched["result"]["channel_token_b64"].is_null(),
+            "a channel token minted here would be signing authority handed out on another profile's \
+             consent: {switched}"
+        );
+        assert_eq!(
+            SignErrorCode::PairDenied.symbol(),
+            switched["error"]["message"],
+            "and the refusal must read as not-granted, so a caller asks again rather than retrying an \
+             unlock it does not need: {switched}"
+        );
+
+        let control = pair_switching_to(None);
+        assert!(
+            control["result"]["channel_token_b64"].is_string(),
+            "control: with no switch the identical pairing must mint a token: {control}"
+        );
+    }
+
+    /// **A record sealed under one profile's DEK is not opened while another profile is active.**
+    ///
+    /// Restore is the path where the KEY, not the DID tag, is the only thing between two profiles:
+    /// `restore_sealed` opens the blob and then registers it live under whichever profile is active, so
+    /// an open that succeeded across a switch would file A's pairing as B's.
+    ///
+    /// This is expressible only because [`LiveDekSealer`] moves the DEK with the profile. Under a
+    /// fixed-DEK fixture the open succeeds, the pairing is registered as B's, and the assertion below
+    /// fails — which is precisely what a fixed-DEK fixture would have hidden.
+    #[test]
+    fn a_record_sealed_by_one_profile_does_not_open_under_another() {
+        const OTHER: &str = "did:chia:not-the-sealing-profile";
+
+        let active = ActiveProfile::starting_at(DID);
+        let store = PairingStore::new(LiveDekSealer(active.clone()), active.live());
+        let sealed = store
+            .pair(
+                &store.consent_now(),
+                &crate::pairing::NewPairing::pinned(EXT, None),
+                1,
+            )
+            .expect("the active profile seals its own pairing")
+            .sealed_record;
+
+        let restored = store.restore_sealed(&sealed);
+        assert!(
+            restored.is_ok(),
+            "control: the sealing profile reopens its own record — the refusal below is the switch, \
+             not an unopenable blob: {restored:?}"
+        );
+        let pairing_id = restored.expect("checked above");
+
+        active.set(Some(OTHER));
+        let across = store.restore_sealed(&sealed);
+        assert!(
+            matches!(across, Err(SealError::Open)),
+            "another profile's DEK must fail the AEAD tag rather than adopt the record: {across:?}"
+        );
+        assert!(
+            !store.is_paired(&pairing_id),
+            "and nothing may be registered live for the profile that could not open it"
         );
     }
 

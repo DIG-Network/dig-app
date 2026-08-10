@@ -209,7 +209,12 @@ mod tests {
     fn granting_an_origin_whitelists_it_and_seals_the_record() {
         let store = store();
         let out = store
-            .grant(&store.consent_now(), ORIGIN, vec!["addresses".to_string()], 1_700_000_000)
+            .grant(
+                &store.consent_now(),
+                ORIGIN,
+                vec!["addresses".to_string()],
+                1_700_000_000,
+            )
             .unwrap();
 
         assert!(store.is_whitelisted(ORIGIN));
@@ -224,7 +229,9 @@ mod tests {
     #[test]
     fn a_sealed_grant_round_trips_through_restore() {
         let store = store();
-        let out = store.grant(&store.consent_now(), ORIGIN, vec![], 42).unwrap();
+        let out = store
+            .grant(&store.consent_now(), ORIGIN, vec![], 42)
+            .unwrap();
         store.revoke(ORIGIN);
         assert!(!store.is_whitelisted(ORIGIN));
 
@@ -236,7 +243,9 @@ mod tests {
     #[test]
     fn revoking_returns_the_origin_to_unconnected() {
         let store = store();
-        store.grant(&store.consent_now(), ORIGIN, vec![], 1).unwrap();
+        store
+            .grant(&store.consent_now(), ORIGIN, vec![], 1)
+            .unwrap();
         assert!(store.revoke(ORIGIN));
         assert!(!store.revoke(ORIGIN));
         assert!(!store.is_whitelisted(ORIGIN));
@@ -246,7 +255,9 @@ mod tests {
     fn a_foreign_profile_cannot_restore_a_sealed_grant() {
         // NC-2 cross-profile isolation: the sealed grant is bound to the sealing profile's DEK.
         let store_a = store();
-        let out = store_a.grant(&store_a.consent_now(), ORIGIN, vec![], 1).unwrap();
+        let out = store_a
+            .grant(&store_a.consent_now(), ORIGIN, vec![], 1)
+            .unwrap();
 
         // A DISTINCT profile DEK (a different label) cannot open A's sealed grant — isolation is
         // cryptographic (the AEAD tag), not by DID string.

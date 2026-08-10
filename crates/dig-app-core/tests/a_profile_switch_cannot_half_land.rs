@@ -404,7 +404,11 @@ fn a_retained_pairing_store_stops_authenticating_the_previous_profiles_pairings(
     );
 
     let under_first = pairings
-        .pair(&pairings.consent_now(), &NewPairing::pinned("app.under.first", None), 1)
+        .pair(
+            &pairings.consent_now(),
+            &NewPairing::pinned("app.under.first", None),
+            1,
+        )
         .expect("an unlocked profile pairs")
         .pairing_id;
     assert!(
@@ -417,7 +421,11 @@ fn a_retained_pairing_store_stops_authenticating_the_previous_profiles_pairings(
         .expect("the second profile is confirmed");
 
     let under_second = pairings
-        .pair(&pairings.consent_now(), &NewPairing::pinned("app.under.second", None), 2)
+        .pair(
+            &pairings.consent_now(),
+            &NewPairing::pinned("app.under.second", None),
+            2,
+        )
         .expect("the retained store still pairs after the switch")
         .pairing_id;
 
