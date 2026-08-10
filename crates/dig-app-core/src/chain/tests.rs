@@ -396,10 +396,14 @@ fn a_well_formed_spend_decodes_with_its_programs_in_the_right_places() {
 /// of a right one, and no assertion about the returned list could catch it, which is why the flag's
 /// refusal is asserted directly.
 ///
-/// The `false` half is asserted in the same test so the refusal cannot be a blanket one.
+/// The `false` half is asserted against a node that DOES hold coins, so the refusal cannot be a
+/// blanket one and cannot be satisfied by a client that returns an empty list for both.
 #[test]
 fn include_spent_is_refused_rather_than_answered_with_the_unspent_set() {
-    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK)));
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain {
+        address_coins: vec![FakeCoin::confirmed("xch", 900)],
+        ..FakeChain::synced_at(PEAK)
+    }));
     let source = source(&node);
 
     let refused = source.coin_records_by_puzzle_hash(id(3), true);
@@ -408,13 +412,11 @@ fn include_spent_is_refused_rather_than_answered_with_the_unspent_set() {
         "the unspent set is not an answer to an include-spent question, got {refused:?}"
     );
 
-    assert_eq!(
-        source
-            .coin_records_by_puzzle_hash(id(3), false)
-            .expect("the unspent question IS serviceable"),
-        vec![],
-        "an address holding nothing is an answer"
-    );
+    let unspent = source
+        .coin_records_by_puzzle_hash(id(3), false)
+        .expect("the unspent question IS serviceable");
+    assert_eq!(unspent.len(), 1, "{unspent:?}");
+    assert_eq!(unspent[0].coin.amount, 900);
 }
 
 /// **`resolve_singleton_lineage` is a stated absence with a remedy, never a hand-rolled walk.**

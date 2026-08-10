@@ -230,6 +230,12 @@ pub mod node {
     pub struct FakeChain {
         /// The coins `control.wallet.coinById` can find, by their own ids.
         pub coins: Vec<FakeCoin>,
+        /// The UNSPENT coins `control.wallet.coins` reports for any address it is asked about.
+        ///
+        /// A separate list from [`coins`](Self::coins) because the two reads answer different
+        /// questions — one by coin id including spent coins, one by address excluding them — and a
+        /// single list would let a client that asked the wrong method pass.
+        pub address_coins: Vec<FakeCoin>,
         /// The spends `control.wallet.coinSpend` can find, keyed by the SPENT coin.
         pub spends: Vec<FakeSpend>,
         /// Each parent coin id and the direct children its spend created, in the ASCENDING
@@ -745,6 +751,7 @@ pub mod node {
             let method_is_sync = is(ControlMethod::WalletSyncStatus);
             let method_is_peer_counts = is(ControlMethod::PeerCounts);
             let chain_method = [
+                ControlMethod::WalletCoins,
                 ControlMethod::WalletCoinById,
                 ControlMethod::WalletCoinSpend,
                 ControlMethod::WalletCoinsByParent,
@@ -1049,6 +1056,23 @@ pub mod node {
                 })
             }
             ControlMethod::WalletCoinsByParent => coins_by_parent_json(chain, request),
+            // `control.wallet.coins` is the ONE read that MUST report a concrete asset: it was
+            // scoped to one, so a `null` there would be a different (and contract-breaking) reply
+            // than the by-id reads give.
+            ControlMethod::WalletCoins => serde_json::json!({
+                "coins": chain
+                    .address_coins
+                    .iter()
+                    .map(|c| {
+                        let mut json = chain_coin_json(c);
+                        json["asset"] = serde_json::Value::String(c.asset.to_string());
+                        json
+                    })
+                    .collect::<Vec<_>>(),
+                "source": chain.source,
+                "synced": chain.synced,
+                "peak_height": chain.peak_height,
+            }),
             other => return rejection(-32601, "METHOD_NOT_FOUND", other.name()),
         };
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
@@ -1083,15 +1107,20 @@ pub mod node {
         };
         let page = &remaining[..page_size.min(remaining.len())];
 
-        // An endless node keeps handing back an ADVANCING cursor and never says `complete`. The
-        // cursor advances so the client cannot detect the loop by a repeated value — the only thing
-        // that can stop it is the client's own page bound.
+        // An endless node keeps handing back an ADVANCING cursor and never says `complete`. It
+        // advances from the cursor the CLIENT sent rather than from any child index, so the value
+        // is genuinely new on every page — a client that detected the loop by spotting a repeated
+        // cursor would never be exercised, and the only thing that can stop this node is the
+        // client's own page bound.
         let (coins, complete, cursor) = if chain.endless_children {
-            let next = format!("{:064x}", start + 1);
+            let seen = after
+                .as_ref()
+                .and_then(|c| u64::from_str_radix(c.trim_start_matches('0'), 16).ok())
+                .unwrap_or(0);
             (
-                vec![FakeCoin::confirmed("xch", (start + 1) as u64)],
+                vec![FakeCoin::confirmed("xch", seen + 1)],
                 false,
-                Some(next),
+                Some(format!("{:064x}", seen + 1)),
             )
         } else if chain.incomplete_without_cursor {
             (page.to_vec(), false, None)
