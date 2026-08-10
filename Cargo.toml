@@ -197,11 +197,6 @@ dig-identity = { version = "0.6", features = ["bls"] }
 dig-did = "0.6"
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
-# Wallet host (U8) — the CANONICAL DIG spend builder + the Chia types/driver/signer it works in.
-# NO spend bundle is hand-rolled: every $DIG spend is built by chip35 (the canonical
-# CHIP-0035 spend builder), signed locally with the chia-wallet-sdk signer, and the DIG treasury
-# constant reused from chip35 — never a placeholder.
-#
 # VERSION WALL (dig_ecosystem#2560): chip35-dl-coin 0.8.0 is its only published release and it pins
 # chia-* 0.26 / chia-sdk-* 0.30, while dig-account 0.10 (the crate every spend must be handed to)
 # pins chia-* 0.36.1 / chia-wallet-sdk 0.34. Those are incompatible 0.x lines, so Cargo keeps BOTH in
@@ -210,7 +205,9 @@ hex = "0.4"
 # $DIG spend yet, so nothing is broken now, but the $DIG spend path (dig_ecosystem#2396) is BLOCKED
 # until chip35-dl-coin publishes on the 0.36.1/0.34 line. Do NOT work around this by re-serialising
 # between the two lines; that puts a hand-rolled conversion in the middle of the money path.
-chip35-dl-coin = "0.8"
+# chip35-dl-coin is therefore NOT declared as a dependency — it has no call sites in this workspace
+# and its presence would pull the entire 0.30 SDK line into the shipped tray binary for zero use.
+#
 # The Chia type line dig-account 0.10 resolves (dig_ecosystem#2560), so every chia type dig-app
 # passes across the dig-account seam is ONE definition rather than a silently-drifted second copy.
 chia-bls = "0.36.1"

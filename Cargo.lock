@@ -1077,7 +1077,6 @@ version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "260c97751f8986e7f82091e3bee504044efb79857f26bfcd2b5d37cba674f79e"
 dependencies = [
- "bech32",
  "bigdecimal",
  "bip39",
  "chia-bls 0.26.0",
@@ -1094,7 +1093,6 @@ dependencies = [
  "clvm-traits 0.26.0",
  "clvm-utils 0.26.0",
  "clvmr 0.14.0",
- "flate2",
  "getrandom 0.2.17",
  "hex",
  "hex-literal",
@@ -1629,29 +1627,6 @@ dependencies = [
  "unicode-segmentation",
  "wasm-bindgen",
  "yaml-rust2 0.11.0",
-]
-
-[[package]]
-name = "chip35-dl-coin"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "629982f52666139909b453e2c793a98f06c8581cac2053f89291c2de1627b28c"
-dependencies = [
- "chia-bls 0.26.0",
- "chia-protocol 0.26.0",
- "chia-puzzle-types 0.26.0",
- "chia-puzzles",
- "chia-sdk-driver 0.30.0",
- "chia-sdk-types 0.30.0",
- "chia-sha2 0.26.0",
- "chia-traits 0.26.0",
- "clvm-traits 0.26.0",
- "clvmr 0.14.0",
- "hex",
- "hex-literal",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2446,7 +2421,6 @@ dependencies = [
  "chia-sdk-utils 0.34.0",
  "chia-traits 0.36.1",
  "chia-wallet-sdk 0.34.0",
- "chip35-dl-coin",
  "clvm-traits 0.36.1",
  "clvmr 0.16.4",
  "dig-account",
