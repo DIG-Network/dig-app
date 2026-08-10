@@ -27,14 +27,17 @@
 //! confirmation, and `control.wallet.broadcast` pushes the signed bundle
 //! ([`NodeWalletEngine`](crate::wallet::node::NodeWalletEngine) speaks all three).
 //!
-//! The fourth is **a coin read BY COIN ID**, and it does not exist. `mint_status` asks the chain for
+//! The fourth is **a coin read BY COIN ID**, and it is not available to dig-app. It now EXISTS
+//! upstream — `control.wallet.coinById`, "read ONE coin record by coin id, spent or unspent" — but
+//! the workspace pins `dig-node-control-interface` 0.6, which predates it, so no code here can name
+//! it. `mint_status` asks the chain for
 //! the DID coin's record — that is the confirmation — and for the funding coin's, to tell a mint that
 //! is merely slow from one that can never confirm because its input was spent elsewhere. The coins
 //! method answers for an ADDRESS and reports only UNSPENT coins, so it can see neither.
 //!
 //! A mint on that transport could be pushed — real XCH, gone — and then never observed, and a DID is
 //! recorded only from evidence of a confirmation. So the binary supplies
-//! [`MintSeams::NoChainTransport`] until the node grows that read (dig_ecosystem#2376), and the
+//! [`MintSeams::NoChainTransport`] until dig-app can reach that read (dig_ecosystem#2376), and the
 //! startup gate asks whether a mint is POSSIBLE before it shows anybody a wizard: see
 //! [`crate::account::journey::startup_wizard`].
 

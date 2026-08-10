@@ -255,6 +255,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::active_profile::WalletSlot;
+    use crate::account::profile_session::test_support::registry_json;
+    use crate::account::profile_session::{MemoryRegistryStore, ProfileSession};
     use crate::account::residency::AccountResidency;
     use crate::session_lock::SessionKeys;
     use async_trait::async_trait;
@@ -351,13 +354,7 @@ mod tests {
         send_to(A_STRANGER, native_out, fee)
     }
 
-    /// A spend paying nobody but this wallet itself, so the vault's outflow rule has nothing to
-    /// refuse. `native_out` still leaves the spent coin, so the spend is a real one with a real total.
-    fn send_to_ourselves(native_out: u64, fee: u64) -> Vec<CoinSpend> {
-        send_to(wallet_key().puzzle_hash(), native_out, fee)
-    }
-
-    /// What [`send_to_a_stranger`] / [`send_to_ourselves`] with these arguments totals to under the
+    /// What [`send_to_a_stranger`] with these arguments totals to under the
     /// gate's accounting: the native amounts that leave, plus the fee.
     const SPEND_TOTAL: u64 = 610;
 
@@ -399,6 +396,9 @@ mod tests {
         /// Locked from INSIDE the ceremony when set, to reproduce a user locking their account while
         /// the confirm window is open.
         lock_during_the_ceremony: Option<AccountResidency>,
+        /// Switched from INSIDE the ceremony when set, to reproduce the active profile moving while
+        /// the confirm window is open.
+        switch_during_the_ceremony: Option<(ProfileSession, ProfileIx)>,
     }
 
     impl RecordingProvider {
@@ -408,6 +408,7 @@ mod tests {
                 confirms: AtomicUsize::new(0),
                 requests: Mutex::new(Vec::new()),
                 lock_during_the_ceremony: None,
+                switch_during_the_ceremony: None,
             }
         }
 
@@ -422,6 +423,15 @@ mod tests {
         fn approving_but_locks(residency: AccountResidency) -> Self {
             Self {
                 lock_during_the_ceremony: Some(residency),
+                ..Self::new(SpendDecision::Approve)
+            }
+        }
+
+        /// A ceremony that approves the spend and switches `session` to `ix` before returning —
+        /// the user agreeing under one identity while the app moves to another.
+        fn approving_but_switches(session: ProfileSession, ix: ProfileIx) -> Self {
+            Self {
+                switch_during_the_ceremony: Some((session, ix)),
                 ..Self::new(SpendDecision::Approve)
             }
         }
@@ -441,6 +451,9 @@ mod tests {
             self.requests.lock().expect("not poisoned").push(request);
             if let Some(residency) = &self.lock_during_the_ceremony {
                 residency.lock_all();
+            }
+            if let Some((session, ix)) = &self.switch_during_the_ceremony {
+                let _switched = session.switch_to(*ix).expect("the target profile is confirmed");
             }
             Ok(self.decision.clone())
         }
@@ -552,6 +565,74 @@ mod tests {
             residency.observe_receiving_address(),
             crate::account::residency::AddressObservation::Derived(_)
         ));
+    }
+
+    /// **A profile switch DURING the confirm ceremony fails the spend closed** (dig_ecosystem#2398).
+    ///
+    /// This is the one seam a live per-call re-read cannot protect on its own, because a human is in
+    /// the middle of it. The confirm dialog names a profile; a person looks at that name and agrees to
+    /// a spend from THAT identity. If the active profile moves before the signature, signing anyway
+    /// takes consent given for one identity's money and applies it to another's.
+    ///
+    /// The fixture varies exactly one actor — the ceremony switches the session and otherwise behaves
+    /// identically to every other approving provider here. The wrong implementation it is aimed at is
+    /// the one that captures the index once and signs blind: that version returns `Ok(bundle)` here,
+    /// which is why the assertion is on the ABSENCE of a `SpendBundle` and not merely on an error
+    /// type. The ceremony is asserted to have RUN, so a refusal that happened before the ceremony —
+    /// which would satisfy "no bundle" identically — cannot be mistaken for this one.
+    #[tokio::test]
+    async fn a_profile_switch_during_the_ceremony_signs_nothing() {
+        let session = ProfileSession::load(Arc::new(MemoryRegistryStore::seeded(registry_json(
+            &[(ProfileIx::ROOT, Some("home")), (ProfileIx(1), Some("work"))],
+            ProfileIx::ROOT,
+        ))))
+        .expect("the fixture registry loads");
+
+        let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
+        let unlocked = AccountSession::enroll(
+            store,
+            account_id(),
+            Password::new("pw"),
+            &SEED,
+            session.wallet_slot().ix(),
+        )
+        .unwrap();
+        let residency =
+            AccountResidency::with_profiles(unlocked, WalletSlot::unprofiled(), session.clone());
+
+        let path = MoneyPath::new(
+            residency,
+            RecordingProvider::approving_but_switches(session.clone(), ProfileIx(1)),
+            account_id(),
+            Network::Mainnet,
+            CustodyPolicy::Hot(HotWallet::default()),
+            AutoSendPolicy::default(),
+            frozen_clock(),
+        )
+        .expect("an unlocked residency yields a money path");
+
+        let outcome = path
+            .authorize_and_sign(send_to_a_stranger(600, 10), SpendOpClass::Undeclared)
+            .await;
+
+        assert!(
+            matches!(outcome, Err(MoneyPathError::ProfileSwitched)),
+            "a spend confirmed under one profile must not be signed under another: {outcome:?}"
+        );
+        assert!(
+            outcome.is_err(),
+            "NO SpendBundle may be produced — an implementation that captured the index once and              signed blind returns Ok here"
+        );
+        assert_eq!(
+            ceremonies(&path),
+            1,
+            "the ceremony DID run, so this is a refusal after consent rather than one before it"
+        );
+        assert_eq!(
+            ProfileIx(1),
+            session.active_ix(),
+            "and the switch itself genuinely landed — otherwise the fixture proves nothing"
+        );
     }
 
     /// **The rolling period cap binds ACROSS calls**, which is only true of a gate the host holds for
