@@ -263,7 +263,9 @@ mod tests {
             residency.sealer(KdfParams::FAST_TEST),
             live_profile_did(&residency),
         );
-        store.grant(ORIGIN, vec![], 1).expect("an unlocked profile grants");
+        store
+            .grant(ORIGIN, vec![], 1)
+            .expect("an unlocked profile grants");
         assert!(
             store.is_whitelisted(ORIGIN),
             "control: the grant authorizes while the account is unlocked"

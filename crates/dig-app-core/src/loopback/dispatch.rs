@@ -2021,7 +2021,10 @@ mod tests {
 
     /// An approving router whose pairing + whitelist stores read `active` live, so a lock or a switch
     /// lands underneath it exactly as it does in the running app.
-    fn router_on(active: &ActiveProfile, gate: Arc<dyn SignReauthGate>) -> FrameRouter<AccountSealer> {
+    fn router_on(
+        active: &ActiveProfile,
+        gate: Arc<dyn SignReauthGate>,
+    ) -> FrameRouter<AccountSealer> {
         let pairings = PairingStore::new(test_sealer(DID), active.live());
         let whitelist = WhitelistStore::new(test_sealer(DID), active.live());
         FrameRouter::new(
