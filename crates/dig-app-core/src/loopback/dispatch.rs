@@ -720,6 +720,15 @@ impl<S: ProfileSealer> FrameRouter<S> {
         if !self.reauth_gate.authorize_sign() {
             return error(id, SignErrorCode::Locked);
         }
+        // Re-decide the connect gate AFTER the re-auth, because `authorize_sign` is a STATE TRANSITION
+        // and not a predicate: it unlocks the account into whichever profile is active by the time it
+        // runs, and a profile switch needs no unlock to get there (`SetActiveProfile` reads the
+        // registry from disk). Everything decided before that call was decided about a different
+        // profile than the one about to hold the key, so the gate is asked again against the profile
+        // that will actually sign (dig_ecosystem#2398).
+        if !self.whitelist.is_whitelisted(&gate.origin) {
+            return error(id, SignErrorCode::ConnectRequired);
+        }
         // Sign fallibly: a locked profile (no identity in the session) yields `None`, which MUST become
         // a `LOCKED` error — NEVER a success envelope carrying a bogus/all-zero signature (SPEC §5.6.7).
         match self.signer.try_sign(&message) {
@@ -896,8 +905,12 @@ impl<S: ProfileSealer> FrameRouter<S> {
                 AuthFailure::Replay => SignErrorCode::AuthReplay,
             })?;
         // The nonce advanced — persist the new high-water mark so a frame captured before a restart
-        // cannot replay into the next session (#956). Best-effort: a lost write only risks a one-frame
-        // replay window across a crash, and every sign still re-gates on the native confirm.
+        // cannot replay into the next session (#956). Best-effort, and the size of "best" is worth
+        // stating honestly: the ledger is not written at all while the account is locked (there is no
+        // profile directory to write it to — `FileSealedStore::write_nonce_ledger`), so a restart
+        // rewinds the high-water mark to the last write and EVERY frame sent during the lock becomes
+        // replayable, not one. Tracked as dig_ecosystem#2546. Every sign still re-gates on the native
+        // confirm, which is what keeps this a hardening gap rather than a signing bypass.
         self.persist.persist_nonce(&auth.pairing_id, auth.nonce);
         // Only an AUTHENTICATED frame moves "last seen", so the management window cannot be made to
         // show a revoked or impersonated app as recently active.
@@ -1979,6 +1992,163 @@ mod tests {
         assert!(
             resp["result"]["signature_b64"].is_string(),
             "an authorized re-auth still yields a signature"
+        );
+    }
+
+    /// The DID the stores read as "the profile now active", switchable mid-test.
+    ///
+    /// This is the only moving part a lock or a profile switch actually presents to a running router:
+    /// the stores keep their entries, and the answer to "whose are they?" changes underneath them.
+    #[derive(Clone)]
+    struct ActiveProfile(Arc<std::sync::Mutex<Option<String>>>);
+
+    impl ActiveProfile {
+        fn starting_at(did: &str) -> Self {
+            Self(Arc::new(std::sync::Mutex::new(Some(did.to_owned()))))
+        }
+
+        /// `None` is a LOCKED account — which a profile switch can move underneath, because
+        /// `SetActiveProfile` reads the registry from disk and needs no unlock.
+        fn set(&self, did: Option<&str>) {
+            *self.0.lock().expect("test mutex") = did.map(str::to_owned);
+        }
+
+        fn live(&self) -> crate::live::LiveDid {
+            let source = Arc::clone(&self.0);
+            crate::live::LiveDid::read(move || source.lock().expect("test mutex").clone())
+        }
+    }
+
+    /// An approving router whose pairing + whitelist stores read `active` live, so a lock or a switch
+    /// lands underneath it exactly as it does in the running app.
+    fn router_on(active: &ActiveProfile, gate: Arc<dyn SignReauthGate>) -> FrameRouter<AccountSealer> {
+        let pairings = PairingStore::new(test_sealer(DID), active.live());
+        let whitelist = WhitelistStore::new(test_sealer(DID), active.live());
+        FrameRouter::new(
+            pairings,
+            whitelist,
+            Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+            Box::new(test_residency().signer()),
+            ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]),
+            [EXT.to_string()],
+        )
+        .with_reauth_gate(gate)
+    }
+
+    /// The re-auth gate as it really behaves: it does not ANSWER a question, it UNLOCKS the account —
+    /// into whichever profile is active when it runs, which is what makes it a state transition.
+    struct ReauthUnlocksInto {
+        active: ActiveProfile,
+        profile: String,
+    }
+
+    impl SignReauthGate for ReauthUnlocksInto {
+        fn authorize_sign(&self) -> bool {
+            self.active.set(Some(&self.profile));
+            true
+        }
+    }
+
+    /// **A locked account authorizes no sign, however it was connected.**
+    ///
+    /// A lock is not "the same profile, briefly quiet": the active profile can be changed while locked
+    /// (`SetActiveProfile` reads the registry from disk), and the sign path's re-auth gate then unlocks
+    /// into whatever that is. So a grant made under one profile must stop answering the moment the
+    /// account locks, before the gate is ever reached.
+    ///
+    /// The control is the identical frame on an UNLOCKED router: without it, a fixture whose MAC or
+    /// nonce was simply wrong would produce the same refusal.
+    #[test]
+    fn a_locked_account_authorizes_no_sign_even_from_an_origin_it_connected() {
+        let origin = "https://dapp.example";
+        let sign = |active: &ActiveProfile, router: &FrameRouter<AccountSealer>| {
+            let (pairing_id, token) = pair_and_connect(router, origin, n(1));
+            // The lock lands AFTER the grant, exactly as an idle timeout does.
+            active.set(None);
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            router.handle(&request("sign.request", params, Some(auth)))
+        };
+
+        let active = ActiveProfile::starting_at(DID);
+        let router = router_on(&active, Arc::new(ScriptedReauthGate::new(true)));
+        let locked = sign(&active, &router);
+        assert!(
+            locked["result"]["signature_b64"].is_null(),
+            "a locked account must not sign for a grant it can no longer attribute: {locked}"
+        );
+        assert_eq!(
+            SignErrorCode::AuthRequired.symbol(),
+            locked["error"]["message"],
+            "and the refusal must come from the authorization layer, not from the key: {locked}"
+        );
+
+        let unlocked = ActiveProfile::starting_at(DID);
+        let control = {
+            let router = router_on(&unlocked, Arc::new(ScriptedReauthGate::new(true)));
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            router.handle(&request("sign.request", params, Some(auth)))
+        };
+        assert!(
+            control["result"]["signature_b64"].is_string(),
+            "control: the same frame on an unlocked account must still sign — the refusal above is \
+             the lock, not a broken fixture: {control}"
+        );
+    }
+
+    /// **A profile switch landing INSIDE the re-auth unlock signs nothing.**
+    ///
+    /// Every gate in `handle_sign` runs before `authorize_sign`, and `authorize_sign` re-unlocks the
+    /// account into whichever profile is active by then. So a decision taken before it is a decision
+    /// about a different profile than the one holding the key at the signature.
+    ///
+    /// The fixture is deliberately TRUTHFUL up to the gate: the account is unlocked on the connecting
+    /// profile throughout, so the pre-gate whitelist read passes honestly and only a re-check placed
+    /// AFTER the transition can refuse. A test asserting the same outcome with the account already
+    /// locked would be satisfied by the fail-closed predicate alone and would stay green if this
+    /// re-check moved back above the gate — which is the mistake it exists to pin.
+    ///
+    /// The control is the same fixture whose re-auth unlocks into the SAME profile: without it, a
+    /// router that refused every sign would pass identically.
+    #[test]
+    fn a_profile_switch_inside_the_reauth_unlock_signs_nothing() {
+        const OTHER: &str = "did:chia:the-other-profile";
+        let origin = "https://dapp.example";
+
+        let sign_with_reauth_into = |unlocks_into: &str| {
+            let active = ActiveProfile::starting_at(DID);
+            let router = router_on(
+                &active,
+                Arc::new(ReauthUnlocksInto {
+                    active: active.clone(),
+                    profile: unlocks_into.to_owned(),
+                }),
+            );
+            let (pairing_id, token) = pair_and_connect(&router, origin, n(1));
+            let params = json!({ "origin": origin, "payload_type": "spend", "payload_b64": spend_payload_b64() });
+            let auth = signed_auth(&token, &pairing_id, n(2), "sign.request", &params);
+            router.handle(&request("sign.request", params, Some(auth)))
+        };
+
+        let switched = sign_with_reauth_into(OTHER);
+        assert!(
+            switched["result"]["signature_b64"].is_null(),
+            "the sign was gated on one profile's consent and signed with another's key: {switched}"
+        );
+        assert_eq!(
+            SignErrorCode::ConnectRequired.symbol(),
+            switched["error"]["message"],
+            "the profile now holding the key never connected this origin, so it must be asked: \
+             {switched}"
+        );
+
+        let same = sign_with_reauth_into(DID);
+        assert!(
+            same["result"]["signature_b64"].is_string(),
+            "control: a re-auth that unlocks the SAME profile must still sign — the refusal above is \
+             the switch, not the re-check refusing everything: {same}"
         );
     }
 

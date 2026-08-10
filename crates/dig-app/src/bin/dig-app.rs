@@ -3469,10 +3469,20 @@ mod tray {
         match profiles.switch_to(ProfileIx(ix)) {
             // The value is deliberately dropped HERE and nowhere else, and the `notify` below is the
             // reason it may be: `#[must_use]` on a switch is a DISCLOSURE obligation, and this
-            // discharges it. There is nothing to rebuild — every profile-scoped seam re-reads the
-            // active index per operation, including the four the sign-service assembly holds
-            // (dig_ecosystem#2398), and that assembly is on a serving thread this shell could not
-            // reach in any case.
+            // discharges it. This shell rebuilds nothing because it CANNOT — the sign-service
+            // assembly lives on a serving thread it has no handle to — so each seam over there is
+            // responsible for following the switch itself, and they do it in two different ways
+            // (dig_ecosystem#2398):
+            //
+            // - the DERIVED values (signer, sealer, profile DID, profile directory) re-read the
+            //   active index per operation, so they genuinely follow;
+            // - the CONSENT maps (pairings, connected origins) cannot be re-derived — they record
+            //   what a person agreed to — so they are FILTERED by the DID each entry was granted
+            //   under, which scopes them without moving them.
+            //
+            // The wallet is the deliberate exception: it stays at the index it was unlocked at, and
+            // every money accessor refuses rather than answer for the profile just left (#2496).
+            // That is why the notice below tells the user their receive address has not moved.
             Ok(switched) => {
                 let _ = switched;
                 notify(

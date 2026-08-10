@@ -144,6 +144,8 @@ impl<S: ProfileSealer> WhitelistStore<S> {
     /// A grant belonging to a DIFFERENT profile is left alone rather than removed: the at-rest half of
     /// this revoke goes to the ACTIVE profile's directory, so deleting another profile's live entry here
     /// would drop access that the next boot restores anyway — a revoke that reads as done and is not.
+    /// A LOCKED account is the same case for the same reason, and its caller
+    /// (`handle_connect_revoke`) refuses `LOCKED` on the durable half regardless.
     pub fn revoke(&self, origin: &str) -> bool {
         let mut live = self.lock();
         match live.get(origin) {
@@ -156,8 +158,8 @@ impl<S: ProfileSealer> WhitelistStore<S> {
     }
 
     /// Whether a recorded grant tagged `entry_did` is one the profile NOW ACTIVE may act on — the
-    /// predicate that stops a grant surviving a profile switch. See
-    /// [`belongs_to_active_profile`](crate::live::belongs_to_active_profile).
+    /// predicate that stops a grant surviving a profile switch, and stops a LOCKED account honouring
+    /// one at all. See [`belongs_to_active_profile`](crate::live::belongs_to_active_profile).
     fn belongs_to_active(&self, entry_did: &str) -> bool {
         belongs_to_active_profile(self.profile_did.get().as_deref(), entry_did)
     }
@@ -238,6 +240,45 @@ mod tests {
             store_b.restore_sealed(&out.sealed_record),
             Err(SealError::Open)
         ));
+    }
+
+    /// **Locking the account withdraws every grant's authority, not just its key.**
+    ///
+    /// A lock is not a quiet moment on the same profile: `SetActiveProfile` reads the registry from
+    /// disk and switches deliberately while locked, and the sign path's re-auth gate then unlocks into
+    /// whatever is active by then. So a grant that still answered "yes" here would be one profile's
+    /// consent honoured by another profile's key.
+    ///
+    /// The control is the same store one line earlier, while unlocked: without it a store that never
+    /// registered the grant at all would produce the same refusal.
+    #[test]
+    fn a_locked_account_authorizes_no_origin_it_granted_while_unlocked() {
+        use crate::account::boot::live_profile_did;
+        use crate::account::residency::AccountResidency;
+        use crate::session_lock::SessionKeys;
+        use dig_keystore::KdfParams;
+
+        let residency = crate::test_support::test_residency();
+        let store = WhitelistStore::new(
+            residency.sealer(KdfParams::FAST_TEST),
+            live_profile_did(&residency),
+        );
+        store.grant(ORIGIN, vec![], 1).expect("an unlocked profile grants");
+        assert!(
+            store.is_whitelisted(ORIGIN),
+            "control: the grant authorizes while the account is unlocked"
+        );
+
+        AccountResidency::lock_all(&residency);
+
+        assert!(
+            !store.is_whitelisted(ORIGIN),
+            "a locked account cannot say whose consent this is, so it must honour none of it"
+        );
+        assert!(
+            store.get(ORIGIN).is_none(),
+            "and the entry itself must not be handed out — the connect handle is built from it"
+        );
     }
 
     #[test]

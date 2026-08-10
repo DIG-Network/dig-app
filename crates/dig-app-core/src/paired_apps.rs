@@ -289,13 +289,21 @@ fn confirm_revoke(confirmer: &dyn NativeConfirmer, app: &PairedApp) -> bool {
 /// "gone" and "gone until you restart DIG", and only the person can decide what to do about it. It names
 /// the one action that makes it stick, because a notice that describes a problem without an answer is a
 /// dead end.
+///
+/// The named action has to be one the user can actually TAKE. It used to be "unlock and remove it
+/// again", which is impossible from here: the live pairing is already dropped, so the row is gone from
+/// the list this window shows and there is nothing left to remove. Following that advice shows an empty
+/// list, which reads as confirmation rather than as the failure it is. Restarting is the step that
+/// works, because `restore` brings the pairing back at the next start — which is precisely the problem
+/// — and it is then removable in the ordinary way.
 fn warn_revoke_is_not_durable(confirmer: &dyn NativeConfirmer, app: &PairedApp) {
     let body = format!(
         "\"{}\" has lost access right now, and cannot use your DIG Account again while DIG is \
          running.\n\n\
          DIG could not write the change down, because your account is locked. If you close DIG now, \
          the app gets its access back at the next start.\n\n\
-         Unlock your account and remove it again to make this permanent.",
+         To remove it for good: close DIG and open it again, unlock your account, then remove the \
+         app from this list. It reappears here when DIG restarts.",
         display_name(app),
     );
     confirmer.show_notice(&NoticePrompt {
@@ -697,9 +705,24 @@ mod tests {
             .iter()
             .find(|notice| notice.contains("not written down"))
             .expect("the person must be told the revoke did not last");
+
+        // The remedy has to be one the user can carry out FROM HERE, and this is what makes that a
+        // real constraint rather than a wording preference: the revoke already dropped the live
+        // pairing, so the row is gone. "Unlock and remove it again" therefore sends the person to a
+        // list the app is no longer in, where an empty result reads as confirmation.
+        let removed = locked.revoked.borrow().clone();
+        assert_eq!(1, removed.len(), "exactly one revoke was asked for");
         assert!(
-            warning.contains("Unlock"),
-            "and told the one action that makes it permanent: {warning}"
+            !locked.list().iter().any(|app| app.pairing_id == removed[0]),
+            "the fixture must reproduce the vanishing row, or it cannot see an impossible remedy"
+        );
+        assert!(
+            warning.contains("open it again"),
+            "the remedy must be the one that works — restart, then remove it: {warning}"
+        );
+        assert!(
+            warning.contains("reappears"),
+            "and must say the app comes back, or restarting looks like giving up: {warning}"
         );
 
         let unlocked = FakeApps::with(apps(2));

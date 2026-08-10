@@ -131,7 +131,8 @@ impl From<PathBuf> for LiveProfileDir {
     }
 }
 
-/// Whether a stored record tagged `entry_did` is one the profile named by `active` may act on.
+/// Whether a stored record tagged `entry_did` is one the profile named by `active` may ACT ON — the
+/// question every authorization read asks before honouring a grant.
 ///
 /// The companion to [`LiveDid`] for state that is unavoidably a COPY. A live handle keeps a derivation
 /// current, but an in-memory map of granted pairings and connected origins cannot be re-derived — it is
@@ -139,10 +140,34 @@ impl From<PathBuf> for LiveProfileDir {
 /// asking this before every lookup, is what stops a consent given under one profile authorizing under
 /// the next (dig_ecosystem#2398 ADV-A1).
 ///
-/// A LOCKED account (`active` is `None`) has no DID to disagree with, so records stay visible and every
-/// operation that needs a key refuses on its own. The property here is about a SWITCH; widening it to
-/// the lock would change which error a locked caller receives without closing anything.
+/// # Why a LOCKED account (`active` is `None`) authorizes NOTHING
+///
+/// It is tempting to read a lock as "no DID to disagree with, so let the operation that needs a key
+/// refuse on its own". That reasoning holds only where the key is reached from the SAME read — and on
+/// the sign path it is not. `handle_sign` gates on this, then calls the re-auth gate, which RE-UNLOCKS
+/// the account into whichever profile is now active, and only then signs. So a locked "yes" here is a
+/// grant made under profile A being honoured by a key belonging to profile B: the dapp is told it is
+/// still connected, and gets back B's signature and B's public key.
+///
+/// The lock is reachable with a foreign profile active because a switch does not require an unlock —
+/// `SetActiveProfile` reads the registry from disk and works deliberately while locked
+/// ([`ProfileSession`](crate::account::profile_session::ProfileSession)). A locked account is therefore
+/// not "the same profile, briefly quiet"; it is an account whose active profile can change without
+/// anyone authenticating. Answering `false` costs a locked caller nothing it was entitled to.
+///
+/// Use [`visible_under_active_profile`] where the answer only DISPLAYS a record.
 pub(crate) fn belongs_to_active_profile(active: Option<&str>, entry_did: &str) -> bool {
+    active == Some(entry_did)
+}
+
+/// Whether a record tagged `entry_did` should be SHOWN to whoever is at the machine, and offered to
+/// them to manage.
+///
+/// Deliberately permissive where [`belongs_to_active_profile`] is closed: a locked account shows its
+/// records rather than an empty list, because a person who locked their screen and came back should
+/// see the apps they paired instead of being told there are none. Showing a row grants nothing — every
+/// path that acts on it asks the authorization predicate above.
+pub(crate) fn visible_under_active_profile(active: Option<&str>, entry_did: &str) -> bool {
     // `Option::is_none_or` would read better but is stable only since 1.82; this crate's MSRV is 1.75.
     active.map_or(true, |active| active == entry_did)
 }
@@ -152,13 +177,35 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A record answers for the profile that granted it, for nobody else, and for a locked account it
-    /// stays visible so the operation that needs a key is the one that refuses.
+    /// A record authorizes for the profile that granted it and for nobody else — INCLUDING a locked
+    /// account, whose active profile can be changed by anyone at the machine without authenticating.
+    ///
+    /// The locked case is the load-bearing one: it is the case the sign path reaches with a foreign
+    /// profile about to be unlocked underneath it.
     #[test]
-    fn a_record_belongs_only_to_the_profile_that_granted_it_or_to_a_locked_account() {
+    fn a_record_authorizes_only_for_the_profile_that_granted_it() {
         assert!(belongs_to_active_profile(Some("did:chia:a"), "did:chia:a"));
         assert!(!belongs_to_active_profile(Some("did:chia:b"), "did:chia:a"));
-        assert!(belongs_to_active_profile(None, "did:chia:a"));
+        assert!(
+            !belongs_to_active_profile(None, "did:chia:a"),
+            "a locked account authorizes nothing: the re-auth gate unlocks into whichever profile is \
+             active by then, so a `true` here is A's consent honoured by B's key"
+        );
+    }
+
+    /// Displaying a record is a different question, and answers YES while locked — the one place the
+    /// permissive reading is correct, because showing a row hands out no authority.
+    #[test]
+    fn a_locked_account_still_sees_its_own_records() {
+        assert!(visible_under_active_profile(None, "did:chia:a"));
+        assert!(visible_under_active_profile(
+            Some("did:chia:a"),
+            "did:chia:a"
+        ));
+        assert!(
+            !visible_under_active_profile(Some("did:chia:b"), "did:chia:a"),
+            "control: visibility is still SCOPED — another profile's records stay hidden"
+        );
     }
 
     /// A fixed value answers the same thing forever; a live one answers what its source says NOW.

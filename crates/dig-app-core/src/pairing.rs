@@ -27,7 +27,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::live::{belongs_to_active_profile, LiveDid};
+use crate::live::{belongs_to_active_profile, visible_under_active_profile, LiveDid};
 use crate::sealer::{ProfileSealer, SealError};
 
 /// The length of the channel secret (a pairing token), in bytes — 256 bits of CSPRNG entropy.
@@ -632,9 +632,15 @@ impl<S: ProfileSealer> PairingStore<S> {
     /// [`WhitelistStore::revoke`](crate::whitelist::WhitelistStore::revoke) gives: the durable half of
     /// this revoke is written to the ACTIVE profile's directory, so dropping a foreign live entry here
     /// would revoke only until the next start.
+    ///
+    /// Scoped to the VISIBLE set rather than the authorized one, so that what a person can see in the
+    /// tray is what they can remove: a locked account lists its pairings ([`list`](Self::list)), and a
+    /// remove that silently reported "not paired" against a row still on the screen would read as the
+    /// app having handled it. Withdrawing access is the safe direction — it hands out no authority —
+    /// which is why this predicate and the authorization one differ here and nowhere else.
     pub fn unpair(&self, pairing_id: &str) -> bool {
         let mut live = self.lock();
-        if self.of_active_mut(&mut live, pairing_id).is_none() {
+        if self.visible_mut(&mut live, pairing_id).is_none() {
             return false;
         }
         live.remove(pairing_id).is_some()
@@ -691,7 +697,7 @@ impl<S: ProfileSealer> PairingStore<S> {
         let mut apps: Vec<PairedApp> = self
             .lock()
             .iter()
-            .filter(|(_, live)| belongs_to_active_profile(active.as_deref(), &live.profile_did))
+            .filter(|(_, live)| visible_under_active_profile(active.as_deref(), &live.profile_did))
             .map(|(pairing_id, live)| PairedApp {
                 pairing_id: pairing_id.clone(),
                 ext_id: live.ext_id.clone(),
@@ -713,7 +719,9 @@ impl<S: ProfileSealer> PairingStore<S> {
         apps
     }
 
-    /// The live pairing under `pairing_id`, but only if it belongs to the profile now active.
+    /// The live pairing under `pairing_id`, but only if the profile now active may ACT on it — the
+    /// lookup behind every authorization read here. A locked account gets `None`
+    /// ([`belongs_to_active_profile`]).
     fn of_active<'a>(
         &self,
         live: &'a HashMap<String, LivePairing>,
@@ -733,6 +741,19 @@ impl<S: ProfileSealer> PairingStore<S> {
         let active = self.profile_did.get();
         live.get_mut(pairing_id)
             .filter(|pairing| belongs_to_active_profile(active.as_deref(), &pairing.profile_did))
+    }
+
+    /// The live pairing under `pairing_id` as the tray SHOWS it — the companion to [`list`](Self::list)
+    /// for the one management action ([`unpair`](Self::unpair)) that removes access rather than
+    /// granting it.
+    fn visible_mut<'a>(
+        &self,
+        live: &'a mut HashMap<String, LivePairing>,
+        pairing_id: &str,
+    ) -> Option<&'a mut LivePairing> {
+        let active = self.profile_did.get();
+        live.get_mut(pairing_id)
+            .filter(|pairing| visible_under_active_profile(active.as_deref(), &pairing.profile_did))
     }
 
     /// A poisoned mutex means another thread panicked mid-update — fail loudly rather than
@@ -955,6 +976,75 @@ mod tests {
         assert_eq!(
             store.verify_frame(&out.pairing_id, n(1), "m", &params, &mac),
             Err(AuthFailure::NotPaired)
+        );
+    }
+
+    /// **A locked account authenticates no frame, but still SHOWS what is paired.**
+    ///
+    /// The two halves are asserted together because they are the whole design: authorization fails
+    /// closed on a lock (the active profile can be switched while locked, and the sign path's re-auth
+    /// unlocks into whatever that is), while display stays permissive so a person coming back to a
+    /// locked screen sees their own apps rather than an empty list. A test asserting only the refusal
+    /// would be satisfied by dropping the entries entirely.
+    ///
+    /// The control is the same store while unlocked: without it a fixture with a bad MAC would produce
+    /// the same `NotPaired`.
+    #[test]
+    fn a_locked_account_authenticates_no_frame_but_still_lists_its_pairings() {
+        use crate::account::boot::live_profile_did;
+        use crate::account::residency::AccountResidency;
+        use crate::session_lock::SessionKeys;
+        use dig_keystore::KdfParams;
+
+        let residency = crate::test_support::test_residency();
+        let store = PairingStore::new(
+            residency.sealer(KdfParams::FAST_TEST),
+            live_profile_did(&residency),
+        );
+        let out = store
+            .pair(&NewPairing::pinned(EXT, None), 1)
+            .expect("an unlocked profile pairs");
+        let params = json!({});
+        let frame = |nonce: u64| {
+            (
+                nonce,
+                client_mac(&out.channel_token_b64, nonce, "m", &params),
+            )
+        };
+
+        let (nonce, mac) = frame(n(1));
+        assert!(
+            store
+                .verify_frame(&out.pairing_id, nonce, "m", &params, &mac)
+                .is_ok(),
+            "control: the pairing authenticates while the account is unlocked"
+        );
+
+        AccountResidency::lock_all(&residency);
+
+        let (nonce, mac) = frame(n(2));
+        assert_eq!(
+            Err(AuthFailure::NotPaired),
+            store.verify_frame(&out.pairing_id, nonce, "m", &params, &mac),
+            "a locked account cannot attribute this pairing, so it must authenticate nothing"
+        );
+        assert!(
+            store.authority_of(&out.pairing_id).is_none(),
+            "and it must hand out no capabilities — `permits` is decided from them"
+        );
+        assert_eq!(
+            vec![out.pairing_id.clone()],
+            store
+                .list()
+                .into_iter()
+                .map(|app| app.pairing_id)
+                .collect::<Vec<_>>(),
+            "but the tray must still SHOW it: hiding a person's own apps behind a lock teaches them \
+             the app forgot, and showing a row grants nothing"
+        );
+        assert!(
+            store.unpair(&out.pairing_id),
+            "and what they can see they must be able to remove — a revoke withdraws access"
         );
     }
 
