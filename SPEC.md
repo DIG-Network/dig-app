@@ -2114,8 +2114,11 @@ rather than signing on a dropped key. Reads never consult the gate.
 
 ### 3.7 Event-driven wallet UI + funds notifications
 
-dig-app does NOT poll wallet state; it SUBSCRIBES to the engine's wallet event stream and drives its
-UI reactively (the "event-driven, poll only on a gap" contract). The event taxonomy — `WalletEvent`,
+The `events` module below is the SUBSCRIBE half — the "event-driven, poll only on a gap" contract —
+and it is a seam awaiting a producer: no `EventFeed` implementation ships today, because dig-node
+pushes no confirmed funds event. What ships is §3.7a's confirmed-arrival watch, which POLLS. The
+paragraphs here describe the contract the app consumes when that stream exists; they are not a
+description of a running subscription. The event taxonomy — `WalletEvent`,
 `EventKind`, `Cursor`/`EmittedEvent`, and the `CatchUp`/`filter_events` shape — is the CANONICAL
 `dig-events-protocol` contract, imported and never re-declared; the engine (dig-node, via
 `dig-wallet-backend`) emits it and dig-app consumes a FILTERED view (an `EnumSet<EventKind>` chosen
@@ -2149,11 +2152,83 @@ wallet read seam when `balances_dirty` is set.
 
 **Funds notifications (`notify`, #970).** A `NotifyingSink` taps `FundsReceived`/`FundsSent` and feeds
 a debounced coalescer: every funds event within a short trailing window merges into ONE native OS toast
-(a burst of 3 receives → one "Received 3 payments: X total"), rendered through a per-OS `NativeNotifier`
-(Linux `notify-send`, macOS `osascript`; a logging fallback elsewhere — native WinRT toast is a
-follow-up). Amounts + asset labels are honest ($DIG vs XCH vs a short CAT id) and a notification NEVER
-carries a key, seed, or address. It is passive, dismissible, and opt-out — it never gates a read
-(§6.0/§6.1). This path holds no key and touches no custody surface.
+(a burst of 3 receives → one "Received 3 payments: X total"). Amounts + asset labels are honest ($DIG
+vs XCH vs a short CAT id — never a guessed ticker) and a notification NEVER carries a key, seed, or
+address. It is passive, dismissible, and opt-out (§6.0/§6.1) — it never gates a read. This path holds
+no key and touches no custody surface. The sink half awaits the event stream above; the RENDER half
+(`Notification`, `NativeNotifier`, the coalescer) is what §3.7a drives today.
+
+**Native notification backends.** `native_notifier()` selects the host's:
+
+| OS | API |
+|---|---|
+| Linux | `notify-send` (libnotify), args passed separately so text cannot inject a command |
+| macOS | `osascript -e 'display notification …'`, both fields escaped for the AppleScript literal |
+| Windows | `Windows.UI.Notifications.ToastNotificationManager` (WinRT), payload built as escaped `ToastGeneric` XML |
+| other | `LoggingNotifier` |
+
+Windows is the one platform with no notification command to shell out to, so it is the one called
+in-process. An UNPACKAGED Win32 process has no package identity, so a toast has nothing to be
+attributed to and is DROPPED SILENTLY — `Show` still returns success. dig-app therefore registers an
+AppUserModelID, **`DIGNetwork.DIG`**, on a per-user Start Menu shortcut
+(`%APPDATA%\Microsoft\Windows\Start Menu\Programs\DIG.lnk`, carrying `System.AppUserModel.ID`).
+That id is CANONICAL: Windows keys the
+user's per-app notification permissions on it, so changing it discards choices the user has already
+made. Registration happens at start-up (`notify::prepare_host()`), not at the first toast — the shell
+resolves the id through an index over the Start Menu that the creating process does not see, so a
+toast raised in the same run as the shortcut is created does not appear.
+
+### 3.7a Confirmed-arrival notifications (`arrivals`, #2548)
+
+**dig-node decides what an arrival is; dig-app decides what to say and when to stop saying it.** The
+node keeps a durable arrival ledger and serves it on a cursor (`control.wallet.arrivals`); `arrivals`
+is a client of that cursor and forms no opinion of its own about whether money arrived.
+
+That division is normative, not stylistic. Telling a payment from the user's own CHANGE requires the
+coin's PARENT, and a parent is spent the moment it produces change — so `control.wallet.coins`, which
+lists UNSPENT coins only, structurally cannot answer the question. dig-app MUST NOT re-derive the
+judgement from it. An implementation that did was measured announcing `Received 8.999 XCH` for a
+transaction in which the user SENT money.
+
+**The seam.** `ArrivalSource::arrivals_since(after_seq)` yields an `ArrivalPage`
+(`arrivals`, `cursor`, `latest`). `watch::ControlPlaneSource` implements it over
+`control.wallet.arrivals`, an OPEN token-less read of the node's own local replica. A future push
+transport implements the same trait and nothing above it changes.
+
+**What `arrivals` is responsible for.** Exactly one property: *each recorded arrival is announced at
+most once, on this machine*.
+
+| Failure | What forbids it |
+|---|---|
+| installing dig-app against a node with a ledger toasts its whole history | an `ArrivalCursor` with no position ADOPTS the node's `latest` in silence |
+| a restart re-announces | the cursor is persisted (`arrival-cursor.json`, written whole via a rename) before anything is drawn |
+| the client resumes past an arrival it never saw | the cursor advances to `page.cursor` — the last row RECEIVED — and never to `latest`, which the node reads after the page |
+| a node whose ledger was rebuilt replays old toasts | the cursor never moves backwards |
+| an amount the client cannot read becomes a wrong figure | `amount` crosses the wire as a decimal string and an unparseable one is refused, never defaulted |
+
+A sweep drains pages until the node has nothing more (bounded per sweep; the remainder is picked up by
+the next sweep, because the cursor advanced over exactly what was read), saves the cursor, and only
+then draws ONE coalesced toast. Saving before drawing is deliberate: a crash between them costs a
+toast, and the other order costs a duplicate claim about money.
+
+**Assets.** The node's `asset_id` is passed through verbatim, so `$DIG` is named from
+`dig_constants::DIG_ASSET_ID` and any other CAT the node attributed is shown by its own short id —
+never relabelled, and never rendered with another asset's divisor.
+
+**Preference.** `AgentConfig.notifications.funds_received`, defaulting to ON — including for an
+`agent.json` written before the field existed. It is turned off in the Settings tab, and it gates the
+TOAST, never the cursor: the cursor keeps advancing while notifications are off, so turning them back
+on does not replay everything received in between.
+
+**A payment that arrives while dig-app is CLOSED is announced when it next opens.** The node records
+it whenever the node is running, so closing the window delays the toast rather than losing it. What is
+genuinely not covered is an arrival while the NODE is stopped: it is recorded by the catch-up that
+follows, and is an arrival unless that catch-up is the wallet's first (see dig-node's
+`sage::arrivals` arrival baseline). The Settings card states this in the user's words.
+
+**Custody (§908).** The one input is a cursor position, over a token-less read of the node's own
+replica. Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no
+oracle leg — polling it discloses nothing off-machine.
 
 ---
 

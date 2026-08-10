@@ -1381,6 +1381,19 @@ mod tray {
         POLLER.get_or_init(dig_app_core::wallet::node::NodeBalance::default)
     }
 
+    /// The process-wide confirmed-arrival watch (dig_ecosystem#2548).
+    ///
+    /// A single instance for the same reason the balance poller is one: its interval and its
+    /// in-flight guard have to span repaints, and a per-snapshot watch would call the node twice a
+    /// second. Every decision about what an arrival IS lives in dig-node's own ledger, and every
+    /// decision about what to SAY lives in `dig_app_core::arrivals` — this is only where the tick
+    /// comes from, because a binary is a test-free zone.
+    fn arrival_watch() -> &'static dig_app_core::arrivals::watch::ArrivalWatch {
+        static WATCH: std::sync::OnceLock<dig_app_core::arrivals::watch::ArrivalWatch> =
+            std::sync::OnceLock::new();
+        WATCH.get_or_init(dig_app_core::arrivals::watch::ArrivalWatch::for_host)
+    }
+
     /// Read the current state of the world into the one snapshot the menu is built from.
     fn snapshot(
         status: &SharedStatus,
@@ -1451,7 +1464,19 @@ mod tray {
             // chain read — and every decision about what the reading MEANS lives in
             // `dig_app_core::wallet`, because a binary is a test-free zone.
             balance: match status.read() {
-                Ok(status) => balance_poller().observe(&status.engine, receive_address.as_deref()),
+                Ok(status) => {
+                    // The same tick also asks whether money ARRIVED, which is a different question
+                    // from what the balance is: a figure that went up says nothing about whether it
+                    // was a payment or the user's own change coming back. dig-node answers that
+                    // question -- it is the only side that can, since telling change from a payment
+                    // needs the SPENT parent coin -- and the watch is a reader of its ledger. It
+                    // takes no address for the same reason: the node's ledger already covers every
+                    // address the wallet watches. The watch owns its own interval and does its
+                    // reading on a worker, so this call never blocks and contributes nothing to the
+                    // view.
+                    arrival_watch().observe(&status.engine);
+                    balance_poller().observe(&status.engine, receive_address.as_deref())
+                }
                 // A poisoned lock says nothing about the balance, and "nothing" is not zero.
                 Err(_) => dig_app_core::wallet::overview::BalanceReading::default(),
             },
@@ -1657,6 +1682,13 @@ mod tray {
     ) -> Result<(), (String, Agent<NodeConnector>)> {
         let event_loop = EventLoopBuilder::<Nudge>::with_user_event().build();
         let status = agent.status_handle();
+
+        // Register this app's notification identity NOW, at start-up, rather than at the moment the
+        // first payment lands. On Windows the shell resolves that identity through an index over the
+        // Start Menu, and the run that creates the entry does not see it — so a toast raised in the
+        // same process would be dropped silently (dig_ecosystem#2548). Minutes of head start is what
+        // makes the first payment on a fresh install the one that gets announced.
+        dig_app_core::notify::prepare_host();
 
         // Claim the global shortcut BEFORE the menu is built, so the very first menu already carries it
         // and the very first `Status` already explains a failure. The chord opens the SAME handler the

@@ -180,6 +180,22 @@ pub(crate) fn save(
     store.read()
 }
 
+/// Turn the funds-arrived notification on or off, then report what the file NOW says.
+///
+/// A separate function from [`save`] because this setting is a CHOICE and not typed text: there is
+/// nothing to validate and nothing to clear, so routing it through [`Setting`] would mean inventing
+/// a string form for a boolean and parsing it back. The read-back rule is identical and is the whole
+/// point — a chooser showing "Off" over a file that still says on is the defect PR #120 named.
+pub(crate) fn save_notifications(
+    store: &dyn ConfigStore,
+    funds_received: bool,
+) -> Result<AgentConfig, String> {
+    let mut config = store.read()?;
+    config.notifications.funds_received = funds_received;
+    store.write(&config)?;
+    store.read()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -356,6 +372,56 @@ pub(crate) mod tests {
             Some("http://kept"),
             "the settings file was replaced by defaults after a failed read"
         );
+    }
+
+    /// **The notification switch moves both ways, and a lost write is reported as the OLD value.**
+    ///
+    /// Both directions because a switch that can only be turned off is not a switch, and the
+    /// lost-write half because this is the control that stops an interruption: a person who turned
+    /// notifications off and was shown "Off" over a file still saying on would be interrupted
+    /// anyway, with the settings page insisting they would not be.
+    #[test]
+    fn the_notification_switch_moves_both_ways_and_never_lies_about_a_lost_write() {
+        let store = FakeStore::holding(AgentConfig::default());
+        assert!(
+            store.read().unwrap().notifications.funds_received,
+            "the fixture must start ON, or turning it off proves nothing"
+        );
+        assert!(
+            !save_notifications(&store, false)
+                .unwrap()
+                .notifications
+                .funds_received
+        );
+        assert!(
+            save_notifications(&store, true)
+                .unwrap()
+                .notifications
+                .funds_received
+        );
+
+        let mut lossy = FakeStore::holding(AgentConfig::default());
+        lossy.writes_are_lost = true;
+        assert!(
+            save_notifications(&lossy, false)
+                .expect("the store reported success")
+                .notifications
+                .funds_received,
+            "the pane would have shown notifications off while the file still says on"
+        );
+    }
+
+    /// **Turning notifications off leaves every other setting alone.**
+    #[test]
+    fn saving_the_notification_switch_preserves_the_rest_of_the_config() {
+        let store = FakeStore::holding(AgentConfig {
+            node_url: Some("http://kept".to_string()),
+            active_profile: Some("did:dig:abc".to_string()),
+            ..AgentConfig::default()
+        });
+        let after = save_notifications(&store, false).unwrap();
+        assert_eq!(after.node_url.as_deref(), Some("http://kept"));
+        assert_eq!(after.active_profile.as_deref(), Some("did:dig:abc"));
     }
 
     /// **Saving one setting leaves every other field of the config alone.**

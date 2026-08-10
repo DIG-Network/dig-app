@@ -1,11 +1,24 @@
 //! Notification rendering: honest amount/asset formatting + the per-OS native toast backends.
 //!
 //! The formatting half ([`direction_line`], [`format_amount`], [`asset_label`]) is pure and
-//! unit-tested. The per-OS half drives the platform's native toast as a SUBPROCESS (no new
-//! dependency, no untested FFI in the custody-adjacent app): Linux `notify-send`, macOS `osascript
-//! display notification`. Windows has no dependency-free toast subprocess, so it falls back to the
-//! [`LoggingNotifier`] for now (native WinRT toast is the #970 follow-up) — every backend is
-//! best-effort and a failure is swallowed, so a missed toast never breaks the app.
+//! unit-tested. The per-OS half drives the platform's native notification API:
+//!
+//! | OS | API | Shape |
+//! |---|---|---|
+//! | Linux | `notify-send` (libnotify) | subprocess, args passed separately |
+//! | macOS | `osascript -e 'display notification …'` | subprocess, AppleScript literal neutralized |
+//! | Windows | `Windows.UI.Notifications.ToastNotificationManager` (WinRT) | in-process, via the `windows` crate already in the tree |
+//!
+//! The two unix backends stay subprocesses because their platforms provide one and a subprocess is
+//! the smaller surface in a custody-adjacent binary. Windows provides no notification command, so it
+//! is the one platform where the native API has to be called directly (dig_ecosystem#2548 — this is
+//! the #970 follow-up that module header used to defer).
+//!
+//! Every backend is best-effort: a failure is logged and swallowed, because a missed awareness toast
+//! must never break the app.
+
+#[cfg(target_os = "windows")]
+pub use windows_toast::{prepare, AUMID};
 
 use std::collections::BTreeMap;
 
@@ -103,9 +116,295 @@ pub fn native_notifier() -> Box<dyn NativeNotifier> {
     {
         Box::new(platform::OsaScript)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(windows_toast::WinToast::for_this_app())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Box::new(LoggingNotifier)
+    }
+}
+
+/// The Windows toast backend, and the Start Menu registration that makes it visible.
+///
+/// # Why this is not just three WinRT calls
+///
+/// An UNPACKAGED Win32 process has no package identity, so Windows has nothing to attribute a toast
+/// to. The documented substitute is an AppUserModelID carried by a Start Menu shortcut: without one,
+/// `CreateToastNotifierWithId` still succeeds and `Show` still returns `Ok`, and **nothing appears**.
+/// That is the exact shape of a feature that ships green and does nothing, so the shortcut is
+/// created here rather than assumed — idempotently, once, pointing at the running executable.
+///
+/// dig-installer is the natural long-term home for it (it already owns Windows autostart, which
+/// `autostart.rs` delegates there for the same reason). Creating it here too is deliberate
+/// belt-and-braces: a build run from a zip, a developer build, and an installed build all notify.
+#[cfg(target_os = "windows")]
+mod windows_toast {
+    use windows::core::{Interface, HSTRING, PCWSTR, PROPVARIANT};
+    use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+
+    use super::{LoggingNotifier, NativeNotifier, Notification};
+
+    /// This application's AppUserModelID.
+    ///
+    /// A CANONICAL value: it is the name Windows files every DIG toast under, so the Start Menu
+    /// shortcut, the notifier and anything dig-installer writes must all use this exact string.
+    /// Changing it orphans every notification setting the user has already chosen — Windows keys
+    /// per-app notification permissions on it.
+    pub const AUMID: &str = "DIGNetwork.DIG";
+
+    /// What the Start Menu entry is called. It is what the toast is attributed to on screen, so it
+    /// is the product name and not the executable's.
+    const SHORTCUT_NAME: &str = "DIG.lnk";
+
+    /// `PKEY_AppUserModel_ID`, written out rather than imported.
+    ///
+    /// The `windows` crate does not export the shell property keys as constants, and this one is a
+    /// documented, frozen value. Spelling it here is the alternative to not being able to set it at
+    /// all; the fmtid/pid pair is from the Windows SDK's `propkey.h`.
+    const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: windows::core::GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3),
+        pid: 5,
+    };
+
+    /// Draws toasts through the Windows notification platform.
+    pub struct WinToast {
+        aumid: HSTRING,
+    }
+
+    impl WinToast {
+        /// The notifier for this process.
+        pub fn for_this_app() -> Self {
+            Self {
+                aumid: HSTRING::from(AUMID),
+            }
+        }
+    }
+
+    /// Register this app's notification identity, early, without showing anything.
+    ///
+    /// # Why this is a separate call the shell makes at start-up
+    ///
+    /// MEASURED on Windows 11: the run that CREATES the Start Menu shortcut still gets its toast
+    /// dropped — `Show` returns `Ok` and nothing appears, and the app does not appear under
+    /// `HKCU\…\Notifications\Settings`. The next run's toast is delivered and the key appears. The
+    /// shell resolves an AppUserModelID through an index over the Start Menu, and that index has not
+    /// caught up within the same process.
+    ///
+    /// So the identity is written when the app STARTS, minutes before any payment could arrive,
+    /// rather than at the moment of the first toast. [`deliver`] still writes it as a fallback for a
+    /// host where start-up could not, which is why this is belt-and-braces rather than the only path.
+    pub fn prepare() {
+        let aumid = HSTRING::from(AUMID);
+        let _ = std::thread::Builder::new()
+            .name("dig-toast-identity".to_string())
+            .spawn(move || unsafe {
+                let started = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                if let Err(e) = ensure_start_menu_identity(&aumid) {
+                    tracing::debug!(error = %e, "the Start Menu notification identity was not written");
+                }
+                if started.is_ok() {
+                    CoUninitialize();
+                }
+            });
+    }
+
+    impl NativeNotifier for WinToast {
+        /// Show `notification` as a Windows toast, falling back to the log if the platform refuses.
+        ///
+        /// The work happens on its own thread because it needs a COM apartment, and this process's
+        /// threads are in whatever apartment their own purpose put them in (dig_ecosystem#1926 puts
+        /// the Hello prompt's thread in the MTA). A fresh thread is the only way to be sure of the
+        /// apartment without disturbing anybody else's, and it is joined so a failure is observed
+        /// rather than lost.
+        fn show(&self, notification: &Notification) {
+            let aumid = self.aumid.clone();
+            let payload = notification.clone();
+            let delivered = std::thread::Builder::new()
+                .name("dig-toast".to_string())
+                .spawn(move || unsafe {
+                    // A failure here is not fatal: it usually means the apartment is already
+                    // initialized differently, and the calls below work regardless.
+                    let started = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                    let outcome = deliver(&aumid, &payload);
+                    if started.is_ok() {
+                        CoUninitialize();
+                    }
+                    outcome
+                })
+                .and_then(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| std::io::Error::other("the toast thread panicked"))
+                });
+
+            match delivered {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "the Windows toast was refused");
+                    LoggingNotifier.show(notification);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "the Windows toast could not be attempted");
+                    LoggingNotifier.show(notification);
+                }
+            }
+        }
+    }
+
+    /// Register the app's identity if needed, then raise the toast.
+    ///
+    /// # Safety
+    /// Calls COM/WinRT on the current thread, which the caller has put in an apartment.
+    unsafe fn deliver(aumid: &HSTRING, notification: &Notification) -> windows::core::Result<()> {
+        // Best-effort: a machine where the Start Menu is not writable (a locked-down profile) may
+        // still have the identity registered by the installer, so a failure here is not a reason to
+        // skip the toast.
+        if let Err(e) = ensure_start_menu_identity(aumid) {
+            tracing::debug!(error = %e, "the Start Menu identity could not be written");
+        }
+
+        let document = windows::Data::Xml::Dom::XmlDocument::new()?;
+        document.LoadXml(&HSTRING::from(toast_xml(notification)))?;
+        let toast = ToastNotification::CreateToastNotification(&document)?;
+        ToastNotificationManager::CreateToastNotifierWithId(aumid)?.Show(&toast)
+    }
+
+    /// Create the Start Menu shortcut carrying [`AUMID`], unless it is already there.
+    ///
+    /// # Safety
+    /// Calls COM on the current thread, which the caller has put in an apartment.
+    unsafe fn ensure_start_menu_identity(aumid: &HSTRING) -> windows::core::Result<()> {
+        let Some(path) = shortcut_path() else {
+            return Ok(());
+        };
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let executable = std::env::current_exe().map_err(|e| {
+            windows::core::Error::new(windows::Win32::Foundation::E_FAIL, e.to_string())
+        })?;
+
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(&HSTRING::from(executable.as_os_str()))?;
+        if let Some(parent) = executable.parent() {
+            link.SetWorkingDirectory(&HSTRING::from(parent.as_os_str()))?;
+        }
+
+        let properties: IPropertyStore = link.cast()?;
+        let mut value = PROPVARIANT::from(AUMID);
+        properties.SetValue(&PKEY_APP_USER_MODEL_ID, &value)?;
+        properties.Commit()?;
+        // `PROPVARIANT::from` allocates the string through COM's allocator; clearing it is how that
+        // memory goes back, and the value has already been copied into the store by `SetValue`.
+        let _ = PropVariantClear(std::ptr::addr_of_mut!(value).cast());
+
+        let file: IPersistFile = link.cast()?;
+        file.Save(PCWSTR(HSTRING::from(path.as_os_str()).as_ptr()), true)?;
+        let _ = aumid;
+        Ok(())
+    }
+
+    /// Where the per-user Start Menu shortcut goes, or `None` when `%APPDATA%` is not set.
+    ///
+    /// Per-user rather than all-users on purpose: dig-app is a per-user agent, writing here needs no
+    /// elevation, and an identity registered for one user is the correct scope for that user's
+    /// notification settings.
+    fn shortcut_path() -> Option<std::path::PathBuf> {
+        let appdata = std::env::var_os("APPDATA")?;
+        Some(
+            std::path::PathBuf::from(appdata)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Start Menu")
+                .join("Programs")
+                .join(SHORTCUT_NAME),
+        )
+    }
+
+    /// The toast payload, as the notification platform's `ToastGeneric` XML.
+    ///
+    /// Both fields are attacker-influenced in principle (an amount and an asset label are rendered
+    /// from chain data), so each is escaped for XML before it is interpolated — the same rule the
+    /// macOS backend applies to its AppleScript literal.
+    pub(super) fn toast_xml(notification: &Notification) -> String {
+        format!(
+            "<toast><visual><binding template=\"ToastGeneric\">\
+             <text>{}</text><text>{}</text>\
+             </binding></visual></toast>",
+            xml_escape(&notification.title),
+            xml_escape(&notification.body),
+        )
+    }
+
+    /// Neutralize text for interpolation into an XML text node or attribute.
+    pub(super) fn xml_escape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for ch in text.chars() {
+            match ch {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&apos;"),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// **Notification text cannot break out of the toast document.**
+        ///
+        /// A body carrying markup would otherwise either fail `LoadXml` (no toast at all) or inject
+        /// elements into the payload. The control is the ordinary body, which must pass through
+        /// unchanged — an escaper that mangled normal text would pass the first half alone.
+        #[test]
+        fn notification_text_is_neutralized_before_it_reaches_the_document() {
+            let hostile = Notification {
+                title: "DIG".to_string(),
+                body: "</text><audio src=\"x\"/><text>& 'pwned'".to_string(),
+            };
+            let xml = toast_xml(&hostile);
+            assert!(
+                !xml.contains("<audio"),
+                "markup survived into the toast: {xml}"
+            );
+            assert!(xml.contains("&lt;/text&gt;"), "{xml}");
+            assert!(xml.contains("&amp;"), "{xml}");
+
+            let ordinary = Notification {
+                title: "DIG — Funds received".to_string(),
+                body: "Received 2.5 $DIG".to_string(),
+            };
+            assert!(
+                toast_xml(&ordinary).contains("Received 2.5 $DIG"),
+                "ordinary text was mangled"
+            );
+        }
+
+        /// **The identity string is the one Windows keys notification permissions on.**
+        ///
+        /// Pinned as a literal because changing it silently resets every choice a user has already
+        /// made about DIG's notifications, and because the shortcut and the notifier have to agree.
+        #[test]
+        fn the_app_identity_is_stable() {
+            assert_eq!(AUMID, "DIGNetwork.DIG");
+        }
     }
 }
 

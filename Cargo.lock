@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "9.2.1"
+version = "10.0.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1973,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "9.2.1"
+version = "10.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2271,9 +2271,9 @@ dependencies = [
 
 [[package]]
 name = "dig-node-control-interface"
-version = "0.6.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82ab25a25af68b512c80de1cc8058966318f382ca3c2e358cec0a4a1b1107911"
+checksum = "875c5f342c3e0e655f5188a53c30ea09c39b8098733e2816fc62e457f37c1b25"
 dependencies = [
  "async-trait",
  "semver",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "9.2.1"
+version = "10.0.0"
 dependencies = [
  "clap",
  "dig-app-core",
