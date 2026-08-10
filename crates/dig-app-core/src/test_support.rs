@@ -1009,6 +1009,138 @@ pub mod node {
         serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
     }
 
+    /// The reply to one of the four OPEN chain reads, field-for-field as the 0.10 contract defines
+    /// it — including the `source` / `synced` / `peak_height` freshness trio every wallet result
+    /// carries, and the required-but-nullable keys (`coin`, `spend`, `cursor`) written as explicit
+    /// `null`s rather than omitted, because the contract makes an ABSENT key a decode error and the
+    /// difference is exactly what a client must not paper over.
+    fn chain_result(reply: &ChainReply, method: ControlMethod, request: &str) -> String {
+        let chain = match reply {
+            ChainReply::Chain(chain) => chain,
+            ChainReply::Rejected { code, symbol } => return rejection(*code, symbol, "chain read"),
+        };
+        let result = match method {
+            ControlMethod::WalletPeak => serde_json::json!({
+                "peak_height": chain.peak_height,
+                "synced": chain.synced,
+            }),
+            ControlMethod::WalletCoinById => {
+                let wanted = string_param(request, "coin_id").unwrap_or_default();
+                let coin = chain.coins.iter().find(|c| c.coin_id == wanted);
+                serde_json::json!({
+                    "coin": coin.map(|c| chain_coin_json(c)),
+                    "source": chain.source,
+                    "synced": chain.synced,
+                    "peak_height": chain.peak_height,
+                })
+            }
+            ControlMethod::WalletCoinSpend => {
+                let wanted = string_param(request, "coin_id").unwrap_or_default();
+                let spend = chain.spends.iter().find(|s| s.coin.coin_id == wanted);
+                serde_json::json!({
+                    "spend": spend.map(|s| serde_json::json!({
+                        "coin": chain_coin_json(&s.coin),
+                        "puzzle_reveal": s.puzzle_reveal,
+                        "solution": s.solution,
+                    })),
+                    "source": chain.source,
+                    "synced": chain.synced,
+                    "peak_height": chain.peak_height,
+                })
+            }
+            ControlMethod::WalletCoinsByParent => coins_by_parent_json(chain, request),
+            other => return rejection(-32601, "METHOD_NOT_FOUND", other.name()),
+        };
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
+    }
+
+    /// One page of `control.wallet.coinsByParent`, resumed HONESTLY from `after_coin_id`.
+    ///
+    /// The page is derived from the scripted child list rather than canned, and `complete` is set
+    /// only when this page genuinely exhausts that list — never from the page's length. A fixture
+    /// that answered the whole child set regardless of the cursor would let a client which never
+    /// paged pass, and one that inferred `complete` from a length would encode into the fixture the
+    /// very mistake the client must not make.
+    fn coins_by_parent_json(chain: &FakeChain, request: &str) -> serde_json::Value {
+        let parent = string_param(request, "parent_coin_id").unwrap_or_default();
+        let after = string_param(request, "after_coin_id");
+        let all: &[FakeCoin] = chain
+            .children
+            .iter()
+            .find(|(id, _)| *id == parent)
+            .map_or(&[], |(_, kids)| kids.as_slice());
+
+        let start = after.as_ref().map_or(0, |cursor| {
+            all.iter()
+                .position(|c| c.coin_id == *cursor)
+                .map_or(0, |i| i + 1)
+        });
+        let remaining = &all[start.min(all.len())..];
+        let page_size = if chain.child_page_size == 0 {
+            remaining.len()
+        } else {
+            chain.child_page_size
+        };
+        let page = &remaining[..page_size.min(remaining.len())];
+
+        // An endless node keeps handing back an ADVANCING cursor and never says `complete`. The
+        // cursor advances so the client cannot detect the loop by a repeated value — the only thing
+        // that can stop it is the client's own page bound.
+        let (coins, complete, cursor) = if chain.endless_children {
+            let next = format!("{:064x}", start + 1);
+            (
+                vec![FakeCoin::confirmed("xch", (start + 1) as u64)],
+                false,
+                Some(next),
+            )
+        } else if chain.incomplete_without_cursor {
+            (page.to_vec(), false, None)
+        } else {
+            let complete = start + page.len() >= all.len();
+            let cursor = page.last().map(|c| c.coin_id.clone());
+            (page.to_vec(), complete, cursor)
+        };
+
+        serde_json::json!({
+            "coins": coins.iter().map(|c| chain_coin_json(c)).collect::<Vec<_>>(),
+            "complete": complete,
+            "cursor": cursor,
+            "source": chain.source,
+            "synced": chain.synced,
+            "peak_height": chain.peak_height,
+        })
+    }
+
+    /// One coin in a chain-read reply.
+    ///
+    /// `asset` is `null` on every chain read, because the contract requires it: a coin id alone
+    /// classifies nothing, so a node emitting a concrete asset would be asserting something it never
+    /// verified. A client that read the asset off one of these would be reading the fixture's
+    /// helpfulness rather than the node's answer.
+    fn chain_coin_json(coin: &FakeCoin) -> serde_json::Value {
+        serde_json::json!({
+            "coin_id": coin.coin_id,
+            "asset": serde_json::Value::Null,
+            "amount": coin.amount,
+            "parent_coin_info": coin.parent_coin_info,
+            "puzzle_hash": coin.puzzle_hash,
+            "created_height": coin.created_height,
+            "spent_height": coin.spent_height,
+        })
+    }
+
+    /// A string parameter's value, read back out of the raw request body.
+    ///
+    /// Read from the WIRE rather than from a structure the fake shares with the client, so a client
+    /// that sent the right value under the wrong key cannot be rescued by a helpful fixture.
+    fn string_param(request: &str, key: &str) -> Option<String> {
+        request
+            .split(&format!("\"{key}\":\""))
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .map(str::to_string)
+    }
+
     /// The node's error envelope: a numeric wire code plus the stable `data.code` symbol.
     fn rejection(code: i64, symbol: &str, what: &str) -> String {
         serde_json::json!({
