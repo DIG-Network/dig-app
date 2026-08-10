@@ -1598,10 +1598,12 @@ of shapes. Two rules bind whoever adds it:
 on chain, both permanent. Copy on this surface MUST NOT say delete, remove, erase or destroy, MUST
 state that a hidden profile remains on chain, and MUST leave a way back to it.
 
-**A switch MUST be disclosed BEFORE it is applied, naming both ends.** The receive address, the
-per-profile DEK and the identity signing key all derive at the profile's index, so the disclosure
-names the profile being LEFT as well as the one arrived at — the one being left holds the address the
-person has been handing out. The standing statement is drawn where the choice is made; the
+**A switch MUST be disclosed BEFORE it is applied, naming both ends.** The per-profile DEK and the
+identity signing key change immediately at the switch; the disclosure names the profile being LEFT
+as well as the one arrived at. The receive address does NOT move at switch time — `dig-account` fixes
+the wallet index at open time and exposes no `wallet_ops_at` (dig_ecosystem#2496), so after a switch
+the wallet can only answer for the profile just left; DIG MUST show no address in the meantime rather
+than the previous profile's. The standing statement is drawn where the choice is made; the
 confirmation repeats it with both profiles named, and refusal is the default answer.
 
 **The active profile MUST NOT be offered a hide control**, because `dig-account` refuses to hide it

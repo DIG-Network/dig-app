@@ -519,7 +519,9 @@ pub fn unknown_reason(why: &BalanceUnknown) -> String {
             "your address could not be derived, so there is nothing to read a balance for.".to_string()
         }
         BalanceUnknown::NoAddress(AddressUnavailable::WalletBehindActiveProfile) => {
-            "your wallet is still on the profile you switched away from, and DIG will not read a              balance for an address belonging to a different profile. Close DIG and open it again to              move your wallet across."
+            "your wallet is still on the profile you switched away from, and DIG will not read a \
+             balance for an address belonging to a different profile. Close DIG and open it again to \
+             move your wallet across."
                 .to_string()
         }
         BalanceUnknown::NoNode => {
@@ -1235,14 +1237,6 @@ mod tests {
         );
     }
 
-    /// **An unlocked account whose address derivation genuinely fails is told the truth, never
-    /// "unlock your account first"** (dig_ecosystem#2059).
-    ///
-    /// Before this fix, `Unlocked { .. }` + `receive_address: None` fell through to the SAME `Locked`
-    /// arm as an ordinary lock — naming a remedy ("unlock it") the user is not in a position to need,
-    /// because they are already unlocked. This is the load-bearing assertion: it fails against the old
-    /// collapse-to-`Locked` mapping and passes only once the address FAULT is threaded through
-    /// to a distinct `DerivationFailed` reading.
     /// **An unlocked account whose wallet is behind the active profile is told THAT, not told to
     /// unlock** (dig_ecosystem#2496).
     ///
@@ -1326,6 +1320,14 @@ mod tests {
         );
     }
 
+    /// **An unlocked account whose address derivation genuinely fails is told the truth, never
+    /// "unlock your account first"** (dig_ecosystem#2059).
+    ///
+    /// Before this fix, `Unlocked { .. }` + `receive_address: None` fell through to the SAME `Locked`
+    /// arm as an ordinary lock — naming a remedy ("unlock it") the user is not in a position to need,
+    /// because they are already unlocked. This is the load-bearing assertion: it fails against the old
+    /// collapse-to-`Locked` mapping and passes only once the address FAULT is threaded through
+    /// to a distinct `DerivationFailed` reading.
     #[test]
     fn an_unlocked_account_with_a_failed_derivation_is_told_the_truth_not_told_to_unlock() {
         let body = window_body(&WalletOverview::of_tray(&crate::tray_menu::TrayView {
