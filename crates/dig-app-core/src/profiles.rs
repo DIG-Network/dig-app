@@ -506,7 +506,8 @@ pub mod copy {
     ///
     /// The notice is assembled in `dig-app/src/bin`, which no guard test can see
     /// (dig_ecosystem#2587) — and the selection is exactly the part worth guarding, because
-    /// [`ProfileCreation::blocked`] answers `None` for **two** different arms. Reading that one
+    /// [`ProfileCreation::blocked`](super::ProfileCreation::blocked) answers `None` for **two**
+    /// different arms. Reading that one
     /// `None` as *creation is possible* would silently drop the whole explanation for an UNMEASURED
     /// node, from a notice whose only job is to give one (dig_ecosystem#2690).
     ///
