@@ -3629,29 +3629,22 @@ mod tray {
         };
 
         let creation = ProfileCreation::of(super::mint_seams().availability());
-        // The same branch the window's create panel carries, and for the same reason: `blocked()`
-        // is always `Some` on every build shipped so far, and `None` is where a real create step
-        // will hang the day dig-account's mint publishes (see `ProfileCreation`).
-        let Some(blocked) = creation.blocked() else {
-            notify(
-                confirmer,
-                copy::ABOUT_TITLE,
-                copy::ABOUT_HEADING,
-                &format!("{}\n\n{held}{}", copy::WHAT_A_PROFILE_IS, copy::HIDE_NOTE),
-            );
-            return;
-        };
-        notify(
-            confirmer,
-            copy::ABOUT_TITLE,
-            copy::ABOUT_HEADING,
-            &format!(
+        // Asked of `copy::about_creation` rather than matched here. `blocked()` answers `None` for
+        // TWO different arms, and the `let Some(_) else` shape this replaced read that one `None` as
+        // *creation is possible, so say nothing about it* — which would silently drop the whole
+        // explanation for an UNMEASURED node the day this reads a node rather than a constant
+        // (dig_ecosystem#2690). The selection lives in the library because this file is one no guard
+        // test can see (dig_ecosystem#2587).
+        let body = match copy::about_creation(creation) {
+            Some(sentence) => format!(
                 "{}\n\n{held}{}\n\n{}",
                 copy::WHAT_A_PROFILE_IS,
-                copy::cannot_create(blocked),
+                sentence,
                 copy::HIDE_NOTE
             ),
-        );
+            None => format!("{}\n\n{held}{}", copy::WHAT_A_PROFILE_IS, copy::HIDE_NOTE),
+        };
+        notify(confirmer, copy::ABOUT_TITLE, copy::ABOUT_HEADING, &body);
     }
 
     /// Apply a validated cap `bytes` to the node, warning first if it would evict cached content.

@@ -734,7 +734,9 @@ mod tests {
         };
         let measured_says = card_says(&measured, 960.0);
         assert!(
-            measured_says.contains(copy::profiles::cannot_create(CreationBlocked::NoChainTransport)),
+            measured_says.contains(copy::profiles::cannot_create(
+                CreationBlocked::NoChainTransport
+            )),
             "a measured blocker stopped being explained: {measured_says}"
         );
         assert!(

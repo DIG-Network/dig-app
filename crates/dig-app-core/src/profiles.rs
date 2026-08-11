@@ -477,6 +477,41 @@ pub mod copy {
         "A profile is an on-chain identity — a DID and a store — that lets you publish, sign for an \
          app and be found by other people. One account can hold several and use one at a time.";
 
+    /// Said while nobody has yet measured whether this node can service a profile mint.
+    ///
+    /// Names the READ, not an outcome, exactly as the card's list-pending sentence does — and for a
+    /// sharper reason: every sentence in [`cannot_create`] ends *there is nothing for you to do*,
+    /// which is the worst thing to tell somebody whose node is merely stopped. An unmeasured node and
+    /// an unreachable one are different facts (dig_ecosystem#2690).
+    ///
+    /// Lives here, beside [`cannot_create`], because the window's card and the tray's About notice
+    /// both read it — one sentence, so the two surfaces cannot come to describe different builds.
+    pub const CHECKING_CREATION: &str =
+        "DIG is still checking whether this computer can create a profile. Nothing here is settled until it has.";
+
+    /// What the tray's About-profiles notice says about CREATING one, or `None` when there is no
+    /// absence to explain.
+    ///
+    /// # Why this selection lives here rather than at the notice
+    ///
+    /// The notice is assembled in `dig-app/src/bin`, which no guard test can see
+    /// (dig_ecosystem#2587) — and the selection is exactly the part worth guarding, because
+    /// [`ProfileCreation::blocked`] answers `None` for **two** different arms. Reading that one
+    /// `None` as *creation is possible* would silently drop the whole explanation for an UNMEASURED
+    /// node, from a notice whose only job is to give one (dig_ecosystem#2690).
+    ///
+    /// Matching here makes the mapping exhaustive, testable, and impossible for the binary to get
+    /// wrong: a new arm breaks this compile rather than quietly falling into a catch-all.
+    pub fn about_creation(creation: super::ProfileCreation) -> Option<&'static str> {
+        match creation {
+            super::ProfileCreation::Unknown => Some(CHECKING_CREATION),
+            super::ProfileCreation::Blocked(blocked) => Some(cannot_create(blocked)),
+            // Creation is possible: the Account tab's card carries the control, and a notice cannot
+            // explain an absence there is none of.
+            super::ProfileCreation::Possible => None,
+        }
+    }
+
     /// Why a profile cannot be created on this build, one sentence per missing piece.
     ///
     /// An EXHAUSTIVE match on [`CreationBlocked`], which
@@ -858,6 +893,46 @@ mod tests {
             ProfileCreation::of_reading(Some(ProfileMintAvailability::NoChainTransport))
         );
         assert!(ProfileCreation::of_reading(Some(ProfileMintAvailability::Possible)).is_possible());
+    }
+
+    /// **The tray's About notice explains an absence for every arm that HAS one, and never invents
+    /// a cause for a node nobody measured** (dig_ecosystem#2690).
+    ///
+    /// The binary assembles that notice, and `src/bin` is a file no guard test can read
+    /// (dig_ecosystem#2587) — so the selection it delegates to is guarded here instead. Each leg
+    /// varies one thing, and the `assert_ne!` is what makes it more than a transcription: an
+    /// implementation that answered the unreachable-chain sentence for BOTH would satisfy every
+    /// "is some" assertion and still be the exact defect.
+    #[test]
+    fn the_about_notice_explains_an_unmeasured_node_differently_from_an_unreachable_one() {
+        let checking = copy::about_creation(ProfileCreation::Unknown);
+        let unreachable =
+            copy::about_creation(ProfileCreation::Blocked(CreationBlocked::NoChainTransport));
+
+        assert_eq!(Some(copy::CHECKING_CREATION), checking);
+        assert_eq!(
+            Some(copy::cannot_create(CreationBlocked::NoChainTransport)),
+            unreachable
+        );
+        assert_ne!(
+            checking, unreachable,
+            "an unmeasured node and an unreachable one were explained in the same words, which \
+             tells somebody whose node is merely stopped that there is nothing for them to do"
+        );
+
+        // Every blocked arm gets its own sentence, so a new one cannot arrive unexplained.
+        for blocked in CreationBlocked::EVERY {
+            assert_eq!(
+                Some(copy::cannot_create(blocked)),
+                copy::about_creation(ProfileCreation::Blocked(blocked))
+            );
+        }
+
+        assert_eq!(
+            None,
+            copy::about_creation(ProfileCreation::Possible),
+            "a notice cannot explain an absence there is none of"
+        );
     }
 
     /// **A switch discloses BOTH ends before it happens.**

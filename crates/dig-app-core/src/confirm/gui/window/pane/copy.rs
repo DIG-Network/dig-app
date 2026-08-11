@@ -442,17 +442,11 @@ pub(crate) mod profiles {
     /// The panel holding what a profile is and why one cannot be created yet.
     pub(crate) const CREATE_PANEL: &str = "Creating a profile";
 
-    /// Said while nobody has yet measured whether this node can service a profile mint.
+    /// Said while nobody has yet measured whether this node can create a profile.
     ///
-    /// Names the READ, exactly as [`PENDING`] does for the list, and for the same reason: an
-    /// unmeasured node and an unreachable one are different facts, and the blocked sentences below
-    /// end with *there is nothing for you to do*, which is the worst possible thing to tell somebody
-    /// whose node is merely stopped (dig_ecosystem#2690).
-    ///
-    /// It promises no outcome. Creation may turn out to be possible or blocked; what is true right
-    /// now is only that DIG is still asking.
-    pub(crate) const CHECKING_CREATION: &str =
-        "DIG is still checking whether this computer can create a profile. Nothing here is settled          until it has.";
+    /// Delegated to [`crate::profiles::copy::CHECKING_CREATION`] rather than written again here, for
+    /// the reason [`cannot_create`] is: the card and the tray's About notice must say one sentence.
+    pub(crate) const CHECKING_CREATION: &str = crate::profiles::copy::CHECKING_CREATION;
 
     /// The badge on the profile the account is deriving at.
     pub(crate) const ACTIVE_BADGE: &str = "In use";
@@ -833,6 +827,7 @@ mod tests {
             account::DIG_ID_UNKNOWN,
             apps::INSTALL_NOTE,
             profiles::PENDING,
+            profiles::CHECKING_CREATION,
             profiles::EMPTY,
             profiles::SWITCH_CAUTION,
             profiles::HIDE_NOTE,
