@@ -82,6 +82,37 @@ struct Cached {
     taken: Instant,
 }
 
+/// The worker's claim on [`PollState::in_flight`], released when the worker's stack unwinds as well
+/// as when it returns.
+///
+/// # Why an RAII guard rather than a line at the end of the worker
+///
+/// The release used to be the worker's last statement, which a panicking probe skips — and the same
+/// unwind skips the write to [`PollState::cached`], so the endpoint was left holding the slot with
+/// nothing to show for it. [`observe`](NodeChainReadiness::observe) then found no reading and
+/// [`start_probe`](NodeChainReadiness::start_probe) found the slot taken, so it declined to probe;
+/// that endpoint answered `None` for the life of the process with no path back. ONE transient panic
+/// bought permanent silent unavailability, and a surface that says *still checking* about an
+/// activity nobody is performing (dig_ecosystem#2686 §3, dig_ecosystem#2690).
+///
+/// A `Drop` releases on both paths by construction, so the failure cannot come back by someone
+/// adding an early return above the release.
+struct InFlight {
+    state: Arc<Mutex<PollState>>,
+    endpoint: String,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Cleared only if it is still OUR probe: the link may have moved to a different node while
+        // we waited, in which case a later worker owns the slot.
+        if state.in_flight.as_deref() == Some(self.endpoint.as_str()) {
+            state.in_flight = None;
+        }
+    }
+}
+
 impl Default for NodeChainReadiness {
     fn default() -> Self {
         Self::new(REFRESH_INTERVAL, READ_TIMEOUT)
@@ -144,6 +175,13 @@ impl NodeChainReadiness {
         let timeout = self.timeout;
         let probe = self.probe;
         std::thread::spawn(move || {
+            // Declared FIRST so it drops LAST — after the guard below — because releasing the slot
+            // takes the same lock. Held for the whole worker so a probe that panics releases it too.
+            let _slot = InFlight {
+                state: Arc::clone(&shared),
+                endpoint: endpoint.clone(),
+            };
+
             let reading = probe(&endpoint, timeout);
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
             state.cached = Some(Cached {
@@ -151,11 +189,6 @@ impl NodeChainReadiness {
                 reading,
                 taken: Instant::now(),
             });
-            // Cleared only if it is still OUR probe: the link may have moved to a different node
-            // while we waited, in which case a later worker owns the slot.
-            if state.in_flight.as_deref() == Some(endpoint.as_str()) {
-                state.in_flight = None;
-            }
         });
     }
 
@@ -244,6 +277,57 @@ mod tests {
             ChainReadiness::NoLineageWalk {
                 why: "no walk here".into()
             }
+        );
+    }
+
+    /// **A probe that falls over releases the endpoint, so the node can be measured again**
+    /// (dig_ecosystem#2686 §3).
+    ///
+    /// Makes impossible: permanent silent unavailability from ONE transient panic. The in-flight
+    /// slot was released on the worker's last line, so an unwinding probe skipped it — and because
+    /// the same unwind also skipped the write to `cached`, [`observe`] then found no reading AND
+    /// found the slot still taken, so [`start_probe`](NodeChainReadiness::start_probe) returned
+    /// early on every subsequent call. That endpoint answered `None` for the life of the process
+    /// with no path back, which the surface renders as *still checking* forever
+    /// (dig_ecosystem#2690): an ongoing activity that is not ongoing, and no action the person can
+    /// take. Fail-closed must not mean permanently denied.
+    ///
+    /// # Why the fixture needs a probe that recovers rather than one that always panics
+    ///
+    /// A probe that panicked every time would leave `observe` answering `None` under both the fixed
+    /// and the broken body, so it could not tell them apart. Only the SECOND attempt distinguishes
+    /// them, and the second attempt happens only if the slot was released — so `settled` landing at
+    /// all IS the property. Against the pre-fix body this fails on `settled`'s own
+    /// *"the probe never landed"*, having spun the full two seconds.
+    ///
+    /// The attempt count is asserted separately so a poller that somehow answered without probing
+    /// twice could not satisfy this either.
+    #[test]
+    fn a_probe_that_panics_does_not_strand_the_endpoint_as_permanently_unmeasured() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+        /// Falls over on its first call and answers honestly on every one after.
+        fn panics_once(_endpoint: &str, _timeout: Duration) -> ChainReadiness {
+            match ATTEMPTS.fetch_add(1, Ordering::SeqCst) {
+                0 => panic!("a transient probe failure"),
+                _ => ChainReadiness::WalksLineages,
+            }
+        }
+
+        let poller = NodeChainReadiness::with_probe(REFRESH_INTERVAL, panics_once);
+        let link = connected("http://dig.local:4801");
+
+        assert_eq!(poller.observe(&link), None, "no probe has landed yet");
+        assert_eq!(
+            settled(&poller, &link),
+            ChainReadiness::WalksLineages,
+            "one panicking probe left the endpoint unmeasurable for the life of the process"
+        );
+        assert!(
+            ATTEMPTS.load(Ordering::SeqCst) >= 2,
+            "the reading arrived without a second probe, so it says nothing about the slot"
         );
     }
 
