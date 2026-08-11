@@ -194,7 +194,10 @@ impl fmt::Display for ChainReadError {
             }
             Self::Unsupported { method, detail } => write!(f, "{method} is unavailable: {detail}"),
             Self::Unusable { method, detail } => {
-                write!(f, "{method} answered beyond what DIG will process: {detail}")
+                write!(
+                    f,
+                    "{method} answered beyond what DIG will process: {detail}"
+                )
             }
         }
     }

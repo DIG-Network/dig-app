@@ -681,7 +681,9 @@ mod tests {
         for seams in [
             ProfileMintSeams::probe(&door, &WalksLineages),
             ProfileMintSeams::probe(&door, &refusing),
-            ProfileMintSeams::NoChainTransport { why: "the node is not running".into() },
+            ProfileMintSeams::NoChainTransport {
+                why: "the node is not running".into(),
+            },
         ] {
             let possible = seams.availability() == ProfileMintAvailability::Possible;
             assert_eq!(
