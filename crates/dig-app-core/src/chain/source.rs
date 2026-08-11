@@ -439,7 +439,7 @@ const LINEAGE_WALK: &str = "resolve_singleton_lineage";
 /// - a deadline overrun is a [`Transport`](ChainReadError::Transport), not a `Malformed`: nothing
 ///   about the chain was necessarily wrong, the walk merely ran out of time, and the remedy is to
 ///   retry. Calling it malformed accuses an honest node of lying for the crime of being slow.
-fn walk_failure(error: LineageWalkError<ChainReadError>) -> ChainReadError {
+pub(super) fn walk_failure(error: LineageWalkError<ChainReadError>) -> ChainReadError {
     match error {
         // Already classified by the read that failed; re-wrapping it would only blur it.
         LineageWalkError::Source(inner) => inner,
