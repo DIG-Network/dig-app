@@ -34,13 +34,20 @@
 //! (and in `SPEC.md` §3.1b) rather than left to be rediscovered by whoever first asks this source
 //! about a CAT. The related mainnet-only `"xch"` address HRP is documented at the method.
 //!
-//! # What consumes this
+//! # Not wired up yet, on purpose
 //!
 //! [`readiness`] measures — off the painting thread — whether the connected node can service the
-//! reads a whole-profile mint needs, which is what lets the shell offer profile creation only where
-//! it can actually be completed (dig_ecosystem#2398). The DID-only wizard's seams
-//! ([`crate::account::chain_mint`]) are deliberately unchanged: a DID-only seam says nothing about
-//! whether a PROFILE can be completed.
+//! reads a whole-profile mint needs. Nothing consumes that measurement at this revision:
+//! [`NodeChainReadiness`] has no caller outside its own module, and the shell still hardcodes the
+//! seam it hands the wizard. The poller already owns its cadence; what it lacks is a caller, and
+//! only once that caller and a creation control land together will a reading decide where the
+//! shell offers profile creation (dig_ecosystem#2398).
+//!
+//! Saying that plainly is the rule [`readiness`] itself argues, turned on this file: an unmeasured
+//! node is not a measured absence, and a seam nobody reads is not a seam in use.
+//!
+//! The DID-only wizard's seams ([`crate::account::chain_mint`]) are deliberately unchanged: a
+//! DID-only seam says nothing about whether a PROFILE can be completed.
 
 pub mod error;
 pub mod publish;
