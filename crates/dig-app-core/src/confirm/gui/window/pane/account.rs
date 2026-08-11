@@ -1017,16 +1017,20 @@ mod tests {
         let mut allowed: Vec<String> = FIXED_WORDS.iter().map(|word| word.to_string()).collect();
         allowed.push(copy::account::summary(kind).to_string());
         allowed.push(kind.word().to_string());
-        // Keyed on the BUILD's mint seam rather than on the account's state — the same string in
-        // all six — so this is not a second per-state sentence set; both arms are listed because
-        // the fixture holds the seam fixed and either could be the one drawn.
-        allowed.push(
-            copy::profiles::cannot_create(crate::profiles::CreationBlocked::NoChainTransport)
-                .to_string(),
-        );
-        allowed.push(
-            copy::profiles::cannot_create(crate::profiles::CreationBlocked::NoLineageWalk)
-                .to_string(),
+        // Every sentence the create panel can draw, keyed on the node READING rather than on the
+        // account's state — the same string in all six — so none of them is a second per-state
+        // sentence set. All of them are admitted because the fixture holds the reading fixed and
+        // any one of them could be the one drawn.
+        //
+        // DERIVED rather than hand-listed, because the hand-listed version drifted the moment a
+        // third arm arrived: `CHECKING_CREATION` (dig_ecosystem#2690) was absent from the list, so
+        // this test failed for a sentence that was never a parallel set at all. Walking
+        // `CreationBlocked::EVERY` stops a new blocked arm doing the same thing again.
+        allowed.push(copy::profiles::CHECKING_CREATION.to_string());
+        allowed.extend(
+            crate::profiles::CreationBlocked::EVERY
+                .into_iter()
+                .map(|blocked| copy::profiles::cannot_create(blocked).to_string()),
         );
         allowed.push(copy::protection::second_factor_needs(&lead));
         allowed.push(copy::protection::pairing_needs(&lead));
