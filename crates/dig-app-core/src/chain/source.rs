@@ -24,7 +24,7 @@
 //! | [`peak_height`](ChainSource::peak_height) | `control.wallet.peak` | open |
 //! | [`parent_spend`](ChainSource::parent_spend) | *(the trait default)* | — |
 //! | [`block_timestamp`](ChainSource::block_timestamp) | *(none exists)* | — |
-//! | [`resolve_singleton_lineage`](ChainSource::resolve_singleton_lineage) | *(not yet built)* | — |
+//! | [`resolve_singleton_lineage`](ChainSource::resolve_singleton_lineage) | *(the shared walk, over the four reads above)* | — |
 //!
 //! `parent_spend` is deliberately NOT overridden: the trait's default composes `coin_record` with
 //! `coin_spend`, which is exactly the two calls a direct implementation would make, and a second
@@ -37,6 +37,7 @@
 
 use chia_protocol::{Bytes32, Coin, CoinSpend, Program};
 use chia_sdk_utils::Address;
+use dig_chainsource_interface::{walk_singleton_lineage, LineageWalkError};
 use dig_chainsource_interface::{ChainSource, CoinRecord, SingletonLineage};
 use dig_node_control_interface::params::{
     Asset, WalletCoinByIdParams, WalletCoinSpendParams, WalletCoinsByParentParams,
@@ -353,27 +354,43 @@ impl ChainSource for ControlChainSource {
         )))
     }
 
-    /// # Deliberately not implemented here — see dig_ecosystem#2572
+    /// Delegates to the ecosystem's ONE hardened singleton walk (dig_ecosystem#2572).
     ///
-    /// An authenticated launcher-to-tip walk is the single most money-critical read in the trait: a
-    /// coin's puzzle hash is attacker-chosen, so membership of a lineage may only be established by
-    /// walking real recreation spends, and a walk that gets this subtly wrong authenticates a
-    /// forgery. `dig-chainsource-interface` ships `walk_singleton_lineage`, built exactly
-    /// once and hardened over four rounds of security review, and this method will delegate to it.
+    /// An authenticated launcher-to-tip walk is the most money-critical read in the trait: a coin's
+    /// puzzle hash is attacker-chosen, so lineage membership may only be established by walking real
+    /// recreation spends, and a walk that gets this subtly wrong authenticates a forgery.
+    /// `dig_chainsource_interface::walk_singleton_lineage` is that walk, built once and hardened
+    /// over four rounds of security review. **Never hand-roll it here.**
     ///
-    /// Until that publishes, this returns [`ChainReadError::Unsupported`] — a stated absence with a
-    /// remedy. **Do not hand-roll the walk here.** A second implementation of singleton
-    /// authentication is the precise thing the shared one exists to prevent, and a fresh one would
-    /// carry none of the attacks the shared one has already survived.
+    /// # Why the PLAIN variant, and not `_bounded` or `_within`
+    ///
+    /// All three exist; the plain one is the only correct choice for a provider. Its default
+    /// [`WalkBounds`](dig_chainsource_interface::WalkBounds) already carry BOTH denial-of-
+    /// service guards — the canonical `MAX_LINEAGE_DEPTH` hop cap and the `DEFAULT_WALK_BUDGET`
+    /// wall-clock budget — and the crate's own documentation says a one-line delegation is how a
+    /// provider INHERITS them rather than having to remember them. The other two exist so a test can
+    /// exercise a guard over a short chain with a tiny value.
+    ///
+    /// Passing bounds of my own would either narrow the ecosystem's shared bound on a guess, or
+    /// attempt to widen it — and `WalkBounds::hops` clamps to `MAX_LINEAGE_DEPTH`, so widening is not
+    /// even expressible. Inheriting the shared numbers is the whole point: an unbounded walk against
+    /// a hostile or very long lineage is a liveness problem, and these two bounds are the ecosystem's
+    /// agreed answer to it.
+    ///
+    /// This is not recursive. The walk reads `coin_record`, `coin_spend` and `coin_records_by_parent`
+    /// only; it never calls back into this method.
+    ///
+    /// # Every failure stays a failure
+    ///
+    /// `Ok(None)` is returned ONLY for the walk's own genuine absences — no such launcher, not a
+    /// launcher coin, never spent, or fully melted. All six `LineageWalkError` variants become an
+    /// `Err`, because on a mint path *the lineage ends here* reads as **safe to spend**. The mapping
+    /// preserves the crate's own remedy taxonomy rather than flattening it.
     fn resolve_singleton_lineage(
         &self,
-        _launcher_id: Bytes32,
+        launcher_id: Bytes32,
     ) -> Result<Option<SingletonLineage>, Self::Error> {
-        Err(ChainReadError::unsupported(
-            "resolve_singleton_lineage",
-            "TODO(dig_ecosystem#2572): delegate to dig_chainsource_interface::walk_singleton_lineage, \
-             which lands in 0.4.0. A hand-rolled singleton walk is forbidden here",
-        ))
+        walk_singleton_lineage(self, launcher_id).map_err(walk_failure)
     }
 
     fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
@@ -397,6 +414,68 @@ impl ChainSource for ControlChainSource {
     /// dig-capsule and dig-social-profile), so this costs no capability today.
     fn block_timestamp(&self, _height: u32) -> Result<Option<u64>, Self::Error> {
         Ok(None)
+    }
+}
+
+/// The trait method name a lineage failure is reported under.
+///
+/// Not a `control.*` method: the walk is composed from four of them, so naming any single one would
+/// point a diagnosis at the wrong read.
+const LINEAGE_WALK: &str = "resolve_singleton_lineage";
+
+/// Project a [`LineageWalkError`] onto this client's error, PRESERVING the remedy.
+///
+/// Every arm produces an `Err`. That is the whole contract: on a mint path an `Ok(None)` means *this
+/// singleton does not exist*, which reads as safe to spend, so a walk that could not complete must
+/// never become one.
+///
+/// The mapping mirrors `dig-chainsource-interface`'s own projection rather than inventing a second
+/// judgement of which failure means what — including the two places that judgement is counter-
+/// intuitive:
+///
+/// - a [`Source`](LineageWalkError::Source) failure passes through **unmodified**, so an
+///   `Unsupported` node stays distinguishable from bad data. Flattening it would erase exactly the
+///   distinction the fail-closed contract depends on.
+/// - a deadline overrun is a [`Transport`](ChainReadError::Transport), not a `Malformed`: nothing
+///   about the chain was necessarily wrong, the walk merely ran out of time, and the remedy is to
+///   retry. Calling it malformed accuses an honest node of lying for the crime of being slow.
+fn walk_failure(error: LineageWalkError<ChainReadError>) -> ChainReadError {
+    match error {
+        // Already classified by the read that failed; re-wrapping it would only blur it.
+        LineageWalkError::Source(inner) => inner,
+        LineageWalkError::Malformed(detail) => ChainReadError::malformed(LINEAGE_WALK, detail),
+        LineageWalkError::NotASingleton { coin_id } => ChainReadError::malformed(
+            LINEAGE_WALK,
+            format!("coin {coin_id} is not a genuine singleton of this launcher"),
+        ),
+        // Size, not corruption — see [`ChainReadError::Unusable`].
+        LineageWalkError::RevealTooLarge { coin_id, limit } => ChainReadError::unusable(
+            LINEAGE_WALK,
+            format!("the puzzle reveal of coin {coin_id} expands beyond the {limit}-byte bound"),
+        ),
+        // Depth, not corruption, and deterministic — so it is not a retry either.
+        LineageWalkError::TooDeep { limit } => ChainReadError::unusable(
+            LINEAGE_WALK,
+            format!("this singleton's lineage is longer than the {limit}-hop bound DIG will walk"),
+        ),
+        LineageWalkError::DeadlineExceeded { budget } => ChainReadError::transport(
+            LINEAGE_WALK,
+            format!("the lineage walk outlasted its {budget:?} budget"),
+        ),
+        // `LineageWalkError` is `#[non_exhaustive]`, so the walk may grow a failure this build has
+        // never heard of. That is precisely a case for failing CLOSED: an unrecognised failure is
+        // still a failure, and the one thing it may never become is `Ok(None)`.
+        //
+        // `Unsupported` — remedy *upgrade* — is the honest arm, because a variant this code cannot
+        // name means the walk knows something this code does not. Its own `Display` is carried
+        // verbatim so a diagnosis is not lost to the wildcard.
+        other => ChainReadError::unsupported(
+            LINEAGE_WALK,
+            format!(
+                "the lineage walk failed in a way this version of DIG does not recognise \
+                 ({other}) — upgrade dig-app"
+            ),
+        ),
     }
 }
 

@@ -26,17 +26,19 @@
 //!
 //! Phase B (`launch_store`) re-derives the DID's puzzle material with
 //! `dig_did::walk_did_lineage_to_tip`, whose first operation is
-//! [`ChainSource::resolve_singleton_lineage`]. [`ControlChainSource`](crate::chain::ControlChainSource)
-//! answers that with `Unsupported`, pending the canonical `walk_singleton_lineage` in a forthcoming
-//! `dig-chainsource-interface` release
-//! (dig_ecosystem#2572). A build in that state can PUSH the DID half and can never finish the store
-//! half — every user stranded at `DidConfirmedStoreNotLaunched` with money spent.
+//! [`ChainSource::resolve_singleton_lineage`].
+//! [`ControlChainSource`](crate::chain::ControlChainSource) now SERVES that read, by delegating to
+//! `dig_chainsource_interface`'s one hardened `walk_singleton_lineage` (dig_ecosystem#2572), so a
+//! whole profile can be minted on a build whose node answers.
 //!
-//! That is a different fact from having no chain at all, and it has a different remedy, so
-//! [`ProfileMintSeams`] names it separately: [`NoLineageWalk`](ProfileMintSeams::NoLineageWalk) is
-//! *can start what it cannot finish*, and [`NoChainTransport`](ProfileMintSeams::NoChainTransport)
-//! is *cannot reach chain*. Only [`Wired`](ProfileMintSeams::Wired) reports
-//! [`ProfileMintAvailability::Possible`].
+//! It is still not a given. A node that is not running cannot be reached at all, and a node too old
+//! to serve the four reads the walk composes cannot walk one — and those are DIFFERENT facts with
+//! different remedies (*start your node* versus *upgrade*). So [`ProfileMintSeams`] keeps them
+//! apart: [`NoLineageWalk`](ProfileMintSeams::NoLineageWalk) is *reached the chain, cannot finish a
+//! mint*, and [`NoChainTransport`](ProfileMintSeams::NoChainTransport) is *could not reach the chain
+//! at all*. Only [`Wired`](ProfileMintSeams::Wired) reports
+//! [`ProfileMintAvailability::Possible`], and a build that cannot finish phase B must never offer a
+//! mint: the user would spend real XCH and be stranded at `DidConfirmedStoreNotLaunched`.
 
 use std::sync::Arc;
 
@@ -116,8 +118,16 @@ pub enum ProfileMintSeams<'a> {
         /// Why the probe failed, verbatim from the chain source.
         why: Arc<str>,
     },
-    /// This build has no chain transport at all.
-    NoChainTransport,
+    /// This build could not reach the chain at all — the node is not running, or not answering.
+    ///
+    /// Carries the reader's own words. Distinguished from
+    /// [`NoLineageWalk`](Self::NoLineageWalk) by a peak read taken BEFORE the walk probe: once the
+    /// walk genuinely works, an unreachable node fails both, and only the order of the two questions
+    /// tells them apart.
+    NoChainTransport {
+        /// Why the chain could not be reached, verbatim from the reader.
+        why: Arc<str>,
+    },
 }
 
 impl<'a> ProfileMintSeams<'a> {
@@ -125,14 +135,14 @@ impl<'a> ProfileMintSeams<'a> {
     ///
     /// # This is a runtime probe, and its one weakness is stated rather than hidden
     ///
-    /// Only `Ok(_)` is accepted; `Unsupported`, a transport failure and a parse failure all yield
-    /// [`NoLineageWalk`](Self::NoLineageWalk). A source that SERVICES the call and answers *wrongly*
-    /// would pass — no probe can see that, and the honest walk in
-    /// `dig-chainsource-interface` is what will make it moot.
+    /// Only `Ok(_)` is accepted from the walk probe; every error withholds the offer. A source that
+    /// SERVICES the call and answers *wrongly* would still pass — no probe can see that, which is
+    /// precisely why the read delegates to the ecosystem's single hardened walk rather than to
+    /// anything written here.
     ///
-    /// Every other way to be wrong fails in the SAFE direction: a chain that is merely unreachable
-    /// reads as `NoLineageWalk`, which WITHHOLDS the offer. The failure mode this excludes is the
-    /// expensive one — offering a mint that strands the user mid-ceremony with money spent.
+    /// Every way to be wrong fails in the SAFE direction: any doubt yields a non-`Wired` arm, which
+    /// WITHHOLDS the offer. The failure mode this excludes is the expensive one — offering a mint
+    /// that strands the user mid-ceremony with real money spent.
     ///
     /// # Every walk `Err` is *unknown*, and none of them may become *absent*
     ///
@@ -155,6 +165,18 @@ impl<'a> ProfileMintSeams<'a> {
     where
         C: ChainSource + ?Sized,
     {
+        // Reachability FIRST, and it is a separate question from capability. Once the walk really
+        // works, an offline node fails `resolve_singleton_lineage` too — so a single probe would
+        // report every unplugged machine as "this version cannot finish a mint", sending somebody to
+        // wait for a release when what they need is to start their node. Asking for the peak first
+        // separates *cannot reach the chain* from *reached it, and it cannot walk a lineage*, which
+        // is the entire reason there are three arms rather than two.
+        if let Err(why) = chain.peak_height() {
+            return Self::NoChainTransport {
+                why: why.to_string().into(),
+            };
+        }
+
         match chain.resolve_singleton_lineage(PROBE_LAUNCHER_ID) {
             Ok(_) => Self::Wired { mint },
             Err(why) => Self::NoLineageWalk {
@@ -169,7 +191,7 @@ impl<'a> ProfileMintSeams<'a> {
         match self {
             Self::Wired { .. } => ProfileMintAvailability::Possible,
             Self::NoLineageWalk { .. } => ProfileMintAvailability::NoLineageWalk,
-            Self::NoChainTransport => ProfileMintAvailability::NoChainTransport,
+            Self::NoChainTransport { .. } => ProfileMintAvailability::NoChainTransport,
         }
     }
 
@@ -180,7 +202,7 @@ impl<'a> ProfileMintSeams<'a> {
     pub fn door(&self) -> Option<&'a dyn ProfileMintDoor> {
         match self {
             Self::Wired { mint } => Some(*mint),
-            Self::NoLineageWalk { .. } | Self::NoChainTransport => None,
+            Self::NoLineageWalk { .. } | Self::NoChainTransport { .. } => None,
         }
     }
 }
@@ -659,7 +681,7 @@ mod tests {
         for seams in [
             ProfileMintSeams::probe(&door, &WalksLineages),
             ProfileMintSeams::probe(&door, &refusing),
-            ProfileMintSeams::NoChainTransport,
+            ProfileMintSeams::NoChainTransport { why: "the node is not running".into() },
         ] {
             let possible = seams.availability() == ProfileMintAvailability::Possible;
             assert_eq!(

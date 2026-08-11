@@ -34,6 +34,7 @@ use dig_account::registry::{ProfileEntry, ProfileRegistry, ProfileVisibility};
 use dig_account::ProfileIx;
 
 use crate::account::chain_mint::MintAvailability;
+use crate::account::profile_mint::ProfileMintAvailability;
 use crate::account::profile_session::ProfileSession;
 
 /// One profile as a list surface sees it: enough to tell it from its siblings, and nothing secret.
@@ -279,6 +280,15 @@ impl CreationBlocked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProfileCreation {
+    /// Both halves of the ceremony are reachable, so a profile really can be created here.
+    ///
+    /// Reachable ONLY from [`of_profile_mint`](Self::of_profile_mint) given a
+    /// [`ProfileMintAvailability::Possible`], which in turn is reachable only from a
+    /// [`ProfileMintSeams::Wired`](crate::account::profile_mint::ProfileMintSeams::Wired) — and that
+    /// requires a live chain that answered BOTH a peak read and a singleton-lineage probe. There is
+    /// no other constructor, so this arm cannot be asserted beside the capability; it can only be
+    /// read off it.
+    Possible,
     /// Creation cannot be attempted, and this is the piece that is missing.
     Blocked(CreationBlocked),
 }
@@ -311,6 +321,29 @@ impl ProfileCreation {
         })
     }
 
+    /// Derive creation's availability from the WHOLE-PROFILE seam — the only route to
+    /// [`Possible`](Self::Possible).
+    ///
+    /// # Why this exists beside [`of`](Self::of) rather than replacing it
+    ///
+    /// [`of`](Self::of) reads the DID-only [`MintAvailability`], which answers a narrower question:
+    /// *can a DID be minted?* A profile is a DID **and** a store, and the store half needs a read the
+    /// DID half does not. A seam that can mint a DID therefore says nothing about whether a profile
+    /// can be completed, which is exactly why `of` can never return `Possible` and this can.
+    ///
+    /// The two are kept apart rather than collapsed because the first-run DID wizard genuinely asks
+    /// the narrower question and its `MintingStep::Possible` unwritability is a proven security
+    /// property built on it.
+    pub fn of_profile_mint(mint: ProfileMintAvailability) -> Self {
+        match mint {
+            ProfileMintAvailability::Possible => Self::Possible,
+            ProfileMintAvailability::NoLineageWalk => Self::Blocked(CreationBlocked::NoLineageWalk),
+            ProfileMintAvailability::NoChainTransport => {
+                Self::Blocked(CreationBlocked::NoChainTransport)
+            }
+        }
+    }
+
     /// Which piece is missing, or `None` once creation is possible.
     ///
     /// The one accessor consumers use. `None` is unreachable today and is deliberately already
@@ -318,6 +351,7 @@ impl ProfileCreation {
     /// type changing shape.
     pub fn blocked(self) -> Option<CreationBlocked> {
         match self {
+            Self::Possible => None,
             Self::Blocked(why) => Some(why),
         }
     }
