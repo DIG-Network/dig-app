@@ -2459,8 +2459,12 @@ mod tests {
             // account's state, because nothing in this build can mint one. Tests that need a list
             // build one from a registry fixture explicitly.
             profiles: crate::profiles::ProfilesReading::Known(Vec::new()),
-            // What `mint_seams()` returns in the shipped binary.
-            profile_creation: crate::profiles::ProfileCreation::default(),
+            // What `mint_seams()` returns in the shipped binary — STATED, because
+            // `ProfileCreation::default()` stopped meaning that: it is now `Unknown`, *nobody has
+            // asked the node yet* (dig_ecosystem#2690), which no shipped build ever answers.
+            profile_creation: crate::profiles::ProfileCreation::of(
+                crate::account::chain_mint::MintAvailability::NoChainTransport,
+            ),
             // A beacon that answered: auto-update on, following stable — the ordinary success case.
             // The tests that describe the absent beacon and the nightly channel null this out or
             // replace it explicitly.

@@ -24,7 +24,7 @@
 //! | [`peak_height`](ChainSource::peak_height) | `control.wallet.peak` | open |
 //! | [`parent_spend`](ChainSource::parent_spend) | *(the trait default)* | — |
 //! | [`block_timestamp`](ChainSource::block_timestamp) | *(none exists)* | — |
-//! | [`resolve_singleton_lineage`](ChainSource::resolve_singleton_lineage) | *(the shared walk, over the four reads above)* | — |
+//! | [`resolve_singleton_lineage`](ChainSource::resolve_singleton_lineage) | *(the shared walk, over `coin_record` and `coin_spend` above)* | — |
 //!
 //! `parent_spend` is deliberately NOT overridden: the trait's default composes `coin_record` with
 //! `coin_spend`, which is exactly the two calls a direct implementation would make, and a second
@@ -443,8 +443,10 @@ impl ChainSource for ControlChainSource {
     /// a hostile or very long lineage is a liveness problem, and these two bounds are the ecosystem's
     /// agreed answer to it.
     ///
-    /// This is not recursive. The walk reads `coin_record`, `coin_spend` and `coin_records_by_parent`
-    /// only; it never calls back into this method.
+    /// This is not recursive. The walk composes exactly TWO of this trait's methods — `coin_record`
+    /// (for the launcher, and again at every hop) and `coin_spend` (at every hop) — and never calls
+    /// back into this method. `coin_records_by_parent` is NOT among them; the claim that it was
+    /// survived here after the probe was corrected to measure both (dig_ecosystem#2685).
     ///
     /// # Every failure stays a failure
     ///
@@ -485,8 +487,8 @@ impl ChainSource for ControlChainSource {
 
 /// The trait method name a lineage failure is reported under.
 ///
-/// Not a `control.*` method: the walk is composed from four of them, so naming any single one would
-/// point a diagnosis at the wrong read.
+/// Not a `control.*` method: the walk is composed from two of them across three call sites, so naming
+/// any single one would point a diagnosis at the wrong read.
 const LINEAGE_WALK: &str = "resolve_singleton_lineage";
 
 /// Project a [`LineageWalkError`] onto this client's error, PRESERVING the remedy.

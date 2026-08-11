@@ -48,6 +48,13 @@ fn preview_view(beacon: Beacon) -> TrayView {
             used_bytes: 350 * MIB,
         }),
         update: beacon.status(),
+        // STATED rather than defaulted: `ProfileCreation::default()` is `Unknown` — *nobody has
+        // asked the node yet* (dig_ecosystem#2690) — while the shipped binary answers this from a
+        // constant and renders the unreachable-chain sentence. On the default this capture would
+        // show a *still checking* card no build a user runs can produce.
+        profile_creation: dig_app_core::profiles::ProfileCreation::of(
+            dig_app_core::account::chain_mint::MintAvailability::NoChainTransport,
+        ),
         ..TrayView::default()
     }
 }
