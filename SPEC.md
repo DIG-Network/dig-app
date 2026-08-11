@@ -348,7 +348,26 @@ otherwise report a `did:chia:` string before an on-chain confirmation
 `chain::ControlChainSource::coin_records_by_parent` MUST page `control.wallet.coinsByParent` to
 exhaustion, resuming only from the `cursor` the previous page returned, terminating only on
 `complete: true` — never on a short page — and MUST fail rather than return a prefix when its own page
-bound (`chain::MAX_CHILD_PAGES`) is reached.
+bound (`chain::MAX_CHILD_PAGES`) is reached. It MUST also refuse a page carrying more rows than the
+limit it asked for (`chain::CHILD_PAGE_SIZE`), because the page bound's guarantee is stated in rows,
+and it MUST record freshness only from a walk that COMPLETED — freshness answers whether a coin is
+really unspent, so a value left by a walk that later failed answers it from a read that errored.
+
+`chain::ControlChainSource::coin_records_by_puzzle_hash` is specified by the trait over ALL coins
+paying to a puzzle hash, but `control.wallet.coins` is scoped to ONE asset. This implementation reads
+**XCH only**, and MUST be understood as such: a puzzle hash holding only $DIG CAT coins answers an
+empty `Vec`, which on that trait means *no matching coins*. The narrowing is permitted only while the
+sole caller selects XCH funding coins; the address it derives likewise uses the mainnet `"xch"` HRP
+unconditionally. Because `control.wallet.coins` MUST echo the concrete asset it was scoped to, the
+client MUST verify each returned record's asset and treat any other value — including an absent one —
+as a malformed answer rather than an XCH coin.
+
+`chain::ControlSpendPublisher` MUST classify a mempool refusal as `PushOutcome::AlreadyInMempool` only
+when the reason is exactly the duplicate token `ALREADY_INCLUDING_TRANSACTION`. `rejection` is
+free-form prose the control contract does not pin to a vocabulary, so a substring match would let a
+hostile node have a refusal reported as a success; every other refusal, including `MEMPOOL_CONFLICT`,
+is a `PushOutcome::Rejected` whose remedy is a rebuild. A reply asserting both acceptance and a
+refusal MUST NOT be read as an acceptance.
 
 `chain::ControlChainSource::resolve_singleton_lineage` MUST delegate to
 `dig_chainsource_interface::walk_singleton_lineage` and MUST NOT be hand-rolled

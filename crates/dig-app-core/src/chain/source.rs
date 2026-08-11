@@ -172,6 +172,14 @@ impl ControlChainSource {
     }
 
     /// Record the freshness an answer disclosed.
+    ///
+    /// # Called only once the reply has been BELIEVED
+    ///
+    /// Every caller of this runs after the reply it came with has passed validation — after the
+    /// coin fields decoded, after the asset was checked, after the walk completed. That ordering
+    /// is the whole meaning of the field: it answers *is this coin really unspent, or is that a
+    /// stale replica*, so freshness taken from a reply the client went on to refuse would answer a
+    /// spend question out of an error. A read that returns `Err` leaves the previous value alone.
     fn note_freshness(&self, freshness: Freshness) {
         *self.last_freshness.lock().expect("freshness mutex") = Some(freshness);
     }
@@ -199,16 +207,17 @@ impl ChainSource for ControlChainSource {
                 coin_id: hex::encode(coin_id),
             },
         )?;
+        let record = answer
+            .coin
+            .as_ref()
+            .map(|c| coin_record_from(method::COIN_BY_ID, c))
+            .transpose()?;
         self.note_freshness(Freshness {
             source: answer.source,
             synced: answer.synced,
             peak_height: answer.peak_height,
         });
-        answer
-            .coin
-            .as_ref()
-            .map(|c| coin_record_from(method::COIN_BY_ID, c))
-            .transpose()
+        Ok(record)
     }
 
     /// # `include_spent` is REFUSED, not quietly ignored
@@ -218,6 +227,21 @@ impl ChainSource for ControlChainSource {
     /// the unspent set would be a wrong answer wearing the shape of a right one — a caller looking
     /// for a spent coin would be told it does not exist. So the unserviceable half of the method is
     /// [`ChainReadError::Unsupported`], and the caller can see which capability it needs.
+    ///
+    /// # This read is narrowed to XCH, and that narrowing is a KNOWN divergence
+    ///
+    /// The trait says this answers ALL coins paying to `puzzle_hash`. `control.wallet.coins` is
+    /// scoped to exactly one asset, so this asks for [`Asset::Xch`] and can only ever answer XCH.
+    /// A puzzle hash holding only $DIG CAT coins therefore answers `vec![]`, which on this trait
+    /// means *no matching coins* — the same wrong-answer-in-the-shape-of-a-right-one this method
+    /// refuses `include_spent` for. It is tolerated (and NOT refused) only because the one caller
+    /// on the mint path selects XCH funding coins, so the narrowing costs no capability today;
+    /// widening it needs either a per-asset loop or a control method that is not scoped.
+    ///
+    /// The `"xch"` address HRP is likewise a mainnet-only assumption. There is no testnet build of
+    /// this app, and the control plane names no network, so `"txch"` has nowhere to come from.
+    ///
+    /// Both facts are recorded in [`crate::chain`]'s absence rule and in `SPEC.md` §3.1b.
     fn coin_records_by_puzzle_hash(
         &self,
         puzzle_hash: Bytes32,
@@ -230,6 +254,9 @@ impl ChainSource for ControlChainSource {
                  parameter; a spent coin must be read by its own id via control.wallet.coinById",
             ));
         }
+        // bech32m over a fixed 32-byte payload and a fixed HRP cannot fail, so this arm is
+        // unreachable in practice. It is kept rather than unwrapped because the alternative on a
+        // money path is a panic, and an error the caller can read costs one line.
         let address = Address::new(puzzle_hash, "xch".to_string())
             .encode()
             .map_err(|e| {
@@ -245,16 +272,34 @@ impl ChainSource for ControlChainSource {
                 asset: Asset::Xch,
             },
         )?;
+        let records: Vec<CoinRecord> = answer
+            .coins
+            .iter()
+            .map(|c| {
+                // The contract makes this the ONE read that must echo the concrete asset it was
+                // scoped to. Since the caller will treat these as XCH funding coins, a record
+                // labelled anything else -- or labelled nothing -- is a node widening or
+                // mislabelling a scoped answer, and believing it would spend a CAT coin as if it
+                // were XCH. An unbelievable answer, not an answer.
+                if c.asset != Some(Asset::Xch) {
+                    return Err(ChainReadError::malformed(
+                        method::COINS,
+                        format!(
+                            "control.wallet.coins was scoped to xch and answered a coin labelled \
+                             {:?}",
+                            c.asset
+                        ),
+                    ));
+                }
+                coin_record_from(method::COINS, c)
+            })
+            .collect::<Result<_, _>>()?;
         self.note_freshness(Freshness {
             source: answer.source,
             synced: answer.synced,
             peak_height: answer.peak_height,
         });
-        answer
-            .coins
-            .iter()
-            .map(|c| coin_record_from(method::COINS, c))
-            .collect()
+        Ok(records)
     }
 
     /// # Paged to exhaustion, or refused
@@ -278,15 +323,32 @@ impl ChainSource for ControlChainSource {
                     limit: Some(CHILD_PAGE_SIZE),
                 },
             )?;
-            self.note_freshness(Freshness {
-                source: page.source,
-                synced: page.synced,
-                peak_height: page.peak_height,
-            });
+            // [`MAX_CHILD_PAGES`] bounds this walk by reasoning about pages of at most
+            // [`CHILD_PAGE_SIZE`] rows -- but that is the limit ASKED for, and nothing on the way
+            // back enforces it. An over-long page makes the stated bound arithmetic false, so the
+            // page is refused rather than absorbed.
+            if page.coins.len() > CHILD_PAGE_SIZE as usize {
+                return Err(ChainReadError::malformed(
+                    method::COINS_BY_PARENT,
+                    format!(
+                        "the node answered {} children to a page limit of {CHILD_PAGE_SIZE}",
+                        page.coins.len()
+                    ),
+                ));
+            }
             for record in &page.coins {
                 children.push(coin_record_from(method::COINS_BY_PARENT, record)?);
             }
             if page.complete {
+                // Recorded HERE and nowhere else in the walk: freshness answers "is this coin
+                // really unspent, or is that a stale replica", so a value left behind by a walk
+                // that then failed on a later page would answer it from a read that returned
+                // `Err`. Only a completed walk has a freshness to report.
+                self.note_freshness(Freshness {
+                    source: page.source,
+                    synced: page.synced,
+                    peak_height: page.peak_height,
+                });
                 return Ok(children);
             }
             // An incomplete page with nothing to resume from is a contradiction the wire shape
@@ -330,12 +392,14 @@ impl ChainSource for ControlChainSource {
                 coin_id: hex::encode(coin_id),
             },
         )?;
-        self.note_freshness(Freshness {
+        let freshness = Freshness {
             source: answer.source,
             synced: answer.synced,
             peak_height: answer.peak_height,
-        });
+        };
         let Some(spend) = answer.spend else {
+            // An absence IS a believed answer here, so it carries freshness like any other.
+            self.note_freshness(freshness);
             return Ok(None);
         };
         // The contract requires a spend's coin to carry a spent height — a spend reporting an
@@ -347,11 +411,13 @@ impl ChainSource for ControlChainSource {
                 "the node returned a spend whose coin reports no spent height",
             ));
         }
-        Ok(Some(CoinSpend::new(
+        let decoded = CoinSpend::new(
             coin_from(method::COIN_SPEND, &spend.coin)?,
             program_from(method::COIN_SPEND, "puzzle_reveal", &spend.puzzle_reveal)?,
             program_from(method::COIN_SPEND, "solution", &spend.solution)?,
-        )))
+        );
+        self.note_freshness(freshness);
+        Ok(Some(decoded))
     }
 
     /// Delegates to the ecosystem's ONE hardened singleton walk (dig_ecosystem#2572).

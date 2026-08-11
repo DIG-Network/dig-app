@@ -24,6 +24,16 @@
 //! [`coin_spend`](dig_chainsource_interface::ChainSource::coin_spend), `Ok(None)` means *unspent or
 //! unknown*, which a caller reads as safe to spend.
 //!
+//! # The ONE place that rule is knowingly bent, and why
+//!
+//! [`ChainSource::coin_records_by_puzzle_hash`](dig_chainsource_interface::ChainSource::coin_records_by_puzzle_hash)
+//! is specified over ALL coins paying to a puzzle hash, but `control.wallet.coins` is scoped to one
+//! asset, so this implementation asks for XCH and only XCH. A puzzle hash holding only $DIG CAT
+//! coins therefore answers `vec![]` — an absence that is not the whole truth. It is tolerated
+//! because the only caller on the mint path selects XCH funding coins, and it is written down here
+//! (and in `SPEC.md` §3.1b) rather than left to be rediscovered by whoever first asks this source
+//! about a CAT. The related mainnet-only `"xch"` address HRP is documented at the method.
+//!
 //! # Not wired up yet, on purpose
 //!
 //! Nothing here is handed to a minter — [`crate::account::chain_mint`]'s seams are unchanged, so

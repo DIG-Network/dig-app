@@ -577,6 +577,16 @@ pub mod node {
             /// The stable `data.code` symbol.
             symbol: String,
         },
+        /// `accepted: true` AND a rejection reason — the node asserting both halves at once.
+        ///
+        /// The mirror image of [`NeitherAcceptedNorRejected`](Self::NeitherAcceptedNorRejected),
+        /// and the contract forbids it (`rejection` is null on acceptance) without the wire shape
+        /// being able to. A fixture that could only express a CONSISTENT acceptance could not tell
+        /// a client that believes `accepted` alone from one that reads the whole reply.
+        AcceptedAndRefused {
+            /// The refusal the node supplied beside its acceptance.
+            reason: String,
+        },
         /// `accepted: false` with NO rejection reason — the node declining to say what judged the
         /// bundle.
         ///
@@ -1016,6 +1026,11 @@ pub mod node {
             }),
             BroadcastReply::RefusedByMempool { reason } => serde_json::json!({
                 "accepted": false,
+                "transaction_id": serde_json::Value::Null,
+                "rejection": reason,
+            }),
+            BroadcastReply::AcceptedAndRefused { reason } => serde_json::json!({
+                "accepted": true,
                 "transaction_id": serde_json::Value::Null,
                 "rejection": reason,
             }),
