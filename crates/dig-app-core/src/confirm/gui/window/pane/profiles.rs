@@ -35,7 +35,7 @@ use super::state::{self, PaneState};
 use super::text;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
-use crate::profiles::{ProfileRow, ProfilesReading};
+use crate::profiles::{ProfileCreation, ProfileRow, ProfilesReading};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 
@@ -321,7 +321,7 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// A recessed panel INSIDE the card rather than a card of its own: it is about the same subject the
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
-fn create_panel(flow: &mut Flow, t: &Tokens, creation: crate::profiles::ProfileCreation) {
+fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation) {
     // `ProfileCreation::Possible` now EXISTS and is reachable from
     // `ProfileCreation::of_profile_mint` given a wired seam — but the create control itself is the
     // next unit of work, so this branch still draws nothing. That is deliberate rather than
@@ -331,10 +331,17 @@ fn create_panel(flow: &mut Flow, t: &Tokens, creation: crate::profiles::ProfileC
     // "you can create one" with no control would be a dead end, which is the one thing
     // `professional-ui` forbids outright — so the honest placeholder is nothing at all until the
     // control lands beside it.
-    let Some(blocked) = creation.blocked() else {
-        return;
+    let sentence = match creation {
+        // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
+        // a blocked cause here would tell a person with a stopped node that nothing is missing from
+        // their setup (dig_ecosystem#2690).
+        ProfileCreation::Unknown => copy::profiles::CHECKING_CREATION,
+        ProfileCreation::Blocked(blocked) => copy::profiles::cannot_create(blocked),
+        // The create control is the next unit of work in this same PR; until it is drawn beside it, a
+        // panel announcing that creation is possible would be a dead end, which `professional-ui`
+        // forbids outright.
+        ProfileCreation::Possible => return,
     };
-    let sentence = copy::profiles::cannot_create(blocked);
     flow.place(|ui, at| {
         (
             card::panel(ui, at, t, Some(copy::profiles::CREATE_PANEL), |inner| {
@@ -349,7 +356,7 @@ fn create_panel(flow: &mut Flow, t: &Tokens, creation: crate::profiles::ProfileC
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{expected_did, session_with};
-    use crate::profiles::{CreationBlocked, ProfileCreation, ProfilesReading, ProfilesUnknown};
+    use crate::profiles::{CreationBlocked, ProfilesUnknown};
     use crate::tray_menu::{AccountState, TrayView};
     use crate::window_model::TabId;
     use dig_account::registry::ProfileVisibility;
@@ -683,6 +690,57 @@ mod tests {
         assert_eq!(
             drawn, offered,
             "the profiles card's buttons are not the model's profile rows"
+        );
+    }
+
+    /// **While nobody has measured the node, the card says it is checking — not that the build cannot
+    /// reach the chain** (dig_ecosystem#2690).
+    ///
+    /// Makes impossible: the sentence *"nothing is missing from your setup and there is nothing for
+    /// you to do"* shown to a person whose node is simply stopped. That is the one blocked sentence
+    /// that also tells them to stop looking, so rendering it for an unmeasured node costs them the
+    /// only action that would help.
+    ///
+    /// # Why the fixture needs the two negative legs
+    ///
+    /// A test that only asserted the checking sentence appears would pass on a card that drew BOTH —
+    /// the honest one and a definite cause beside it — which is the same lie with extra words. So each
+    /// blocked sentence is required ABSENT, and the control leg requires the same card to still draw a
+    /// blocked sentence when a reading really was taken, so "draws nothing ever" cannot pass either.
+    #[test]
+    fn an_unmeasured_node_is_drawn_as_checking_and_not_as_an_unreachable_chain() {
+        let checking = TrayView {
+            profile_creation: ProfileCreation::Unknown,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let painted = card_says(&checking, 960.0);
+
+        assert!(
+            painted.contains(copy::profiles::CHECKING_CREATION),
+            "an unmeasured node drew no honest waiting state: {painted}"
+        );
+        for blocked in CreationBlocked::EVERY {
+            assert!(
+                !painted.contains(copy::profiles::cannot_create(blocked)),
+                "{blocked:?} was stated as a cause on a node nobody had measured: {painted}"
+            );
+        }
+
+        // Control: a reading that WAS taken still explains itself, so this cannot be satisfied by a
+        // card that has stopped drawing the panel at all.
+        let measured = TrayView {
+            profile_creation: ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let measured_says = card_says(&measured, 960.0);
+        assert!(
+            measured_says.contains(copy::profiles::cannot_create(CreationBlocked::NoChainTransport)),
+            "a measured blocker stopped being explained: {measured_says}"
+        );
+        assert!(
+            !measured_says.contains(copy::profiles::CHECKING_CREATION),
+            "a measured blocker was ALSO drawn as still being checked, which is two answers to one \
+             question: {measured_says}"
         );
     }
 

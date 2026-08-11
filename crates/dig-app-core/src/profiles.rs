@@ -280,6 +280,18 @@ impl CreationBlocked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProfileCreation {
+    /// **Nobody has asked the node yet.**
+    ///
+    /// Not a failure and not a capability — the absence of a reading. Distinct from
+    /// [`Blocked`](Self::Blocked) because a blocker is a fact somebody measured, and rendering an
+    /// unmeasured node as one names a cause nobody observed: a person whose node is merely stopped
+    /// would be told *nothing is missing from your setup and there is nothing for you to do*, which
+    /// is false and leaves them without the one action that would help (dig_ecosystem#2690).
+    ///
+    /// It withholds the offer exactly as a blocker does, so the safe direction is unchanged; what
+    /// changes is what the surface SAYS while it waits. This is `BalanceReading`'s
+    /// pending/known/unknown split, applied to a capability rather than an amount.
+    Unknown,
     /// Both halves of the ceremony are reachable, so a profile really can be created here.
     ///
     /// Reachable ONLY from [`of_profile_mint`](Self::of_profile_mint) given a
@@ -294,13 +306,14 @@ pub enum ProfileCreation {
 }
 
 impl Default for ProfileCreation {
-    /// The build's own answer: blocked, for want of a chain transport.
+    /// [`Unknown`](Self::Unknown) — a field nobody filled has measured nothing.
     ///
-    /// Safe as a default precisely because no arm OFFERS creation — a view whose field was never
-    /// filled cannot fall into claiming a capability. It matches what `mint_seams()` returns in the
-    /// shipped binary, so a snapshot built without it renders the same surface as one built with it.
+    /// It used to be `Blocked(NoChainTransport)`, which was accurate only while the binary hardcoded
+    /// that seam: it stated a definite cause on behalf of a reading that had never been taken, and
+    /// went false the moment creation was fed from a node (dig_ecosystem#2690). `Unknown` withholds
+    /// the offer just as firmly, so nothing about the safe direction rests on the change.
     fn default() -> Self {
-        Self::Blocked(CreationBlocked::NoChainTransport)
+        Self::Unknown
     }
 }
 
@@ -334,6 +347,23 @@ impl ProfileCreation {
     /// The two are kept apart rather than collapsed because the first-run DID wizard genuinely asks
     /// the narrower question and its `MintingStep::Possible` unwritability is a proven security
     /// property built on it.
+    /// Derive creation from a whole-profile READING, which may not have been taken yet.
+    ///
+    /// The one place an unmeasured node lands, and the reason [`Unknown`](Self::Unknown) cannot be
+    /// reached by accident: `None` means *nobody has asked*, and it is spelled here rather than
+    /// inferred from an error, so a transport failure and an absent reading can never collapse into
+    /// one another (dig_ecosystem#2690).
+    ///
+    /// Callers hold an `Option` because that is genuinely what a poller answers before its first
+    /// probe returns — see
+    /// [`NodeChainReadiness::observe`](crate::chain::readiness::NodeChainReadiness::observe).
+    pub fn of_reading(mint: Option<ProfileMintAvailability>) -> Self {
+        match mint {
+            None => Self::Unknown,
+            Some(mint) => Self::of_profile_mint(mint),
+        }
+    }
+
     pub fn of_profile_mint(mint: ProfileMintAvailability) -> Self {
         match mint {
             ProfileMintAvailability::Possible => Self::Possible,
@@ -351,14 +381,20 @@ impl ProfileCreation {
     /// type changing shape.
     pub fn blocked(self) -> Option<CreationBlocked> {
         match self {
-            Self::Possible => None,
+            Self::Possible | Self::Unknown => None,
             Self::Blocked(why) => Some(why),
         }
     }
 
-    /// Whether a profile can be created here. `false` on every build shipped so far.
+    /// Whether a profile can be created here.
+    ///
+    /// Keys on the ARM, never on `blocked().is_none()`. Those agreed while there were two arms and
+    /// diverge now that there are three: [`Unknown`](Self::Unknown) has no reason to name, so a
+    /// `blocked()`-derived answer would read *not blocked* as *possible* and open a create control
+    /// against a node nobody has spoken to — fail-open on a path that spends real XCH
+    /// (dig_ecosystem#2690).
     pub fn is_possible(self) -> bool {
-        self.blocked().is_none()
+        matches!(self, Self::Possible)
     }
 }
 
@@ -763,6 +799,65 @@ mod tests {
             );
             assert!(creation.blocked().is_some());
         }
+    }
+
+    /// **A node nobody has measured is `Unknown` — never a measured absence, and never possible**
+    /// (dig_ecosystem#2690).
+    ///
+    /// Makes impossible: telling a person whose dig-node is merely stopped that *this version of DIG
+    /// has no way to reach the chain… nothing is missing from your setup and there is nothing for you
+    /// to do*. That sentence is a claim about the BUILD, and the moment creation is fed from a node
+    /// reading it becomes a claim about the NODE wearing the build's clothes — false, and it leaves
+    /// the one person who could fix it with no action to take.
+    ///
+    /// # The two legs that make this load-bearing, not a transcription
+    ///
+    /// The `assert_ne!` is the fixture that distinguishes this from the nearest wrong
+    /// implementation, which is the one that shipped: mapping an unmeasured reading onto
+    /// `Blocked(NoChainTransport)` satisfies "withholds the offer" identically, so an assertion about
+    /// withholding alone cannot see the defect at all.
+    ///
+    /// The `is_possible` leg pins the other direction. `Unknown` is not blocked FOR A REASON, so a
+    /// `blocked()`-derived `is_possible` — which is what shipped — reads it as *creation is possible*
+    /// and opens a create control against a node nobody has spoken to. That is the fail-open
+    /// direction on a money path, and it is why `is_possible` must key on the arm.
+    #[test]
+    fn an_unmeasured_node_is_unknown_rather_than_a_measured_absence() {
+        let unmeasured = ProfileCreation::of_reading(None);
+
+        assert_eq!(ProfileCreation::Unknown, unmeasured);
+        assert_ne!(
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            unmeasured,
+            "an unmeasured node was reported with a definite cause, which puts a diagnostic on \
+             screen that names something nobody observed"
+        );
+        assert_eq!(
+            None,
+            unmeasured.blocked(),
+            "there is no reason to name, because no reading was taken"
+        );
+        assert!(
+            !unmeasured.is_possible(),
+            "an unmeasured node was read as one a profile can be minted against — the fail-open \
+             direction on a path that spends real XCH"
+        );
+
+        // The default is the unmeasured state, because a view whose field was never filled has not
+        // measured anything either.
+        assert_eq!(ProfileCreation::Unknown, ProfileCreation::default());
+
+        // Controls: a reading that WAS taken still maps to its own definite answer, in both
+        // directions, or the arm above would be indistinguishable from a constant.
+        assert_eq!(
+            ProfileCreation::Possible,
+            ProfileCreation::of_reading(Some(ProfileMintAvailability::Possible))
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            ProfileCreation::of_reading(Some(ProfileMintAvailability::NoChainTransport))
+        );
+        assert!(ProfileCreation::of_reading(Some(ProfileMintAvailability::Possible)).is_possible());
     }
 
     /// **A switch discloses BOTH ends before it happens.**
