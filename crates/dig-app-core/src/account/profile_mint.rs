@@ -1128,9 +1128,13 @@ mod tests {
     }
 
     /// The record of a DID that has CONFIRMED at coin 3 — the input the store half spends.
+    ///
+    /// The DID string is DERIVED from the launcher id rather than written out: the registry rejects
+    /// a journal whose DID does not belong to its launcher, which is a rule this fixture must obey
+    /// rather than route around.
     fn confirmed_did() -> MintedDidRecord {
         MintedDidRecord {
-            did: "did:chia:fixture".to_owned(),
+            did: dig_did::did_string_from_launcher_id(coin_id(1)),
             launcher_id: coin_id(1),
             coin_id: coin_id(3),
             confirmed_height: PUSHED_AT,
@@ -1141,14 +1145,21 @@ mod tests {
     /// for the stage that is waiting on this host.**
     ///
     /// Makes impossible: swapping the two coin ids in the `StorePushed` arm. That swap keeps every
-    /// `InFlight::read` test green — they construct `InFlight` directly and never go through this
-    /// function — and makes a live store launch read as `ProvablyDead`, telling a user their
-    /// paid-for mint is dead mid-flight and inviting a second spend.
+    /// `InFlight::read` test green, because those tests construct `InFlight` directly and never go
+    /// through the arm that decides WHICH coin is which.
     ///
-    /// The `StorePushed` fixture is what makes the swap visible: the DID coin (which the store half
-    /// SPENDS) is spent and the store coin is absent — the honest reading is `Waiting`, because the
-    /// funding coin of a bundle is always spent by that bundle. Under the swap the same chain reads
-    /// as death. A fixture with both coins unspent would answer `Waiting` either way and see nothing.
+    /// # The one fixture that can see the swap, and why the obvious one cannot
+    ///
+    /// The store launch SPENDS the DID coin and CREATES the store coin. The fixture therefore has
+    /// the DID coin spent and the store coin absent, which is provable death — some other spend took
+    /// the DID coin, so this launch can never be included. Under the swap the same chain finds the
+    /// DID coin present, concludes the bundle was included, and reports `Waiting` — leaving a user
+    /// waiting indefinitely on a launch the chain can already prove is dead, with the evidence that
+    /// would let them act withheld.
+    ///
+    /// The fixture that first suggested itself — a LIVE launch, store coin present — cannot see the
+    /// swap at all: both readings find a coin and both answer `Waiting`. Only the asymmetric case,
+    /// where exactly one of the two coins exists, distinguishes them.
     #[test]
     fn liveness_reads_the_coins_of_the_stage_that_is_in_the_air() {
         let ix = dig_account::ProfileIx(1);
@@ -1176,7 +1187,8 @@ mod tests {
         );
 
         // The STORE half is in the air: it spends the DID coin (3) and would create the store coin
-        // (5). The DID coin being spent is what a launched store looks like, not a death.
+        // (5). The DID coin is gone and the store coin never appeared, so some OTHER spend consumed
+        // the DID — this launch can never be included, exactly as in the DID stage.
         let store_pushed = session_minting(
             ix,
             MintStage::StorePushed {
@@ -1195,10 +1207,15 @@ mod tests {
             .with_coin(coin_id(3), spent_at(coin_id(3), PUSHED_AT + 3));
         assert_eq!(
             liveness_of(&store_pushed, ix, &store_chain),
-            Some(MintLiveness::Waiting {
-                blocks_since_push: 20_000
+            Some(MintLiveness::ProvablyDead {
+                evidence: DeathEvidence {
+                    funding_coin_id: coin_id(3),
+                    funding_spent_at: PUSHED_AT + 3,
+                    absent_did_coin_id: coin_id(5),
+                }
             }),
-            "a spent DID coin is the store bundle spending its own input, never evidence of death"
+            "the store stage's INPUT is the DID coin and its OUTPUT is the store coin; reading them \
+             the other way round is the swap this fixture exists to catch"
         );
 
         // Nothing is on the network: the mint is waiting on THIS host, so there is no liveness.
