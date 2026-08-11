@@ -634,7 +634,12 @@ mod tests {
     /// `ProfileCreation::Possible` now EXISTS, so that one-line flip is once again writable; the only
     /// thing standing between it and a shipped dead end is that the binary never reaches for it.
     ///
-    /// So this reads the binary's SOURCE, which is the one way a test can see into that file at all.
+    /// So this reads the binary's SOURCE, which is the one way a test can see into those files at
+    /// all. It reads the WHOLE crate, every `.rs` under `src/` at any depth, because the entry
+    /// point is not the only place an offer could be assembled — the tray worker builds the
+    /// snapshot the entry point paints, and a guard that watched only `src/bin/` would let the
+    /// same flip through one directory over.
+    ///
     /// Opening the gate now requires deleting this guard, which is a deliberate act in the diff
     /// rather than a line nobody notices.
     ///
@@ -643,20 +648,14 @@ mod tests {
     /// them, and the change is the point.
     #[test]
     fn the_binary_cannot_open_the_profile_creation_gate() {
-        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("dig-app")
-            .join("src")
-            .join("bin");
-        let mut checked = 0usize;
+            .join("src");
+        let sources = rust_sources_under(&src);
 
-        for entry in std::fs::read_dir(&bin).expect("the binary crate's bin directory") {
-            let path = entry.expect("a readable directory entry").path();
-            if path.extension().is_none_or(|ext| ext != "rs") {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).expect("a readable source file");
-            checked += 1;
+        for path in &sources {
+            let source = std::fs::read_to_string(path).expect("a readable source file");
 
             for opener in ["ProfileCreation::Possible", "of_profile_mint"] {
                 // A doc comment naming the symbol is fine; a call is not. Both spellings are checked
@@ -676,10 +675,47 @@ mod tests {
             }
         }
 
+        // A walk that silently reached nothing would pass every assertion above. These pin the
+        // REACH of the walk, not just its verdict: `bin/dig-app.rs` is where dig_ecosystem#2377
+        // actually happened, and `tray_worker.rs` is where a tray snapshot — and so a creation
+        // offer — would be assembled. A guard that scanned only one directory could satisfy the
+        // openers check while never opening the other file, which is exactly how this guard read
+        // for one revision.
+        for reached in ["dig-app.rs", "tray_worker.rs"] {
+            assert!(
+                sources.iter().any(|p| p.ends_with(reached)),
+                "the walk never reached `{reached}`, so it cannot speak for the binary crate; \
+                 it read {} file(s): {sources:?}",
+                sources.len()
+            );
+        }
+
         assert!(
-            checked > 0,
-            "the guard read no files at all, so it proves nothing about the binary"
+            sources.len() > 1,
+            "the guard read {} file(s), which cannot cover a crate of several modules",
+            sources.len()
         );
+    }
+
+    /// Every `.rs` file in the binary crate, at any depth.
+    ///
+    /// The guard above is named for a property of the whole binary CRATE, so its predicate has to
+    /// cover the whole crate: `src/bin/` holds the entry point, but the modules that assemble what
+    /// the entry point paints — the tray worker, link and popup — live beside it in `src/`.
+    fn rust_sources_under(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+
+        for entry in std::fs::read_dir(dir).expect("a readable source directory") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                found.extend(rust_sources_under(&path));
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+
+        found.sort();
+        found
     }
 
     /// **Creation's answer is a function of the mint seam the wizard reads, and it never says
