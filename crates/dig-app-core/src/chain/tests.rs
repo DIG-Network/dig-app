@@ -566,10 +566,7 @@ fn every_lineage_walk_failure_keeps_its_own_remedy() {
         (
             "inconsistent chain data is unbelievable",
             LineageWalkError::Malformed("a spend of the wrong coin".into()),
-            ChainReadError::malformed(
-                "resolve_singleton_lineage",
-                "a spend of the wrong coin",
-            ),
+            ChainReadError::malformed("resolve_singleton_lineage", "a spend of the wrong coin"),
         ),
         (
             "a coin that is not this launcher's singleton is unbelievable",
