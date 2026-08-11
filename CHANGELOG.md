@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [10.6.0] - 2026-08-11
+
+### Features
+- **chain:** ChainSource and SpendPublisher over the dig-node control plane (#153)- **profile:** Profile-mint seams, journalled mint door and liveness (gate closed) (#155)- **profile:** Open the profile creation gate on a real lineage walk (#157)- **chain:** Poll node chain readiness off the painting thread (#159)- **profiles:** An unmeasured node is Unknown, and the readiness probe measures what it credits
+
+### Bug Fixes
+- **did:** Never offer a spend this build cannot make, nor a menu route that does not exist (#152)- **control:** Require a loopback address before sending the node control token (#154)- **chain:** Tighten the push refusal taxonomy and the coins read's asset check (#156)
+
+### Documentation
+- **spec:** SPEC 3.1d now matches the served lineage walk (#158)
+
 ## [10.1.1] - 2026-08-10
 
 ### Features
