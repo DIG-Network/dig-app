@@ -280,6 +280,18 @@ impl CreationBlocked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProfileCreation {
+    /// **Nobody has asked the node yet.**
+    ///
+    /// Not a failure and not a capability — the absence of a reading. Distinct from
+    /// [`Blocked`](Self::Blocked) because a blocker is a fact somebody measured, and rendering an
+    /// unmeasured node as one names a cause nobody observed: a person whose node is merely stopped
+    /// would be told *nothing is missing from your setup and there is nothing for you to do*, which
+    /// is false and leaves them without the one action that would help (dig_ecosystem#2690).
+    ///
+    /// It withholds the offer exactly as a blocker does, so the safe direction is unchanged; what
+    /// changes is what the surface SAYS while it waits. This is `BalanceReading`'s
+    /// pending/known/unknown split, applied to a capability rather than an amount.
+    Unknown,
     /// Both halves of the ceremony are reachable, so a profile really can be created here.
     ///
     /// Reachable ONLY from [`of_profile_mint`](Self::of_profile_mint) given a
@@ -294,13 +306,14 @@ pub enum ProfileCreation {
 }
 
 impl Default for ProfileCreation {
-    /// The build's own answer: blocked, for want of a chain transport.
+    /// [`Unknown`](Self::Unknown) — a field nobody filled has measured nothing.
     ///
-    /// Safe as a default precisely because no arm OFFERS creation — a view whose field was never
-    /// filled cannot fall into claiming a capability. It matches what `mint_seams()` returns in the
-    /// shipped binary, so a snapshot built without it renders the same surface as one built with it.
+    /// It used to be `Blocked(NoChainTransport)`, which was accurate only while the binary hardcoded
+    /// that seam: it stated a definite cause on behalf of a reading that had never been taken, and
+    /// went false the moment creation was fed from a node (dig_ecosystem#2690). `Unknown` withholds
+    /// the offer just as firmly, so nothing about the safe direction rests on the change.
     fn default() -> Self {
-        Self::Blocked(CreationBlocked::NoChainTransport)
+        Self::Unknown
     }
 }
 
@@ -321,8 +334,28 @@ impl ProfileCreation {
         })
     }
 
-    /// Derive creation's availability from the WHOLE-PROFILE seam — the only route to
-    /// [`Possible`](Self::Possible).
+    /// Derive creation from a whole-profile READING, which may not have been taken yet.
+    ///
+    /// The one place an unmeasured node lands, and the reason [`Unknown`](Self::Unknown) cannot be
+    /// reached by accident: `None` means *nobody has asked*, and it is spelled here rather than
+    /// inferred from an error, so a transport failure and an absent reading can never collapse into
+    /// one another (dig_ecosystem#2690).
+    ///
+    /// Callers hold an `Option` because that is genuinely what a poller answers before its first
+    /// probe returns — see
+    /// [`NodeChainReadiness::observe`](crate::chain::readiness::NodeChainReadiness::observe).
+    pub fn of_reading(mint: Option<ProfileMintAvailability>) -> Self {
+        match mint {
+            None => Self::Unknown,
+            Some(mint) => Self::of_profile_mint(mint),
+        }
+    }
+
+    /// Derive creation's availability from the WHOLE-PROFILE seam — the only place
+    /// [`Possible`](Self::Possible) is ever constructed.
+    ///
+    /// [`of_reading`](Self::of_reading) can also answer `Possible`, but only by delegating here, so
+    /// this stays the single door and the guard that watches it has one place to watch.
     ///
     /// # Why this exists beside [`of`](Self::of) rather than replacing it
     ///
@@ -344,21 +377,34 @@ impl ProfileCreation {
         }
     }
 
-    /// Which piece is missing, or `None` once creation is possible.
+    /// Which piece is missing, or `None` when there is no missing piece to name.
     ///
-    /// The one accessor consumers use. `None` is unreachable today and is deliberately already
-    /// spelled, so the surface that will draw a create control has somewhere to hang it without this
-    /// type changing shape.
+    /// # `None` answers for TWO arms, and neither of them means "possible"
+    ///
+    /// [`Possible`](Self::Possible) has nothing missing; [`Unknown`](Self::Unknown) has nothing
+    /// measured. Both answer `None`, and `Unknown` is the [`Default`], so that answer is now the
+    /// COMMON case rather than the unreachable one this doc used to promise.
+    ///
+    /// So never derive capability from it: `blocked().is_none()` reads a node nobody has spoken to
+    /// as one a profile can be minted against, which is the fail-open direction on a path that
+    /// spends real XCH. Ask [`is_possible`](Self::is_possible), which keys on the arm
+    /// (dig_ecosystem#2690).
     pub fn blocked(self) -> Option<CreationBlocked> {
         match self {
-            Self::Possible => None,
+            Self::Possible | Self::Unknown => None,
             Self::Blocked(why) => Some(why),
         }
     }
 
-    /// Whether a profile can be created here. `false` on every build shipped so far.
+    /// Whether a profile can be created here.
+    ///
+    /// Keys on the ARM, never on `blocked().is_none()`. Those agreed while there were two arms and
+    /// diverge now that there are three: [`Unknown`](Self::Unknown) has no reason to name, so a
+    /// `blocked()`-derived answer would read *not blocked* as *possible* and open a create control
+    /// against a node nobody has spoken to — fail-open on a path that spends real XCH
+    /// (dig_ecosystem#2690).
     pub fn is_possible(self) -> bool {
-        self.blocked().is_none()
+        matches!(self, Self::Possible)
     }
 }
 
@@ -440,6 +486,42 @@ pub mod copy {
     pub const WHAT_A_PROFILE_IS: &str =
         "A profile is an on-chain identity — a DID and a store — that lets you publish, sign for an \
          app and be found by other people. One account can hold several and use one at a time.";
+
+    /// Said while nobody has yet measured whether this node can service a profile mint.
+    ///
+    /// Names the READ, not an outcome, exactly as the card's list-pending sentence does — and for a
+    /// sharper reason: every sentence in [`cannot_create`] ends *there is nothing for you to do*,
+    /// which is the worst thing to tell somebody whose node is merely stopped. An unmeasured node and
+    /// an unreachable one are different facts (dig_ecosystem#2690).
+    ///
+    /// Lives here, beside [`cannot_create`], because the window's card and the tray's About notice
+    /// both read it — one sentence, so the two surfaces cannot come to describe different builds.
+    pub const CHECKING_CREATION: &str =
+        "DIG is still checking whether this computer can create a profile. Nothing here is settled until it has.";
+
+    /// What the tray's About-profiles notice says about CREATING one, or `None` when there is no
+    /// absence to explain.
+    ///
+    /// # Why this selection lives here rather than at the notice
+    ///
+    /// The notice is assembled in `dig-app/src/bin`, which no guard test can see
+    /// (dig_ecosystem#2587) — and the selection is exactly the part worth guarding, because
+    /// [`ProfileCreation::blocked`](super::ProfileCreation::blocked) answers `None` for **two**
+    /// different arms. Reading that one
+    /// `None` as *creation is possible* would silently drop the whole explanation for an UNMEASURED
+    /// node, from a notice whose only job is to give one (dig_ecosystem#2690).
+    ///
+    /// Matching here makes the mapping exhaustive, testable, and impossible for the binary to get
+    /// wrong: a new arm breaks this compile rather than quietly falling into a catch-all.
+    pub fn about_creation(creation: super::ProfileCreation) -> Option<&'static str> {
+        match creation {
+            super::ProfileCreation::Unknown => Some(CHECKING_CREATION),
+            super::ProfileCreation::Blocked(blocked) => Some(cannot_create(blocked)),
+            // Creation is possible: the Account tab's card carries the control, and a notice cannot
+            // explain an absence there is none of.
+            super::ProfileCreation::Possible => None,
+        }
+    }
 
     /// Why a profile cannot be created on this build, one sentence per missing piece.
     ///
@@ -656,23 +738,14 @@ mod tests {
 
         for path in &sources {
             let source = std::fs::read_to_string(path).expect("a readable source file");
+            let reached = openers_reached_in(&source);
 
-            for opener in ["ProfileCreation::Possible", "of_profile_mint"] {
-                // A doc comment naming the symbol is fine; a call is not. Both spellings are checked
-                // outside comments only, so the module's own explanation of why the gate is shut does
-                // not trip the guard that keeps it shut.
-                let code_only: String = source
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("//"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(
-                    !code_only.contains(opener),
-                    "{} reaches for `{opener}`, which opens the profile-creation gate. The create \
-                     control, the verb and the wizard must land in the SAME change (dig_ecosystem#2398)",
-                    path.display()
-                );
-            }
+            assert!(
+                reached.is_empty(),
+                "{} reaches for {reached:?}, which opens the profile-creation gate. The create \
+                 control, the verb and the wizard must land in the SAME change (dig_ecosystem#2398)",
+                path.display()
+            );
         }
 
         // A walk that silently reached nothing would pass every assertion above. These pin the
@@ -694,6 +767,92 @@ mod tests {
             sources.len() > 1,
             "the guard read {} file(s), which cannot cover a crate of several modules",
             sources.len()
+        );
+    }
+
+    /// The spellings that would open the profile-creation gate from the binary crate.
+    ///
+    /// `of_reading` is on the list even though it is the seam the wiring will eventually use, and
+    /// FOR that reason: it answers [`ProfileCreation::Possible`] for
+    /// `Some(ProfileMintAvailability::Possible)`, so one line reaching it in a file no test executes
+    /// re-creates dig_ecosystem#2377 in its exact original shape. Landing the wiring therefore means
+    /// editing this list in the same diff as the create control, which is the point of the guard.
+    ///
+    /// # The residual, stated rather than papered over
+    ///
+    /// This list is HAND-maintained, and nothing mechanical can complete it: a text scan cannot tell
+    /// a function that CONSTRUCTS [`ProfileCreation::Possible`] from one that merely matches on it,
+    /// which is most of this module. So any new public function that can answer `Possible` must be
+    /// added here by hand — and dig_ecosystem#2690 is the proof that the step gets missed, because
+    /// `of_reading` was added in that change and this list was not.
+    ///
+    /// What keeps the residual small is that
+    /// [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only place `Possible` is ever
+    /// constructed; a new route has to go through it, so it is one name to watch rather than many.
+    const CREATION_GATE_OPENERS: [&str; 3] =
+        ["ProfileCreation::Possible", "of_profile_mint", "of_reading"];
+
+    /// Which openers `source` reaches for OUTSIDE its comments.
+    ///
+    /// A doc comment naming a symbol is fine; a call is not — otherwise the module's own explanation
+    /// of why the gate is shut would have to be deleted to keep the guard green.
+    ///
+    /// Split out from the guard so the PREDICATE can itself be exercised, by
+    /// `the_gate_guard_catches_an_opener_and_tolerates_a_mention`. A name-scan passes identically
+    /// when the crate is clean and when the scan can find nothing at all — a misspelt needle, a
+    /// filter that eats every line, a list an arm was never added to — and this scan is the only
+    /// thing standing between a one-line flip and a shipped dead end.
+    fn openers_reached_in(source: &str) -> Vec<&'static str> {
+        let code_only: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        CREATION_GATE_OPENERS
+            .into_iter()
+            .filter(|opener| code_only.contains(opener))
+            .collect()
+    }
+
+    /// **The gate guard's scan really catches each opener, and really tolerates one merely named in
+    /// a comment.**
+    ///
+    /// `the_binary_cannot_open_the_profile_creation_gate` passes today because the binary is clean,
+    /// which is indistinguishable from passing because the scan can never find anything. This is the
+    /// leg that tells those apart: every opener is planted in a source that plainly reaches for it,
+    /// one at a time, and the scan must name it.
+    ///
+    /// The comment leg is the other direction, and it is not decoration: without it the honest fix
+    /// for a tripped guard would be to delete the sentence explaining why the gate is shut.
+    ///
+    /// The last assertion pins the boundary — the call the shipped binary genuinely makes
+    /// (`ProfileCreation::of`) must NOT read as an opener, or the guard would be unsatisfiable
+    /// rather than protective, and the first person to hit it would delete it.
+    #[test]
+    fn the_gate_guard_catches_an_opener_and_tolerates_a_mention() {
+        for opener in CREATION_GATE_OPENERS {
+            assert_eq!(
+                vec![opener],
+                openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")),
+                "the scan missed `{opener}` in source that plainly reaches for it, so the guard \
+                 built on it cannot speak for the binary crate"
+            );
+
+            assert!(
+                openers_reached_in(&format!(
+                    "// the gate stays shut, so nothing here calls {opener}\nfn wire() {{}}"
+                ))
+                .is_empty(),
+                "`{opener}` named in a COMMENT tripped the scan, which would force the module's own \
+                 explanation of the shut gate to be deleted to stay green"
+            );
+        }
+
+        assert!(
+            openers_reached_in("fn wire() { let _ = ProfileCreation::of(seam); }").is_empty(),
+            "the call the shipped binary actually makes was read as an opener, which makes the \
+             guard unsatisfiable rather than protective"
         );
     }
 
@@ -763,6 +922,105 @@ mod tests {
             );
             assert!(creation.blocked().is_some());
         }
+    }
+
+    /// **A node nobody has measured is `Unknown` — never a measured absence, and never possible**
+    /// (dig_ecosystem#2690).
+    ///
+    /// Makes impossible: telling a person whose dig-node is merely stopped that *this version of DIG
+    /// has no way to reach the chain… nothing is missing from your setup and there is nothing for you
+    /// to do*. That sentence is a claim about the BUILD, and the moment creation is fed from a node
+    /// reading it becomes a claim about the NODE wearing the build's clothes — false, and it leaves
+    /// the one person who could fix it with no action to take.
+    ///
+    /// # The two legs that make this load-bearing, not a transcription
+    ///
+    /// The `assert_ne!` is the fixture that distinguishes this from the nearest wrong
+    /// implementation, which is the one that shipped: mapping an unmeasured reading onto
+    /// `Blocked(NoChainTransport)` satisfies "withholds the offer" identically, so an assertion about
+    /// withholding alone cannot see the defect at all.
+    ///
+    /// The `is_possible` leg pins the other direction. `Unknown` is not blocked FOR A REASON, so a
+    /// `blocked()`-derived `is_possible` — which is what shipped — reads it as *creation is possible*
+    /// and opens a create control against a node nobody has spoken to. That is the fail-open
+    /// direction on a money path, and it is why `is_possible` must key on the arm.
+    #[test]
+    fn an_unmeasured_node_is_unknown_rather_than_a_measured_absence() {
+        let unmeasured = ProfileCreation::of_reading(None);
+
+        assert_eq!(ProfileCreation::Unknown, unmeasured);
+        assert_ne!(
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            unmeasured,
+            "an unmeasured node was reported with a definite cause, which puts a diagnostic on \
+             screen that names something nobody observed"
+        );
+        assert_eq!(
+            None,
+            unmeasured.blocked(),
+            "there is no reason to name, because no reading was taken"
+        );
+        assert!(
+            !unmeasured.is_possible(),
+            "an unmeasured node was read as one a profile can be minted against — the fail-open \
+             direction on a path that spends real XCH"
+        );
+
+        // The default is the unmeasured state, because a view whose field was never filled has not
+        // measured anything either.
+        assert_eq!(ProfileCreation::Unknown, ProfileCreation::default());
+
+        // Controls: a reading that WAS taken still maps to its own definite answer, in both
+        // directions, or the arm above would be indistinguishable from a constant.
+        assert_eq!(
+            ProfileCreation::Possible,
+            ProfileCreation::of_reading(Some(ProfileMintAvailability::Possible))
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            ProfileCreation::of_reading(Some(ProfileMintAvailability::NoChainTransport))
+        );
+        assert!(ProfileCreation::of_reading(Some(ProfileMintAvailability::Possible)).is_possible());
+    }
+
+    /// **The tray's About notice explains an absence for every arm that HAS one, and never invents
+    /// a cause for a node nobody measured** (dig_ecosystem#2690).
+    ///
+    /// The binary assembles that notice, and `src/bin` is a file no guard test can read
+    /// (dig_ecosystem#2587) — so the selection it delegates to is guarded here instead. Each leg
+    /// varies one thing, and the `assert_ne!` is what makes it more than a transcription: an
+    /// implementation that answered the unreachable-chain sentence for BOTH would satisfy every
+    /// "is some" assertion and still be the exact defect.
+    #[test]
+    fn the_about_notice_explains_an_unmeasured_node_differently_from_an_unreachable_one() {
+        let checking = copy::about_creation(ProfileCreation::Unknown);
+        let unreachable =
+            copy::about_creation(ProfileCreation::Blocked(CreationBlocked::NoChainTransport));
+
+        assert_eq!(Some(copy::CHECKING_CREATION), checking);
+        assert_eq!(
+            Some(copy::cannot_create(CreationBlocked::NoChainTransport)),
+            unreachable
+        );
+        assert_ne!(
+            checking, unreachable,
+            "an unmeasured node and an unreachable one were explained in the same words, which \
+             tells somebody whose node is merely stopped that there is nothing for them to do"
+        );
+
+        // Every blocked arm gets its own sentence, so a new one cannot arrive unexplained.
+        for blocked in CreationBlocked::EVERY {
+            assert_eq!(
+                Some(copy::cannot_create(blocked)),
+                copy::about_creation(ProfileCreation::Blocked(blocked))
+            );
+        }
+
+        assert_eq!(
+            None,
+            copy::about_creation(ProfileCreation::Possible),
+            "a notice cannot explain an absence there is none of"
+        );
     }
 
     /// **A switch discloses BOTH ends before it happens.**

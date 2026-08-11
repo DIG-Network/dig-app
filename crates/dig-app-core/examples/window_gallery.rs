@@ -38,6 +38,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dig_app_core::account::chain_mint::MintAvailability;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{photograph_shell, Theme};
 use dig_app_core::engine::{EngineConnector, EngineState, NodeConnector};
@@ -47,7 +48,7 @@ use dig_app_core::hosted_stores::{
 };
 use dig_app_core::network::{ChainSync, NetworkStanding, NodeNetworkStanding, PeerCount};
 use dig_app_core::node_facts::NodeFacts;
-use dig_app_core::profiles::ProfilesReading;
+use dig_app_core::profiles::{ProfileCreation, ProfilesReading};
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::wallet::overview::{BalanceReading, Balances};
 use dig_app_core::window_model::TabId;
@@ -200,6 +201,14 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
         },
         second_factor,
         profiles: profiles.reading(),
+        // STATED rather than defaulted, because the default no longer means what this picture must
+        // show. `ProfileCreation::default()` is now `Unknown` — *nobody has asked the node yet*
+        // (dig_ecosystem#2690) — while the shipped binary hardcodes `MintSeams::NoChainTransport`
+        // and therefore renders the unreachable-chain sentence. Left on the default, every capture
+        // in this gallery would show a *still checking* card that no build any user runs can
+        // produce: a picture that contradicts the product, which is the one thing a gallery must
+        // never do.
+        profile_creation: ProfileCreation::of(MintAvailability::NoChainTransport),
         window_host: WindowHost::Available,
         cache: Some(CacheSnapshot {
             cap_bytes: GIB,

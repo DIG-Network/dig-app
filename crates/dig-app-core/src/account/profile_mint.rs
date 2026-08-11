@@ -32,7 +32,7 @@
 //! whole profile can be minted on a build whose node answers.
 //!
 //! It is still not a given. A node that is not running cannot be reached at all, and a node too old
-//! to serve the four reads the walk composes cannot walk one — and those are DIFFERENT facts with
+//! to serve the two source methods the walk composes cannot walk one — and those are DIFFERENT facts with
 //! different remedies (*start your node* versus *upgrade*). So [`ProfileMintSeams`] keeps them
 //! apart: [`NoLineageWalk`](ProfileMintSeams::NoLineageWalk) is *reached the chain, cannot finish a
 //! mint*, and [`NoChainTransport`](ProfileMintSeams::NoChainTransport) is *could not reach the chain
@@ -56,7 +56,9 @@ use crate::account::residency::AccountResidency;
 ///
 /// Deliberately a value no singleton can have, so the probe cannot be mistaken for a real read and
 /// costs a node nothing to answer. What is under test is whether the call is SERVICED — a source
-/// that walks lineages answers `Ok(None)` here, and one that cannot answers `Err`.
+/// that walks lineages answers `Ok(None)` here, and one that cannot answers `Err`. Reused for the
+/// `coin_spend` probe, where `Ok(None)` — unspent or unknown — is likewise the honest answer for a
+/// coin that does not exist.
 const PROBE_LAUNCHER_ID: Bytes32 = Bytes32::new([0; 32]);
 
 /// Whether this build can mint a WHOLE profile — both halves — and, when it cannot, which half is
@@ -107,7 +109,7 @@ pub trait ProfileMintDoor {
 /// the seams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainReadiness {
-    /// The chain answered the peak AND serviced a singleton lineage walk.
+    /// The chain answered the peak AND serviced both source methods the singleton lineage walk composes.
     WalksLineages,
     /// The chain answers ordinary reads and refuses the walk. Carries the source's own words.
     NoLineageWalk {
@@ -122,7 +124,7 @@ pub enum ChainReadiness {
 }
 
 impl ChainReadiness {
-    /// Ask `chain` the two questions, in the order that keeps their answers distinguishable.
+    /// Ask `chain` the three questions, in the order that keeps their answers distinguishable.
     ///
     /// Reachability FIRST, and it is a separate question from capability. Once the walk really
     /// works, an offline node fails `resolve_singleton_lineage` too — so a single probe would report
@@ -144,7 +146,25 @@ impl ChainReadiness {
             };
         }
 
-        match chain.resolve_singleton_lineage(PROBE_LAUNCHER_ID) {
+        if let Err(why) = chain.resolve_singleton_lineage(PROBE_LAUNCHER_ID) {
+            return Self::NoLineageWalk {
+                why: why.to_string().into(),
+            };
+        }
+
+        // The walk composes exactly TWO source METHODS — `coin_record`, for the launcher and again
+        // at every hop (dig-chainsource-interface 0.3.1, `walk.rs:512` and `:592`), and `coin_spend`
+        // at every hop (`:547`). Three call sites, two methods. The probe above exercises only the
+        // first, because a launcher id naming no coin returns `Ok(None)` out of `read_launcher_coin`
+        // (`:389`) before the hop loop begins. So this read is not belt-and-braces: without it
+        // `WalksLineages` credits `coin_spend` on no evidence, and a node serving `coin_record` but
+        // not `coin_spend` is offered a mint it cannot finish (dig_ecosystem#2685).
+        //
+        // Asked with the same unreal id for the same reason: what is under test is whether the call
+        // is SERVICED, and `Ok(None)` — unspent or unknown — is the honest answer for a coin that
+        // does not exist. Only `Err` withholds, so the collapse this whole gate forbids — reading
+        // *I could not answer* as *there is nothing there* — stays unwritable here too.
+        match chain.coin_spend(PROBE_LAUNCHER_ID) {
             Ok(_) => Self::WalksLineages,
             Err(why) => Self::NoLineageWalk {
                 why: why.to_string().into(),
@@ -210,7 +230,8 @@ impl<'a> ProfileMintSeams<'a> {
     ///
     /// # What a successful probe does NOT prove
     ///
-    /// It proves the SOURCE can service the call. It says nothing about any particular singleton,
+    /// It proves the SOURCE can service the two source methods a walk composes. It says nothing about any
+    /// particular singleton,
     /// and in particular a lineage of exactly `{launcher, eve}` with an unspent eve does **not**
     /// establish that the eve is a genuine singleton curried to that launcher — that rests on the
     /// launcher spender alone. For a DID this host is minting, the launcher spender is this host, so
@@ -636,6 +657,24 @@ mod tests {
         peak: Option<u32>,
         /// Whether the singleton lineage walk is serviced.
         walks: bool,
+        /// Whether `coin_spend` — the second of the two source methods the walk composes — is serviced.
+        ///
+        /// A third knob because a two-knob double cannot express the state dig_ecosystem#2685
+        /// measured: the walk probe answers, and the read the walk needs at its first hop does not.
+        /// A double that could only vary `walks` cannot express that multi-field lie, so it would
+        /// confirm the probe against exactly the states the probe already got right.
+        serves_coin_spend: bool,
+    }
+
+    impl TwoKnobChain {
+        /// A node that answers everything the probe asks — the control.
+        fn wired() -> Self {
+            Self {
+                peak: Some(PEAK),
+                walks: true,
+                serves_coin_spend: true,
+            }
+        }
     }
 
     impl ChainSource for TwoKnobChain {
@@ -657,12 +696,23 @@ mod tests {
             &self,
             _id: Bytes32,
         ) -> Result<Option<chia_protocol::CoinSpend>, Self::Error> {
-            Ok(None)
+            match self.serves_coin_spend {
+                true => Ok(None),
+                false => Err("this node does not serve coin_spend".to_owned()),
+            }
         }
         fn resolve_singleton_lineage(
             &self,
             _launcher_id: Bytes32,
         ) -> Result<Option<SingletonLineage>, Self::Error> {
+            // Deliberately does NOT consult `serves_coin_spend`, because the real
+            // `walk_singleton_lineage` does not either for a launcher id that names no coin: it
+            // returns `Ok(None)` from `read_launcher_coin` before the hop loop — and therefore
+            // before `coin_spend` — ever runs (dig-chainsource-interface 0.3.1, `walk.rs:389`).
+            // A double that routed the walk through `coin_spend` would make
+            // `a_node_that_cannot_serve_the_hop_read_is_not_credited_with_walking_lineages` pass
+            // against the very code it exists to fail, which is a fixture proving a property it
+            // cannot see.
             match self.walks {
                 true => Ok(None),
                 false => Err("this node does not serve a lineage walk".to_owned()),
@@ -764,6 +814,7 @@ mod tests {
         let refuses = TwoKnobChain {
             peak: Some(PEAK),
             walks: false,
+            serves_coin_spend: true,
         };
 
         let seams = ProfileMintSeams::probe(&door, &refuses);
@@ -784,6 +835,55 @@ mod tests {
         assert_eq!(wired.availability(), ProfileMintAvailability::Possible);
         assert!(
             wired.door().is_some(),
+            "the control must genuinely be offered, or the refusal above proves nothing"
+        );
+    }
+
+    /// **A node that answers the walk probe but cannot serve the read the walk needs at its first
+    /// hop is NOT credited with walking lineages** (dig_ecosystem#2685).
+    ///
+    /// Makes impossible: the fail-OPEN money gate. `PROBE_LAUNCHER_ID` names no coin, so the
+    /// canonical `walk_singleton_lineage` returns `Ok(None)` out of `read_launcher_coin` **before
+    /// the hop loop runs** — meaning the probe's one `Ok(_)` measures `coin_record` alone and
+    /// credits `coin_spend` on no evidence at all. A dig-node that serves `peak` and `coin_record`
+    /// and answers `METHOD_NOT_FOUND` for `coin_spend` therefore probes as `WalksLineages` →
+    /// `Wired` → `Possible`, and the app offers a create control against a node that cannot finish
+    /// phase B: real XCH spent, stranded at `DidConfirmedStoreNotLaunched`.
+    ///
+    /// # Why this fixture can see it and the existing ones cannot
+    ///
+    /// The two knobs both existing probe tests vary are `peak` and `walks`, and this defect lives in
+    /// neither: it needs `walks: true` — an honestly-answering walk probe — beside a broken
+    /// `coin_spend`. That is a two-field lie, and a double that could only vary one field could not
+    /// state it. The double's walk deliberately does not consult `coin_spend`, exactly as the real
+    /// walk does not, so this cannot pass against the pre-fix body.
+    ///
+    /// The control varies ONE field back and requires a real `Possible` from the same function, so an
+    /// implementation that refused everything cannot pass either.
+    #[test]
+    fn a_node_that_cannot_serve_the_hop_read_is_not_credited_with_walking_lineages() {
+        let door = CountingDoor::default();
+        let no_hop_read = TwoKnobChain {
+            serves_coin_spend: false,
+            ..TwoKnobChain::wired()
+        };
+
+        assert_eq!(
+            ProfileMintSeams::probe(&door, &no_hop_read).availability(),
+            ProfileMintAvailability::NoLineageWalk,
+            "a node missing one of the two source methods the walk composes cannot finish phase B, and \
+             crediting it spends a user's XCH on a profile that can never complete"
+        );
+        assert_eq!(
+            door.begins.get(),
+            0,
+            "a withheld offer must not have reached the mint at all"
+        );
+
+        // Control: the SAME door and the SAME walk answer, with only the hop read restored.
+        assert_eq!(
+            ProfileMintSeams::probe(&door, &TwoKnobChain::wired()).availability(),
+            ProfileMintAvailability::Possible,
             "the control must genuinely be offered, or the refusal above proves nothing"
         );
     }
@@ -812,6 +912,7 @@ mod tests {
         let offline = TwoKnobChain {
             peak: None,
             walks: false,
+            serves_coin_spend: true,
         };
         assert_eq!(
             ProfileMintSeams::probe(&door, &offline).availability(),
@@ -823,6 +924,7 @@ mod tests {
         let no_walk = TwoKnobChain {
             peak: Some(PEAK),
             walks: false,
+            serves_coin_spend: true,
         };
         assert_eq!(
             ProfileMintSeams::probe(&door, &no_walk).availability(),
@@ -854,6 +956,7 @@ mod tests {
         let refusing = TwoKnobChain {
             peak: Some(PEAK),
             walks: false,
+            serves_coin_spend: true,
         };
 
         for seams in [

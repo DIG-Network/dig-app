@@ -2081,10 +2081,39 @@ mod tray {
     ///
     /// A `Mutex<TrayView>` rather than a channel because the window wants the LATEST, not every
     /// intermediate: it re-reads each frame and has no use for a backlog.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct LiveView(Arc<Mutex<TrayView>>);
 
+    impl Default for LiveView {
+        /// Seeded with [`LiveView::before_any_publish`] rather than a bare `TrayView::default()`, so
+        /// the window's very first frame states what this build actually answers.
+        fn default() -> Self {
+            Self(Arc::new(Mutex::new(LiveView::before_any_publish())))
+        }
+    }
+
     impl LiveView {
+        /// What the window shows before the first snapshot lands, and after a poisoned lock.
+        ///
+        /// `TrayView::default()` with the ONE field this binary answers from a constant filled in.
+        /// `ProfileCreation::default()` is `Unknown` — *nobody has asked the node yet* — which is the
+        /// honest answer for a reading somebody eventually takes, and a falsehood HERE: nothing in
+        /// this build ever asks, because [`mint_seams`](super::mint_seams) is a constant. Left on the
+        /// default, the card would say *DIG is still checking* about an activity nobody is
+        /// performing (dig_ecosystem#2690) — and a `std::sync::Mutex` stays poisoned, so on that path
+        /// it would say it forever.
+        ///
+        /// Derived from the same `mint_seams()` the published snapshot uses, so the first frame and
+        /// every frame after it cannot disagree about what this build can do.
+        fn before_any_publish() -> TrayView {
+            TrayView {
+                profile_creation: dig_app_core::profiles::ProfileCreation::of(
+                    super::mint_seams().availability(),
+                ),
+                ..TrayView::default()
+            }
+        }
+
         /// Replace the published snapshot.
         fn publish(&self, view: TrayView) {
             if let Ok(mut slot) = self.0.lock() {
@@ -2092,16 +2121,16 @@ mod tray {
             }
         }
 
-        /// The newest snapshot, or an empty one.
+        /// The newest snapshot, or the pre-publish one.
         ///
-        /// A poisoned lock returns the DEFAULT view rather than panicking on the prompt thread: the
-        /// window then shows the honest not-yet-known state, which is what it shows at start-up
-        /// anyway. Taking the prompt thread down would cost every consent prompt in the process.
+        /// A poisoned lock returns [`before_any_publish`](Self::before_any_publish) rather than
+        /// panicking on the prompt thread: the window then shows exactly what it shows at start-up.
+        /// Taking the prompt thread down would cost every consent prompt in the process.
         fn read(&self) -> TrayView {
             self.0
                 .lock()
                 .map(|view| view.clone())
-                .unwrap_or_else(|_| TrayView::default())
+                .unwrap_or_else(|_| Self::before_any_publish())
         }
     }
 
@@ -3629,29 +3658,22 @@ mod tray {
         };
 
         let creation = ProfileCreation::of(super::mint_seams().availability());
-        // The same branch the window's create panel carries, and for the same reason: `blocked()`
-        // is always `Some` on every build shipped so far, and `None` is where a real create step
-        // will hang the day dig-account's mint publishes (see `ProfileCreation`).
-        let Some(blocked) = creation.blocked() else {
-            notify(
-                confirmer,
-                copy::ABOUT_TITLE,
-                copy::ABOUT_HEADING,
-                &format!("{}\n\n{held}{}", copy::WHAT_A_PROFILE_IS, copy::HIDE_NOTE),
-            );
-            return;
-        };
-        notify(
-            confirmer,
-            copy::ABOUT_TITLE,
-            copy::ABOUT_HEADING,
-            &format!(
+        // Asked of `copy::about_creation` rather than matched here. `blocked()` answers `None` for
+        // TWO different arms, and the `let Some(_) else` shape this replaced read that one `None` as
+        // *creation is possible, so say nothing about it* — which would silently drop the whole
+        // explanation for an UNMEASURED node the day this reads a node rather than a constant
+        // (dig_ecosystem#2690). The selection lives in the library because this file is one no guard
+        // test can see (dig_ecosystem#2587).
+        let body = match copy::about_creation(creation) {
+            Some(sentence) => format!(
                 "{}\n\n{held}{}\n\n{}",
                 copy::WHAT_A_PROFILE_IS,
-                copy::cannot_create(blocked),
+                sentence,
                 copy::HIDE_NOTE
             ),
-        );
+            None => format!("{}\n\n{held}{}", copy::WHAT_A_PROFILE_IS, copy::HIDE_NOTE),
+        };
+        notify(confirmer, copy::ABOUT_TITLE, copy::ABOUT_HEADING, &body);
     }
 
     /// Apply a validated cap `bytes` to the node, warning first if it would evict cached content.

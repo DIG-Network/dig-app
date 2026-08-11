@@ -442,6 +442,12 @@ pub(crate) mod profiles {
     /// The panel holding what a profile is and why one cannot be created yet.
     pub(crate) const CREATE_PANEL: &str = "Creating a profile";
 
+    /// Said while nobody has yet measured whether this node can create a profile.
+    ///
+    /// Delegated to [`crate::profiles::copy::CHECKING_CREATION`] rather than written again here, for
+    /// the reason [`cannot_create`] is: the card and the tray's About notice must say one sentence.
+    pub(crate) const CHECKING_CREATION: &str = crate::profiles::copy::CHECKING_CREATION;
+
     /// The badge on the profile the account is deriving at.
     pub(crate) const ACTIVE_BADGE: &str = "In use";
     /// The badge on a profile the user has taken out of this computer's lists.
@@ -821,6 +827,7 @@ mod tests {
             account::DIG_ID_UNKNOWN,
             apps::INSTALL_NOTE,
             profiles::PENDING,
+            profiles::CHECKING_CREATION,
             profiles::EMPTY,
             profiles::SWITCH_CAUTION,
             profiles::HIDE_NOTE,
