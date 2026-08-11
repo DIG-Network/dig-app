@@ -1156,7 +1156,28 @@ mod tests {
     /// This is the direction that would make an over-strict fix a worse regression than the bug:
     /// §5.3 says an explicitly configured node always wins, so a user pointing dig-app at their own
     /// node on another machine must keep working. Its control is the test above.
+    ///
+    /// **Ignored on Windows (dig_ecosystem#2705), because it hangs there rather than failing.**
+    /// `accept()` and `read_to_end()` below are both untimed, and `read_to_end` returns only at EOF
+    /// — i.e. only once the client end is fully closed. The 300ms budget passed to `post_json_to`
+    /// bounds the CLIENT's wait, not this side's. Dialling the wildcard `0.0.0.0` is also
+    /// platform-dependent: Linux routes it to localhost, Windows does not. The result is not a red
+    /// test but a wedged harness — no `test result:` line at all — which is indistinguishable from
+    /// a dead agent, and which ran the `Native confirmer (windows-latest)` job into GitHub's
+    /// six-hour ceiling on every merge to `main` after it landed.
+    ///
+    /// `ignore` rather than `cfg(not(windows))` on purpose: the test still COMPILES on Windows, so
+    /// it cannot rot behind a cfg while the code it covers changes, and it can still be run there
+    /// deliberately with `-- --ignored` once the fix lands. It still runs normally on Linux and
+    /// macOS, so the guarantee keeps a real guard on two of three platforms.
+    ///
+    /// Un-skip by bounding THIS side — `set_read_timeout` on the accepted stream, and read the
+    /// request head rather than to EOF, since only headers are asserted — and dialling `127.0.0.1`.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "hangs on Windows: untimed accept()/read_to_end() on a 0.0.0.0 dial (dig_ecosystem#2705)"
+    )]
     fn a_user_configured_host_off_loopback_still_receives_the_token() {
         let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();

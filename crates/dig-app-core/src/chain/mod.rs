@@ -36,13 +36,22 @@
 //!
 //! # Not wired up yet, on purpose
 //!
-//! Nothing here is handed to a minter — [`crate::account::chain_mint`]'s seams are unchanged, so
-//! this adds capability without changing any existing behaviour. Wiring, and the
-//! [`resolve_singleton_lineage`](dig_chainsource_interface::ChainSource::resolve_singleton_lineage)
-//! walk it still needs, are later stages of dig_ecosystem#2398.
+//! [`readiness`] measures — off the painting thread — whether the connected node can service the
+//! reads a whole-profile mint needs. Nothing consumes that measurement at this revision:
+//! [`NodeChainReadiness`] has no caller outside its own module, and the shell still hardcodes the
+//! seam it hands the wizard. The poller already owns its cadence; what it lacks is a caller, and
+//! only once that caller and a creation control land together will a reading decide where the
+//! shell offers profile creation (dig_ecosystem#2398).
+//!
+//! Saying that plainly is the rule [`readiness`] itself argues, turned on this file: an unmeasured
+//! node is not a measured absence, and a seam nobody reads is not a seam in use.
+//!
+//! The DID-only wizard's seams ([`crate::account::chain_mint`]) are deliberately unchanged: a
+//! DID-only seam says nothing about whether a PROFILE can be completed.
 
 pub mod error;
 pub mod publish;
+pub mod readiness;
 pub mod source;
 
 #[cfg(test)]
@@ -50,4 +59,5 @@ mod tests;
 
 pub use error::ChainReadError;
 pub use publish::{ControlSpendPublisher, PublishFailure, PUSH_TIMEOUT};
+pub use readiness::NodeChainReadiness;
 pub use source::{ControlChainSource, Freshness, CHILD_PAGE_SIZE, MAX_CHILD_PAGES, READ_TIMEOUT};

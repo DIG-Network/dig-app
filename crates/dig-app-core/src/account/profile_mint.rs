@@ -98,6 +98,61 @@ pub trait ProfileMintDoor {
     fn liveness(&self) -> Option<MintLiveness>;
 }
 
+/// What the CHAIN answered about minting here — the half of [`ProfileMintSeams`] that needs no door.
+///
+/// Exists so the slow half of the decision can be taken off the painting thread (see
+/// [`ProfileMintSeams::from_readiness`]). It deliberately has **no `availability()`**: an
+/// availability read off this type would be a second expression of the same capability, which is the
+/// drift dig_ecosystem#2377 measured. To learn whether a profile can be minted, attach a door and ask
+/// the seams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainReadiness {
+    /// The chain answered the peak AND serviced a singleton lineage walk.
+    WalksLineages,
+    /// The chain answers ordinary reads and refuses the walk. Carries the source's own words.
+    NoLineageWalk {
+        /// Why the walk probe failed, verbatim from the chain source.
+        why: Arc<str>,
+    },
+    /// The chain could not be reached at all. Carries the reader's own words.
+    NoChainTransport {
+        /// Why the chain could not be reached, verbatim from the reader.
+        why: Arc<str>,
+    },
+}
+
+impl ChainReadiness {
+    /// Ask `chain` the two questions, in the order that keeps their answers distinguishable.
+    ///
+    /// Reachability FIRST, and it is a separate question from capability. Once the walk really
+    /// works, an offline node fails `resolve_singleton_lineage` too — so a single probe would report
+    /// every unplugged machine as *this version cannot finish a mint*, sending somebody to wait for a
+    /// release when what they need is to start their node. Asking for the peak first separates
+    /// *cannot reach the chain* from *reached it, and it cannot walk a lineage*, which is the entire
+    /// reason there are three arms rather than two.
+    ///
+    /// Every walk `Err` — a timeout, a depth bound, a reveal-size bound — withholds. None of them may
+    /// become *absent*: only `Ok` is a capability here, so *I could not read the lineage* can never be
+    /// written as *the lineage ends here*, which on a mint path would read as **safe to spend**.
+    pub fn probe<C>(chain: &C) -> Self
+    where
+        C: ChainSource + ?Sized,
+    {
+        if let Err(why) = chain.peak_height() {
+            return Self::NoChainTransport {
+                why: why.to_string().into(),
+            };
+        }
+
+        match chain.resolve_singleton_lineage(PROBE_LAUNCHER_ID) {
+            Ok(_) => Self::WalksLineages,
+            Err(why) => Self::NoLineageWalk {
+                why: why.to_string().into(),
+            },
+        }
+    }
+}
+
 /// The profile-minting seams a build actually has — and the ONLY source of a
 /// [`ProfileMintAvailability`].
 ///
@@ -165,23 +220,27 @@ impl<'a> ProfileMintSeams<'a> {
     where
         C: ChainSource + ?Sized,
     {
-        // Reachability FIRST, and it is a separate question from capability. Once the walk really
-        // works, an offline node fails `resolve_singleton_lineage` too — so a single probe would
-        // report every unplugged machine as "this version cannot finish a mint", sending somebody to
-        // wait for a release when what they need is to start their node. Asking for the peak first
-        // separates *cannot reach the chain* from *reached it, and it cannot walk a lineage*, which
-        // is the entire reason there are three arms rather than two.
-        if let Err(why) = chain.peak_height() {
-            return Self::NoChainTransport {
-                why: why.to_string().into(),
-            };
-        }
+        Self::from_readiness(ChainReadiness::probe(chain), mint)
+    }
 
-        match chain.resolve_singleton_lineage(PROBE_LAUNCHER_ID) {
-            Ok(_) => Self::Wired { mint },
-            Err(why) => Self::NoLineageWalk {
-                why: why.to_string().into(),
-            },
+    /// Attach `mint` to a chain answer taken EARLIER, and possibly on another thread.
+    ///
+    /// # Why the probe is separable from the door at all
+    ///
+    /// The three arms are decided entirely by the chain; the door is only carried. A surface that
+    /// repaints twice a second therefore cannot afford to probe at paint time — two node round trips
+    /// per frame — while the door it must attach borrows a live account session and so cannot leave
+    /// the painting thread. Splitting the two lets the slow half run on a worker and the free half
+    /// happen in the frame.
+    ///
+    /// This is the ONE mapping from a chain answer to seams, which is what keeps the split from
+    /// becoming the drift the type exists to prevent: [`probe`](Self::probe) routes through it too,
+    /// so there is no second expression of "what does a walking chain mean" to disagree with.
+    pub fn from_readiness(readiness: ChainReadiness, mint: &'a dyn ProfileMintDoor) -> Self {
+        match readiness {
+            ChainReadiness::WalksLineages => Self::Wired { mint },
+            ChainReadiness::NoLineageWalk { why } => Self::NoLineageWalk { why },
+            ChainReadiness::NoChainTransport { why } => Self::NoChainTransport { why },
         }
     }
 
@@ -524,6 +583,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::profile_session::test_support::session_with;
+    use dig_account::registry::journal::{
+        MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,
+    };
     use dig_chainsource_interface::{
         ChainSourceError, CoinRecord, MockChainSource, SingletonLineage,
     };
@@ -917,5 +980,261 @@ mod tests {
     /// Named so the assertion above reads as the claim it makes rather than as a second `read`.
     fn succeeded_reading<C: ChainSource + ?Sized>(flight: &InFlight, chain: &C) -> MintLiveness {
         flight.read(chain)
+    }
+
+    /// A chain whose peak answers and whose `coin_record` fails for ONE named coin.
+    ///
+    /// # Why the shared `MockChainSource` cannot express this
+    ///
+    /// Its `fail_with` arms one error across every method, peak included, so the state that
+    /// distinguishes a real implementation from `chain.coin_record(..).unwrap_or(None)` — *the peak
+    /// is known, and one coin read failed* — is not among the states it can produce. A suite written
+    /// only against it stays green under that mutation while a user is told a live mint is dead.
+    struct OneCoinFails {
+        /// The coin whose read fails. Every other coin answers from `records`.
+        failing: Bytes32,
+        /// The coins this chain knows about.
+        records: Vec<(Bytes32, CoinRecord)>,
+    }
+
+    impl ChainSource for OneCoinFails {
+        type Error = String;
+        fn coin_record(&self, id: Bytes32) -> Result<Option<CoinRecord>, Self::Error> {
+            if id == self.failing {
+                return Err("the read timed out".to_owned());
+            }
+            Ok(self
+                .records
+                .iter()
+                .find(|(known, _)| *known == id)
+                .map(|(_, record)| record.clone()))
+        }
+        fn coin_records_by_puzzle_hash(
+            &self,
+            _ph: Bytes32,
+            _include_spent: bool,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn coin_records_by_parent(&self, _p: Bytes32) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn coin_spend(
+            &self,
+            _id: Bytes32,
+        ) -> Result<Option<chia_protocol::CoinSpend>, Self::Error> {
+            Ok(None)
+        }
+        fn resolve_singleton_lineage(
+            &self,
+            _launcher_id: Bytes32,
+        ) -> Result<Option<SingletonLineage>, Self::Error> {
+            Ok(None)
+        }
+        fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
+            Ok(Some(PEAK))
+        }
+        fn block_timestamp(&self, _h: u32) -> Result<Option<u64>, Self::Error> {
+            Ok(None)
+        }
+    }
+
+    /// **A FAILED coin read is `Unknown`, on EITHER coin independently — never an absent coin.**
+    ///
+    /// Makes impossible: `chain.coin_record(..).unwrap_or(None)`, in either position. Both legs are
+    /// needed because the two reads fail into different lies, and a suite covering one leg cannot see
+    /// the other:
+    ///
+    /// - the CREATED coin swallowed reads as *the mint's coin does not exist*, which combined with a
+    ///   spent funding coin is exactly the shape of [`MintLiveness::ProvablyDead`] — a live, paid-for
+    ///   mint reported dead, which invites a second spend;
+    /// - the FUNDING coin swallowed reads as *the funding coin is unspent*, which reports `Waiting`
+    ///   for a mint the chain could genuinely prove dead.
+    ///
+    /// Each leg's fixture is arranged so the mutation produces a DIFFERENT arm rather than the same
+    /// one: the created-coin leg is otherwise `ProvablyDead`, the funding-coin leg otherwise
+    /// `Waiting`. A fixture whose honest answer already matched the mutant's could not see it.
+    #[test]
+    fn a_failed_coin_read_is_unknown_on_either_coin_and_never_an_absent_coin() {
+        let flight = InFlight {
+            funding_coin_id: coin_id(2),
+            created_coin_id: coin_id(3),
+            pushed_at_height: PUSHED_AT,
+        };
+
+        // The created coin cannot be read, and the funding coin is spent. Swallowing the error
+        // reports ProvablyDead about a mint nobody has evidence about.
+        let created_unreadable = OneCoinFails {
+            failing: coin_id(3),
+            records: vec![(coin_id(2), spent_at(coin_id(2), PUSHED_AT + 3))],
+        };
+        assert_eq!(
+            flight.read(&created_unreadable),
+            MintLiveness::Unknown,
+            "an unreadable mint coin was treated as an absent one, which is the death test's whole \
+             second half"
+        );
+
+        // The funding coin cannot be read, and the mint's own coin is absent. Swallowing the error
+        // reports Waiting for a mint whose funding coin may already be spent elsewhere.
+        let funding_unreadable = OneCoinFails {
+            failing: coin_id(2),
+            records: Vec::new(),
+        };
+        assert_eq!(
+            flight.read(&funding_unreadable),
+            MintLiveness::Unknown,
+            "an unreadable funding coin was treated as an unspent one"
+        );
+
+        // Control: the SAME shapes with every read answering. Both reach a real, non-Unknown arm, so
+        // an implementation returning `Unknown` whenever a coin is missing cannot pass.
+        let answers = MockChainSource::new()
+            .with_peak(PEAK)
+            .with_coin(coin_id(2), spent_at(coin_id(2), PUSHED_AT + 3));
+        assert_eq!(
+            flight.read(&answers),
+            MintLiveness::ProvablyDead {
+                evidence: DeathEvidence {
+                    funding_coin_id: coin_id(2),
+                    funding_spent_at: PUSHED_AT + 3,
+                    absent_did_coin_id: coin_id(3),
+                }
+            }
+        );
+    }
+
+    /// A session holding exactly one journalled mint at `ix`, in `stage`.
+    fn session_minting(ix: dig_account::ProfileIx, stage: MintStage) -> ProfileSession {
+        let session = session_with(&[(dig_account::ProfileIx::ROOT, Some("first"))]);
+        session
+            .with_journal(|registry| {
+                registry
+                    .begin_seeded_mint(ix, stage, [0x44; 32], 10_000_000)
+                    .map_err(|why| MintError::Journal(why.to_string()))
+            })
+            .expect("the fixture journals one mint");
+        session
+    }
+
+    /// The pending record a pushed DID half journals: it spends wallet coin 2 to create DID coin 3.
+    fn did_pending() -> PendingMintRecord {
+        PendingMintRecord {
+            launcher_id: coin_id(1),
+            did_coin_id: coin_id(3),
+            source_coin_id: coin_id(2),
+            pushed_at_height: PUSHED_AT,
+        }
+    }
+
+    /// The record of a DID that has CONFIRMED at coin 3 — the input the store half spends.
+    ///
+    /// The DID string is DERIVED from the launcher id rather than written out: the registry rejects
+    /// a journal whose DID does not belong to its launcher, which is a rule this fixture must obey
+    /// rather than route around.
+    fn confirmed_did() -> MintedDidRecord {
+        MintedDidRecord {
+            did: dig_did::did_string_from_launcher_id(coin_id(1)),
+            launcher_id: coin_id(1),
+            coin_id: coin_id(3),
+            confirmed_height: PUSHED_AT,
+        }
+    }
+
+    /// **`liveness_of` reads the coins of the stage that is actually in the air, and reports nothing
+    /// for the stage that is waiting on this host.**
+    ///
+    /// Makes impossible: swapping the two coin ids in the `StorePushed` arm. That swap keeps every
+    /// `InFlight::read` test green, because those tests construct `InFlight` directly and never go
+    /// through the arm that decides WHICH coin is which.
+    ///
+    /// # The one fixture that can see the swap, and why the obvious one cannot
+    ///
+    /// The store launch SPENDS the DID coin and CREATES the store coin. The fixture therefore has
+    /// the DID coin spent and the store coin absent, which is provable death — some other spend took
+    /// the DID coin, so this launch can never be included. Under the swap the same chain finds the
+    /// DID coin present, concludes the bundle was included, and reports `Waiting` — leaving a user
+    /// waiting indefinitely on a launch the chain can already prove is dead, with the evidence that
+    /// would let them act withheld.
+    ///
+    /// The fixture that first suggested itself — a LIVE launch, store coin present — cannot see the
+    /// swap at all: both readings find a coin and both answer `Waiting`. Only the asymmetric case,
+    /// where exactly one of the two coins exists, distinguishes them.
+    #[test]
+    fn liveness_reads_the_coins_of_the_stage_that_is_in_the_air() {
+        let ix = dig_account::ProfileIx(1);
+
+        // The DID half is in the air: it spends coin 2 and would create coin 3.
+        let did_pushed = session_minting(
+            ix,
+            MintStage::DidPushed {
+                pending: did_pending(),
+            },
+        );
+        let did_chain = MockChainSource::new()
+            .with_peak(PEAK)
+            .with_coin(coin_id(2), spent_at(coin_id(2), PUSHED_AT + 3));
+        assert_eq!(
+            liveness_of(&did_pushed, ix, &did_chain),
+            Some(MintLiveness::ProvablyDead {
+                evidence: DeathEvidence {
+                    funding_coin_id: coin_id(2),
+                    funding_spent_at: PUSHED_AT + 3,
+                    absent_did_coin_id: coin_id(3),
+                }
+            }),
+            "the DID stage's funding coin is the wallet coin it spends"
+        );
+
+        // The STORE half is in the air: it spends the DID coin (3) and would create the store coin
+        // (5). The DID coin is gone and the store coin never appeared, so some OTHER spend consumed
+        // the DID — this launch can never be included, exactly as in the DID stage.
+        let store_pushed = session_minting(
+            ix,
+            MintStage::StorePushed {
+                did: confirmed_did(),
+                pending_store: PendingStoreLaunchRecord {
+                    launcher_id: coin_id(4),
+                    store_coin_id: coin_id(5),
+                    did_coin_id: coin_id(3),
+                    committed_root: [0x66; 32],
+                    pushed_at_height: PUSHED_AT,
+                },
+            },
+        );
+        let store_chain = MockChainSource::new()
+            .with_peak(PEAK)
+            .with_coin(coin_id(3), spent_at(coin_id(3), PUSHED_AT + 3));
+        assert_eq!(
+            liveness_of(&store_pushed, ix, &store_chain),
+            Some(MintLiveness::ProvablyDead {
+                evidence: DeathEvidence {
+                    funding_coin_id: coin_id(3),
+                    funding_spent_at: PUSHED_AT + 3,
+                    absent_did_coin_id: coin_id(5),
+                }
+            }),
+            "the store stage's INPUT is the DID coin and its OUTPUT is the store coin; reading them \
+             the other way round is the swap this fixture exists to catch"
+        );
+
+        // Nothing is on the network: the mint is waiting on THIS host, so there is no liveness.
+        let paused = session_minting(
+            ix,
+            MintStage::DidConfirmedStoreNotLaunched {
+                did: confirmed_did(),
+            },
+        );
+        assert_eq!(
+            liveness_of(&paused, ix, &store_chain),
+            None,
+            "a mint waiting on this host has no bundle in the air to report on"
+        );
+
+        // A profile with no journalled mint has no liveness either, whatever the chain says.
+        assert_eq!(
+            liveness_of(&did_pushed, dig_account::ProfileIx(7), &did_chain),
+            None
+        );
     }
 }
