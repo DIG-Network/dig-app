@@ -710,6 +710,10 @@ mod tests {
         // No build shipped so far can create a profile, and `is_possible` is the one place a future
         // control will ask. Asserted over BOTH seam values, so an arm added without wiring a real
         // minter fails here rather than shipping a control that refuses.
+        //
+        // This loop is the gate dig_ecosystem#2398 exists to open, and opening it is deliberately
+        // expensive: it fails until creation is DERIVED from the seam, which cannot happen until a
+        // control and its money ceremony exist to finish what an offer starts.
         for mint in [
             MintAvailability::NoChainTransport,
             MintAvailability::Possible,
@@ -717,8 +721,9 @@ mod tests {
             let creation = ProfileCreation::of(mint);
             assert!(
                 !creation.is_possible(),
-                "{mint:?} was read as a build that can create a profile, and dig-account 0.8's \
-                 `ProfileMinter::mint` is still `todo!()`"
+                "{mint:?} was read as a build that can create a profile, and this shell has no \
+                 control and no money ceremony to finish one — dig-account 0.11 can mint, so the \
+                 missing half is here, not underneath"
             );
             assert!(creation.blocked().is_some());
         }

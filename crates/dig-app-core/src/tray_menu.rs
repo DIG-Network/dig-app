@@ -814,11 +814,21 @@ pub enum TrayAction {
     /// EXPLAIN what a dig-profile is, what creating one would cost, and why this version cannot
     /// create one (dig_ecosystem#2403).
     ///
-    /// There is deliberately **no `CreateProfile` action**, for exactly the reason
-    /// [`AboutDid`](Self::AboutDid) records: creating a profile is a mint, dig-account 0.8's
-    /// `ProfileMinter::mint` is `todo!()`, and an action that mints does not exist and therefore is
-    /// not offered — not even disabled. Because no [`TrayAction`] can create a profile, "this build
-    /// cannot mint one" is STRUCTURAL rather than one `enabled: true` away from being wrong.
+    /// There is deliberately **no `CreateProfile` action**, and because no [`TrayAction`] can create
+    /// a profile, "this build cannot create one" is STRUCTURAL rather than one `enabled: true` away
+    /// from being wrong.
+    ///
+    /// # Why, now that the crate underneath CAN mint
+    ///
+    /// The original reason — dig-account's `ProfileMinter::mint` being `todo!()` — **expired**: as of
+    /// dig-account 0.11 the mint is implemented, so the absence of a verb here is no longer a fact
+    /// about that crate. What is still missing is in THIS shell: a mint spends real money across two
+    /// bundles, and there is no ceremony to disclose the cost, take consent, and report the outcome.
+    /// A verb without one would take a person's money on a click, which is a worse dead end than the
+    /// one #1800 removed.
+    ///
+    /// The verb and that ceremony must therefore land together — see dig_ecosystem#2398 — and until
+    /// they do, the honest surface is an explainer rather than a control.
     ///
     /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
     AboutProfiles,

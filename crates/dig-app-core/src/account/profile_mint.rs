@@ -1232,6 +1232,9 @@ mod tests {
         );
 
         // A profile with no journalled mint has no liveness either, whatever the chain says.
-        assert_eq!(liveness_of(&did_pushed, dig_account::ProfileIx(7), &did_chain), None);
+        assert_eq!(
+            liveness_of(&did_pushed, dig_account::ProfileIx(7), &did_chain),
+            None
+        );
     }
 }
