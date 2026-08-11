@@ -32,7 +32,7 @@
 //! whole profile can be minted on a build whose node answers.
 //!
 //! It is still not a given. A node that is not running cannot be reached at all, and a node too old
-//! to serve the two reads the walk composes cannot walk one — and those are DIFFERENT facts with
+//! to serve the two source methods the walk composes cannot walk one — and those are DIFFERENT facts with
 //! different remedies (*start your node* versus *upgrade*). So [`ProfileMintSeams`] keeps them
 //! apart: [`NoLineageWalk`](ProfileMintSeams::NoLineageWalk) is *reached the chain, cannot finish a
 //! mint*, and [`NoChainTransport`](ProfileMintSeams::NoChainTransport) is *could not reach the chain
@@ -109,7 +109,7 @@ pub trait ProfileMintDoor {
 /// the seams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainReadiness {
-    /// The chain answered the peak AND serviced both reads the singleton lineage walk composes.
+    /// The chain answered the peak AND serviced both source methods the singleton lineage walk composes.
     WalksLineages,
     /// The chain answers ordinary reads and refuses the walk. Carries the source's own words.
     NoLineageWalk {
@@ -152,10 +152,11 @@ impl ChainReadiness {
             };
         }
 
-        // The walk composes exactly TWO source reads — `coin_record` for the launcher and
-        // `coin_spend` at every hop (dig-chainsource-interface 0.3.1, `walk.rs:512` and `:547`) —
-        // and the probe above exercises only the first, because a launcher id naming no coin returns
-        // `Ok(None)` before the hop loop begins. So this read is not belt-and-braces: without it
+        // The walk composes exactly TWO source METHODS — `coin_record`, for the launcher and again
+        // at every hop (dig-chainsource-interface 0.3.1, `walk.rs:512` and `:592`), and `coin_spend`
+        // at every hop (`:547`). Three call sites, two methods. The probe above exercises only the
+        // first, because a launcher id naming no coin returns `Ok(None)` out of `read_launcher_coin`
+        // (`:389`) before the hop loop begins. So this read is not belt-and-braces: without it
         // `WalksLineages` credits `coin_spend` on no evidence, and a node serving `coin_record` but
         // not `coin_spend` is offered a mint it cannot finish (dig_ecosystem#2685).
         //
@@ -229,7 +230,7 @@ impl<'a> ProfileMintSeams<'a> {
     ///
     /// # What a successful probe does NOT prove
     ///
-    /// It proves the SOURCE can service the two reads a walk composes. It says nothing about any
+    /// It proves the SOURCE can service the two source methods a walk composes. It says nothing about any
     /// particular singleton,
     /// and in particular a lineage of exactly `{launcher, eve}` with an unspent eve does **not**
     /// establish that the eve is a genuine singleton curried to that launcher — that rests on the
@@ -656,7 +657,7 @@ mod tests {
         peak: Option<u32>,
         /// Whether the singleton lineage walk is serviced.
         walks: bool,
-        /// Whether `coin_spend` — the walk's SECOND composed read — is serviced.
+        /// Whether `coin_spend` — the second of the two source methods the walk composes — is serviced.
         ///
         /// A third knob because a two-knob double cannot express the state dig_ecosystem#2685
         /// measured: the walk probe answers, and the read the walk needs at its first hop does not.
@@ -870,7 +871,7 @@ mod tests {
         assert_eq!(
             ProfileMintSeams::probe(&door, &no_hop_read).availability(),
             ProfileMintAvailability::NoLineageWalk,
-            "a node missing one of the two reads the walk composes cannot finish phase B, and \
+            "a node missing one of the two source methods the walk composes cannot finish phase B, and \
              crediting it spends a user's XCH on a profile that can never complete"
         );
         assert_eq!(

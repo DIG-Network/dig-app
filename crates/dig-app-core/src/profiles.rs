@@ -334,19 +334,6 @@ impl ProfileCreation {
         })
     }
 
-    /// Derive creation's availability from the WHOLE-PROFILE seam — the only route to
-    /// [`Possible`](Self::Possible).
-    ///
-    /// # Why this exists beside [`of`](Self::of) rather than replacing it
-    ///
-    /// [`of`](Self::of) reads the DID-only [`MintAvailability`], which answers a narrower question:
-    /// *can a DID be minted?* A profile is a DID **and** a store, and the store half needs a read the
-    /// DID half does not. A seam that can mint a DID therefore says nothing about whether a profile
-    /// can be completed, which is exactly why `of` can never return `Possible` and this can.
-    ///
-    /// The two are kept apart rather than collapsed because the first-run DID wizard genuinely asks
-    /// the narrower question and its `MintingStep::Possible` unwritability is a proven security
-    /// property built on it.
     /// Derive creation from a whole-profile READING, which may not have been taken yet.
     ///
     /// The one place an unmeasured node lands, and the reason [`Unknown`](Self::Unknown) cannot be
@@ -364,6 +351,22 @@ impl ProfileCreation {
         }
     }
 
+    /// Derive creation's availability from the WHOLE-PROFILE seam — the only place
+    /// [`Possible`](Self::Possible) is ever constructed.
+    ///
+    /// [`of_reading`](Self::of_reading) can also answer `Possible`, but only by delegating here, so
+    /// this stays the single door and the guard that watches it has one place to watch.
+    ///
+    /// # Why this exists beside [`of`](Self::of) rather than replacing it
+    ///
+    /// [`of`](Self::of) reads the DID-only [`MintAvailability`], which answers a narrower question:
+    /// *can a DID be minted?* A profile is a DID **and** a store, and the store half needs a read the
+    /// DID half does not. A seam that can mint a DID therefore says nothing about whether a profile
+    /// can be completed, which is exactly why `of` can never return `Possible` and this can.
+    ///
+    /// The two are kept apart rather than collapsed because the first-run DID wizard genuinely asks
+    /// the narrower question and its `MintingStep::Possible` unwritability is a proven security
+    /// property built on it.
     pub fn of_profile_mint(mint: ProfileMintAvailability) -> Self {
         match mint {
             ProfileMintAvailability::Possible => Self::Possible,
@@ -374,11 +377,18 @@ impl ProfileCreation {
         }
     }
 
-    /// Which piece is missing, or `None` once creation is possible.
+    /// Which piece is missing, or `None` when there is no missing piece to name.
     ///
-    /// The one accessor consumers use. `None` is unreachable today and is deliberately already
-    /// spelled, so the surface that will draw a create control has somewhere to hang it without this
-    /// type changing shape.
+    /// # `None` answers for TWO arms, and neither of them means "possible"
+    ///
+    /// [`Possible`](Self::Possible) has nothing missing; [`Unknown`](Self::Unknown) has nothing
+    /// measured. Both answer `None`, and `Unknown` is the [`Default`], so that answer is now the
+    /// COMMON case rather than the unreachable one this doc used to promise.
+    ///
+    /// So never derive capability from it: `blocked().is_none()` reads a node nobody has spoken to
+    /// as one a profile can be minted against, which is the fail-open direction on a path that
+    /// spends real XCH. Ask [`is_possible`](Self::is_possible), which keys on the arm
+    /// (dig_ecosystem#2690).
     pub fn blocked(self) -> Option<CreationBlocked> {
         match self {
             Self::Possible | Self::Unknown => None,
@@ -727,23 +737,14 @@ mod tests {
 
         for path in &sources {
             let source = std::fs::read_to_string(path).expect("a readable source file");
+            let reached = openers_reached_in(&source);
 
-            for opener in ["ProfileCreation::Possible", "of_profile_mint"] {
-                // A doc comment naming the symbol is fine; a call is not. Both spellings are checked
-                // outside comments only, so the module's own explanation of why the gate is shut does
-                // not trip the guard that keeps it shut.
-                let code_only: String = source
-                    .lines()
-                    .filter(|line| !line.trim_start().starts_with("//"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(
-                    !code_only.contains(opener),
-                    "{} reaches for `{opener}`, which opens the profile-creation gate. The create \
-                     control, the verb and the wizard must land in the SAME change (dig_ecosystem#2398)",
-                    path.display()
-                );
-            }
+            assert!(
+                reached.is_empty(),
+                "{} reaches for {reached:?}, which opens the profile-creation gate. The create \
+                 control, the verb and the wizard must land in the SAME change (dig_ecosystem#2398)",
+                path.display()
+            );
         }
 
         // A walk that silently reached nothing would pass every assertion above. These pin the
@@ -765,6 +766,92 @@ mod tests {
             sources.len() > 1,
             "the guard read {} file(s), which cannot cover a crate of several modules",
             sources.len()
+        );
+    }
+
+    /// The spellings that would open the profile-creation gate from the binary crate.
+    ///
+    /// `of_reading` is on the list even though it is the seam the wiring will eventually use, and
+    /// FOR that reason: it answers [`ProfileCreation::Possible`] for
+    /// `Some(ProfileMintAvailability::Possible)`, so one line reaching it in a file no test executes
+    /// re-creates dig_ecosystem#2377 in its exact original shape. Landing the wiring therefore means
+    /// editing this list in the same diff as the create control, which is the point of the guard.
+    ///
+    /// # The residual, stated rather than papered over
+    ///
+    /// This list is HAND-maintained, and nothing mechanical can complete it: a text scan cannot tell
+    /// a function that CONSTRUCTS [`ProfileCreation::Possible`] from one that merely matches on it,
+    /// which is most of this module. So any new public function that can answer `Possible` must be
+    /// added here by hand — and dig_ecosystem#2690 is the proof that the step gets missed, because
+    /// `of_reading` was added in that change and this list was not.
+    ///
+    /// What keeps the residual small is that
+    /// [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only place `Possible` is ever
+    /// constructed; a new route has to go through it, so it is one name to watch rather than many.
+    const CREATION_GATE_OPENERS: [&str; 3] =
+        ["ProfileCreation::Possible", "of_profile_mint", "of_reading"];
+
+    /// Which openers `source` reaches for OUTSIDE its comments.
+    ///
+    /// A doc comment naming a symbol is fine; a call is not — otherwise the module's own explanation
+    /// of why the gate is shut would have to be deleted to keep the guard green.
+    ///
+    /// Split out from the guard so the PREDICATE can itself be exercised, by
+    /// `the_gate_guard_catches_an_opener_and_tolerates_a_mention`. A name-scan passes identically
+    /// when the crate is clean and when the scan can find nothing at all — a misspelt needle, a
+    /// filter that eats every line, a list an arm was never added to — and this scan is the only
+    /// thing standing between a one-line flip and a shipped dead end.
+    fn openers_reached_in(source: &str) -> Vec<&'static str> {
+        let code_only: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        CREATION_GATE_OPENERS
+            .into_iter()
+            .filter(|opener| code_only.contains(opener))
+            .collect()
+    }
+
+    /// **The gate guard's scan really catches each opener, and really tolerates one merely named in
+    /// a comment.**
+    ///
+    /// `the_binary_cannot_open_the_profile_creation_gate` passes today because the binary is clean,
+    /// which is indistinguishable from passing because the scan can never find anything. This is the
+    /// leg that tells those apart: every opener is planted in a source that plainly reaches for it,
+    /// one at a time, and the scan must name it.
+    ///
+    /// The comment leg is the other direction, and it is not decoration: without it the honest fix
+    /// for a tripped guard would be to delete the sentence explaining why the gate is shut.
+    ///
+    /// The last assertion pins the boundary — the call the shipped binary genuinely makes
+    /// (`ProfileCreation::of`) must NOT read as an opener, or the guard would be unsatisfiable
+    /// rather than protective, and the first person to hit it would delete it.
+    #[test]
+    fn the_gate_guard_catches_an_opener_and_tolerates_a_mention() {
+        for opener in CREATION_GATE_OPENERS {
+            assert_eq!(
+                vec![opener],
+                openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")),
+                "the scan missed `{opener}` in source that plainly reaches for it, so the guard \
+                 built on it cannot speak for the binary crate"
+            );
+
+            assert!(
+                openers_reached_in(&format!(
+                    "// the gate stays shut, so nothing here calls {opener}\nfn wire() {{}}"
+                ))
+                .is_empty(),
+                "`{opener}` named in a COMMENT tripped the scan, which would force the module's own \
+                 explanation of the shut gate to be deleted to stay green"
+            );
+        }
+
+        assert!(
+            openers_reached_in("fn wire() { let _ = ProfileCreation::of(seam); }").is_empty(),
+            "the call the shipped binary actually makes was read as an opener, which makes the \
+             guard unsatisfiable rather than protective"
         );
     }
 
