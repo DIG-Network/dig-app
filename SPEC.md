@@ -309,6 +309,11 @@ only in the third state, where both halves are reachable
 DID's puzzle material by walking that lineage. Offering a mint there spends real XCH on a ceremony
 that cannot complete, which is worse than offering nothing.
 
+The three states MUST be distinguished by asking REACHABILITY before CAPABILITY: a peak read first,
+then the lineage probe. Once the walk is genuinely served, an unreachable node fails the walk probe
+too, so a single probe reports every stopped node as a build that cannot finish a mint — which sends
+the user to wait for a release when the remedy is to start their node.
+
 Availability MUST be READ OFF the seams rather than asserted beside them: obtaining a mint and
 reporting that minting is possible MUST be the same value, so the two cannot drift. The check MUST be
 a live probe of the source, and every failure of that probe — unsupported, timeout, depth bound,
@@ -345,15 +350,31 @@ exhaustion, resuming only from the `cursor` the previous page returned, terminat
 `complete: true` — never on a short page — and MUST fail rather than return a prefix when its own page
 bound (`chain::MAX_CHILD_PAGES`) is reached.
 
-What is missing is one READ: `resolve_singleton_lineage`. It MUST delegate to
-`dig_chainsource_interface::walk_singleton_lineage` (unpublished) and MUST NOT be hand-rolled
+`chain::ControlChainSource::resolve_singleton_lineage` MUST delegate to
+`dig_chainsource_interface::walk_singleton_lineage` and MUST NOT be hand-rolled
 here — a coin's puzzle hash is attacker-chosen, so a second implementation of singleton
-authentication is a second forgery surface. `dig_did::walk_did_lineage_to_tip` calls it, and
-`ProfileMinter::advance_profile_mint` calls that to launch the profile's store, so a profile mint
-cannot complete without it. A mint pushed on a transport that cannot finish phase B leaves funds
-committed, an identity on chain, and no profile, permanently. So the shell still supplies
-`account::chain_mint::MintSeams::NoChainTransport` on this build, the startup gate correctly draws
-nothing, and no `TrayAction` mints.
+authentication is a second forgery surface. It MUST use the PLAIN variant, whose default
+`WalkBounds` carry both denial-of-service guards — the canonical `MAX_LINEAGE_DEPTH` hop cap and the
+`DEFAULT_WALK_BUDGET` wall-clock budget — so a provider inherits them rather than restating them; the
+`_bounded` and `_within` variants exist for tests that exercise a guard over a short chain.
+
+Every `LineageWalkError` MUST become an error, and each MUST keep its own REMEDY. A failed source read
+passes through unmodified; a budget overrun is a retry, not an accusation that the node lied; and a
+refusal for reveal SIZE or lineage DEPTH is neither a retry nor a corruption report
+(`chain::ChainReadError::Unusable`) — a consumer that cannot tell *too big* from *corrupt* cannot tell
+a hostile peer from a heavy one.
+
+`dig_did::walk_did_lineage_to_tip` calls that read, and `ProfileMinter::advance_profile_mint` calls
+it in turn to launch the profile's store, so a profile mint cannot complete without it. A mint pushed
+on a transport that cannot finish phase B leaves funds committed, an identity on chain, and no
+profile, permanently.
+
+The read is now served, so that is no longer what withholds a mint. What withholds it is WIRING: the
+shell constructs no `chain::ControlChainSource` and no publisher, so it still supplies
+`account::chain_mint::MintSeams::NoChainTransport`, the startup gate correctly draws nothing, and no
+`TrayAction` mints. An implementation MUST NOT report profile creation as possible until a create
+control, its verb and its wizard exist to complete the ceremony — offering the capability without the
+flow is the dead end dig_ecosystem#1800 removed and dig_ecosystem#2377 measured.
 
 **The gate and the minter MUST be one value (MUST).** Availability is READ OFF `MintSeams`
 (`MintSeams::availability`), never asserted beside it. A build that reports a mint as possible
