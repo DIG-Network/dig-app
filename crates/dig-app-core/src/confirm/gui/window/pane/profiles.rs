@@ -322,10 +322,15 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
 fn create_panel(flow: &mut Flow, t: &Tokens, creation: crate::profiles::ProfileCreation) {
-    // The one branch the `Possible` arm will land in. Today `blocked()` is always `Some`, so the
-    // panel always explains; the day dig-account's mint publishes, `None` arrives here and this is
-    // where the create control goes — a body change, with no consumer's shape moving
-    // (`ProfileCreation`'s own docs record the sequencing).
+    // `ProfileCreation::Possible` now EXISTS and is reachable from
+    // `ProfileCreation::of_profile_mint` given a wired seam — but the create control itself is the
+    // next unit of work, so this branch still draws nothing. That is deliberate rather than
+    // forgotten, and it is safe only because the shipped binary cannot produce `Possible`: it never
+    // calls `of_profile_mint`, which the source guard
+    // `the_binary_cannot_open_the_profile_creation_gate` holds it to. Drawing a panel that said
+    // "you can create one" with no control would be a dead end, which is the one thing
+    // `professional-ui` forbids outright — so the honest placeholder is nothing at all until the
+    // control lands beside it.
     let Some(blocked) = creation.blocked() else {
         return;
     };

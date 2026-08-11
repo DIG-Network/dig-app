@@ -34,6 +34,7 @@ use dig_account::registry::{ProfileEntry, ProfileRegistry, ProfileVisibility};
 use dig_account::ProfileIx;
 
 use crate::account::chain_mint::MintAvailability;
+use crate::account::profile_mint::ProfileMintAvailability;
 use crate::account::profile_session::ProfileSession;
 
 /// One profile as a list surface sees it: enough to tell it from its siblings, and nothing secret.
@@ -279,6 +280,15 @@ impl CreationBlocked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProfileCreation {
+    /// Both halves of the ceremony are reachable, so a profile really can be created here.
+    ///
+    /// Reachable ONLY from [`of_profile_mint`](Self::of_profile_mint) given a
+    /// [`ProfileMintAvailability::Possible`], which in turn is reachable only from a
+    /// [`ProfileMintSeams::Wired`](crate::account::profile_mint::ProfileMintSeams::Wired) — and that
+    /// requires a live chain that answered BOTH a peak read and a singleton-lineage probe. There is
+    /// no other constructor, so this arm cannot be asserted beside the capability; it can only be
+    /// read off it.
+    Possible,
     /// Creation cannot be attempted, and this is the piece that is missing.
     Blocked(CreationBlocked),
 }
@@ -311,6 +321,29 @@ impl ProfileCreation {
         })
     }
 
+    /// Derive creation's availability from the WHOLE-PROFILE seam — the only route to
+    /// [`Possible`](Self::Possible).
+    ///
+    /// # Why this exists beside [`of`](Self::of) rather than replacing it
+    ///
+    /// [`of`](Self::of) reads the DID-only [`MintAvailability`], which answers a narrower question:
+    /// *can a DID be minted?* A profile is a DID **and** a store, and the store half needs a read the
+    /// DID half does not. A seam that can mint a DID therefore says nothing about whether a profile
+    /// can be completed, which is exactly why `of` can never return `Possible` and this can.
+    ///
+    /// The two are kept apart rather than collapsed because the first-run DID wizard genuinely asks
+    /// the narrower question and its `MintingStep::Possible` unwritability is a proven security
+    /// property built on it.
+    pub fn of_profile_mint(mint: ProfileMintAvailability) -> Self {
+        match mint {
+            ProfileMintAvailability::Possible => Self::Possible,
+            ProfileMintAvailability::NoLineageWalk => Self::Blocked(CreationBlocked::NoLineageWalk),
+            ProfileMintAvailability::NoChainTransport => {
+                Self::Blocked(CreationBlocked::NoChainTransport)
+            }
+        }
+    }
+
     /// Which piece is missing, or `None` once creation is possible.
     ///
     /// The one accessor consumers use. `None` is unreachable today and is deliberately already
@@ -318,6 +351,7 @@ impl ProfileCreation {
     /// type changing shape.
     pub fn blocked(self) -> Option<CreationBlocked> {
         match self {
+            Self::Possible => None,
             Self::Blocked(why) => Some(why),
         }
     }
@@ -589,6 +623,62 @@ mod tests {
         assert_eq!(
             reading.row(ProfileIx(3)).map(|row| row.did.clone()),
             Some(expected_did(ProfileIx(3)))
+        );
+    }
+
+    /// **The shipped binary cannot open the profile-creation gate.**
+    ///
+    /// Makes impossible: the dig_ecosystem#2377 defect, in its exact original shape. That incident
+    /// was one constant flipped in `src/bin/dig-app.rs` — a file no test can execute — which opened
+    /// an undismissible dead end AND a start-up password window, neither catchable by a test.
+    /// `ProfileCreation::Possible` now EXISTS, so that one-line flip is once again writable; the only
+    /// thing standing between it and a shipped dead end is that the binary never reaches for it.
+    ///
+    /// So this reads the binary's SOURCE, which is the one way a test can see into that file at all.
+    /// Opening the gate now requires deleting this guard, which is a deliberate act in the diff
+    /// rather than a line nobody notices.
+    ///
+    /// It is not a ban on ever opening it — it is a ban on opening it without also landing the create
+    /// control, the verb and the wizard the arm implies. When those land, this test changes with
+    /// them, and the change is the point.
+    #[test]
+    fn the_binary_cannot_open_the_profile_creation_gate() {
+        let bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("dig-app")
+            .join("src")
+            .join("bin");
+        let mut checked = 0usize;
+
+        for entry in std::fs::read_dir(&bin).expect("the binary crate's bin directory") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("a readable source file");
+            checked += 1;
+
+            for opener in ["ProfileCreation::Possible", "of_profile_mint"] {
+                // A doc comment naming the symbol is fine; a call is not. Both spellings are checked
+                // outside comments only, so the module's own explanation of why the gate is shut does
+                // not trip the guard that keeps it shut.
+                let code_only: String = source
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    !code_only.contains(opener),
+                    "{} reaches for `{opener}`, which opens the profile-creation gate. The create \
+                     control, the verb and the wizard must land in the SAME change (dig_ecosystem#2398)",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "the guard read no files at all, so it proves nothing about the binary"
         );
     }
 

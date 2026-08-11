@@ -551,30 +551,27 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
     }
 }
 
-/// The DID-minting seams this build has (dig_ecosystem#2359, #2377).
+/// The DID-only minting seams this build has (dig_ecosystem#2359, #2377).
 ///
-/// **There are none yet, and the reason is a missing TRANSPORT rather than a missing mint.**
+/// **Still none, and the reason is now narrow and specific.**
 ///
-/// The coin-by-id blocker this doc used to name is GONE: the workspace pins
-/// `dig-node-control-interface` 0.9, `control.wallet.coinById` exists, and a running dig-node
-/// 0.109.0 answers it as an open read (dig_ecosystem#2560). Do not plan work from the old text.
+/// Do not plan work from the text this replaced. It claimed the workspace pinned
+/// `dig-node-control-interface` 0.9 and that dig-node served neither `coin_spend` nor
+/// `resolve_singleton_lineage`; all three statements are false. The pin is 0.10, dig-node serves
+/// `coin_spend`, and [`dig_app_core::chain::ControlChainSource`] now serves
+/// `resolve_singleton_lineage` by delegating to the ecosystem's one hardened
+/// `walk_singleton_lineage` (dig_ecosystem#2572).
 ///
-/// The gap that remains is in the SECOND half of a profile mint. A DID is never minted alone: a
-/// profile is a DID plus a dig-store launched from that DID's coin, and dig-account resolves the
-/// store half by walking the DID's singleton lineage back from chain. That walk needs
-/// `ChainSource::resolve_singleton_lineage` and `ChainSource::coin_spend`, and dig-node's control
-/// surface has neither — verified with a control token, which is what distinguishes `-32601 method
-/// not found` from the `-32030 UNAUTHORIZED` an unknown name returns without one.
+/// What is missing here is WIRING, not capability. Nothing in this binary constructs a
+/// [`dig_app_core::chain::ControlChainSource`] or a publisher yet, so there is no live reader to
+/// hand a minter — and a value invented here would be exactly the drift
+/// [`MintSeams`] exists to prevent. Returning the seams rather than an availability flag is what
+/// keeps that honest: the wizard reads its gate off this same value, so no line here can report a
+/// mint as possible while the wizard holds a minter that refuses (dig_ecosystem#2377).
 ///
-/// So a seam built on today's node could push the DID, watch it confirm, and then fail every store
-/// launch — stranding the user with real XCH spent, an identity on chain, and no profile. That is
-/// the one outcome worse than no seam at all, so this stays [`MintSeams::NoChainTransport`] until
-/// dig-node serves those two reads (the full read table is in
-/// [`dig_app_core::account::chain_mint`]).
-///
-/// Returned as the SEAMS rather than as an availability flag, deliberately: the wizard's gate reads
-/// its answer off this same value, so there is no line here that could report a mint as possible
-/// while the wizard is handed a minter that refuses (dig_ecosystem#2377).
+/// The WHOLE-PROFILE gate is a different question and a different type
+/// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]); a DID-only seam says nothing about
+/// whether a profile can be COMPLETED, which is why the two are not collapsed.
 #[cfg(feature = "tray")]
 fn mint_seams() -> MintSeams<'static> {
     MintSeams::NoChainTransport

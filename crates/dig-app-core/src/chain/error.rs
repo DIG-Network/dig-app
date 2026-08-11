@@ -67,6 +67,27 @@ pub enum ChainReadError {
         /// What is missing, and what would supply it.
         detail: String,
     },
+    /// The node answered TRUTHFULLY and the answer exceeds a bound this client refuses to cross —
+    /// a singleton lineage deeper than the canonical hop cap, or a puzzle reveal that expands past
+    /// the hostile-input size bound.
+    ///
+    /// The remedy is to **report it**, and specifically NOT to retry: the bound is deterministic, so
+    /// a second attempt refuses identically.
+    ///
+    /// # Why this is not [`Malformed`](Self::Malformed)
+    ///
+    /// `Malformed` says *the node's answer could not be believed*. Here it could: the data may be
+    /// perfectly well-formed and may hash correctly, and it is refused for its SIZE alone.
+    /// `dig-chainsource-interface` keeps `RevealTooLarge` and `LineageTooDeep` as their own variants
+    /// for exactly this reason — collapsing them accuses an honest source of serving bad data for
+    /// the crime of serving a big one, and a consumer that cannot tell *too big* from *corrupt*
+    /// cannot tell a hostile peer from a heavy one.
+    Unusable {
+        /// The trait method whose answer was refused.
+        method: &'static str,
+        /// Which bound was crossed, and by what.
+        detail: String,
+    },
 }
 
 impl ChainReadError {
@@ -154,6 +175,14 @@ impl ChainReadError {
             detail: detail.into(),
         }
     }
+
+    /// A truthful answer this client refuses for its size or depth.
+    pub fn unusable(method: &'static str, detail: impl Into<String>) -> Self {
+        Self::Unusable {
+            method,
+            detail: detail.into(),
+        }
+    }
 }
 
 impl fmt::Display for ChainReadError {
@@ -164,6 +193,12 @@ impl fmt::Display for ChainReadError {
                 write!(f, "{method} answered something unreadable: {detail}")
             }
             Self::Unsupported { method, detail } => write!(f, "{method} is unavailable: {detail}"),
+            Self::Unusable { method, detail } => {
+                write!(
+                    f,
+                    "{method} answered beyond what DIG will process: {detail}"
+                )
+            }
         }
     }
 }

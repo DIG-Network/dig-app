@@ -2365,7 +2365,7 @@ dependencies = [
  "chia-puzzle-types 0.36.1",
  "chia-wallet-sdk 0.34.0",
  "clvmr 0.16.4",
- "dig-chainsource-interface 0.3.0",
+ "dig-chainsource-interface 0.3.1",
  "dig-constants 0.10.0",
  "dig-did 0.6.0",
  "dig-identity 0.6.0",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "10.3.0"
+version = "10.4.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2404,7 +2404,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "10.3.0"
+version = "10.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2425,7 +2425,7 @@ dependencies = [
  "clvmr 0.16.4",
  "dig-account",
  "dig-app-core",
- "dig-chainsource-interface 0.3.0",
+ "dig-chainsource-interface 0.3.1",
  "dig-constants 0.10.0",
  "dig-did 0.6.0",
  "dig-events-protocol",
@@ -2514,11 +2514,18 @@ dependencies = [
 
 [[package]]
 name = "dig-chainsource-interface"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18e893e89f6a8033a4083ca34329a0097cc5f65cf2d19dd2b205375c710c1718"
+checksum = "dd547c8e7813320f226fa747e16ab05c3183f41f920204e6bfabb6f36a140115"
 dependencies = [
  "chia-protocol 0.36.1",
+ "chia-puzzle-types 0.36.1",
+ "chia-puzzles",
+ "chia-sdk-driver 0.34.0",
+ "chia-sdk-types 0.34.0",
+ "clvm-traits 0.36.1",
+ "clvm-utils 0.36.1",
+ "clvmr 0.16.4",
  "thiserror 2.0.18",
 ]
 
@@ -2574,7 +2581,7 @@ dependencies = [
  "chia-wallet-sdk 0.34.0",
  "clvm-traits 0.36.1",
  "clvm-utils 0.36.1",
- "dig-chainsource-interface 0.3.0",
+ "dig-chainsource-interface 0.3.1",
  "thiserror 2.0.18",
 ]
 
@@ -2715,7 +2722,7 @@ dependencies = [
  "chia-sha2 0.36.1",
  "chia-wallet-sdk 0.34.0",
  "clvm-traits 0.36.1",
- "dig-chainsource-interface 0.3.0",
+ "dig-chainsource-interface 0.3.1",
  "hex-literal",
  "thiserror 2.0.18",
 ]
@@ -2914,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "10.3.0"
+version = "10.4.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -7116,7 +7123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

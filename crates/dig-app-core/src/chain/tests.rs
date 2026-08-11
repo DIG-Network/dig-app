@@ -488,30 +488,131 @@ fn include_spent_is_refused_rather_than_answered_with_the_unspent_set() {
     assert_eq!(unspent[0].coin.amount, 900);
 }
 
-/// **`resolve_singleton_lineage` is a stated absence with a remedy, never a hand-rolled walk.**
+/// **A launcher the chain does not have is a genuine `Ok(None)` — proving the walk is SERVED.**
 ///
-/// A coin's puzzle hash is attacker-chosen, so authenticating a singleton means walking real
-/// recreation spends — and a second implementation of that walk is precisely what
-/// `dig-chainsource-interface`'s `walk_singleton_lineage` exists to prevent. Until it
-/// publishes, the honest answer is `Unsupported`.
+/// Through 10.3.0 this method was a stated `Unsupported` placeholder, so the nearest wrong
+/// implementation is the one that was actually here: a client that never looks. That version fails
+/// this test, because it cannot produce `Ok(None)` at all.
 ///
-/// The nearest wrong implementation is `Ok(None)`, which reads as *the launcher never existed or the
-/// singleton was melted* — a fail-OPEN verdict about an identity, delivered by a client that never
-/// looked. The assertion names the ticket so the placeholder cannot outlive its remedy silently.
+/// `Ok(None)` is the walk's own documented answer for *no such launcher* — the node was asked, it
+/// answered that the coin does not exist, and the walk stopped there. The companion test below is
+/// what keeps this from licensing the opposite error: an absence may be reached ONLY from an answer,
+/// never from a failure.
 #[test]
-fn an_unbuilt_lineage_walk_is_unsupported_and_never_a_melted_singleton() {
+fn a_launcher_the_chain_does_not_have_is_a_genuine_absence() {
     let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK)));
+
+    let answered = source(&node)
+        .resolve_singleton_lineage(id(1))
+        .expect("a node that answers must not produce an error");
+
+    assert_eq!(
+        answered, None,
+        "a launcher no coin record names resolves to no lineage"
+    );
+}
+
+/// **A lineage walk against an unanswerable node is an `Err`, and NEVER `Ok(None)`.**
+///
+/// This is the money-critical half, and it is the reason the walk is delegated rather than written
+/// here. `Ok(None)` on this method means *the launcher never existed, or the singleton was melted* —
+/// a verdict about an identity. Delivered because a socket dropped, it is a fail-OPEN answer about
+/// somebody's DID, and on the mint path *the lineage ends here* reads as **safe to spend**.
+///
+/// The nearest wrong implementation is a `map_err` that collapses a walk failure into an absence, or
+/// a `.ok()` anywhere on this path. The fixture is a node that accepts the connection and never
+/// replies — the shape most likely to decode into an empty default — and the control leg is the test
+/// above, on a node that DOES answer, so this cannot pass by the client erroring unconditionally.
+#[test]
+fn a_lineage_walk_that_could_not_be_completed_is_never_reported_as_an_absent_singleton() {
+    let node = FakeNode::with_behaviour(Behaviour::Silent);
 
     let outcome = source(&node).resolve_singleton_lineage(id(1));
 
     let Err(error) = outcome else {
-        panic!("an unbuilt walk must not answer a verdict about an identity: {outcome:?}");
+        panic!("an unanswered walk must not become a verdict about an identity: {outcome:?}");
     };
+    // A dropped socket is a retry, not an accusation and not an upgrade prompt.
     assert!(
-        matches!(error, ChainReadError::Unsupported { .. }),
-        "{error:?}"
+        matches!(error, ChainReadError::Transport { .. }),
+        "an unanswered read is a transport fault: {error:?}"
     );
-    assert!(error.to_string().contains("2572"), "{error}");
+}
+
+/// **Each walk failure keeps its OWN remedy: retry, report, or upgrade.**
+///
+/// `ChainReadError`'s three original arms encode remedies, not causes, and the walk can fail in six
+/// ways. The nearest wrong implementation flattens them — most temptingly into `Malformed`, which
+/// says *the node's answer could not be believed*. Saying that about a node whose only sin was being
+/// slow, or serving a singleton with a large puzzle reveal, accuses an honest party of lying; the
+/// walk crate keeps `RevealTooLarge` and `LineageTooDeep` as distinct variants for exactly that
+/// reason, which is why `ChainReadError::Unusable` now exists to receive them.
+///
+/// Asserted over the mapping function directly, because several of these variants cannot be provoked
+/// from a fixture node at all — a 100,000-hop lineage is not something a test builds. Every arm is
+/// listed, so a future variant added to the match without a remedy shows up here.
+#[test]
+fn every_lineage_walk_failure_keeps_its_own_remedy() {
+    use dig_chainsource_interface::LineageWalkError;
+
+    let source_fault = ChainReadError::transport("control.wallet.coinById", "socket closed");
+
+    let cases: Vec<(&str, LineageWalkError<ChainReadError>, ChainReadError)> = vec![
+        (
+            "a failed read passes through UNMODIFIED, keeping its own arm",
+            LineageWalkError::Source(source_fault.clone()),
+            source_fault,
+        ),
+        (
+            "inconsistent chain data is unbelievable",
+            LineageWalkError::Malformed("a spend of the wrong coin".into()),
+            ChainReadError::malformed("resolve_singleton_lineage", "a spend of the wrong coin"),
+        ),
+        (
+            "a coin that is not this launcher's singleton is unbelievable",
+            LineageWalkError::NotASingleton { coin_id: id(9) },
+            ChainReadError::malformed(
+                "resolve_singleton_lineage",
+                format!("coin {} is not a genuine singleton of this launcher", id(9)),
+            ),
+        ),
+        (
+            "an oversized reveal is refused for SIZE, not accused of corruption",
+            LineageWalkError::RevealTooLarge {
+                coin_id: id(9),
+                limit: 4096,
+            },
+            ChainReadError::unusable(
+                "resolve_singleton_lineage",
+                format!(
+                    "the puzzle reveal of coin {} expands beyond the 4096-byte bound",
+                    id(9)
+                ),
+            ),
+        ),
+        (
+            "a too-deep lineage is refused for DEPTH, and is not a retry",
+            LineageWalkError::TooDeep { limit: 100_000 },
+            ChainReadError::unusable(
+                "resolve_singleton_lineage",
+                "this singleton's lineage is longer than the 100000-hop bound DIG will walk",
+            ),
+        ),
+        (
+            "a budget overrun is a retry, never an accusation",
+            LineageWalkError::DeadlineExceeded {
+                budget: Duration::from_secs(45),
+            },
+            ChainReadError::transport(
+                "resolve_singleton_lineage",
+                "the lineage walk outlasted its 45s budget",
+            ),
+        ),
+    ];
+
+    for (property, failure, expected) in cases {
+        assert_eq!(super::source::walk_failure(failure), expected, "{property}");
+    }
 }
 
 /// **`peak_height` reports the node's height, and a null peak stays unknown.**

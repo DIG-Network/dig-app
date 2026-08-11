@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "10.3.0"
+version = "10.4.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -215,7 +215,13 @@ chia-protocol = "0.36.1"
 # The ONE canonical chain-READ seam (reads only — it deliberately cannot broadcast). dig-account's
 # mint is generic over it, so the DID mint reads coins, peak height and its own confirmation through
 # this trait and dig-app can hand it any provider without dig-account knowing which.
-dig-chainsource-interface = "0.3"
+# `lineage-walk` is OFF by default and is what ships `walk_singleton_lineage` — the ecosystem's one
+# hardened launcher-to-tip singleton walk, which `chain::ControlChainSource::resolve_singleton_lineage`
+# delegates to (dig_ecosystem#2572). Without it that read cannot be served and a profile mint can push
+# its DID half and never launch its store. The feature's extra deps (chia-puzzle-types/-puzzles,
+# chia-sdk-driver/-types, clvm-traits/-utils/clvmr) are all already in this graph at the same versions,
+# so enabling it adds no new crate — only the walk.
+dig-chainsource-interface = { version = "0.3", features = ["lineage-walk"] }
 chia-puzzle-types = "0.36.1"
 chia-sdk-driver = "0.34"
 chia-sdk-signer = "0.34"
