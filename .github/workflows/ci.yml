@@ -129,11 +129,18 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # A hung test must cost minutes and go RED, not run to GitHub's six-hour ceiling and report
+    # A hung test must go RED in an hour, not run to GitHub's six-hour ceiling and report
     # `cancelled` — which reads as "somebody superseded it" and is how dig_ecosystem#2705 stayed
     # invisible for a day. This job is not a required check, so a hang here shows only as
     # `mergeStateStatus=UNSTABLE`; a bounded job turns that silence into a signal.
-    timeout-minutes: 30
+    #
+    # 60 and not 30: a healthy Windows run is genuinely slow. Successful runs before the hang took
+    # 10m and 23m, `dig-app-core`'s integration tests include one that alone takes ~5m on Windows,
+    # and a cold `Swatinem/rust-cache` adds a full cold compile on top. A ceiling tight enough to
+    # clip a healthy cold-cache run would trade a hang for a flake, and a flaky non-required check
+    # gets ignored exactly like the hang did. The hang this guards against ran for six hours, so an
+    # hour still separates the two cases by a wide margin.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (clippy)
