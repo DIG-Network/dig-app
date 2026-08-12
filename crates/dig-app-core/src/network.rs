@@ -386,15 +386,49 @@ pub struct NetworkStanding {
     pub dig_peers: PeerCount,
     /// Chia full nodes the wallet reads the chain through.
     pub chia_peers: PeerCount,
+    /// The peak height this node's OWN Chia peers announced to it, or `None` when none has.
+    ///
+    /// Deliberately NOT [`ChainSync::peak_height`], and the two are never reconciled into one
+    /// figure. That one is how far this machine's replica has copied; this one is how far the peers
+    /// serving it say the chain has got. The replica's number sits visibly LOWER while it catches
+    /// up, and that gap is the correct reading rather than a discrepancy to paper over — averaging
+    /// them, or showing whichever is larger, would destroy the only thing the pair says.
+    ///
+    /// This is the one height in the payload that evidences a LIVE light client: it can only have a
+    /// value because a peer spoke to this node, so it moves while the window is open even on a
+    /// machine whose own replica is standing still.
+    ///
+    /// `None` is unobservable — no peer has announced anything yet — and is drawn as no reading at
+    /// all. Never `0`, which every block is trivially above (dig_ecosystem#2806).
+    pub chia_peer_peak_height: Option<u32>,
 }
 
 impl NetworkStanding {
+    /// The strip's reading for the peak this node's Chia peers announced, or `None` when none has.
+    ///
+    /// Formatted here, beside [`ChainSync::height_badge`], because the two figures are read as a
+    /// pair and a grouping that differed between them would make the comparison harder than no
+    /// grouping at all.
+    ///
+    /// Always [`ChainSyncTone::Neutral`], for the same reason its sibling is: this is a measurement,
+    /// and the verdict about the sync is already carried by the badge beside it. A peers' peak above
+    /// the replica's is the ORDINARY state of a working light client, so painting the gap as a
+    /// warning would flag healthy catch-up as a fault.
+    pub fn chia_peer_height_badge(&self) -> Option<(String, ChainSyncTone)> {
+        self.chia_peer_peak_height
+            .map(|height| (group_digits(height), ChainSyncTone::Neutral))
+    }
+
     /// The standing of a node nobody could reach, with `reason` given for all three readings.
+    ///
+    /// The peers' peak takes no `reason`: it is an `Option` whose absence already means "nobody
+    /// said", and a node that cannot be reached is the plainest case of nobody having said.
     fn unavailable(reason: SyncUnknown) -> Self {
         Self {
             sync: ChainSync::Unknown(reason.clone()),
             dig_peers: PeerCount::Unknown(reason.clone()),
             chia_peers: PeerCount::Unknown(reason),
+            chia_peer_peak_height: None,
         }
     }
 }
@@ -477,10 +511,13 @@ fn classify(failure: ControlFailure) -> SyncUnknown {
 /// Separated from the poller so the derivation and the classification above are testable against a
 /// real socket without a cadence in the way.
 fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkStanding {
-    let sync =
+    // Both readings come off the SAME status result, so the height the peers announced and the
+    // phase it is judged against can never be from two different moments — which is exactly the
+    // drift a second call would introduce between two figures a reader compares side by side.
+    let (sync, chia_peer_peak_height) =
         match control::call_control_result(endpoint, &WalletSyncStatusParams {}, token, timeout) {
-            Ok(result) => ChainSync::of_status(&result),
-            Err(failure) => ChainSync::Unknown(classify(failure)),
+            Ok(result) => (ChainSync::of_status(&result), result.chia_peer_peak_height),
+            Err(failure) => (ChainSync::Unknown(classify(failure)), None),
         };
     let (dig_peers, chia_peers) =
         match control::call_control_result(endpoint, &PeerCountsParams {}, token, timeout) {
@@ -507,6 +544,7 @@ fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkS
         sync,
         dig_peers,
         chia_peers,
+        chia_peer_peak_height,
     }
 }
 

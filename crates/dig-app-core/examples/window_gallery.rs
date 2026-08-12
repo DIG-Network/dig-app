@@ -219,12 +219,18 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
         // The fixture's networks: a chain replica that has reached a block, six DIG peers and four
         // Chia peers. Three DIFFERENT figures, because a fixture whose counts agree is a picture in
         // which a strip that drew one number twice would look correct.
+        //
+        // The peers' announced peak is a FOURTH distinct figure, and sits three blocks above the
+        // replica's own. Even a caught-up replica trails the tip by the blocks found since it last
+        // wrote, so equal heights here would make the ordinary case look like the exceptional one —
+        // and would hide a strip that drew the replica's height under both labels.
         network: NetworkStanding {
             sync: ChainSync::Synced {
                 peak_height: 6_012_345,
             },
             dig_peers: PeerCount::Known(6),
             chia_peers: PeerCount::Known(4),
+            chia_peer_peak_height: Some(6_012_348),
         },
         ..TrayView::default()
     }
@@ -596,6 +602,9 @@ mod tests {
                 },
                 dig_peers: PeerCount::Known(2),
                 chia_peers: PeerCount::Known(3),
+                // Well above the replica's own, which is what SYNCING means: the peers have told
+                // this node where the chain is, and it has not copied that far yet.
+                chia_peer_peak_height: Some(6_012_340),
             },
         }
     }
