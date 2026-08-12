@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [10.7.0] - 2026-08-12
+
+### Features
+- **app:** Show the Chia light client — peers held and the peak they announced (#161)
+
 ## [10.6.0] - 2026-08-11
 
 ### Features
