@@ -807,10 +807,18 @@ mod tests {
     /// is stated, so the two silences below cannot be read as a badge that never says anything.
     #[test]
     fn the_catch_up_distance_is_stated_only_when_both_heights_are_known() {
-        let (word, tone) = heights(ChainSync::Syncing { peak_height: REPLICA }, Some(PEERS))
-            .catch_up_badge()
-            .expect("both heights are known, so the distance between them exists");
-        assert_eq!(word, "1,709 blocks", "the distance, grouped as the heights are");
+        let (word, tone) = heights(
+            ChainSync::Syncing {
+                peak_height: REPLICA,
+            },
+            Some(PEERS),
+        )
+        .catch_up_badge()
+        .expect("both heights are known, so the distance between them exists");
+        assert_eq!(
+            word, "1,709 blocks",
+            "the distance, grouped as the heights are"
+        );
         assert_eq!(
             tone,
             ChainSyncTone::Neutral,
@@ -826,7 +834,12 @@ mod tests {
             ),
             (
                 "no peer has announced a peak",
-                heights(ChainSync::Syncing { peak_height: REPLICA }, None),
+                heights(
+                    ChainSync::Syncing {
+                        peak_height: REPLICA,
+                    },
+                    None,
+                ),
             ),
             (
                 "neither height was ever read",
@@ -855,7 +868,12 @@ mod tests {
     #[test]
     fn a_replica_level_with_or_above_its_peers_is_caught_up() {
         for (position, replica) in [("level with", PEERS), ("one block above", PEERS + 1)] {
-            let standing = heights(ChainSync::Syncing { peak_height: replica }, Some(PEERS));
+            let standing = heights(
+                ChainSync::Syncing {
+                    peak_height: replica,
+                },
+                Some(PEERS),
+            );
             assert_eq!(
                 standing.progress(),
                 SyncProgress::CaughtUp,
@@ -864,13 +882,22 @@ mod tests {
             let (word, tone) = standing
                 .catch_up_badge()
                 .expect("caught up is a reading, not a silence");
-            assert_eq!(word, "0 blocks", "one grammar for the distance, including at zero");
+            assert_eq!(
+                word, "0 blocks",
+                "one grammar for the distance, including at zero"
+            );
             assert_eq!(tone, ChainSyncTone::Good, "caught up is the good state");
         }
 
         // Singular at one, because `1 blocks` beside a real figure makes a person doubt the figure.
         assert_eq!(
-            heights(ChainSync::Syncing { peak_height: PEERS - 1 }, Some(PEERS)).catch_up_badge(),
+            heights(
+                ChainSync::Syncing {
+                    peak_height: PEERS - 1
+                },
+                Some(PEERS)
+            )
+            .catch_up_badge(),
             Some(("1 block".to_string(), ChainSyncTone::Neutral))
         );
     }
@@ -896,7 +923,12 @@ mod tests {
         );
         assert_eq!(caught_up_but_syncing.progress(), SyncProgress::CaughtUp);
 
-        let synced_but_trailing = heights(ChainSync::Synced { peak_height: REPLICA }, Some(PEERS));
+        let synced_but_trailing = heights(
+            ChainSync::Synced {
+                peak_height: REPLICA,
+            },
+            Some(PEERS),
+        );
         assert_eq!(
             synced_but_trailing.sync.badge().map(|(word, _)| word),
             Some(SYNC_SYNCED),

@@ -443,6 +443,15 @@ mod tests {
     /// Both figures are asserted PRESENT AND DISTINCT, each after its own label. A strip that
     /// reconciled them — drew the larger, averaged them, or drew one number under both labels —
     /// passes any test that only looks for one of them, and destroys the only thing the pair says.
+    ///
+    /// # Why the width moved
+    ///
+    /// This was measured at 960 px until the strip gained the `Behind` reading (dig_ecosystem#2820),
+    /// at which point the peers' peak — the last reading, and therefore the first surrendered — no
+    /// longer fitted. The property here is that the two heights are DISTINCT WHEN SHOWN, not that
+    /// they are shown at any particular width, so the fixture is widened to one where the whole
+    /// strip fits. Which reading is surrendered FIRST when it does not fit is the separate,
+    /// deliberate decision pinned by [`the_distance_outranks_the_raw_peer_height_when_room_runs_out`].
     #[test]
     fn the_peers_announced_peak_is_shown_apart_from_the_replicas_own() {
         use crate::network::{ChainSync, PeerCount};
@@ -457,7 +466,7 @@ mod tests {
                 ),
                 9_140_656,
             ),
-            960.0,
+            1_120.0,
         );
 
         for (label, figure) in [
@@ -472,6 +481,53 @@ mod tests {
                 "{label} is not followed by {figure}: {laid:?}"
             );
         }
+    }
+
+    /// **When the strip runs out of room, the DISTANCE survives and the raw peers' height is what
+    /// goes** (dig_ecosystem#2820).
+    ///
+    /// Not an incidental consequence of where the reading was inserted — the decision itself, pinned
+    /// so a later reorder cannot silently reverse it. A person watching a sync is asking how far
+    /// behind they are, and `Behind 16 blocks` answers that in one glance where two seven-digit
+    /// figures require them to do the subtraction. The distance is also DERIVED from the peers'
+    /// peak, so surrendering that figure to show it loses nothing the pair was saying.
+    ///
+    /// 960 px is the width at which exactly this trade happens — every reading through the replica's
+    /// own height fits and the peers' peak does not — so the assertion is that the strip made the
+    /// choice, not merely that it drew something.
+    #[test]
+    fn the_distance_outranks_the_raw_peer_height_when_room_runs_out() {
+        use crate::network::{ChainSync, PeerCount};
+        let said = painted(
+            &with_peer_peak(
+                on_the_networks(
+                    ChainSync::Syncing {
+                        peak_height: 9_140_640,
+                    },
+                    PeerCount::Known(0),
+                    PeerCount::Known(5),
+                ),
+                9_140_656,
+            ),
+            960.0,
+        );
+
+        assert!(
+            said.iter().any(|s| s == copy::header::BEHIND_LABEL) && said.iter().any(|s| s == "16 blocks"),
+            "the distance is what a person is asking for and must be the reading that survives: {said:?}"
+        );
+        assert!(
+            !said
+                .iter()
+                .any(|s| s == copy::header::CHIA_PEER_HEIGHT_LABEL),
+            "at this width something has to go, and the figure the distance is derived from is it: {said:?}"
+        );
+        // The control: the replica's OWN height still fits here. Without it, a strip that had
+        // dropped both heights — or everything after the badge — would satisfy the assertion above.
+        assert!(
+            said.iter().any(|s| s == copy::header::CHAIN_HEIGHT_LABEL),
+            "only the LAST reading is surrendered at this width: {said:?}"
+        );
     }
 
     /// **Peers that have announced nothing produce no reading — not a zero** (dig_ecosystem#2806).
