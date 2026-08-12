@@ -941,6 +941,15 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   each labelled with the network it is about. It MUST NOT report one combined figure and MUST NOT add the
   two together: a person shown a single count cannot tell which network is healthy, and the two answers
   routinely differ.
+- **The replica's own peak height and the peak its Chia peers announced MUST be reported as TWO separate
+  labelled readings (MUST).** A light client's peers sit above the replica while it catches up; that gap is
+  the ordinary state and MUST NOT be rendered as a fault. The two heights MUST NOT be averaged, reconciled,
+  or drawn as one figure: the only thing the pair says is the distance between them, so collapsing them to
+  one erases the reading.
+- **`subscription_peer_count` MUST NOT be reported as, or summed with, the Chia peer count (MUST).** It is
+  at most one by design and is not a measure of network reach. The two failures are distinct and both are
+  forbidden: REPORTING it as the Chia peer count is what made a node holding five Chia peers report one,
+  and SUMMING the two would report that same node as holding six.
 - **A reading nobody could take MUST be drawn as nothing, never as a zero (MUST).** A peer count is
   rendered only from a node's own answer. An unasked node, an unreachable one, and a node that cannot
   observe the count are three states that MUST be distinguishable from an observed `0`, and none of them

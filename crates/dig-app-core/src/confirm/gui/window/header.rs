@@ -136,11 +136,11 @@ fn readings(facts: &PaneFacts) -> Vec<Reading> {
             items.push(Reading::new(label, &word, tone(severity)));
         }
     }
-    // Last, so it is the first reading dropped when the window is narrow (see `draw`). It is the
-    // most explanatory reading here and the least URGENT: the badges above it are what a person
-    // checks when something is wrong, while the height is what they watch when it is working
-    // (dig_ecosystem#2806). It is also the widest, so surrendering it is what keeps the four
-    // diagnostic badges on a 480 px window.
+    // Second to last, so it is the second reading dropped when the window is narrow (see `draw`).
+    // It is the most explanatory reading here and the least URGENT: the badges above it are what a
+    // person checks when something is wrong, while the height is what they watch when it is working
+    // (dig_ecosystem#2806). It is also wide, so surrendering it is what keeps the four diagnostic
+    // badges on a 480 px window.
     if let Some((word, severity)) = facts.network.sync.height_badge() {
         items.push(Reading::new(
             copy::header::CHAIN_HEIGHT_LABEL,
