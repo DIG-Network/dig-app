@@ -813,9 +813,19 @@ mod tests {
     #[test]
     fn a_chain_height_is_shown_only_when_the_replica_has_reached_one() {
         for (reading, height) in [
-            (ChainSync::Synced { peak_height: 9_140_540 }, 9_140_540),
+            (
+                ChainSync::Synced {
+                    peak_height: 9_140_540,
+                },
+                9_140_540,
+            ),
             (ChainSync::Syncing { peak_height: 1 }, 1),
-            (ChainSync::Idle { peak_height: 9_139_211 }, 9_139_211),
+            (
+                ChainSync::Idle {
+                    peak_height: 9_139_211,
+                },
+                9_139_211,
+            ),
         ] {
             assert_eq!(reading.peak_height(), Some(height));
         }

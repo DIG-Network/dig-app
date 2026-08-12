@@ -41,9 +41,9 @@ use std::time::{Duration, Instant};
 use dig_app_core::account::chain_mint::MintAvailability;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::config::AgentConfig;
-use dig_app_core::environment::AppEnvironment;
 use dig_app_core::confirm::gui::{photograph_shell, Theme};
 use dig_app_core::engine::{EngineConnector, EngineState, NodeConnector};
+use dig_app_core::environment::AppEnvironment;
 use dig_app_core::hosted_stores::{
     HostedStoresReading, HostedStoresUnknown, NodeHostedStores, REFRESH_INTERVAL,
     STORES_READ_TIMEOUT,
