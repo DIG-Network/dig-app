@@ -704,6 +704,18 @@ mod tests {
             // follows is a WALLET fact, and the strip reports the chain. Pinned rather than
             // defaulted so that stays a decision somebody made.
             watched_addresses: None,
+            // Also not a parameter, and for a sharper reason than the above: this module reads it
+            // but `ChainSync` deliberately does not. The peers' announced peak is carried on
+            // `NetworkStanding` beside the sync rather than folded into it, so every fixture that
+            // exercises the phase derivation must be unable to influence it — a `wire()` that could
+            // set this would let a sync test pass or fail on a height the sync never consults.
+            chia_peer_peak_height: None,
+            // The supervisor's own subscription session, which is at most ONE by design and is NOT
+            // a measure of network reach. It is deliberately read NOWHERE in this app: rendering it
+            // beside the Chia peer count is precisely the confusion dig_ecosystem#2806 exists to
+            // undo, since it is the number `chia_peer_count` used to carry when a node holding five
+            // peers reported one. Pinned here so that stays a decision rather than an oversight.
+            subscription_peer_count: None,
         }
     }
 
