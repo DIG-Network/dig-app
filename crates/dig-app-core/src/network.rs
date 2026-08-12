@@ -156,6 +156,16 @@ pub enum SyncUnknown {
     Unreachable(String),
     /// The node refused for a reason we cannot classify; its own words are carried.
     ReadFailed(String),
+    /// The node named a sync phase this build does not know — it is NEWER than this app.
+    ///
+    /// Kept apart from [`NodeCannotRead`](Self::NodeCannotRead), which is the same shape of problem
+    /// pointing the other way: that one is a node too OLD to answer, and its remedy is upgrading the
+    /// node. This one's remedy is upgrading the app, and this enum keeps one variant per remedy.
+    ///
+    /// The token is carried already escaped for display — see [`ChainSync::of_status`]. It is
+    /// node-supplied text, and the contract is explicit that the raw accessor must never reach a
+    /// log, a terminal, or a UI.
+    PhaseNotUnderstood(String),
 }
 
 impl SyncUnknown {
@@ -173,6 +183,7 @@ impl SyncUnknown {
             Self::TimedOut("the read took longer than 5s".to_string()),
             Self::Unreachable("connection refused".to_string()),
             Self::ReadFailed("the node fell over".to_string()),
+            Self::PhaseNotUnderstood("a_newer_token".to_string()),
         ]
     }
 }
@@ -193,10 +204,30 @@ impl ChainSync {
     /// being caught up with no block behind it is the one reading this surface must never render.
     pub fn of_status(status: &WalletSyncStatusResult) -> Self {
         let no_peers = status.chia_peer_count == Some(0);
-        match (status.phase, status.peak_height) {
+        match (&status.phase, status.peak_height) {
+            // A phase this build cannot name licenses NO claim about syncing — never a fall-through
+            // to "it has a height, so it must be progressing". Matched FIRST, above every arm that
+            // could otherwise absorb it. The token is escaped for display here, at the boundary,
+            // because the raw accessor returns unescaped node-supplied text.
+            (WalletSyncPhase::Unrecognized(token), _) => Self::Unknown(
+                SyncUnknown::PhaseNotUnderstood(token.display_bounded(PHASE_TOKEN_SHOWN)),
+            ),
             (WalletSyncPhase::Synced, Some(peak_height)) => Self::Synced { peak_height },
+            // No wallet is enrolled, so there is nothing to follow and nothing is going unwatched.
+            // The contract names this the honest all-clear and permits presenting it as settled —
+            // and it is the state of every fresh install, which must not be drawn as a fault.
+            (WalletSyncPhase::NoWalletEnrolled, Some(peak_height)) => Self::Synced { peak_height },
             (WalletSyncPhase::NotStarted, Some(peak_height)) => Self::Idle { peak_height },
             (WalletSyncPhase::NotStarted, None) => Self::NoProgress(NoProgress::NeverStarted),
+            // A wallet IS enrolled and its addresses are NOT being followed, so coins are going
+            // unwatched. The contract forbids rendering this as synced, settled or up to date, and
+            // "syncing" is refused with it: nothing is being caught up, so a word promising progress
+            // is as untrue as one promising completion. `Idle` is the state that says a sync is not
+            // running and still shows the height the replica did reach.
+            (WalletSyncPhase::WalletNotUnlocked, Some(peak_height)) => Self::Idle { peak_height },
+            (WalletSyncPhase::WalletNotUnlocked, None) => {
+                Self::NoProgress(NoProgress::NeverStarted)
+            }
             (_, Some(peak_height)) => Self::Syncing { peak_height },
             (_, None) if no_peers => Self::NoProgress(NoProgress::NoPeers),
             (_, None) => Self::NoProgress(NoProgress::NoHeight),
@@ -221,6 +252,61 @@ impl ChainSync {
             Self::Pending | Self::Unknown(_) => None,
         }
     }
+
+    /// How far the replica has actually got, or `None` when it has got nowhere.
+    ///
+    /// The three variants that carry a height are the three the node gave one for. Everything else
+    /// genuinely has no number — and the absence is the point: `NoProgress` exists precisely because
+    /// the wire reported no height, so a `0` here would manufacture the fact this type was written to
+    /// avoid manufacturing (see the module docs).
+    pub fn peak_height(&self) -> Option<u32> {
+        match self {
+            Self::Synced { peak_height }
+            | Self::Syncing { peak_height }
+            | Self::Idle { peak_height } => Some(*peak_height),
+            Self::NoProgress(_) | Self::Pending | Self::Unknown(_) => None,
+        }
+    }
+
+    /// The strip's height reading — the block this replica has reached — or `None` when there is
+    /// none to show.
+    ///
+    /// Always [`ChainSyncTone::Neutral`]. The height is a measurement, and the verdict about it is
+    /// already carried by [`badge`](Self::badge) beside it; painting the number in a warning tone
+    /// would put two opinions about one sync on one line, which is how a strip starts contradicting
+    /// itself. Absent rather than placeheld, for the reason the header's `readings` gives.
+    pub fn height_badge(&self) -> Option<(String, ChainSyncTone)> {
+        self.peak_height()
+            .map(|height| (group_digits(height), ChainSyncTone::Neutral))
+    }
+}
+
+/// How much of an unrecognised phase token is ever repeated back.
+///
+/// The token is node-supplied text of no bounded length — the contract deliberately does not reject
+/// an over-long one, and says the bound belongs where it is displayed, which is here. A phase name
+/// is a short snake_case identifier, so this is generous for every real one while keeping a hostile
+/// or malformed answer from becoming a label thousands of characters wide (as an unbounded node
+/// string already did once, `wallet::overview`).
+const PHASE_TOKEN_SHOWN: usize = 32;
+
+/// Group `value` into thousands with commas — `9140540` becomes `9,140,540`.
+///
+/// A chain height is seven digits and is read at a glance, where `9140540` and `9240540` are the
+/// same shape. Written here rather than pulled in as a dependency because this is the only figure in
+/// the app that needs it, and it is the module that already owns how this reading is worded.
+fn group_digits(value: u32) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (position, digit) in digits.chars().enumerate() {
+        // A separator goes before every digit that opens a group of three, counted from the RIGHT —
+        // never before the first character, or `1000` would come out as `,1,000`.
+        if position > 0 && (digits.len() - position) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// How worried to be about a sync reading.
@@ -300,15 +386,49 @@ pub struct NetworkStanding {
     pub dig_peers: PeerCount,
     /// Chia full nodes the wallet reads the chain through.
     pub chia_peers: PeerCount,
+    /// The peak height this node's OWN Chia peers announced to it, or `None` when none has.
+    ///
+    /// Deliberately NOT [`ChainSync::peak_height`], and the two are never reconciled into one
+    /// figure. That one is how far this machine's replica has copied; this one is how far the peers
+    /// serving it say the chain has got. The replica's number sits visibly LOWER while it catches
+    /// up, and that gap is the correct reading rather than a discrepancy to paper over — averaging
+    /// them, or showing whichever is larger, would destroy the only thing the pair says.
+    ///
+    /// This is the one height in the payload that evidences a LIVE light client: it can only have a
+    /// value because a peer spoke to this node, so it moves while the window is open even on a
+    /// machine whose own replica is standing still.
+    ///
+    /// `None` is unobservable — no peer has announced anything yet — and is drawn as no reading at
+    /// all. Never `0`, which every block is trivially above (dig_ecosystem#2806).
+    pub chia_peer_peak_height: Option<u32>,
 }
 
 impl NetworkStanding {
+    /// The strip's reading for the peak this node's Chia peers announced, or `None` when none has.
+    ///
+    /// Formatted here, beside [`ChainSync::height_badge`], because the two figures are read as a
+    /// pair and a grouping that differed between them would make the comparison harder than no
+    /// grouping at all.
+    ///
+    /// Always [`ChainSyncTone::Neutral`], for the same reason its sibling is: this is a measurement,
+    /// and the verdict about the sync is already carried by the badge beside it. A peers' peak above
+    /// the replica's is the ORDINARY state of a working light client, so painting the gap as a
+    /// warning would flag healthy catch-up as a fault.
+    pub fn chia_peer_height_badge(&self) -> Option<(String, ChainSyncTone)> {
+        self.chia_peer_peak_height
+            .map(|height| (group_digits(height), ChainSyncTone::Neutral))
+    }
+
     /// The standing of a node nobody could reach, with `reason` given for all three readings.
+    ///
+    /// The peers' peak takes no `reason`: it is an `Option` whose absence already means "nobody
+    /// said", and a node that cannot be reached is the plainest case of nobody having said.
     fn unavailable(reason: SyncUnknown) -> Self {
         Self {
             sync: ChainSync::Unknown(reason.clone()),
             dig_peers: PeerCount::Unknown(reason.clone()),
             chia_peers: PeerCount::Unknown(reason),
+            chia_peer_peak_height: None,
         }
     }
 }
@@ -391,16 +511,23 @@ fn classify(failure: ControlFailure) -> SyncUnknown {
 /// Separated from the poller so the derivation and the classification above are testable against a
 /// real socket without a cadence in the way.
 fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkStanding {
-    let sync =
+    // Both readings come off the SAME status result, so the height the peers announced and the
+    // phase it is judged against can never be from two different moments — which is exactly the
+    // drift a second call would introduce between two figures a reader compares side by side.
+    let (sync, chia_peer_peak_height) =
         match control::call_control_result(endpoint, &WalletSyncStatusParams {}, token, timeout) {
-            Ok(result) => ChainSync::of_status(&result),
-            Err(failure) => ChainSync::Unknown(classify(failure)),
+            Ok(result) => (ChainSync::of_status(&result), result.chia_peer_peak_height),
+            Err(failure) => (ChainSync::Unknown(classify(failure)), None),
         };
     let (dig_peers, chia_peers) =
         match control::call_control_result(endpoint, &PeerCountsParams {}, token, timeout) {
+            // `..` deliberately: this reads the two counts the strip draws, and a result type that
+            // grows a field it does not draw (`known_dig_peer_count` arrived exactly so) must not
+            // break the build of a client that never wanted it.
             Ok(PeerCountsResult {
                 dig_peer_count,
                 chia_peer_count,
+                ..
             }) => (
                 PeerCount::of_wire(dig_peer_count),
                 PeerCount::of_wire(chia_peer_count),
@@ -417,6 +544,7 @@ fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkS
         sync,
         dig_peers,
         chia_peers,
+        chia_peer_peak_height,
     }
 }
 
@@ -572,7 +700,193 @@ mod tests {
             phase,
             peak_height,
             chia_peer_count,
+            // Not a parameter, because this module never reads it: how many addresses the wallet
+            // follows is a WALLET fact, and the strip reports the chain. Pinned rather than
+            // defaulted so that stays a decision somebody made.
+            watched_addresses: None,
+            // Also not a parameter, and for a sharper reason than the above: this module reads it
+            // but `ChainSync` deliberately does not. The peers' announced peak is carried on
+            // `NetworkStanding` beside the sync rather than folded into it, so every fixture that
+            // exercises the phase derivation must be unable to influence it — a `wire()` that could
+            // set this would let a sync test pass or fail on a height the sync never consults.
+            chia_peer_peak_height: None,
+            // The supervisor's own subscription session, which is at most ONE by design and is NOT
+            // a measure of network reach. It is deliberately read NOWHERE in this app: rendering it
+            // beside the Chia peer count is precisely the confusion dig_ecosystem#2806 exists to
+            // undo, since it is the number `chia_peer_count` used to carry when a node holding five
+            // peers reported one. Pinned here so that stays a decision rather than an oversight.
+            subscription_peer_count: None,
         }
+    }
+
+    /// **A node with no wallet is settled, not stuck** (dig_ecosystem#2806, #2609).
+    ///
+    /// This is the state of every FRESH install — the machine a stranger has five minutes after
+    /// downloading DIG — and until the contract bump that phase did not parse at all, taking the
+    /// whole status read down with it and leaving the strip with no chain reading whatsoever. That
+    /// is not a hypothetical: it is what a live 0.115.0 node drew before this test existed.
+    ///
+    /// Settled is the honest word. There is no wallet, so there are no addresses to follow and
+    /// nothing is going unwatched — the contract names it the all-clear and permits presenting it as
+    /// such. The height is what stops that being a bare claim: it is shown beside the badge, so a
+    /// reader sees the block the verdict was formed at.
+    #[test]
+    fn a_node_with_no_wallet_enrolled_is_settled_rather_than_stuck() {
+        let fresh = ChainSync::of_status(&wire(
+            WalletSyncPhase::NoWalletEnrolled,
+            Some(9_140_562),
+            Some(5),
+        ));
+        assert_eq!(
+            fresh,
+            ChainSync::Synced {
+                peak_height: 9_140_562
+            }
+        );
+        assert_eq!(fresh.peak_height(), Some(9_140_562));
+        let (word, tone) = fresh.badge().expect("a fresh install must say something");
+        assert_eq!(word, SYNC_SYNCED);
+        assert_eq!(tone, ChainSyncTone::Good);
+    }
+
+    /// **A wallet that is not unlocked is NEVER drawn as progress or as settled** (#2806).
+    ///
+    /// The contract is explicit that this MUST NOT read as synced, settled, or up to date: a wallet
+    /// is enrolled, and its addresses are NOT being followed, so coins are going unwatched. It looks
+    /// identical to [`WalletSyncPhase::NoWalletEnrolled`] from inside the sync loop and means the
+    /// opposite of it, which is why both are asserted here against each other rather than alone.
+    ///
+    /// `Syncing` is refused as firmly as `Synced`. Nothing is being caught up — the address set is
+    /// empty — so a word promising progress would be as untrue as one promising completion.
+    #[test]
+    fn a_wallet_that_is_not_unlocked_is_never_drawn_as_settled_or_progressing() {
+        let locked = ChainSync::of_status(&wire(
+            WalletSyncPhase::WalletNotUnlocked,
+            Some(9_140_562),
+            Some(5),
+        ));
+        let (word, tone) = locked.badge().expect("a locked wallet must say something");
+        assert_ne!(word, SYNC_SYNCED, "coins are going unwatched behind a tick");
+        assert_ne!(word, SYNC_SYNCING, "nothing is being caught up");
+        assert_eq!(tone, ChainSyncTone::Warn);
+        // The height it did reach is still true, and still shown.
+        assert_eq!(locked.peak_height(), Some(9_140_562));
+        // The control: the same reading with no wallet enrolled is the opposite verdict.
+        assert_ne!(
+            locked,
+            ChainSync::of_status(&wire(
+                WalletSyncPhase::NoWalletEnrolled,
+                Some(9_140_562),
+                Some(5)
+            )),
+            "nothing to do and something not being done were collapsed into one state"
+        );
+    }
+
+    /// **A phase this build cannot name makes NO claim about syncing** (#2806, #2609).
+    ///
+    /// The forward-compatibility case, and the one that has already cost the ecosystem a release:
+    /// the enum shipped closed, dig-node grew a phase, and every consumer's entire status read
+    /// aborted. The contract now carries the token verbatim so a client can degrade instead — and
+    /// degrading means saying NOTHING, never guessing at progress.
+    ///
+    /// A height alongside it is deliberately supplied: the tempting wrong answer is to fall through
+    /// to "it has a height, so call it syncing", which would render an unknown future phase as
+    /// confident progress.
+    #[test]
+    fn a_phase_this_build_cannot_name_makes_no_claim_at_all() {
+        let future = ChainSync::of_status(&wire(
+            WalletSyncPhase::from("gone_fishing"),
+            Some(9_140_562),
+            Some(5),
+        ));
+        assert!(
+            future.badge().is_none(),
+            "an unnameable phase was given a word: {future:?}"
+        );
+        assert!(
+            matches!(future, ChainSync::Unknown(_)),
+            "an unnameable phase was rendered as a state we understand: {future:?}"
+        );
+    }
+
+    /// **A height is shown when, and only when, the replica actually reached one**
+    /// (dig_ecosystem#2806).
+    ///
+    /// The strip's other badges say what the sync is DOING; this one says how far it has GOT, which
+    /// is the fact that makes a light client visibly a light client — it is the number that moves
+    /// while somebody watches. It is also the number with the most obvious dishonest rendering: a
+    /// replica with no block behind it has no height, and drawing that as `0` would claim the
+    /// genesis block as this machine's progress.
+    ///
+    /// Every heightless state is asserted, not just one, because they arrive by different routes —
+    /// nobody asked yet, the node is too old, the sync never started, the sync is stuck — and a
+    /// derivation that unwrapped a default would turn all four into the same confident zero.
+    #[test]
+    fn a_chain_height_is_shown_only_when_the_replica_has_reached_one() {
+        for (reading, height) in [
+            (
+                ChainSync::Synced {
+                    peak_height: 9_140_540,
+                },
+                9_140_540,
+            ),
+            (ChainSync::Syncing { peak_height: 1 }, 1),
+            (
+                ChainSync::Idle {
+                    peak_height: 9_139_211,
+                },
+                9_139_211,
+            ),
+        ] {
+            assert_eq!(reading.peak_height(), Some(height));
+        }
+        for heightless in [
+            ChainSync::Pending,
+            ChainSync::Unknown(SyncUnknown::NoNode),
+            ChainSync::NoProgress(NoProgress::NoHeight),
+            ChainSync::NoProgress(NoProgress::NoPeers),
+            ChainSync::NoProgress(NoProgress::NeverStarted),
+        ] {
+            assert_eq!(
+                heightless.peak_height(),
+                None,
+                "{heightless:?} has reached no block, so any figure here would be invented"
+            );
+            assert!(
+                heightless.height_badge().is_none(),
+                "{heightless:?} would be drawn carrying a height it does not have"
+            );
+        }
+    }
+
+    /// **A chain height is grouped, because it is read by a person and it is seven digits long.**
+    ///
+    /// `9140540` and `9240540` differ by a hundred thousand blocks and look identical at a glance,
+    /// which is the whole failure mode of an ungrouped figure in a strip designed to be GLANCED at.
+    /// The boundary cases are asserted alongside a real mainnet height so the grouping cannot be a
+    /// rule that only holds at seven digits.
+    #[test]
+    fn a_chain_height_is_grouped_so_it_can_be_read_at_a_glance() {
+        for (height, shown) in [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (9_140_540, "9,140,540"),
+            (u32::MAX, "4,294,967,295"),
+        ] {
+            assert_eq!(group_digits(height), shown);
+        }
+        let (word, tone) = ChainSync::Syncing {
+            peak_height: 9_140_540,
+        }
+        .height_badge()
+        .expect("a replica with a height must be able to show it");
+        assert_eq!(word, "9,140,540");
+        // A height is a FACT, not a verdict. The badge beside it already carries the verdict, and a
+        // number painted in the warning tone would be a second, contradictory opinion about it.
+        assert_eq!(tone, ChainSyncTone::Neutral);
     }
 
     /// **The machine every user actually has is NOT drawn as progress** (dig_ecosystem#2569, #2568).
@@ -698,6 +1012,7 @@ mod tests {
             SyncUnknown::TimedOut(String::new()),
             SyncUnknown::Unreachable(String::new()),
             SyncUnknown::ReadFailed(String::new()),
+            SyncUnknown::PhaseNotUnderstood(String::new()),
         ] {
             let named = |candidate: &SyncUnknown| {
                 std::mem::discriminant(candidate) == std::mem::discriminant(&reason)
@@ -706,7 +1021,7 @@ mod tests {
         }
         assert_eq!(
             all.len(),
-            5,
+            6,
             "all() has grown a duplicate or lost a variant"
         );
     }

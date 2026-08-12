@@ -68,6 +68,20 @@ pub(crate) mod header {
     /// "Chain", not "Sync": the badge beside it is frequently a statement that no syncing is
     /// happening, and a label promising a sync would contradict its own value.
     pub(crate) const CHAIN_LABEL: &str = "Chain";
+    /// The label before the block the chain replica has reached (dig_ecosystem#2806).
+    ///
+    /// "Chain height", not "Block" or "Peak": it has to be distinguishable at a glance from the two
+    /// peer COUNTS it is drawn beside, and a seven-digit figure under a one-word label is exactly
+    /// what a reader would otherwise take for a third count.
+    pub(crate) const CHAIN_HEIGHT_LABEL: &str = "Chain height";
+    /// The label before the peak this node's own Chia peers announced.
+    ///
+    /// Names WHOSE height it is, for the same reason the two peer counts name their networks. It
+    /// sits beside a `Chain height` that is this machine's replica, and the two legitimately differ
+    /// — the replica trails while it catches up. Under a bare label like `Network height` a reader
+    /// would take the pair for one number reported twice and read the gap as a contradiction; naming
+    /// the peers makes it the ordinary reading it is.
+    pub(crate) const CHIA_PEER_HEIGHT_LABEL: &str = "Chia peer height";
 }
 
 /// The Home pane.

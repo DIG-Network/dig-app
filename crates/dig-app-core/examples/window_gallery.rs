@@ -40,8 +40,10 @@ use std::time::{Duration, Instant};
 
 use dig_app_core::account::chain_mint::MintAvailability;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
+use dig_app_core::config::AgentConfig;
 use dig_app_core::confirm::gui::{photograph_shell, Theme};
 use dig_app_core::engine::{EngineConnector, EngineState, NodeConnector};
+use dig_app_core::environment::AppEnvironment;
 use dig_app_core::hosted_stores::{
     HostedStoresReading, HostedStoresUnknown, NodeHostedStores, REFRESH_INTERVAL,
     STORES_READ_TIMEOUT,
@@ -217,12 +219,18 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
         // The fixture's networks: a chain replica that has reached a block, six DIG peers and four
         // Chia peers. Three DIFFERENT figures, because a fixture whose counts agree is a picture in
         // which a strip that drew one number twice would look correct.
+        //
+        // The peers' announced peak is a FOURTH distinct figure, and sits three blocks above the
+        // replica's own. Even a caught-up replica trails the tip by the blocks found since it last
+        // wrote, so equal heights here would make the ordinary case look like the exceptional one —
+        // and would hide a strip that drew the replica's height under both labels.
         network: NetworkStanding {
             sync: ChainSync::Synced {
                 peak_height: 6_012_345,
             },
             dig_peers: PeerCount::Known(6),
             chia_peers: PeerCount::Known(4),
+            chia_peer_peak_height: Some(6_012_348),
         },
         ..TrayView::default()
     }
@@ -301,6 +309,30 @@ fn answered(reading: &HostedStoresReading) -> bool {
 /// exactly to the budget would report "no answer" for a node that was about to say `TimedOut`.
 const LIVE_WAIT: Duration = Duration::from_secs(STORES_READ_TIMEOUT.as_secs() * 2);
 
+/// The node address this machine is configured to use, or an empty string to walk the §5.3 ladder.
+///
+/// Resolved exactly as the application resolves it — the same [`AppEnvironment`] and the same
+/// [`AgentConfig`] — because a capture is a claim about what the app draws on THIS machine, and a
+/// harness with its own idea of where the node lives is photographing a different machine.
+///
+/// This used to be a hard-coded `""`, which silently ignored a configured node and always dialled
+/// the ladder. On a host running a second node — the ordinary way to look at an unreleased one — the
+/// picture came back showing the node the reader was not asking about, labelled live and entirely
+/// plausible (dig_ecosystem#2806).
+///
+/// A config that cannot be read yields the ladder rather than an error: a missing config is the
+/// ordinary case for a fresh install, and it is what `AgentConfig::load` already returns a default
+/// for.
+fn configured_node() -> String {
+    let environment = AppEnvironment::from_host();
+    let config = environment
+        .config_path()
+        .ok()
+        .map(|path| AgentConfig::load(&path).unwrap_or_default())
+        .unwrap_or_default();
+    environment.endpoint(&config)
+}
+
 /// Everything a live capture shows, taken from the running node — or the reason there is nothing.
 ///
 /// The node is found the way the application finds it: [`NodeConnector`] walking the §5.3 ladder,
@@ -311,7 +343,7 @@ const LIVE_WAIT: Duration = Duration::from_secs(STORES_READ_TIMEOUT.as_secs() * 
 /// **There is no fallback.** Every branch that cannot produce a reading returns an error naming what
 /// did not answer, and the caller writes no file.
 fn live_readings() -> Result<NodeReadings, String> {
-    let link = NodeConnector::default().probe("");
+    let link = NodeConnector::default().probe(&configured_node());
     let EngineState::Connected { .. } = &link else {
         return Err(format!(
             "no node answered control.status, so there is nothing live to photograph — {}",
@@ -570,6 +602,9 @@ mod tests {
                 },
                 dig_peers: PeerCount::Known(2),
                 chia_peers: PeerCount::Known(3),
+                // Well above the replica's own, which is what SYNCING means: the peers have told
+                // this node where the chain is, and it has not copied that far yet.
+                chia_peer_peak_height: Some(6_012_340),
             },
         }
     }

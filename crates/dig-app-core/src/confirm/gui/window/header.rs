@@ -136,6 +136,33 @@ fn readings(facts: &PaneFacts) -> Vec<Reading> {
             items.push(Reading::new(label, &word, tone(severity)));
         }
     }
+    // Second to last, so it is the second reading dropped when the window is narrow (see `draw`).
+    // It is the most explanatory reading here and the least URGENT: the badges above it are what a
+    // person checks when something is wrong, while the height is what they watch when it is working
+    // (dig_ecosystem#2806). It is also wide, so surrendering it is what keeps the four diagnostic
+    // badges on a 480 px window.
+    if let Some((word, severity)) = facts.network.sync.height_badge() {
+        items.push(Reading::new(
+            copy::header::CHAIN_HEIGHT_LABEL,
+            &word,
+            tone(severity),
+        ));
+    }
+    // After the replica's own height, and therefore the very first reading surrendered when the
+    // window narrows. That ordering is deliberate: this is the reading that proves the light client
+    // is ALIVE — it can only have a value because a peer spoke to this node — but proving liveness
+    // is what a person wants when things are working, and the badges above are what they need when
+    // things are not (dig_ecosystem#2806).
+    //
+    // Immediately after its pair so the two heights are read together. Separated, the gap between
+    // them reads as two unrelated figures that happen to disagree.
+    if let Some((word, severity)) = facts.network.chia_peer_height_badge() {
+        items.push(Reading::new(
+            copy::header::CHIA_PEER_HEIGHT_LABEL,
+            &word,
+            tone(severity),
+        ));
+    }
     items
 }
 
@@ -362,6 +389,10 @@ mod tests {
     }
 
     /// A view of a node reporting `sync`, `dig` DIG peers and `chia` Chia peers.
+    ///
+    /// No peer has announced a peak. That is the honest default for a helper whose callers are
+    /// asking about counts and phases: it keeps every one of those tests asserting the strip WITHOUT
+    /// a peer height, so the reading below has to earn its place rather than appearing everywhere.
     fn on_the_networks(
         sync: crate::network::ChainSync,
         dig: crate::network::PeerCount,
@@ -374,9 +405,104 @@ mod tests {
                 sync,
                 dig_peers: dig,
                 chia_peers: chia,
+                chia_peer_peak_height: None,
             },
             ..TrayView::default()
         }
+    }
+
+    /// [`on_the_networks`], with a peak this node's Chia peers announced.
+    fn with_peer_peak(mut view: TrayView, peers_peak: u32) -> TrayView {
+        view.network.chia_peer_peak_height = Some(peers_peak);
+        view
+    }
+
+    /// **The peers' announced peak is shown, and is NOT collapsed into the replica's**
+    /// (dig_ecosystem#2806).
+    ///
+    /// These are two different facts about two different things: how far this machine has copied,
+    /// and how far the peers serving it say the chain has got. The replica's sits LOWER while it
+    /// catches up, and that gap is the correct reading — it is what a working light client looks
+    /// like from the outside.
+    ///
+    /// The peers' peak is the one figure here that evidences a LIVE client rather than a merely
+    /// connected one: it can only have a value because a peer spoke to this node.
+    ///
+    /// Both figures are asserted PRESENT AND DISTINCT, each after its own label. A strip that
+    /// reconciled them — drew the larger, averaged them, or drew one number under both labels —
+    /// passes any test that only looks for one of them, and destroys the only thing the pair says.
+    #[test]
+    fn the_peers_announced_peak_is_shown_apart_from_the_replicas_own() {
+        use crate::network::{ChainSync, PeerCount};
+        let laid = laid_out(
+            &with_peer_peak(
+                on_the_networks(
+                    ChainSync::Syncing {
+                        peak_height: 9_140_640,
+                    },
+                    PeerCount::Known(0),
+                    PeerCount::Known(5),
+                ),
+                9_140_656,
+            ),
+            960.0,
+        );
+
+        for (label, figure) in [
+            (copy::header::CHAIN_HEIGHT_LABEL, "9,140,640"),
+            (copy::header::CHIA_PEER_HEIGHT_LABEL, "9,140,656"),
+        ] {
+            let at = placed(&laid, label);
+            assert!(
+                laid.iter()
+                    .filter(|(said, _)| said == figure)
+                    .any(|(_, spot)| spot.left() >= at.right() && spot.left() - at.right() < 40.0),
+                "{label} is not followed by {figure}: {laid:?}"
+            );
+        }
+    }
+
+    /// **Peers that have announced nothing produce no reading — not a zero** (dig_ecosystem#2806).
+    ///
+    /// The control for the test above. `None` here means no peer has said anything yet, which is the
+    /// state of every node in the seconds after it starts and of every node that never reaches one.
+    /// A `0` would claim the peers had announced the genesis block, which is both false and the
+    /// worst possible reading: it is below every real height, so it would render a healthy replica
+    /// as impossibly far AHEAD of the network.
+    ///
+    /// The label must be absent too, not merely its digits — a lone `Chia peer height` with nothing
+    /// after it reads as a value that failed to load. The replica's own height is deliberately
+    /// PRESENT, so this asserts the two readings are independent rather than a strip that dropped
+    /// both.
+    #[test]
+    fn peers_that_announced_nothing_draw_no_peer_height_at_all() {
+        use crate::network::{ChainSync, PeerCount};
+        let laid = laid_out(
+            &on_the_networks(
+                ChainSync::Syncing {
+                    peak_height: 9_140_640,
+                },
+                PeerCount::Known(3),
+                PeerCount::Known(5),
+            ),
+            960.0,
+        );
+
+        assert!(
+            !laid
+                .iter()
+                .any(|(said, _)| said == copy::header::CHIA_PEER_HEIGHT_LABEL),
+            "an unannounced peer peak was given a label: {laid:?}"
+        );
+        assert!(
+            !laid.iter().any(|(said, _)| said == "0"),
+            "an unannounced peer peak was drawn as a height of zero: {laid:?}"
+        );
+        // The replica's own height is unaffected — the two readings are independent.
+        assert!(
+            laid.iter().any(|(said, _)| said == "9,140,640"),
+            "the replica's height went missing with the peers': {laid:?}"
+        );
     }
 
     /// **Both networks are counted, both are named, and the two counts stay apart**
@@ -436,6 +562,74 @@ mod tests {
                 .iter()
                 .any(|(said, _)| said == crate::network::SYNC_SYNCING),
             "a replica at no height was drawn as making progress: {laid:?}"
+        );
+    }
+
+    /// **The strip says how far the chain replica has actually got** (dig_ecosystem#2806).
+    ///
+    /// The peer counts say the node is TALKING to the Chia network and the chain badge says what it
+    /// is doing about it; neither says where it has reached. The height is the fact that makes a
+    /// light client visibly working rather than merely connected — it is the figure a person watches
+    /// move — and until this test it appeared nowhere in the application.
+    ///
+    /// Asserted against its own label and grouped exactly as it is drawn, because a bare seven-digit
+    /// number sitting after two single-digit peer counts is the one reading on this strip a person
+    /// could mistake for a third count.
+    #[test]
+    fn the_strip_says_how_far_the_chain_replica_has_got() {
+        use crate::network::{ChainSync, PeerCount};
+        let laid = laid_out(
+            &on_the_networks(
+                ChainSync::Syncing {
+                    peak_height: 9_140_540,
+                },
+                PeerCount::Known(0),
+                PeerCount::Known(5),
+            ),
+            960.0,
+        );
+
+        let label = placed(&laid, copy::header::CHAIN_HEIGHT_LABEL);
+        assert!(
+            laid.iter()
+                .filter(|(said, _)| said == "9,140,540")
+                .any(|(_, at)| at.left() >= label.right() && at.left() - label.right() < 40.0),
+            "the height label is not followed by its figure: {laid:?}"
+        );
+    }
+
+    /// **A replica that has reached no block shows no height — not a zero** (dig_ecosystem#2806).
+    ///
+    /// The control for the test above, and the reason the reading is an `Option` all the way down.
+    /// A default install sits at no height permanently (#2568), so this is not an edge case, it is
+    /// the machine most readers have: a `0` there would claim the genesis block as their progress,
+    /// beside a badge that correctly says they have got nowhere.
+    ///
+    /// The label must be absent too, not merely its digits. A lone `Chain height` with nothing after
+    /// it reads as a value that failed to load.
+    ///
+    /// **Both peer counts are deliberately non-zero.** The first cut of this test used the honest
+    /// `0 DIG peers` fixture from the test above and failed against correct code, because the `0` it
+    /// caught was that peer count rather than a fabricated height. With neither count at zero, a `0`
+    /// anywhere on this strip can only be a height nobody measured.
+    #[test]
+    fn a_replica_at_no_height_shows_no_height_reading_at_all() {
+        use crate::network::{ChainSync, NoProgress, PeerCount};
+        let said = painted(
+            &on_the_networks(
+                ChainSync::NoProgress(NoProgress::NoHeight),
+                PeerCount::Known(2),
+                PeerCount::Known(5),
+            ),
+            960.0,
+        );
+        assert!(
+            !said.iter().any(|s| s == copy::header::CHAIN_HEIGHT_LABEL),
+            "a replica at no height was given a height reading: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|s| s == "0"),
+            "a replica at no height was drawn as being at block zero: {said:?}"
         );
     }
 
