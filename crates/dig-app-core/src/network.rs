@@ -290,6 +290,17 @@ impl ChainSync {
 /// string already did once, `wallet::overview`).
 const PHASE_TOKEN_SHOWN: usize = 32;
 
+/// The catch-up distance worded for the strip: `0 blocks`, `1 block`, `1,709 blocks`.
+///
+/// Grouped by [`group_digits`] for the same reason the heights beside it are, and singular at one
+/// because `1 blocks` is the kind of seam that makes a person doubt the figure next to it.
+fn blocks_behind(blocks: u32) -> String {
+    match blocks {
+        1 => "1 block".to_string(),
+        other => format!("{} blocks", group_digits(other)),
+    }
+}
+
 /// Group `value` into thousands with commas — `9140540` becomes `9,140,540`.
 ///
 /// A chain height is seven digits and is read at a glance, where `9140540` and `9240540` are the
@@ -403,7 +414,85 @@ pub struct NetworkStanding {
     pub chia_peer_peak_height: Option<u32>,
 }
 
+/// How far this machine's replica trails the chain its own Chia peers report — the reading that
+/// turns a bare "Chain syncing" into a progress a person can act on (dig_ecosystem#2820).
+///
+/// # A DISTANCE, never a percentage
+///
+/// A percentage of the whole chain reads 99.98% at every moment that matters, including while a sync
+/// is wedged, so it answers the question it appears to answer with a figure that never moves. The
+/// distance is what a person actually asks for, and it is the one that changes while they watch it.
+///
+/// # This explains the phase; it never decides it
+///
+/// The node reports its own phase and that reading is authoritative ([`ChainSync::badge`]). A
+/// machine with no wallet enrolled reports a sync forever by design (dig_ecosystem#2666), and a
+/// distance drawn as "nearly there" over that would invent progress that is not happening. So this
+/// type is computed from the two HEIGHTS and from nothing else — it never consults the phase, and
+/// the phase never consults it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncProgress {
+    /// Both heights are known and the replica trails by this many blocks.
+    Behind {
+        /// How many blocks separate the replica from the peak its peers announced. Never zero —
+        /// that is [`CaughtUp`](Self::CaughtUp), so the two states cannot be confused by a caller
+        /// that forgot to check.
+        blocks: u32,
+    },
+    /// Both heights are known and the replica is level with — or above — the peak its peers
+    /// announced.
+    ///
+    /// Above collapses into level rather than becoming a negative distance: a peer's announcement is
+    /// the last thing that peer said, not a live reading, so a replica that has since copied another
+    /// block is momentarily higher. That is a stale announcement, not a fault, and "ahead of the
+    /// chain" is not a state there is an honest reading of.
+    CaughtUp,
+    /// One of the two heights is missing, so there is no distance to state.
+    ///
+    /// This is the case the honesty rule is about. `chia_peer_peak_height` is absent on a node
+    /// holding no peers, and `peak_height` is absent before the replica has reached a block;
+    /// substituting `0` for either manufactures a reading rather than reporting one. A `0` network
+    /// height draws the replica as impossibly AHEAD, and a `0` replica height claims it has copied
+    /// nothing — two opposite lies from the same shortcut.
+    CannotTell,
+}
+
 impl NetworkStanding {
+    /// How far this replica trails the peak its own Chia peers announced.
+    ///
+    /// Both heights or nothing: see [`SyncProgress::CannotTell`].
+    pub fn progress(&self) -> SyncProgress {
+        let (Some(replica), Some(peers)) = (self.sync.peak_height(), self.chia_peer_peak_height)
+        else {
+            return SyncProgress::CannotTell;
+        };
+        match peers.saturating_sub(replica) {
+            0 => SyncProgress::CaughtUp,
+            blocks => SyncProgress::Behind { blocks },
+        }
+    }
+
+    /// The strip's catch-up reading, or `None` when the pair of heights cannot produce one.
+    ///
+    /// Absent rather than placeheld, exactly as every other reading in this module is absent when
+    /// unknown — the header's `readings` gives the reason.
+    ///
+    /// Caught up is drawn in [`ChainSyncTone::Good`] and any distance in
+    /// [`ChainSyncTone::Neutral`], never [`Warn`](ChainSyncTone::Warn): trailing the chain is the
+    /// ORDINARY state of a light client that is working, and painting healthy catch-up as a fault
+    /// would have the strip contradict the badge beside it. The words stay uniform across both
+    /// (`0 blocks`, `1,709 blocks`) so the reading is a measurement in one grammar rather than a
+    /// verdict that switches vocabulary at zero.
+    pub fn catch_up_badge(&self) -> Option<(String, ChainSyncTone)> {
+        match self.progress() {
+            SyncProgress::CannotTell => None,
+            SyncProgress::CaughtUp => Some((blocks_behind(0), ChainSyncTone::Good)),
+            SyncProgress::Behind { blocks } => {
+                Some((blocks_behind(blocks), ChainSyncTone::Neutral))
+            }
+        }
+    }
+
     /// The strip's reading for the peak this node's Chia peers announced, or `None` when none has.
     ///
     /// Formatted here, beside [`ChainSync::height_badge`], because the two figures are read as a
@@ -689,6 +778,135 @@ impl NodeNetworkStanding {
 mod tests {
     use super::*;
     use crate::test_support::node::{FakeNode, SyncReply};
+
+    /// A standing carrying just the two heights the catch-up reading is computed from.
+    fn heights(sync: ChainSync, chia_peer_peak_height: Option<u32>) -> NetworkStanding {
+        NetworkStanding {
+            sync,
+            chia_peer_peak_height,
+            ..NetworkStanding::default()
+        }
+    }
+
+    /// This machine's real reading while dig_ecosystem#2820 was written: a replica 1,709 blocks
+    /// behind the peak its own peers had announced.
+    const REPLICA: u32 = 9_139_211;
+    /// What the peers said, at the same instant.
+    const PEERS: u32 = 9_140_920;
+
+    /// **The distance is stated only when BOTH heights are known, and is never invented from one**
+    /// (dig_ecosystem#2820).
+    ///
+    /// The two absences are the whole point of the rule and they fail in OPPOSITE directions, so
+    /// both are driven: a `0` substituted for the peers' peak draws the replica as impossibly ahead
+    /// of the chain, and a `0` substituted for the replica claims a machine that has copied nothing
+    /// is nine million blocks behind. Either shortcut satisfies a test that only asserted "some
+    /// reading appears", which is why what is asserted here is that NO reading appears.
+    ///
+    /// The first case is the truthful control: with both heights present a real distance genuinely
+    /// is stated, so the two silences below cannot be read as a badge that never says anything.
+    #[test]
+    fn the_catch_up_distance_is_stated_only_when_both_heights_are_known() {
+        let (word, tone) = heights(ChainSync::Syncing { peak_height: REPLICA }, Some(PEERS))
+            .catch_up_badge()
+            .expect("both heights are known, so the distance between them exists");
+        assert_eq!(word, "1,709 blocks", "the distance, grouped as the heights are");
+        assert_eq!(
+            tone,
+            ChainSyncTone::Neutral,
+            "trailing the chain is the ordinary state of a working light client, not a fault"
+        );
+
+        // The replica has reached no block. `peak_height()` is `None` here BY CONSTRUCTION —
+        // `NoProgress` is the variant that exists because the wire reported no height.
+        for (missing, standing) in [
+            (
+                "the replica has reached no block",
+                heights(ChainSync::NoProgress(NoProgress::NoHeight), Some(PEERS)),
+            ),
+            (
+                "no peer has announced a peak",
+                heights(ChainSync::Syncing { peak_height: REPLICA }, None),
+            ),
+            (
+                "neither height was ever read",
+                heights(ChainSync::Unknown(SyncUnknown::NoNode), None),
+            ),
+        ] {
+            assert_eq!(
+                standing.progress(),
+                SyncProgress::CannotTell,
+                "{missing}: there is no distance, and a substituted zero would manufacture one"
+            );
+            assert!(
+                standing.catch_up_badge().is_none(),
+                "{missing}: the strip must stay silent rather than draw a distance nobody measured"
+            );
+        }
+    }
+
+    /// **A replica level with — or above — its peers reads as caught up, never as a giant number.**
+    ///
+    /// The above case is the one a subtraction gets wrong. A peer's announced peak is the last thing
+    /// that peer SAID, not a live reading, so a replica that has since copied another block is
+    /// momentarily higher; an unsaturated `peers - replica` on `u32` underflows there and would draw
+    /// a machine that is perfectly caught up as four billion blocks behind. It is asserted one block
+    /// ahead rather than at some large lead because one block is the case that actually happens.
+    #[test]
+    fn a_replica_level_with_or_above_its_peers_is_caught_up() {
+        for (position, replica) in [("level with", PEERS), ("one block above", PEERS + 1)] {
+            let standing = heights(ChainSync::Syncing { peak_height: replica }, Some(PEERS));
+            assert_eq!(
+                standing.progress(),
+                SyncProgress::CaughtUp,
+                "a replica {position} its peers has nothing left to copy"
+            );
+            let (word, tone) = standing
+                .catch_up_badge()
+                .expect("caught up is a reading, not a silence");
+            assert_eq!(word, "0 blocks", "one grammar for the distance, including at zero");
+            assert_eq!(tone, ChainSyncTone::Good, "caught up is the good state");
+        }
+
+        // Singular at one, because `1 blocks` beside a real figure makes a person doubt the figure.
+        assert_eq!(
+            heights(ChainSync::Syncing { peak_height: PEERS - 1 }, Some(PEERS)).catch_up_badge(),
+            Some(("1 block".to_string(), ChainSyncTone::Neutral))
+        );
+    }
+
+    /// **The distance EXPLAINS the phase and never replaces it** (dig_ecosystem#2820).
+    ///
+    /// The node reports its own phase and that reading is authoritative. A machine with no wallet
+    /// enrolled reports a sync forever by design (dig_ecosystem#2666), so a surface that inferred
+    /// "synced" from a zero gap — or "syncing" from a non-zero one — would overwrite a fact with a
+    /// guess in both directions.
+    ///
+    /// Both halves are driven because they are separately wrong: a node still SYNCING whose replica
+    /// has momentarily caught its peers must keep saying `Chain syncing`, and a node reporting
+    /// `Synced` whose peers have since announced a higher block must keep saying `Chain synced`. A
+    /// derivation that read the heights would flip each one to the other's word.
+    #[test]
+    fn the_distance_explains_the_phase_and_never_replaces_it() {
+        let caught_up_but_syncing = heights(ChainSync::Syncing { peak_height: PEERS }, Some(PEERS));
+        assert_eq!(
+            caught_up_but_syncing.sync.badge().map(|(word, _)| word),
+            Some(SYNC_SYNCING),
+            "the node says it is syncing; a zero gap is not a licence to say it has finished"
+        );
+        assert_eq!(caught_up_but_syncing.progress(), SyncProgress::CaughtUp);
+
+        let synced_but_trailing = heights(ChainSync::Synced { peak_height: REPLICA }, Some(PEERS));
+        assert_eq!(
+            synced_but_trailing.sync.badge().map(|(word, _)| word),
+            Some(SYNC_SYNCED),
+            "the node says it is synced; a gap explains the distance, it does not retract the phase"
+        );
+        assert_eq!(
+            synced_but_trailing.progress(),
+            SyncProgress::Behind { blocks: 1_709 }
+        );
+    }
 
     /// The node's answer, with every field named so a fixture cannot silently reuse a default.
     fn wire(

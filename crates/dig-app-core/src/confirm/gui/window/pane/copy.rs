@@ -82,6 +82,13 @@ pub(crate) mod header {
     /// would take the pair for one number reported twice and read the gap as a contradiction; naming
     /// the peers makes it the ordinary reading it is.
     pub(crate) const CHIA_PEER_HEIGHT_LABEL: &str = "Chia peer height";
+    /// The label before how far the replica trails its peers (dig_ecosystem#2820).
+    ///
+    /// "Behind" states the RELATION, which is the thing being asked about — the two heights beside
+    /// it already state the positions. A person watching a sync wants to know the distance is
+    /// shrinking, and a label naming the distance is what makes the figure under it a progress
+    /// rather than a third height to compare by eye.
+    pub(crate) const BEHIND_LABEL: &str = "Behind";
 }
 
 /// The Home pane.

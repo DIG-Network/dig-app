@@ -125,6 +125,18 @@ fn readings(facts: &PaneFacts) -> Vec<Reading> {
             tone(severity),
         ));
     }
+    // Immediately after the badge it explains, and therefore among the LAST readings surrendered
+    // when the window narrows (see `draw`). "Chain syncing" on its own says nothing about whether
+    // the machine is nearly done, stuck, or falling behind, and that distance is what a person is
+    // actually asking when they read the badge (dig_ecosystem#2820) — so it outranks both raw
+    // heights below, which state the positions this reading turns into a relation.
+    if let Some((word, severity)) = facts.network.catch_up_badge() {
+        items.push(Reading::new(
+            copy::header::BEHIND_LABEL,
+            &word,
+            tone(severity),
+        ));
+    }
     // Both networks, each named. Never one "peers" figure: a person told `1` cannot tell whether
     // their content network or their chain connection is the healthy one, and on a default install
     // those two answers differ (dig_ecosystem#2569).
