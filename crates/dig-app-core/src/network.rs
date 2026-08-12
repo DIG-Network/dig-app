@@ -290,10 +290,11 @@ impl ChainSync {
 /// string already did once, `wallet::overview`).
 const PHASE_TOKEN_SHOWN: usize = 32;
 
-/// The catch-up distance worded for the strip: `0 blocks`, `1 block`, `1,709 blocks`.
+/// The catch-up distance worded for the strip: `1 block`, `1,709 blocks`.
 ///
-/// Grouped by [`group_digits`] for the same reason the heights beside it are, and singular at one
-/// because `1 blocks` is the kind of seam that makes a person doubt the figure next to it.
+/// Only ever called with a real distance — zero is [`CAUGHT_UP`], which is a word rather than a
+/// quantity. Grouped by [`group_digits`] for the same reason the heights beside it are, and singular
+/// at one because `1 blocks` is the kind of seam that makes a person doubt the figure next to it.
 fn blocks_behind(blocks: u32) -> String {
     match blocks {
         1 => "1 block".to_string(),
@@ -480,13 +481,19 @@ impl NetworkStanding {
     /// Caught up is drawn in [`ChainSyncTone::Good`] and any distance in
     /// [`ChainSyncTone::Neutral`], never [`Warn`](ChainSyncTone::Warn): trailing the chain is the
     /// ORDINARY state of a light client that is working, and painting healthy catch-up as a fault
-    /// would have the strip contradict the badge beside it. The words stay uniform across both
-    /// (`0 blocks`, `1,709 blocks`) so the reading is a measurement in one grammar rather than a
-    /// verdict that switches vocabulary at zero.
+    /// would have the strip contradict the badge beside it.
+    ///
+    /// # Caught up gets a WORD, not a quantity
+    ///
+    /// This reading was first written as `0 blocks`, for the uniform grammar. That is honest and it
+    /// reads badly at the exact moment the news is good: `Chain syncing · 0 blocks` makes a person
+    /// stop and work out that the zero means nothing is wrong, which is a double-take charged at the
+    /// one state they most want to recognise on sight. A distance is a measurement and reads as one;
+    /// arriving is an EVENT, and [`CAUGHT_UP`] is the word for it.
     pub fn catch_up_badge(&self) -> Option<(String, ChainSyncTone)> {
         match self.progress() {
             SyncProgress::CannotTell => None,
-            SyncProgress::CaughtUp => Some((blocks_behind(0), ChainSyncTone::Good)),
+            SyncProgress::CaughtUp => Some((CAUGHT_UP.to_string(), ChainSyncTone::Good)),
             SyncProgress::Behind { blocks } => {
                 Some((blocks_behind(blocks), ChainSyncTone::Neutral))
             }
@@ -532,6 +539,13 @@ pub const CHIA_PEERS_LABEL: &str = "Chia peers";
 /// The badge word for a count the node cannot observe.
 pub const PEERS_UNOBSERVABLE: &str = "Not reported";
 
+/// The catch-up word for a replica level with the peak its peers announced (dig_ecosystem#2820).
+///
+/// A word rather than `0 blocks`, because this is the one reading on the strip a person wants to
+/// recognise without reading it. It sits under the `Behind` label, which is what keeps it a
+/// statement about the DISTANCE — it says the gap is closed, and deliberately not that the sync has
+/// finished, which is the node's to report and is carried by [`SYNC_SYNCED`] beside it.
+pub const CAUGHT_UP: &str = "Caught up";
 /// The badge word for a replica that is caught up and connected.
 pub const SYNC_SYNCED: &str = "Chain synced";
 /// The badge word for a sync that is running and has reached a block.
@@ -865,6 +879,12 @@ mod tests {
     /// momentarily higher; an unsaturated `peers - replica` on `u32` underflows there and would draw
     /// a machine that is perfectly caught up as four billion blocks behind. It is asserted one block
     /// ahead rather than at some large lead because one block is the case that actually happens.
+    ///
+    /// The word is asserted to be a WORD and not a quantity, and specifically not to contain a digit.
+    /// `0 blocks` was the first cut and is honest; it costs a person a double-take at the one moment
+    /// the news is good, because a zero has to be read and interpreted where a word is recognised.
+    /// Asserting the absence of any digit is what stops that regressing back to a figure that merely
+    /// happens to differ from the string here.
     #[test]
     fn a_replica_level_with_or_above_its_peers_is_caught_up() {
         for (position, replica) in [("level with", PEERS), ("one block above", PEERS + 1)] {
@@ -883,8 +903,12 @@ mod tests {
                 .catch_up_badge()
                 .expect("caught up is a reading, not a silence");
             assert_eq!(
-                word, "0 blocks",
-                "one grammar for the distance, including at zero"
+                word, CAUGHT_UP,
+                "arriving is an event and gets a word, not a measurement of zero"
+            );
+            assert!(
+                !word.chars().any(|c| c.is_ascii_digit()),
+                "a digit here is a quantity a person has to interpret: {word:?}"
             );
             assert_eq!(tone, ChainSyncTone::Good, "caught up is the good state");
         }
