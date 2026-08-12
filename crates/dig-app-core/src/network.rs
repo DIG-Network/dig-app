@@ -156,6 +156,16 @@ pub enum SyncUnknown {
     Unreachable(String),
     /// The node refused for a reason we cannot classify; its own words are carried.
     ReadFailed(String),
+    /// The node named a sync phase this build does not know — it is NEWER than this app.
+    ///
+    /// Kept apart from [`NodeCannotRead`](Self::NodeCannotRead), which is the same shape of problem
+    /// pointing the other way: that one is a node too OLD to answer, and its remedy is upgrading the
+    /// node. This one's remedy is upgrading the app, and this enum keeps one variant per remedy.
+    ///
+    /// The token is carried already escaped for display — see [`ChainSync::of_status`]. It is
+    /// node-supplied text, and the contract is explicit that the raw accessor must never reach a
+    /// log, a terminal, or a UI.
+    PhaseNotUnderstood(String),
 }
 
 impl SyncUnknown {
@@ -173,6 +183,7 @@ impl SyncUnknown {
             Self::TimedOut("the read took longer than 5s".to_string()),
             Self::Unreachable("connection refused".to_string()),
             Self::ReadFailed("the node fell over".to_string()),
+            Self::PhaseNotUnderstood("a_newer_token".to_string()),
         ]
     }
 }
@@ -193,10 +204,30 @@ impl ChainSync {
     /// being caught up with no block behind it is the one reading this surface must never render.
     pub fn of_status(status: &WalletSyncStatusResult) -> Self {
         let no_peers = status.chia_peer_count == Some(0);
-        match (status.phase, status.peak_height) {
+        match (&status.phase, status.peak_height) {
+            // A phase this build cannot name licenses NO claim about syncing — never a fall-through
+            // to "it has a height, so it must be progressing". Matched FIRST, above every arm that
+            // could otherwise absorb it. The token is escaped for display here, at the boundary,
+            // because the raw accessor returns unescaped node-supplied text.
+            (WalletSyncPhase::Unrecognized(token), _) => Self::Unknown(
+                SyncUnknown::PhaseNotUnderstood(token.display_bounded(PHASE_TOKEN_SHOWN)),
+            ),
             (WalletSyncPhase::Synced, Some(peak_height)) => Self::Synced { peak_height },
+            // No wallet is enrolled, so there is nothing to follow and nothing is going unwatched.
+            // The contract names this the honest all-clear and permits presenting it as settled —
+            // and it is the state of every fresh install, which must not be drawn as a fault.
+            (WalletSyncPhase::NoWalletEnrolled, Some(peak_height)) => Self::Synced { peak_height },
             (WalletSyncPhase::NotStarted, Some(peak_height)) => Self::Idle { peak_height },
             (WalletSyncPhase::NotStarted, None) => Self::NoProgress(NoProgress::NeverStarted),
+            // A wallet IS enrolled and its addresses are NOT being followed, so coins are going
+            // unwatched. The contract forbids rendering this as synced, settled or up to date, and
+            // "syncing" is refused with it: nothing is being caught up, so a word promising progress
+            // is as untrue as one promising completion. `Idle` is the state that says a sync is not
+            // running and still shows the height the replica did reach.
+            (WalletSyncPhase::WalletNotUnlocked, Some(peak_height)) => Self::Idle { peak_height },
+            (WalletSyncPhase::WalletNotUnlocked, None) => {
+                Self::NoProgress(NoProgress::NeverStarted)
+            }
             (_, Some(peak_height)) => Self::Syncing { peak_height },
             (_, None) if no_peers => Self::NoProgress(NoProgress::NoPeers),
             (_, None) => Self::NoProgress(NoProgress::NoHeight),
@@ -249,6 +280,15 @@ impl ChainSync {
             .map(|height| (group_digits(height), ChainSyncTone::Neutral))
     }
 }
+
+/// How much of an unrecognised phase token is ever repeated back.
+///
+/// The token is node-supplied text of no bounded length — the contract deliberately does not reject
+/// an over-long one, and says the bound belongs where it is displayed, which is here. A phase name
+/// is a short snake_case identifier, so this is generous for every real one while keeping a hostile
+/// or malformed answer from becoming a label thousands of characters wide (as an unbounded node
+/// string already did once, `wallet::overview`).
+const PHASE_TOKEN_SHOWN: usize = 32;
 
 /// Group `value` into thousands with commas — `9140540` becomes `9,140,540`.
 ///
@@ -444,9 +484,13 @@ fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkS
         };
     let (dig_peers, chia_peers) =
         match control::call_control_result(endpoint, &PeerCountsParams {}, token, timeout) {
+            // `..` deliberately: this reads the two counts the strip draws, and a result type that
+            // grows a field it does not draw (`known_dig_peer_count` arrived exactly so) must not
+            // break the build of a client that never wanted it.
             Ok(PeerCountsResult {
                 dig_peer_count,
                 chia_peer_count,
+                ..
             }) => (
                 PeerCount::of_wire(dig_peer_count),
                 PeerCount::of_wire(chia_peer_count),
@@ -618,7 +662,102 @@ mod tests {
             phase,
             peak_height,
             chia_peer_count,
+            // Not a parameter, because this module never reads it: how many addresses the wallet
+            // follows is a WALLET fact, and the strip reports the chain. Pinned rather than
+            // defaulted so that stays a decision somebody made.
+            watched_addresses: None,
         }
+    }
+
+    /// **A node with no wallet is settled, not stuck** (dig_ecosystem#2806, #2609).
+    ///
+    /// This is the state of every FRESH install — the machine a stranger has five minutes after
+    /// downloading DIG — and until the contract bump that phase did not parse at all, taking the
+    /// whole status read down with it and leaving the strip with no chain reading whatsoever. That
+    /// is not a hypothetical: it is what a live 0.115.0 node drew before this test existed.
+    ///
+    /// Settled is the honest word. There is no wallet, so there are no addresses to follow and
+    /// nothing is going unwatched — the contract names it the all-clear and permits presenting it as
+    /// such. The height is what stops that being a bare claim: it is shown beside the badge, so a
+    /// reader sees the block the verdict was formed at.
+    #[test]
+    fn a_node_with_no_wallet_enrolled_is_settled_rather_than_stuck() {
+        let fresh = ChainSync::of_status(&wire(
+            WalletSyncPhase::NoWalletEnrolled,
+            Some(9_140_562),
+            Some(5),
+        ));
+        assert_eq!(
+            fresh,
+            ChainSync::Synced {
+                peak_height: 9_140_562
+            }
+        );
+        assert_eq!(fresh.peak_height(), Some(9_140_562));
+        let (word, tone) = fresh.badge().expect("a fresh install must say something");
+        assert_eq!(word, SYNC_SYNCED);
+        assert_eq!(tone, ChainSyncTone::Good);
+    }
+
+    /// **A wallet that is not unlocked is NEVER drawn as progress or as settled** (#2806).
+    ///
+    /// The contract is explicit that this MUST NOT read as synced, settled, or up to date: a wallet
+    /// is enrolled, and its addresses are NOT being followed, so coins are going unwatched. It looks
+    /// identical to [`WalletSyncPhase::NoWalletEnrolled`] from inside the sync loop and means the
+    /// opposite of it, which is why both are asserted here against each other rather than alone.
+    ///
+    /// `Syncing` is refused as firmly as `Synced`. Nothing is being caught up — the address set is
+    /// empty — so a word promising progress would be as untrue as one promising completion.
+    #[test]
+    fn a_wallet_that_is_not_unlocked_is_never_drawn_as_settled_or_progressing() {
+        let locked = ChainSync::of_status(&wire(
+            WalletSyncPhase::WalletNotUnlocked,
+            Some(9_140_562),
+            Some(5),
+        ));
+        let (word, tone) = locked.badge().expect("a locked wallet must say something");
+        assert_ne!(word, SYNC_SYNCED, "coins are going unwatched behind a tick");
+        assert_ne!(word, SYNC_SYNCING, "nothing is being caught up");
+        assert_eq!(tone, ChainSyncTone::Warn);
+        // The height it did reach is still true, and still shown.
+        assert_eq!(locked.peak_height(), Some(9_140_562));
+        // The control: the same reading with no wallet enrolled is the opposite verdict.
+        assert_ne!(
+            locked,
+            ChainSync::of_status(&wire(
+                WalletSyncPhase::NoWalletEnrolled,
+                Some(9_140_562),
+                Some(5)
+            )),
+            "nothing to do and something not being done were collapsed into one state"
+        );
+    }
+
+    /// **A phase this build cannot name makes NO claim about syncing** (#2806, #2609).
+    ///
+    /// The forward-compatibility case, and the one that has already cost the ecosystem a release:
+    /// the enum shipped closed, dig-node grew a phase, and every consumer's entire status read
+    /// aborted. The contract now carries the token verbatim so a client can degrade instead — and
+    /// degrading means saying NOTHING, never guessing at progress.
+    ///
+    /// A height alongside it is deliberately supplied: the tempting wrong answer is to fall through
+    /// to "it has a height, so call it syncing", which would render an unknown future phase as
+    /// confident progress.
+    #[test]
+    fn a_phase_this_build_cannot_name_makes_no_claim_at_all() {
+        let future = ChainSync::of_status(&wire(
+            WalletSyncPhase::from("gone_fishing"),
+            Some(9_140_562),
+            Some(5),
+        ));
+        assert!(
+            future.badge().is_none(),
+            "an unnameable phase was given a word: {future:?}"
+        );
+        assert!(
+            matches!(future, ChainSync::Unknown(_)),
+            "an unnameable phase was rendered as a state we understand: {future:?}"
+        );
     }
 
     /// **A height is shown when, and only when, the replica actually reached one**
@@ -813,6 +952,7 @@ mod tests {
             SyncUnknown::TimedOut(String::new()),
             SyncUnknown::Unreachable(String::new()),
             SyncUnknown::ReadFailed(String::new()),
+            SyncUnknown::PhaseNotUnderstood(String::new()),
         ] {
             let named = |candidate: &SyncUnknown| {
                 std::mem::discriminant(candidate) == std::mem::discriminant(&reason)
@@ -821,7 +961,7 @@ mod tests {
         }
         assert_eq!(
             all.len(),
-            5,
+            6,
             "all() has grown a duplicate or lost a variant"
         );
     }
