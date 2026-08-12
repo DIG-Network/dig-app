@@ -136,6 +136,18 @@ fn readings(facts: &PaneFacts) -> Vec<Reading> {
             items.push(Reading::new(label, &word, tone(severity)));
         }
     }
+    // Last, so it is the first reading dropped when the window is narrow (see `draw`). It is the
+    // most explanatory reading here and the least URGENT: the badges above it are what a person
+    // checks when something is wrong, while the height is what they watch when it is working
+    // (dig_ecosystem#2806). It is also the widest, so surrendering it is what keeps the four
+    // diagnostic badges on a 480 px window.
+    if let Some((word, severity)) = facts.network.sync.height_badge() {
+        items.push(Reading::new(
+            copy::header::CHAIN_HEIGHT_LABEL,
+            &word,
+            tone(severity),
+        ));
+    }
     items
 }
 
@@ -436,6 +448,74 @@ mod tests {
                 .iter()
                 .any(|(said, _)| said == crate::network::SYNC_SYNCING),
             "a replica at no height was drawn as making progress: {laid:?}"
+        );
+    }
+
+    /// **The strip says how far the chain replica has actually got** (dig_ecosystem#2806).
+    ///
+    /// The peer counts say the node is TALKING to the Chia network and the chain badge says what it
+    /// is doing about it; neither says where it has reached. The height is the fact that makes a
+    /// light client visibly working rather than merely connected — it is the figure a person watches
+    /// move — and until this test it appeared nowhere in the application.
+    ///
+    /// Asserted against its own label and grouped exactly as it is drawn, because a bare seven-digit
+    /// number sitting after two single-digit peer counts is the one reading on this strip a person
+    /// could mistake for a third count.
+    #[test]
+    fn the_strip_says_how_far_the_chain_replica_has_got() {
+        use crate::network::{ChainSync, PeerCount};
+        let laid = laid_out(
+            &on_the_networks(
+                ChainSync::Syncing {
+                    peak_height: 9_140_540,
+                },
+                PeerCount::Known(0),
+                PeerCount::Known(5),
+            ),
+            960.0,
+        );
+
+        let label = placed(&laid, copy::header::CHAIN_HEIGHT_LABEL);
+        assert!(
+            laid.iter()
+                .filter(|(said, _)| said == "9,140,540")
+                .any(|(_, at)| at.left() >= label.right() && at.left() - label.right() < 40.0),
+            "the height label is not followed by its figure: {laid:?}"
+        );
+    }
+
+    /// **A replica that has reached no block shows no height — not a zero** (dig_ecosystem#2806).
+    ///
+    /// The control for the test above, and the reason the reading is an `Option` all the way down.
+    /// A default install sits at no height permanently (#2568), so this is not an edge case, it is
+    /// the machine most readers have: a `0` there would claim the genesis block as their progress,
+    /// beside a badge that correctly says they have got nowhere.
+    ///
+    /// The label must be absent too, not merely its digits. A lone `Chain height` with nothing after
+    /// it reads as a value that failed to load.
+    ///
+    /// **Both peer counts are deliberately non-zero.** The first cut of this test used the honest
+    /// `0 DIG peers` fixture from the test above and failed against correct code, because the `0` it
+    /// caught was that peer count rather than a fabricated height. With neither count at zero, a `0`
+    /// anywhere on this strip can only be a height nobody measured.
+    #[test]
+    fn a_replica_at_no_height_shows_no_height_reading_at_all() {
+        use crate::network::{ChainSync, NoProgress, PeerCount};
+        let said = painted(
+            &on_the_networks(
+                ChainSync::NoProgress(NoProgress::NoHeight),
+                PeerCount::Known(2),
+                PeerCount::Known(5),
+            ),
+            960.0,
+        );
+        assert!(
+            !said.iter().any(|s| s == copy::header::CHAIN_HEIGHT_LABEL),
+            "a replica at no height was given a height reading: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|s| s == "0"),
+            "a replica at no height was drawn as being at block zero: {said:?}"
         );
     }
 

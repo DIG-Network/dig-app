@@ -221,6 +221,52 @@ impl ChainSync {
             Self::Pending | Self::Unknown(_) => None,
         }
     }
+
+    /// How far the replica has actually got, or `None` when it has got nowhere.
+    ///
+    /// The three variants that carry a height are the three the node gave one for. Everything else
+    /// genuinely has no number — and the absence is the point: `NoProgress` exists precisely because
+    /// the wire reported no height, so a `0` here would manufacture the fact this type was written to
+    /// avoid manufacturing (see the module docs).
+    pub fn peak_height(&self) -> Option<u32> {
+        match self {
+            Self::Synced { peak_height }
+            | Self::Syncing { peak_height }
+            | Self::Idle { peak_height } => Some(*peak_height),
+            Self::NoProgress(_) | Self::Pending | Self::Unknown(_) => None,
+        }
+    }
+
+    /// The strip's height reading — the block this replica has reached — or `None` when there is
+    /// none to show.
+    ///
+    /// Always [`ChainSyncTone::Neutral`]. The height is a measurement, and the verdict about it is
+    /// already carried by [`badge`](Self::badge) beside it; painting the number in a warning tone
+    /// would put two opinions about one sync on one line, which is how a strip starts contradicting
+    /// itself. Absent rather than placeheld, for the reason the header's `readings` gives.
+    pub fn height_badge(&self) -> Option<(String, ChainSyncTone)> {
+        self.peak_height()
+            .map(|height| (group_digits(height), ChainSyncTone::Neutral))
+    }
+}
+
+/// Group `value` into thousands with commas — `9140540` becomes `9,140,540`.
+///
+/// A chain height is seven digits and is read at a glance, where `9140540` and `9240540` are the
+/// same shape. Written here rather than pulled in as a dependency because this is the only figure in
+/// the app that needs it, and it is the module that already owns how this reading is worded.
+fn group_digits(value: u32) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (position, digit) in digits.chars().enumerate() {
+        // A separator goes before every digit that opens a group of three, counted from the RIGHT —
+        // never before the first character, or `1000` would come out as `,1,000`.
+        if position > 0 && (digits.len() - position) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// How worried to be about a sync reading.
@@ -573,6 +619,75 @@ mod tests {
             peak_height,
             chia_peer_count,
         }
+    }
+
+    /// **A height is shown when, and only when, the replica actually reached one**
+    /// (dig_ecosystem#2806).
+    ///
+    /// The strip's other badges say what the sync is DOING; this one says how far it has GOT, which
+    /// is the fact that makes a light client visibly a light client — it is the number that moves
+    /// while somebody watches. It is also the number with the most obvious dishonest rendering: a
+    /// replica with no block behind it has no height, and drawing that as `0` would claim the
+    /// genesis block as this machine's progress.
+    ///
+    /// Every heightless state is asserted, not just one, because they arrive by different routes —
+    /// nobody asked yet, the node is too old, the sync never started, the sync is stuck — and a
+    /// derivation that unwrapped a default would turn all four into the same confident zero.
+    #[test]
+    fn a_chain_height_is_shown_only_when_the_replica_has_reached_one() {
+        for (reading, height) in [
+            (ChainSync::Synced { peak_height: 9_140_540 }, 9_140_540),
+            (ChainSync::Syncing { peak_height: 1 }, 1),
+            (ChainSync::Idle { peak_height: 9_139_211 }, 9_139_211),
+        ] {
+            assert_eq!(reading.peak_height(), Some(height));
+        }
+        for heightless in [
+            ChainSync::Pending,
+            ChainSync::Unknown(SyncUnknown::NoNode),
+            ChainSync::NoProgress(NoProgress::NoHeight),
+            ChainSync::NoProgress(NoProgress::NoPeers),
+            ChainSync::NoProgress(NoProgress::NeverStarted),
+        ] {
+            assert_eq!(
+                heightless.peak_height(),
+                None,
+                "{heightless:?} has reached no block, so any figure here would be invented"
+            );
+            assert!(
+                heightless.height_badge().is_none(),
+                "{heightless:?} would be drawn carrying a height it does not have"
+            );
+        }
+    }
+
+    /// **A chain height is grouped, because it is read by a person and it is seven digits long.**
+    ///
+    /// `9140540` and `9240540` differ by a hundred thousand blocks and look identical at a glance,
+    /// which is the whole failure mode of an ungrouped figure in a strip designed to be GLANCED at.
+    /// The boundary cases are asserted alongside a real mainnet height so the grouping cannot be a
+    /// rule that only holds at seven digits.
+    #[test]
+    fn a_chain_height_is_grouped_so_it_can_be_read_at_a_glance() {
+        for (height, shown) in [
+            (0, "0"),
+            (7, "7"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (9_140_540, "9,140,540"),
+            (u32::MAX, "4,294,967,295"),
+        ] {
+            assert_eq!(group_digits(height), shown);
+        }
+        let (word, tone) = ChainSync::Syncing {
+            peak_height: 9_140_540,
+        }
+        .height_badge()
+        .expect("a replica with a height must be able to show it");
+        assert_eq!(word, "9,140,540");
+        // A height is a FACT, not a verdict. The badge beside it already carries the verdict, and a
+        // number painted in the warning tone would be a second, contradictory opinion about it.
+        assert_eq!(tone, ChainSyncTone::Neutral);
     }
 
     /// **The machine every user actually has is NOT drawn as progress** (dig_ecosystem#2569, #2568).

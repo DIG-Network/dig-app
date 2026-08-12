@@ -68,6 +68,12 @@ pub(crate) mod header {
     /// "Chain", not "Sync": the badge beside it is frequently a statement that no syncing is
     /// happening, and a label promising a sync would contradict its own value.
     pub(crate) const CHAIN_LABEL: &str = "Chain";
+    /// The label before the block the chain replica has reached (dig_ecosystem#2806).
+    ///
+    /// "Chain height", not "Block" or "Peak": it has to be distinguishable at a glance from the two
+    /// peer COUNTS it is drawn beside, and a seven-digit figure under a one-word label is exactly
+    /// what a reader would otherwise take for a third count.
+    pub(crate) const CHAIN_HEIGHT_LABEL: &str = "Chain height";
 }
 
 /// The Home pane.
