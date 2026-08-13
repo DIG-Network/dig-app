@@ -425,6 +425,11 @@ mod tests {
                 dig_peers: dig,
                 chia_peers: chia,
                 chia_peer_peak_height: None,
+                // A wallet IS enrolled here. Stated rather than defaulted because the default is an
+                // unresolved subscription, under which the catch-up reading is silent — so every
+                // fixture below that expects a distance would be asserting against a strip that
+                // draws none, and would pass for the wrong reason (dig_ecosystem#2820).
+                watched_addresses: Some(1),
             },
             ..TrayView::default()
         }

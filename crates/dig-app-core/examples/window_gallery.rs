@@ -231,6 +231,10 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
             dig_peers: PeerCount::Known(6),
             chia_peers: PeerCount::Known(4),
             chia_peer_peak_height: Some(6_012_348),
+            // A wallet IS enrolled. The default is an unresolved subscription, under which the
+            // catch-up reading is silent — so a gallery left on it would photograph a strip missing
+            // a reading every real enrolled machine shows (dig_ecosystem#2820).
+            watched_addresses: Some(3),
         },
         ..TrayView::default()
     }
@@ -605,6 +609,10 @@ mod tests {
                 // Well above the replica's own, which is what SYNCING means: the peers have told
                 // this node where the chain is, and it has not copied that far yet.
                 chia_peer_peak_height: Some(6_012_340),
+                // A wallet IS enrolled, which is what makes the trailing heights above mean
+                // anything: with an empty subscription the node never syncs at all and the honest
+                // reading is "Nothing to sync", not a distance (dig_ecosystem#2820).
+                watched_addresses: Some(2),
             },
         }
     }

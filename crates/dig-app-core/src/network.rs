@@ -413,6 +413,19 @@ pub struct NetworkStanding {
     /// `None` is unobservable — no peer has announced anything yet — and is drawn as no reading at
     /// all. Never `0`, which every block is trivially above (dig_ecosystem#2806).
     pub chia_peer_peak_height: Option<u32>,
+    /// How many addresses the wallet replica is following, or `None` when the node has not resolved
+    /// its set yet.
+    ///
+    /// Carried because it decides whether a catch-up DISTANCE means anything at all — see
+    /// [`SyncProgress::NothingToSync`]. This module's `wire()` fixture used to state, correctly for
+    /// its time, that the strip reports the chain and how many addresses the wallet follows is a
+    /// WALLET fact it never reads. That stopped being true the moment the strip began reporting
+    /// progress: a replica with nothing to follow makes no progress BY DESIGN, and a distance drawn
+    /// over it is a growing falsehood rather than a lagging measurement.
+    ///
+    /// `Some(0)` is a MEASURED empty set and licenses the claim. `None` is unresolved — a session
+    /// attached and has not yet worked out its set, which takes real time — and licenses nothing.
+    pub watched_addresses: Option<u32>,
 }
 
 /// How far this machine's replica trails the chain its own Chia peers report — the reading that
@@ -448,6 +461,25 @@ pub enum SyncProgress {
     /// block is momentarily higher. That is a stale announcement, not a fault, and "ahead of the
     /// chain" is not a state there is an honest reading of.
     CaughtUp,
+    /// The wallet follows NO addresses, so there is nothing to catch up to and no distance to state.
+    ///
+    /// # This variant exists because the first cut of this feature shipped a growing lie
+    ///
+    /// A node whose subscription is empty never runs its catch-up loop at all — `dig-wallet`'s
+    /// `sync.rs` refuses an empty puzzle-hash set BY DESIGN, so that a completion flag can never
+    /// declare an un-queried database authoritative. Its `peak_height` is therefore FROZEN, not
+    /// lagging.
+    ///
+    /// That is the default install. Measured on this machine while the feature was written: the
+    /// replica sat at `9,139,211` and never moved while its peers' peak climbed, so the computed
+    /// distance read `1,709`, then `1,754`, `1,817`, `1,820`, rising forever. Drawn as `Behind
+    /// 1,820 blocks` it asserts a sync that is in progress and falling further behind, on a machine
+    /// where nothing is wrong and nothing is syncing — a MORE confident falsehood than the bare
+    /// "Chain syncing" this feature set out to explain.
+    ///
+    /// Checked BEFORE the heights, because both heights are perfectly readable in this state and a
+    /// distance computed from them is arithmetically correct and completely false.
+    NothingToSync,
     /// One of the two heights is missing, so there is no distance to state.
     ///
     /// This is the case the honesty rule is about. `chia_peer_peak_height` is absent on a node
@@ -463,6 +495,20 @@ impl NetworkStanding {
     ///
     /// Both heights or nothing: see [`SyncProgress::CannotTell`].
     pub fn progress(&self) -> SyncProgress {
+        // FIRST, and above the heights: a wallet following no addresses is not behind, it is not
+        // syncing, and both heights are still perfectly readable — so a distance computed here is
+        // arithmetically correct and false. See `SyncProgress::NothingToSync`.
+        //
+        // Only a MEASURED zero says this. `None` is the node not having resolved its subscription
+        // yet, which is a different fact with a different remedy, and it falls through to the
+        // heights below — where an unresolved subscription cannot be distinguished from a real
+        // catch-up, so `CannotTell` is the honest answer rather than a distance nobody can vouch
+        // for.
+        match self.watched_addresses {
+            Some(0) => return SyncProgress::NothingToSync,
+            None => return SyncProgress::CannotTell,
+            Some(_) => {}
+        }
         let (Some(replica), Some(peers)) = (self.sync.peak_height(), self.chia_peer_peak_height)
         else {
             return SyncProgress::CannotTell;
@@ -493,6 +539,14 @@ impl NetworkStanding {
     pub fn catch_up_badge(&self) -> Option<(String, ChainSyncTone)> {
         match self.progress() {
             SyncProgress::CannotTell => None,
+            // Said rather than left silent, and this is the case the whole feature is for: it is
+            // the reading on a default install, and it is the ONE state where "Chain syncing" with
+            // a frozen height is correct behaviour rather than a fault. Silence here would leave
+            // exactly the complaint that opened dig_ecosystem#2820 — a badge claiming a sync, with
+            // nothing to say why nothing moves.
+            SyncProgress::NothingToSync => {
+                Some((NOTHING_TO_SYNC.to_string(), ChainSyncTone::Neutral))
+            }
             SyncProgress::CaughtUp => Some((CAUGHT_UP.to_string(), ChainSyncTone::Good)),
             SyncProgress::Behind { blocks } => {
                 Some((blocks_behind(blocks), ChainSyncTone::Neutral))
@@ -525,6 +579,11 @@ impl NetworkStanding {
             dig_peers: PeerCount::Unknown(reason.clone()),
             chia_peers: PeerCount::Unknown(reason),
             chia_peer_peak_height: None,
+            // Same reasoning as the peak above, and it matters more: an unreachable node has not
+            // said its subscription is empty, and `Some(0)` here would claim it had — turning "we
+            // could not ask" into "there is nothing to sync", which is a statement about the
+            // machine rather than about the asking.
+            watched_addresses: None,
         }
     }
 }
@@ -546,6 +605,13 @@ pub const PEERS_UNOBSERVABLE: &str = "Not reported";
 /// statement about the DISTANCE — it says the gap is closed, and deliberately not that the sync has
 /// finished, which is the node's to report and is carried by [`SYNC_SYNCED`] beside it.
 pub const CAUGHT_UP: &str = "Caught up";
+/// The catch-up word for a wallet that follows no addresses (dig_ecosystem#2820).
+///
+/// States the SYSTEM's condition, not the user's: "Nothing to sync" is true of the machine and
+/// implies no fault, where "No wallet" would read as an error on a default install that is behaving
+/// exactly as designed. Under the `Behind` label it is also the literal answer to how far behind the
+/// replica is — it is behind by nothing, because there is nothing to follow.
+pub const NOTHING_TO_SYNC: &str = "Nothing to sync";
 /// The badge word for a replica that is caught up and connected.
 pub const SYNC_SYNCED: &str = "Chain synced";
 /// The badge word for a sync that is running and has reached a block.
@@ -617,10 +683,14 @@ fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkS
     // Both readings come off the SAME status result, so the height the peers announced and the
     // phase it is judged against can never be from two different moments — which is exactly the
     // drift a second call would introduce between two figures a reader compares side by side.
-    let (sync, chia_peer_peak_height) =
+    let (sync, chia_peer_peak_height, watched_addresses) =
         match control::call_control_result(endpoint, &WalletSyncStatusParams {}, token, timeout) {
-            Ok(result) => (ChainSync::of_status(&result), result.chia_peer_peak_height),
-            Err(failure) => (ChainSync::Unknown(classify(failure)), None),
+            Ok(result) => (
+                ChainSync::of_status(&result),
+                result.chia_peer_peak_height,
+                result.watched_addresses,
+            ),
+            Err(failure) => (ChainSync::Unknown(classify(failure)), None, None),
         };
     let (dig_peers, chia_peers) =
         match control::call_control_result(endpoint, &PeerCountsParams {}, token, timeout) {
@@ -648,6 +718,7 @@ fn read_once(endpoint: &str, token: Option<&str>, timeout: Duration) -> NetworkS
         dig_peers,
         chia_peers,
         chia_peer_peak_height,
+        watched_addresses,
     }
 }
 
@@ -793,11 +864,18 @@ mod tests {
     use super::*;
     use crate::test_support::node::{FakeNode, SyncReply};
 
-    /// A standing carrying just the two heights the catch-up reading is computed from.
+    /// A standing carrying the two heights the catch-up reading is computed from, for a wallet that
+    /// IS enrolled.
+    ///
+    /// `watched_addresses` is stated rather than defaulted, and it is the reason these fixtures say
+    /// anything at all: the default is `None` — an unresolved subscription — under which every
+    /// reading here would be `CannotTell` and every distance assertion would be vacuous. One
+    /// followed address is the smallest honest "a wallet is enrolled".
     fn heights(sync: ChainSync, chia_peer_peak_height: Option<u32>) -> NetworkStanding {
         NetworkStanding {
             sync,
             chia_peer_peak_height,
+            watched_addresses: Some(1),
             ..NetworkStanding::default()
         }
     }
@@ -870,6 +948,92 @@ mod tests {
                 "{missing}: the strip must stay silent rather than draw a distance nobody measured"
             );
         }
+    }
+
+    /// **A wallet following NO addresses is not behind — it has nothing to sync**
+    /// (dig_ecosystem#2820).
+    ///
+    /// This is the defect the first cut of this feature shipped, and it is the one this whole
+    /// reading exists to avoid rather than commit. A node whose subscription is empty never runs its
+    /// catch-up loop at all — `dig-wallet`'s `sync.rs` refuses an empty puzzle-hash set BY DESIGN,
+    /// so a completion flag can never declare an un-queried database authoritative — so its
+    /// `peak_height` is FROZEN, not lagging.
+    ///
+    /// **Both heights are perfectly readable in this state**, which is what makes it dangerous: the
+    /// subtraction succeeds, the answer is arithmetically correct, and it is false. Measured on the
+    /// machine this was written on, the distance read 1,709 then 1,754 then 1,817 then 1,820 while
+    /// the replica never moved — a growing assertion that a sync was falling behind, on a default
+    /// install where nothing was wrong. That is more confidently untrue than the bare "Chain
+    /// syncing" this feature set out to explain.
+    ///
+    /// The fixture therefore uses REAL trailing heights rather than equal ones: with equal heights
+    /// the case would be satisfied by the `CaughtUp` arm and the ordering would be pinned by
+    /// nothing. The control immediately below varies ONLY `watched_addresses`, so what is asserted
+    /// is that the enrolment decides it — not the heights, which are identical in both halves.
+    #[test]
+    fn a_wallet_following_no_addresses_has_nothing_to_sync_rather_than_a_distance() {
+        let unenrolled = NetworkStanding {
+            watched_addresses: Some(0),
+            ..heights(
+                ChainSync::Syncing {
+                    peak_height: REPLICA,
+                },
+                Some(PEERS),
+            )
+        };
+
+        assert_eq!(
+            unenrolled.progress(),
+            SyncProgress::NothingToSync,
+            "an empty subscription never syncs, so there is no distance to be behind by"
+        );
+        let (word, tone) = unenrolled
+            .catch_up_badge()
+            .expect("the default install is exactly the machine this reading is FOR");
+        assert_eq!(word, NOTHING_TO_SYNC);
+        assert!(
+            !word.chars().any(|c| c.is_ascii_digit()),
+            "a digit here is the growing falsehood this variant exists to delete: {word:?}"
+        );
+        assert_eq!(
+            tone,
+            ChainSyncTone::Neutral,
+            "a default install is behaving as designed and must not be painted as a fault"
+        );
+
+        // THE CONTROL: the same heights, one followed address. Without it, an implementation that
+        // returned `NothingToSync` for everything would satisfy every assertion above.
+        assert_eq!(
+            heights(
+                ChainSync::Syncing {
+                    peak_height: REPLICA,
+                },
+                Some(PEERS),
+            )
+            .progress(),
+            SyncProgress::Behind { blocks: 1_709 },
+            "one followed address and the very same heights is a real catch-up"
+        );
+
+        // UNRESOLVED is not empty. A node that has attached a session and not yet worked out its
+        // set says `None`, and corroboration takes real time. Claiming "nothing to sync" there
+        // would state a fact about the machine that nobody measured; claiming a distance would be
+        // the original defect. Silence is the only honest reading, and it is what a `None` that
+        // fell through to the heights below would NOT produce — both heights are present here.
+        assert_eq!(
+            NetworkStanding {
+                watched_addresses: None,
+                ..heights(
+                    ChainSync::Syncing {
+                        peak_height: REPLICA,
+                    },
+                    Some(PEERS),
+                )
+            }
+            .progress(),
+            SyncProgress::CannotTell,
+            "an unresolved subscription is not a measured empty one"
+        );
     }
 
     /// **A replica level with — or above — its peers reads as caught up, never as a giant number.**
