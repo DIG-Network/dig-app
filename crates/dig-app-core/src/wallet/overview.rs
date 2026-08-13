@@ -666,7 +666,8 @@ pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> 
     }
 }
 
-/// The clause that says whose number this is, or `""` when it is the wallet's own.
+/// The parenthetical a menu row carries after the figures, or `""` when a replica is level with
+/// the chain.
 ///
 /// # Why the row cannot stay silent about provenance
 ///
@@ -679,10 +680,10 @@ pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> 
 /// It is not hypothetical: until node-side enrolment lands (dig_ecosystem#2823) EVERY live read
 /// returns the fallback tier, so on a real install today this row is the oracle case, always.
 ///
-/// [`Replica`](BalanceAsOf::Replica) takes no suffix, and that is the point of the split rather than
-/// an omission: it IS the wallet's own node, so the default reading of the row is already true. Its
-/// as-of height belongs in the window, where there is room to state a height without crowding the
-/// figures.
+/// [`Replica`](BalanceAsOf::Replica) takes no suffix only when it is LEVEL with the chain per
+/// [`is_level`]: then it IS the wallet's own current reading, so the default reading of the row is
+/// already true. A replica still behind renders ` (syncing)` instead. Its as-of height belongs in
+/// the window, where there is room to state a height without crowding the figures.
 ///
 /// Digit-free, like [`menu_reason`], so the no-numeral rule stays mechanical — the only numerals a
 /// row may carry are the figures themselves.
@@ -700,8 +701,6 @@ pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> 
 /// `dig-node-control-interface`'s `WalletBalanceResult` states that absent "means the answering node
 /// predates tier disclosure". So it names the fact AND the remedy, in the shortest form that does
 /// both.
-/// The parenthetical a menu row carries after the figures, or nothing when the figure needs none.
-///
 /// # Why the oracle clause is written so tightly
 ///
 /// A row cannot wrap, and the widest a `u64` pair of figures can render is 63 characters against a
