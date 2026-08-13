@@ -2072,8 +2072,22 @@ contract-first pattern as the §5.3 session methods). The engine's chain access 
     nothing, so its `balance: 0` is no data rather than no money.
   - `source: "fallback"` MUST be shown as a third party's number and MUST NOT be given an as-of height,
     which such an answer does not carry.
+  - `source: "db"` with `synced: false` and `balance: 0` MUST be an UNKNOWN, whether or not a
+    `peak_height` is present. A replica that has not finished its first sync cannot distinguish "this
+    address holds nothing" from "I have not read this address yet", and a dated zero states the first
+    with a precision that reads as corroboration. A `synced: true` zero IS a fact and MUST render as
+    `0`.
   - An ABSENT `source` MUST be reported as an undisclosed provenance and MUST NOT be assumed to be a
     tier.
+
+**Saying that a node is still syncing (MUST).** Every surface that shows a balance MUST show, BESIDE
+the figure, whether the node is still catching up — the tray row, the Wallet pane and the window
+sentence alike. A reading is treated as LEVEL with the chain when the node reported `synced: true`, or
+when its `peak_height` has reached the peak the node's peers announced; where neither is known it MUST
+NOT be presented as current. A level reading MUST carry NO syncing indicator: an indicator that never
+comes off is one a person learns to ignore. A `fallback` reading MUST carry the indicator — the oracle
+answered because the replica has not reached the address yet — while its FIGURE MUST NOT be described
+as out of date, the oracle being at the chain tip.
 
 **Reading the balance for real (MUST).** dig-app MUST obtain the balance by ASKING a node, never by
 asserting an outcome it did not test:
