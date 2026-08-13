@@ -141,6 +141,17 @@ pub mod node {
             /// How long the node takes to give it.
             delay: Duration,
         },
+        /// A healthy node that also answers the three key-enrolment methods —
+        /// `control.wallet.watched` and `control.wallet.watch` — over a REAL enrolled set that a
+        /// watch call mutates (dig_ecosystem#2848).
+        ///
+        /// Stateful rather than canned, because every property worth testing here is about the
+        /// DIFFERENCE between what the node holds and what the app sends: a fake that replayed a
+        /// fixed list would answer a client that reconciles and one that blindly re-sends its whole
+        /// set identically. Kept BEHIND the control token, as the contract gates all three
+        /// ([`ControlMethod::is_open_read`] is false for them) — the answer names the node's own
+        /// key set, not the caller's.
+        WalletWatch(WatchReply),
         /// A healthy node that also answers `control.wallet.coins` per the given [`CoinsReply`],
         /// serving it as the OPEN read the 0.6.0 contract declares it (dig_ecosystem#2378).
         WalletCoins(CoinsReply),
@@ -607,6 +618,38 @@ pub mod node {
         }
     }
 
+    /// How a [`FakeNode`] should answer the key-enrolment methods.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum WatchReply {
+        /// Serve a real enrolled set, seeded with these keys. `control.wallet.watched` returns the
+        /// current set and `control.wallet.watch` adds to it, so re-watching an existing key is the
+        /// no-op the live node performs.
+        Holding(Vec<String>),
+        /// Refuse both methods, in the node's error envelope: a numeric wire code plus the stable
+        /// `data.code` symbol a client is contractually required to branch on.
+        Rejected {
+            /// The numeric JSON-RPC error code.
+            code: i64,
+            /// The stable `data.code` symbol.
+            symbol: String,
+        },
+    }
+
+    impl WatchReply {
+        /// A node whose enrolled set already contains `keys`.
+        pub fn holding(keys: &[String]) -> Self {
+            WatchReply::Holding(keys.to_vec())
+        }
+
+        /// A refusal carrying `code` + its stable `symbol`.
+        pub fn rejected(code: i64, symbol: &str) -> Self {
+            WatchReply::Rejected {
+                code,
+                symbol: symbol.to_string(),
+            }
+        }
+    }
+
     /// A fake control plane on loopback, serving requests until dropped (dropping it joins the
     /// server thread).
     pub struct FakeNode {
@@ -615,6 +658,13 @@ pub mod node {
         requests: mpsc::Receiver<String>,
         served: Arc<AtomicUsize>,
         server: Option<JoinHandle<()>>,
+        /// The keys this node currently follows, shared with the server thread — the enrolment
+        /// fixture's whole point (see [`Behaviour::WalletWatch`]). Empty and unused for every other
+        /// behaviour.
+        enrolled: Arc<std::sync::Mutex<Vec<String>>>,
+        /// The bodies of the `control.wallet.watch` calls that reached the wire, in order, so a test
+        /// can assert WHAT was sent rather than only where the node ended up.
+        watch_requests: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl FakeNode {
@@ -676,6 +726,12 @@ pub mod node {
             Self::with_behaviour(Behaviour::Chain(reply))
         }
 
+        /// A fake that answers the key-enrolment methods over a real, mutable enrolled set
+        /// (dig_ecosystem#2848).
+        pub fn serving_watch(reply: WatchReply) -> Self {
+            Self::with_behaviour(Behaviour::WalletWatch(reply))
+        }
+
         /// A fake with an explicit [`Behaviour`], bound to an ephemeral loopback port.
         pub fn with_behaviour(behaviour: Behaviour) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
@@ -683,14 +739,41 @@ pub mod node {
             let (tx, requests) = mpsc::channel();
             let served = Arc::new(AtomicUsize::new(0));
             let counter = Arc::clone(&served);
-            let server = std::thread::spawn(move || serve(listener, behaviour, tx, counter));
+            let enrolled = Arc::new(std::sync::Mutex::new(match &behaviour {
+                Behaviour::WalletWatch(WatchReply::Holding(keys)) => keys.clone(),
+                _ => Vec::new(),
+            }));
+            let watch_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let set = Arc::clone(&enrolled);
+            let sent = Arc::clone(&watch_requests);
+            let server =
+                std::thread::spawn(move || serve(listener, behaviour, tx, counter, set, sent));
             Self {
                 addr,
                 token: Self::TOKEN.to_string(),
                 requests,
                 served,
                 server: Some(server),
+                enrolled,
+                watch_requests,
             }
+        }
+
+        /// The keys this node currently follows — the fixture's own state, read back so a test can
+        /// assert what enrolment actually did to the node rather than what the client believed.
+        pub fn enrolled(&self) -> Vec<String> {
+            self.enrolled
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        /// The `control.wallet.watch` request bodies that reached the wire, in order.
+        pub fn watch_requests(&self) -> Vec<String> {
+            self.watch_requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
         }
 
         /// How many requests the fake has actually served.
@@ -743,6 +826,8 @@ pub mod node {
         behaviour: Behaviour,
         tx: mpsc::Sender<String>,
         served: Arc<AtomicUsize>,
+        enrolled: Arc<std::sync::Mutex<Vec<String>>>,
+        watch_requests: Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         while let Ok((mut stream, _)) = listener.accept() {
             let request = read_request(&mut stream);
@@ -835,6 +920,18 @@ pub mod node {
                     chain_result(reply, chain_method.expect("checked above"), &request),
                 ),
                 _ if !authorized => (401, "401: unauthorized control request".to_string()),
+                // Authorized, and asking about — or changing — the enrolled set. Both arms sit
+                // behind the token gate above, exactly as the real node gates them.
+                Behaviour::WalletWatch(reply) if is(ControlMethod::WalletWatched) => {
+                    (200, watched_result(reply, &enrolled))
+                }
+                Behaviour::WalletWatch(reply) if is(ControlMethod::WalletWatch) => {
+                    watch_requests
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(request.clone());
+                    (200, watch_result(reply, &enrolled, &request))
+                }
                 // Authorized, and asking for the hosted-store list: answer it. Any OTHER method
                 // falls through to the status body below, so a fake set up for stores still
                 // supports a client that probes `control.status` first.
@@ -856,6 +953,7 @@ pub mod node {
                 | Behaviour::WalletArrivals(_)
                 | Behaviour::WalletBroadcast(_)
                 | Behaviour::WalletSync(_)
+                | Behaviour::WalletWatch(_)
                 | Behaviour::HostedStores(_)
                 | Behaviour::SlowHostedStores { .. }
                 | Behaviour::Chain(_) => (200, status_result()),
@@ -984,6 +1082,67 @@ pub mod node {
     }
 
     /// The `control.wallet.coins` reply, field-for-field as the 0.6.0 contract defines it.
+    /// The `control.wallet.watched` reply: the node's CURRENT enrolled set, not a canned list.
+    fn watched_result(reply: &WatchReply, enrolled: &Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        if let WatchReply::Rejected { code, symbol } = reply {
+            return rejection(*code, symbol, "watched read");
+        }
+        let public_keys = enrolled.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "public_keys": public_keys }
+        })
+        .to_string()
+    }
+
+    /// The `control.wallet.watch` reply, having actually ADDED the request's keys to the set.
+    ///
+    /// Idempotent exactly as the live node is — a key already present is not added twice and is not
+    /// counted in `added` — so a client that re-sends its whole set every time is indistinguishable
+    /// from one that reconciles WHEN JUDGED BY THE END STATE. That is deliberate: it forces a test
+    /// that cares about the difference to assert on the request bodies instead.
+    fn watch_result(
+        reply: &WatchReply,
+        enrolled: &Arc<std::sync::Mutex<Vec<String>>>,
+        request: &str,
+    ) -> String {
+        if let WatchReply::Rejected { code, symbol } = reply {
+            return rejection(*code, symbol, "enrolment");
+        }
+        let sent: Vec<String> = serde_json::from_str::<serde_json::Value>(body_of(request))
+            .ok()
+            .and_then(|value| {
+                Some(
+                    value["params"]["public_keys"]
+                        .as_array()?
+                        .iter()
+                        .filter_map(|key| key.as_str().map(str::to_string))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        let mut set = enrolled.lock().unwrap_or_else(|e| e.into_inner());
+        let mut added = 0u32;
+        for key in sent {
+            if !set.contains(&key) {
+                set.push(key);
+                added += 1;
+            }
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "added": added, "watched": set.len() }
+        })
+        .to_string()
+    }
+
+    /// The JSON body of a raw HTTP request — everything after the blank line.
+    fn body_of(request: &str) -> &str {
+        request.split_once("\r\n\r\n").map_or(request, |(_, b)| b)
+    }
+
     fn coins_result(reply: &CoinsReply) -> String {
         let (coins, synced, peak_height) = match reply {
             CoinsReply::Coins(coins) => (coins, true, Some(5_412_009u32)),

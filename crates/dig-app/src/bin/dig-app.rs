@@ -1564,6 +1564,22 @@ mod tray {
             // Where this node stands on BOTH networks (dig_ecosystem#2569). The poller owns the
             // cadence, and every decision about what the readings MEAN lives in
             // `dig_app_core::network`, because a binary is a test-free zone.
+            // Whether the node follows this account's addresses, and the call that makes it so
+            // (dig_ecosystem#2848). Driven from the repaint rather than from a lifecycle hook
+            // because that is what makes it cover every way an account becomes available — created,
+            // unlocked, imported, a profile added — and every way the NODE changes underneath it:
+            // the reconciler re-asks whenever the endpoint or the key set differs from what it last
+            // asked about, and a locked account derives no keys and so asks nothing.
+            enrolment: match status.read() {
+                Ok(status) => key_enrolment().observe(
+                    &status.engine,
+                    &session
+                        .map(|s| s.residency.wallet_public_keys_hex())
+                        .unwrap_or_default(),
+                ),
+                // A poisoned lock says nothing about the node's enrolled set.
+                Err(_) => dig_app_core::wallet::enrol::Enrolment::default(),
+            },
             network: match status.read() {
                 Ok(status) => network_poller().observe(&status.engine),
                 // A poisoned lock says nothing about either network, and "nothing" is not zero.
@@ -1640,6 +1656,17 @@ mod tray {
     /// A single instance for the same reason [`balance_poller`] is one: a per-snapshot poller would
     /// have an empty cache every time and turn the twice-a-second repaint into twice-a-second node
     /// reads.
+    /// The process-wide key-enrolment reconciler (dig_ecosystem#2848).
+    ///
+    /// A single instance for the same reason the balance poller is one: it remembers which node it
+    /// asked and what it asked about, and a per-snapshot instance would re-ask twice a second. It
+    /// runs its exchange on a worker, so this call never blocks the repaint.
+    fn key_enrolment() -> &'static dig_app_core::wallet::enrol::KeyEnrolment {
+        static ENROLMENT: std::sync::OnceLock<dig_app_core::wallet::enrol::KeyEnrolment> =
+            std::sync::OnceLock::new();
+        ENROLMENT.get_or_init(dig_app_core::wallet::enrol::KeyEnrolment::default)
+    }
+
     fn network_poller() -> &'static dig_app_core::network::NodeNetworkStanding {
         static POLLER: std::sync::OnceLock<dig_app_core::network::NodeNetworkStanding> =
             std::sync::OnceLock::new();

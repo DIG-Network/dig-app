@@ -2077,6 +2077,43 @@ asserting an outcome it did not test:
   `UNAUTHORIZED` mean this build does not serve the read; `WALLET_NOT_SYNCED` means it is catching up;
   `WALLET_NO_CHAIN_SOURCE` means it serves the read but has no chain to read from. Those three MUST NOT
   be collapsed into one another — they call for an upgrade, a wait, and a node connection respectively.
+- **`WALLET_NOT_SYNCED` MUST be narrowed before it is spoken (MUST).** The symbol covers at least three
+  situations whose remedies differ, and dig-app MUST tell them apart from the node's own sync payload —
+  `peak_height` against `chia_peer_peak_height`, and the MEASURED `watched_addresses` — together with
+  whether this app's keys are enrolled (below):
+  - the replica trails the peak its Chia peers announced → it is genuinely catching up, and waiting is
+    the remedy;
+  - `watched_addresses` is a measured `0` → the node follows none of this account's addresses, so it
+    holds no record of this account's coins and the remedy is ENROLMENT, not waiting. This reading is
+    answered from the watched count BEFORE either height is consulted, so the sentence shown for it
+    MUST NOT assert that the node is caught up (nor that it is behind) — a first run that is genuinely
+    still syncing with nothing enrolled reaches it too;
+  - the same, with this app's keys already accepted by the node → the node begins following them at its
+    next start, and there is nothing to do.
+  An UNRESOLVED `watched_addresses` (`null`, not a measured zero) licenses none of these narrower
+  claims and MUST fall back to the unnarrowed reason. A balance the node SERVED — including a zero —
+  MUST NOT be re-explained by any of them: a measured zero is a fact.
+
+**Enrolling the account's addresses (MUST).** A node follows only the keys it has been asked to follow,
+so dig-app MUST register its account's WALLET public keys with the node over `control.wallet.watch`:
+
+- The key registered MUST be the **synthetic** wallet public key — the same key whose
+  `StandardArgs::curry_tree_hash` is the address dig-app displays. dig-node curries an enrolled key
+  DIRECTLY, so any other key of the account makes it follow an address the user does not hold, with no
+  error reported anywhere.
+- The wire form is lowercase 96-hex, unprefixed.
+- Enrolment MUST be a RECONCILIATION against `control.wallet.watched`, not a fire-and-forget: the app
+  MUST NOT assume a node remembers, and MUST re-assert against a node that was restarted or replaced.
+  Both methods are TOKEN-GATED — they answer with, or mutate, the node's own key set.
+- Registration MUST NOT block the surface that drives it, and MUST NOT be reported as enrolment until
+  the node has answered.
+- **A FAILED exchange MUST be retried after a bounded interval (MUST).** The expected failure is a node
+  that was slow at startup, and an implementation that remembers a failure for the life of the process
+  leaves the account unenrolled for the whole session while the surface tells its owner that DIG
+  registers addresses while unlocked. The memo MUST expire rather than be cleared: clearing it makes
+  the repaint rate the retry rate. A SUCCESS is not re-asked on a timer — only a change of endpoint or
+  of key set invalidates it.
+- No secret material crosses this boundary: a public key confers watching, never spending (§908).
 - The read MUST be throttled independently of the repaint rate, because the tray snapshot is taken on
   every repaint and a balance is a rate-limited chain read.
 - **The read's timeout MUST be sized for a chain round-trip and MUST NOT be the §5.3 ladder's probe

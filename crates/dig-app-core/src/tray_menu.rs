@@ -333,6 +333,14 @@ pub struct TrayView {
     /// The default — every reading `Pending` — is the truth before the first poll, and is
     /// deliberately not "synced with zero peers". See [`crate::network`].
     pub network: crate::network::NetworkStanding,
+    /// Whether the node has this account's addresses enrolled (dig_ecosystem#2848).
+    ///
+    /// Carried because it is what tells apart the two reasons a caught-up node holds no figure: one
+    /// where the addresses were never registered, and one where they were and the node picks them up
+    /// at its next start (dig_ecosystem#2826). Without it both render as the third situation
+    /// entirely — "still catching up" — which is what a live user saw beside a window reporting the
+    /// chain synced.
+    pub enrolment: crate::wallet::enrol::Enrolment,
 }
 
 impl TrayView {
@@ -380,6 +388,7 @@ impl TrayView {
             profiles,
             profile_creation,
             network,
+            enrolment,
         } = self;
 
         running == &other.running
@@ -455,6 +464,10 @@ impl TrayView {
             // avoid (dig_ecosystem#2206). It cannot change per tick: the poller returns a CACHED
             // reading for a whole `REFRESH_INTERVAL`.
             && network == &other.network
+            // The Wallet window's explanation for a missing figure NAMES this, so an enrolment that
+            // landed must repaint — otherwise the window keeps blaming the chain after the reason
+            // stopped being the chain.
+            && enrolment == &other.enrolment
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -2235,6 +2248,9 @@ mod tests {
             ("installed_apps", |v| {
                 v.installed_apps = crate::apps::AppPresence::Known(Vec::new())
             }),
+            ("enrolment", |v| {
+                v.enrolment = crate::wallet::enrol::Enrolment::Registered
+            }),
             ("network", |v| {
                 v.network.dig_peers = crate::network::PeerCount::Known(6)
             }),
@@ -2258,7 +2274,7 @@ mod tests {
         // The table is only a guard if it is complete. `renders_same_as` destructures exhaustively, so
         // the field count is fixed at compile time; this pins the table to it.
         assert_eq!(
-            19,
+            20,
             cases.len(),
             "TrayView gained or lost a field — add or remove its case above"
         );
@@ -2424,6 +2440,8 @@ mod tests {
             // pre-first-poll default rather than varying them. `network::tests` and the header's own
             // suite exercise the states.
             network: crate::network::NetworkStanding::default(),
+            // Nothing has been asked of a node in this fixture, which is what the default states.
+            enrolment: crate::wallet::enrol::Enrolment::default(),
             account: Some(account),
             receive_address,
             address_fault: None,
