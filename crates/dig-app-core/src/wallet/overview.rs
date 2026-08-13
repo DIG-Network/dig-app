@@ -503,12 +503,55 @@ pub fn as_of_sentence(as_of: BalanceAsOf) -> String {
 pub fn menu_balance_label(balance: &BalanceReading) -> String {
     match balance {
         BalanceReading::Pending => "Balance: checking…".to_string(),
-        BalanceReading::Known { balances, .. } => format!(
-            "Balance: {} $DIG · {} XCH",
+        BalanceReading::Known { balances, as_of } => format!(
+            "Balance: {} $DIG · {} XCH{}",
             format_amount(Asset::Dig, balances.dig_units),
-            format_amount(Asset::Xch, balances.xch_mojos)
+            format_amount(Asset::Xch, balances.xch_mojos),
+            menu_provenance(*as_of)
         ),
         BalanceReading::Unknown(why) => format!("Balance not known — {}…", menu_reason(why)),
+    }
+}
+
+/// The clause that says whose number this is, or `""` when it is the wallet's own.
+///
+/// # Why the row cannot stay silent about provenance
+///
+/// The window explains the provenance in a sentence; this row had no room for one and therefore
+/// said nothing — which is not neutral. A bare `Balance: … XCH` on a menu is read as *your wallet's
+/// balance*, so an oracle figure shown that way is the app presenting a third party's number as its
+/// own view of the user's money. That is the money-provenance claim the whole `as_of` split exists
+/// to keep honest, and it was being dropped at exactly the surface a person glances at most.
+///
+/// It is not hypothetical: until node-side enrolment lands (dig_ecosystem#2823) EVERY live read
+/// returns the fallback tier, so on a real install today this row is the oracle case, always.
+///
+/// [`Replica`](BalanceAsOf::Replica) takes no suffix, and that is the point of the split rather than
+/// an omission: it IS the wallet's own node, so the default reading of the row is already true. Its
+/// as-of height belongs in the window, where there is room to state a height without crowding the
+/// figures.
+///
+/// Digit-free, like [`menu_reason`], so the no-numeral rule stays mechanical — the only numerals a
+/// row may carry are the figures themselves.
+///
+/// # Why these are so short
+///
+/// The window's wording is a sentence; these are the same facts at menu width. The row's budget is
+/// what is left of 80 characters after two figures, and two `u64` amounts spend 61 of them on their
+/// own — so the first draft (`(public chain service)`) made the widest row 86 characters wide.
+/// `every_menu_label_stays_short_including_a_hostile_upstream_error` now measures the widest figures
+/// against EVERY provenance, so a longer rewording fails loudly rather than silently overflowing an
+/// OS menu.
+///
+/// `(older node)` is the contract's own reading of an absent `source`, not an inference from one:
+/// `dig-node-control-interface`'s `WalletBalanceResult` states that absent "means the answering node
+/// predates tier disclosure". So it names the fact AND the remedy, in the shortest form that does
+/// both.
+fn menu_provenance(as_of: BalanceAsOf) -> &'static str {
+    match as_of {
+        BalanceAsOf::Replica { .. } => "",
+        BalanceAsOf::Oracle => " (public source)",
+        BalanceAsOf::Undisclosed => " (older node)",
     }
 }
 
@@ -903,6 +946,65 @@ mod tests {
         );
     }
 
+    /// **A figure that is NOT the wallet's own says so on the menu row too** (dig_ecosystem#2824).
+    ///
+    /// The window explains provenance in a sentence and this row had no room for one, so it said
+    /// nothing — which is not neutral. A bare `Balance: … XCH` on a menu is read as *your wallet's
+    /// balance*, so an oracle figure rendered that way is a third party's number presented as the
+    /// app's own view of the user's money.
+    ///
+    /// Not hypothetical: until node-side enrolment lands (#2823) every live read returns the
+    /// fallback tier, so on a real install today this row is the oracle case, always.
+    ///
+    /// The `Replica` control is the half that makes this a distinction rather than a decoration. A
+    /// suffix on every reading would satisfy the two assertions below and be wrong — the wallet's
+    /// own node needs no disclaimer, and one there would teach a person to ignore the parenthetical
+    /// exactly when it starts carrying information.
+    #[test]
+    fn a_figure_that_is_not_the_wallets_own_is_labelled_on_the_menu_row() {
+        let row = |as_of| {
+            menu_balance_label(&BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of,
+            })
+        };
+
+        let oracle = row(BalanceAsOf::Oracle);
+        assert!(
+            oracle.contains("public source"),
+            "an oracle figure must not read as the wallet's own: {oracle}"
+        );
+        let undisclosed = row(BalanceAsOf::Undisclosed);
+        assert!(
+            undisclosed.contains("older node"),
+            "an undisclosed tier must not read as the wallet's own: {undisclosed}"
+        );
+        assert_ne!(
+            oracle, undisclosed,
+            "a third party's number and an unstated source are different claims"
+        );
+
+        // THE CONTROL: the wallet's own node carries no disclaimer, because the row's default
+        // reading is already true of it.
+        let replica = row(BalanceAsOf::Replica { height: 7_000_000 });
+        assert_eq!(
+            replica, "Balance: 2.5 $DIG · 1.25 XCH",
+            "a replica reading IS the wallet's own and must not be qualified: {replica}"
+        );
+
+        // The figures survive the suffix — a label that dropped them would satisfy every
+        // `contains` above.
+        for labelled in [&oracle, &undisclosed] {
+            assert!(
+                labelled.contains("2.5 $DIG") && labelled.contains("1.25 XCH"),
+                "the provenance must be added to the figures, not instead of them: {labelled}"
+            );
+        }
+    }
+
     /// A menu row cannot wrap or scroll, so EVERY label this function can emit is bounded — not just
     /// the ones someone remembered to measure.
     ///
@@ -920,14 +1022,24 @@ mod tests {
         labels.push(menu_balance_label(&BalanceReading::Unknown(
             BalanceUnknown::ReadFailed("x".repeat(4000)),
         )));
-        // The widest KNOWN reading a u64 pair can produce, so the bound covers the figures too.
-        labels.push(menu_balance_label(&BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: u64::MAX,
-                dig_units: u64::MAX,
-            },
-            as_of: BalanceAsOf::Replica { height: 7_000_000 },
-        }));
+        // The widest KNOWN reading a u64 pair can produce, so the bound covers the figures too —
+        // and once for EVERY provenance, because the suffix is part of the row's width and the
+        // longest one lands on the case that is universal today (dig_ecosystem#2824). Measured with
+        // only the unsuffixed `Replica` here, this bound would have been checked against the one
+        // reading no real install can currently produce.
+        for as_of in [
+            BalanceAsOf::Replica { height: 7_000_000 },
+            BalanceAsOf::Oracle,
+            BalanceAsOf::Undisclosed,
+        ] {
+            labels.push(menu_balance_label(&BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: u64::MAX,
+                    dig_units: u64::MAX,
+                },
+                as_of,
+            }));
+        }
 
         for label in &labels {
             assert!(
