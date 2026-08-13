@@ -1015,6 +1015,28 @@ mod tests {
             "one followed address and the very same heights is a real catch-up"
         );
 
+        // THE BRAND-NEW INSTALL, and the case that pins the ORDER (dig_ecosystem#2820 re-gate).
+        //
+        // Every fixture above carries a replica height, so all of them are answered identically
+        // whether the enrolment check runs before the heights or after: demote it and the whole
+        // suite stays green. This one differs, because it has NO height — a machine that has just
+        // installed, follows nothing, and has copied nothing.
+        //
+        // Enrolment first says `NothingToSync`: there is nothing to follow, which is the true and
+        // useful sentence. Heights first says `CannotTell` and the strip falls silent, leaving a
+        // bare "Chain syncing" on the single most common machine this feature exists for — the
+        // exact complaint that opened the ticket, on day one of every install.
+        assert_eq!(
+            NetworkStanding {
+                watched_addresses: Some(0),
+                ..heights(ChainSync::NoProgress(NoProgress::NoHeight), Some(PEERS))
+            }
+            .progress(),
+            SyncProgress::NothingToSync,
+            "a fresh install follows nothing AND has copied nothing: the enrolment is the answer, \
+             and it must be read BEFORE the missing height turns this into a silence"
+        );
+
         // UNRESOLVED is not empty. A node that has attached a session and not yet worked out its
         // set says `None`, and corroboration takes real time. Claiming "nothing to sync" there
         // would state a fact about the machine that nobody measured; claiming a distance would be
@@ -1138,9 +1160,16 @@ mod tests {
             phase,
             peak_height,
             chia_peer_count,
-            // Not a parameter, because this module never reads it: how many addresses the wallet
-            // follows is a WALLET fact, and the strip reports the chain. Pinned rather than
-            // defaulted so that stays a decision somebody made.
+            // Not a parameter, because every caller of `wire()` feeds it to `ChainSync::of_status`,
+            // and the PHASE derivation does not read this field. Pinned rather than defaulted so
+            // that stays a decision somebody made.
+            //
+            // This comment used to say the MODULE never reads it — that how many addresses the
+            // wallet follows is a WALLET fact while the strip reports the chain. That stopped being
+            // true at `NetworkStanding::progress`, which reads it decisively: a replica following
+            // nothing never syncs, so a catch-up distance computed over it is arithmetically
+            // correct and false (dig_ecosystem#2820). The narrower claim above is the one that
+            // still holds, and it is the one that justifies the pin.
             watched_addresses: None,
             // Also not a parameter, and for a sharper reason than the above: this module reads it
             // but `ChainSync` deliberately does not. The peers' announced peak is carried on
