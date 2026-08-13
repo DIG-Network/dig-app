@@ -56,7 +56,7 @@ pub(crate) fn draw(
 ) -> Option<TrayAction> {
     receive_card(flow, t, facts);
     flow.gap(space::S4);
-    holdings_card(flow, t, &facts.balance);
+    holdings_card(flow, t, &facts.balance, facts);
     flow.gap(space::S4);
     sending_card(flow, t);
     // The tab's own verbs, LAST and in a card of their own — but only where the model offers one
@@ -141,10 +141,12 @@ fn known_address(inner: &mut Flow, t: &Tokens, address: &str) {
 /// as-of line is what makes it a true one (dig_ecosystem#2824). It carries only its own provenance:
 /// how far behind the node is, is the header strip's job, and repeating it here would say the same
 /// thing twice in two voices.
-fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading) {
+fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading, facts: &PaneFacts) {
     let items = holdings(balance);
     let as_of = match balance {
-        BalanceReading::Known { as_of, .. } => Some(as_of_sentence(*as_of)),
+        BalanceReading::Known { as_of, .. } => {
+            Some(as_of_sentence(*as_of, facts.network.chia_peer_peak_height))
+        }
         BalanceReading::Pending | BalanceReading::Unknown(_) => None,
     };
     flow.place(|ui, at| {

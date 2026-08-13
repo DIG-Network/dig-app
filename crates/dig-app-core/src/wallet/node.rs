@@ -578,7 +578,7 @@ mod tests {
             "a node that answered must produce a KNOWN balance"
         );
         assert_eq!(
-            balance_line(&overview.balance),
+            balance_line(&overview.balance, None),
             "Balance: 2 $DIG and 1 XCH. Correct as of block 6,000,000, the last your node has read."
         );
         // Asserted from the SERVER's copy of the bytes: the contract method name must have gone out
@@ -659,9 +659,9 @@ mod tests {
             }
         );
         assert!(
-            balance_line(&overview.balance).contains("as of block 6,000,000"),
+            balance_line(&overview.balance, None).contains("as of block 6,000,000"),
             "a behind figure must say what it is true as of: {}",
-            balance_line(&overview.balance)
+            balance_line(&overview.balance, None)
         );
     }
 
@@ -759,7 +759,7 @@ mod tests {
                 as_of: BalanceAsOf::Oracle,
             }
         );
-        let line = balance_line(&overview.balance);
+        let line = balance_line(&overview.balance, None);
         assert!(line.contains("public chain service"), "{line}");
         assert!(
             !line.contains("6,000,000") && !line.contains("as of block"),
@@ -795,7 +795,7 @@ mod tests {
                 as_of: BalanceAsOf::Undisclosed,
             }
         );
-        let line = balance_line(&overview.balance);
+        let line = balance_line(&overview.balance, None);
         assert!(line.contains("did not say where this came from"), "{line}");
     }
 
@@ -818,7 +818,7 @@ mod tests {
             overview.balance,
             BalanceReading::Unknown(BalanceUnknown::NoChainSource)
         );
-        let line = balance_line(&overview.balance);
+        let line = balance_line(&overview.balance, None);
         assert!(line.contains("no live connection to the"), "{line}");
         assert!(
             !line.contains("money sent to it still arrives") || !line.contains("upgrade"),

@@ -213,6 +213,17 @@ pub struct WalletOverview {
     /// That is the silent address move this whole area exists to prevent, so it is stated rather
     /// than left to be inferred from the profile list.
     pub profiles_unreadable: bool,
+    /// The peak this node's own Chia peers announced, or `None` when none has.
+    ///
+    /// Carried beside the balance because a height alone cannot say whether a figure is CURRENT —
+    /// only a comparison can, and this is the only chain tip the app knows. Without it the surface
+    /// can state what a figure is true as of, and can never state that it is up to date.
+    ///
+    /// `None` fails closed to the as-of wording, which is true whether or not the replica has caught
+    /// up. That is why this is an `Option` rather than a height defaulted to zero: a zero would make
+    /// every figure trivially "up to date", which is the money-currency version of the
+    /// absent-rendered-as-zero mistake this module exists to prevent.
+    pub peers_peak: Option<u32>,
 }
 
 impl WalletOverview {
@@ -236,6 +247,11 @@ impl WalletOverview {
             address,
             balance,
             profiles_unreadable: false,
+            // This path reads a balance for an address handed to it; it has no view of the network
+            // and therefore no chain tip to compare against. `None` is the honest answer, and it
+            // fails closed to the as-of wording — a figure from this constructor is never claimed to
+            // be up to date, because nothing here could check that.
+            peers_peak: None,
         }
     }
 
@@ -305,6 +321,10 @@ impl WalletOverview {
             address,
             balance,
             profiles_unreadable: view.profiles.is_unreadable(),
+            // The one figure that can say whether the balance above is CURRENT. Taken from the same
+            // snapshot as the balance so the two describe one moment; a pane that read it separately
+            // could call a figure up to date on the strength of a later reading than the figure.
+            peers_peak: view.network.chia_peer_peak_height,
         }
     }
 }
@@ -319,7 +339,7 @@ pub fn window_body(overview: &WalletOverview) -> String {
          Reading DIG content never needs an account or a wallet.",
         address_line(&overview.address),
         unreadable_registry_caveat(overview.profiles_unreadable),
-        balance_line(&overview.balance),
+        balance_line(&overview.balance, overview.peers_peak),
     )
 }
 
@@ -435,14 +455,14 @@ pub fn address_line(address: &AddressReading) -> String {
 ///
 /// The whole point of this function: an [`BalanceReading::Unknown`] renders WORDS, never a numeral, so
 /// no unknown can be read as "you hold nothing".
-pub fn balance_line(balance: &BalanceReading) -> String {
+pub fn balance_line(balance: &BalanceReading, peers_peak: Option<u32>) -> String {
     match balance {
         BalanceReading::Pending => "Balance: checking with your node…".to_string(),
         BalanceReading::Known { balances, as_of } => format!(
             "Balance: {} $DIG and {} XCH. {}",
             format_amount(Asset::Dig, balances.dig_units),
             format_amount(Asset::Xch, balances.xch_mojos),
-            as_of_sentence(*as_of)
+            as_of_sentence(*as_of, peers_peak)
         ),
         BalanceReading::Unknown(why) => format!("Balance: not known — {}", unknown_reason(why)),
     }
@@ -457,7 +477,29 @@ pub fn balance_line(balance: &BalanceReading) -> String {
 ///
 /// The oracle branch names the third party deliberately, and carries no height: an oracle answer has
 /// none by contract, so writing one would invent it.
-pub fn as_of_sentence(as_of: BalanceAsOf) -> String {
+///
+/// # `peers_peak` is what separates *current* from *behind*
+///
+/// A height alone cannot say whether a figure is current — only a comparison can, and the only chain
+/// tip this app knows is the peak this node's own Chia peers announced
+/// ([`NetworkStanding::chia_peer_peak_height`](crate::network::NetworkStanding::chia_peer_peak_height)).
+/// The BALANCE's own height is compared against it, rather than reusing the header's
+/// [`SyncProgress`](crate::network::SyncProgress): that reading is about the replica at the moment
+/// the sync was polled, and this claim is about the figure on screen. A pane that borrowed the
+/// header's verdict could call a balance current on the strength of a different, later reading.
+///
+/// `None` — no peer has announced a peak — can never produce the current claim. There is nothing to
+/// have reached, so the fail-closed reading is the as-of one, which is true either way.
+pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
+    /// Whether `height` is level with, or past, the peak this node's peers announced.
+    ///
+    /// Fail-closed on `None`: an unobservable tip licenses no claim that anything reached it.
+    /// `>=` rather than `==` because a replica that copied another block between the sync poll and
+    /// the balance read is momentarily higher, which is still up to date.
+    fn reached(height: u32, peers_peak: Option<u32>) -> bool {
+        peers_peak.is_some_and(|peak| height >= peak)
+    }
+
     /// A block height with thousands separators — seven bare digits are a number nobody reads.
     fn grouped(height: u32) -> String {
         let digits = height.to_string();
@@ -472,6 +514,19 @@ pub fn as_of_sentence(as_of: BalanceAsOf) -> String {
     }
 
     match as_of {
+        // LEVEL with the peak this node's own peers announced: the figure is current, and saying so
+        // is the point. A replica genuinely does reach its peers' peak and track it — measured on an
+        // enrolled 0.116.0 node following peaks 9,141,738 → 9,141,739 → 9,141,741 — so this is an
+        // ordinary state, not a theoretical one.
+        //
+        // Wording it as a caveat here would be the same defect as putting the provenance suffix on
+        // every menu row (see `menu_provenance`): a permanent apology attached to a figure that is
+        // actually current teaches a person to stop reading it, exactly when the day it means
+        // something is the day it changes. The height stays, because it is what makes the claim
+        // checkable rather than a reassurance.
+        BalanceAsOf::Replica { height } if reached(height, peers_peak) => {
+            format!("Up to date with the chain, at block {}.", grouped(height))
+        }
         BalanceAsOf::Replica { height } => {
             format!(
                 "Correct as of block {}, the last your node has read.",
@@ -737,8 +792,8 @@ mod tests {
             },
             "a source that answered zero IS a zero balance"
         );
-        let empty_line = balance_line(&empty.balance);
-        let unreadable_line = balance_line(&unreadable.balance);
+        let empty_line = balance_line(&empty.balance, None);
+        let unreadable_line = balance_line(&unreadable.balance, None);
         assert_ne!(empty_line, unreadable_line);
         assert!(empty_line.contains('0'), "{empty_line}");
         assert!(
@@ -772,9 +827,9 @@ mod tests {
             }
         );
         assert!(
-            balance_line(&overview.balance).starts_with("Balance: 2.5 $DIG and 1.25 XCH."),
+            balance_line(&overview.balance, None).starts_with("Balance: 2.5 $DIG and 1.25 XCH."),
             "{}",
-            balance_line(&overview.balance)
+            balance_line(&overview.balance, None)
         );
     }
 
@@ -827,7 +882,7 @@ mod tests {
 
         let mut seen = std::collections::HashSet::new();
         for (reading, expected) in cases {
-            let line = balance_line(&reading);
+            let line = balance_line(&reading, None);
             assert!(line.contains(expected), "{line}");
             assert!(
                 matches!(reading, BalanceReading::Unknown(_)),
@@ -943,6 +998,104 @@ mod tests {
         assert!(
             !empty.contains("not known"),
             "a source that answered zero KNOWS the balance: {empty}"
+        );
+    }
+
+    /// **A balance level with the chain says so, instead of apologising** (dig_ecosystem#2824).
+    ///
+    /// A replica genuinely reaches its peers' peak and tracks it — measured on an enrolled 0.116.0
+    /// node following 9,141,738 → 9,141,739 → 9,141,741 — so this is the ordinary state, not a
+    /// theoretical one. Wording it as a caveat would be the same defect as putting the provenance
+    /// suffix on every menu row: a permanent apology on a figure that is actually current teaches a
+    /// person to stop reading it, and the day it means something is the day it changes.
+    #[test]
+    fn a_balance_level_with_the_chain_says_so_rather_than_apologising() {
+        const PEAK: u32 = 9_141_741;
+
+        // LEVEL with the peers' peak. A replica genuinely reaches this and tracks it — measured on
+        // an enrolled 0.116.0 node following 9,141,738 → 9,141,739 → 9,141,741 — so this is the
+        // ordinary state, not a theoretical one.
+        let current = as_of_sentence(BalanceAsOf::Replica { height: PEAK }, Some(PEAK));
+        assert!(
+            current.contains("Up to date"),
+            "a figure level with the chain must not be worded as a caveat: {current}"
+        );
+        assert!(
+            current.contains("9,141,741"),
+            "the height stays, because it is what makes the claim checkable: {current}"
+        );
+
+        // A block PAST the announced peak is still up to date: the replica copied another block
+        // between the sync poll and the balance read.
+        assert!(
+            as_of_sentence(BalanceAsOf::Replica { height: PEAK + 1 }, Some(PEAK))
+                .contains("Up to date"),
+        );
+
+        // THE CONTROL, and the reason this is a distinction rather than a decoration: a replica that
+        // is genuinely behind must NOT claim to be current. Without this, a sentence that always
+        // said "Up to date" would satisfy every assertion above — which is the money-currency
+        // version of the mistake the provenance suffix test guards against.
+        let behind = as_of_sentence(
+            BalanceAsOf::Replica {
+                height: PEAK - 1_709,
+            },
+            Some(PEAK),
+        );
+        assert!(
+            !behind.contains("Up to date"),
+            "a trailing replica must not be presented as current: {behind}"
+        );
+        assert!(
+            behind.contains("as of block") && behind.contains("9,140,032"),
+            "a trailing figure states the moment it IS true of: {behind}"
+        );
+
+        // FAIL CLOSED: no peer has announced a peak, so there is nothing to have reached. The as-of
+        // wording is true either way; the current claim is not checkable and is not made. A `0`
+        // default for the peak would make EVERY figure trivially up to date.
+        let unknowable = as_of_sentence(BalanceAsOf::Replica { height: PEAK }, None);
+        assert!(
+            !unknowable.contains("Up to date"),
+            "an unobservable chain tip licenses no claim that anything reached it: {unknowable}"
+        );
+        assert!(unknowable.contains("as of block"), "{unknowable}");
+    }
+
+    /// **The peers' peak reaches the balance sentence from the SAME snapshot as the balance.**
+    ///
+    /// `of_tray` takes both off one `TrayView`. A pane that read the tip separately could call a
+    /// figure up to date on the strength of a reading taken after the figure — which is the money
+    /// claim this whole module is careful about, made by accident through a plumbing choice.
+    #[test]
+    fn the_chain_tip_used_to_judge_a_balance_comes_from_the_balances_own_snapshot() {
+        let view = crate::tray_menu::TrayView {
+            receive_address: Some("xch1example".to_string()),
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            balance: BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: BalanceAsOf::Replica { height: 9_141_741 },
+            },
+            network: crate::network::NetworkStanding {
+                chia_peer_peak_height: Some(9_141_741),
+                ..crate::network::NetworkStanding::default()
+            },
+            ..crate::tray_menu::TrayView::default()
+        };
+
+        let overview = WalletOverview::of_tray(&view);
+        assert_eq!(
+            overview.peers_peak,
+            Some(9_141_741),
+            "the tip must be carried off the same snapshot as the balance"
+        );
+        let body = window_body(&overview);
+        assert!(
+            body.contains("Up to date"),
+            "a caught-up balance reads as current on the window too: {body}"
         );
     }
 
@@ -1076,7 +1229,7 @@ mod tests {
         assert_eq!(syncing, BalanceReading::Unknown(BalanceUnknown::NotSynced));
         assert_eq!(unreachable, BalanceReading::Unknown(BalanceUnknown::NoNode));
 
-        let lines = [&timed_out, &syncing, &unreachable].map(balance_line);
+        let lines = [&timed_out, &syncing, &unreachable].map(|r| balance_line(r, None));
         let rows = [&timed_out, &syncing, &unreachable].map(menu_balance_label);
         assert_eq!(
             std::collections::HashSet::from(lines.clone()).len(),
@@ -1100,12 +1253,13 @@ mod tests {
     fn a_timed_out_read_never_claims_the_node_is_missing() {
         let timed_out = BalanceReading::Unknown(BalanceUnknown::NodeTimedOut);
         let surfaces = [
-            balance_line(&timed_out),
+            balance_line(&timed_out, None),
             menu_balance_label(&timed_out),
             window_body(&WalletOverview {
                 address: known(),
                 balance: timed_out.clone(),
                 profiles_unreadable: false,
+                peers_peak: None,
             }),
         ];
         for text in surfaces {
@@ -1133,7 +1287,7 @@ mod tests {
     #[test]
     fn a_read_in_flight_reads_as_checking_rather_than_as_a_failure() {
         let pending = BalanceReading::Pending;
-        for text in [balance_line(&pending), menu_balance_label(&pending)] {
+        for text in [balance_line(&pending, None), menu_balance_label(&pending)] {
             assert!(text.to_lowercase().contains("checking"), "{text}");
             assert!(
                 !text.chars().any(|c| c.is_ascii_digit()),
@@ -1145,8 +1299,8 @@ mod tests {
             );
         }
         assert_ne!(
-            balance_line(&pending),
-            balance_line(&BalanceReading::Unknown(BalanceUnknown::NoNode))
+            balance_line(&pending, None),
+            balance_line(&BalanceReading::Unknown(BalanceUnknown::NoNode), None)
         );
     }
 
@@ -1197,7 +1351,7 @@ mod tests {
             overview.balance,
             BalanceReading::Unknown(BalanceUnknown::ReadFailed(_))
         ));
-        assert!(!balance_line(&overview.balance).contains('7'));
+        assert!(!balance_line(&overview.balance, None).contains('7'));
     }
 
     /// The read is made for THIS address, not a hardcoded or empty one — a source keyed on the wrong
