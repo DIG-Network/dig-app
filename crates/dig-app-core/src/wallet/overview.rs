@@ -748,7 +748,7 @@ fn is_level(height: u32, caught_up: bool, peers_peak: Option<u32>) -> bool {
 /// An [`Oracle`](BalanceAsOf::Oracle) reading is included even though the figure itself is current:
 /// the oracle answered *because* the user's own replica has not got there yet, so the node is
 /// demonstrably still syncing. What that indicator must not do is call the FIGURE stale — see
-/// [`menu_provenance`] and [`as_of_sentence`], which both name the public source.
+/// `menu_provenance` and [`as_of_sentence`], which both name the public source.
 pub fn is_syncing(balance: &BalanceReading, peers_peak: Option<u32>) -> bool {
     match balance {
         BalanceReading::Known { as_of, .. } => match as_of {
