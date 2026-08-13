@@ -593,10 +593,13 @@ mod tests {
 
         // A real reading, by contrast, DOES produce figures — without this the assertions above are
         // satisfied by a `holdings` that never returns a number at all.
-        let known = holdings(&BalanceReading::Known { balances: Balances {
-            xch_mojos: 1_000_000_000_000,
-            dig_units: 2_000,
-        }, as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 } });
+        let known = holdings(&BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: 1_000_000_000_000,
+                dig_units: 2_000,
+            },
+            as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+        });
         assert_eq!(known.len(), 2);
         assert!(known.iter().all(|item| item.value.is_known()));
     }

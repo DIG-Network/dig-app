@@ -137,7 +137,10 @@ impl Case {
         use dig_app_core::wallet::overview::{BalanceReading, BalanceUnknown};
         match self {
             Self::Healthy => TrayView {
-                balance: BalanceReading::Known { balances: HELD, as_of: BalanceAsOf::Replica { height: 7_000_000 } },
+                balance: BalanceReading::Known {
+                    balances: HELD,
+                    as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+                },
                 ..view
             },
             Self::BalancePending => TrayView {

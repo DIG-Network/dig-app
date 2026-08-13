@@ -46,12 +46,13 @@ fn main() {
             node_connected: true,
             node: "Node v0.66.0 · 0 capsule(s) cached · 0 store(s) hosted".to_string(),
             // A real reading, so the gallery photographs the Wallet row as a funded account sees it.
-            balance: dig_app_core::wallet::overview::BalanceReading::Known { balances: 
-                dig_app_core::wallet::overview::Balances {
+            balance: dig_app_core::wallet::overview::BalanceReading::Known {
+                balances: dig_app_core::wallet::overview::Balances {
                     xch_mojos: 1_250_000_000_000,
                     dig_units: 3_400,
                 },
-            , as_of: BalanceAsOf::Replica { height: 7_000_000 } },
+                as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+            },
             account: Some(account.clone()),
             // A connected node, matching the `node` line above: the gallery photographs the
             // account states, so the #2330 fields are pinned rather than varied.

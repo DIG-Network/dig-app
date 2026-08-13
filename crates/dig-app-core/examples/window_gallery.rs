@@ -199,7 +199,10 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
             .then(|| "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string()),
         balance: match sealed {
             true => BalanceReading::default(),
-            false => BalanceReading::Known { balances: HELD, as_of: BalanceAsOf::Replica { height: 7_000_000 } },
+            false => BalanceReading::Known {
+                balances: HELD,
+                as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+            },
         },
         second_factor,
         profiles: profiles.reading(),

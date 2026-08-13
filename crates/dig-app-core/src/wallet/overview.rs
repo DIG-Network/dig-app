@@ -344,11 +344,10 @@ fn unreadable_registry_caveat(unreadable: bool) -> &'static str {
 /// showing one asset's balance beside a silently-missing other is a half-truth about someone's money.
 fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
     let read = |asset| {
-        engine
-            .balance(BalanceRequest {
-                address: address.to_string(),
-                asset,
-            })
+        engine.balance(BalanceRequest {
+            address: address.to_string(),
+            asset,
+        })
     };
     match (read(Asset::Xch), read(Asset::Dig)) {
         (Ok(xch), Ok(dig)) => BalanceReading::Known {
@@ -472,7 +471,6 @@ pub fn as_of_sentence(as_of: BalanceAsOf) -> String {
         out
     }
 
-
     match as_of {
         BalanceAsOf::Replica { height } => {
             format!(
@@ -483,9 +481,7 @@ pub fn as_of_sentence(as_of: BalanceAsOf) -> String {
         BalanceAsOf::Oracle => {
             "Read from a public chain service, not from your own node.".to_string()
         }
-        BalanceAsOf::Undisclosed => {
-            "Your node did not say where this came from.".to_string()
-        }
+        BalanceAsOf::Undisclosed => "Your node did not say where this came from.".to_string(),
     }
 }
 
@@ -688,10 +684,13 @@ mod tests {
 
         assert_eq!(
             empty.balance,
-            BalanceReading::Known { balances: Balances {
-                xch_mojos: 0,
-                dig_units: 0
-            }, as_of: BalanceAsOf::Replica { height: 7_000_000 } },
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 0,
+                    dig_units: 0
+                },
+                as_of: BalanceAsOf::Replica { height: 7_000_000 }
+            },
             "a source that answered zero IS a zero balance"
         );
         let empty_line = balance_line(&empty.balance);
@@ -720,10 +719,13 @@ mod tests {
 
         assert_eq!(
             overview.balance,
-            BalanceReading::Known { balances: Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500,
-            }, as_of: crate::wallet::engine::test_support::FAKE_AS_OF }
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: crate::wallet::engine::test_support::FAKE_AS_OF
+            }
         );
         assert!(
             balance_line(&overview.balance).starts_with("Balance: 2.5 $DIG and 1.25 XCH."),
@@ -868,17 +870,23 @@ mod tests {
     /// is the one case where a numeral is the truth.
     #[test]
     fn a_known_balance_shows_both_assets_on_the_menu_row() {
-        let held = menu_balance_label(&BalanceReading::Known { balances: Balances {
-            xch_mojos: 1_250_000_000_000,
-            dig_units: 2_500,
-        }, as_of: BalanceAsOf::Replica { height: 7_000_000 } });
+        let held = menu_balance_label(&BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: 1_250_000_000_000,
+                dig_units: 2_500,
+            },
+            as_of: BalanceAsOf::Replica { height: 7_000_000 },
+        });
         assert!(held.contains("2.5 $DIG"), "{held}");
         assert!(held.contains("1.25 XCH"), "{held}");
 
-        let empty = menu_balance_label(&BalanceReading::Known { balances: Balances {
-            xch_mojos: 0,
-            dig_units: 0,
-        }, as_of: BalanceAsOf::Replica { height: 7_000_000 } });
+        let empty = menu_balance_label(&BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: 0,
+                dig_units: 0,
+            },
+            as_of: BalanceAsOf::Replica { height: 7_000_000 },
+        });
         assert!(
             empty.contains("0 $DIG") && empty.contains("0 XCH"),
             "{empty}"
@@ -907,10 +915,13 @@ mod tests {
             BalanceUnknown::ReadFailed("x".repeat(4000)),
         )));
         // The widest KNOWN reading a u64 pair can produce, so the bound covers the figures too.
-        labels.push(menu_balance_label(&BalanceReading::Known { balances: Balances {
-            xch_mojos: u64::MAX,
-            dig_units: u64::MAX,
-        }, as_of: BalanceAsOf::Replica { height: 7_000_000 } }));
+        labels.push(menu_balance_label(&BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: u64::MAX,
+                dig_units: u64::MAX,
+            },
+            as_of: BalanceAsOf::Replica { height: 7_000_000 },
+        }));
 
         for label in &labels {
             assert!(
@@ -1164,10 +1175,13 @@ mod tests {
             account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
             receive_address: Some(ADDRESS.to_string()),
             node_connected: true,
-            balance: BalanceReading::Known { balances: Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500,
-            }, as_of: BalanceAsOf::Replica { height: 7_000_000 } },
+            balance: BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: BalanceAsOf::Replica { height: 7_000_000 },
+            },
             ..Default::default()
         }));
         assert!(body.contains("Balance: 2.5 $DIG and 1.25 XCH."), "{body}");
@@ -1224,10 +1238,13 @@ mod tests {
             account: Some(crate::tray_menu::AccountState::Locked),
             receive_address: None,
             node_connected: true,
-            balance: BalanceReading::Known { balances: Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500,
-            }, as_of: BalanceAsOf::Replica { height: 7_000_000 } },
+            balance: BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: BalanceAsOf::Replica { height: 7_000_000 },
+            },
             ..Default::default()
         }));
         assert!(body.contains("account is locked"), "{body}");

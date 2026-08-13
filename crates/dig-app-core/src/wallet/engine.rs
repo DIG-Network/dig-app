@@ -117,9 +117,9 @@ impl BalanceAsOf {
         match (self, other) {
             (Self::Undisclosed, _) | (_, Self::Undisclosed) => Self::Undisclosed,
             (Self::Oracle, _) | (_, Self::Oracle) => Self::Oracle,
-            (Self::Replica { height: a }, Self::Replica { height: b }) => Self::Replica {
-                height: a.min(b),
-            },
+            (Self::Replica { height: a }, Self::Replica { height: b }) => {
+                Self::Replica { height: a.min(b) }
+            }
         }
     }
 }
@@ -210,6 +210,48 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::FakeWalletEngine;
+    use super::BalanceAsOf;
+
+    /// **Two replica heights resolve to the EARLIER one.** The later figure is also true of the
+    /// earlier height, so the pair is true as of the earlier; taking the later would state an
+    /// as-of one of the two readings never supported.
+    #[test]
+    fn two_replica_heights_take_the_earlier() {
+        let early = BalanceAsOf::Replica { height: 100 };
+        let late = BalanceAsOf::Replica { height: 200 };
+        assert_eq!(early.weaker(late), early);
+        assert_eq!(
+            late.weaker(early),
+            early,
+            "the merge must not depend on order"
+        );
+    }
+
+    /// **An oracle answer beside a replica answer is an ORACLE answer.** Presenting the pair as the
+    /// wallet's own view would claim a provenance half of it does not have.
+    #[test]
+    fn an_oracle_read_drags_a_replica_read_down_to_oracle() {
+        let replica = BalanceAsOf::Replica { height: 100 };
+        assert_eq!(replica.weaker(BalanceAsOf::Oracle), BalanceAsOf::Oracle);
+        assert_eq!(BalanceAsOf::Oracle.weaker(replica), BalanceAsOf::Oracle);
+    }
+
+    /// **An undisclosed provenance beats everything.** It is the only one of the three that claims
+    /// nothing, and a pair containing it cannot honestly claim more.
+    #[test]
+    fn an_undisclosed_read_makes_the_pair_undisclosed() {
+        for other in [BalanceAsOf::Replica { height: 100 }, BalanceAsOf::Oracle] {
+            assert_eq!(
+                BalanceAsOf::Undisclosed.weaker(other),
+                BalanceAsOf::Undisclosed
+            );
+            assert_eq!(
+                other.weaker(BalanceAsOf::Undisclosed),
+                BalanceAsOf::Undisclosed
+            );
+        }
+    }
+
     use super::*;
 
     fn dig_coin(amount: u64) -> CoinRecord {

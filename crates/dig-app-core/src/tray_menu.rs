@@ -4035,10 +4035,13 @@ mod tests {
 
         let held = balance_row(wallet_labels_with(
             AccountState::Unlocked { recoverable: true },
-            BalanceReading::Known { balances: Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500,
-            }, as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 } },
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+            },
         ));
         assert!(held.contains("2.5 $DIG"), "{held}");
         assert!(held.contains("1.25 XCH"), "{held}");
