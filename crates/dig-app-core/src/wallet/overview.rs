@@ -677,7 +677,7 @@ pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> 
 /// own view of the user's money. That is the money-provenance claim the whole `as_of` split exists
 /// to keep honest, and it was being dropped at exactly the surface a person glances at most.
 ///
-/// It is not hypothetical: until node-side enrolment lands (dig_ecosystem#2823) EVERY live read
+/// It is not hypothetical: until the replica completes initial sync (dig_ecosystem#2871) EVERY live read
 /// returns the fallback tier, so on a real install today this row is the oracle case, always.
 ///
 /// [`Replica`](BalanceAsOf::Replica) takes no suffix only when it is LEVEL with the chain per
