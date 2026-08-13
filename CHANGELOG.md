@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [10.8.0] - 2026-08-13
+
+### Features
+- **network:** State how far the chain replica is behind its peers (#162)
+
 ## [10.7.0] - 2026-08-12
 
 ### Features
