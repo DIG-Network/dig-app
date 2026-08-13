@@ -108,6 +108,17 @@ pub enum WalletError {
     /// is the state a default dig-node install is actually in today.
     #[error("the DIG node has no live chain source")]
     EngineNoChainSource,
+
+    /// The node's own replica answered and has synced NOTHING — it reported no peak height at all.
+    ///
+    /// Its `balance: 0` is therefore *no data*, not *no money*, and the two must never be collapsed:
+    /// a zero shown here is a false statement about the user's funds. Reported as an error precisely
+    /// so the surface renders the balance ABSENT rather than as a figure.
+    ///
+    /// Distinct from [`EngineNoChainSource`](Self::EngineNoChainSource) (there is no source at all)
+    /// and from [`EngineNotSynced`](Self::EngineNotSynced) (the node itself refused the read).
+    #[error("the DIG node's chain replica has not synced anything yet")]
+    EngineNoReplicaData,
 }
 
 /// Serialize a fully-signed [`SpendBundle`] to the lowercase-hex wire form the engine broadcast seam

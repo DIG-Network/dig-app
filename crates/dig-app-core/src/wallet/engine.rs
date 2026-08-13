@@ -78,11 +78,60 @@ pub struct CoinsResponse {
     pub coins: Vec<CoinRecord>,
 }
 
-/// `control.wallet.balance` response: the address's spendable balance in the asset's base units.
+/// What a balance figure is true AS OF — the provenance that travels with every reading.
+///
+/// A light client trails the chain permanently, so "caught up" is a moment it passes through rather
+/// than a state it sits in. Refusing every figure that is not caught up therefore shows no figure at
+/// all. The honest alternative is not to hide the number but to say what it is a statement ABOUT:
+/// a replica balance at height N is true of height N, and becomes a lie only when presented as
+/// current without saying so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BalanceAsOf {
+    /// The node's OWN replica answered, and its figures are true as of this peak height.
+    Replica {
+        /// The peak height the figures reflect.
+        height: u32,
+    },
+    /// A third party's coinset answer, not the wallet's own view of the chain.
+    ///
+    /// Carries no height by contract — the figures came from the oracle's chain view, not the
+    /// node's — so a surface may not invent an as-of for it.
+    Oracle,
+    /// The answering node predates tier disclosure, so which tier produced the figures is unknown.
+    ///
+    /// A THIRD state and not a default tier: naming a tier that was never reported would state
+    /// something about the reading that nothing measured.
+    Undisclosed,
+}
+
+impl BalanceAsOf {
+    /// The weaker of two provenances — the one that claims less.
+    ///
+    /// Two assets are read separately and shown as one holding, so the pair needs a single as-of.
+    /// Taking the weaker claim is the only choice that cannot overstate either read: an
+    /// [`Undisclosed`](Self::Undisclosed) answer cannot be presented as an [`Oracle`](Self::Oracle)
+    /// one, an oracle figure cannot be presented as the wallet's own, and two replica heights
+    /// resolve to the earlier one — the later figure is also true of the earlier height, so the
+    /// pair is true as of the earlier.
+    pub fn weaker(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Undisclosed, _) | (_, Self::Undisclosed) => Self::Undisclosed,
+            (Self::Oracle, _) | (_, Self::Oracle) => Self::Oracle,
+            (Self::Replica { height: a }, Self::Replica { height: b }) => Self::Replica {
+                height: a.min(b),
+            },
+        }
+    }
+}
+
+/// `control.wallet.balance` response: the address's spendable balance in the asset's base units,
+/// with the provenance that makes the figure readable as a claim about a moment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BalanceResponse {
     /// The spendable balance, in the asset's base unit (mojos for XCH, base units for DIG).
     pub balance: u64,
+    /// What this figure is true as of.
+    pub as_of: BalanceAsOf,
 }
 
 /// The engine operations the wallet delegates: broadcast a signed bundle, and read chain state for
@@ -112,7 +161,16 @@ pub(crate) mod test_support {
         pub broadcasts: std::cell::RefCell<Vec<String>>,
         /// The coins [`WalletEngine::coins`] / [`WalletEngine::balance`] report.
         pub coins: Vec<CoinRecord>,
+        /// The provenance [`WalletEngine::balance`] reports, or [`FAKE_AS_OF`] when unset.
+        ///
+        /// An [`Option`] rather than a plain field because [`BalanceAsOf`] deliberately has no
+        /// `Default` — a default provenance would be a claim nothing measured — while this fake
+        /// wants one so the many tests that do not care about provenance need not state one.
+        pub as_of: Option<BalanceAsOf>,
     }
+
+    /// The provenance a [`FakeWalletEngine`] reports when a test does not choose one.
+    pub const FAKE_AS_OF: BalanceAsOf = BalanceAsOf::Replica { height: 7_000_000 };
 
     impl WalletEngine for FakeWalletEngine {
         fn broadcast(&self, request: BroadcastRequest) -> Result<BroadcastResponse, WalletError> {
@@ -141,7 +199,10 @@ pub(crate) mod test_support {
                 .filter(|c| c.asset == request.asset)
                 .map(|c| c.amount)
                 .sum();
-            Ok(BalanceResponse { balance })
+            Ok(BalanceResponse {
+                balance,
+                as_of: self.as_of.unwrap_or(FAKE_AS_OF),
+            })
         }
     }
 }

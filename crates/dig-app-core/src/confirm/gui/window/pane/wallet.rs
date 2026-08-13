@@ -41,7 +41,8 @@ use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
-    address_line, format_amount, unknown_reason, AddressReading, BalanceReading, Balances,
+    address_line, as_of_sentence, format_amount, unknown_reason, AddressReading, BalanceReading,
+    Balances,
 };
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
@@ -134,12 +135,26 @@ fn known_address(inner: &mut Flow, t: &Tokens, address: &str) {
 }
 
 /// What this account holds, or the reason there is no figure.
+///
+/// A shown figure is always followed by what it is true AS OF. A light client trails the chain tip
+/// permanently, so the figure above is a statement about a moment rather than about now, and the
+/// as-of line is what makes it a true one (dig_ecosystem#2824). It carries only its own provenance:
+/// how far behind the node is, is the header strip's job, and repeating it here would say the same
+/// thing twice in two voices.
 fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading) {
     let items = holdings(balance);
+    let as_of = match balance {
+        BalanceReading::Known { as_of, .. } => Some(as_of_sentence(*as_of)),
+        BalanceReading::Pending | BalanceReading::Unknown(_) => None,
+    };
     flow.place(|ui, at| {
         (
             card::card(ui, at, t, Some(copy::wallet::HOLDINGS_CARD), |inner| {
                 inner.place(|ui, at| (data::readouts(ui, at, t, &items), ()));
+                if let Some(sentence) = &as_of {
+                    inner.gap(space::S2);
+                    inner.place(|ui, at| (text::caption(ui, at, t, sentence), ()));
+                }
             }),
             (),
         )
@@ -156,7 +171,7 @@ fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading) {
 /// two independent facts.
 fn holdings(balance: &BalanceReading) -> Vec<Readout> {
     match balance {
-        BalanceReading::Known(held) => figures(held),
+        BalanceReading::Known { balances, .. } => figures(balances),
         BalanceReading::Pending => vec![Readout::new(
             copy::wallet::BALANCE_LABEL,
             Value::Unknown(copy::wallet::BALANCE_PENDING.to_string()),

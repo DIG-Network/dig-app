@@ -29,7 +29,7 @@
 
 use crate::amount::format_asset_amount;
 
-use super::engine::{BalanceRequest, WalletEngine};
+use super::engine::{BalanceAsOf, BalanceRequest, WalletEngine};
 use super::state::Asset;
 use super::WalletError;
 
@@ -101,7 +101,17 @@ pub struct Balances {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BalanceReading {
     /// A balance actually read from a chain source. `0` here means genuinely nothing held.
-    Known(Balances),
+    ///
+    /// Carries its [`BalanceAsOf`] because a figure from a light client is a statement about a
+    /// MOMENT, not about now: the replica trails the tip permanently, so "wait until it is caught
+    /// up" shows no balance at all (dig_ecosystem#2824). Shown with its as-of, a behind figure is
+    /// true; shown bare, it is a claim about the present that nothing supports.
+    Known {
+        /// What is held, as of `as_of`.
+        balances: Balances,
+        /// What those figures are true as of.
+        as_of: BalanceAsOf,
+    },
     /// A read is under way and has not answered yet.
     ///
     /// The third state, and the honest one for the several seconds a chain read takes
@@ -155,10 +165,19 @@ pub enum BalanceUnknown {
     /// node's own connection), and a surface that names the wrong one sends a person after a fault
     /// they do not have. This is the state a default dig-node install is in today.
     NoChainSource,
-    /// A source is there and still catching up to the chain tip, so any figure it gave would be
-    /// stale. Reported as unknown rather than shown with a caveat: a stale number still reads as
-    /// the truth.
+    /// The NODE ITSELF refused the read as not caught up (`WALLET_NOT_SYNCED`).
+    ///
+    /// This is the node declining to answer, not this app declining to show a behind figure — dig-app
+    /// no longer does the latter, because a light client is never caught up and that rule hid the
+    /// balance permanently (dig_ecosystem#2824). A figure the node DOES give while behind is shown
+    /// with its as-of height instead.
     NotSynced,
+    /// The node's own replica answered and has synced nothing, so there is no figure to show.
+    ///
+    /// Its `balance: 0` is *no data*, not *no money*, and this variant is what keeps the two apart:
+    /// a zero rendered here would tell somebody who holds funds that they hold none. Absent, not
+    /// stale, and never a numeral.
+    ReplicaHasNoData,
     /// The read reached a source and failed. Carries the source's own words so the window can say
     /// what went wrong.
     ReadFailed(String),
@@ -330,13 +349,17 @@ fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
                 address: address.to_string(),
                 asset,
             })
-            .map(|response| response.balance)
     };
     match (read(Asset::Xch), read(Asset::Dig)) {
-        (Ok(xch_mojos), Ok(dig_units)) => BalanceReading::Known(Balances {
-            xch_mojos,
-            dig_units,
-        }),
+        (Ok(xch), Ok(dig)) => BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: xch.balance,
+                dig_units: dig.balance,
+            },
+            // The two assets are read separately and shown as one holding, so the pair takes the
+            // weaker of the two provenances — see `BalanceAsOf::weaker`.
+            as_of: xch.as_of.weaker(dig.as_of),
+        },
         (Err(e), _) | (_, Err(e)) => BalanceReading::Unknown(why_unread(e)),
     }
 }
@@ -352,6 +375,7 @@ fn why_unread(error: WalletError) -> BalanceUnknown {
         WalletError::EngineTimedOut(_) => BalanceUnknown::NodeTimedOut,
         WalletError::EngineUnsupported => BalanceUnknown::NodeCannotRead,
         WalletError::EngineNotSynced => BalanceUnknown::NotSynced,
+        WalletError::EngineNoReplicaData => BalanceUnknown::ReplicaHasNoData,
         WalletError::EngineNoChainSource => BalanceUnknown::NoChainSource,
         other => BalanceUnknown::ReadFailed(other.to_string()),
     }
@@ -415,12 +439,36 @@ pub fn address_line(address: &AddressReading) -> String {
 pub fn balance_line(balance: &BalanceReading) -> String {
     match balance {
         BalanceReading::Pending => "Balance: checking with your node…".to_string(),
-        BalanceReading::Known(held) => format!(
-            "Balance: {} $DIG and {} XCH.",
-            format_amount(Asset::Dig, held.dig_units),
-            format_amount(Asset::Xch, held.xch_mojos)
+        BalanceReading::Known { balances, as_of } => format!(
+            "Balance: {} $DIG and {} XCH. {}",
+            format_amount(Asset::Dig, balances.dig_units),
+            format_amount(Asset::Xch, balances.xch_mojos),
+            as_of_sentence(*as_of)
         ),
         BalanceReading::Unknown(why) => format!("Balance: not known — {}", unknown_reason(why)),
+    }
+}
+
+/// The sentence stating what a shown figure is true AS OF.
+///
+/// Every branch says a fact and implies no fault: being behind the tip is how a light client works,
+/// and an oracle answer is somebody else's reading rather than a failure of this one. The height is
+/// stated because it is the whole difference between a stale figure and a true statement about a
+/// moment (dig_ecosystem#2824).
+///
+/// The oracle branch names the third party deliberately, and carries no height: an oracle answer has
+/// none by contract, so writing one would invent it.
+pub fn as_of_sentence(as_of: BalanceAsOf) -> String {
+    match as_of {
+        BalanceAsOf::Replica { height } => {
+            format!("Correct as of block {height}, the last your node has read.")
+        }
+        BalanceAsOf::Oracle => {
+            "Read from a public chain service, not from your own node.".to_string()
+        }
+        BalanceAsOf::Undisclosed => {
+            "Your node did not say where this came from.".to_string()
+        }
     }
 }
 
@@ -442,10 +490,10 @@ pub fn balance_line(balance: &BalanceReading) -> String {
 pub fn menu_balance_label(balance: &BalanceReading) -> String {
     match balance {
         BalanceReading::Pending => "Balance: checking…".to_string(),
-        BalanceReading::Known(held) => format!(
+        BalanceReading::Known { balances, .. } => format!(
             "Balance: {} $DIG · {} XCH",
-            format_amount(Asset::Dig, held.dig_units),
-            format_amount(Asset::Xch, held.xch_mojos)
+            format_amount(Asset::Dig, balances.dig_units),
+            format_amount(Asset::Xch, balances.xch_mojos)
         ),
         BalanceReading::Unknown(why) => format!("Balance not known — {}…", menu_reason(why)),
     }
@@ -482,6 +530,7 @@ fn menu_reason(why: &BalanceUnknown) -> &'static str {
         BalanceUnknown::NodeCannotRead => "this node cannot read balances yet",
         BalanceUnknown::NoChainSource => "your node has no chain connection yet",
         BalanceUnknown::NotSynced => "your node is still syncing",
+        BalanceUnknown::ReplicaHasNoData => "your node has not synced your wallet yet",
         BalanceUnknown::ReadFailed(_) => "the read failed",
     }
 }
@@ -550,6 +599,10 @@ pub fn unknown_reason(why: &BalanceUnknown) -> String {
         BalanceUnknown::NotSynced => {
             "your node is still catching up with the blockchain. A figure now would be out of date, so \
              DIG waits rather than showing one."
+                .to_string()
+        }
+        BalanceUnknown::ReplicaHasNoData => {
+            "your node has not synced your wallet yet, so there is no balance for it to report. This              resolves itself once the node has followed your address for a while."
                 .to_string()
         }
         BalanceUnknown::ReadFailed(detail) => format!("the read failed ({detail})."),

@@ -38,13 +38,13 @@ use dig_node_control_interface::method::ControlMethod;
 use dig_node_control_interface::params::{
     Asset as WireAsset, WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
 };
-use dig_node_control_interface::results::WalletCoinRecord;
+use dig_node_control_interface::results::{WalletCoinRecord, WalletReadSource};
 
 use crate::control::{self, ControlCallError, ControlFailure};
 use crate::engine::EngineState;
 
 use super::engine::{
-    BalanceRequest, BalanceResponse, BroadcastRequest, BroadcastResponse, CoinsRequest,
+    BalanceAsOf, BalanceRequest, BalanceResponse, BroadcastRequest, BroadcastResponse, CoinsRequest,
     CoinsResponse, WalletEngine,
 };
 use super::overview::{AddressReading, BalanceReading, ChainSource, WalletOverview};
@@ -137,6 +137,16 @@ impl WalletEngine for NodeWalletEngine {
         })
     }
 
+    /// Read a spendable balance through the node's `control.wallet.balance`, WITH its provenance.
+    ///
+    /// # A behind-but-real figure is shown; a figure that was never measured is not
+    ///
+    /// This deliberately does not refuse a reading for being behind the chain tip. A light client
+    /// trails the tip permanently, so a `synced`-only gate hides the balance essentially always
+    /// (dig_ecosystem#2824). What travels instead is [`BalanceAsOf`], so the surface can state what
+    /// the figure is true as of.
+    ///
+    /// The one answer that is still refused is the replica having synced NOTHING — see [`as_of`].
     fn balance(&self, request: BalanceRequest) -> Result<BalanceResponse, WalletError> {
         let params = WalletBalanceParams {
             address: request.address,
@@ -150,13 +160,9 @@ impl WalletEngine for NodeWalletEngine {
         )
         .map_err(|failure| classify(ControlMethod::WalletBalance, failure))?;
 
-        // The node answered with figures AND told us they are stale. A stale number still reads as
-        // the truth on a menu row, so it is reported as an unknown rather than shown with a caveat.
-        if !result.synced {
-            return Err(WalletError::EngineNotSynced);
-        }
         Ok(BalanceResponse {
             balance: result.balance,
+            as_of: as_of(result.source, result.peak_height)?,
         })
     }
 }
@@ -275,6 +281,30 @@ fn classify(method: ControlMethod, failure: ControlFailure) -> WalletError {
             unauthorized(method)
         }
         other => classify_read_failure(other),
+    }
+}
+
+/// What the node's disclosed tier + peak height say a balance figure is true AS OF.
+///
+/// # The one case that is an error rather than a reading
+///
+/// A `Db` answer with NO peak height is the node's own replica reporting that it has synced
+/// nothing. Its `balance: 0` is therefore *no data*, and rendering it as a figure would tell
+/// somebody who holds funds that they hold none. That case alone becomes
+/// [`WalletError::EngineNoReplicaData`], which the overview renders as an absent balance.
+///
+/// The other three are readings, each stating exactly what it knows: the replica as of its height,
+/// the oracle as a third party's number with no height by contract, and an undisclosed tier as an
+/// unknown provenance rather than an assumed one.
+fn as_of(
+    source: Option<WalletReadSource>,
+    peak_height: Option<u32>,
+) -> Result<BalanceAsOf, WalletError> {
+    match (source, peak_height) {
+        (Some(WalletReadSource::Db), Some(height)) => Ok(BalanceAsOf::Replica { height }),
+        (Some(WalletReadSource::Db), None) => Err(WalletError::EngineNoReplicaData),
+        (Some(WalletReadSource::Fallback), _) => Ok(BalanceAsOf::Oracle),
+        (None, _) => Ok(BalanceAsOf::Undisclosed),
     }
 }
 
