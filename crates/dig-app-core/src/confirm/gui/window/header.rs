@@ -130,6 +130,13 @@ fn readings(facts: &PaneFacts) -> Vec<Reading> {
     // the machine is nearly done, stuck, or falling behind, and that distance is what a person is
     // actually asking when they read the badge (dig_ecosystem#2820) — so it outranks both raw
     // heights below, which state the positions this reading turns into a relation.
+    //
+    // It outranks the two PEER COUNTS below as well, which is worth stating because the position
+    // says it and a reader scanning for the heights alone would miss it: measured, `Chia peers` is
+    // surrendered for this reading at 640 px. That costs nothing in the case that matters — a node
+    // with no Chia peers has no peer peak either, so there is no distance to draw and nothing is
+    // displaced — but it is the ordering, and an understated comment here is how the next person
+    // reorders the strip believing they are moving something free.
     if let Some((word, severity)) = facts.network.catch_up_badge() {
         items.push(Reading::new(
             copy::header::BEHIND_LABEL,
