@@ -2194,12 +2194,13 @@ mod tests {
                 v.address_fault = Some(AddressFault::DerivationFailed)
             }),
             ("balance", |v| {
-                v.balance = crate::wallet::overview::BalanceReading::Known(
-                    crate::wallet::overview::Balances {
+                v.balance = crate::wallet::overview::BalanceReading::Known {
+                    balances: crate::wallet::overview::Balances {
                         xch_mojos: 1,
                         dig_units: 0,
                     },
-                )
+                    as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+                }
             }),
             ("did", |v| v.did = Some("did:chia:x".to_string())),
             ("second_factor", |v| v.second_factor = true),
@@ -4034,10 +4035,10 @@ mod tests {
 
         let held = balance_row(wallet_labels_with(
             AccountState::Unlocked { recoverable: true },
-            BalanceReading::Known(Balances {
+            BalanceReading::Known { balances: Balances {
                 xch_mojos: 1_250_000_000_000,
                 dig_units: 2_500,
-            }),
+            }, as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 } },
         ));
         assert!(held.contains("2.5 $DIG"), "{held}");
         assert!(held.contains("1.25 XCH"), "{held}");

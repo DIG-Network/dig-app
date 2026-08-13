@@ -440,6 +440,7 @@ mod tests {
             BalanceUnknown::NodeCannotRead,
             BalanceUnknown::NoChainSource,
             BalanceUnknown::NotSynced,
+            BalanceUnknown::ReplicaHasNoData,
             // The one arm whose sentence comes from OUTSIDE this crate, given the node text that
             // breaks a naive no-digit rule: an HTTP status and a timeout are both numerals.
             BalanceUnknown::ReadFailed("rpc error 500 after 30s".to_string()),
@@ -592,10 +593,10 @@ mod tests {
 
         // A real reading, by contrast, DOES produce figures — without this the assertions above are
         // satisfied by a `holdings` that never returns a number at all.
-        let known = holdings(&BalanceReading::Known(Balances {
+        let known = holdings(&BalanceReading::Known { balances: Balances {
             xch_mojos: 1_000_000_000_000,
             dig_units: 2_000,
-        }));
+        }, as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 } });
         assert_eq!(known.len(), 2);
         assert!(known.iter().all(|item| item.value.is_known()));
     }
@@ -621,7 +622,8 @@ mod tests {
                 BalanceUnknown::NodeCannotRead => 9,
                 BalanceUnknown::NoChainSource => 10,
                 BalanceUnknown::NotSynced => 11,
-                BalanceUnknown::ReadFailed(_) => 12,
+                BalanceUnknown::ReplicaHasNoData => 12,
+                BalanceUnknown::ReadFailed(_) => 13,
             }
         }
         let mut arms: Vec<u8> = every_unknown_reason().iter().map(arm).collect();
@@ -629,7 +631,7 @@ mod tests {
         arms.dedup();
         assert_eq!(
             arms,
-            (0..13).collect::<Vec<u8>>(),
+            (0..14).collect::<Vec<u8>>(),
             "the guard's reason list is not the whole enum"
         );
     }

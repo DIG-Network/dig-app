@@ -414,6 +414,15 @@ pub mod node {
             dig: u64,
             /// The node's `synced` flag: `false` means the figures are STALE.
             synced: bool,
+            /// The disclosed read tier (`"db"` / `"fallback"`), or `None` for a node too old to
+            /// disclose one — which serializes as an ABSENT field, exactly as such a node answers.
+            source: Option<&'static str>,
+            /// The peak height the figures reflect, or `None` when the answer carries none.
+            ///
+            /// Varies INDEPENDENTLY of `source` and `synced` because the three are independent facts
+            /// on the wire, and a fake that could not separate them could not express the one answer
+            /// that must not become a figure: a `db` read with no height at all.
+            peak_height: Option<u32>,
         },
         /// Refuse, exactly as the node's error envelope does: a numeric wire code plus the stable
         /// UPPER_SNAKE `data.code` symbol a client is contractually required to branch on.
@@ -893,22 +902,29 @@ pub mod node {
     /// `dig-node-service`'s `control::wallet_balance` emits.
     fn wallet_result(reply: &WalletReply, asset: Asset) -> String {
         match reply {
-            WalletReply::Balance { xch, dig, synced } => {
+            WalletReply::Balance {
+                xch,
+                dig,
+                synced,
+                source,
+                peak_height,
+            } => {
                 let balance = match asset {
                     Asset::Xch => *xch,
                     Asset::Dig => *dig,
                 };
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": {
-                        "balance": balance,
-                        "pending": 0,
-                        "synced": synced,
-                        "peak_height": 6_000_000,
-                    }
-                })
-                .to_string()
+                let mut result = serde_json::json!({
+                    "balance": balance,
+                    "pending": 0,
+                    "synced": synced,
+                    "peak_height": peak_height,
+                });
+                // Omitted rather than null: a node predating tier disclosure has no such field at
+                // all, and a fake that always emits the key cannot exercise that node.
+                if let Some(source) = source {
+                    result["source"] = serde_json::json!(source);
+                }
+                serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }).to_string()
             }
             WalletReply::Rejected { code, symbol } => serde_json::json!({
                 "jsonrpc": "2.0",
