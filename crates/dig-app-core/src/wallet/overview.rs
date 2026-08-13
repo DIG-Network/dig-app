@@ -158,7 +158,33 @@ pub enum BalanceUnknown {
     /// A source is there and still catching up to the chain tip, so any figure it gave would be
     /// stale. Reported as unknown rather than shown with a caveat: a stale number still reads as
     /// the truth.
+    ///
+    /// This is the reason a node gives for declining a read, and it is ONE of at least three
+    /// situations that used to render as it — see [`AddressesNotFollowed`](Self::AddressesNotFollowed)
+    /// and [`AwaitingNodeRestart`](Self::AwaitingNodeRestart), which it must no longer speak for.
     NotSynced,
+    /// The node is following NO addresses of this account, measured, so it holds no record of this
+    /// account's coins to read (dig_ecosystem#2848).
+    ///
+    /// It claims nothing about the node's chain position, because the reading that produces it —
+    /// [`SyncProgress::NothingToSync`](crate::network::SyncProgress::NothingToSync) — is answered
+    /// from the watched count BEFORE either height is consulted, so this is reached on a first run
+    /// that is genuinely still syncing as well as on a caught-up one.
+    ///
+    /// Distinct from [`NotSynced`](Self::NotSynced) because the remedy is the opposite one: waiting
+    /// achieves nothing here, since a replica with an empty subscription does not sync by design.
+    /// This is the state a live user was shown as "your node is still catching up with the
+    /// blockchain" while the same window reported the chain synced — the contradiction that opened
+    /// dig_ecosystem#2848.
+    AddressesNotFollowed,
+    /// The node has ACCEPTED this account's keys and has not begun following them yet, because
+    /// enrolment reaches the live subscription only at the node's next start
+    /// (dig_ecosystem#2826).
+    ///
+    /// A known interval with a known cause, so it is neither a fault nor a silent wait: it is
+    /// reported as itself. Distinct from [`AddressesNotFollowed`](Self::AddressesNotFollowed)
+    /// because nothing more is asked of anyone — the registration already happened.
+    AwaitingNodeRestart,
     /// The read reached a source and failed. Carries the source's own words so the window can say
     /// what went wrong.
     ReadFailed(String),
@@ -280,13 +306,81 @@ impl WalletOverview {
             AddressReading::Unavailable(why) => {
                 BalanceReading::Unknown(BalanceUnknown::NoAddress(*why))
             }
-            AddressReading::Known(_) => view.balance.clone(),
+            // The node's refusal arrives with the balance; what that refusal MEANS needs two more
+            // readings from the same snapshot, so the naming happens here rather than in the
+            // engine (dig_ecosystem#2848).
+            AddressReading::Known(_) => match &view.balance {
+                BalanceReading::Unknown(BalanceUnknown::NotSynced) => {
+                    BalanceReading::Unknown(refine_unsynced(&view.network, &view.enrolment))
+                }
+                other => other.clone(),
+            },
         };
         Self {
             address,
             balance,
             profiles_unreadable: view.profiles.is_unreadable(),
         }
+    }
+}
+
+/// Which of the three "no figure yet" situations the node is actually in
+/// (dig_ecosystem#2848).
+///
+/// The node declines a read with one symbol, `WALLET_NOT_SYNCED`, for situations whose remedies have
+/// nothing in common: one is waited out, one is fixed by enrolling addresses, and one is a known
+/// interval that resolves itself. Telling them apart needs two readings the engine's error does not
+/// carry — the node's own catch-up [`progress`](crate::network::NetworkStanding::progress) and what
+/// this app knows about [`Enrolment`] — which is why this is a function over a SNAPSHOT rather than
+/// a mapping in `why_unread`.
+///
+/// # A measured distance keeps the original reason
+///
+/// [`SyncProgress::Behind`] means the replica trails the peak its peers announced, and there waiting
+/// IS the remedy — any other explanation would distract from a wait that is working.
+///
+/// # What the enrolment reasons may NOT claim, and why
+///
+/// [`NetworkStanding::progress`](crate::network::NetworkStanding::progress) answers
+/// [`NothingToSync`](SyncProgress::NothingToSync) from the measured `watched_addresses` alone,
+/// **before it looks at either height** — deliberately, because a replica with an empty subscription
+/// is frozen rather than lagging and a distance computed over it is arithmetically correct and false
+/// (dig_ecosystem#2820).
+///
+/// So this arm is ALSO reached on a first run that is genuinely still syncing with nothing enrolled,
+/// and neither enrolment sentence may assert that the node is caught up. An earlier draft opened
+/// with *"your node is caught up with the blockchain"* — the mirror of the defect this whole feature
+/// exists to remove, an app asserting a sync state nobody measured, merely inverted. The sentences
+/// therefore say only what the enrolment fact supports: which addresses the node follows, and what
+/// happens next.
+///
+/// # Silence where nothing is known
+///
+/// [`SyncProgress::CaughtUp`] and [`SyncProgress::CannotTell`] fall back to
+/// [`BalanceUnknown::NotSynced`] unchanged. Both are states where the node has declined for a reason
+/// this app cannot name, and naming one anyway — "your addresses are not followed" over a node that
+/// has simply not resolved its subscription yet — would trade a vague truth for a confident guess.
+fn refine_unsynced(
+    standing: &crate::network::NetworkStanding,
+    enrolment: &crate::wallet::enrol::Enrolment,
+) -> BalanceUnknown {
+    use crate::network::SyncProgress;
+    use crate::wallet::enrol::Enrolment;
+
+    match standing.progress() {
+        SyncProgress::Behind { .. } => BalanceUnknown::NotSynced,
+        // A MEASURED empty subscription: whatever this node's chain position is, it holds no record
+        // of THIS account, so a catch-up is not what stands between the user and their figure — see
+        // the doc above for why no claim about that position may ride along. Which of the two
+        // enrolment reasons it is turns on whether
+        // this app has got its keys ACCEPTED — the node takes them into its live set only when it
+        // next starts (dig_ecosystem#2826), so "registered" and "followed" are different facts and
+        // the wait between them is its own state.
+        SyncProgress::NothingToSync => match enrolment {
+            Enrolment::Registered => BalanceUnknown::AwaitingNodeRestart,
+            Enrolment::Unasked | Enrolment::Refused(_) => BalanceUnknown::AddressesNotFollowed,
+        },
+        SyncProgress::CaughtUp | SyncProgress::CannotTell => BalanceUnknown::NotSynced,
     }
 }
 
@@ -482,6 +576,10 @@ fn menu_reason(why: &BalanceUnknown) -> &'static str {
         BalanceUnknown::NodeCannotRead => "this node cannot read balances yet",
         BalanceUnknown::NoChainSource => "your node has no chain connection yet",
         BalanceUnknown::NotSynced => "your node is still syncing",
+        BalanceUnknown::AddressesNotFollowed => "your node is not following your addresses yet",
+        BalanceUnknown::AwaitingNodeRestart => {
+            "your node follows your addresses from its next start"
+        }
         BalanceUnknown::ReadFailed(_) => "the read failed",
     }
 }
@@ -550,6 +648,19 @@ pub fn unknown_reason(why: &BalanceUnknown) -> String {
         BalanceUnknown::NotSynced => {
             "your node is still catching up with the blockchain. A figure now would be out of date, so \
              DIG waits rather than showing one."
+                .to_string()
+        }
+        BalanceUnknown::AddressesNotFollowed => {
+            "your node is not following your addresses yet, so it holds no record of your coins to \
+             read. Nothing is wrong with your account, and money sent to your address still \
+             arrives. DIG registers your addresses with your node while your account is \
+             unlocked."
+                .to_string()
+        }
+        BalanceUnknown::AwaitingNodeRestart => {
+            "your addresses are registered with your node, and it starts following them the next \
+             time it restarts. Nothing is wrong and there is nothing to do — the figure \
+             appears once it has read them."
                 .to_string()
         }
         BalanceUnknown::ReadFailed(detail) => format!("the read failed ({detail})."),
@@ -1399,6 +1510,145 @@ mod tests {
         assert_eq!(
             AddressReading::Unavailable(AddressUnavailable::Locked).address(),
             None
+        );
+    }
+
+    /// The three situations that used to render as one sentence must now render as three
+    /// (dig_ecosystem#2848).
+    ///
+    /// This is a TABLE rather than three separate tests for one reason: a test that asserts a single
+    /// reason in isolation passes against an implementation that returns that reason for
+    /// everything. The discriminating structure is that every row varies only what it names — the
+    /// pair of heights, the measured watched count, the enrolment — and every row must produce a
+    /// DIFFERENT reason from its neighbours, which the final uniqueness assertion pins.
+    #[test]
+    fn a_declined_read_names_which_of_the_three_situations_the_node_is_in() {
+        use crate::network::{ChainSync, NetworkStanding};
+        use crate::wallet::enrol::Enrolment;
+
+        /// A node standing: how far the replica has copied, what its peers announced, and how many
+        /// addresses it is measurably following.
+        fn standing(replica: u32, peers: u32, watched: Option<u32>) -> NetworkStanding {
+            NetworkStanding {
+                sync: ChainSync::Syncing {
+                    peak_height: replica,
+                },
+                chia_peer_peak_height: Some(peers),
+                watched_addresses: watched,
+                ..Default::default()
+            }
+        }
+        let reason = |standing, enrolment| {
+            let overview = WalletOverview::of_tray(&crate::tray_menu::TrayView {
+                account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+                receive_address: Some(ADDRESS.to_string()),
+                node_connected: true,
+                balance: BalanceReading::Unknown(BalanceUnknown::NotSynced),
+                network: standing,
+                enrolment,
+                ..Default::default()
+            });
+            match overview.balance {
+                BalanceReading::Unknown(why) => why,
+                other => panic!("a declined read is never a figure: {other:?}"),
+            }
+        };
+
+        // Genuinely behind: waiting IS the remedy, so the original sentence stands. The watched
+        // count is deliberately non-zero here — a replica with an empty subscription would not be
+        // behind, it would be frozen.
+        let behind = reason(standing(9_140_000, 9_142_585, Some(1)), Enrolment::Unasked);
+        // Level with the chain, following nothing, nothing registered: the measured state on the
+        // user's machine. Note it shares its ENROLMENT with the row above, so a reason derived from
+        // enrolment alone cannot tell them apart.
+        let unfollowed = reason(standing(9_142_585, 9_142_585, Some(0)), Enrolment::Unasked);
+        // The same node, the same heights, the same empty live set — and the keys accepted. Varies
+        // ONE field against the row above, so it discriminates the enrolment leg exactly.
+        let awaiting = reason(
+            standing(9_142_585, 9_142_585, Some(0)),
+            Enrolment::Registered,
+        );
+        // An UNRESOLVED subscription (`None`, not a measured zero) is not evidence of anything, so
+        // the vague-but-true sentence is kept rather than a confident guess made.
+        let unresolved = reason(standing(9_142_585, 9_142_585, None), Enrolment::Registered);
+
+        assert_eq!(behind, BalanceUnknown::NotSynced);
+        assert_eq!(unfollowed, BalanceUnknown::AddressesNotFollowed);
+        assert_eq!(awaiting, BalanceUnknown::AwaitingNodeRestart);
+        assert_eq!(unresolved, BalanceUnknown::NotSynced);
+
+        // The sentences a person reads must differ too, not only the variants: three names for one
+        // paragraph would leave the defect exactly where it was.
+        let sentences = [&behind, &unfollowed, &awaiting].map(unknown_reason);
+        assert_ne!(sentences[0], sentences[1]);
+        assert_ne!(sentences[1], sentences[2]);
+        assert_ne!(sentences[0], sentences[2]);
+        assert!(
+            !unknown_reason(&unfollowed).contains("catching up")
+                && !unknown_reason(&awaiting).contains("catching up"),
+            "neither enrolment reason may blame the chain: {sentences:?}"
+        );
+
+        // And neither may assert the OPPOSITE chain state either — the mirror of the same defect.
+        // `progress()` answers `NothingToSync` from the watched count alone, before it consults
+        // either height (`network.rs`, dig_ecosystem#2820), so both enrolment reasons are reached on
+        // a first run that is genuinely still syncing. An earlier draft opened with "your node is
+        // caught up with the blockchain" and was, on that machine, false.
+        //
+        // The control is the `behind` row: it is the ONE reason licensed to talk about the chain,
+        // and it must still do so — otherwise a version that stripped every chain word everywhere
+        // would pass this.
+        for chain_claim in ["caught up", "up to date", "in sync", "synced"] {
+            for (name, sentence) in [("unfollowed", &unfollowed), ("awaiting", &awaiting)] {
+                assert!(
+                    !unknown_reason(sentence).contains(chain_claim),
+                    "{name} asserts a chain position nothing measured ({chain_claim:?}): {}",
+                    unknown_reason(sentence)
+                );
+            }
+        }
+        assert!(
+            unknown_reason(&behind).contains("catching up with the blockchain"),
+            "control: the one reason that IS about the chain must still say so: {}",
+            unknown_reason(&behind)
+        );
+    }
+
+    /// **A measured zero is a FACT and stays a zero.** The refinement above must never reach a
+    /// balance the node actually served: an account that holds nothing is entitled to be told so.
+    ///
+    /// The discriminating fixture is the one under which the refinement WOULD fire — a caught-up
+    /// node following no addresses — so an implementation that refined every reading rather than
+    /// only a declined one fails here.
+    #[test]
+    fn a_real_zero_survives_a_node_that_follows_no_addresses() {
+        use crate::network::{ChainSync, NetworkStanding};
+
+        let overview = WalletOverview::of_tray(&crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            node_connected: true,
+            balance: BalanceReading::Known(Balances {
+                xch_mojos: 0,
+                dig_units: 0,
+            }),
+            network: NetworkStanding {
+                sync: ChainSync::Synced {
+                    peak_height: 9_142_585,
+                },
+                chia_peer_peak_height: Some(9_142_585),
+                watched_addresses: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Known(Balances {
+                xch_mojos: 0,
+                dig_units: 0
+            }),
+            "a figure the node served is never re-explained away"
         );
     }
 }

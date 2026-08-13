@@ -58,6 +58,9 @@ fn main() {
             node_facts: None,
             hosted_stores: dig_app_core::hosted_stores::HostedStoresReading::Known(Vec::new()),
             installed_apps: dig_app_core::apps::AppPresence::Known(Vec::new()),
+            // The account's addresses are enrolled with that node, matching the funded reading
+            // above: the gallery photographs the account states, not the enrolment states.
+            enrolment: dig_app_core::wallet::enrol::Enrolment::Registered,
             // The profile rows live in the WINDOW, not on the tray, so this gallery pins them to
             // the state every real account is in rather than varying them.
             profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
