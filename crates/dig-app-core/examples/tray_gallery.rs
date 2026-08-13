@@ -51,7 +51,10 @@ fn main() {
                     xch_mojos: 1_250_000_000_000,
                     dig_units: 3_400,
                 },
-                as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+                as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
             },
             account: Some(account.clone()),
             // A connected node, matching the `node` line above: the gallery photographs the

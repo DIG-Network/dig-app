@@ -496,10 +496,6 @@ pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
     /// Fail-closed on `None`: an unobservable tip licenses no claim that anything reached it.
     /// `>=` rather than `==` because a replica that copied another block between the sync poll and
     /// the balance read is momentarily higher, which is still up to date.
-    fn reached(height: u32, peers_peak: Option<u32>) -> bool {
-        peers_peak.is_some_and(|peak| height >= peak)
-    }
-
     /// A block height with thousands separators — seven bare digits are a number nobody reads.
     fn grouped(height: u32) -> String {
         let digits = height.to_string();
@@ -524,17 +520,25 @@ pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
         // actually current teaches a person to stop reading it, exactly when the day it means
         // something is the day it changes. The height stays, because it is what makes the claim
         // checkable rather than a reassurance.
-        BalanceAsOf::Replica { height } if reached(height, peers_peak) => {
+        BalanceAsOf::Replica { height, caught_up } if is_level(height, caught_up, peers_peak) => {
             format!("Up to date with the chain, at block {}.", grouped(height))
         }
-        BalanceAsOf::Replica { height } => {
+        // BEHIND, and the sentence says both halves. The as-of alone was true but incomplete: a
+        // reader can take "the last your node has read" for a node that has finished and simply
+        // reads that block, which is the one reading of it that would stop them waiting
+        // (dig_ecosystem#2869). The figure is not called stale — it is correct as of that height —
+        // and the node is named as still working.
+        BalanceAsOf::Replica { height, .. } => {
             format!(
-                "Correct as of block {}, the last your node has read.",
+                "Still syncing — correct as of block {}, the last your node has read.",
                 grouped(height)
             )
         }
+        // Current, and NOT the user's own node: the oracle answered because the replica has not
+        // caught up to this address yet. So the syncing signal belongs here too, on a figure that
+        // must not itself be described as out of date.
         BalanceAsOf::Oracle => {
-            "Read from a public chain service, not from your own node.".to_string()
+            "Still syncing — read from a public chain service, not from your own node.".to_string()
         }
         BalanceAsOf::Undisclosed => "Your node did not say where this came from.".to_string(),
     }
@@ -555,14 +559,14 @@ pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
 /// from outside this crate and has neither a length bound nor a guarantee about its contents, so on a
 /// menu row it could be arbitrarily wide — and could itself carry digits, defeating the rule above. The
 /// row says the read failed; the window says what the source said.
-pub fn menu_balance_label(balance: &BalanceReading) -> String {
+pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> String {
     match balance {
         BalanceReading::Pending => "Balance: checking…".to_string(),
         BalanceReading::Known { balances, as_of } => format!(
             "Balance: {} $DIG · {} XCH{}",
             format_amount(Asset::Dig, balances.dig_units),
             format_amount(Asset::Xch, balances.xch_mojos),
-            menu_provenance(*as_of)
+            menu_provenance(*as_of, peers_peak)
         ),
         BalanceReading::Unknown(why) => format!("Balance not known — {}…", menu_reason(why)),
     }
@@ -602,11 +606,67 @@ pub fn menu_balance_label(balance: &BalanceReading) -> String {
 /// `dig-node-control-interface`'s `WalletBalanceResult` states that absent "means the answering node
 /// predates tier disclosure". So it names the fact AND the remedy, in the shortest form that does
 /// both.
-fn menu_provenance(as_of: BalanceAsOf) -> &'static str {
+/// The parenthetical a menu row carries after the figures, or nothing when the figure needs none.
+///
+/// # Why the oracle clause is written so tightly
+///
+/// A row cannot wrap, and the widest a `u64` pair of figures can render is 63 characters against a
+/// bound of 80 — so every suffix has 17 characters to say what it needs, and the oracle case has
+/// the most to say: the node is still syncing AND this figure is not the node's own. `·` rather
+/// than a spaced separator is what fits both facts; the window's sentence is where either is
+/// explained (dig_ecosystem#2869).
+fn menu_provenance(as_of: BalanceAsOf, peers_peak: Option<u32>) -> &'static str {
     match as_of {
-        BalanceAsOf::Replica { .. } => "",
-        BalanceAsOf::Oracle => " (public source)",
+        BalanceAsOf::Replica { height, caught_up } if is_level(height, caught_up, peers_peak) => "",
+        BalanceAsOf::Replica { .. } => " (syncing)",
+        BalanceAsOf::Oracle => " (syncing·public)",
         BalanceAsOf::Undisclosed => " (older node)",
+    }
+}
+
+/// Whether a replica reading is LEVEL with the chain — the node's own claim, corroborated by the
+/// peak its peers announced.
+///
+/// Two sources because the two read paths have different evidence. The node's `synced` flag travels
+/// with every reading; the peers' peak exists only on a tray snapshot. Either alone is incomplete:
+/// the comparison alone marks a caught-up node as syncing wherever no peak is known, and a node
+/// that has advanced past the peak recorded in the snapshot is level even before it says so.
+///
+/// Where NEITHER is available the answer is *not level*, which is the direction this feature must
+/// fail in: silence about the chain tip is not evidence of being at it (dig_ecosystem#2869).
+fn is_level(height: u32, caught_up: bool, peers_peak: Option<u32>) -> bool {
+    caught_up || peers_peak.is_some_and(|peak| height >= peak)
+}
+
+/// Whether this reading needs a SYNCING indicator beside the figure.
+///
+/// One predicate for every surface that shows a balance, because the tray row and the Wallet pane
+/// disagreeing about whether the same figure is current is the drift this returns a `bool` to
+/// prevent. `true` means the figure is real and shown, and something must say so beside it.
+///
+/// # Beside, not beneath (dig_ecosystem#2869)
+///
+/// The user asked for *"an indicator that its still syncing next to the balance"*, and the
+/// distinction is not cosmetic: an as-of sentence a scroll away from the number qualifies the
+/// number only for somebody who reads on. The indicator travels WITH the figure so the qualified
+/// claim is the one a glance takes away.
+///
+/// An [`Oracle`](BalanceAsOf::Oracle) reading is included even though the figure itself is current:
+/// the oracle answered *because* the user's own replica has not got there yet, so the node is
+/// demonstrably still syncing. What that indicator must not do is call the FIGURE stale — see
+/// [`menu_provenance`] and [`as_of_sentence`], which both name the public source.
+pub fn is_syncing(balance: &BalanceReading, peers_peak: Option<u32>) -> bool {
+    match balance {
+        BalanceReading::Known { as_of, .. } => match as_of {
+            BalanceAsOf::Replica { height, caught_up } => {
+                !is_level(*height, *caught_up, peers_peak)
+            }
+            BalanceAsOf::Oracle => true,
+            // An older node disclosed nothing, so "still syncing" is a claim about it that nothing
+            // measured. Its own row already says `older node`.
+            BalanceAsOf::Undisclosed => false,
+        },
+        BalanceReading::Pending | BalanceReading::Unknown(_) => false,
     }
 }
 
@@ -788,7 +848,10 @@ mod tests {
                     xch_mojos: 0,
                     dig_units: 0
                 },
-                as_of: BalanceAsOf::Replica { height: 7_000_000 }
+                as_of: BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true
+                }
             },
             "a source that answered zero IS a zero balance"
         );
@@ -923,7 +986,7 @@ mod tests {
     #[test]
     fn an_unknown_balance_never_renders_a_numeral_on_a_menu_row() {
         for why in every_unknown() {
-            let label = menu_balance_label(&BalanceReading::Unknown(why.clone()));
+            let label = menu_balance_label(&BalanceReading::Unknown(why.clone()), None);
             assert!(
                 !label.chars().any(|c| c.is_ascii_digit()),
                 "{why:?}: an unknown balance must never show a figure: {label}"
@@ -964,7 +1027,7 @@ mod tests {
                 !reason.contains("  "),
                 "{why:?}: rendered reason must not contain double spaces: {reason}"
             );
-            let label = menu_balance_label(&BalanceReading::Unknown(why.clone()));
+            let label = menu_balance_label(&BalanceReading::Unknown(why.clone()), None);
             assert!(label.contains(clause), "{why:?}: {label}");
             assert!(seen.insert(label.clone()), "reasons must differ: {label}");
         }
@@ -974,23 +1037,35 @@ mod tests {
     /// is the one case where a numeral is the truth.
     #[test]
     fn a_known_balance_shows_both_assets_on_the_menu_row() {
-        let held = menu_balance_label(&BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500,
+        let held = menu_balance_label(
+            &BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
             },
-            as_of: BalanceAsOf::Replica { height: 7_000_000 },
-        });
+            None,
+        );
         assert!(held.contains("2.5 $DIG"), "{held}");
         assert!(held.contains("1.25 XCH"), "{held}");
 
-        let empty = menu_balance_label(&BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 0,
-                dig_units: 0,
+        let empty = menu_balance_label(
+            &BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 0,
+                    dig_units: 0,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
             },
-            as_of: BalanceAsOf::Replica { height: 7_000_000 },
-        });
+            None,
+        );
         assert!(
             empty.contains("0 $DIG") && empty.contains("0 XCH"),
             "{empty}"
@@ -1008,6 +1083,11 @@ mod tests {
     /// theoretical one. Wording it as a caveat would be the same defect as putting the provenance
     /// suffix on every menu row: a permanent apology on a figure that is actually current teaches a
     /// person to stop reading it, and the day it means something is the day it changes.
+    ///
+    /// Every fixture here sets `caught_up: false` deliberately. The node's own claim is the OTHER
+    /// route to "level" (dig_ecosystem#2869), and it short-circuits the comparison — so a fixture
+    /// that set it would pass whatever the comparison did, and this test would stop being about
+    /// the peak at all.
     #[test]
     fn a_balance_level_with_the_chain_says_so_rather_than_apologising() {
         const PEAK: u32 = 9_141_741;
@@ -1015,7 +1095,13 @@ mod tests {
         // LEVEL with the peers' peak. A replica genuinely reaches this and tracks it — measured on
         // an enrolled 0.116.0 node following 9,141,738 → 9,141,739 → 9,141,741 — so this is the
         // ordinary state, not a theoretical one.
-        let current = as_of_sentence(BalanceAsOf::Replica { height: PEAK }, Some(PEAK));
+        let current = as_of_sentence(
+            BalanceAsOf::Replica {
+                height: PEAK,
+                caught_up: false,
+            },
+            Some(PEAK),
+        );
         assert!(
             current.contains("Up to date"),
             "a figure level with the chain must not be worded as a caveat: {current}"
@@ -1027,10 +1113,14 @@ mod tests {
 
         // A block PAST the announced peak is still up to date: the replica copied another block
         // between the sync poll and the balance read.
-        assert!(
-            as_of_sentence(BalanceAsOf::Replica { height: PEAK + 1 }, Some(PEAK))
-                .contains("Up to date"),
-        );
+        assert!(as_of_sentence(
+            BalanceAsOf::Replica {
+                height: PEAK + 1,
+                caught_up: false
+            },
+            Some(PEAK)
+        )
+        .contains("Up to date"),);
 
         // THE CONTROL, and the reason this is a distinction rather than a decoration: a replica that
         // is genuinely behind must NOT claim to be current. Without this, a sentence that always
@@ -1039,6 +1129,7 @@ mod tests {
         let behind = as_of_sentence(
             BalanceAsOf::Replica {
                 height: PEAK - 1_709,
+                caught_up: false,
             },
             Some(PEAK),
         );
@@ -1054,7 +1145,13 @@ mod tests {
         // FAIL CLOSED: no peer has announced a peak, so there is nothing to have reached. The as-of
         // wording is true either way; the current claim is not checkable and is not made. A `0`
         // default for the peak would make EVERY figure trivially up to date.
-        let unknowable = as_of_sentence(BalanceAsOf::Replica { height: PEAK }, None);
+        let unknowable = as_of_sentence(
+            BalanceAsOf::Replica {
+                height: PEAK,
+                caught_up: false,
+            },
+            None,
+        );
         assert!(
             !unknowable.contains("Up to date"),
             "an unobservable chain tip licenses no claim that anything reached it: {unknowable}"
@@ -1077,7 +1174,10 @@ mod tests {
                     xch_mojos: 1_250_000_000_000,
                     dig_units: 2_500,
                 },
-                as_of: BalanceAsOf::Replica { height: 9_141_741 },
+                as_of: BalanceAsOf::Replica {
+                    height: 9_141_741,
+                    caught_up: true,
+                },
             },
             network: crate::network::NetworkStanding {
                 chia_peer_peak_height: Some(9_141_741),
@@ -1116,18 +1216,21 @@ mod tests {
     #[test]
     fn a_figure_that_is_not_the_wallets_own_is_labelled_on_the_menu_row() {
         let row = |as_of| {
-            menu_balance_label(&BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_250_000_000_000,
-                    dig_units: 2_500,
+            menu_balance_label(
+                &BalanceReading::Known {
+                    balances: Balances {
+                        xch_mojos: 1_250_000_000_000,
+                        dig_units: 2_500,
+                    },
+                    as_of,
                 },
-                as_of,
-            })
+                None,
+            )
         };
 
         let oracle = row(BalanceAsOf::Oracle);
         assert!(
-            oracle.contains("public source"),
+            oracle.contains("public"),
             "an oracle figure must not read as the wallet's own: {oracle}"
         );
         let undisclosed = row(BalanceAsOf::Undisclosed);
@@ -1142,7 +1245,10 @@ mod tests {
 
         // THE CONTROL: the wallet's own node carries no disclaimer, because the row's default
         // reading is already true of it.
-        let replica = row(BalanceAsOf::Replica { height: 7_000_000 });
+        let replica = row(BalanceAsOf::Replica {
+            height: 7_000_000,
+            caught_up: true,
+        });
         assert_eq!(
             replica, "Balance: 2.5 $DIG · 1.25 XCH",
             "a replica reading IS the wallet's own and must not be qualified: {replica}"
@@ -1170,28 +1276,40 @@ mod tests {
     fn every_menu_label_stays_short_including_a_hostile_upstream_error() {
         let mut labels: Vec<String> = every_unknown()
             .into_iter()
-            .map(|why| menu_balance_label(&BalanceReading::Unknown(why)))
+            .map(|why| menu_balance_label(&BalanceReading::Unknown(why), None))
             .collect();
-        labels.push(menu_balance_label(&BalanceReading::Unknown(
-            BalanceUnknown::ReadFailed("x".repeat(4000)),
-        )));
+        labels.push(menu_balance_label(
+            &BalanceReading::Unknown(BalanceUnknown::ReadFailed("x".repeat(4000))),
+            None,
+        ));
         // The widest KNOWN reading a u64 pair can produce, so the bound covers the figures too —
         // and once for EVERY provenance, because the suffix is part of the row's width and the
         // longest one lands on the case that is universal today (dig_ecosystem#2824). Measured with
         // only the unsuffixed `Replica` here, this bound would have been checked against the one
         // reading no real install can currently produce.
         for as_of in [
-            BalanceAsOf::Replica { height: 7_000_000 },
+            BalanceAsOf::Replica {
+                height: 7_000_000,
+                caught_up: true,
+            },
             BalanceAsOf::Oracle,
             BalanceAsOf::Undisclosed,
         ] {
-            labels.push(menu_balance_label(&BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: u64::MAX,
-                    dig_units: u64::MAX,
-                },
-                as_of,
-            }));
+            // BOTH sides of the level/behind split, because they render DIFFERENT suffixes and
+            // the wider one is the syncing form this feature added. A sweep pinned only at
+            // `None` would measure the row that says least.
+            for peers_peak in [None, Some(1), Some(u32::MAX)] {
+                labels.push(menu_balance_label(
+                    &BalanceReading::Known {
+                        balances: Balances {
+                            xch_mojos: u64::MAX,
+                            dig_units: u64::MAX,
+                        },
+                        as_of,
+                    },
+                    peers_peak,
+                ));
+            }
         }
 
         for label in &labels {
@@ -1230,7 +1348,7 @@ mod tests {
         assert_eq!(unreachable, BalanceReading::Unknown(BalanceUnknown::NoNode));
 
         let lines = [&timed_out, &syncing, &unreachable].map(|r| balance_line(r, None));
-        let rows = [&timed_out, &syncing, &unreachable].map(menu_balance_label);
+        let rows = [&timed_out, &syncing, &unreachable].map(|r| menu_balance_label(r, None));
         assert_eq!(
             std::collections::HashSet::from(lines.clone()).len(),
             3,
@@ -1254,7 +1372,7 @@ mod tests {
         let timed_out = BalanceReading::Unknown(BalanceUnknown::NodeTimedOut);
         let surfaces = [
             balance_line(&timed_out, None),
-            menu_balance_label(&timed_out),
+            menu_balance_label(&timed_out, None),
             window_body(&WalletOverview {
                 address: known(),
                 balance: timed_out.clone(),
@@ -1287,7 +1405,10 @@ mod tests {
     #[test]
     fn a_read_in_flight_reads_as_checking_rather_than_as_a_failure() {
         let pending = BalanceReading::Pending;
-        for text in [balance_line(&pending, None), menu_balance_label(&pending)] {
+        for text in [
+            balance_line(&pending, None),
+            menu_balance_label(&pending, None),
+        ] {
             assert!(text.to_lowercase().contains("checking"), "{text}");
             assert!(
                 !text.chars().any(|c| c.is_ascii_digit()),
@@ -1452,7 +1573,10 @@ mod tests {
                     xch_mojos: 1_250_000_000_000,
                     dig_units: 2_500,
                 },
-                as_of: BalanceAsOf::Replica { height: 7_000_000 },
+                as_of: BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
             },
             ..Default::default()
         }));
@@ -1515,7 +1639,10 @@ mod tests {
                     xch_mojos: 1_250_000_000_000,
                     dig_units: 2_500,
                 },
-                as_of: BalanceAsOf::Replica { height: 7_000_000 },
+                as_of: BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
             },
             ..Default::default()
         }));

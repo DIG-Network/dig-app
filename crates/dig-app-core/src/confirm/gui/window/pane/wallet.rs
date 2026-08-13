@@ -41,8 +41,8 @@ use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
-    address_line, as_of_sentence, format_amount, unknown_reason, AddressReading, BalanceReading,
-    Balances,
+    address_line, as_of_sentence, format_amount, is_syncing, unknown_reason, AddressReading,
+    BalanceReading, Balances,
 };
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
@@ -149,9 +149,30 @@ fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading, facts: &
         }
         BalanceReading::Pending | BalanceReading::Unknown(_) => None,
     };
+    let syncing = is_syncing(balance, facts.network.chia_peer_peak_height);
     flow.place(|ui, at| {
         (
             card::card(ui, at, t, Some(copy::wallet::HOLDINGS_CARD), |inner| {
+                // The badge leads the figures rather than following the sentence, because it
+                // qualifies the number a glance takes and a glance stops at the number
+                // (dig_ecosystem#2869). `Warn`, not `Good`: nothing is broken, but the figure is
+                // not the last word yet.
+                if syncing {
+                    inner.place(|ui, at| {
+                        (
+                            data::badge(
+                                ui,
+                                at.left_top(),
+                                t,
+                                copy::wallet::BALANCE_SYNCING_BADGE,
+                                Tone::Warn,
+                            )
+                            .height(),
+                            (),
+                        )
+                    });
+                    inner.gap(space::S2);
+                }
                 inner.place(|ui, at| (data::readouts(ui, at, t, &items), ()));
                 if let Some(sentence) = &as_of {
                     inner.gap(space::S2);
@@ -600,7 +621,10 @@ mod tests {
                 xch_mojos: 1_000_000_000_000,
                 dig_units: 2_000,
             },
-            as_of: crate::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+            as_of: crate::wallet::engine::BalanceAsOf::Replica {
+                height: 7_000_000,
+                caught_up: true,
+            },
         });
         assert_eq!(known.len(), 2);
         assert!(known.iter().all(|item| item.value.is_known()));

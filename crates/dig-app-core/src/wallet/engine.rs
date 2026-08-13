@@ -91,6 +91,18 @@ pub enum BalanceAsOf {
     Replica {
         /// The peak height the figures reflect.
         height: u32,
+        /// Whether the node called this replica view CAUGHT UP — its own `synced` flag, carried
+        /// rather than discarded (dig_ecosystem#2869).
+        ///
+        /// The syncing indicator has to come from somewhere, and the node's own claim is the only
+        /// source every read path has. Comparing the height against the peak the node's peers
+        /// announced corroborates it, but that peak is a property of a tray SNAPSHOT — the direct
+        /// [`WalletOverview::read`](crate::wallet::overview::WalletOverview::read) path has no view
+        /// of the network at all. Deriving the indicator from the comparison alone therefore marked
+        /// every figure on that path as syncing, including a node that had just said it was caught
+        /// up: a caveat that never comes off, which is the failure the whole indicator exists to
+        /// avoid.
+        caught_up: bool,
     },
     /// A third party's coinset answer, not the wallet's own view of the chain.
     ///
@@ -117,9 +129,21 @@ impl BalanceAsOf {
         match (self, other) {
             (Self::Undisclosed, _) | (_, Self::Undisclosed) => Self::Undisclosed,
             (Self::Oracle, _) | (_, Self::Oracle) => Self::Oracle,
-            (Self::Replica { height: a }, Self::Replica { height: b }) => {
-                Self::Replica { height: a.min(b) }
-            }
+            (
+                Self::Replica {
+                    height: a,
+                    caught_up: a_caught_up,
+                },
+                Self::Replica {
+                    height: b,
+                    caught_up: b_caught_up,
+                },
+            ) => Self::Replica {
+                height: a.min(b),
+                // Caught up only if BOTH halves are: one asset read from a settled view does not
+                // settle the other, and the pair is shown as one holding.
+                caught_up: a_caught_up && b_caught_up,
+            },
         }
     }
 }
@@ -170,7 +194,10 @@ pub(crate) mod test_support {
     }
 
     /// The provenance a [`FakeWalletEngine`] reports when a test does not choose one.
-    pub const FAKE_AS_OF: BalanceAsOf = BalanceAsOf::Replica { height: 7_000_000 };
+    pub const FAKE_AS_OF: BalanceAsOf = BalanceAsOf::Replica {
+        height: 7_000_000,
+        caught_up: true,
+    };
 
     impl WalletEngine for FakeWalletEngine {
         fn broadcast(&self, request: BroadcastRequest) -> Result<BroadcastResponse, WalletError> {
@@ -217,8 +244,14 @@ mod tests {
     /// as-of one of the two readings never supported.
     #[test]
     fn two_replica_heights_take_the_earlier() {
-        let early = BalanceAsOf::Replica { height: 100 };
-        let late = BalanceAsOf::Replica { height: 200 };
+        let early = BalanceAsOf::Replica {
+            height: 100,
+            caught_up: true,
+        };
+        let late = BalanceAsOf::Replica {
+            height: 200,
+            caught_up: true,
+        };
         assert_eq!(early.weaker(late), early);
         assert_eq!(
             late.weaker(early),
@@ -231,7 +264,10 @@ mod tests {
     /// wallet's own view would claim a provenance half of it does not have.
     #[test]
     fn an_oracle_read_drags_a_replica_read_down_to_oracle() {
-        let replica = BalanceAsOf::Replica { height: 100 };
+        let replica = BalanceAsOf::Replica {
+            height: 100,
+            caught_up: true,
+        };
         assert_eq!(replica.weaker(BalanceAsOf::Oracle), BalanceAsOf::Oracle);
         assert_eq!(BalanceAsOf::Oracle.weaker(replica), BalanceAsOf::Oracle);
     }
@@ -240,7 +276,13 @@ mod tests {
     /// nothing, and a pair containing it cannot honestly claim more.
     #[test]
     fn an_undisclosed_read_makes_the_pair_undisclosed() {
-        for other in [BalanceAsOf::Replica { height: 100 }, BalanceAsOf::Oracle] {
+        for other in [
+            BalanceAsOf::Replica {
+                height: 100,
+                caught_up: true,
+            },
+            BalanceAsOf::Oracle,
+        ] {
             assert_eq!(
                 BalanceAsOf::Undisclosed.weaker(other),
                 BalanceAsOf::Undisclosed

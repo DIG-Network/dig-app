@@ -605,6 +605,14 @@ pub(crate) mod wallet {
     /// mid-thought in lower case.
     pub(crate) const BALANCE_NOT_KNOWN: &str = "Not known —";
 
+    /// The badge shown BESIDE the figures while the node is still catching up
+    /// (dig_ecosystem#2869).
+    ///
+    /// Beside them, not only beneath: the as-of sentence under the card explains, and a person who
+    /// takes the number at a glance never reaches it. Two words, so it reads as a state on the
+    /// holding rather than as a warning about it — the figure is real, and the node is working.
+    pub(crate) const BALANCE_SYNCING_BADGE: &str = "Still syncing";
+
     /// The unit shown beside the native-coin figure.
     pub(crate) const XCH_UNIT: &str = "XCH";
     /// The unit shown beside the DIG CAT figure.

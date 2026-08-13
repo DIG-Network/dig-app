@@ -201,7 +201,10 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
             true => BalanceReading::default(),
             false => BalanceReading::Known {
                 balances: HELD,
-                as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica { height: 7_000_000 },
+                as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
             },
         },
         second_factor,
