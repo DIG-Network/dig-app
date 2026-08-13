@@ -2061,10 +2061,19 @@ contract-first pattern as the §5.3 session methods). The engine's chain access 
   EMPTY list is an ANSWER — the address holds nothing — and every failure to consult a chain MUST be an
   error instead; returning an empty list for an unreachable chain would tell somebody who holds funds
   that they hold none. Served as an OPEN read.
-- `control.wallet.balance` — `{ address, asset }` → `{ balance }`. The address's spendable balance in
-  the asset's base unit. The node's reply is a strict SUPERSET of that shape; dig-app reads `balance`
-  plus `synced`, and MUST treat a reply carrying `synced: false` as UNKNOWN rather than rendering the
-  stale figure it contains.
+- `control.wallet.balance` — `{ address, asset }` → `{ balance, as_of }`. The address's spendable
+  balance in the asset's base unit, with the provenance that figure is true AS OF. The node's reply is
+  a strict SUPERSET of that shape; dig-app reads `balance`, `source` and `peak_height`.
+  - dig-app MUST NOT refuse a figure for carrying `synced: false`. A light client trails the chain tip
+    permanently, so that rule withholds the balance essentially always. A behind figure MUST instead be
+    shown together with what it is true as of.
+  - `source: "db"` with a `peak_height` MUST be reported as the node's own replica AS OF that height.
+  - `source: "db"` with NO `peak_height` MUST be an UNKNOWN, never a figure: that replica has synced
+    nothing, so its `balance: 0` is no data rather than no money.
+  - `source: "fallback"` MUST be shown as a third party's number and MUST NOT be given an as-of height,
+    which such an answer does not carry.
+  - An ABSENT `source` MUST be reported as an undisclosed provenance and MUST NOT be assumed to be a
+    tier.
 
 **Reading the balance for real (MUST).** dig-app MUST obtain the balance by ASKING a node, never by
 asserting an outcome it did not test:
