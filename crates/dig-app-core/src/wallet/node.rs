@@ -146,7 +146,8 @@ impl WalletEngine for NodeWalletEngine {
     /// (dig_ecosystem#2824). What travels instead is [`BalanceAsOf`], so the surface can state what
     /// the figure is true as of.
     ///
-    /// The one answer that is still refused is the replica having synced NOTHING — see [`as_of`].
+    /// The one answer that is still refused is the replica having synced NOTHING — see the `as_of`
+    /// mapping below.
     fn balance(&self, request: BalanceRequest) -> Result<BalanceResponse, WalletError> {
         let params = WalletBalanceParams {
             address: request.address,

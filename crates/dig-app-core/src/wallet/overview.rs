@@ -615,7 +615,8 @@ pub fn unknown_reason(why: &BalanceUnknown) -> String {
                 .to_string()
         }
         BalanceUnknown::ReplicaHasNoData => {
-            "your node has not synced your wallet yet, so there is no balance for it to report. This              resolves itself once the node has followed your address for a while."
+            "your node has not synced your wallet yet, so there is no balance for it to report. The \
+             figure appears once the node has synced the address."
                 .to_string()
         }
         BalanceUnknown::ReadFailed(detail) => format!("the read failed ({detail})."),
@@ -860,6 +861,11 @@ mod tests {
         ];
         let mut seen = std::collections::HashSet::new();
         for (why, clause) in every_unknown().into_iter().zip(expected) {
+            let reason = unknown_reason(&why);
+            assert!(
+                !reason.contains("  "),
+                "{why:?}: rendered reason must not contain double spaces: {reason}"
+            );
             let label = menu_balance_label(&BalanceReading::Unknown(why.clone()));
             assert!(label.contains(clause), "{why:?}: {label}");
             assert!(seen.insert(label.clone()), "reasons must differ: {label}");
