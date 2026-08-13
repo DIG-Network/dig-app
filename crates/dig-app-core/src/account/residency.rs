@@ -327,6 +327,58 @@ impl AccountResidency {
         }
     }
 
+    /// The account's WALLET public keys, hex, for enrolment with the node
+    /// (dig_ecosystem#2848) — one per profile whose coins this account can hold. Empty while locked.
+    ///
+    /// # Which key, and why it is not a free choice
+    ///
+    /// `WalletOps::public_key` — dig-account's **synthetic** money key, the same one
+    /// [`observe_receiving_address`](Self::observe_receiving_address) curries into the address on
+    /// screen. dig-node curries whatever it is enrolled DIRECTLY, so any other key of this account
+    /// would have it follow a real address the user does not hold: no error anywhere, a non-zero
+    /// watched count, and a balance that never arrives. See
+    /// [`crate::wallet::enrol`], and `wallet_keys_curry_to_the_address_on_screen` for the assertion
+    /// that pins it.
+    ///
+    /// # Every profile, not only the active one
+    ///
+    /// Each profile derives at its own HD index and so has its own address. A person who switches
+    /// profile must not have to wait for a node to notice — and a node following one profile's
+    /// address while the app shows another's is exactly the money lie the wallet surface refuses
+    /// elsewhere. Enrolment is idempotent and public, so the widest honest set is the cheapest
+    /// correct one.
+    ///
+    /// No secret material crosses this boundary: these keys are derivable from the addresses the
+    /// account already hands out (§908).
+    pub fn wallet_public_keys_hex(&self) -> Vec<String> {
+        let indices = self.wallet_indices();
+        let guard = self.guard();
+        let Some(account) = guard.as_ref() else {
+            return Vec::new();
+        };
+        indices
+            .into_iter()
+            .map(|ix| hex::encode(account.wallet_ops_at(ix).public_key().to_bytes()))
+            .collect()
+    }
+
+    /// Every profile index this account holds money at: the slot this unlock derives at, plus every
+    /// profile in the registry.
+    ///
+    /// Read BEFORE the account mutex is taken — the registry lock is always the outer one
+    /// ([`ProfileSession`]'s lock ordering), and taking it inside the guard would invert that.
+    fn wallet_indices(&self) -> Vec<ProfileIx> {
+        let mut indices = vec![self.wallet_slot.ix()];
+        self.profiles.with_registry(|registry| {
+            for entry in registry.entries() {
+                if !indices.contains(&entry.ix()) {
+                    indices.push(entry.ix());
+                }
+            }
+        });
+        indices
+    }
+
     /// The 48-byte identity signing public key of the ACTIVE profile, as hex — for the connect-handle
     /// advertisement at assembly time (read while unlocked). `None` if the residency is locked.
     pub fn signing_public_key_hex(&self) -> Option<String> {
@@ -616,6 +668,86 @@ mod tests {
         let mut near_miss = SEED;
         near_miss[0] ^= 0x01;
         assert_ne!(derived, independent_address(&near_miss));
+    }
+
+    /// The key handed to the node must curry to the address the app puts on screen
+    /// (dig_ecosystem#2848).
+    ///
+    /// dig-node curries an enrolled key DIRECTLY into `StandardArgs::curry_tree_hash` — there is no
+    /// `derive_synthetic()` on that side — so this is the one assertion that can catch the wrong
+    /// key. Its discriminating input is the PRE-synthetic key: a real, well-formed BLS key of this
+    /// same account that a node accepts and syncs a real address for, so an implementation
+    /// enrolling it would be invisible everywhere else (a non-zero watched count, no error, and a
+    /// balance that simply never arrives). The final `assert_ne!` is what makes the first assertion
+    /// load-bearing rather than a coincidence of two derivations that happen to agree.
+    #[test]
+    fn wallet_keys_curry_to_the_address_on_screen() {
+        use chia_bls::{master_to_wallet_unhardened, PublicKey, SecretKey};
+        use chia_puzzle_types::standard::StandardArgs;
+
+        const SEED: [u8; ENTROPY_LEN] = [0x11; ENTROPY_LEN];
+        let residency = residency_from_seed(&SEED);
+
+        let address = residency
+            .receiving_address()
+            .expect("unlocked")
+            .expect("an address encodes");
+        let keys = residency.wallet_public_keys_hex();
+        let [enrolled] = keys.as_slice() else {
+            panic!("an unprofiled account enrols exactly one key: {keys:?}");
+        };
+
+        let bytes: [u8; 48] = hex::decode(enrolled)
+            .expect("the wire form is hex")
+            .try_into()
+            .expect("a BLS G1 key is 48 bytes");
+        let node_side = StandardArgs::curry_tree_hash(
+            PublicKey::from_bytes(&bytes).expect("the enrolled key is a valid G1 point"),
+        );
+        assert_eq!(
+            bech32m("xch", node_side.to_bytes().as_ref()),
+            address,
+            "the node would follow a different address than the app displays"
+        );
+
+        let expanded = bip39::Mnemonic::from_entropy_in(bip39::Language::English, &SEED)
+            .expect("valid entropy")
+            .to_seed("");
+        let pre_synthetic =
+            master_to_wallet_unhardened(&SecretKey::from_seed(&expanded), ProfileIx::ROOT.0)
+                .public_key();
+        assert_ne!(
+            bech32m(
+                "xch",
+                StandardArgs::curry_tree_hash(pre_synthetic)
+                    .to_bytes()
+                    .as_ref()
+            ),
+            address,
+            "the pre-synthetic key must reach a DIFFERENT address, or this test proves nothing"
+        );
+    }
+
+    /// The enrolled set is 96-hex, lowercase and unprefixed — the wire form the contract accepts.
+    #[test]
+    fn wallet_keys_are_the_contract_wire_form() {
+        for key in residency().wallet_public_keys_hex() {
+            assert_eq!(key.len(), 96, "48 bytes as hex: {key}");
+            assert!(
+                key.chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "lowercase hex, unprefixed: {key}"
+            );
+        }
+    }
+
+    /// A locked residency enrols nothing — there is no key to derive from, and an empty set is not
+    /// a claim that this account has no addresses.
+    #[test]
+    fn a_locked_residency_offers_no_keys() {
+        let residency = residency();
+        residency.lock_all();
+        assert!(residency.wallet_public_keys_hex().is_empty());
     }
 
     /// Derive the canonical Chia receive address for `seed` at the root profile WITHOUT dig-account:

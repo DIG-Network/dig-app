@@ -350,7 +350,7 @@ mod tests {
     use super::*;
     use crate::confirm::gui::render::Weight;
     use crate::tray_menu::{AccountState, MenuRow, TrayView};
-    use crate::wallet::overview::{AddressUnavailable, BalanceUnknown};
+    use crate::wallet::overview::{balance_line, AddressUnavailable, BalanceUnknown};
 
     /// The address a live account derives.
     const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
@@ -464,6 +464,8 @@ mod tests {
             BalanceUnknown::NoChainSource,
             BalanceUnknown::NotSynced,
             BalanceUnknown::ReplicaHasNoData,
+            BalanceUnknown::AddressesNotFollowed,
+            BalanceUnknown::AwaitingNodeRestart,
             // The one arm whose sentence comes from OUTSIDE this crate, given the node text that
             // breaks a naive no-digit rule: an HTTP status and a timeout are both numerals.
             BalanceUnknown::ReadFailed("rpc error 500 after 30s".to_string()),
@@ -508,6 +510,60 @@ mod tests {
                 unknown_reason(&why).trim(),
                 "{why:?} rendered the prefix without the reason it introduces"
             );
+        }
+    }
+
+    /// **No reason reaches the pane carrying a run of spaces.**
+    ///
+    /// egui does not collapse whitespace, so a multi-space run in a source literal is rendered
+    /// verbatim to the user — a ragged gap mid-sentence on the money surface. It is produced by the
+    /// ordinary mistake of wrapping a long literal across source lines without the trailing
+    /// backslash the neighbouring arms use, and it is invisible in a diff.
+    ///
+    /// Asserted over the WHOLE reason list and over BOTH sentence functions rather than one, because
+    /// this defect class has now appeared three times in two days in this file family: a guard added
+    /// for one function did not catch two later instances in its sibling, which is the entire reason
+    /// it is written this way. It also checks the pane's own rendering, so a gap introduced between
+    /// the prefix and the reason is caught alongside one inside a literal.
+    ///
+    /// The control is the assertion's own subject: every reason is a real multi-word sentence, so a
+    /// vacuous pass would need the list to be empty — which
+    /// `every_unknown_reason_lists_every_arm_of_the_enum` independently forbids.
+    ///
+    /// # The mechanism, so the next person does not reach for the wrong fix
+    ///
+    /// The backslash-continuation idiom the neighbouring arms use is correct but NOT durable:
+    /// `cargo fmt` joins a continued literal back onto one physical line when the result fits inside
+    /// `max_width`, and the join keeps the continuation's indentation as literal spaces while the
+    /// backslash disappears. So a sentence can acquire this defect from a formatting run alone,
+    /// without anyone editing it. That is why the guard is mechanical rather than a review habit.
+    #[test]
+    fn no_reason_renders_a_run_of_spaces() {
+        for why in every_unknown_reason() {
+            let rendered = holdings(&BalanceReading::Unknown(why.clone()))[0]
+                .value
+                .shown()
+                .to_string();
+            for (source, text) in [
+                ("unknown_reason", unknown_reason(&why)),
+                (
+                    "menu_reason",
+                    balance_line(&BalanceReading::Unknown(why.clone()), None),
+                ),
+                ("the pane", rendered),
+            ] {
+                assert!(
+                    !text.contains("  "),
+                    "{source} gives {why:?} a run of spaces egui will render verbatim: {text:?}"
+                );
+                assert!(
+                    !text.contains(
+                        " 
+"
+                    ) && !text.contains("	"),
+                    "{source} gives {why:?} stray whitespace: {text:?}"
+                );
+            }
         }
     }
 
@@ -652,7 +708,9 @@ mod tests {
                 BalanceUnknown::NoChainSource => 10,
                 BalanceUnknown::NotSynced => 11,
                 BalanceUnknown::ReplicaHasNoData => 12,
-                BalanceUnknown::ReadFailed(_) => 13,
+                BalanceUnknown::AddressesNotFollowed => 13,
+                BalanceUnknown::AwaitingNodeRestart => 14,
+                BalanceUnknown::ReadFailed(_) => 15,
             }
         }
         let mut arms: Vec<u8> = every_unknown_reason().iter().map(arm).collect();
@@ -660,7 +718,7 @@ mod tests {
         arms.dedup();
         assert_eq!(
             arms,
-            (0..14).collect::<Vec<u8>>(),
+            (0..16).collect::<Vec<u8>>(),
             "the guard's reason list is not the whole enum"
         );
     }

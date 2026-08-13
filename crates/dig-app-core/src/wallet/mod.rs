@@ -22,6 +22,7 @@
 //! `dig-account` signer; the engine only ever sees signed bytes.
 
 pub mod engine;
+pub mod enrol;
 pub mod node;
 pub mod overview;
 pub mod state;

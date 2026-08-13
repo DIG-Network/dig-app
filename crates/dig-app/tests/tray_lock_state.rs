@@ -73,6 +73,8 @@ fn view_for(state: AccountState) -> TrayView {
         address_fault: None,
         // Not yet polled. This suite is about the LOCK axis, so the balance is held constant.
         balance: dig_app_core::wallet::overview::BalanceReading::default(),
+        // Nothing asked of a node yet — this suite is about the LOCK axis.
+        enrolment: dig_app_core::wallet::enrol::Enrolment::default(),
         account: Some(state),
         // This suite is about the LOCK axis, so the #2330 node/app fields are pinned to a plain
         // connected node with nothing hosted and no sibling app installed.
