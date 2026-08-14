@@ -30,12 +30,14 @@ use dig_account::{
     transfer_status, AccountId, AutoSendPolicy, CustodyPolicy, HotWallet, SystemClock,
     TransferRequest, TransferStatus,
 };
+use dig_app_core::account::auth::HarnessAuthProvider;
 use dig_app_core::account::boot::{unlock_existing_account, DEFAULT_ACCOUNT_ID};
 use dig_app_core::account::ceremony::PromptedCeremony;
 use dig_app_core::account::money::MoneyPath;
+use dig_app_core::account::residency::AccountResidency;
 use dig_app_core::chain::{ControlChainSource, ControlSpendPublisher};
 use dig_app_core::environment::AppEnvironment;
-use dig_app_core::wallet::send::{SendSession, DEFAULT_SEND_FEE_MOJOS};
+use dig_app_core::wallet::send::{InFlightSend, SendError, SendSession, DEFAULT_SEND_FEE_MOJOS};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,8 +49,22 @@ const POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// payment coin id is printed either way, so a human can keep looking.
 const MAX_POLLS: u32 = 80;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+/// # `main` is SYNCHRONOUS, and that is load-bearing
+///
+/// [`unlock_existing_account`] is deliberately synchronous: it bridges to the async unlock ceremony by
+/// building its own private current-thread runtime and calling `block_on` (`account/boot.rs:295`), so
+/// that the tray shell need not own a runtime. Tokio refuses to start a runtime from inside a runtime,
+/// so an `async fn main` under `#[tokio::main]` makes that unlock panic — before anything is built and
+/// long before any money could move.
+///
+/// The runtime therefore comes into existence AFTER the unlock, wrapping only the part that genuinely
+/// needs one ([`SendSession::send`] is async because the custody gate's confirm ceremony is). The
+/// polling afterwards is synchronous and wants no runtime at all.
+///
+/// This is an example's `main`, which no test can execute, so the guard is this comment plus the
+/// narrow scope of [`run_the_send`] — the only `async` in the file, and the only thing inside a
+/// runtime.
+fn main() {
     let mut args = std::env::args().skip(1);
     let destination = args
         .next()
@@ -95,9 +111,7 @@ async fn main() {
         residency.clone(),
         // The PRODUCTION ceremony. The spend confirmation a person sees here is the one the app
         // shows; a fake would make this run a proof about the fake.
-        dig_app_core::account::auth::HarnessAuthProvider::new(PromptedCeremony::unlocking(
-            "confirm this payment",
-        )),
+        HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
         // The account the residency was actually opened as. This string is what the confirm ceremony
         // NAMES to the user while asking them to approve a real payment, so a decorative label here
         // would have the dialog spend from one account while naming another.
@@ -116,9 +130,14 @@ async fn main() {
         .with_fee(DEFAULT_SEND_FEE_MOJOS);
 
     println!("\nbuilding, then asking you to confirm…");
-    let in_flight = SendSession::new(&residency, &money, custody, &chain, &publisher)
-        .send(&request)
-        .await
+    // The runtime is born HERE — after the unlock, never around it. See `main`'s docs.
+    let in_flight = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a current-thread runtime for the send")
+        .block_on(run_the_send(
+            &residency, &money, custody, &chain, &publisher, &request,
+        ))
         .unwrap_or_else(|e| panic!("the send did not reach the chain: {e}"));
 
     let pending = in_flight.pending();
@@ -155,6 +174,24 @@ async fn main() {
     println!(
         "\ngave up watching after {MAX_POLLS} polls; the transfer is unaffected. Coin id above."
     );
+}
+
+/// The one `async` step: assemble the session and run the send.
+///
+/// It exists as its own function so the runtime wraps EXACTLY this and nothing else. Inlining it back
+/// into an `async fn main` would put the unlock inside a runtime again, which is the panic this file's
+/// shape is built to avoid (see `main`).
+async fn run_the_send<'a>(
+    residency: &'a AccountResidency,
+    money: &'a MoneyPath<HarnessAuthProvider<PromptedCeremony>>,
+    custody: CustodyPolicy,
+    chain: &'a ControlChainSource,
+    publisher: &'a ControlSpendPublisher,
+    request: &TransferRequest,
+) -> Result<InFlightSend, SendError> {
+    SendSession::new(residency, money, custody, chain, publisher)
+        .send(request)
+        .await
 }
 
 /// The chain's peak as a printable string — `?` where it cannot be read, since an unreadable peak is
