@@ -714,13 +714,19 @@ mod tests {
         );
     }
 
-    /// **The shipped binary cannot open the profile-creation gate.**
+    /// **The shipped binary cannot ASSERT the profile-creation gate open.**
     ///
     /// Makes impossible: the dig_ecosystem#2377 defect, in its exact original shape. That incident
     /// was one constant flipped in `src/bin/dig-app.rs` — a file no test can execute — which opened
     /// an undismissible dead end AND a start-up password window, neither catchable by a test.
-    /// `ProfileCreation::Possible` now EXISTS, so that one-line flip is once again writable; the only
-    /// thing standing between it and a shipped dead end is that the binary never reaches for it.
+    ///
+    /// # It now permits the DERIVED route and forbids the ASSERTED one
+    ///
+    /// The binary reads creation from a node probe (`ProfileCreation::of_reading`), so a blanket ban
+    /// on the doors would be unsatisfiable. What is banned instead is every name that would let a
+    /// binary produce `Possible` WITHOUT a node having answered — see [`CREATION_GATE_OPENERS`],
+    /// which lists one per link of that chain. The one-constant flip stays unexpressible, because
+    /// after this change there is no constant in the binary whose value alone opens the gate.
     ///
     /// So this reads the binary's SOURCE, which is the one way a test can see into those files at
     /// all. It reads the WHOLE crate, every `.rs` under `src/` at any depth, because the entry
@@ -776,27 +782,57 @@ mod tests {
         );
     }
 
-    /// The spellings that would open the profile-creation gate from the binary crate.
+    /// The spellings that would open the profile-creation gate from the binary crate **without a
+    /// measurement standing behind it**.
     ///
-    /// `of_reading` is on the list even though it is the seam the wiring will eventually use, and
-    /// FOR that reason: it answers [`ProfileCreation::Possible`] for
-    /// `Some(ProfileMintAvailability::Possible)`, so one line reaching it in a file no test executes
-    /// re-creates dig_ecosystem#2377 in its exact original shape. Landing the wiring therefore means
-    /// editing this list in the same diff as the create control, which is the point of the guard.
+    /// # What this list is aimed at, now that the wiring has landed
+    ///
+    /// It used to ban `of_reading` and `of_profile_mint` outright, because while the binary reached
+    /// for neither, banning the doors was the cheapest way to ban the outcome. The binary now calls
+    /// `of_reading`, so those two came OFF the list — and the guard's job did not shrink, it
+    /// narrowed: what it forbids is a `Possible` **asserted** in a file no test can execute, rather
+    /// than one **derived** from a probe of a real node and a real mint door.
+    ///
+    /// That distinction is the whole property. `of_reading` cannot answer
+    /// [`ProfileCreation::Possible`] out of thin air: it needs a
+    /// [`ProfileMintAvailability::Possible`](crate::account::profile_mint::ProfileMintAvailability),
+    /// which comes only from a `ProfileMintSeams::Wired`, which
+    /// [`from_readiness`](crate::account::profile_mint::ProfileMintSeams::from_readiness) builds only
+    /// from a `ChainReadiness::WalksLineages` — a value produced only by
+    /// [`ChainReadiness::probe`](crate::account::profile_mint::ChainReadiness::probe) asking a live
+    /// chain three questions. So every name a binary could write to SHORT-CIRCUIT that chain is
+    /// banned here instead, one per link:
+    ///
+    /// - `ProfileCreation::Possible` — the outcome itself, asserted.
+    /// - `ProfileMintAvailability::Possible` and `MintAvailability::Possible` — the availability,
+    ///   asserted beside the seams rather than read off them, which is dig_ecosystem#2377 exactly.
+    /// - `ProfileMintSeams::Wired` — a wired seam built without a probe.
+    /// - `ChainReadiness::WalksLineages` — a reading asserted without asking a node.
+    ///
+    /// With all five banned, the one-constant flip that caused dig_ecosystem#2377 stays
+    /// unexpressible: there is no constant in `src/bin/dig-app.rs` whose value alone opens the gate,
+    /// because the gate now opens on what a node ANSWERED. `MintAvailability::Possible` stays banned
+    /// even though creation no longer reads the DID-only seam, so the original flip — `mint_seams()`
+    /// returning `Possible` — remains unwritable too.
     ///
     /// # The residual, stated rather than papered over
     ///
     /// This list is HAND-maintained, and nothing mechanical can complete it: a text scan cannot tell
     /// a function that CONSTRUCTS [`ProfileCreation::Possible`] from one that merely matches on it,
-    /// which is most of this module. So any new public function that can answer `Possible` must be
-    /// added here by hand — and dig_ecosystem#2690 is the proof that the step gets missed, because
-    /// `of_reading` was added in that change and this list was not.
+    /// which is most of this module. So any new route to `Possible` must be added here by hand — and
+    /// dig_ecosystem#2690 is the proof that the step gets missed, because `of_reading` was added in
+    /// that change and this list was not.
     ///
-    /// What keeps the residual small is that
-    /// [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only place `Possible` is ever
-    /// constructed; a new route has to go through it, so it is one name to watch rather than many.
-    const CREATION_GATE_OPENERS: [&str; 3] =
-        ["ProfileCreation::Possible", "of_profile_mint", "of_reading"];
+    /// What keeps the residual small is that every link above is a single named type, and
+    /// [`of_profile_mint`](ProfileCreation::of_profile_mint) remains the only place `Possible` is
+    /// ever constructed.
+    const CREATION_GATE_OPENERS: [&str; 5] = [
+        "ProfileCreation::Possible",
+        "ProfileMintAvailability::Possible",
+        "MintAvailability::Possible",
+        "ProfileMintSeams::Wired",
+        "ChainReadiness::WalksLineages",
+    ];
 
     /// Which openers `source` reaches for OUTSIDE its comments.
     ///
@@ -838,9 +874,13 @@ mod tests {
     #[test]
     fn the_gate_guard_catches_an_opener_and_tolerates_a_mention() {
         for opener in CREATION_GATE_OPENERS {
-            assert_eq!(
-                vec![opener],
-                openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")),
+            // `contains` rather than an equality against a one-element vector, because two of the
+            // openers genuinely nest — `MintAvailability::Possible` is a suffix of
+            // `ProfileMintAvailability::Possible` — so planting the longer one legitimately names
+            // both. What matters is that the scan NAMES the planted opener; over-naming a nested
+            // spelling withholds the offer just as firmly.
+            assert!(
+                openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")).contains(&opener),
                 "the scan missed `{opener}` in source that plainly reaches for it, so the guard \
                  built on it cannot speak for the binary crate"
             );
@@ -855,11 +895,21 @@ mod tests {
             );
         }
 
-        assert!(
-            openers_reached_in("fn wire() { let _ = ProfileCreation::of(seam); }").is_empty(),
-            "the call the shipped binary actually makes was read as an opener, which makes the \
-             guard unsatisfiable rather than protective"
-        );
+        // The calls the shipped binary genuinely makes, which must NOT read as openers or the guard
+        // would be unsatisfiable rather than protective — and the first person to hit it would
+        // delete it. These are the DERIVED route: each one needs a reading that only a probe of a
+        // live node produces, so permitting them does not permit an assertion.
+        for permitted in [
+            "fn wire() { let _ = ProfileCreation::of(seam); }",
+            "fn wire() { let _ = ProfileCreation::of_reading(availability); }",
+            "fn wire() { let _ = ProfileMintSeams::from_readiness(reading, &door).availability(); }",
+        ] {
+            assert!(
+                openers_reached_in(permitted).is_empty(),
+                "`{permitted}` was read as an opener, but it derives its answer from a reading \
+                 rather than asserting one; banning it makes the guard unsatisfiable"
+            );
+        }
     }
 
     /// Every `.rs` file in the binary crate, at any depth.
