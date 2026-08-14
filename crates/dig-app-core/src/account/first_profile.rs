@@ -424,6 +424,31 @@ pub fn first_profile_cost_mojos() -> u64 {
     whole_profile_cost_mojos(DEFAULT_MINT_FEE_MOJOS)
 }
 
+/// The moment a balance was read, as the recheck answers name it: `14:03:22 UTC`.
+///
+/// # Why UTC, spelled out, rather than the user's own clock
+///
+/// This crate has no timezone database and no date library, so the only instant it can derive
+/// honestly is the one the epoch counts. A bare `14:03:22` would be read as local time and be wrong
+/// by hours for most people — a timestamp that lies is worse than none, because its whole job here
+/// is to prove the read ran. Naming the zone costs four characters and makes it true everywhere.
+///
+/// Seconds resolution is deliberate: [`RECHECK_THROTTLE`] is five seconds, so two answerable presses
+/// can never carry the same label.
+pub fn read_at_label(now: SystemTime) -> String {
+    let secs = now
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        day / 3600,
+        (day % 3600) / 60,
+        day % 60
+    )
+}
+
 /// The prompt itself: what a profile is, what it costs, where to send it, and a real way to say
 /// later.
 ///
@@ -810,6 +835,158 @@ mod tests {
         assert_eq!(
             raised, 1,
             "five launches inside one day raised {raised} prompts"
+        );
+
+        // ...and the sixth launch, the next day, is prompted again — because the profile still does
+        // not exist. Without this the test passes for an implementation that raised the prompt once
+        // and then never again, which is a different feature from the one that was asked for.
+        let tomorrow = t0() + REMINDER_INTERVAL;
+        assert!(
+            first_profile_prompt(
+                &no_profiles(),
+                ProfileCreation::Possible,
+                &reminder,
+                tomorrow
+            )
+            .should_raise(),
+            "the prompt did not come back the next day"
+        );
+    }
+
+    /// **The live machine's own balance opens the wizard, and never builds a deposit body.**
+    ///
+    /// The fixture is the figure measured on the user's machine — 1.599 XCH against a 20,002-mojo
+    /// cost, some 80,000x over — because that is what ships to them, and a deposit window there
+    /// would be the app telling a funded person they have no money.
+    ///
+    /// It is driven from a whole [`BalanceReading`] rather than from a [`MintFunds`], which is the
+    /// point: every other funding test starts at the narrowed type and so cannot see a mistake in
+    /// the narrowing itself. The nearest wrong implementation — one that read the DIG figure, or a
+    /// pending arrival, or defaulted a `Known` to unmeasured — is invisible to those and fails here.
+    ///
+    /// The assertion is written as an exhaustive match rather than an equality so that the failure
+    /// message can carry the shortfall the code would have PUT ON SCREEN.
+    #[test]
+    fn the_measured_live_balance_opens_the_wizard_rather_than_a_deposit_window() {
+        use crate::wallet::engine::BalanceAsOf;
+        use crate::wallet::overview::Balances;
+
+        let funded = BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: 1_599_179_999_973,
+                dig_units: 0,
+            },
+            as_of: BalanceAsOf::Replica {
+                height: 9_150_343,
+                caught_up: true,
+            },
+        };
+
+        let funds = MintFunds::of_balance(&funded);
+        assert_eq!(
+            funds,
+            MintFunds::Measured {
+                spendable_mojos: 1_599_179_999_973
+            },
+            "a measured, spendable balance was narrowed to something else"
+        );
+
+        match funding_step(&funds, &FundingLatch::new(), first_profile_cost_mojos()) {
+            FundingStep::Ready => {}
+            FundingStep::Deposit { shortfall_mojos } => panic!(
+                "a wallet holding 1.599 XCH was asked for {shortfall_mojos} more mojos before it \
+                 could create a profile"
+            ),
+            FundingStep::Unmeasured => {
+                panic!("a balance the node answered with was reported as unmeasured")
+            }
+        }
+    }
+
+    /// **A cold cache draws no window at all until something has been read.**
+    ///
+    /// [`BalanceReading::default`] is what every not-yet-populated snapshot carries — the first
+    /// frames of a launch, and a poisoned status lock. The flow reaches this state before its forced
+    /// read has landed, so what it means here decides what the very first draw of the window says.
+    ///
+    /// `Deposit` is the wrong answer and `Ready` is the dangerous one: the first would tell a funded
+    /// person they are short, the second would open a ceremony on a balance nobody has read.
+    #[test]
+    fn a_cold_cache_is_unmeasured_and_is_neither_a_shortfall_nor_a_go_ahead() {
+        let cold = BalanceReading::default();
+        assert_eq!(
+            MintFunds::of_balance(&cold),
+            MintFunds::Unmeasured,
+            "an unpopulated reading carried a figure"
+        );
+        assert_eq!(
+            funding_step(
+                &MintFunds::of_balance(&cold),
+                &FundingLatch::new(),
+                first_profile_cost_mojos()
+            ),
+            FundingStep::Unmeasured
+        );
+    }
+
+    /// The unmeasured window states the cost and the node's reason, and claims nothing about money.
+    #[test]
+    fn the_unmeasured_window_names_a_reason_and_never_a_shortfall() {
+        const WHY: &str = "DIG could not reach a node.";
+        let body = copy::unmeasured_body(WHY, first_profile_cost_mojos());
+
+        assert!(
+            body.contains(WHY),
+            "the node's own reason is missing: {body}"
+        );
+        assert!(body.contains("20,002"), "the cost is missing: {body}");
+        assert!(
+            !body.contains("short") && !body.contains("needs"),
+            "an unmeasured balance was rendered as a shortfall: {body}"
+        );
+    }
+
+    /// The end-of-watch window says the wallet can pay, repeats the cost, and denies a spend.
+    ///
+    /// The denial is the load-bearing half. This build has no creation ceremony behind it, so a
+    /// window that read as *your profile is being created* would report a spend that never happened
+    /// — the one class of claim this app may not make.
+    #[test]
+    fn the_ready_window_promises_no_creation_and_no_spend() {
+        let body = copy::ready_body(first_profile_cost_mojos());
+
+        assert!(body.contains("20,002"), "the cost is missing: {body}");
+        assert!(
+            body.contains("NOTHING HAS BEEN SPENT"),
+            "the window does not say that nothing was spent: {body}"
+        );
+        assert!(
+            !body.contains("created your profile") && !body.contains("Creating your profile"),
+            "the window claims a creation this build cannot perform: {body}"
+        );
+    }
+
+    /// Two answerable presses can never carry the same read time.
+    ///
+    /// The label's whole job is to prove a read ran, so a resolution coarser than the throttle would
+    /// make two legitimate presses indistinguishable — the invisible no-op, wearing a timestamp.
+    #[test]
+    fn two_presses_a_throttle_apart_are_labelled_differently() {
+        let first = read_at_label(t0());
+        let second = read_at_label(t0() + RECHECK_THROTTLE);
+
+        assert_ne!(
+            first, second,
+            "two reads {RECHECK_THROTTLE:?} apart read alike"
+        );
+        assert!(
+            first.ends_with(" UTC"),
+            "the zone is unstated, so the time reads as local and is wrong for most people: {first}"
+        );
+        assert_eq!(
+            first.len(),
+            "00:00:00 UTC".len(),
+            "unexpected shape: {first}"
         );
     }
 

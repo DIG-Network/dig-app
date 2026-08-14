@@ -2746,7 +2746,7 @@ mod tray {
             }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
             TrayAction::CreateFirstProfile => {
-                prompt_for_a_first_profile(session.as_ref(), confirmer)
+                prompt_for_a_first_profile(status, session.as_ref(), confirmer)
             }
             // Both wallet arms re-snapshot LIVE for the same reason `show_status` does: a node that came
             // up — or a lock that dropped the keys — while the menu sat open must be reflected, not
@@ -3903,56 +3903,220 @@ mod tray {
     /// # Money
     ///
     /// **Nothing here spends anything.** The window states a cost and shows an address; the affirming
-    /// control puts that address on the clipboard. There is no mint on this path, which is why the
-    /// prompt can be raised on a schedule without ever taking somebody's money by surprise.
+    /// control asks the node for a fresh balance. There is no mint on this path — no surface in this
+    /// app calls [`ProfileMintDoor::begin`](dig_app_core::account::profile_mint::ProfileMintDoor::begin)
+    /// yet — which is why the prompt can be raised on a schedule without ever taking somebody's money
+    /// by surprise.
     ///
-    /// # Why the affirming control is a COPY and not a mint
+    /// # It is a WATCH, not a single question
     ///
-    /// The user asked for a *"popout to fund your wallet"*, and funding is what this does. A wallet
-    /// at zero profiles has no money in it yet by definition — that is why it is being prompted — so
-    /// a mint control here would refuse for insufficient funds on the very first press, which is the
-    /// dead end #1800 removed. The create control belongs on the profiles card, beside a funded
-    /// balance the person can see (dig_ecosystem#2939).
-    fn prompt_for_a_first_profile(session: Option<&TraySession>, confirmer: &dyn NativeConfirmer) {
+    /// The user's sentence was *"DIG will notice when it arrives"*, so the window re-reads the
+    /// balance every time its own deadline elapses
+    /// ([`CONFIRM_DEADLINE`](dig_app_core::confirm::gui) — two minutes) and redraws itself with the
+    /// current shortfall, until the wallet can pay or the person says later. A timeout and a refusal
+    /// are therefore OPPOSITE answers here, which is why they are matched separately: an expiry
+    /// continues the watch, and only an explicit dismissal ends it.
+    ///
+    /// # An unmeasured balance never draws a deposit window
+    ///
+    /// Before the first poll lands the app has measured NOTHING, and the honest render of nothing is
+    /// not *you need funds* — a shortfall is a subtraction and there is no figure to subtract from
+    /// (dig_ecosystem#2871's absent-versus-zero rule; `Unknown` is not `Blocked`, dig_ecosystem#2690).
+    /// So an unmeasured reading forces ONE fresh read before anything is drawn, and only a balance
+    /// still unmeasured after that may put a window up — one that says the balance is unknown and
+    /// names the node's own reason, never a shortfall and never a zero.
+    ///
+    /// # The gate is DERIVED, never asserted
+    ///
+    /// Whether a whole profile can be minted here was decided by [`profile_creation_of`], from a live
+    /// node probe, before this was raised. This function names none of the five symbols that would
+    /// short-circuit that reading — `profiles.rs`'s `the_binary_cannot_open_the_profile_creation_gate`
+    /// holds that mechanically.
+    fn prompt_for_a_first_profile(
+        status: &SharedStatus,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+    ) {
         use dig_app_core::account::first_profile::copy;
         use dig_app_core::account::first_profile::first_profile_claim;
         use dig_app_core::account::first_profile::first_profile_cost_mojos;
+        use dig_app_core::account::first_profile::funding_step;
+        use dig_app_core::account::first_profile::FundingLatch;
+        use dig_app_core::account::first_profile::FundingStep;
+        use dig_app_core::account::first_profile::MintFunds;
         use dig_app_core::confirm::ConfirmDecision;
+        use dig_app_core::confirm::QrArt;
+        use dig_app_core::wallet::overview::BalanceReading;
 
         // No live session means no address to fund, and a funding window with no address on it is
         // the trap this app does not ship. The decision that raised this read a session-derived
         // creation state, so reaching here without one is a lock taken in the gap between the two.
         let Some(session) = session else { return };
+        // A mismatch between the wallet's index and the active profile's answers `Err` here
+        // (`residency.rs`'s `wallet_agrees_with_the_active_profile`), and that draws NO window at
+        // all rather than a QR code for a wallet the ceremony would not spend from.
         let Some(Ok(address)) = session.residency.receiving_address() else {
             return;
         };
 
-        let body = copy::body(first_profile_cost_mojos());
-        if confirmer.confirm_claim(&first_profile_claim(&address, &body))
-            != ConfirmDecision::Approve
-        {
-            // "Remind me later", or the window closed. Both are the same answer and both are
-            // already deferred — the state loop wrote the next prompt time when it raised this,
-            // precisely so that every way out of the window behaves the same.
-            return;
+        // Offered only where the confirmer will actually draw it, so the copy never points at a
+        // picture that is not there — the shipped pattern from `journey::show_where_to_send_funds`.
+        let scannable = confirmer
+            .draws_qr()
+            .then(|| QrArt::encode(&address))
+            .flatten();
+        let cost = first_profile_cost_mojos();
+        let latch = FundingLatch::new();
+        let mut last_read_at: Option<std::time::SystemTime> = None;
+
+        // The freshest cached reading, at the poller's own cadence: this is the same figure the tray
+        // is showing, because it is the same poller.
+        let observed = || match status.read() {
+            Ok(status) => balance_poller().observe(&status.engine, Some(&address)),
+            // A poisoned lock says nothing about the balance, and "nothing" is not zero.
+            Err(_) => BalanceReading::default(),
+        };
+        // A read that does not wait out the refresh interval, for the two places a person is owed an
+        // answer now: the first draw of an unmeasured wallet, and the recheck control.
+        let read_now = || match status.read() {
+            Ok(status) => balance_poller().read_now(&status.engine, Some(&address)),
+            Err(_) => BalanceReading::default(),
+        };
+
+        loop {
+            let mut reading = observed();
+            if matches!(MintFunds::of_balance(&reading), MintFunds::Unmeasured) {
+                reading = read_now();
+                last_read_at = Some(std::time::SystemTime::now());
+            }
+
+            let body = match funding_step(&MintFunds::of_balance(&reading), &latch, cost) {
+                FundingStep::Ready => return say_the_wallet_can_pay(confirmer, cost),
+                FundingStep::Deposit { shortfall_mojos } => copy::body(shortfall_mojos, cost),
+                // Reached only when the forced read above ALSO failed to measure anything. It reads
+                // the original reading rather than the narrowed one for its reason: `MintFunds`
+                // deliberately keeps no cause, and the cause is the whole content of this window.
+                FundingStep::Unmeasured => copy::unmeasured_body(&unread_reason(&reading), cost),
+            };
+
+            match confirmer.confirm_claim(&first_profile_claim(&address, &body, scannable.as_ref()))
+            {
+                ConfirmDecision::Approve => {
+                    if recheck(confirmer, &read_now, &latch, cost, &mut last_read_at) {
+                        return;
+                    }
+                }
+                // The window's own two-minute deadline elapsed. THIS is the automatic path the user
+                // asked for: nobody pressed anything, so the loop re-reads and redraws with whatever
+                // the balance now is.
+                ConfirmDecision::Timeout => continue,
+                // "Remind me later", Escape, or the frame's X — all one answer, and all already
+                // deferred: the state loop wrote the next prompt time when it raised this, precisely
+                // so every way out behaves the same. `Unavailable` is a host with no desktop session
+                // to draw on, where continuing would spin.
+                ConfirmDecision::Deny | ConfirmDecision::Unavailable => return,
+            }
+        }
+    }
+
+    /// Answer a press of "Recheck balance". Returns whether the whole flow is finished.
+    ///
+    /// Every one of the four outcomes SAYS something. A press that produced no visible change is the
+    /// invisible no-op this control exists to rule out, and the people pressing it are precisely
+    /// those who already suspect nothing is happening.
+    #[cfg(feature = "tray")]
+    fn recheck(
+        confirmer: &dyn NativeConfirmer,
+        read_now: &dyn Fn() -> dig_app_core::wallet::overview::BalanceReading,
+        latch: &dig_app_core::account::first_profile::FundingLatch,
+        cost: u64,
+        last_read_at: &mut Option<std::time::SystemTime>,
+    ) -> bool {
+        use dig_app_core::account::first_profile::copy;
+        use dig_app_core::account::first_profile::funding_step;
+        use dig_app_core::account::first_profile::read_at_label;
+        use dig_app_core::account::first_profile::recheck_allowed;
+        use dig_app_core::account::first_profile::FundingStep;
+        use dig_app_core::account::first_profile::MintFunds;
+
+        let now = std::time::SystemTime::now();
+        if let Err(seconds_ago) = recheck_allowed(*last_read_at, now) {
+            notify(
+                confirmer,
+                copy::RECHECK_TITLE,
+                copy::RECHECK_HEADING,
+                &copy::checked_recently(seconds_ago),
+            );
+            return false;
         }
 
-        match write_clipboard(&address) {
-            true => notify(
-                confirmer,
-                copy::COPIED_TITLE,
-                copy::COPIED_HEADING,
-                copy::COPIED_BODY,
-            ),
-            // A copy that silently did nothing would leave somebody pasting whatever was on the
-            // clipboard before into a send field. The address is repeated so the window is still a
-            // way forward.
-            false => notify_identifier(
-                confirmer,
-                copy::COPIED_TITLE,
-                "DIG could not reach the clipboard. Here is your address (select it to copy).",
-                &address,
-            ),
+        let reading = read_now();
+        let read_at = read_at_label(std::time::SystemTime::now());
+        *last_read_at = Some(std::time::SystemTime::now());
+
+        match funding_step(&MintFunds::of_balance(&reading), latch, cost) {
+            FundingStep::Ready => {
+                say_the_wallet_can_pay(confirmer, cost);
+                true
+            }
+            FundingStep::Deposit { shortfall_mojos } => {
+                notify(
+                    confirmer,
+                    copy::RECHECK_TITLE,
+                    copy::RECHECK_HEADING,
+                    &copy::still_short(shortfall_mojos, &read_at),
+                );
+                false
+            }
+            FundingStep::Unmeasured => {
+                notify(
+                    confirmer,
+                    copy::RECHECK_TITLE,
+                    copy::RECHECK_HEADING,
+                    &copy::cannot_measure(&unread_reason(&reading), &read_at),
+                );
+                false
+            }
+        }
+    }
+
+    /// The end of the funding watch: the wallet can pay, and this build stops there.
+    ///
+    /// # Why this is a sentence and not a wizard
+    ///
+    /// The creation ceremony is not wired into this app — nothing calls
+    /// [`ProfileMintDoor::begin`](dig_app_core::account::profile_mint::ProfileMintDoor::begin), and
+    /// the DID-only first-run wizard must NOT be borrowed for it, because a DIG profile is a DID
+    /// singleton **and** a store and minting the DID alone strands the account half-created
+    /// (dig_ecosystem#2398). So the honest end of the road is to say the wallet is ready, repeat the
+    /// cost, and state plainly that nothing was spent. Reporting a creation that did not happen
+    /// would be the app lying about money, which is the one defect class that stops a release.
+    #[cfg(feature = "tray")]
+    fn say_the_wallet_can_pay(confirmer: &dyn NativeConfirmer, cost: u64) {
+        use dig_app_core::account::first_profile::copy;
+
+        notify(
+            confirmer,
+            copy::READY_TITLE,
+            copy::READY_HEADING,
+            &copy::ready_body(cost),
+        );
+    }
+
+    /// Why a balance could not be read, in the wallet surface's own words — or a plain sentence for
+    /// the states that carry no fault at all.
+    ///
+    /// `Known` cannot occur where this is called and needs no words; `Pending` is a read still in
+    /// flight, which is not a fault and must not borrow one.
+    #[cfg(feature = "tray")]
+    fn unread_reason(reading: &dig_app_core::wallet::overview::BalanceReading) -> String {
+        use dig_app_core::wallet::overview::BalanceReading;
+
+        match reading {
+            BalanceReading::Unknown(why) => dig_app_core::wallet::overview::unknown_reason(why),
+            BalanceReading::Pending | BalanceReading::Known { .. } => {
+                "DIG is still waiting for the node to answer.".to_string()
+            }
         }
     }
 
