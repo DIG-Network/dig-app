@@ -1,0 +1,111 @@
+
+  GitNexus Analyzer
+
+[2K(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\ingestion\workers\parse-worker.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+(node:67492) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+[2K(node:67492) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 drain listeners added to [WriteStream]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+
+  Repository indexed successfully (16.4s)
+
+  8,730 nodes | 22,768 edges | 444 clusters | 300 flows
+  C:\tmp\worktrees\dig-app-send
+
+(node:3812) [DEP0151] DeprecationWarning: Package C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\node_modules\tree-sitter-c-sharp\ has a "main" field set to "bindings/node", excluding the full filename and extension to the resolved file at "bindings\node\index.js", imported from C:\Users\micha\AppData\Local\nvm\v22.19.0\node_modules\gitnexus\dist\core\tree-sitter\parser-loader.js.
+ Automatic extension resolution of the "main" field is deprecated for ES modules.
+(Use `node --trace-deprecation ...` to show where the warning was created)
