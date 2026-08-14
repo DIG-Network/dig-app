@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [11.0.0] - 2026-08-14
+
+### Features
+- **wallet:** Send XCH end to end — build, sign locally, push via the node, confirm on chain (#167)
+
 ## [10.10.0] - 2026-08-14
 
 ### Features
