@@ -337,6 +337,32 @@ impl SendDraft<'_> {
 #[derive(Default)]
 pub struct SendHolder {
     watched: std::sync::Mutex<Watched>,
+    /// The money gate, kept ACROSS sends (dig_ecosystem#2890).
+    ///
+    /// The rolling window behind `AutoSendPolicy::max_confirmations_per_period` lives inside the
+    /// `PolicyAuthorizer` that [`MoneyPath`](crate::account::money::MoneyPath) holds, so building a
+    /// fresh path per send handed every send an empty ledger and made that ceiling unreachable —
+    /// the exact host mistake `account::money`'s own module doc names. Held here, the ledger
+    /// measures a window.
+    gate: std::sync::Mutex<Option<UnlockGate>>,
+}
+
+/// The money path built for one unlock, and the address that identifies which unlock it belongs to.
+///
+/// # Why the address is the key
+///
+/// A `MoneyPath` decodes the profile's hot-wallet receive address at construction, because that is
+/// what the vault outflow rule compares a payee against. The address is therefore the one piece of
+/// the gate that can go stale — a profile switch moves it — and a gate rebuilt only on a *lock*
+/// would keep comparing against the profile the user just left. Keying on the address means the
+/// ledger survives everything that leaves the gate's own premise intact, and nothing that does not.
+struct UnlockGate {
+    /// The receive address this gate was built against.
+    address: String,
+    /// The gate itself, holding the rolling confirmation ledger.
+    money: crate::account::money::MoneyPath<
+        crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
+    >,
 }
 
 /// How long to leave between chain polls of a pending transfer.
@@ -540,6 +566,46 @@ impl SendHolder {
         }
     }
 
+    /// The money gate for this unlock, built once and reused (dig_ecosystem#2890).
+    ///
+    /// A gate is rebuilt only when the receive address it rules against changes — see [`UnlockGate`]
+    /// for why that, and not a lock, is the right trigger. The returned guard keeps the gate borrowed
+    /// for the whole send, which is safe because [`begin`](Self::begin) admits one send at a time.
+    fn gate_for(
+        &self,
+        residency: &crate::account::residency::AccountResidency,
+        custody: dig_account::CustodyPolicy,
+    ) -> Result<std::sync::MutexGuard<'_, Option<UnlockGate>>, SendError> {
+        use crate::account::auth::HarnessAuthProvider;
+        use crate::account::boot::DEFAULT_ACCOUNT_ID;
+        use crate::account::ceremony::PromptedCeremony;
+        use crate::account::money::MoneyPath;
+
+        // Read before the gate is consulted, so a profile switch is caught here rather than by a
+        // stale address comparison inside a gate that outlived it.
+        let Some(Ok(address)) = residency.receiving_address() else {
+            // The residency locked, or its address stopped deriving, between the click and this
+            // call. Nothing was built.
+            return Err(SendError::Locked);
+        };
+
+        let mut held = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if held.as_ref().is_none_or(|gate| gate.address != address) {
+            let money = MoneyPath::new(
+                residency.clone(),
+                HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
+                dig_account::AccountId::new(DEFAULT_ACCOUNT_ID),
+                dig_wallet_backend::types::Network::Mainnet,
+                custody,
+                dig_account::AutoSendPolicy::default(),
+                std::sync::Arc::new(dig_account::SystemClock),
+            )
+            .map_err(|_| SendError::Locked)?;
+            *held = Some(UnlockGate { address, money });
+        }
+        Ok(held)
+    }
+
     /// Build, gate, sign and push — every step that can fail, and none that record state.
     ///
     /// Split out from [`send`](Self::send) so that recording the outcome happens in exactly one place,
@@ -550,13 +616,9 @@ impl SendHolder {
         residency: Option<&crate::account::residency::AccountResidency>,
         request: &TransferRequest,
     ) -> Result<crate::wallet::send::InFlightSend, SendError> {
-        use crate::account::auth::HarnessAuthProvider;
-        use crate::account::boot::DEFAULT_ACCOUNT_ID;
-        use crate::account::ceremony::PromptedCeremony;
-        use crate::account::money::MoneyPath;
         use crate::chain::{ControlChainSource, ControlSpendPublisher};
         use crate::wallet::send::SendSession;
-        use dig_account::{AccountId, AutoSendPolicy, CustodyPolicy, HotWallet, SystemClock};
+        use dig_account::{CustodyPolicy, HotWallet};
 
         let Some(residency) = residency else {
             return Err(SendError::Locked);
@@ -577,19 +639,11 @@ impl SendHolder {
         };
 
         let custody = CustodyPolicy::Hot(HotWallet { auto_send_limit: 0 });
-        let money = match MoneyPath::new(
-            residency.clone(),
-            HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
-            AccountId::new(DEFAULT_ACCOUNT_ID),
-            dig_wallet_backend::types::Network::Mainnet,
-            custody,
-            AutoSendPolicy::default(),
-            std::sync::Arc::new(SystemClock),
-        ) {
-            Ok(money) => money,
-            // The residency locked between the click and this call. Nothing was built.
-            Err(_) => return Err(SendError::Locked),
-        };
+        let held = self.gate_for(residency, custody)?;
+        let money = &held
+            .as_ref()
+            .expect("gate_for leaves a gate in place or returns an error")
+            .money;
 
         let chain = ControlChainSource::new(endpoint);
         let publisher = ControlSpendPublisher::new(endpoint);
@@ -601,9 +655,8 @@ impl SendHolder {
                     "this app could not start the worker the confirmation needs: {e}"
                 )))
             })?;
-        runtime.block_on(
-            SendSession::new(residency, &money, custody, &chain, &publisher).send(request),
-        )
+        runtime
+            .block_on(SendSession::new(residency, money, custody, &chain, &publisher).send(request))
     }
 
     /// Poll the watched transfer against the connected node, if there is one.
@@ -992,5 +1045,69 @@ mod tests {
             }
         );
         assert!(!SendProgress::of_error(&rejected).in_flight());
+    }
+
+    /// **The confirmation ledger survives one send and is still there for the next**
+    /// (dig_ecosystem#2890).
+    ///
+    /// The nearest wrong implementation — and the one that shipped — builds a `MoneyPath` inside
+    /// `perform`, so every send hands the `PolicyAuthorizer` an empty rolling window and
+    /// `max_confirmations_per_period` can never be reached. No assertion about a send's OUTCOME can
+    /// see that, because a per-request gate and a per-unlock gate approve identically until the
+    /// ceiling would have bitten. So the fixture asks the question directly: is the gate the SAME
+    /// gate?
+    ///
+    /// Identity is compared by address, not by pointer: two gates built back to back would live at
+    /// different addresses, and a gate that was rebuilt cannot be the one holding the earlier
+    /// ledger.
+    #[test]
+    fn the_money_gate_is_built_once_per_unlock_and_reused_by_every_later_send() {
+        let residency = crate::test_support::test_residency();
+        let custody =
+            dig_account::CustodyPolicy::Hot(dig_account::HotWallet { auto_send_limit: 0 });
+        let holder = SendHolder::default();
+
+        let first = {
+            let held = holder
+                .gate_for(&residency, custody)
+                .expect("an unlocked residency yields a gate");
+            std::ptr::from_ref(&held.as_ref().expect("a gate is present").money).addr()
+        };
+        let second = {
+            let held = holder
+                .gate_for(&residency, custody)
+                .expect("the same unlocked residency yields a gate");
+            std::ptr::from_ref(&held.as_ref().expect("a gate is present").money).addr()
+        };
+
+        assert_eq!(
+            first, second,
+            "a second send got a fresh gate, so it also got a fresh confirmation ledger"
+        );
+    }
+
+    /// **A locked residency yields no gate, and leaves no gate behind to be reused**
+    /// (dig_ecosystem#2890).
+    ///
+    /// The control on the test above. Caching a gate is only safe while the premise it was built on
+    /// still holds, and the nearest wrong implementation of the cache hands back the retained gate
+    /// without re-checking that the account is still open — which would let a relocked account keep
+    /// spending through a gate built when it was not.
+    #[test]
+    fn a_locked_residency_is_refused_rather_than_served_a_retained_gate() {
+        let residency = crate::test_support::test_residency();
+        let custody =
+            dig_account::CustodyPolicy::Hot(dig_account::HotWallet { auto_send_limit: 0 });
+        let holder = SendHolder::default();
+
+        holder
+            .gate_for(&residency, custody)
+            .expect("the gate is built while the account is open");
+        crate::session_lock::SessionKeys::lock_all(&residency);
+
+        assert!(
+            matches!(holder.gate_for(&residency, custody), Err(SendError::Locked)),
+            "a relocked account was served the gate built for its earlier unlock"
+        );
     }
 }
