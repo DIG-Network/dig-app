@@ -322,15 +322,12 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
 fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation) {
-    // `ProfileCreation::Possible` now EXISTS and is reachable from
-    // `ProfileCreation::of_profile_mint` given a wired seam — but the create control itself is the
-    // next unit of work, so this branch still draws nothing. That is deliberate rather than
-    // forgotten, and it is safe only because the shipped binary cannot produce `Possible`: it never
-    // calls `of_profile_mint`, which the source guard
-    // `the_binary_cannot_open_the_profile_creation_gate` holds it to. Drawing a panel that said
-    // "you can create one" with no control would be a dead end, which is the one thing
-    // `professional-ui` forbids outright — so the honest placeholder is nothing at all until the
-    // control lands beside it.
+    // `ProfileCreation::Possible` is now REACHABLE in the shipped binary: it wires a real mint seam,
+    // so `of_profile_mint` can genuinely report a capable node. The create control is the next unit
+    // of work, so what keeps that from becoming a dead end is the `Possible => return` arm below —
+    // this panel draws NOTHING rather than announcing a capability with no control, which is the one
+    // thing `professional-ui` forbids outright. The safety is that arm, not an unreachable variant;
+    // deleting it would ship the dead end.
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
         // a blocked cause here would tell a person with a stopped node that nothing is missing from

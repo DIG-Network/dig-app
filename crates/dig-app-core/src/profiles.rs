@@ -503,9 +503,10 @@ pub mod copy {
     /// Said while nobody has yet measured whether this node can service a profile mint.
     ///
     /// Names the READ, not an outcome, exactly as the card's list-pending sentence does — and for a
-    /// sharper reason: every sentence in [`cannot_create`] ends *there is nothing for you to do*,
-    /// which is the worst thing to tell somebody whose node is merely stopped. An unmeasured node and
-    /// an unreachable one are different facts (dig_ecosystem#2690).
+    /// sharper reason: every sentence in [`cannot_create`] names a CAUSE and the remedy for it, and
+    /// nobody has yet measured which cause applies. Borrowing one of them here would hand a person a
+    /// specific thing to go fix on the strength of a guess. An unmeasured node and an unreachable one
+    /// are different facts (dig_ecosystem#2690).
     ///
     /// Lives here, beside [`cannot_create`], because the window's card and the tray's About notice
     /// both read it — one sentence, so the two surfaces cannot come to describe different builds.
