@@ -965,7 +965,7 @@ mod tests {
         );
 
         let holder = SendHolder::default();
-        holder.signing();
+        assert!(holder.begin(), "an idle holder offers its send slot");
         assert_eq!(holder.progress(), SendProgress::Signing);
 
         let started = Instant::now();
@@ -1039,11 +1039,16 @@ mod tests {
             matches!(holder.progress(), SendProgress::Unknown { .. }),
             "an unanswered push was shown as something other than an unknown outcome"
         );
-        // Still watched: the chain, not this app, decides what became of it.
+        // Still watched, and still UNKNOWN. Driven past the poll interval so a poll really fires:
+        // asserting `Pending | Unknown` here accepted the defect that the poll silently promotes an
+        // unjudged transfer, and an `Instant::now()` inside the interval polled nothing at all.
         assert!(
             matches!(
-                holder.observe(&chain, std::time::Instant::now()),
-                SendProgress::Pending { .. } | SendProgress::Unknown { .. }
+                holder.observe(
+                    &chain,
+                    std::time::Instant::now() + crate::wallet::sending::POLL_INTERVAL * 2
+                ),
+                SendProgress::Unknown { .. }
             ),
             "an unknown outcome stopped being watched, so nothing can ever resolve it"
         );
@@ -1056,7 +1061,8 @@ mod tests {
         assert_eq!(
             after,
             SendProgress::Failed {
-                reason: rejected.to_string()
+                reason: rejected.to_string(),
+                payment_coin_id: None,
             },
             "a rejected bundle is still being polled, so a coin that cannot exist is being looked for"
         );
@@ -1153,6 +1159,117 @@ mod tests {
                 "{failure:?} offered a second send while a bundle may be in a mempool"
             );
         }
+    }
+
+    /// **A poll cannot turn a push nobody judged into "the network has taken this payment".**
+    ///
+    /// `TransferStatus::Awaiting` says only that the payment coin is not on chain yet, which is the
+    /// SAME answer a bundle that was never broadcast produces. So an unjudged transfer must stay
+    /// [`SendProgress::Unknown`] across a poll, or ten seconds after an unanswered push the person
+    /// reads *"the network has taken this payment and is settling it"* about bytes that may never
+    /// have left — and on the token-less path, provably did not.
+    ///
+    /// The judged holder is the control, and it is what makes this test load-bearing: it polls the
+    /// SAME chain, where the payment coin is equally absent, and MUST become `Pending`. An
+    /// implementation that simply never promoted anything would satisfy the first half and fail here.
+    #[tokio::test]
+    async fn a_poll_promotes_a_judged_transfer_and_leaves_an_unjudged_one_unknown() {
+        use crate::wallet::sending::{SendHolder, SendProgress, POLL_INTERVAL};
+
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let unanswered_error = bench
+            .session(
+                &chain,
+                &ScriptedPublisher::answering(bench.journal.clone(), Err(unanswered())),
+            )
+            .send(&request())
+            .await
+            .expect_err("an unanswered push is not a completed send");
+
+        let unjudged = SendHolder::default();
+        unjudged.finished(&unanswered_error);
+        let due = std::time::Instant::now() + POLL_INTERVAL * 2;
+        assert!(
+            matches!(unjudged.observe(&chain, due), SendProgress::Unknown { .. }),
+            "a transfer no mempool accepted was shown as being settled by the network"
+        );
+
+        // The control: a genuinely accepted push, polled against the same chain.
+        let accepted_bench = Bench::funded();
+        let accepted_chain = accepted_bench.chain();
+        let in_flight = accepted_bench
+            .session(
+                &accepted_chain,
+                &ScriptedPublisher::accepting(accepted_bench.journal.clone()),
+            )
+            .send(&request())
+            .await
+            .expect("a funded, approved send is accepted");
+
+        let judged = SendHolder::default();
+        judged.accepted(in_flight.finish());
+        assert!(
+            matches!(
+                judged.observe(&accepted_chain, due),
+                SendProgress::Pending { .. }
+            ),
+            "an accepted push stopped reporting the wait it is actually in"
+        );
+    }
+
+    /// **A send is refused outright while another is in flight, and the running one is untouched.**
+    ///
+    /// Asserted through `SendHolder::send` rather than through `begin` alone, because the defect was
+    /// a PLACEMENT: the claim existed nowhere on the path a click takes, so the second send ran, and
+    /// the first thing it did was erase the pending transfer of the send already under way. A guard
+    /// that lived only in `begin` would satisfy a test of `begin`.
+    ///
+    /// The fixture is the cheapest call that still reaches the guard: `send` with no residency, which
+    /// on an idle holder records `Locked` — the control below. On an in-flight holder that same call
+    /// must change NOTHING, and the surviving pending transfer is what proves it. It deliberately
+    /// does not involve the tray's `ActionWorker`: the guarantee has to hold wherever a send starts.
+    #[tokio::test]
+    async fn a_send_is_refused_while_another_is_in_flight_and_leaves_it_undisturbed() {
+        use crate::agent::AgentStatus;
+        use crate::engine::EngineState;
+        use crate::wallet::sending::{SendHolder, SendProgress};
+
+        let status = std::sync::Arc::new(std::sync::RwLock::new(AgentStatus {
+            running: true,
+            engine: EngineState::initial(),
+            active_profile: None,
+        }));
+
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let in_flight = bench
+            .session(&chain, &ScriptedPublisher::accepting(bench.journal.clone()))
+            .send(&request())
+            .await
+            .expect("a funded, approved send is accepted");
+        let coin_id = in_flight.pending().payment_coin_id().to_string();
+
+        let holder = SendHolder::default();
+        holder.accepted(in_flight.finish());
+        holder.send(&status, None, &request());
+
+        assert_eq!(
+            holder.progress(),
+            SendProgress::Pending {
+                payment_coin_id: coin_id,
+                blocks_since_push: 0,
+            },
+            "a second send ran while one was in flight and overwrote the transfer being watched"
+        );
+
+        // The control: with nothing in flight, that same call is accepted and records its failure.
+        let idle = SendHolder::default();
+        idle.send(&status, None, &request());
+        assert!(
+            matches!(idle.progress(), SendProgress::Failed { .. }),
+            "an idle holder refused a send, so the guard above proves nothing"
+        );
     }
 
     /// The wallet slot the money path derives at is the one this bench asserts against — a guard so a

@@ -306,10 +306,25 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
             Tone::Good,
             copy::wallet::SEND_CONFIRMED_BODY.to_string(),
         ),
-        SendProgress::Failed { reason } => (
+        // The two failures are NOT the same statement. One never reached the network and may promise
+        // that no money moved; the other was broadcast and ruled out by a coin being spent elsewhere,
+        // which is a thing that happened on chain. Saying "nothing was sent" there would be a lie
+        // about money, so each gets its own words.
+        SendProgress::Failed {
+            reason,
+            payment_coin_id: None,
+        } => (
             copy::wallet::SEND_FAILED_BADGE,
             Tone::Warn,
             format!("{} {reason}", copy::wallet::SEND_FAILED_BODY),
+        ),
+        SendProgress::Failed {
+            reason,
+            payment_coin_id: Some(_),
+        } => (
+            copy::wallet::SEND_DIED_BADGE,
+            Tone::Warn,
+            format!("{} {reason}", copy::wallet::SEND_DIED_BODY),
         ),
     };
 
@@ -331,12 +346,24 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
 /// one, not only the happy ones.
 fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
     match send {
-        SendProgress::Idle | SendProgress::Signing | SendProgress::Failed { .. } => Vec::new(),
+        SendProgress::Idle
+        | SendProgress::Signing
+        | SendProgress::Failed {
+            payment_coin_id: None,
+            ..
+        } => Vec::new(),
         SendProgress::Pending {
             payment_coin_id, ..
         }
         | SendProgress::Unknown {
             payment_coin_id, ..
+        }
+        // A payment that died AFTER being pushed has a real coin, and that is exactly when a person
+        // most needs something to look up. Withholding it here left them with a verdict and no way
+        // to check it.
+        | SendProgress::Failed {
+            payment_coin_id: Some(payment_coin_id),
+            ..
         } => vec![Readout::new(
             copy::wallet::SEND_COIN_LABEL,
             Value::Identifier(payment_coin_id.clone()),
@@ -1181,6 +1208,11 @@ mod tests {
             },
             SendProgress::Failed {
                 reason: "the network rejected the transfer: DOUBLE_SPEND".to_string(),
+                payment_coin_id: None,
+            },
+            SendProgress::Failed {
+                reason: "a source coin was spent elsewhere".to_string(),
+                payment_coin_id: Some("5e771ed".to_string()),
             },
         ]
     }

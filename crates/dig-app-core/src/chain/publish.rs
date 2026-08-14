@@ -49,9 +49,13 @@ pub const PUSH_TIMEOUT: Duration = Duration::from_secs(20);
 /// What the extra type buys is the *diagnosis*, which `ChainUnavailable` flattens to prose. A local
 /// refusal for a missing token and an absent node are wholly different situations — one is fixed by
 /// running dig-app with access to the node's token, the other by starting a node — and a caller (or
-/// a test) that can only read a sentence cannot tell them apart. So the concrete publisher exposes
-/// [`ControlSpendPublisher::push_detailed`], and the trait method is a thin, message-preserving map
-/// over it.
+/// a test) that can only read a sentence cannot tell them apart. So this type is what
+/// [`DetailedSpendPublisher::push_detailed`] returns, and `SpendPublisher::push` is a thin,
+/// message-preserving map over it.
+///
+/// The send path needs more than a diagnosis: it needs to know whether these bytes could be in a
+/// mempool right now, because that decides both what a person is told and whether they may send
+/// again. [`may_have_reached_a_mempool`](Self::may_have_reached_a_mempool) is that judgement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PublishFailure {
     /// This app holds no control token, so the push was **refused before it was sent**.

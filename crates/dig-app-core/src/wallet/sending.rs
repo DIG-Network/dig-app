@@ -70,10 +70,24 @@ pub enum SendProgress {
         /// The height it confirmed at.
         confirmed_height: u32,
     },
-    /// Nothing was sent, and the reason is final.
+    /// The transfer is over and will never settle.
+    ///
+    /// # The two ways to arrive here are not the same statement
+    ///
+    /// [`of_error`](Self::of_error) reaches it BEFORE any broadcast — the build refused, the gate
+    /// refused, the mempool refused, or the push provably never left. Nothing moved and nothing ever
+    /// existed on chain.
+    ///
+    /// [`of_status`](Self::of_status) reaches it AFTER a push, from `dig-account`'s proof of death: a
+    /// source coin was observed SPENT while the payment coin is absent, so these bytes can never be
+    /// included. Something did happen on chain — just not this payment — and the person has a coin id
+    /// worth looking up. `payment_coin_id` is what tells the two apart, and the surface MUST NOT tell
+    /// the second one that no money has moved.
     Failed {
         /// Why, verbatim from whoever decided it — the mempool, the builder, or the custody gate.
         reason: String,
+        /// The payment coin, present exactly when this transfer had been pushed.
+        payment_coin_id: Option<String>,
     },
 }
 
@@ -111,6 +125,9 @@ impl SendProgress {
             | SendError::PushNotSent(_)
             | SendError::Rejected { .. } => Self::Failed {
                 reason: error.to_string(),
+                // No push survived, so there is no coin to look up. `None` is what lets the surface
+                // say "no money has moved" here and NOT say it after a proof of death.
+                payment_coin_id: None,
             },
         }
     }
@@ -129,8 +146,10 @@ impl SendProgress {
                 payment_coin_id: settled.payment_coin_id().to_string(),
                 confirmed_height: settled.confirmed_height(),
             },
+            // A proof of death: the transfer WAS pushed, so the coin id goes with it.
             TransferStatus::Failed { reason } => Self::Failed {
                 reason: reason.clone(),
+                payment_coin_id: Some(pending.payment_coin_id().to_string()),
             },
         }
     }
@@ -306,7 +325,7 @@ pub struct SendHolder {
 ///
 /// A Chia block is roughly 18.75 seconds, so this is comfortably inside one block: the reading cannot
 /// go stale by a whole block, and the node is not asked twice for one answer.
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The send being watched, if any.
 #[derive(Default)]
@@ -317,6 +336,21 @@ struct Watched {
     pending: Option<PendingTransfer>,
     /// When the chain may next be asked. `None` means "as soon as anyone looks".
     next_poll: Option<std::time::Instant>,
+    /// Whether a mempool actually ACCEPTED this bundle.
+    ///
+    /// # Why polling cannot answer this, and why the surface lies without it
+    ///
+    /// `TransferStatus::Awaiting` means only *the payment coin is not on chain yet*, which is the
+    /// identical answer a bundle that was never broadcast produces — the coin is absent either way.
+    /// So a poll of an UNJUDGED transfer promotes an honest "nobody knows" into
+    /// [`SendProgress::Pending`], and the person reads *"the network has taken this payment and is
+    /// settling it"* about a bundle that may never have left. On the token-less path that sentence is
+    /// known false, and the coin id offered for lookup will never exist.
+    ///
+    /// Set ONLY by [`SendHolder::accepted`], which is reached only from a real `PushOutcome`. While
+    /// it is `false`, `Awaiting` changes nothing; `Confirmed` and `Failed` are genuine chain verdicts
+    /// and still resolve the state.
+    judged: bool,
 }
 
 impl SendHolder {
@@ -325,20 +359,46 @@ impl SendHolder {
         self.lock().progress.clone()
     }
 
-    /// Record that a send has started and the ceremony is in front of the person.
-    pub fn signing(&self) {
+    /// Claim the one send slot, moving to [`SendProgress::Signing`], or report that it is taken.
+    ///
+    /// # Why this is a compare-and-set and not a check the caller makes
+    ///
+    /// It is the ONLY thing standing between a person and two payments. Every other guard is
+    /// advisory: [`SendDraft::assess`] judges the send state carried by the PUBLISHED view, and the
+    /// tray publishes nothing while the action worker holds the session — which it does for the whole
+    /// ceremony, up to two minutes. So the window keeps drawing an enabled **Send** button, on a form
+    /// that still says `Idle`, for the entire time a send is running. A second click in that window
+    /// used to be accepted, and the first thing it did was erase the pending transfer of the send
+    /// already under way.
+    ///
+    /// Reading the state and then setting it would leave the same hole, one lock acquisition wide, so
+    /// both happen under a single lock here. It deliberately does NOT rely on the tray's
+    /// `ActionWorker` busy flag: the guarantee has to hold wherever a send is started from, and a
+    /// guard that depends on another component's timing is a guard nobody can check.
+    ///
+    /// Returns `false` when a send is already in flight, in which case NOTHING was disturbed.
+    #[must_use = "a refused claim means another send is running; do not proceed"]
+    pub fn begin(&self) -> bool {
         let mut watched = self.lock();
+        if watched.progress.in_flight() {
+            return false;
+        }
         watched.progress = SendProgress::Signing;
         watched.pending = None;
         watched.next_poll = None;
+        watched.judged = false;
+        true
     }
 
     /// Record a push a mempool accepted, and begin watching its payment coin.
+    ///
+    /// The one place a transfer becomes JUDGED — see [`Watched::judged`] for what that buys.
     pub fn accepted(&self, pending: PendingTransfer) {
         let mut watched = self.lock();
         watched.progress = SendProgress::accepted(&pending);
         watched.pending = Some(pending);
         watched.next_poll = Some(std::time::Instant::now() + POLL_INTERVAL);
+        watched.judged = true;
     }
 
     /// Record how a send ended.
@@ -353,10 +413,13 @@ impl SendHolder {
             SendError::PushUnanswered { pending, .. } => {
                 watched.pending = Some((**pending).clone());
                 watched.next_poll = Some(std::time::Instant::now() + POLL_INTERVAL);
+                // Unjudged, and it stays that way: no mempool ever said anything about this bundle.
+                watched.judged = false;
             }
             _ => {
                 watched.pending = None;
                 watched.next_poll = None;
+                watched.judged = false;
             }
         }
     }
@@ -366,6 +429,13 @@ impl SendHolder {
     /// A read that FAILS changes nothing: the app's ability to ask is not a fact about the transfer,
     /// and turning a timeout into a failure would tell a person their payment died because their node
     /// was busy. A settled transfer stops being polled — a confirmation does not become less true.
+    ///
+    /// # An unjudged transfer cannot be promoted by a poll
+    ///
+    /// `Awaiting` is the same answer whether a bundle is queued in a mempool or was never broadcast
+    /// at all, so for a transfer no mempool ever accepted it establishes nothing and MUST leave
+    /// [`SendProgress::Unknown`] standing ([`Watched::judged`]). Only `Confirmed` and `Failed` are
+    /// verdicts, and those resolve it either way.
     pub fn observe<C>(&self, chain: &C, now: std::time::Instant) -> SendProgress
     where
         C: dig_chainsource_interface::ChainSource + ?Sized,
@@ -376,9 +446,13 @@ impl SendHolder {
             return watched.progress.clone();
         };
         if let Ok(status) = dig_account::transfer_status(pending, chain) {
-            watched.progress = SendProgress::of_status(pending, &status);
-            if !watched.progress.in_flight() {
-                watched.pending = None;
+            let establishes_nothing =
+                !watched.judged && matches!(status, TransferStatus::Awaiting { .. });
+            if !establishes_nothing {
+                watched.progress = SendProgress::of_status(pending, &status);
+                if !watched.progress.in_flight() {
+                    watched.pending = None;
+                }
             }
         }
         watched.next_poll = Some(now + POLL_INTERVAL);
@@ -408,12 +482,41 @@ impl SendHolder {
     /// that guard across this call would hold it across the confirm ceremony — which has a
     /// two-minute deadline — and the agent's own tick, which needs the write side, would be stalled
     /// for the whole time a person was reading the dialog.
+    /// # Two things it will not do, whatever the caller does
+    ///
+    /// It refuses outright while another send is in flight ([`begin`](Self::begin)), and it leaves no
+    /// state behind if the ceremony PANICS: the whole attempt runs under a guard that records a
+    /// failure on an unwind. Without it, `ActionWorker` would catch the panic, the tray would survive,
+    /// and the form would sit at `Signing` — in flight, unpollable because nothing was pushed, and so
+    /// refusing every later send until the app restarts.
     pub fn send(
         &self,
         status: &crate::agent::SharedStatus,
         residency: Option<&crate::account::residency::AccountResidency>,
         request: &TransferRequest,
     ) {
+        if !self.begin() {
+            return;
+        }
+        let mut guard = AbandonedSend::watching(self);
+        let outcome = self.perform(status, residency, request);
+        guard.completed();
+        match outcome {
+            Ok(in_flight) => self.accepted(in_flight.finish()),
+            Err(error) => self.finished(&error),
+        }
+    }
+
+    /// Build, gate, sign and push — every step that can fail, and none that record state.
+    ///
+    /// Split out from [`send`](Self::send) so that recording the outcome happens in exactly one place,
+    /// and so an unwind through here cannot be mistaken for a recorded one.
+    fn perform(
+        &self,
+        status: &crate::agent::SharedStatus,
+        residency: Option<&crate::account::residency::AccountResidency>,
+        request: &TransferRequest,
+    ) -> Result<crate::wallet::send::InFlightSend, SendError> {
         use crate::account::auth::HarnessAuthProvider;
         use crate::account::boot::DEFAULT_ACCOUNT_ID;
         use crate::account::ceremony::PromptedCeremony;
@@ -423,7 +526,7 @@ impl SendHolder {
         use dig_account::{AccountId, AutoSendPolicy, CustodyPolicy, HotWallet, SystemClock};
 
         let Some(residency) = residency else {
-            return self.refuse(SendError::Locked);
+            return Err(SendError::Locked);
         };
         // Cloned out from under the lock, which is then released — see the docs above.
         let engine = match status.read() {
@@ -433,7 +536,7 @@ impl SendHolder {
             Err(_) => crate::engine::EngineState::initial(),
         };
         let crate::engine::EngineState::Connected { endpoint, .. } = &engine else {
-            return self.refuse(SendError::PeakUnreadable(
+            return Err(SendError::PeakUnreadable(
                 dig_account::TransferError::ChainUnreachable(
                     "no node is connected, so nothing could be built or broadcast".to_string(),
                 ),
@@ -452,34 +555,20 @@ impl SendHolder {
         ) {
             Ok(money) => money,
             // The residency locked between the click and this call. Nothing was built.
-            Err(_) => return self.refuse(SendError::Locked),
+            Err(_) => return Err(SendError::Locked),
         };
 
-        self.signing();
         let chain = ControlChainSource::new(endpoint);
         let publisher = ControlSpendPublisher::new(endpoint);
-        let outcome = match tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-        {
-            Ok(runtime) => runtime.block_on(
-                SendSession::new(residency, &money, custody, &chain, &publisher).send(request),
-            ),
-            Err(e) => Err(SendError::Sign(
-                crate::account::money::MoneyPathError::Sign(format!(
+            .map_err(|e| {
+                SendError::Sign(crate::account::money::MoneyPathError::Sign(format!(
                     "this app could not start the worker the confirmation needs: {e}"
-                )),
-            )),
-        };
-        match outcome {
-            Ok(in_flight) => self.accepted(in_flight.finish()),
-            Err(error) => self.finished(&error),
-        }
-    }
-
-    /// Record a send that never started, in the same shape as one that did.
-    fn refuse(&self, error: SendError) {
-        self.finished(&error);
+                )))
+            })?;
+        runtime.block_on(SendSession::new(residency, &money, custody, &chain, &publisher).send(request))
     }
 
     /// Poll the watched transfer against the connected node, if there is one.
@@ -506,6 +595,51 @@ impl SendHolder {
         self.watched
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Restores the send form if the attempt it is watching never records an outcome.
+///
+/// # Why a guard rather than a `catch_unwind`
+///
+/// The send slot is claimed before anything can fail, and a panic anywhere in build, ceremony, signing
+/// or push would otherwise leave it claimed forever: `ActionWorker` catches the unwind and keeps the
+/// tray running, so the process survives with `progress = Signing` — in flight, and unpollable because
+/// nothing was ever pushed. `SendDraft::assess` then answers `AlreadySending` to every later send for
+/// a payment that never existed, with no way out but a restart. A `Drop` runs on the unwind path
+/// wherever the panic came from, which a `catch_unwind` around one call cannot promise.
+///
+/// A panicking send is reported as a FAILURE, never as an unknown outcome: the panic is this app's
+/// own fault and says nothing about a bundle, and an unknown outcome would hold the form closed again.
+struct AbandonedSend<'a> {
+    holder: &'a SendHolder,
+    /// Whether the attempt is still outstanding. Cleared by [`completed`](Self::completed).
+    outstanding: bool,
+}
+
+impl<'a> AbandonedSend<'a> {
+    fn watching(holder: &'a SendHolder) -> Self {
+        Self {
+            holder,
+            outstanding: true,
+        }
+    }
+
+    /// The attempt returned, so its own outcome is about to be recorded.
+    fn completed(&mut self) {
+        self.outstanding = false;
+    }
+}
+
+impl Drop for AbandonedSend<'_> {
+    fn drop(&mut self) {
+        if self.outstanding {
+            self.holder.finished(&SendError::Sign(
+                crate::account::money::MoneyPathError::Sign(
+                    "this app failed part-way through the payment, so nothing was sent".to_string(),
+                ),
+            ));
+        }
     }
 }
 
@@ -625,6 +759,7 @@ mod tests {
             },
             SendProgress::Failed {
                 reason: "the network rejected the transfer".to_string(),
+                payment_coin_id: None,
             },
         ] {
             assert!(!progress.in_flight(), "{progress:?} blocks a fresh send");
@@ -752,6 +887,43 @@ mod tests {
         }
     }
 
+    /// **A send that panics part-way leaves the form usable, and one that completes is left alone.**
+    ///
+    /// `ActionWorker` catches the unwind and the tray survives, so without the guard the holder keeps
+    /// the slot it claimed: `Signing` forever, in flight, and unpollable because nothing was pushed —
+    /// `assess` then answers `AlreadySending` to every later send until the app restarts.
+    ///
+    /// The pair is the property. A guard that fired unconditionally would also leave the form usable
+    /// in the first case, and would destroy the outcome of every ordinary send; the second half is
+    /// what rules that out.
+    #[test]
+    fn a_send_abandoned_by_a_panic_frees_the_form_and_a_completed_one_keeps_its_outcome() {
+        let holder = SendHolder::default();
+        assert!(holder.begin(), "an idle holder offers its send slot");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = AbandonedSend::watching(&holder);
+            panic!("the ceremony fell over");
+        }));
+        assert!(panicked.is_err(), "the fixture did not actually panic");
+        assert!(
+            !holder.progress().in_flight(),
+            "a panicked send kept the slot, so no further send can ever be started"
+        );
+        assert!(matches!(holder.progress(), SendProgress::Failed { .. }));
+
+        // A completed attempt is disarmed, so the guard writes nothing over its outcome.
+        assert!(holder.begin(), "the freed slot is offered again");
+        {
+            let mut guard = AbandonedSend::watching(&holder);
+            guard.completed();
+        }
+        assert_eq!(
+            holder.progress(),
+            SendProgress::Signing,
+            "the guard overwrote the outcome of a send that finished normally"
+        );
+    }
+
     /// **An unanswered push is NOT rendered as a failure, and every other error is.**
     ///
     /// The load-bearing distinction of this whole module. `PushUnanswered` means the outcome is
@@ -767,19 +939,22 @@ mod tests {
         assert_eq!(
             SendProgress::of_error(&rejected),
             SendProgress::Failed {
-                reason: rejected.to_string()
+                reason: rejected.to_string(),
+                payment_coin_id: None,
             }
         );
         assert_eq!(
             SendProgress::of_error(&SendError::Locked),
             SendProgress::Failed {
-                reason: SendError::Locked.to_string()
+                reason: SendError::Locked.to_string(),
+                payment_coin_id: None,
             }
         );
         assert_eq!(
             SendProgress::of_error(&SendError::WalletBehindActiveProfile("slot 3".to_string())),
             SendProgress::Failed {
-                reason: SendError::WalletBehindActiveProfile("slot 3".to_string()).to_string()
+                reason: SendError::WalletBehindActiveProfile("slot 3".to_string()).to_string(),
+                payment_coin_id: None,
             }
         );
         assert!(!SendProgress::of_error(&rejected).in_flight());

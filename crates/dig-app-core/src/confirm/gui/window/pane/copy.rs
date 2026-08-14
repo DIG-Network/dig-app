@@ -672,7 +672,8 @@ pub(crate) mod wallet {
     pub(crate) fn send_pending_body(blocks: u32) -> String {
         format!(
             "The network has taken this payment and is settling it. {blocks} block(s) have been \
-             produced since it was sent; a few more and it is final."
+             produced since it was sent; a few more and it is final. Keep the payment coin below if \
+             you want to follow it yourself — DIG watches it only until you close the app."
         )
     }
 
@@ -682,11 +683,16 @@ pub(crate) mod wallet {
     ///
     /// It says *keep watching* and never *it did not send*, because the payment may be in a mempool
     /// right now — and sending it again is the one action that could pay the recipient twice.
+    ///
+    /// The last sentence is the app being honest about its own memory: the transfer is held in this
+    /// process and nowhere else, so a restart forgets it. Telling someone not to send again while
+    /// silently losing the one identifier that lets them check is the worse half of that.
     pub(crate) fn send_unknown_body(detail: &str) -> String {
         format!(
             "Your node did not answer when DIG sent this payment, so whether it went out is not yet \
              known ({detail}). It may already be settling. DIG is watching the coin below and will \
-             say when the chain decides — do not send it again in the meantime."
+             say when the chain decides — do not send it again in the meantime. Write the payment \
+             coin down: DIG forgets it if you close the app, and it is how you check afterwards."
         )
     }
 
@@ -698,9 +704,27 @@ pub(crate) mod wallet {
 
     /// The glance-level word for a payment that never left.
     pub(crate) const SEND_FAILED_BADGE: &str = "Not sent";
-    /// The lead-in above the verbatim reason a send failed.
+    /// The lead-in above the verbatim reason a send that was NEVER BROADCAST failed.
+    ///
+    /// It may promise that no money moved only because nothing was ever pushed. A transfer that died
+    /// AFTER a push gets [`SEND_DIED_BODY`] instead — see [`SendProgress::Failed`] for the two paths.
+    ///
+    /// [`SendProgress::Failed`]: crate::wallet::sending::SendProgress::Failed
     pub(crate) const SEND_FAILED_BODY: &str =
         "Nothing was sent and no money has moved. The reason, as it was given:";
+
+    /// The glance-level word for a pushed payment the chain has ruled out.
+    pub(crate) const SEND_DIED_BADGE: &str = "Did not go through";
+    /// The lead-in for a payment that WAS broadcast and can no longer be included.
+    ///
+    /// It must not claim nothing happened: this state is reached only when a coin the payment was
+    /// built from is observed SPENT while the payment coin is absent, so something did move on chain
+    /// — just not this payment. The coin id is shown with it, because it is the one thing a person can
+    /// take to a block explorer to see that for themselves.
+    pub(crate) const SEND_DIED_BODY: &str =
+        "This payment will not go through: one of the coins it was built from has been spent \
+         elsewhere, so the network can no longer include it. This payment did not reach the \
+         recipient. The reason, as it was given:";
 
     /// The label on the payment coin a person can look up themselves.
     pub(crate) const SEND_COIN_LABEL: &str = "Payment coin";
