@@ -2203,6 +2203,32 @@ the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
   payment leave with no confirmation.
 - CAT / `$DIG` sending is not part of this flow.
 
+#### 3.3b The send surface (normative)
+
+The Wallet tab offers the send, and `dig_app_core::wallet::sending` is the only place that decides
+anything about it. The pane draws that module's answers and returns an intent
+(`TrayAction::SendXch`); the shell forwards the intent and performs the send.
+
+- A typed amount MUST be converted to base units by `amount::parse_asset_amount`, the exact inverse of
+  `amount::format_asset_amount`. The conversion MUST be integer arithmetic on the digits: a binary
+  float cannot represent XCH's twelve decimal places, and a rounding error here misstates money at the
+  moment a person authorises it. An amount with more decimal places than the asset carries MUST be
+  refused, never truncated.
+- Every figure the send surface shows — the amount, the fee, and anything echoed back in the confirm
+  ceremony — MUST be rendered through `crate::amount`. A base-unit integer beside a ticker is
+  FORBIDDEN.
+- A destination MUST reach a `TransferRequest` through `dig_account::PayableDestination::from_address`,
+  which refuses any prefix but `xch`. Reconstructing one from a puzzle hash via `from_derived` on the
+  send path is FORBIDDEN: it bypasses the check that stops a `txch` address burning the funds.
+- **Send** MUST be refused, with the condition stated on screen, when the account is sealed, when a
+  send is in flight, when either field is unusable, or when the amount plus the fee exceeds a MEASURED
+  balance. A balance nobody has read MUST NOT refuse a send — that would invent the figure.
+- The five states (`SendProgress`) MUST each be rendered as themselves. `Awaiting` MUST NOT be shown as
+  success, and an unanswered push MUST be shown as an UNKNOWN outcome to keep watching — never as a
+  failure, since rebuilding it can pay the recipient twice.
+- The state MUST live in `TrayView` and be compared by `TrayView::renders_same_as`; otherwise a send
+  moves through every state behind a window that never repaints.
+
 ### 3.4 Per-user data at rest (NC-2 / NC-3)
 
 All user-facing data lives in the interactive user's per-OS application-data directory, in a
