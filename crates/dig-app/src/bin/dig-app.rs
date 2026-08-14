@@ -3919,7 +3919,7 @@ mod tray {
             return;
         };
 
-        let body = copy::body(&address, first_profile_cost_mojos());
+        let body = copy::body(first_profile_cost_mojos());
         if confirmer.confirm_claim(&first_profile_claim(&address, &body)) != ConfirmDecision::Approve
         {
             // "Remind me later", or the window closed. Both are the same answer and both are

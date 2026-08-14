@@ -747,6 +747,11 @@ mod tests {
             // Wallet pane draws, and a native menu cannot hold one. It is listed here because this
             // match is the compile-time prompt to make exactly that decision about a new variant.
             | TrayAction::SendXch(_)
+            // Never a menu ROW either, and for a stronger reason than `SendXch`: nobody clicks it
+            // at all. The state loop raises it on a schedule (dig_ecosystem#2950), which is the
+            // whole of what the user asked for — an *automatic* popout — so a row offering it would
+            // be a second, manual way in that the daily cadence knows nothing about.
+            | TrayAction::CreateFirstProfile
             | TrayAction::OpenWindow
             | TrayAction::OpenLogs
             | TrayAction::Quit => {}

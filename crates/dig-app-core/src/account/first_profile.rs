@@ -50,8 +50,10 @@ use serde::Serialize;
 use crate::account::profile_mint::whole_profile_cost_mojos;
 use crate::account::profile_mint::DEFAULT_MINT_FEE_MOJOS;
 use crate::confirm::ClaimPrompt;
+use crate::confirm::QrArt;
 use crate::profiles::ProfileCreation;
 use crate::profiles::ProfilesReading;
+use crate::wallet::overview::BalanceReading;
 
 /// The file the next-prompt time lives in, beside the DID ledger in the account's brand directory.
 const REMINDER_FILE: &str = "first-profile-reminder.json";
@@ -61,6 +63,35 @@ const REMINDER_FILE: &str = "first-profile-reminder.json";
 /// A single constant rather than a preference. The interval is the whole of what was requested, and
 /// a knob here would be a way for the app to nag more often than a person agreed to.
 pub const REMINDER_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The shortest gap between two node-hitting balance reads the "Recheck balance" control will make.
+///
+/// A held or repeatedly-clicked button must not become a request storm against a node that is
+/// already the suspect. Five seconds is long enough that no human clicking produces load worth
+/// naming, and short enough that somebody watching for a transfer never feels blocked — a Chia block
+/// is about 52 seconds, so nothing can arrive faster than this anyway.
+///
+/// When it bites, the window SAYS so ([`copy::checked_recently`]) rather than silently doing
+/// nothing, because a press that produces no visible change is exactly the failure this control
+/// exists to rule out.
+pub const RECHECK_THROTTLE: Duration = Duration::from_secs(5);
+
+/// Whether a recheck asked for at `now` should actually hit the node.
+///
+/// `Err(seconds_ago)` when the last read is too recent to repeat, carrying how long ago it was so the
+/// window can say it. A monotonic clock is not required: a `now` that went backwards yields
+/// `duration_since` failing, which is treated as *long enough ago* — the fail-open direction here is
+/// one extra read, and the fail-closed one would wedge the button permanently on a machine whose
+/// clock was corrected.
+pub fn recheck_allowed(last_read_at: Option<SystemTime>, now: SystemTime) -> Result<(), u64> {
+    let Some(last) = last_read_at else {
+        return Ok(());
+    };
+    match now.duration_since(last) {
+        Ok(since) if since < RECHECK_THROTTLE => Err(since.as_secs()),
+        _ => Ok(()),
+    }
+}
 
 /// Where the next-prompt time is kept.
 ///
@@ -223,6 +254,152 @@ pub fn first_profile_prompt(
     }
 }
 
+/// What the app knows about the money that would PAY for a mint.
+///
+/// A narrowing of [`BalanceReading`] to the one question this flow asks, with the app's three-state
+/// rule intact: **an unmeasured balance is not a zero balance**, and neither is a fault.
+///
+/// # Why this type exists rather than a bare `u64`
+///
+/// A shortfall is a claim about somebody's money. Computing one from a balance nobody read means a
+/// deposit window telling a person they are short when the truth is that their node is not
+/// answering — the absent-versus-zero collapse that showed a funded wallet as empty
+/// (dig_ecosystem#2871). An `Option<u64>` would permit it by accident; this does not, because
+/// [`Unmeasured`](Self::Unmeasured) has no number in it to subtract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MintFunds {
+    /// Nobody has measured the balance, or the read did not answer. **Not zero, and not a
+    /// shortfall.**
+    Unmeasured,
+    /// A confirmed, spendable figure the chain actually answered with.
+    ///
+    /// # Confirmed, and deliberately not "confirmed plus what is on the way"
+    ///
+    /// Arrivals still in flight are excluded, because the gate this feeds opens a ceremony that
+    /// SPENDS. Counting a submitted transfer would let the wizard open onto a mint whose funding
+    /// coin does not exist yet, and dig-account would refuse it with the money apparently already
+    /// there — the worst possible moment to be wrong.
+    Measured {
+        /// Spendable XCH, in mojos, as the chain answered it.
+        spendable_mojos: u64,
+    },
+}
+
+impl MintFunds {
+    /// Narrow a wallet reading to the mint gate's question.
+    ///
+    /// [`BalanceReading::Pending`] and every [`BalanceReading::Unknown`] land on
+    /// [`Unmeasured`](Self::Unmeasured) TOGETHER, and that is not a collapse of the distinction —
+    /// the distinction is real and the wallet surface still draws it. It is that both answer this
+    /// question identically: neither licenses a claim about how short somebody is. What the deposit
+    /// window SAYS about the two differs, and it reads the original for that.
+    pub fn of_balance(reading: &BalanceReading) -> Self {
+        match reading {
+            BalanceReading::Known { balances, .. } => Self::Measured {
+                spendable_mojos: balances.xch_mojos,
+            },
+            BalanceReading::Pending | BalanceReading::Unknown(_) => Self::Unmeasured,
+        }
+    }
+}
+
+/// Remembers that the wallet has ONCE been seen able to pay — the flow's hysteresis, in one place.
+///
+/// # Why a latch and not a second threshold
+///
+/// A balance can cross the mint cost and dip back under it without anybody spending anything: a coin
+/// becomes momentarily unavailable, a replica answers from a slightly older height, a read lands
+/// between two blocks. Without a latch each of those bounces the user between a deposit window and a
+/// creation wizard, which is worse than either window being wrong — a screen that changes under
+/// somebody's hands teaches them the app is broken.
+///
+/// The direction is deliberate and stated rather than tuned: **once sufficient, always sufficient,
+/// for the life of this flow.** It is the safe direction because the ceremony itself re-checks — a
+/// wizard opened on a balance that has since dipped refuses at the mint, honestly and without
+/// spending, which costs one clear error message. The opposite error sends a funded person back to a
+/// deposit screen to send money they have already sent.
+///
+/// It is cleared by the flow ENDING, never by a low reading: a minted profile stops the flow at
+/// [`PromptHeld::AlreadyHasAProfile`], and "Remind me later" stops it at
+/// [`PromptHeld::Deferred`], both of which are checked before the latch is ever consulted.
+#[derive(Debug, Default)]
+pub struct FundingLatch {
+    /// Whether a sufficient balance has been observed.
+    crossed: std::sync::atomic::AtomicBool,
+}
+
+impl FundingLatch {
+    /// A latch that has seen nothing.
+    pub const fn new() -> Self {
+        Self {
+            crossed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the wallet has already been seen able to pay.
+    pub fn has_crossed(&self) -> bool {
+        self.crossed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Record that it has.
+    pub fn note_crossed(&self) {
+        self.crossed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Forget, because the flow ended.
+    pub fn reset(&self) {
+        self.crossed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// What the flow should be SHOWING, once it has been raised.
+///
+/// Split from [`first_profile_prompt`] deliberately: that decides whether to open the flow at all
+/// and costs nothing, so the tick can ask it twice a second. This one needs a balance, which costs a
+/// node round trip, so it is asked on the worker inside the flow rather than in the frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FundingStep {
+    /// The balance could not be measured. Say so — never a shortfall.
+    Unmeasured,
+    /// The wallet is short by this much, and cannot pay for a mint yet.
+    Deposit {
+        /// How many more mojos are needed. Never zero: at zero the step is
+        /// [`Ready`](Self::Ready).
+        shortfall_mojos: u64,
+    },
+    /// The wallet can pay. Open the create-profile wizard.
+    Ready,
+}
+
+/// Decide what the flow shows for a funds reading.
+///
+/// `>=` rather than `>`: a wallet holding exactly the cost can pay exactly the cost.
+///
+/// The latch is consulted FIRST, so a wallet once seen sufficient never returns to a deposit
+/// window — see [`FundingLatch`] for why that direction is the safe one.
+pub fn funding_step(funds: &MintFunds, latch: &FundingLatch, cost_mojos: u64) -> FundingStep {
+    if latch.has_crossed() {
+        return FundingStep::Ready;
+    }
+    let MintFunds::Measured { spendable_mojos } = funds else {
+        return FundingStep::Unmeasured;
+    };
+    match spendable_mojos.checked_sub(cost_mojos) {
+        // `checked_sub` returning `Some` IS the comparison: the wallet covers the cost exactly when
+        // subtracting it does not go negative. One expression rather than a `>=` beside a `-`, which
+        // is how a boundary comes to be tested one way and computed the other.
+        Some(_) => {
+            latch.note_crossed();
+            FundingStep::Ready
+        }
+        None => FundingStep::Deposit {
+            shortfall_mojos: cost_mojos - spendable_mojos,
+        },
+    }
+}
+
 /// Push the next prompt one [`REMINDER_INTERVAL`] out from `now`.
 ///
 /// # Why this is called when the prompt is RAISED, not when the button is pressed
@@ -253,17 +430,21 @@ pub fn first_profile_cost_mojos() -> u64 {
 /// Public for the reason [`funding_claim`](crate::account::journey::funding_claim) is: the
 /// screenshot gallery photographs THIS screen rather than a retyped copy of it, and a photograph of
 /// retyped copy is a photograph of a second implementation.
-pub fn first_profile_claim<'a>(address: &'a str, body: &'a str) -> ClaimPrompt<'a> {
+pub fn first_profile_claim<'a>(
+    address: &'a str,
+    body: &'a str,
+    scannable: Option<&'a QrArt>,
+) -> ClaimPrompt<'a> {
     ClaimPrompt {
         title: copy::TITLE,
         heading: copy::HEADING,
         body,
-        affirm: copy::COPY_ADDRESS,
+        affirm: copy::RECHECK,
         decline: Some(copy::LATER),
         // Neither control spends anything and neither is a claim about the world, so a bare Enter
-        // may safely take the friendly one — copying an address to the clipboard.
+        // may safely take the affirming one — asking the node for a fresh balance.
         refusal_is_default: false,
-        scannable: None,
+        scannable,
         identifier: Some(address),
     }
 }
@@ -281,36 +462,108 @@ pub mod copy {
     pub const TITLE: &str = "DIG — Create your first profile";
     /// The question being put to the user.
     pub const HEADING: &str = "Fund your wallet to create your first profile";
-    /// The affirming control: copies the receiving address.
-    pub const COPY_ADDRESS: &str = "Copy my address";
-    /// The declining control, in the user's own words.
+    /// The affirming control: asks the node for a FRESH balance.
+    ///
+    /// # Why a manual control exists beside an automatic one
+    ///
+    /// The window re-reads by itself every time its deadline elapses, so nobody has to press this
+    /// for the flow to work. It is here because this node has a history of stalling SILENTLY — a
+    /// replica frozen for hours while still reporting `synced` (dig_ecosystem#2851), a wedged
+    /// service still answering HTTP (dig_ecosystem#2880) — and the automatic path renders every one
+    /// of those as a window that simply never changes. A person staring at a stale figure needs a
+    /// way to ask again that does not depend on the thing that is stuck.
+    ///
+    /// It changes WHEN the balance is read. It never changes what counts as funded.
+    pub const RECHECK: &str = "Recheck balance";
+    /// The declining control, in the user's own words. Dismisses the whole flow for a day.
     pub const LATER: &str = "Remind me later";
 
-    /// Said after the address reaches the clipboard.
-    pub const COPIED_TITLE: &str = "DIG — Address copied";
-    /// The heading of the copied notice.
-    pub const COPIED_HEADING: &str = "Your receiving address is on the clipboard";
-    /// The body of the copied notice.
-    pub const COPIED_BODY: &str =
-        "Paste it into your wallet to send XCH. DIG will offer to create your profile again \
-         tomorrow, and the Profiles tab has the same address whenever you want it.";
+    /// Said when a recheck found the balance still short — with the moment it was read.
+    ///
+    /// # The read time is not decoration
+    ///
+    /// A press that changes nothing on screen is indistinguishable from a button that does nothing,
+    /// and this button exists precisely for people who already suspect nothing is happening. The
+    /// timestamp is the only part of the answer that is guaranteed to differ between two presses, so
+    /// it is what proves the read ran.
+    pub fn still_short(shortfall_mojos: u64, read_at: &str) -> String {
+        format!(
+            "Checked at {read_at}: this wallet is still {} mojos short of what a profile costs. \
+             Nothing has arrived yet, or what has arrived is not spendable — a transfer becomes \
+             spendable once the blockchain confirms it, which usually takes a few minutes.",
+            grouped(shortfall_mojos)
+        )
+    }
 
-    /// What the prompt says, with the real cost and the real address.
+    /// Said when a recheck could not measure the balance at all.
+    ///
+    /// The most likely reason somebody pressed the button, and the one the automatic path renders as
+    /// silence. It names the fault the wallet reading named, so the remedy is the node's own rather
+    /// than a generic outage, and it never states a shortfall — nothing was measured to be short by.
+    pub fn cannot_measure(why: &str, read_at: &str) -> String {
+        format!(
+            "Checked at {read_at}: DIG could not read this wallet's balance, so it cannot say \
+             whether the funds have arrived. This is about reading the balance, not about your \
+             money — the address above is unaffected and anything sent to it is safe.\n\n{why}"
+        )
+    }
+
+    /// Said when a recheck was asked for again too soon.
+    ///
+    /// States what it DID rather than pretending to have run: a button that silently ignored a press
+    /// would be the same invisible no-op the recheck exists to rule out.
+    pub fn checked_recently(seconds_ago: u64) -> String {
+        format!(
+            "DIG checked {seconds_ago} seconds ago and is not asking the node again yet. It \
+             re-checks by itself while this window is open, and the answer above is from that last \
+             read."
+        )
+    }
+
+    /// The title over every recheck answer.
+    pub const RECHECK_TITLE: &str = "DIG — Balance checked";
+    /// The heading over every recheck answer.
+    pub const RECHECK_HEADING: &str = "Here is what DIG found";
+
+    /// What the prompt says, with the real cost.
     ///
     /// Takes the cost rather than reading it, so the sentence and the charge cannot drift: the one
     /// caller passes [`super::first_profile_cost_mojos`], and a test asserts that value equals what
     /// the door charges.
-    pub fn body(address: &str, cost_mojos: u64) -> String {
+    ///
+    /// # The address is deliberately NOT in here
+    ///
+    /// It is the prompt's [`identifier`](crate::confirm::ClaimPrompt::identifier), which the window
+    /// draws set apart in Space Mono — the face that reads character by character, which is what an
+    /// address needs and what prose wrapping at an arbitrary column destroys. An early revision put
+    /// it in both, and the photograph showed the same 62 characters twice, one of them broken across
+    /// a line: two addresses on a funding screen is an invitation to copy the wrong one.
+    pub fn body(shortfall_mojos: u64, cost_mojos: u64) -> String {
         format!(
             "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
              for an app and be found by other people. This account does not have one yet.\n\n\
-             Creating it costs {cost_mojos} mojos in blockchain fees, paid from this account's \
-             wallet, so the wallet needs at least that much before it can be created. Send XCH \
-             to:\n\n{address}\n\n\
-             Your account already holds funds, receives at this address, and reads everything on \
-             the DIG Network without a profile. Nothing is created and nothing is spent by this \
-             window."
+             Creating one costs {} mojos, and this wallet needs {} more before it can. Scan the \
+             code or send XCH to the address below; DIG will notice when it arrives and open the \
+             profile wizard by itself.\n\n\
+             This window creates nothing and spends nothing. Reading the DIG Network never needs a \
+             profile.",
+            grouped(cost_mojos),
+            grouped(shortfall_mojos)
         )
+    }
+
+    /// A mojo count with thousands separators — `20002` is a number nobody reads, and misreading the
+    /// one on a funding screen is misreading a price.
+    fn grouped(mojos: u64) -> String {
+        let digits = mojos.to_string();
+        let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+        for (i, digit) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(digit);
+        }
+        out
     }
 }
 
@@ -576,27 +829,245 @@ mod tests {
             "the prompt's cost is not the door's cost"
         );
 
-        let body = copy::body("xch1example", cost);
+        // Asserted in the GROUPED spelling, because that is the one on screen. Checking the bare
+        // digits would pass against a body that had lost its separators, and a mis-grouped price is
+        // the way a money screen misleads without saying anything false.
+        let body = copy::body(cost - 2, cost);
         assert!(
-            body.contains(&cost.to_string()),
-            "the prompt does not state its cost: {body}"
+            body.contains("20,002"),
+            "the prompt does not state its cost legibly: {body}"
+        );
+        assert!(
+            body.contains("20,000"),
+            "the prompt does not state the SHORTFALL, which is the actionable half: {body}"
+        );
+        assert_eq!(
+            cost, 20_002,
+            "the whole-profile cost moved; the copy must move with it"
         );
     }
 
-    /// The prompt names the address it is asking money to be sent to, in the body AND as the
-    /// identifier the window sets apart.
+    /// **An unmeasured balance is never a shortfall.**
     ///
-    /// A funding screen whose address appeared only in prose would be one the user has to
-    /// hand-transcribe; one that appeared only as an identifier would lose it to a screen reader
-    /// reading the body alone.
+    /// The trap this rules out: a node that is not answering renders as a deposit window telling
+    /// somebody they are short by an amount nobody measured. Every non-`Known` wallet reading —
+    /// still fetching, and each distinct fault — must reach [`FundingStep::Unmeasured`], because
+    /// none of them contains a number this flow is entitled to subtract from (dig_ecosystem#2871,
+    /// #2690).
     #[test]
-    fn the_prompt_shows_the_real_receiving_address() {
-        let address = "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
-        let body = copy::body(address, first_profile_cost_mojos());
-        let claim = first_profile_claim(address, &body);
+    fn a_balance_that_was_not_read_is_never_reported_as_a_shortfall() {
+        use crate::wallet::overview::BalanceUnknown;
 
-        assert!(body.contains(address), "the body does not carry the address");
+        let unread = [
+            BalanceReading::Pending,
+            BalanceReading::Unknown(BalanceUnknown::NoNode),
+            BalanceReading::Unknown(BalanceUnknown::NodeTimedOut),
+            BalanceReading::Unknown(BalanceUnknown::NoChainSource),
+            BalanceReading::Unknown(BalanceUnknown::NodeCannotRead),
+        ];
+
+        for reading in unread {
+            let funds = MintFunds::of_balance(&reading);
+            assert_eq!(funds, MintFunds::Unmeasured, "{reading:?} carried a figure");
+            assert_eq!(
+                funding_step(&funds, &FundingLatch::new(), first_profile_cost_mojos()),
+                FundingStep::Unmeasured,
+                "{reading:?} produced a claim about how short the wallet is"
+            );
+        }
+    }
+
+    /// The gate at the boundary: one mojo under is short, exactly the cost is enough.
+    ///
+    /// The exact-cost case is the one an inequality typo gets wrong, and getting it wrong tells a
+    /// funded person to send money they do not need.
+    #[test]
+    fn the_funding_gate_opens_at_exactly_the_cost() {
+        let cost = first_profile_cost_mojos();
+
+        assert_eq!(
+            funding_step(
+                &MintFunds::Measured {
+                    spendable_mojos: cost - 1
+                },
+                &FundingLatch::new(),
+                cost
+            ),
+            FundingStep::Deposit {
+                shortfall_mojos: 1
+            }
+        );
+        assert_eq!(
+            funding_step(
+                &MintFunds::Measured {
+                    spendable_mojos: cost
+                },
+                &FundingLatch::new(),
+                cost
+            ),
+            FundingStep::Ready
+        );
+        assert_eq!(
+            funding_step(
+                &MintFunds::Measured { spendable_mojos: 0 },
+                &FundingLatch::new(),
+                cost
+            ),
+            FundingStep::Deposit {
+                shortfall_mojos: cost
+            }
+        );
+    }
+
+    /// **The flow does not flap.** Once the wallet has been seen able to pay, a later dip does not
+    /// send the user back to a deposit window.
+    ///
+    /// Driven as a sequence rather than asserted on the latch directly, because what is being
+    /// guarded is the behaviour a person experiences — two windows trading places under their hands
+    /// — not the flag's value.
+    #[test]
+    fn a_wallet_once_seen_funded_does_not_return_to_the_deposit_window() {
+        let cost = first_profile_cost_mojos();
+        let latch = FundingLatch::new();
+
+        assert_eq!(
+            funding_step(
+                &MintFunds::Measured {
+                    spendable_mojos: cost
+                },
+                &latch,
+                cost
+            ),
+            FundingStep::Ready
+        );
+
+        // A coin momentarily unavailable, a replica answering from an older height, a read between
+        // two blocks. None of these is somebody spending, and none may reopen the deposit window.
+        for dipped in [MintFunds::Measured { spendable_mojos: 0 }, MintFunds::Unmeasured] {
+            assert_eq!(
+                funding_step(&dipped, &latch, cost),
+                FundingStep::Ready,
+                "{dipped:?} after a sufficient reading reopened the deposit window"
+            );
+        }
+
+        latch.reset();
+        assert_eq!(
+            funding_step(&MintFunds::Measured { spendable_mojos: 0 }, &latch, cost),
+            FundingStep::Deposit {
+                shortfall_mojos: cost
+            },
+            "a reset latch must forget, or the flow could never ask for funds again"
+        );
+    }
+
+    /// The recheck throttle admits the first press, refuses a fast second, and admits one after the
+    /// interval — and a backwards clock never wedges it shut.
+    #[test]
+    fn the_recheck_throttle_bites_briefly_and_never_permanently() {
+        assert_eq!(recheck_allowed(None, t0()), Ok(()), "the first press was refused");
+        assert_eq!(
+            recheck_allowed(Some(t0()), t0() + Duration::from_secs(1)),
+            Err(1),
+            "a press one second later hit the node"
+        );
+        assert_eq!(
+            recheck_allowed(Some(t0()), t0() + RECHECK_THROTTLE),
+            Ok(()),
+            "a press at the interval was still refused"
+        );
+        assert_eq!(
+            recheck_allowed(Some(t0() + Duration::from_secs(60)), t0()),
+            Ok(()),
+            "a clock correction wedged the button shut"
+        );
+    }
+
+    /// Every recheck answer names the moment it was read.
+    ///
+    /// A press that changes nothing on screen is indistinguishable from a broken button, and this
+    /// control exists for people who already suspect nothing is happening — so the read time, which
+    /// is the one part guaranteed to differ between two presses, must be in every answer.
+    #[test]
+    fn every_recheck_answer_states_when_it_read() {
+        const READ_AT: &str = "14:32:07";
+
+        let answers = [
+            copy::still_short(500, READ_AT),
+            copy::cannot_measure("DIG could not reach a node.", READ_AT),
+        ];
+
+        for answer in answers {
+            assert!(
+                answer.contains(READ_AT),
+                "a recheck answer does not say when it read: {answer}"
+            );
+        }
+
+        // The unmeasured answer must not also state a shortfall — it has none to state.
+        let unmeasured = copy::cannot_measure("DIG could not reach a node.", READ_AT);
+        assert!(
+            !unmeasured.contains("short"),
+            "an unmeasured balance was reported as a shortfall: {unmeasured}"
+        );
+
+        // The throttled answer is the one that did NOT read, so it says how long ago instead of
+        // pretending to a fresh time.
+        let throttled = copy::checked_recently(2);
+        assert!(
+            throttled.contains('2') && throttled.contains("not asking"),
+            "a throttled press did not say it declined to re-read: {throttled}"
+        );
+    }
+
+    /// The address appears EXACTLY ONCE, as the identifier the window sets apart.
+    ///
+    /// Both directions are asserted. It must be present, or the funding screen names no destination;
+    /// and it must not also be in the body, because the photograph of the revision that had both
+    /// showed the same 62 characters twice with one copy broken across a line — two addresses on a
+    /// screen asking for money is an invitation to copy the wrong one.
+    #[test]
+    fn the_prompt_shows_the_receiving_address_exactly_once() {
+        let address = "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+        let body = copy::body(1_000, first_profile_cost_mojos());
+        let qr = QrArt::encode(address);
+        let claim = first_profile_claim(address, &body, qr.as_ref());
+
         assert_eq!(claim.identifier, Some(address));
+        assert!(
+            !body.contains(address),
+            "the address is in the body as well as the identifier: {body}"
+        );
         assert_eq!(claim.decline, Some(copy::LATER));
+        assert_eq!(claim.affirm, copy::RECHECK);
+    }
+
+    /// **The QR encodes the address the mint will actually fund from, and nothing else.**
+    ///
+    /// The trap: a QR pointing at any other address silently sends money to a wallet the ceremony
+    /// will not spend from, and the person has no way to see that from the picture. At zero profiles
+    /// the funding index is `ProfileIx::ROOT`, which is why the address funded before minting is the
+    /// one the first profile inherits — so the ONE address in this window has to be the one the
+    /// caller was handed, carried through to both the code and the identifier without substitution.
+    #[test]
+    fn the_qr_and_the_identifier_carry_the_same_address() {
+        let address = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+        let body = copy::body(1_000, first_profile_cost_mojos());
+        let qr = QrArt::encode(address);
+        let claim = first_profile_claim(address, &body, qr.as_ref());
+
+        assert_eq!(claim.identifier, Some(address));
+        assert!(
+            claim.scannable.is_some(),
+            "the deposit window has no scannable code, which is half of what was asked for"
+        );
+        // The code is built from the SAME `&str` the identifier shows, so there is no second place
+        // an address could enter this window. Asserting the pointer identity of the source rather
+        // than decoding the matrix: what could realistically go wrong here is a caller passing two
+        // different addresses, not `QrArt` mis-encoding one.
+        assert!(std::ptr::eq(
+            claim.identifier.expect("an identifier"),
+            address
+        ));
     }
 }

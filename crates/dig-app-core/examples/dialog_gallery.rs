@@ -22,6 +22,8 @@
 //! | `claim` | the enrolment retention either/or |
 //! | `qr` | the two-factor enrolment window WITH its scannable QR (dig_ecosystem#1849) — the one window
 //!   whose correctness a screenshot cannot settle, since a camera has to read it |
+//! | `first-profile` | the zero-profile fund-and-create prompt (dig_ecosystem#2950) — the one window
+//!   nobody can reach by clicking, since the state loop raises it on a schedule |
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
@@ -281,7 +283,7 @@ fn main() {
 
             const ADDRESS: &str =
                 "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
-            let body = copy::body(ADDRESS, first_profile_cost_mojos());
+            let body = copy::body(first_profile_cost_mojos());
             confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body))
         }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
