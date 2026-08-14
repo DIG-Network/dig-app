@@ -360,8 +360,15 @@ struct UnlockGate {
     /// The receive address this gate was built against.
     address: String,
     /// The gate itself, holding the rolling confirmation ledger.
-    money: crate::account::money::MoneyPath<
-        crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
+    ///
+    /// Behind an [`Arc`](std::sync::Arc) so that "is this the same gate?" is answerable. Replacing
+    /// the gate writes into this same `Option` slot, so the slot's ADDRESS is identical either way —
+    /// a rebuild and a reuse are indistinguishable by reference. `Arc::ptr_eq` distinguishes them,
+    /// which is what lets the reuse test fail when the gate is rebuilt.
+    money: std::sync::Arc<
+        crate::account::money::MoneyPath<
+            crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
+        >,
     >,
 }
 
@@ -601,7 +608,10 @@ impl SendHolder {
                 std::sync::Arc::new(dig_account::SystemClock),
             )
             .map_err(|_| SendError::Locked)?;
-            *held = Some(UnlockGate { address, money });
+            *held = Some(UnlockGate {
+                address,
+                money: std::sync::Arc::new(money),
+            });
         }
         Ok(held)
     }
@@ -1057,9 +1067,10 @@ mod tests {
     /// ceiling would have bitten. So the fixture asks the question directly: is the gate the SAME
     /// gate?
     ///
-    /// Identity is compared by address, not by pointer: two gates built back to back would live at
-    /// different addresses, and a gate that was rebuilt cannot be the one holding the earlier
-    /// ledger.
+    /// Identity is `Arc::ptr_eq`, deliberately. The first version of this test compared the address
+    /// of the retained field and passed even when the gate was rebuilt on every call — a rebuild
+    /// writes into the same `Option` slot, so the address is the same either way. Measured: with the
+    /// cache condition forced to always rebuild, the address form stayed GREEN and this form fails.
     #[test]
     fn the_money_gate_is_built_once_per_unlock_and_reused_by_every_later_send() {
         let residency = crate::test_support::test_residency();
@@ -1071,17 +1082,17 @@ mod tests {
             let held = holder
                 .gate_for(&residency, custody)
                 .expect("an unlocked residency yields a gate");
-            std::ptr::from_ref(&held.as_ref().expect("a gate is present").money).addr()
+            std::sync::Arc::clone(&held.as_ref().expect("a gate is present").money)
         };
         let second = {
             let held = holder
                 .gate_for(&residency, custody)
                 .expect("the same unlocked residency yields a gate");
-            std::ptr::from_ref(&held.as_ref().expect("a gate is present").money).addr()
+            std::sync::Arc::clone(&held.as_ref().expect("a gate is present").money)
         };
 
-        assert_eq!(
-            first, second,
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
             "a second send got a fresh gate, so it also got a fresh confirmation ledger"
         );
     }
