@@ -772,6 +772,249 @@ mod tests {
         assert!(!bench.steps().contains(&Step::Confirmed));
     }
 
+    /// **An unanswered push reaches the surface as an UNKNOWN outcome carrying its coin id — never as
+    /// a failure** (dig_ecosystem#2819).
+    ///
+    /// This lives here, beside the bench, because a [`PendingTransfer`] can only be obtained by
+    /// performing a real send: dig-account constructs one from a plan and a peak, and there is no
+    /// hatch. A test of the mapping alone would have to invent one, and the invented value is exactly
+    /// the part that matters — the coin id the person is told to watch.
+    #[tokio::test]
+    async fn an_unanswered_push_surfaces_as_an_unknown_outcome_naming_the_coin_to_watch() {
+        use crate::wallet::sending::SendProgress;
+
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let publisher = ScriptedPublisher::answering(
+            bench.journal.clone(),
+            Err(ChainUnavailable::new("the node did not answer")),
+        );
+
+        let error = bench
+            .session(&chain, &publisher)
+            .send(&request())
+            .await
+            .expect_err("an unanswered push is not a completed send");
+        let SendError::PushUnanswered { pending, .. } = &error else {
+            panic!("expected an unanswered push, got {error:?}");
+        };
+        let coin_id = pending.payment_coin_id().to_string();
+
+        let progress = SendProgress::of_error(&error);
+        assert_eq!(
+            progress,
+            SendProgress::Unknown {
+                payment_coin_id: coin_id,
+                detail: "the node did not answer".to_string(),
+            },
+            "an unknown outcome was flattened into a failure, which invites the one action that can \
+             pay the recipient twice"
+        );
+        assert!(
+            progress.in_flight(),
+            "an unknown outcome must keep the Send control refused"
+        );
+    }
+
+    /// **A pushed transfer reads as pending until it is buried, and only then as confirmed**
+    /// (dig_ecosystem#2819).
+    ///
+    /// The surface's half of `a_pushed_transfer_awaits_until_its_payment_coin_is_buried`: the same
+    /// three chains, asserted through the projection a person actually reads. The shallow chain is the
+    /// near-miss — a projection that reported success on the coin merely existing passes without it.
+    #[tokio::test]
+    async fn a_pushed_transfer_reads_as_pending_until_the_chain_buries_it() {
+        use crate::wallet::sending::SendProgress;
+
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let publisher = ScriptedPublisher::accepting(bench.journal.clone());
+        let in_flight = bench
+            .session(&chain, &publisher)
+            .send(&request())
+            .await
+            .expect("a funded, approved send is accepted");
+        let pending = in_flight.pending();
+        let coin_id = pending.payment_coin_id();
+
+        let progress = |chain: &WatchedChain| {
+            SendProgress::of_status(pending, &in_flight.status(chain).expect("a readable chain"))
+        };
+        assert!(
+            matches!(progress(&chain), SendProgress::Pending { .. }),
+            "an accepted push was shown as something other than pending"
+        );
+
+        let payment = Coin::new(bench.funding.coin_id(), RECIPIENT, AMOUNT);
+        let shallow = WatchedChain::new(
+            MockChainSource::new()
+                .with_peak(PEAK + 1)
+                .with_coin(coin_id, confirmed(payment, PEAK)),
+            bench.journal.clone(),
+        );
+        let SendProgress::Pending {
+            blocks_since_push, ..
+        } = progress(&shallow)
+        else {
+            panic!("a coin one block deep was shown as settled money");
+        };
+        assert_eq!(
+            blocks_since_push, 1,
+            "the wait must be legible, and one block had passed"
+        );
+
+        let buried = WatchedChain::new(
+            MockChainSource::new()
+                .with_peak(PEAK + MIN_CONFIRMATION_DEPTH + 1)
+                .with_coin(coin_id, confirmed(payment, PEAK)),
+            bench.journal.clone(),
+        );
+        assert_eq!(
+            progress(&buried),
+            SendProgress::Confirmed {
+                payment_coin_id: coin_id.to_string(),
+                confirmed_height: PEAK,
+            }
+        );
+        assert!(
+            !progress(&buried).in_flight(),
+            "a settled transfer must free the form for the next send"
+        );
+    }
+
+    /// **The shell's handle walks a real send from accepted to confirmed, asks the chain no more
+    /// often than a block, and never turns a failed read into a failed payment**
+    /// (dig_ecosystem#2819).
+    ///
+    /// Three properties in one fixture because they share one actor and the fixture is a real pushed
+    /// transfer. Each is varied against a truthful control:
+    ///
+    /// - the throttle is asserted against a chain that WOULD say confirmed, so a handle that polled
+    ///   every time would visibly move and fail;
+    /// - the unreadable chain is asserted between two readable ones, so a handle that treated a read
+    ///   failure as a verdict would lose the pending state it later has to report;
+    /// - the confirmation is asserted last, proving the throttle delays a poll rather than preventing
+    ///   one.
+    #[tokio::test]
+    async fn the_send_handle_polls_at_most_once_a_block_and_survives_a_chain_it_cannot_read() {
+        use crate::wallet::sending::{SendHolder, SendProgress};
+        use std::time::{Duration, Instant};
+
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let publisher = ScriptedPublisher::accepting(bench.journal.clone());
+        let in_flight = bench
+            .session(&chain, &publisher)
+            .send(&request())
+            .await
+            .expect("a funded, approved send is accepted");
+        let coin_id = in_flight.pending().payment_coin_id();
+        let payment = Coin::new(bench.funding.coin_id(), RECIPIENT, AMOUNT);
+        let buried = WatchedChain::new(
+            MockChainSource::new()
+                .with_peak(PEAK + MIN_CONFIRMATION_DEPTH + 1)
+                .with_coin(coin_id, confirmed(payment, PEAK)),
+            bench.journal.clone(),
+        );
+
+        let holder = SendHolder::default();
+        holder.signing();
+        assert_eq!(holder.progress(), SendProgress::Signing);
+
+        let started = Instant::now();
+        holder.accepted(in_flight.finish());
+        assert!(
+            matches!(holder.progress(), SendProgress::Pending { .. }),
+            "an accepted push must read as pending, never as sent"
+        );
+
+        // Inside the interval, against a chain that would confirm: the answer must not move.
+        assert!(
+            matches!(
+                holder.observe(&buried, started + Duration::from_secs(1)),
+                SendProgress::Pending { .. }
+            ),
+            "the handle asked the chain again inside a single block"
+        );
+
+        // Due, but the chain cannot be read. That is a fact about this app, not about the transfer.
+        let unreadable = bench.chain().with_unreadable_peak();
+        assert!(
+            matches!(
+                holder.observe(&unreadable, started + Duration::from_secs(30)),
+                SendProgress::Pending { .. }
+            ),
+            "a chain read that failed was reported as the transfer failing"
+        );
+
+        // Due again, and readable: the confirmation lands.
+        assert_eq!(
+            holder.observe(&buried, started + Duration::from_secs(60)),
+            SendProgress::Confirmed {
+                payment_coin_id: coin_id.to_string(),
+                confirmed_height: PEAK,
+            }
+        );
+        assert!(
+            !holder.progress().in_flight(),
+            "a confirmed send must free the form for the next one"
+        );
+    }
+
+    /// **A send that ended without a broadcast stops the watch; one whose push went unanswered keeps
+    /// it** (dig_ecosystem#2819).
+    ///
+    /// The pair is the property. Both actors are real errors off the same bench, and they differ only
+    /// in whether a bundle may exist — which is exactly what decides whether there is anything left to
+    /// poll. A handle that dropped the watch in both cases would leave a possibly-live transfer
+    /// unwatched, and one that kept it in both would poll a coin that was never created.
+    #[tokio::test]
+    async fn only_a_send_whose_fate_is_unknown_stays_under_watch() {
+        use crate::wallet::sending::{SendHolder, SendProgress};
+
+        let bench = Bench::funded();
+        let chain = bench.chain();
+        let unanswered = bench
+            .session(
+                &chain,
+                &ScriptedPublisher::answering(
+                    bench.journal.clone(),
+                    Err(ChainUnavailable::new("the node did not answer")),
+                ),
+            )
+            .send(&request())
+            .await
+            .expect_err("an unanswered push is not a completed send");
+
+        let holder = SendHolder::default();
+        holder.finished(&unanswered);
+        assert!(
+            matches!(holder.progress(), SendProgress::Unknown { .. }),
+            "an unanswered push was shown as something other than an unknown outcome"
+        );
+        // Still watched: the chain, not this app, decides what became of it.
+        assert!(
+            matches!(
+                holder.observe(&chain, std::time::Instant::now()),
+                SendProgress::Pending { .. } | SendProgress::Unknown { .. }
+            ),
+            "an unknown outcome stopped being watched, so nothing can ever resolve it"
+        );
+
+        let rejected = SendError::Rejected {
+            reason: "DOUBLE_SPEND".to_string(),
+        };
+        holder.finished(&rejected);
+        let after = holder.observe(&chain, std::time::Instant::now());
+        assert_eq!(
+            after,
+            SendProgress::Failed {
+                reason: rejected.to_string()
+            },
+            "a rejected bundle is still being polled, so a coin that cannot exist is being looked for"
+        );
+    }
+
     /// The wallet slot the money path derives at is the one this bench asserts against — a guard so a
     /// later profile-slot change cannot make the fixtures quietly test a different key.
     #[test]

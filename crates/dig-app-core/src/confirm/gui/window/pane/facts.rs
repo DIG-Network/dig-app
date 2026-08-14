@@ -104,6 +104,13 @@ pub(crate) struct PaneFacts {
     /// because every one of its readings distinguishes *nobody asked* from *the node answered* —
     /// which is what keeps an unknown peer count from being drawn as a zero.
     pub(crate) network: crate::network::NetworkStanding,
+    /// How the send this app is running is going, or that there is none (dig_ecosystem#2819).
+    ///
+    /// A reading, exactly like [`balance`](Self::balance): it says what HAPPENED, and the pane draws
+    /// each state as itself. It decides no verb — whether **Send** can be pressed is
+    /// [`SendDraft::assess`](crate::wallet::sending::SendDraft::assess)'s answer, and this is one of
+    /// the facts that answer is derived from.
+    pub(crate) send: crate::wallet::sending::SendProgress,
 }
 
 impl PaneFacts {
@@ -131,6 +138,7 @@ impl PaneFacts {
             profiles: view.profiles.clone(),
             profile_creation: view.profile_creation,
             network: view.network.clone(),
+            send: view.send.clone(),
         }
     }
 
