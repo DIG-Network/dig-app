@@ -12,23 +12,30 @@
 //! [`HostedStoresReading`](crate::hosted_stores::HostedStoresReading) already use, for the same
 //! reason: there is then no path that turns an unknown into an empty list.
 //!
-//! # Why creation is a value derived from the mint seam
+//! # Why creation is a value READ off the node rather than asserted
 //!
-//! A profile is a DID singleton plus a store plus a seeded SMT, and creating one is a MINT. dig-app
-//! already has exactly one place that answers whether this build can mint —
-//! [`MintSeams::availability`](crate::account::chain_mint::MintSeams::availability), which the
-//! start-up wizard's gate reads — and [`ProfileCreation::of`] is a **function of that value**. That
-//! is deliberate and is the whole design of dig_ecosystem#2377: two independent checks are how a
-//! surface comes to advertise a capability whose implementation refuses, which is the dead end
-//! dig_ecosystem#1800 removed once already.
+//! A profile is a DID singleton plus a store plus a seeded SMT, and creating one is a MINT — so
+//! whether it can be done is a property of the machine, not of the build. [`ProfileCreation`] is a
+//! **function of** what the connected node answered
+//! ([`ProfileMintSeams::availability`](crate::account::profile_mint::ProfileMintSeams::availability),
+//! taken off a [`ChainReadiness`](crate::account::profile_mint::ChainReadiness) probe), never a
+//! second opinion beside it. That is the whole design of dig_ecosystem#2377: two independent checks
+//! are how a surface comes to advertise a capability whose implementation refuses, which is the
+//! dead end dig_ecosystem#1800 removed once already.
 //!
-//! [`ProfileCreation`] has no *possible* arm. That is not pessimism, it is the build: this
-//! workspace pins dig-account **0.11.3**, whose profile-mint ceremony is real, but the store half of
-//! that ceremony walks a singleton lineage and
-//! [`ControlChainSource`](crate::chain::ControlChainSource) cannot serve that read yet
-//! (dig_ecosystem#2572). So a mint started on this build could be paid for and never finished. An
-//! arm claiming otherwise would be a state nothing can reach, which this crate has already decided
-//! is worse than no state at all (`pane::state`'s epitaph for `Unwired`).
+//! # The two seams are NOT interchangeable, and [`ProfileCreation::of`] is the narrow one
+//!
+//! [`MintSeams`](crate::account::chain_mint::MintSeams) answers *can a DID be minted?* — the
+//! narrower question the first-run wizard asks. A profile is a DID **and** a store, and the store
+//! half needs a read the DID half does not, so a seam that can mint a DID says nothing about whether
+//! a profile can be completed. [`ProfileCreation::of`] reads that narrow seam and therefore can
+//! never answer [`Possible`](ProfileCreation::Possible) — deliberately, because a wired DID-only
+//! seam opening creation would let a DID be minted alone, and a user left holding one has spent real
+//! XCH on an identity with no store.
+//!
+//! [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only door to `Possible`, and it
+//! opens only for a node that answered a peak read, a singleton-lineage probe and a coin-spend
+//! probe. `the_binary_cannot_open_the_profile_creation_gate` holds the binary to the derived route.
 
 use dig_account::registry::{ProfileEntry, ProfileRegistry, ProfileVisibility};
 use dig_account::ProfileIx;
