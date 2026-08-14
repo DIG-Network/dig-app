@@ -698,12 +698,7 @@ mod tests {
 
         for creation in withheld {
             assert_eq!(
-                first_profile_prompt(
-                    &no_profiles(),
-                    creation,
-                    &Remembered::default(),
-                    t0()
-                ),
+                first_profile_prompt(&no_profiles(), creation, &Remembered::default(), t0()),
                 FirstProfilePrompt::Held(PromptHeld::CreationNotPossible),
                 "{creation:?} reached a funding prompt"
             );
@@ -727,12 +722,8 @@ mod tests {
             (due, true),
             (due + Duration::from_secs(1), true),
         ] {
-            let verdict = first_profile_prompt(
-                &no_profiles(),
-                ProfileCreation::Possible,
-                &reminder,
-                when,
-            );
+            let verdict =
+                first_profile_prompt(&no_profiles(), ProfileCreation::Possible, &reminder, when);
             assert_eq!(
                 verdict.should_raise(),
                 expected,
@@ -763,7 +754,10 @@ mod tests {
             }
         }
 
-        assert_eq!(raised, 1, "five launches inside one day raised {raised} prompts");
+        assert_eq!(
+            raised, 1,
+            "five launches inside one day raised {raised} prompts"
+        );
     }
 
     /// A ledger that cannot store the deferral re-prompts rather than going silent.
@@ -809,10 +803,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let file = ReminderFile::new(dir.path());
 
-        assert_eq!(file.deferred_until(), None, "an absent file deferred nothing");
+        assert_eq!(
+            file.deferred_until(),
+            None,
+            "an absent file deferred nothing"
+        );
 
         std::fs::write(dir.path().join(REMINDER_FILE), "{ this is not json").expect("written");
-        assert_eq!(file.deferred_until(), None, "a corrupt file deferred nothing");
+        assert_eq!(
+            file.deferred_until(),
+            None,
+            "a corrupt file deferred nothing"
+        );
     }
 
     /// **The sentence on screen quotes what the door actually charges.**
@@ -893,9 +895,7 @@ mod tests {
                 &FundingLatch::new(),
                 cost
             ),
-            FundingStep::Deposit {
-                shortfall_mojos: 1
-            }
+            FundingStep::Deposit { shortfall_mojos: 1 }
         );
         assert_eq!(
             funding_step(
@@ -943,7 +943,10 @@ mod tests {
 
         // A coin momentarily unavailable, a replica answering from an older height, a read between
         // two blocks. None of these is somebody spending, and none may reopen the deposit window.
-        for dipped in [MintFunds::Measured { spendable_mojos: 0 }, MintFunds::Unmeasured] {
+        for dipped in [
+            MintFunds::Measured { spendable_mojos: 0 },
+            MintFunds::Unmeasured,
+        ] {
             assert_eq!(
                 funding_step(&dipped, &latch, cost),
                 FundingStep::Ready,
@@ -965,7 +968,11 @@ mod tests {
     /// interval — and a backwards clock never wedges it shut.
     #[test]
     fn the_recheck_throttle_bites_briefly_and_never_permanently() {
-        assert_eq!(recheck_allowed(None, t0()), Ok(()), "the first press was refused");
+        assert_eq!(
+            recheck_allowed(None, t0()),
+            Ok(()),
+            "the first press was refused"
+        );
         assert_eq!(
             recheck_allowed(Some(t0()), t0() + Duration::from_secs(1)),
             Err(1),
