@@ -1247,3 +1247,196 @@ fn a_spend_whose_programs_are_not_hex_is_refused_rather_than_emptied() {
         "got {outcome:?}"
     );
 }
+
+// --------------------------------------------------------------------------------------------
+// ABSENCE vs UNKNOWN — an empty answer is only an answer when the tier that gave it was caught up
+// --------------------------------------------------------------------------------------------
+
+/// A node whose replica is behind, answering from the third-party tier, holding nothing.
+///
+/// This is the exact wire shape measured on a live machine against dig-node 0.118.1 while the node
+/// itself was synced at peak 9148701: `ok:true`, an empty result, `complete:true`,
+/// `source:"fallback"`, `synced:false`, `peak_height:null`. It is not a hypothetical — different
+/// reads landed on different tiers within the same second.
+fn unsynced_and_empty() -> FakeChain {
+    FakeChain {
+        source: "fallback",
+        synced: false,
+        peak_height: None,
+        ..FakeChain::synced_at(PEAK)
+    }
+}
+
+/// A node whose replica is behind, answering from the third-party tier, but which DOES hold `coin`.
+fn unsynced_holding(coin: FakeCoin) -> FakeChain {
+    let held = coin.clone();
+    FakeChain {
+        address_coins: vec![coin],
+        ..unsynced_and_empty().with_coin(held)
+    }
+}
+
+/// **An empty `control.wallet.coins` answer from an UNSYNCED tier is an unknown, never an absence.**
+///
+/// The nearest wrong implementation is the one that shipped: `synced` is read into the freshness
+/// display and nothing branches on it, so a stale replica's "I have nothing" is returned as the
+/// chain's "there is nothing". dig-account's `select_funding_coin` then turns that into
+/// `InsufficientFunds { available: 0 }` — a money lie told about a wallet the user can see has
+/// money in it.
+///
+/// The fixture serves the measured shape rather than a transport failure, because a transport
+/// failure already errors — what must be ruled out is the `ok:true` empty body, which the existing
+/// error mapping treats as a success by construction.
+#[test]
+fn an_empty_coins_answer_from_an_unsynced_tier_is_an_unknown() {
+    let node = FakeNode::serving_chain(ChainReply::of(unsynced_and_empty()));
+    let outcome = format!(
+        "{:?}",
+        source(&node).coin_records_by_puzzle_hash(id(2), false)
+    );
+
+    assert!(
+        outcome.starts_with("Err("),
+        "an unsynced empty coins answer was read as an absence: {outcome}"
+    );
+    assert!(
+        outcome.contains("synced"),
+        "the refusal must name the tier that could not be believed: {outcome}"
+    );
+}
+
+/// **`coin_record` and `coin_records_by_parent` MUST keep answering `Ok` for an unsynced absence —
+/// this test exists to FAIL if somebody widens the freshness guard over them.**
+///
+/// Read the name as an instruction, not a description. It looks like a test for the absence of a
+/// safety check, and it is deliberately that, because on today's dig-node those two reads can never
+/// obtain the warrant the guard demands. `control.wallet.coinById` and `control.wallet.coinsByParent`
+/// are not scoped to the wallet, so `route(_, scoped_to_wallet = false) => Source::Fallback`
+/// (dig-node `crates/dig-wallet/src/sage/routing.rs:31-40`) sends them to the fallback tier whatever
+/// the node's sync state, and the reply carries the local database's flag (`rpc.rs:577`) even though
+/// the database did not answer. Measured on dig-node 0.118.1, synced at peak 9148856:
+/// `coin-by-id` reported `source:"fallback", synced:false, peak_height:null` **both for an absent
+/// coin and for a coin the node's own database held**.
+///
+/// A guard there is therefore not strict, it is permanently on — and permanently on means
+/// [`ChainReadiness::probe`](crate::account::profile_mint::ChainReadiness::probe) can never return
+/// `WalksLineages`, which closes profile creation on every healthy machine, forever. The companion
+/// test `the_lineage_probe_walks_lineages_on_a_node_that_reports_unsynced` shows that consequence
+/// end to end; this one pins the single read it hinges on, so the breakage is caught at the source
+/// rather than only at the seam.
+///
+/// **When dig-node's routing is fixed so these reads can report `synced: true`, this test SHOULD be
+/// re-examined and the guard extended** — that is the intended way for it to die.
+#[test]
+fn an_unsynced_absence_is_still_an_answer_on_the_reads_that_can_never_be_warranted() {
+    let node = FakeNode::serving_chain(ChainReply::of(unsynced_and_empty()));
+    let source = source(&node);
+
+    assert_eq!(
+        source
+            .coin_record(id(1))
+            .expect("coin_record must stay open: the lineage probe's first read is this one"),
+        None,
+        "a coin id that names nothing must answer, not withhold"
+    );
+    assert_eq!(
+        source
+            .coin_records_by_parent(id(70))
+            .expect("coin_records_by_parent must stay open for the same routing reason"),
+        vec![],
+        "a coin with no children must answer, not withhold"
+    );
+}
+
+/// **A genuine absence from a SYNCED tier is still an answer.**
+///
+/// The control, and the reason the guard above is not vacuous: an implementation that simply errored
+/// on every empty answer would satisfy it perfectly while making a wallet with no coins, a coin id
+/// the chain has never seen, and a childless coin all unreadable. `Ok(None)` and `Ok(vec![])` must
+/// stay reachable, or "never an absence" stops being a constraint and becomes a refusal to answer.
+#[test]
+fn a_genuine_absence_from_a_synced_tier_is_still_an_answer() {
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK)));
+    let source = source(&node);
+
+    assert_eq!(
+        source.coin_record(id(1)).expect("a synced tier answers"),
+        None,
+        "a coin the synced chain does not hold is a genuine absence"
+    );
+    assert_eq!(
+        source
+            .coin_records_by_puzzle_hash(id(2), false)
+            .expect("a synced tier answers"),
+        vec![],
+        "an address holding nothing on a synced chain holds nothing"
+    );
+    assert_eq!(
+        source
+            .coin_records_by_parent(id(70))
+            .expect("a synced tier answers"),
+        vec![],
+        "a coin whose synced spend created no children created none"
+    );
+}
+
+/// **A node that reports `synced: false` on every read can still be found able to walk lineages —
+/// so profile creation stays reachable on a healthy machine.**
+///
+/// This is the regression test for the whole defect. The seam is the one that decides whether the
+/// app offers profile creation at all: `probe` establishes that a chain source SERVICES the lineage
+/// walk by resolving `PROBE_LAUNCHER_ID`, thirty-two zero bytes, an id chosen precisely because it
+/// names no coin — so `Ok(None)` is the proof, and only `Err` withholds. The walk's first read is
+/// `coin_record`, and its second probe is `coin_spend`.
+///
+/// The nearest wrong implementation is a freshness guard applied to `coin_record`: it turns both
+/// probes into `Err`, `probe` answers `NoLineageWalk`, `ProfileMintSeams` never reaches `Wired`,
+/// `ProfileMintAvailability::Possible` becomes unconstructible and profile creation is shut on every
+/// node — permanently, because the warrant that would reopen it cannot be issued (see
+/// `an_unsynced_absence_is_still_an_answer_on_the_reads_that_can_never_be_warranted`).
+///
+/// The fixture serves the measured shape and nothing gentler: `synced: false` and a null peak on
+/// EVERY read, with neither the probe coin nor its spend present. A fixture that reported
+/// `synced: true` would pass against the guarded implementation too and prove nothing.
+#[test]
+fn the_lineage_probe_walks_lineages_on_a_node_that_reports_unsynced() {
+    use crate::account::profile_mint::ChainReadiness;
+
+    let node = FakeNode::serving_chain(ChainReply::of(unsynced_and_empty()));
+
+    assert_eq!(
+        ChainReadiness::probe(&source(&node)),
+        ChainReadiness::WalksLineages,
+        "an unsynced node that answers every read is a node that can walk a lineage"
+    );
+}
+
+/// **A coin that is PRESENT is believed whatever tier reported it.**
+///
+/// This pins the ASYMMETRY itself, which is the whole content of the rule: existence is positive
+/// evidence a stale replica cannot fabricate, so a present coin needs no freshness warrant, while an
+/// absence needs one. The nearest wrong implementation is the tempting simplification — *distrust
+/// the unsynced tier entirely* — which passes both tests above and breaks every read on a degraded
+/// node, including the balance a person is looking at while they wait for their replica to catch up.
+#[test]
+fn a_present_coin_is_believed_even_from_an_unsynced_tier() {
+    let coin = FakeCoin::confirmed("xch", 4242);
+    let coin_id = coin.coin_id.clone();
+    let node = FakeNode::serving_chain(ChainReply::of(unsynced_holding(coin)));
+    let source = source(&node);
+
+    let found = source
+        .coin_record(bytes32(&coin_id))
+        .expect("a present coin is an answer from any tier")
+        .expect("the coin the node reported");
+    assert_eq!(found.coin.amount, 4242);
+
+    let held = source
+        .coin_records_by_puzzle_hash(id(3), false)
+        .expect("a present coin is an answer from any tier");
+    assert_eq!(
+        held.len(),
+        1,
+        "an unsynced tier that reports a coin has reported a coin: {held:?}"
+    );
+}

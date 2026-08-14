@@ -294,6 +294,44 @@ the token-gated push, dig-node 0.110.0 serves them, and `chain::ControlChainSour
 in particular a failed read MUST NOT become `Ok(None)` or an empty `Vec`, because on `coin_spend`
 an absence means *unspent or unknown*, which a caller reads as safe to spend.
 
+**A PRESENT coin MAY be believed from any answering tier; an ABSENCE MAY be believed only from a tier
+reporting `synced: true` — and today that rule is ENFORCED on exactly one read (normative).** Every
+`control.wallet.*` result discloses the tier that answered it (`source` / `synced` / `peak_height`). A
+tier that is behind can only be BEHIND, never ahead, so existence is positive evidence it cannot
+fabricate — but emptiness is the one answer a stale replica produces indistinguishably from the chain
+itself.
+
+`coin_records_by_puzzle_hash` (`control.wallet.coins`) MUST return a `ChainReadError` naming the tier
+when an EMPTY answer arrives with `synced: false`; a non-empty answer MUST be returned unchanged
+whatever the tier. That read is scoped to an address, so dig-node answers it from its own database and
+`synced: true` is routinely obtained. Enforcing it there stops `select_funding_coin` reporting
+`InsufficientFunds { available: 0 }` against a wallet the user can see has money in it.
+
+`coin_record` (`control.wallet.coinById`) and `coin_records_by_parent` (`control.wallet.coinsByParent`)
+MUST NOT enforce it, and MUST return an unsynced absence as an answer. This is a deliberate, documented
+and temporary narrowing whose cause is producer-side: dig-node's
+`crates/dig-wallet/src/sage/routing.rs:31-40` routes any read NOT scoped to the wallet
+(`scoped_to_wallet = false`) to the fallback tier whatever its own sync state, and the reply then
+carries the local database's flag (`rpc.rs:577`) though the database did not answer. Measured against
+dig-node 0.118.1 while synced at peak 9148856 with five chia peers, `coinById` reported
+`source: "fallback", synced: false, peak_height: null` **both for an absent coin and for a coin that
+node's own database held**. A guard there is therefore not strict but permanently on, and permanently
+on closes profile creation on every healthy machine: `ChainReadiness::probe` proves a source can walk a
+lineage by resolving an all-zero launcher id — one chosen because it names no coin, so `Ok(None)` is
+the proof — and that walk's first read is `coin_record`. Guarded, `ProfileMintAvailability::Possible`
+is unreachable and no profile can ever be created. When dig-node's routing lets these reads report a
+real sync state, the rule MUST be extended to cover them.
+
+One consequence is recorded rather than closed: because `coin_record` cannot carry a warrant,
+`dig_account::ProfileMinter::mint_status` — which concludes *"the funding coin was spent by a different
+spend; this mint can never confirm"* from a DID coin read as absent beside a spent funding coin — can
+still reach that conclusion for a mint that CONFIRMED. The remedy belongs on that CONCLUSION, not on
+the read: guarding the read only converts the false failure into a false *"the chain could not be
+reached"*, since `ChainMint::look` maps a read error to `Sighting::Unreachable` and
+`await_confirmation` abandons the watch after twelve consecutive unreachable looks — well inside a
+mainnet confirmation window. A surface MUST render an unresolved mint status as *unknown / still
+checking*, never as a failure and never as blocked.
+
 ### 3.1d Whole-profile minting (normative)
 
 A DID is never minted alone. A **dig-profile** is a DID singleton PLUS a dig-store launched from that
