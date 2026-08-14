@@ -64,7 +64,9 @@ use crate::wallet::overview::{
     BalanceReading, Balances,
 };
 use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
-use crate::wallet::sending::{SendBlocked, SendDraft, SendProgress, VerdictSource};
+use crate::wallet::sending::{
+    ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendProgress, VerdictSource,
+};
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
 
@@ -548,15 +550,22 @@ fn sending_card(
     flow.place(|ui, at| {
         let (height, pressed) =
             card::interactive_card(ui, at, t, live, Some(copy::wallet::SENDING_CARD), |inner| {
-                if !matches!(facts.send, SendProgress::Idle) {
-                    outcome(inner, t, &facts.send);
-                    inner.gap(space::S4);
-                }
+                let released = match matches!(facts.send, SendProgress::Idle) {
+                    true => None,
+                    false => {
+                        let released = outcome(inner, t, &facts.send);
+                        inner.gap(space::S4);
+                        released
+                    }
+                };
                 let pressed = send_form(inner, t, facts);
                 inner.gap(space::S2);
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SENDING_HINT), ()));
                 let done = closable && close_control(inner, t, live, "dig-window-wallet-send-done");
-                (pressed, done)
+                // A stuck send refuses the Send control, so the two can never both be produced —
+                // but the release is named first regardless, because it is the one a person in that
+                // state is reaching for.
+                (released.or(pressed), done)
             });
         let (pressed, done) = pressed.unwrap_or((None, false));
         (height, (pressed, done))
@@ -596,9 +605,9 @@ fn close_control(flow: &mut Flow, t: &Tokens, live: bool, element: &str) -> bool
 /// Each state gets its own badge word, its own sentence and its own facts, because they call for
 /// different things: waiting, doing nothing, watching, or reading a reason. The two that a surface is
 /// most tempted to merge are kept furthest apart — `Unknown` is not a failure, and says so.
-fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
+fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) -> Option<TrayAction> {
     let (word, tone, body) = match send {
-        SendProgress::Idle => return,
+        SendProgress::Idle => return None,
         SendProgress::Signing => (
             copy::wallet::SEND_SIGNING_BADGE,
             Tone::Neutral,
@@ -668,6 +677,94 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
         flow.gap(space::S3);
         flow.place(|ui, at| (data::readouts(ui, at, t, &facts), ()));
     }
+
+    release_control(flow, t, send)
+}
+
+/// The escape from a send this app can never resolve (dig_ecosystem#2894).
+///
+/// Drawn ONLY for a stuck send, and only under the coin id it is about — a person has to be able to
+/// read the id before they are asked to type it back. It is not a dismiss button: the field is the
+/// mechanism, because releasing the form is a claim the person makes about a specific payment and
+/// not one this app makes on their behalf.
+fn release_control(flow: &mut Flow, t: &Tokens, send: &SendProgress) -> Option<TrayAction> {
+    if !matches!(send, SendProgress::Unknown { .. }) {
+        return None;
+    }
+    let element = egui::Id::new("dig-window-wallet-release");
+    let live = flow.live();
+    let mut typed = flow.place(|ui, _| {
+        (
+            0.0,
+            ui.ctx().data(|d| {
+                d.get_temp::<String>(element.with("text"))
+                    .unwrap_or_default()
+            }),
+        )
+    });
+
+    let verdict = ReleaseDraft {
+        typed: &typed,
+        send,
+    }
+    .assess();
+
+    flow.gap(space::S4);
+    flow.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SEND_RELEASE_ASK), ()));
+    flow.gap(space::S2);
+    flow.place(|ui, at| {
+        (
+            field::text_field(
+                ui,
+                at,
+                t,
+                live,
+                &field::Field {
+                    label: copy::wallet::SEND_COIN_LABEL,
+                    placeholder: copy::wallet::SEND_RELEASE_PLACEHOLDER,
+                    help: copy::wallet::SEND_RELEASE_HELP,
+                    // Only the mismatch is a mistake. An untouched field is a person who has not
+                    // finished looking yet, and colouring it red would rush them into the one
+                    // decision this control exists to slow down.
+                    error: matches!(verdict, Err(ReleaseBlocked::WrongCoinId))
+                        .then(|| copy::wallet::SEND_RELEASE_MISMATCH.to_string()),
+                    id: element.with("field"),
+                },
+                &mut typed,
+            ),
+            (),
+        )
+    });
+    flow.place(|ui, _| {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(element.with("text"), typed.clone()));
+        (0.0, ())
+    });
+
+    flow.gap(space::S3);
+    let pressed = flow.place(|ui, at| {
+        let hit = paint::button_at(
+            ui,
+            egui::Rect::from_min_size(
+                at.left_top(),
+                egui::Vec2::new(
+                    paint::button_width(ui, copy::wallet::SEND_RELEASE_ACTION),
+                    paint::BUTTON_HEIGHT,
+                ),
+            ),
+            element.with("submit"),
+            copy::wallet::SEND_RELEASE_ACTION,
+            // Never Primary. The payment may be live, so this is the cautious way out of a trap and
+            // not the thing the page wants a person to do.
+            Weight::Ghost,
+            verdict.is_ok() && live,
+            t,
+        )
+        .clicked();
+        (paint::BUTTON_HEIGHT, hit)
+    });
+
+    (pressed && verdict.is_ok()).then_some(TrayAction::ReleaseUnknownSend)
 }
 
 /// The identifiers a person can take away from a payment: the coin, and the block it settled at.

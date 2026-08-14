@@ -775,13 +775,22 @@ pub(crate) mod wallet {
     ///
     /// It attributes the claim to THEM and repeats what this app knows, which is nothing. Saying
     /// anything about where the money went would be this app borrowing the person's certainty.
-    pub(crate) const SEND_RELEASED_BODY: &str =
-        "You checked this payment yourself and released the form. DIG never found out what became          of it, so this is your finding and not its own — the coin id is below if you want to look          again.";
+    pub(crate) const SEND_RELEASED_BODY: &str = concat!(
+        "You checked this payment yourself and released the form. DIG never found out what ",
+        "became of it, so this is your finding and not its own — the coin id is below if you ",
+        "want to look again."
+    );
     /// The call to action on the control that releases a stuck form.
     pub(crate) const SEND_RELEASE_ACTION: &str = "I checked this myself — release the form";
     /// The instruction above the field that takes the acknowledgement.
     pub(crate) const SEND_RELEASE_ASK: &str =
         "Look this payment up first, then type its coin id here to confirm the finding is yours.";
+    /// The greyed prompt in the acknowledgement field.
+    pub(crate) const SEND_RELEASE_PLACEHOLDER: &str = "Paste the coin id shown above";
+    /// The help under the acknowledgement field, saying what releasing does and does not mean.
+    pub(crate) const SEND_RELEASE_HELP: &str =
+        "Releasing only lets you send again. It does not cancel the payment, and DIG still does \
+         not know whether it went through.";
     /// Said when the typed id is not the payment's.
     pub(crate) const SEND_RELEASE_MISMATCH: &str =
         "That is not this payment's coin id, so nothing has been released.";
@@ -1001,6 +1010,10 @@ mod tests {
             wallet::SEND_CONFIRMED_BODY,
             wallet::SEND_FAILED_BODY,
             wallet::SEND_DIED_BODY,
+            wallet::SEND_RELEASED_BODY,
+            wallet::SEND_RELEASE_ASK,
+            wallet::SEND_RELEASE_HELP,
+            wallet::SEND_RELEASE_MISMATCH,
             settings::NOTIFY_COST,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
