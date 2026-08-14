@@ -752,6 +752,22 @@ pub(crate) mod wallet {
          elsewhere, so the network can no longer include it. This payment did not reach the \
          recipient. The reason, as it was given:";
 
+    /// The glance-level word for a payment this app lost track of part-way through.
+    pub(crate) const SEND_ABANDONED_BADGE: &str = "Lost track";
+    /// Said when DIG itself fell over mid-payment (dig_ecosystem#2895).
+    ///
+    /// It claims only what a crash establishes. This app stopping proves nothing about whether the
+    /// bundle left the machine, so the sentence must not borrow [`SEND_FAILED_BODY`]'s promise that
+    /// no money moved — and it must send the person to look before they send again, because the form
+    /// is open and repeating the payment is the one action that could pay twice.
+    pub(crate) fn send_abandoned_body(detail: &str) -> String {
+        format!(
+            "DIG stopped part-way through this payment ({detail}), so it cannot say whether the \
+             payment was sent. Check your balance and this wallet's recent history before sending \
+             again — sending twice is how a payment goes out twice."
+        )
+    }
+
     /// The label on the payment coin a person can look up themselves.
     pub(crate) const SEND_COIN_LABEL: &str = "Payment coin";
     /// The label on the block height a payment settled at.
@@ -1030,6 +1046,7 @@ mod tests {
         said.push(wallet::send_pending_body(3));
         said.push(wallet::send_unknown_body("the node closed the connection"));
         said.push(wallet::send_fee("0.00001"));
+        said.push(wallet::send_abandoned_body("the confirmation fell over"));
         said.push(content::add_field_error(63));
         said.push(protection::second_factor_needs("Two-factor codes"));
         said.push(protection::pairing_needs("Paired apps"));
@@ -1307,6 +1324,33 @@ mod tests {
             said[2].to_lowercase().contains("node"),
             "a running agent with no node does not name the node: {}",
             said[2]
+        );
+    }
+
+    /// **A send DIG lost track of promises nothing about the money** (dig_ecosystem#2895).
+    ///
+    /// The panic path used to be rendered through [`wallet::SEND_FAILED_BODY`], whose first words
+    /// are a promise — *nothing was sent, no money has moved* — that a crash cannot support. The
+    /// control is the other half: `SEND_FAILED_BODY` is asserted to still MAKE that promise, so this
+    /// cannot be satisfied by the promise having been softened everywhere, which would take it away
+    /// from the one state that has earned it (a send that provably never left).
+    #[test]
+    fn a_send_this_app_lost_track_of_does_not_promise_the_money_is_safe() {
+        let said = wallet::send_abandoned_body("the confirmation fell over").to_lowercase();
+        for promise in ["nothing was sent", "no money has moved"] {
+            assert!(
+                !said.contains(promise),
+                "a crash cannot establish {promise:?}, and this sentence claims it: {said}"
+            );
+            assert!(
+                wallet::SEND_FAILED_BODY.to_lowercase().contains(promise),
+                "the state that HAS earned this promise no longer makes it, so the assertion above \
+                 proves nothing"
+            );
+        }
+        assert!(
+            said.contains("before sending again"),
+            "the form reopens after this state, so the sentence must send the person to look first"
         );
     }
 

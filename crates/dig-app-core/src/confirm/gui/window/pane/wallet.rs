@@ -641,6 +641,13 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
             Tone::Warn,
             format!("{} {reason}", copy::wallet::SEND_DIED_BODY),
         ),
+        // Drawn as its own state and NEVER through `SEND_FAILED_BODY`: this app crashing is not
+        // evidence that no money moved (dig_ecosystem#2895).
+        SendProgress::Abandoned { detail } => (
+            copy::wallet::SEND_ABANDONED_BADGE,
+            Tone::Warn,
+            copy::wallet::send_abandoned_body(detail),
+        ),
     };
 
     flow.place(|ui, at| (data::badge(ui, at.left_top(), t, word, tone).height(), ()));
@@ -663,6 +670,9 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
     match send {
         SendProgress::Idle
         | SendProgress::Signing
+        // A panic produces no payment coin, so there is nothing to offer for lookup — which is
+        // exactly why this state cannot be `Unknown`.
+        | SendProgress::Abandoned { .. }
         | SendProgress::Failed {
             payment_coin_id: None,
             ..
@@ -1824,6 +1834,9 @@ mod tests {
                 reason: "a source coin was spent elsewhere".to_string(),
                 payment_coin_id: Some("5e771ed".to_string()),
             },
+            SendProgress::Abandoned {
+                detail: "this app stopped part-way through the payment".to_string(),
+            },
         ]
     }
 
@@ -1838,12 +1851,13 @@ mod tests {
                 SendProgress::Unknown { .. } => 3,
                 SendProgress::Confirmed { .. } => 4,
                 SendProgress::Failed { .. } => 5,
+                SendProgress::Abandoned { .. } => 6,
             }
         }
         let mut arms: Vec<u8> = every_send_state().iter().map(arm).collect();
         arms.sort_unstable();
         arms.dedup();
-        assert_eq!(arms, (0..6).collect::<Vec<u8>>());
+        assert_eq!(arms, (0..7).collect::<Vec<u8>>());
     }
 
     /// **Each send state is drawn as ITSELF, and an unknown outcome is never drawn as a failure**

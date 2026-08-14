@@ -89,6 +89,24 @@ pub enum SendProgress {
         /// The payment coin, present exactly when this transfer had been pushed.
         payment_coin_id: Option<String>,
     },
+    /// The attempt fell over part-way and this app does not know how far it got.
+    ///
+    /// # Why a panic cannot be reported as a failure (dig_ecosystem#2895)
+    ///
+    /// [`AbandonedSend`] fires on an unwind from anywhere between building and the push returning,
+    /// and a panic establishes only that this app stopped — never that nothing left. Reporting it as
+    /// [`Failed`](Self::Failed) drew [`SEND_FAILED_BODY`], whose first words are *"Nothing was sent
+    /// and no money has moved"*: a claim about the user's money made out of this app's own crash.
+    ///
+    /// It is deliberately NOT [`Unknown`](Self::Unknown), which would be the honest word but is
+    /// [`in_flight`](Self::in_flight) and carries a payment coin id to watch. A panic yields no coin
+    /// id, so `Unknown` would close the form for the process lifetime with nothing to check and no
+    /// escape — `professional-ui`'s trap. So the form reopens and the sentence carries the warning
+    /// instead: a person who may have sent money is told to look before sending again.
+    Abandoned {
+        /// Where the attempt was when it stopped, for the person and for a bug report.
+        detail: String,
+    },
 }
 
 impl SendProgress {
@@ -401,6 +419,21 @@ impl SendHolder {
         watched.judged = true;
     }
 
+    /// Record that an attempt stopped without ever recording its own outcome.
+    ///
+    /// Reached only from [`AbandonedSend`]'s unwind. It frees the send slot — the alternative is a
+    /// form nobody can use again — while claiming nothing about where the money got to
+    /// (dig_ecosystem#2895). Nothing is left to poll: a panic yields no payment coin.
+    pub fn abandoned(&self, detail: impl Into<String>) {
+        let mut watched = self.lock();
+        watched.progress = SendProgress::Abandoned {
+            detail: detail.into(),
+        };
+        watched.pending = None;
+        watched.next_poll = None;
+        watched.judged = false;
+    }
+
     /// Record how a send ended.
     ///
     /// An unanswered push keeps its transfer and keeps being polled, because its fate is undecided and
@@ -611,8 +644,10 @@ impl SendHolder {
 /// a payment that never existed, with no way out but a restart. A `Drop` runs on the unwind path
 /// wherever the panic came from, which a `catch_unwind` around one call cannot promise.
 ///
-/// A panicking send is reported as a FAILURE, never as an unknown outcome: the panic is this app's
-/// own fault and says nothing about a bundle, and an unknown outcome would hold the form closed again.
+/// A panicking send is reported as [`SendProgress::Abandoned`] — neither a failure nor an unknown
+/// outcome. It is not a failure because a panic cannot establish that nothing left this machine
+/// (dig_ecosystem#2895), and it is not `Unknown` because that state holds the form closed and offers
+/// a coin id to watch, and a panic produces no coin id to offer.
 struct AbandonedSend<'a> {
     holder: &'a SendHolder,
     /// Whether the attempt is still outstanding. Cleared by [`completed`](Self::completed).
@@ -636,11 +671,8 @@ impl<'a> AbandonedSend<'a> {
 impl Drop for AbandonedSend<'_> {
     fn drop(&mut self) {
         if self.outstanding {
-            self.holder.finished(&SendError::Sign(
-                crate::account::money::MoneyPathError::Sign(
-                    "this app failed part-way through the payment, so nothing was sent".to_string(),
-                ),
-            ));
+            self.holder
+                .abandoned("this app stopped part-way through the payment");
         }
     }
 }
@@ -911,7 +943,7 @@ mod tests {
             !holder.progress().in_flight(),
             "a panicked send kept the slot, so no further send can ever be started"
         );
-        assert!(matches!(holder.progress(), SendProgress::Failed { .. }));
+        assert!(matches!(holder.progress(), SendProgress::Abandoned { .. }));
 
         // A completed attempt is disarmed, so the guard writes nothing over its outcome.
         assert!(holder.begin(), "the freed slot is offered again");
