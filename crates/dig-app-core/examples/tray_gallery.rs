@@ -72,6 +72,8 @@ fn main() {
             // the state every real account is in rather than varying them.
             profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
             profile_creation: dig_app_core::profiles::ProfileCreation::default(),
+            // A fixture takes no reading (dig_ecosystem#2398).
+            mint_chain: None,
             // The network strip is a WINDOW surface; this gallery photographs the tray menu, so the
             // reading is pinned to its pre-poll default rather than varied.
             network: dig_app_core::network::NetworkStanding::default(),

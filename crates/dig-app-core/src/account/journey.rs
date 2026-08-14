@@ -16,7 +16,6 @@
 
 use crate::account::boot::DiscardOutcome;
 use crate::account::chain_mint::{MintAvailability, MintSeams};
-use crate::account::profile_mint::ChainReadiness;
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
 use crate::account::mint::{
@@ -24,6 +23,7 @@ use crate::account::mint::{
     WaitProgress, WaitSurface, POLL_EVERY_SECS,
 };
 use crate::account::phrase_vault::PhraseVault;
+use crate::account::profile_mint::ChainReadiness;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::second_factor::journey::Clock;
 use crate::confirm::{
