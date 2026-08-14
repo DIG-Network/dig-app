@@ -878,6 +878,24 @@ pub enum TrayAction {
     ///
     /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
     AboutProfiles,
+    /// Put the zero-profile funding prompt on screen (dig_ecosystem#2950).
+    ///
+    /// # The one action here that NO menu row offers
+    ///
+    /// Every other variant is a click. This one is raised by the state loop, which is the whole
+    /// point of the feature: the user asked for *"an automatic popout"*, so nobody presses anything
+    /// to reach it.
+    ///
+    /// It is a [`TrayAction`] rather than a dialog the tick opens directly for two reasons, and both
+    /// are properties the worker already provides. The tick thread must never block — a prompt drawn
+    /// there would freeze the tray for as long as somebody left the window open — and the worker's
+    /// one-at-a-time reservation is what stops this window appearing on top of an unlock, a recovery
+    /// phrase, or a send confirmation. A prompt that could stack over a custody dialog would be a
+    /// window asking for money in front of one asking for a password.
+    ///
+    /// Whether it is raised at all is decided by
+    /// [`first_profile_prompt`](crate::account::first_profile::first_profile_prompt), never here.
+    CreateFirstProfile,
     /// Copy the account's `xch1…` receive address to the clipboard (dig_ecosystem#1850).
     ///
     /// The address comes from [`TrayView::receive_address`], which the shell fills from the account's own
