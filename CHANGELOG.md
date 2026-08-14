@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [11.1.0] - 2026-08-14
+
+### Features
+- **app:** Wire the profile-mint transport in the binary (S1 of #2398) (#170)
+
+### Bug Fixes
+- **chain:** An ABSENCE may be believed only from a synced tier (#169)
+
 ## [11.0.0] - 2026-08-14
 
 ### Features
