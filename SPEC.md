@@ -2246,7 +2246,10 @@ anything about it. The pane draws that module's answers and returns an intent
   and an unanswered push MUST be shown as an UNKNOWN outcome to keep watching — never as a failure,
   since rebuilding it can pay the recipient twice. (`Signing` is not currently reachable on screen: the
   action worker holds the session for the whole ceremony and the tray publishes no view while it does,
-  so the window keeps drawing the state from before the send. In that window a second press is refused by `SendHolder::begin`'s compare-and-set and is dropped without feedback — nothing is built, signed or pushed, and the first send is undisturbed. The surface corrects itself when the tray republishes and the in-flight state becomes visible.)
+  so the window keeps drawing the state from before the send. In that window a second press is
+  refused by `SendHolder::begin`'s compare-and-set and is dropped without feedback — nothing
+  is built, signed or pushed, and the first send is undisturbed. The surface corrects itself
+  when the tray republishes and the in-flight state becomes visible.)
 - `Failed` MUST distinguish its two producers. Reached before any broadcast, the surface MAY state that
   no money has moved. Reached from a proof of death AFTER a push — a source coin observed spent while
   the payment coin is absent — it MUST NOT state that, and it MUST show the payment coin id.
