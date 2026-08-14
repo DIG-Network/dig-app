@@ -64,6 +64,8 @@ fn state_for(residency: &AccountResidency) -> AccountState {
 fn view_for(state: AccountState) -> TrayView {
     TrayView {
         running: true,
+        // This suite is about the lock, and a locked wallet is offered no send at all.
+        send: dig_app_core::wallet::sending::SendProgress::Idle,
         node_connected: true,
         node: "Node v0.65.0 - 3 capsule(s) cached - 1 store(s) hosted".to_string(),
         // The shell derives this from the residency, so it is present exactly while unlocked — the same

@@ -24,3 +24,9 @@ Thumbs.db
 
 # Lane scratch files (a lane marker committed by mistake in #1752).
 .lane-*.md
+
+# gitnexus analyze writes these as a side effect; they are tooling output, not this repo.
+.lane/
+/CLAUDE.md
+/AGENTS.md
+.claude/skills/gitnexus/

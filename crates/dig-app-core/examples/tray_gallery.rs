@@ -43,6 +43,9 @@ fn main() {
         // is missing because of the account state, not because the fixture starved it.
         let view = TrayView {
             running: true,
+            // The tray offers no send — a native menu cannot hold a form — so the gallery
+            // photographs the state a machine that has sent nothing is in.
+            send: dig_app_core::wallet::sending::SendProgress::Idle,
             node_connected: true,
             node: "Node v0.66.0 · 0 capsule(s) cached · 0 store(s) hosted".to_string(),
             // A real reading, so the gallery photographs the Wallet row as a funded account sees it.

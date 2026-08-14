@@ -25,6 +25,8 @@ pub mod engine;
 pub mod enrol;
 pub mod node;
 pub mod overview;
+pub mod send;
+pub mod sending;
 pub mod state;
 
 use chia_protocol::SpendBundle;

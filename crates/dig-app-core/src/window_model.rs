@@ -743,6 +743,10 @@ mod tests {
             | TrayAction::SetUpdateChannel(_)
             | TrayAction::AboutAutoUpdate
             | TrayAction::LaunchApp(_)
+            // Never a menu ROW, so deliberately absent from `every_action`: a send is a form the
+            // Wallet pane draws, and a native menu cannot hold one. It is listed here because this
+            // match is the compile-time prompt to make exactly that decision about a new variant.
+            | TrayAction::SendXch(_)
             | TrayAction::OpenWindow
             | TrayAction::OpenLogs
             | TrayAction::Quit => {}

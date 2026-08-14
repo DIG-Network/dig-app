@@ -36,8 +36,10 @@ use zeroize::Zeroizing;
 
 use crate::account::auth::{AuthCeremony, CeremonyError};
 use crate::account::password::{establish_password, request_password, PasswordOutcome};
+use crate::amount::format_asset_amount;
 use crate::confirm::{native_confirmer, ConfirmDecision, NativeConfirmer, SignPrompt};
 use crate::keystore::CredentialStore;
+use crate::wallet::state::Asset;
 
 /// The number of random bytes in a generated account master password before hex-encoding — 32 bytes
 /// (256 bits) of CSPRNG entropy, well beyond any Argon2id-stretched brute-force reach.
@@ -334,11 +336,54 @@ const SPEND_CONFIRM_ORIGIN: &str = "dig-app (local wallet)";
 const SPEND_PAYLOAD_TYPE: &str = "wallet.spend";
 
 /// Render a [`SpendSummary`] as the plain-text confirm body: the custody tier, each recipient +
-/// amount, and the fee. Uses the summary's own [`Display`](std::fmt::Display) — the recipients + fee
-/// are dig-account's independently re-derived figures, so the body cannot disagree with what is signed.
+/// amount, and the fee.
+///
+/// # The figures are dig-account's; the FORMATTING is ours (dig_ecosystem#2885)
+///
+/// Every number here is read off the [`SpendSummary`] struct — the recipients and the fee that
+/// dig-account independently re-derived from the coin spends — so the body still cannot disagree with
+/// what is signed. What is no longer dig-account's is how those numbers are WRITTEN. Its
+/// [`Display`](std::fmt::Display) puts the raw base-unit figure beside the ticker, so a payment of
+/// 50,000,000 mojos rendered as `50000000 XCH` — 0.00005 XCH, overstated a trillion times, on the one
+/// screen where a person consents to money leaving. The fee on the same line was correctly labelled
+/// `mojos`, so the sentence contradicted itself.
+///
+/// So amounts go through [`crate::amount`], the one place that knows an asset's decimals, exactly as
+/// every figure on the Wallet tab does.
+///
+/// # A CAT amount is NOT divided here
+///
+/// A recipient carries an asset id, not a number of decimal places, and CATs do not agree on one.
+/// Dividing by $DIG's three would be a confidently wrong figure for every other CAT — the same defect
+/// class this function exists to fix. So a CAT amount is shown as its base units, said in those
+/// words, beside the asset it belongs to. Unglamorous, and true.
+///
 /// Plain text only (the per-OS confirmers neutralize markup), never key material.
 fn render_spend(summary: &SpendSummary) -> String {
-    format!("Approve this {:?}-tier spend?\n\n{}", summary.tier, summary)
+    let paid = match summary.recipients.is_empty() {
+        true => "no recipients".to_string(),
+        false => summary
+            .recipients
+            .iter()
+            .map(|to| format!("{} -> {}", paid_amount(to), to.address))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!(
+        "Approve this {:?}-tier spend?\n\n{paid}\n\nNetwork fee: {} XCH",
+        summary.tier,
+        format_asset_amount(Asset::Xch, summary.fee)
+    )
+}
+
+/// One recipient's amount, in the units a person reads.
+fn paid_amount(to: &dig_account::SpendRecipient) -> String {
+    match &to.asset_id {
+        None => format!("{} XCH", format_asset_amount(Asset::Xch, to.amount_mojos)),
+        // Named as base units precisely because this function does not know the CAT's precision —
+        // see the caller's docs.
+        Some(asset) => format!("{} base units of CAT {asset}", to.amount_mojos),
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +515,92 @@ mod tests {
             *self.last_body.lock().unwrap() = prompt.decoded_tx.map(str::to_string);
             self.decision
         }
+    }
+
+    /// **The confirm body states an amount in XCH, never its raw mojo count** (dig_ecosystem#2885).
+    ///
+    /// The fixture is the payment that exposed this: a live mainnet send of 50,000,000 mojos, whose
+    /// dialog read `Confirm: 50000000 XCH` — 0.00005 XCH overstated by a factor of 10^12, on the
+    /// screen where a person authorises money leaving their wallet. The fee beside it was labelled
+    /// `mojos` and was correct, so the sentence disagreed with itself.
+    ///
+    /// Both halves are asserted, because presence alone is not the property: the true figure must
+    /// appear AND the raw count must not — a body that printed both would be no less misleading. The
+    /// fee is asserted the same way, and at a different value from the amount, so one figure standing
+    /// in for the other cannot pass.
+    #[test]
+    fn the_confirm_body_states_amounts_in_xch_and_never_in_raw_mojos() {
+        use dig_account::{SpendRecipient, SpendTier};
+
+        let body = render_spend(&SpendSummary::new(
+            SpendTier::Confirm,
+            vec![SpendRecipient::to_address(
+                "xch1nnu75",
+                50_000_000,
+                None::<String>,
+            )],
+            1_000_000,
+        ));
+
+        assert!(
+            body.contains("0.00005 XCH"),
+            "the amount was not stated in XCH: {body}"
+        );
+        assert!(
+            !body.contains("50000000"),
+            "the amount was stated as its raw mojo count, which overstates it a trillion times: \
+             {body}"
+        );
+        assert!(
+            body.contains("0.000001 XCH"),
+            "the fee was not stated in XCH: {body}"
+        );
+        assert!(
+            !body.contains("1000000"),
+            "the fee was stated as its raw mojo count: {body}"
+        );
+        assert!(
+            body.contains("xch1nnu75"),
+            "the body no longer says who is being paid: {body}"
+        );
+    }
+
+    /// **A CAT amount is not divided by a precision this app does not know** (dig_ecosystem#2885).
+    ///
+    /// A recipient carries an asset id, not a number of decimals, and CATs do not agree on one.
+    /// Applying $DIG's three places to an arbitrary CAT would be a confidently wrong figure — the same
+    /// defect the XCH fix removes, pointed at a different asset. So the base units are shown as base
+    /// units, and the words say so; what must never appear is that number beside a bare ticker.
+    #[test]
+    fn a_cat_amount_is_shown_as_base_units_rather_than_guessed_at() {
+        use dig_account::{SpendRecipient, SpendTier};
+
+        let body = render_spend(&SpendSummary::new(
+            SpendTier::Confirm,
+            vec![SpendRecipient::to_address("xch1cat", 7_000, Some("cafe"))],
+            0,
+        ));
+        assert!(
+            body.contains("7000 base units of CAT cafe"),
+            "a CAT amount was not stated in the units it is actually in: {body}"
+        );
+        assert!(
+            !body.contains("7000 XCH") && !body.contains("7 XCH"),
+            "a CAT amount was presented as XCH: {body}"
+        );
+    }
+
+    /// **A spend paying nobody says so, rather than rendering an empty line.**
+    ///
+    /// The state exists — a fee-only spend derives no recipients — and a body that fell silent there
+    /// would ask a person to approve a blank.
+    #[test]
+    fn a_spend_with_no_recipients_says_that_plainly() {
+        use dig_account::SpendTier;
+
+        let body = render_spend(&SpendSummary::new(SpendTier::Vault, vec![], 3));
+        assert!(body.contains("no recipients"), "{body}");
+        assert!(body.contains("0.000000000003 XCH"), "{body}");
     }
 
     fn sample_summary() -> SpendSummary {

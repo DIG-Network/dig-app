@@ -29,8 +29,9 @@ use std::sync::{Arc, Mutex};
 use chia_protocol::CoinSpend;
 use dig_account::{
     AccountError, CustodyPolicy, LocalMoneySigner, ProfileIx, ProfileMinter,
-    Result as AccountResult, SpendSummary, UnlockedAccount,
+    Result as AccountResult, SpendSummary, TransferPlan, TransferRequest, UnlockedAccount,
 };
+use dig_chainsource_interface::ChainSource;
 use dig_ipc_protocol::domain::{Signature, SigningPublicKey};
 use dig_ipc_protocol::signer::SessionSigner;
 use dig_keystore::KdfParams;
@@ -42,6 +43,7 @@ use crate::account::profile_session::ProfileSession;
 use crate::account::sealer::AccountSealer;
 use crate::sealer::{ProfileSealer, SealError};
 use crate::session_lock::SessionKeys;
+use crate::wallet::send::SendError;
 
 /// The single unlocked account the app currently holds, behind a shared lock so the tray, the sign
 /// path, and the seal path all see the SAME lock state. Cheap to clone (an `Arc`); locking any clone
@@ -241,6 +243,40 @@ impl AccountResidency {
         self.guard()
             .as_ref()
             .map(|acct| acct.wallet_ops().summarize(coin_spends, policy))
+    }
+
+    /// Build the UNSIGNED coin spends that pay `request`, through the CURRENT account's wallet — or
+    /// `None` once the residency is locked (fail-closed: a locked account builds nothing, so no spend
+    /// of the user's coins can even be assembled while the seed is away).
+    ///
+    /// The coin selection, the change output and the shortfall judgement are all `dig-account`'s
+    /// ([`WalletOps::build_transfer`](dig_account::WalletOps::build_transfer)); this adds only the two
+    /// residency facts a builder cannot know — whether the account is unlocked, and whether the wallet
+    /// this unlock derives still belongs to the active profile.
+    ///
+    /// The result is a PLAN, never a spend: nothing here signs, and nothing here reaches the network.
+    /// See [`crate::wallet::send`] for the order the plan must then travel in.
+    pub fn build_transfer<C>(
+        &self,
+        chain: &C,
+        custody: &CustodyPolicy,
+        request: &TransferRequest,
+    ) -> Option<Result<TransferPlan, SendError>>
+    where
+        C: ChainSource + ?Sized,
+    {
+        if let Err(disagreement) = self.wallet_agrees_with_the_active_profile() {
+            return self.guard().as_ref().map(|_| {
+                Err(SendError::WalletBehindActiveProfile(
+                    disagreement.to_string(),
+                ))
+            });
+        }
+        self.guard().as_ref().map(|acct| {
+            acct.wallet_ops()
+                .build_transfer(chain, custody, request)
+                .map_err(SendError::Build)
+        })
     }
 
     /// Build the LIVE money signer for the default profile on `network`, through the CURRENT account —

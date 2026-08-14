@@ -341,6 +341,16 @@ pub struct TrayView {
     /// entirely — "still catching up" — which is what a live user saw beside a window reporting the
     /// chain synced.
     pub enrolment: crate::wallet::enrol::Enrolment,
+    /// How the send this app is running is going, or that there is none (dig_ecosystem#2819).
+    ///
+    /// Carried in the view for the reason [`balance`](Self::balance) is: the Wallet pane RENDERS it,
+    /// and the window only repaints when the view changes. A send whose progress lived anywhere else
+    /// would move from signing to pending to confirmed while the screen kept showing the form.
+    ///
+    /// The default — [`SendProgress::Idle`](crate::wallet::sending::SendProgress::Idle) — is the truth
+    /// on a fresh boot: this app sends nothing it was not asked to. It says nothing about transfers
+    /// made in an earlier run, which are the chain's business and not this field's.
+    pub send: crate::wallet::sending::SendProgress,
 }
 
 impl TrayView {
@@ -389,6 +399,7 @@ impl TrayView {
             profile_creation,
             network,
             enrolment,
+            send,
         } = self;
 
         running == &other.running
@@ -468,6 +479,11 @@ impl TrayView {
             // landed must repaint — otherwise the window keeps blaming the chain after the reason
             // stopped being the chain.
             && enrolment == &other.enrolment
+            // The Wallet pane RENDERS this, and every state it passes through is one a person is
+            // waiting on: signing, then pending with a block count that grows, then confirmed.
+            // Without this arm a send would move through all of them behind a screen still showing
+            // the form — the freeze `balance` needed this same arm to avoid (dig_ecosystem#2206).
+            && send == &other.send
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -677,7 +693,11 @@ fn collect_action_ids(rows: &[MenuRow], found: &mut Vec<(String, TrayAction)>) {
 }
 
 /// One thing the user can click. The shell maps each to its handler; the model never performs an action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Deliberately NOT `Hash`: [`SendXch`](Self::SendXch) carries a `TransferRequest`, which is not, and
+/// nothing keys a map by an action — the shell's verb map is keyed by [`action_id`], a string, so that
+/// two rows performing the same verb can share one handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     /// Show everything the tray knows, in full, in a window that can hold it.
     ///
@@ -860,6 +880,27 @@ pub enum TrayAction {
     /// `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid) follows
     /// for minting (dig_ecosystem#1841).
     AboutWallet,
+    /// Send XCH from this wallet — the transfer a person filled in on the Wallet tab, ready to build
+    /// (dig_ecosystem#2819).
+    ///
+    /// # Why it carries a `TransferRequest` and not the typed strings
+    ///
+    /// [`TransferRequest`](dig_account::TransferRequest) can only be built from a destination that has
+    /// already been decoded and judged payable, because
+    /// [`PayableDestination`](dig_account::PayableDestination) has no other public route from a string
+    /// — its `from_address` refuses any prefix but `xch`, since paying the puzzle hash inside a `txch`
+    /// address burns the funds permanently. Carrying the raw text instead would move that decode into
+    /// the shell binary, which no test can execute (dig_ecosystem#2377); carrying a bare puzzle hash
+    /// would mean reconstructing the request through `from_derived`, which is the documented way to
+    /// bypass the very check that prevents the burn.
+    ///
+    /// So the validation happens where the string is — in
+    /// [`SendDraft::assess`](crate::wallet::sending::SendDraft::assess), under test — and what reaches
+    /// the shell is a request that is payable by construction. The fee is already applied.
+    ///
+    /// This action is offered by the Wallet PANE and never by a tray row: a menu cannot hold a form,
+    /// and an amount is not something a person picks from a list.
+    SendXch(dig_account::TransferRequest),
     /// Set the node's content-cache size cap to a specific preset (dig_ecosystem#2002).
     ///
     /// Carries the target cap in bytes so the shell forwards it straight to the node's
@@ -2450,6 +2491,8 @@ mod tests {
             network: crate::network::NetworkStanding::default(),
             // Nothing has been asked of a node in this fixture, which is what the default states.
             enrolment: crate::wallet::enrol::Enrolment::default(),
+            // This suite is about the MENU, which offers no send at all — a form is a window's job.
+            send: crate::wallet::sending::SendProgress::Idle,
             account: Some(account),
             receive_address,
             address_fault: None,
@@ -2520,11 +2563,13 @@ mod tests {
         changed.node = "Node v0.84.0 · 9 capsule(s) cached · 4 store(s) hosted".to_string();
         let after = build(&changed);
 
-        let ids_before: std::collections::HashMap<_, _> = action_ids(&before.rows)
+        // Pairs rather than a map: `TrayAction` is deliberately not `Hash` (it carries a
+        // `TransferRequest`), and a menu holds few enough rows that a scan is free.
+        let ids_before: Vec<(TrayAction, String)> = action_ids(&before.rows)
             .into_iter()
             .map(|(id, a)| (a, id))
             .collect();
-        let ids_after: std::collections::HashMap<_, _> = action_ids(&after.rows)
+        let ids_after: Vec<(TrayAction, String)> = action_ids(&after.rows)
             .into_iter()
             .map(|(id, a)| (a, id))
             .collect();
@@ -2532,7 +2577,10 @@ mod tests {
         assert!(!ids_before.is_empty(), "the fixture menu must offer verbs");
         for (action, id) in &ids_before {
             assert_eq!(
-                ids_after.get(action),
+                ids_after
+                    .iter()
+                    .find(|(candidate, _)| candidate == action)
+                    .map(|(_, id)| id),
                 Some(id),
                 "{action:?} was renamed by a rebuild, so a click on it would be dropped"
             );

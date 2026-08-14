@@ -17,8 +17,8 @@ use dig_node_control_interface::results::WalletReadSource;
 use std::time::Duration;
 
 use crate::chain::{
-    ChainReadError, ControlChainSource, ControlSpendPublisher, PublishFailure, CHILD_PAGE_SIZE,
-    MAX_CHILD_PAGES,
+    ChainReadError, ControlChainSource, ControlSpendPublisher, DetailedSpendPublisher,
+    PublishFailure, CHILD_PAGE_SIZE, MAX_CHILD_PAGES,
 };
 use crate::test_support::node::{Behaviour, ChainReply, FakeChain, FakeCoin, FakeNode, FakeSpend};
 

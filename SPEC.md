@@ -2172,6 +2172,93 @@ drops in as the production implementation without touching the wallet logic.
 [dig_ecosystem#910]: https://github.com/DIG-Network/dig_ecosystem/issues/910
 [dig_ecosystem#2295]: https://github.com/DIG-Network/dig_ecosystem/issues/2295
 
+#### 3.3a Sending XCH (normative)
+
+A send travels in exactly this order, and `dig_app_core::wallet::send` is the only implementation of
+it: **build** the unsigned spends (`dig_account::WalletOps::build_transfer`, reached through
+`AccountResidency::build_transfer` so a locked account builds nothing) → **sign** through the custody
+gate (`account::money::MoneyPath::authorize_and_sign`, op class `SmallSend`) → **anchor** by reading
+the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
+(`chain::ControlSpendPublisher`).
+
+- The anchoring peak MUST be read AFTER the signature and immediately BEFORE the push. Read earlier it
+  is stale by however long the human took; read later it is worthless. It is the only height a
+  back-dated confirmation can contradict.
+- A peak that cannot be read MUST refuse the push. Anchoring at `0` is FORBIDDEN — every height is at
+  or above genesis, so a zero anchor makes the back-dating check vacuous.
+- A send MUST report success only from a `TransferStatus::Confirmed`, which `dig-account` constructs
+  solely from a buried chain record. An accepted push is an acceptance, not a payment, and dig-app MUST
+  NOT define any value of its own meaning "sent" or "succeeded".
+- A failed push MUST be classified by whether the bundle could be in a mempool
+  (`chain::PublishFailure::may_have_reached_a_mempool`), and the two classes MUST NOT be merged. A push
+  refused locally, or ANSWERED by the node declining to serve or to authorize it, provably never left:
+  it is a plain failure, and the send surface MUST come back. A push that went unanswered or timed out
+  has an UNKNOWN outcome: the caller MUST poll the pending transfer, and rebuilding it can pay the
+  recipient twice. Where it is not knowable which class a failure belongs to, it MUST be treated as
+  UNKNOWN — an over-cautious wait costs time, an over-confident failure can cost the money twice.
+- A transfer whose push no mempool ACCEPTED MUST NOT be promoted out of the unknown state by polling.
+  `TransferStatus::Awaiting` is the identical answer a never-broadcast bundle produces, so it
+  establishes nothing about an unjudged transfer; only `Confirmed` and `Failed` are chain verdicts.
+- A pending transfer is remembered **for the lifetime of the process and no longer**. It lives in
+  `wallet::sending::SendHolder`'s memory and is not persisted, so a restart forgets it. The payment
+  coin id is what makes the transfer watchable afterwards, by this app or by anyone with a block
+  explorer, and the surface MUST say so wherever it asks the user to keep waiting (§3.3b).
+- At most one send per profile may be in flight, enforced by `SendHolder::begin`: claiming the send slot
+  and moving to `Signing` happen under ONE lock, and a send MUST be refused outright while the slot is
+  held. It is NOT structural — `SendSession::send` consuming its session constrains only that value, and
+  the production path builds a fresh session per attempt. It MUST NOT be delegated to the pane, the
+  published view, or the tray's action worker: no view is published while the ceremony holds the
+  session, so the drawn form is stale for the whole of it.
+- A send that fails part-way, including by PANIC, MUST release the send slot. A claimed slot that is
+  never released leaves the surface permanently unable to send for a payment that does not exist.
+- There is NO retry or fee bump. A future one MUST use `WalletOps::build_transfer_replacing`, which
+  reuses the original inputs; a rebuilt transfer at a higher fee can select a different input set, and
+  two bundles spending disjoint inputs can both confirm.
+- The fee is a FIXED constant (`wallet::send::DEFAULT_SEND_FEE_MOJOS`) displayed to the user, never an
+  estimate. What the confirm ceremony shows is exactly what is paid.
+- Every send reaches the human. The production custody policy is `Hot { auto_send_limit: 0 }` with the
+  default deny-everything `AutoSendPolicy`; raising the allowance above zero is what would let a
+  payment leave with no confirmation.
+- CAT / `$DIG` sending is not part of this flow.
+
+#### 3.3b The send surface (normative)
+
+The Wallet tab offers the send, and `dig_app_core::wallet::sending` is the only place that decides
+anything about it. The pane draws that module's answers and returns an intent
+(`TrayAction::SendXch`); the shell forwards the intent and performs the send.
+
+- A typed amount MUST be converted to base units by `amount::parse_asset_amount`, the exact inverse of
+  `amount::format_asset_amount`. The conversion MUST be integer arithmetic on the digits: a binary
+  float cannot represent XCH's twelve decimal places, and a rounding error here misstates money at the
+  moment a person authorises it. An amount with more decimal places than the asset carries MUST be
+  refused, never truncated.
+- Every figure the send surface shows — the amount, the fee, and anything echoed back in the confirm
+  ceremony — MUST be rendered through `crate::amount`. A base-unit integer beside a ticker is
+  FORBIDDEN.
+- A destination MUST reach a `TransferRequest` through `dig_account::PayableDestination::from_address`,
+  which refuses any prefix but `xch`. Reconstructing one from a puzzle hash via `from_derived` on the
+  send path is FORBIDDEN: it bypasses the check that stops a `txch` address burning the funds.
+- **Send** MUST be refused, with the condition stated on screen, when the account is sealed, when a
+  send is in flight, when either field is unusable, or when the amount plus the fee exceeds a MEASURED
+  balance. A balance nobody has read MUST NOT refuse a send — that would invent the figure.
+- The six states of `SendProgress` — `Idle`, `Signing`, `Pending`, `Unknown`, `Confirmed` and `Failed` —
+  MUST each be rendered as themselves where they are reached. `Awaiting` MUST NOT be shown as success,
+  and an unanswered push MUST be shown as an UNKNOWN outcome to keep watching — never as a failure,
+  since rebuilding it can pay the recipient twice. (`Signing` is not currently reachable on screen: the
+  action worker holds the session for the whole ceremony and the tray publishes no view while it does,
+  so the window keeps drawing the state from before the send. In that window a second press is
+  refused by `SendHolder::begin`'s compare-and-set and is dropped without feedback — nothing
+  is built, signed or pushed, and the first send is undisturbed. The surface corrects itself
+  when the tray republishes and the in-flight state becomes visible.)
+- `Failed` MUST distinguish its two producers. Reached before any broadcast, the surface MAY state that
+  no money has moved. Reached from a proof of death AFTER a push — a source coin observed spent while
+  the payment coin is absent — it MUST NOT state that, and it MUST show the payment coin id.
+- Wherever the surface asks the user to keep waiting rather than to send again, it MUST tell them to
+  keep the payment coin id, because the app forgets the transfer when the process ends (§3.3a). Every
+  state that HAS a payment coin id MUST display it.
+- The state MUST live in `TrayView` and be compared by `TrayView::renders_same_as`; otherwise a send
+  moves through every state behind a window that never repaints.
+
 ### 3.4 Per-user data at rest (NC-2 / NC-3)
 
 All user-facing data lives in the interactive user's per-OS application-data directory, in a
