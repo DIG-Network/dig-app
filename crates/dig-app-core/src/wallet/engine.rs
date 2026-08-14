@@ -78,11 +78,84 @@ pub struct CoinsResponse {
     pub coins: Vec<CoinRecord>,
 }
 
-/// `control.wallet.balance` response: the address's spendable balance in the asset's base units.
+/// What a balance figure is true AS OF — the provenance that travels with every reading.
+///
+/// A light client trails the chain permanently, so "caught up" is a moment it passes through rather
+/// than a state it sits in. Refusing every figure that is not caught up therefore shows no figure at
+/// all. The honest alternative is not to hide the number but to say what it is a statement ABOUT:
+/// a replica balance at height N is true of height N, and becomes a lie only when presented as
+/// current without saying so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BalanceAsOf {
+    /// The node's OWN replica answered, and its figures are true as of this peak height.
+    Replica {
+        /// The peak height the figures reflect.
+        height: u32,
+        /// Whether the node called this replica view CAUGHT UP — its own `synced` flag, carried
+        /// rather than discarded (dig_ecosystem#2869).
+        ///
+        /// The syncing indicator has to come from somewhere, and the node's own claim is the only
+        /// source every read path has. Comparing the height against the peak the node's peers
+        /// announced corroborates it, but that peak is a property of a tray SNAPSHOT — the direct
+        /// [`WalletOverview::read`](crate::wallet::overview::WalletOverview::read) path has no view
+        /// of the network at all. Deriving the indicator from the comparison alone therefore marked
+        /// every figure on that path as syncing, including a node that had just said it was caught
+        /// up: a caveat that never comes off, which is the failure the whole indicator exists to
+        /// avoid.
+        caught_up: bool,
+    },
+    /// A third party's coinset answer, not the wallet's own view of the chain.
+    ///
+    /// Carries no height by contract — the figures came from the oracle's chain view, not the
+    /// node's — so a surface may not invent an as-of for it.
+    Oracle,
+    /// The answering node predates tier disclosure, so which tier produced the figures is unknown.
+    ///
+    /// A THIRD state and not a default tier: naming a tier that was never reported would state
+    /// something about the reading that nothing measured.
+    Undisclosed,
+}
+
+impl BalanceAsOf {
+    /// The weaker of two provenances — the one that claims less.
+    ///
+    /// Two assets are read separately and shown as one holding, so the pair needs a single as-of.
+    /// Taking the weaker claim is the only choice that cannot overstate either read: an
+    /// [`Undisclosed`](Self::Undisclosed) answer cannot be presented as an [`Oracle`](Self::Oracle)
+    /// one, an oracle figure cannot be presented as the wallet's own, and two replica heights
+    /// resolve to the earlier one — the later figure is also true of the earlier height, so the
+    /// pair is true as of the earlier.
+    pub fn weaker(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Undisclosed, _) | (_, Self::Undisclosed) => Self::Undisclosed,
+            (Self::Oracle, _) | (_, Self::Oracle) => Self::Oracle,
+            (
+                Self::Replica {
+                    height: a,
+                    caught_up: a_caught_up,
+                },
+                Self::Replica {
+                    height: b,
+                    caught_up: b_caught_up,
+                },
+            ) => Self::Replica {
+                height: a.min(b),
+                // Caught up only if BOTH halves are: one asset read from a settled view does not
+                // settle the other, and the pair is shown as one holding.
+                caught_up: a_caught_up && b_caught_up,
+            },
+        }
+    }
+}
+
+/// `control.wallet.balance` response: the address's spendable balance in the asset's base units,
+/// with the provenance that makes the figure readable as a claim about a moment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BalanceResponse {
     /// The spendable balance, in the asset's base unit (mojos for XCH, base units for DIG).
     pub balance: u64,
+    /// What this figure is true as of.
+    pub as_of: BalanceAsOf,
 }
 
 /// The engine operations the wallet delegates: broadcast a signed bundle, and read chain state for
@@ -112,7 +185,19 @@ pub(crate) mod test_support {
         pub broadcasts: std::cell::RefCell<Vec<String>>,
         /// The coins [`WalletEngine::coins`] / [`WalletEngine::balance`] report.
         pub coins: Vec<CoinRecord>,
+        /// The provenance [`WalletEngine::balance`] reports, or [`FAKE_AS_OF`] when unset.
+        ///
+        /// An [`Option`] rather than a plain field because [`BalanceAsOf`] deliberately has no
+        /// `Default` — a default provenance would be a claim nothing measured — while this fake
+        /// wants one so the many tests that do not care about provenance need not state one.
+        pub as_of: Option<BalanceAsOf>,
     }
+
+    /// The provenance a [`FakeWalletEngine`] reports when a test does not choose one.
+    pub const FAKE_AS_OF: BalanceAsOf = BalanceAsOf::Replica {
+        height: 7_000_000,
+        caught_up: true,
+    };
 
     impl WalletEngine for FakeWalletEngine {
         fn broadcast(&self, request: BroadcastRequest) -> Result<BroadcastResponse, WalletError> {
@@ -141,7 +226,10 @@ pub(crate) mod test_support {
                 .filter(|c| c.asset == request.asset)
                 .map(|c| c.amount)
                 .sum();
-            Ok(BalanceResponse { balance })
+            Ok(BalanceResponse {
+                balance,
+                as_of: self.as_of.unwrap_or(FAKE_AS_OF),
+            })
         }
     }
 }
@@ -149,6 +237,63 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::FakeWalletEngine;
+    use super::BalanceAsOf;
+
+    /// **Two replica heights resolve to the EARLIER one.** The later figure is also true of the
+    /// earlier height, so the pair is true as of the earlier; taking the later would state an
+    /// as-of one of the two readings never supported.
+    #[test]
+    fn two_replica_heights_take_the_earlier() {
+        let early = BalanceAsOf::Replica {
+            height: 100,
+            caught_up: true,
+        };
+        let late = BalanceAsOf::Replica {
+            height: 200,
+            caught_up: true,
+        };
+        assert_eq!(early.weaker(late), early);
+        assert_eq!(
+            late.weaker(early),
+            early,
+            "the merge must not depend on order"
+        );
+    }
+
+    /// **An oracle answer beside a replica answer is an ORACLE answer.** Presenting the pair as the
+    /// wallet's own view would claim a provenance half of it does not have.
+    #[test]
+    fn an_oracle_read_drags_a_replica_read_down_to_oracle() {
+        let replica = BalanceAsOf::Replica {
+            height: 100,
+            caught_up: true,
+        };
+        assert_eq!(replica.weaker(BalanceAsOf::Oracle), BalanceAsOf::Oracle);
+        assert_eq!(BalanceAsOf::Oracle.weaker(replica), BalanceAsOf::Oracle);
+    }
+
+    /// **An undisclosed provenance beats everything.** It is the only one of the three that claims
+    /// nothing, and a pair containing it cannot honestly claim more.
+    #[test]
+    fn an_undisclosed_read_makes_the_pair_undisclosed() {
+        for other in [
+            BalanceAsOf::Replica {
+                height: 100,
+                caught_up: true,
+            },
+            BalanceAsOf::Oracle,
+        ] {
+            assert_eq!(
+                BalanceAsOf::Undisclosed.weaker(other),
+                BalanceAsOf::Undisclosed
+            );
+            assert_eq!(
+                other.weaker(BalanceAsOf::Undisclosed),
+                BalanceAsOf::Undisclosed
+            );
+        }
+    }
+
     use super::*;
 
     fn dig_coin(amount: u64) -> CoinRecord {

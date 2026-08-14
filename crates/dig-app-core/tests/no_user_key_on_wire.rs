@@ -91,7 +91,13 @@ impl WalletEngine for WireRecordingEngine {
         request: CoinsRequest,
     ) -> Result<dig_app_core::wallet::engine::BalanceResponse, WalletError> {
         self.record(&request);
-        Ok(dig_app_core::wallet::engine::BalanceResponse { balance: 0 })
+        Ok(dig_app_core::wallet::engine::BalanceResponse {
+            balance: 0,
+            as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica {
+                height: 7_000_000,
+                caught_up: true,
+            },
+        })
     }
 }
 

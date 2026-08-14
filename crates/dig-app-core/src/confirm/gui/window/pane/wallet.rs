@@ -41,7 +41,8 @@ use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
-    address_line, format_amount, unknown_reason, AddressReading, BalanceReading, Balances,
+    address_line, as_of_sentence, format_amount, is_syncing, unknown_reason, AddressReading,
+    BalanceReading, Balances,
 };
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
@@ -55,7 +56,7 @@ pub(crate) fn draw(
 ) -> Option<TrayAction> {
     receive_card(flow, t, facts);
     flow.gap(space::S4);
-    holdings_card(flow, t, &facts.balance);
+    holdings_card(flow, t, &facts.balance, facts);
     flow.gap(space::S4);
     sending_card(flow, t);
     // The tab's own verbs, LAST and in a card of their own — but only where the model offers one
@@ -134,12 +135,49 @@ fn known_address(inner: &mut Flow, t: &Tokens, address: &str) {
 }
 
 /// What this account holds, or the reason there is no figure.
-fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading) {
+///
+/// A shown figure is always followed by what it is true AS OF. A light client trails the chain tip
+/// permanently, so the figure above is a statement about a moment rather than about now, and the
+/// as-of line is what makes it a true one (dig_ecosystem#2824). It carries only its own provenance:
+/// how far behind the node is, is the header strip's job, and repeating it here would say the same
+/// thing twice in two voices.
+fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading, facts: &PaneFacts) {
     let items = holdings(balance);
+    let as_of = match balance {
+        BalanceReading::Known { as_of, .. } => {
+            Some(as_of_sentence(*as_of, facts.network.chia_peer_peak_height))
+        }
+        BalanceReading::Pending | BalanceReading::Unknown(_) => None,
+    };
+    let syncing = is_syncing(balance, facts.network.chia_peer_peak_height);
     flow.place(|ui, at| {
         (
             card::card(ui, at, t, Some(copy::wallet::HOLDINGS_CARD), |inner| {
+                // The badge leads the figures rather than following the sentence, because it
+                // qualifies the number a glance takes and a glance stops at the number
+                // (dig_ecosystem#2869). `Warn`, not `Good`: nothing is broken, but the figure is
+                // not the last word yet.
+                if syncing {
+                    inner.place(|ui, at| {
+                        (
+                            data::badge(
+                                ui,
+                                at.left_top(),
+                                t,
+                                copy::wallet::BALANCE_SYNCING_BADGE,
+                                Tone::Warn,
+                            )
+                            .height(),
+                            (),
+                        )
+                    });
+                    inner.gap(space::S2);
+                }
                 inner.place(|ui, at| (data::readouts(ui, at, t, &items), ()));
+                if let Some(sentence) = &as_of {
+                    inner.gap(space::S2);
+                    inner.place(|ui, at| (text::caption(ui, at, t, sentence), ()));
+                }
             }),
             (),
         )
@@ -156,7 +194,7 @@ fn holdings_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading) {
 /// two independent facts.
 fn holdings(balance: &BalanceReading) -> Vec<Readout> {
     match balance {
-        BalanceReading::Known(held) => figures(held),
+        BalanceReading::Known { balances, .. } => figures(balances),
         BalanceReading::Pending => vec![Readout::new(
             copy::wallet::BALANCE_LABEL,
             Value::Unknown(copy::wallet::BALANCE_PENDING.to_string()),
@@ -425,6 +463,7 @@ mod tests {
             BalanceUnknown::NodeCannotRead,
             BalanceUnknown::NoChainSource,
             BalanceUnknown::NotSynced,
+            BalanceUnknown::ReplicaHasNoData,
             BalanceUnknown::AddressesNotFollowed,
             BalanceUnknown::AwaitingNodeRestart,
             // The one arm whose sentence comes from OUTSIDE this crate, given the node text that
@@ -509,7 +548,7 @@ mod tests {
                 ("unknown_reason", unknown_reason(&why)),
                 (
                     "menu_reason",
-                    balance_line(&BalanceReading::Unknown(why.clone())),
+                    balance_line(&BalanceReading::Unknown(why.clone()), None),
                 ),
                 ("the pane", rendered),
             ] {
@@ -633,10 +672,16 @@ mod tests {
 
         // A real reading, by contrast, DOES produce figures — without this the assertions above are
         // satisfied by a `holdings` that never returns a number at all.
-        let known = holdings(&BalanceReading::Known(Balances {
-            xch_mojos: 1_000_000_000_000,
-            dig_units: 2_000,
-        }));
+        let known = holdings(&BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: 1_000_000_000_000,
+                dig_units: 2_000,
+            },
+            as_of: crate::wallet::engine::BalanceAsOf::Replica {
+                height: 7_000_000,
+                caught_up: true,
+            },
+        });
         assert_eq!(known.len(), 2);
         assert!(known.iter().all(|item| item.value.is_known()));
     }
@@ -662,9 +707,10 @@ mod tests {
                 BalanceUnknown::NodeCannotRead => 9,
                 BalanceUnknown::NoChainSource => 10,
                 BalanceUnknown::NotSynced => 11,
-                BalanceUnknown::AddressesNotFollowed => 12,
-                BalanceUnknown::AwaitingNodeRestart => 13,
-                BalanceUnknown::ReadFailed(_) => 14,
+                BalanceUnknown::ReplicaHasNoData => 12,
+                BalanceUnknown::AddressesNotFollowed => 13,
+                BalanceUnknown::AwaitingNodeRestart => 14,
+                BalanceUnknown::ReadFailed(_) => 15,
             }
         }
         let mut arms: Vec<u8> = every_unknown_reason().iter().map(arm).collect();
@@ -672,7 +718,7 @@ mod tests {
         arms.dedup();
         assert_eq!(
             arms,
-            (0..15).collect::<Vec<u8>>(),
+            (0..16).collect::<Vec<u8>>(),
             "the guard's reason list is not the whole enum"
         );
     }

@@ -1662,9 +1662,13 @@ pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<Men
     }
     rows.push(MenuRow::action(
         TrayAction::AboutWallet,
-        crate::wallet::overview::menu_balance_label(
-            &crate::wallet::overview::WalletOverview::of_tray(view).balance,
-        ),
+        {
+            // ONE overview, so the figure and the peak it is judged against come from the same
+            // snapshot. Reading them separately could mark a figure current on the strength of a
+            // peak observed after it.
+            let overview = crate::wallet::overview::WalletOverview::of_tray(view);
+            crate::wallet::overview::menu_balance_label(&overview.balance, overview.peers_peak)
+        },
         true,
     ));
     rows.push(MenuRow::Separator);
@@ -2207,12 +2211,16 @@ mod tests {
                 v.address_fault = Some(AddressFault::DerivationFailed)
             }),
             ("balance", |v| {
-                v.balance = crate::wallet::overview::BalanceReading::Known(
-                    crate::wallet::overview::Balances {
+                v.balance = crate::wallet::overview::BalanceReading::Known {
+                    balances: crate::wallet::overview::Balances {
                         xch_mojos: 1,
                         dig_units: 0,
                     },
-                )
+                    as_of: crate::wallet::engine::BalanceAsOf::Replica {
+                        height: 7_000_000,
+                        caught_up: true,
+                    },
+                }
             }),
             ("did", |v| v.did = Some("did:chia:x".to_string())),
             ("second_factor", |v| v.second_factor = true),
@@ -4052,10 +4060,16 @@ mod tests {
 
         let held = balance_row(wallet_labels_with(
             AccountState::Unlocked { recoverable: true },
-            BalanceReading::Known(Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 2_500,
-            }),
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_250_000_000_000,
+                    dig_units: 2_500,
+                },
+                as_of: crate::wallet::engine::BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
+            },
         ));
         assert!(held.contains("2.5 $DIG"), "{held}");
         assert!(held.contains("1.25 XCH"), "{held}");

@@ -38,14 +38,14 @@ use dig_node_control_interface::method::ControlMethod;
 use dig_node_control_interface::params::{
     Asset as WireAsset, WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
 };
-use dig_node_control_interface::results::WalletCoinRecord;
+use dig_node_control_interface::results::{WalletCoinRecord, WalletReadSource};
 
 use crate::control::{self, ControlCallError, ControlFailure};
 use crate::engine::EngineState;
 
 use super::engine::{
-    BalanceRequest, BalanceResponse, BroadcastRequest, BroadcastResponse, CoinsRequest,
-    CoinsResponse, WalletEngine,
+    BalanceAsOf, BalanceRequest, BalanceResponse, BroadcastRequest, BroadcastResponse,
+    CoinsRequest, CoinsResponse, WalletEngine,
 };
 use super::overview::{AddressReading, BalanceReading, ChainSource, WalletOverview};
 use super::state::{Asset, CoinRecord};
@@ -137,6 +137,17 @@ impl WalletEngine for NodeWalletEngine {
         })
     }
 
+    /// Read a spendable balance through the node's `control.wallet.balance`, WITH its provenance.
+    ///
+    /// # A behind-but-real figure is shown; a figure that was never measured is not
+    ///
+    /// This deliberately does not refuse a reading for being behind the chain tip. A light client
+    /// trails the tip permanently, so a `synced`-only gate hides the balance essentially always
+    /// (dig_ecosystem#2824). What travels instead is [`BalanceAsOf`], so the surface can state what
+    /// the figure is true as of.
+    ///
+    /// The one answer that is still refused is the replica having synced NOTHING — see the `as_of`
+    /// mapping below.
     fn balance(&self, request: BalanceRequest) -> Result<BalanceResponse, WalletError> {
         let params = WalletBalanceParams {
             address: request.address,
@@ -150,13 +161,14 @@ impl WalletEngine for NodeWalletEngine {
         )
         .map_err(|failure| classify(ControlMethod::WalletBalance, failure))?;
 
-        // The node answered with figures AND told us they are stale. A stale number still reads as
-        // the truth on a menu row, so it is reported as an unknown rather than shown with a caveat.
-        if !result.synced {
-            return Err(WalletError::EngineNotSynced);
-        }
         Ok(BalanceResponse {
             balance: result.balance,
+            as_of: as_of(
+                result.source,
+                result.peak_height,
+                result.synced,
+                result.balance,
+            )?,
         })
     }
 }
@@ -275,6 +287,70 @@ fn classify(method: ControlMethod, failure: ControlFailure) -> WalletError {
             unauthorized(method)
         }
         other => classify_read_failure(other),
+    }
+}
+
+/// What the node's disclosed tier + peak height say a balance figure is true AS OF.
+///
+/// # The cases that are an error rather than a reading
+///
+/// A `Db` answer with NO peak height is the node's own replica reporting that it has synced
+/// nothing. Its `balance: 0` is therefore *no data*, and rendering it as a figure would tell
+/// somebody who holds funds that they hold none. It becomes
+/// [`WalletError::EngineNoReplicaData`], which the overview renders as an absent balance.
+///
+/// **A height being PRESENT is not evidence of coverage, and that gap is the dangerous one.**
+/// Measured on the live node behind dig_ecosystem#2869: `peak_height = 9140640`,
+/// `initial_sync_complete = 0`, and **zero rows in the `coins` table**. A replica in that state
+/// answers `Db` + a valid height + `balance: 0`, which a height-only guard passes straight through
+/// — and the surface then renders *"0. Correct as of block 9,140,640"*, a confident, precisely
+/// dated zero against a wallet holding 1.599 XCH. Precision is what makes it worse than silence:
+/// the height reads as corroboration.
+///
+/// So `synced` is consulted, and this is the ONE thing it decides. It no longer gates the figure —
+/// that gate is what this feature removed — it disambiguates a `0`:
+///
+/// - **`Db` + `!synced` + `balance == 0`** → no data. An incomplete replica cannot tell "you hold
+///   nothing" from "I have not read your coins yet", and only one of those two readings is safe to
+///   be wrong about.
+/// - **`Db` + `!synced` + a NON-ZERO figure** → a reading, shown, labelled as still syncing. It
+///   could be a partial sum, which is why it is never presented as final; withholding it instead
+///   would restore the defect this whole feature exists to remove.
+/// - **`Db` + `synced` + `balance == 0`** → a REAL zero, and a real zero is a fact. The third
+///   address measured on that machine holds exactly nothing, and it must read as `0`.
+///
+/// # Why this is not a new wire field
+///
+/// The app cannot see the node's coin-row count, so it cannot distinguish an empty replica from an
+/// empty address in general. It does not need to: the node already tells it the replica's own view
+/// is incomplete, and a zero is the only figure whose meaning that changes. Adding a coverage field
+/// would be a two-repo contract change to learn something `synced` already implies here — and the
+/// node lane is separately guaranteeing it never serves an uncovered `Db` answer, which this arm
+/// backstops rather than duplicates.
+///
+/// The other three are readings, each stating exactly what it knows: the replica as of its height,
+/// the oracle as a third party's number with no height by contract, and an undisclosed tier as an
+/// unknown provenance rather than an assumed one.
+fn as_of(
+    source: Option<WalletReadSource>,
+    peak_height: Option<u32>,
+    synced: bool,
+    balance: u64,
+) -> Result<BalanceAsOf, WalletError> {
+    match (source, peak_height) {
+        // A ZERO from a replica that has not finished its first sync is NO DATA wearing a figure's
+        // clothes — see the section above. Checked before the ordinary `Db` arm so the narrower,
+        // dangerous case wins.
+        (Some(WalletReadSource::Db), _) if !synced && balance == 0 => {
+            Err(WalletError::EngineNoReplicaData)
+        }
+        (Some(WalletReadSource::Db), Some(height)) => Ok(BalanceAsOf::Replica {
+            height,
+            caught_up: synced,
+        }),
+        (Some(WalletReadSource::Db), None) => Err(WalletError::EngineNoReplicaData),
+        (Some(WalletReadSource::Fallback), _) => Ok(BalanceAsOf::Oracle),
+        (None, _) => Ok(BalanceAsOf::Undisclosed),
     }
 }
 
@@ -483,7 +559,7 @@ impl NodeBalance {
 mod tests {
     use super::*;
     use crate::test_support::node::{BroadcastReply, CoinsReply, FakeCoin, FakeNode, WalletReply};
-    use crate::wallet::overview::{balance_line, BalanceUnknown, Balances};
+    use crate::wallet::overview::{balance_line, menu_balance_label, BalanceUnknown, Balances};
 
     const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
 
@@ -526,6 +602,8 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let engine = engine_for(&node);
         let overview = WalletOverview::read(
@@ -535,15 +613,21 @@ mod tests {
 
         assert_eq!(
             overview.balance,
-            BalanceReading::Known(Balances {
-                xch_mojos: XCH_MOJOS,
-                dig_units: DIG_UNITS,
-            }),
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: XCH_MOJOS,
+                    dig_units: DIG_UNITS,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 6_000_000,
+                    caught_up: true
+                }
+            },
             "a node that answered must produce a KNOWN balance"
         );
         assert_eq!(
-            balance_line(&overview.balance),
-            "Balance: 2 $DIG and 1 XCH."
+            balance_line(&overview.balance, None),
+            "Balance: 2 $DIG and 1 XCH. Up to date with the chain, at block 6,000,000."
         );
         // Asserted from the SERVER's copy of the bytes: the contract method name must have gone out
         // on the wire, not merely been named in a constant the client also owns.
@@ -590,15 +674,23 @@ mod tests {
         ));
     }
 
-    /// **A node that answers with figures AND `synced: false` is still an unknown.** The nearest
-    /// wrong implementation reads `balance` and ignores `synced`; this fixture is the only one that
-    /// can catch it, because the read SUCCEEDS at the transport layer.
+    /// **A node that answers with figures AND `synced: false` still yields a BALANCE, labelled.**
+    ///
+    /// This is dig_ecosystem#2824 inverted from what it used to assert. A light client is never
+    /// caught up, so refusing every `synced: false` answer hid the balance permanently. The figure
+    /// is shown — and the as-of height it is true of is shown with it, which is what keeps a behind
+    /// figure a true statement rather than a stale one.
+    ///
+    /// The fixture varies ONLY `synced`: `source` and `peak_height` are the same as the caught-up
+    /// case, so an implementation that still consulted `synced` is the only thing that can fail it.
     #[test]
-    fn figures_the_node_calls_stale_are_not_a_balance() {
+    fn figures_the_node_calls_stale_are_shown_with_their_as_of_height() {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: false,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let overview = WalletOverview::read(
             AddressReading::Known(ADDRESS.to_string()),
@@ -606,13 +698,308 @@ mod tests {
         );
         assert_eq!(
             overview.balance,
-            BalanceReading::Unknown(BalanceUnknown::NotSynced)
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: XCH_MOJOS,
+                    dig_units: DIG_UNITS,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 6_000_000,
+                    caught_up: false,
+                },
+            }
         );
         assert!(
-            !balance_line(&overview.balance).contains('2'),
-            "a stale figure must not reach the user: {}",
-            balance_line(&overview.balance)
+            balance_line(&overview.balance, None).contains("as of block 6,000,000"),
+            "a behind figure must say what it is true as of: {}",
+            balance_line(&overview.balance, None)
         );
+    }
+
+    /// **A `db` answer with NO peak height is ABSENT, never a zero.**
+    ///
+    /// The node's own replica reporting no height at all has synced nothing, so its `balance: 0` is
+    /// *no data* — and a zero shown here tells somebody who holds funds that they hold none.
+    ///
+    /// The fixture holds the balance at `0` deliberately: that is the value the wrong implementation
+    /// would render, so this is the only figure that can catch it. Its control is
+    /// [`a_replica_with_a_height_shows_a_genuine_zero_as_a_figure`], which is the SAME fixture with a
+    /// height — so the pair discriminates "no height" from "zero balance", and an implementation
+    /// that refused every zero would fail the control.
+    #[test]
+    fn a_replica_that_has_synced_nothing_yields_no_figure_at_all() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: 0,
+            dig: 0,
+            synced: false,
+            source: Some("db"),
+            peak_height: None,
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Unknown(BalanceUnknown::ReplicaHasNoData)
+        );
+        assert!(
+            !menu_balance_label(&overview.balance, None)
+                .chars()
+                .any(|c| c.is_ascii_digit()),
+            "an unsynced replica must not render a numeral: {}",
+            menu_balance_label(&overview.balance, None)
+        );
+    }
+
+    /// **A dated zero from a replica that has NOT finished syncing is no data, not a balance.**
+    ///
+    /// The shape measured on the live node behind dig_ecosystem#2869 — `peak_height = 9140640`,
+    /// `initial_sync_complete = 0`, zero rows in `coins` — against a wallet holding 1.599 XCH. The
+    /// height is PRESENT, deliberately: the guard this replaced keyed on the height being missing,
+    /// so a fixture without one passes against the broken implementation and proves nothing. What
+    /// it produced was *"Balance: 0. Correct as of block 9,140,640"* — a confident, precisely dated
+    /// zero, whose precision reads as corroboration.
+    ///
+    /// Catches: an implementation that consults only `source` + `peak_height`, and any later one
+    /// that reintroduces the height as sufficient evidence of coverage.
+    #[test]
+    fn a_dated_zero_from_an_unfinished_replica_is_not_a_balance() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: 0,
+            dig: 0,
+            synced: false,
+            source: Some("db"),
+            peak_height: Some(9_140_640),
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Unknown(BalanceUnknown::ReplicaHasNoData)
+        );
+        let line = balance_line(&overview.balance, Some(9_145_204));
+        assert!(
+            !line.contains("9,140,640"),
+            "the height must not lend a zero it cannot support any credibility: {line}"
+        );
+        assert!(
+            !line.chars().any(|c| c.is_ascii_digit()),
+            "an absent balance must render no numeral at all: {line}"
+        );
+    }
+
+    /// **The control that keeps the guard above from becoming "hide every zero".**
+    ///
+    /// A CAUGHT-UP replica reporting nothing is the third address measured on that same machine: it
+    /// genuinely holds `0`, and a real zero is a fact a person is entitled to see. One field
+    /// differs from the fixture above — `synced` — which is what makes this pair able to tell a
+    /// coverage guard from a blanket zero-suppressor.
+    #[test]
+    fn a_caught_up_replica_shows_a_genuine_zero_as_a_figure() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: 0,
+            dig: 0,
+            synced: true,
+            source: Some("db"),
+            peak_height: Some(5_123_456),
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 0,
+                    dig_units: 0,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 5_123_456,
+                    caught_up: true
+                },
+            }
+        );
+    }
+
+    /// The measured live state, end to end: a replica 530 blocks behind its peers' peak.
+    ///
+    /// Both surfaces must say the node is STILL SYNCING, not merely which block the figure is
+    /// true at. Catches the wording that stated the as-of alone — *"correct as of block N, the
+    /// last your node has read"* — which a reader can take for a node that has finished and simply
+    /// reads that block, the one reading that would stop them waiting.
+    #[test]
+    fn a_behind_replica_says_it_is_still_syncing_on_both_surfaces() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: XCH_MOJOS,
+            dig: DIG_UNITS,
+            synced: false,
+            source: Some("db"),
+            peak_height: Some(9_144_674),
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        let peers_peak = Some(9_145_204);
+
+        let line = balance_line(&overview.balance, peers_peak);
+        assert!(line.contains("Still syncing"), "{line}");
+        assert!(
+            line.contains("9,144,674"),
+            "the as-of height is what makes the figure a true claim: {line}"
+        );
+        assert!(line.contains("2 $DIG") && line.contains("1 XCH"), "{line}");
+
+        let row = menu_balance_label(&overview.balance, peers_peak);
+        assert!(
+            row.contains("(syncing)"),
+            "the row a person actually glances at must carry the indicator: {row}"
+        );
+        assert!(row.contains("2 $DIG") && row.contains("1 XCH"), "{row}");
+        assert!(!row.contains('\n'), "a menu row cannot wrap: {row}");
+    }
+
+    /// **The control: a replica LEVEL with its peers' peak carries no syncing indicator.**
+    ///
+    /// The same reading, one field of the COMPARISON different. Without it, the test above is
+    /// satisfied by a surface that says "still syncing" permanently — which is the nearest wrong
+    /// fix, and a worse defect than the one it replaces: a caveat that never comes off is one a
+    /// person learns to stop reading, exactly when the day it changes is the day it matters.
+    #[test]
+    fn a_level_replica_carries_no_syncing_indicator() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: XCH_MOJOS,
+            dig: DIG_UNITS,
+            synced: true,
+            source: Some("db"),
+            peak_height: Some(9_145_204),
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        let peers_peak = Some(9_145_204);
+
+        let line = balance_line(&overview.balance, peers_peak);
+        assert!(!line.contains("Still syncing"), "{line}");
+        assert!(line.contains("Up to date"), "{line}");
+
+        let row = menu_balance_label(&overview.balance, peers_peak);
+        assert!(!row.contains("syncing"), "{row}");
+        assert!(row.contains("2 $DIG") && row.contains("1 XCH"), "{row}");
+    }
+
+    /// **An oracle answer is marked as syncing WITHOUT being called out of date.**
+    ///
+    /// The state every enrolled address on the measured machine is in. Two properties at once, and
+    /// they pull in opposite directions: the node is demonstrably still syncing — the oracle
+    /// answered *because* the replica has not got there — while the figure itself came from the
+    /// chain tip and is current.
+    ///
+    /// Catches an implementation that handles only the replica case (no indicator at all here),
+    /// and one that reuses the replica wording (which would describe a current figure as stale).
+    #[test]
+    fn an_oracle_answer_is_marked_syncing_but_never_called_stale() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: XCH_MOJOS,
+            dig: DIG_UNITS,
+            synced: false,
+            source: Some("fallback"),
+            peak_height: None,
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        let peers_peak = Some(9_145_204);
+
+        let line = balance_line(&overview.balance, peers_peak);
+        assert!(line.contains("Still syncing"), "{line}");
+        assert!(
+            line.contains("public chain service"),
+            "the figure's real source must be named, not implied to be the node: {line}"
+        );
+        assert!(
+            !line.contains("as of block"),
+            "an oracle answer has no replica height, so none may be stated: {line}"
+        );
+
+        let row = menu_balance_label(&overview.balance, peers_peak);
+        assert!(row.contains("syncing"), "{row}");
+        assert!(row.contains("public"), "{row}");
+        assert!(!row.contains('\n'), "a menu row cannot wrap: {row}");
+    }
+
+    /// **A `fallback` answer is shown as a THIRD PARTY's number, and carries no height.**
+    ///
+    /// This is what the live node answers today for every address. The fixture supplies a peak
+    /// height anyway: an implementation that reached for `peak_height` regardless of tier would
+    /// attach an as-of the oracle never made, and only a fixture carrying one can catch that.
+    #[test]
+    fn an_oracle_answer_is_labelled_as_a_third_party_and_gets_no_height() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: XCH_MOJOS,
+            dig: DIG_UNITS,
+            synced: false,
+            source: Some("fallback"),
+            peak_height: Some(6_000_000),
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: XCH_MOJOS,
+                    dig_units: DIG_UNITS,
+                },
+                as_of: BalanceAsOf::Oracle,
+            }
+        );
+        let line = balance_line(&overview.balance, None);
+        assert!(line.contains("public chain service"), "{line}");
+        assert!(
+            !line.contains("6,000,000") && !line.contains("as of block"),
+            "an oracle answer has no as-of height to state: {line}"
+        );
+    }
+
+    /// **A node that discloses no tier is reported as UNDISCLOSED, not as a tier we picked.**
+    ///
+    /// The fixture omits `source` entirely, which is how a node predating tier disclosure answers.
+    /// It still carries a peak height, so an implementation that inferred `db` from the presence of
+    /// a height would claim the wallet's own replica answered when nothing said so.
+    #[test]
+    fn a_node_that_discloses_no_tier_says_the_provenance_is_unknown() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: XCH_MOJOS,
+            dig: DIG_UNITS,
+            synced: true,
+            source: None,
+            peak_height: Some(6_000_000),
+        });
+        let overview = WalletOverview::read(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+        );
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: XCH_MOJOS,
+                    dig_units: DIG_UNITS,
+                },
+                as_of: BalanceAsOf::Undisclosed,
+            }
+        );
+        let line = balance_line(&overview.balance, None);
+        assert!(line.contains("did not say where this came from"), "{line}");
     }
 
     /// **The answer a DEFAULT dig-node install actually gives today.** Measured against a live
@@ -634,7 +1021,7 @@ mod tests {
             overview.balance,
             BalanceReading::Unknown(BalanceUnknown::NoChainSource)
         );
-        let line = balance_line(&overview.balance);
+        let line = balance_line(&overview.balance, None);
         assert!(line.contains("no live connection to the"), "{line}");
         assert!(
             !line.contains("money sent to it still arrives") || !line.contains("upgrade"),
@@ -661,10 +1048,16 @@ mod tests {
         );
         assert_ne!(
             overview.balance,
-            BalanceReading::Known(Balances {
-                xch_mojos: 0,
-                dig_units: 0
-            })
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 0,
+                    dig_units: 0
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 6_000_000,
+                    caught_up: true
+                }
+            }
         );
     }
 
@@ -679,6 +1072,8 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let engine = NodeWalletEngine::new(node.endpoint(), None, Duration::from_secs(5));
         assert_eq!(ask(&engine, Asset::Xch).ok(), Some(XCH_MOJOS));
@@ -698,6 +1093,8 @@ mod tests {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
                 synced: true,
+                source: Some("db"),
+                peak_height: Some(6_000_000),
             },
             Duration::from_secs(4),
         );
@@ -728,6 +1125,8 @@ mod tests {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
                 synced: true,
+                source: Some("db"),
+                peak_height: Some(6_000_000),
             },
             control::DEFAULT_PROBE_TIMEOUT + Duration::from_millis(250),
         );
@@ -982,15 +1381,23 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let poller =
             NodeBalance::with_token_reader(REFRESH_INTERVAL, Duration::from_secs(5), fake_token);
         assert_eq!(
             settle(&poller, &connected_to(&node)),
-            BalanceReading::Known(Balances {
-                xch_mojos: XCH_MOJOS,
-                dig_units: DIG_UNITS,
-            })
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: XCH_MOJOS,
+                    dig_units: DIG_UNITS,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 6_000_000,
+                    caught_up: true
+                }
+            }
         );
     }
 
@@ -1008,6 +1415,8 @@ mod tests {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
                 synced: true,
+                source: Some("db"),
+                peak_height: Some(6_000_000),
             },
             DELAY,
         );
@@ -1030,10 +1439,16 @@ mod tests {
         );
         assert_eq!(
             settle(&poller, &link),
-            BalanceReading::Known(Balances {
-                xch_mojos: XCH_MOJOS,
-                dig_units: DIG_UNITS,
-            }),
+            BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: XCH_MOJOS,
+                    dig_units: DIG_UNITS,
+                },
+                as_of: BalanceAsOf::Replica {
+                    height: 6_000_000,
+                    caught_up: true
+                }
+            },
             "the figure must arrive once the node answers"
         );
     }
@@ -1059,6 +1474,8 @@ mod tests {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
                 synced: true,
+                source: Some("db"),
+                peak_height: Some(6_000_000),
             },
             READ_TAKES,
         );
@@ -1069,10 +1486,16 @@ mod tests {
             fake_token,
         );
         let link = connected_to(&node);
-        let held = BalanceReading::Known(Balances {
-            xch_mojos: XCH_MOJOS,
-            dig_units: DIG_UNITS,
-        });
+        let held = BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: XCH_MOJOS,
+                dig_units: DIG_UNITS,
+            },
+            as_of: BalanceAsOf::Replica {
+                height: 6_000_000,
+                caught_up: true,
+            },
+        };
         assert_eq!(settle(&poller, &link), held, "the first read must land");
 
         // Now stale. This observation starts the re-read and must answer with the figure on screen.
@@ -1118,6 +1541,8 @@ mod tests {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
                 synced: true,
+                source: Some("db"),
+                peak_height: Some(6_000_000),
             },
             Duration::from_millis(800),
         );
@@ -1132,7 +1557,10 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(matches!(settle(&poller, &link), BalanceReading::Known(_)));
+        assert!(matches!(
+            settle(&poller, &link),
+            BalanceReading::Known { .. }
+        ));
         assert_eq!(
             node.request_count(),
             2,
@@ -1186,6 +1614,8 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let poller = NodeBalance::with_token_reader(
             Duration::from_secs(600),
@@ -1214,6 +1644,8 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let poller = NodeBalance::with_token_reader(
             Duration::from_secs(600),
@@ -1237,6 +1669,8 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let poller = NodeBalance::with_token_reader(
             Duration::from_secs(600),
@@ -1244,7 +1678,10 @@ mod tests {
             fake_token,
         );
         let link = connected_to(&node);
-        assert!(matches!(settle(&poller, &link), BalanceReading::Known(_)));
+        assert!(matches!(
+            settle(&poller, &link),
+            BalanceReading::Known { .. }
+        ));
         assert_eq!(
             poller.observe(&link, None),
             BalanceReading::Pending,
@@ -1262,12 +1699,14 @@ mod tests {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
             synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
         });
         let poller =
             NodeBalance::with_token_reader(REFRESH_INTERVAL, Duration::from_secs(5), no_token);
         assert!(matches!(
             settle(&poller, &connected_to(&node)),
-            BalanceReading::Known(_)
+            BalanceReading::Known { .. }
         ));
     }
 

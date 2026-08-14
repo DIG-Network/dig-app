@@ -414,9 +414,13 @@ pub fn build(view: &TrayView) -> WindowModel {
             TabId::Wallet,
             PaneNote::Ready,
             vec![Section {
-                heading: Some(crate::wallet::overview::menu_balance_label(
-                    &crate::wallet::overview::WalletOverview::of_tray(view).balance,
-                )),
+                heading: Some({
+                    let overview = crate::wallet::overview::WalletOverview::of_tray(view);
+                    crate::wallet::overview::menu_balance_label(
+                        &overview.balance,
+                        overview.peers_peak,
+                    )
+                }),
                 rows: wallet_actions(view, &account),
             }],
         ),

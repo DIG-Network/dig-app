@@ -821,6 +821,8 @@ mod tests {
                 xch: 1,
                 dig: 1,
                 synced: true,
+                source: Some("db"),
+                peak_height: Some(6_000_000),
             },
             // Comfortably past the budget below, so the outcome cannot depend on scheduling noise.
             delay: Duration::from_secs(3),
