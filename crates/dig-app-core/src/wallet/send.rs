@@ -48,10 +48,10 @@
 //! nothing and is never asked to.
 
 use dig_account::mint::{PushOutcome, SpendPublisher};
+use dig_account::{AuthProvider, TransferResult};
 use dig_account::{
     CustodyPolicy, PendingTransfer, SpendOpClass, TransferError, TransferRequest, TransferStatus,
 };
-use dig_account::{AuthProvider, TransferResult};
 use dig_chainsource_interface::ChainSource;
 
 use crate::account::money::{MoneyPath, MoneyPathError};
@@ -482,10 +482,9 @@ mod tests {
         /// The chain before the send: a peak and one spendable coin.
         fn chain(&self) -> WatchedChain {
             WatchedChain::new(
-                MockChainSource::new().with_peak(PEAK).with_coin(
-                    self.funding.coin_id(),
-                    confirmed(self.funding, PEAK - 100),
-                ),
+                MockChainSource::new()
+                    .with_peak(PEAK)
+                    .with_coin(self.funding.coin_id(), confirmed(self.funding, PEAK - 100)),
                 self.journal.clone(),
             )
         }
@@ -494,8 +493,12 @@ mod tests {
             &'a self,
             chain: &'a WatchedChain,
             publisher: &'a ScriptedPublisher,
-        ) -> SendSession<'a, WatchedChain, ScriptedPublisher, HarnessAuthProvider<JournallingCeremony>>
-        {
+        ) -> SendSession<
+            'a,
+            WatchedChain,
+            ScriptedPublisher,
+            HarnessAuthProvider<JournallingCeremony>,
+        > {
             SendSession::new(
                 &self.residency,
                 &self.money,

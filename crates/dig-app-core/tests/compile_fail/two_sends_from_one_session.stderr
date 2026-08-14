@@ -1,0 +1,16 @@
+error[E0382]: use of moved value: `session`
+  --> tests/compile_fail/two_sends_from_one_session.rs:26:19
+   |
+18 |     session: SendSession<'_, C, Pub, P>,
+   |     ------- move occurs because `session` has type `SendSession<'_, C, Pub, P>`, which does not implement the `Copy` trait
+...
+25 |     let _first = session.send(request).await;
+   |                          ------------- `session` moved due to this method call
+26 |     let _second = session.send(request).await;
+   |                   ^^^^^^^ value used here after move
+   |
+note: `SendSession::<'a, C, Pub, P>::send` takes ownership of the receiver `self`, which moves `session`
+  --> src/wallet/send.rs
+   |
+   |     pub async fn send(self, request: &TransferRequest) -> Result<InFlightSend, SendError> {
+   |                       ^^^^

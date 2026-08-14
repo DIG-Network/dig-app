@@ -2172,6 +2172,37 @@ drops in as the production implementation without touching the wallet logic.
 [dig_ecosystem#910]: https://github.com/DIG-Network/dig_ecosystem/issues/910
 [dig_ecosystem#2295]: https://github.com/DIG-Network/dig_ecosystem/issues/2295
 
+#### 3.3a Sending XCH (normative)
+
+A send travels in exactly this order, and `dig_app_core::wallet::send` is the only implementation of
+it: **build** the unsigned spends (`dig_account::WalletOps::build_transfer`, reached through
+`AccountResidency::build_transfer` so a locked account builds nothing) → **sign** through the custody
+gate (`account::money::MoneyPath::authorize_and_sign`, op class `SmallSend`) → **anchor** by reading
+the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
+(`chain::ControlSpendPublisher`).
+
+- The anchoring peak MUST be read AFTER the signature and immediately BEFORE the push. Read earlier it
+  is stale by however long the human took; read later it is worthless. It is the only height a
+  back-dated confirmation can contradict.
+- A peak that cannot be read MUST refuse the push. Anchoring at `0` is FORBIDDEN — every height is at
+  or above genesis, so a zero anchor makes the back-dating check vacuous.
+- A send MUST report success only from a `TransferStatus::Confirmed`, which `dig-account` constructs
+  solely from a buried chain record. An accepted push is an acceptance, not a payment, and dig-app MUST
+  NOT define any value of its own meaning "sent" or "succeeded".
+- A push that was never JUDGED (the node could not be asked, or did not answer) has an UNKNOWN outcome.
+  The caller MUST poll the pending transfer; rebuilding it can pay the recipient twice.
+- At most one send per profile may be in flight. This is structural: starting a send consumes the
+  session that starts it.
+- There is NO retry or fee bump. A future one MUST use `WalletOps::build_transfer_replacing`, which
+  reuses the original inputs; a rebuilt transfer at a higher fee can select a different input set, and
+  two bundles spending disjoint inputs can both confirm.
+- The fee is a FIXED constant (`wallet::send::DEFAULT_SEND_FEE_MOJOS`) displayed to the user, never an
+  estimate. What the confirm ceremony shows is exactly what is paid.
+- Every send reaches the human. The production custody policy is `Hot { auto_send_limit: 0 }` with the
+  default deny-everything `AutoSendPolicy`; raising the allowance above zero is what would let a
+  payment leave with no confirmation.
+- CAT / `$DIG` sending is not part of this flow.
+
 ### 3.4 Per-user data at rest (NC-2 / NC-3)
 
 All user-facing data lives in the interactive user's per-OS application-data directory, in a

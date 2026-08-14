@@ -42,8 +42,8 @@ use crate::account::active_profile::{ActiveSlot, WalletSlot};
 use crate::account::profile_session::ProfileSession;
 use crate::account::sealer::AccountSealer;
 use crate::sealer::{ProfileSealer, SealError};
-use crate::wallet::send::SendError;
 use crate::session_lock::SessionKeys;
+use crate::wallet::send::SendError;
 
 /// The single unlocked account the app currently holds, behind a shared lock so the tray, the sign
 /// path, and the seal path all see the SAME lock state. Cheap to clone (an `Arc`); locking any clone
