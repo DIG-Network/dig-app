@@ -696,10 +696,7 @@ mod tests {
     async fn an_unanswered_push_reports_an_unknown_fate_and_hands_back_the_pending_transfer() {
         let bench = Bench::funded();
         let chain = bench.chain();
-        let publisher = ScriptedPublisher::answering(
-            bench.journal.clone(),
-            Err(unanswered()),
-        );
+        let publisher = ScriptedPublisher::answering(bench.journal.clone(), Err(unanswered()));
 
         let error = bench
             .session(&chain, &publisher)
@@ -832,10 +829,7 @@ mod tests {
 
         let bench = Bench::funded();
         let chain = bench.chain();
-        let publisher = ScriptedPublisher::answering(
-            bench.journal.clone(),
-            Err(unanswered()),
-        );
+        let publisher = ScriptedPublisher::answering(bench.journal.clone(), Err(unanswered()));
 
         let error = bench
             .session(&chain, &publisher)
@@ -1024,10 +1018,7 @@ mod tests {
         let unanswered = bench
             .session(
                 &chain,
-                &ScriptedPublisher::answering(
-                    bench.journal.clone(),
-                    Err(unanswered()),
-                ),
+                &ScriptedPublisher::answering(bench.journal.clone(), Err(unanswered())),
             )
             .send(&request())
             .await

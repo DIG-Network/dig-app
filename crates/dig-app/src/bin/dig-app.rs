@@ -2583,9 +2583,19 @@ mod tray {
             // The Wallet pane's send (dig_ecosystem#2819). ONE call: the request arriving here was
             // already validated by `SendDraft::assess`, and every decision left — is there an
             // account, is there a node, what did the outcome mean — is made inside `SendHolder`,
-            // under test. This arm runs on the action worker, never the repaint thread, so the
-            // confirm ceremony can hold a person for as long as they need without freezing the
-            // window; that is the same thread every other blocking confirm here already uses.
+            // under test.
+            //
+            // What running on the action worker does and does not buy, said precisely, because the
+            // looser version of this comment claimed more than is true (dig_ecosystem#2253). It
+            // keeps the REPAINT thread free, so the window keeps drawing for the whole ceremony —
+            // up to 120 s. It does NOT leave the app responsive: this arm HOLDS the single
+            // `ActionWorker` and the session mutex until the person answers, so Quit is refused and
+            // the tick publishes no new view meanwhile. Three sibling arms behave the same way, so
+            // it is the established shape here rather than something this send introduced.
+            //
+            // The stale view is why a second send cannot be prevented by the drawn form: the button
+            // a person sees was published before the send began. `SendHolder::send` refuses on its
+            // own compare-and-set instead.
             TrayAction::SendXch(request) => {
                 send_holder().send(status, session.as_ref().map(|s| &s.residency), &request)
             }

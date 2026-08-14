@@ -392,7 +392,7 @@ impl SendHolder {
 
     /// Record a push a mempool accepted, and begin watching its payment coin.
     ///
-    /// The one place a transfer becomes JUDGED — see [`Watched::judged`] for what that buys.
+    /// The one place a transfer becomes JUDGED, which is what lets a later poll report a wait as real.
     pub fn accepted(&self, pending: PendingTransfer) {
         let mut watched = self.lock();
         watched.progress = SendProgress::accepted(&pending);
@@ -434,8 +434,8 @@ impl SendHolder {
     ///
     /// `Awaiting` is the same answer whether a bundle is queued in a mempool or was never broadcast
     /// at all, so for a transfer no mempool ever accepted it establishes nothing and MUST leave
-    /// [`SendProgress::Unknown`] standing ([`Watched::judged`]). Only `Confirmed` and `Failed` are
-    /// verdicts, and those resolve it either way.
+    /// [`SendProgress::Unknown`] standing. Only `Confirmed` and `Failed` are verdicts, and those
+    /// resolve it either way.
     pub fn observe<C>(&self, chain: &C, now: std::time::Instant) -> SendProgress
     where
         C: dig_chainsource_interface::ChainSource + ?Sized,
@@ -568,7 +568,9 @@ impl SendHolder {
                     "this app could not start the worker the confirmation needs: {e}"
                 )))
             })?;
-        runtime.block_on(SendSession::new(residency, &money, custody, &chain, &publisher).send(request))
+        runtime.block_on(
+            SendSession::new(residency, &money, custody, &chain, &publisher).send(request),
+        )
     }
 
     /// Poll the watched transfer against the connected node, if there is one.
