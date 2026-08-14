@@ -262,6 +262,28 @@ fn main() {
             wizard::draw(confirmer.as_ref(), &screen);
             return;
         }
+        // The zero-profile funding prompt (dig_ecosystem#2950) — the window the state loop raises,
+        // by itself, once a day, on an account that has no profiles yet.
+        //
+        // Photographed here because it is the ONE window in the app nobody can reach by clicking:
+        // raising it needs an unlocked account with zero profiles AND a node answering both mint
+        // probes, which is not a state a person can arrange on demand. Without this arm the only
+        // evidence it renders correctly would be its assertions, and an assertion cannot see a
+        // sentence that wraps into an unreadable column or a cost that fell off the bottom.
+        //
+        // The address is a FIXED published-format example and the cost comes from
+        // `first_profile_cost_mojos`, so what is photographed is the real arithmetic rather than a
+        // number typed into a screenshot.
+        "first-profile" => {
+            use dig_app_core::account::first_profile::copy;
+            use dig_app_core::account::first_profile::first_profile_claim;
+            use dig_app_core::account::first_profile::first_profile_cost_mojos;
+
+            const ADDRESS: &str =
+                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+            let body = copy::body(ADDRESS, first_profile_cost_mojos());
+            confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body))
+        }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
             secret: "your 24-word DIG recovery phrase",
@@ -349,7 +371,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, did-wizard, authorization, destroy, unopenable, input, passphrase, open or bar"
+                "unknown window `{other}` — expected notice, claim, did-wizard, first-profile, authorization, destroy, unopenable, input, passphrase, open or bar"
             );
             std::process::exit(2);
         }

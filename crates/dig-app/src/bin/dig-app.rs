@@ -2337,6 +2337,47 @@ mod tray {
 
     /// Returns once the user has chosen Quit and the render loop has been told to exit.
     #[allow(clippy::too_many_arguments)]
+    /// Raise the zero-profile funding prompt when it is due (dig_ecosystem#2950).
+    ///
+    /// Reads the view the tick has ALREADY built rather than taking its own readings, so the prompt
+    /// and the profiles card can never disagree about whether this account has profiles or whether a
+    /// profile can be minted — they are literally the same two values.
+    ///
+    /// # Why the deferral is written on RAISE, and only when the worker accepted
+    ///
+    /// Writing it here rather than in the "Remind me later" handler is what makes every dismissal
+    /// path behave identically: the button, the close box, and a shell that kills the window all
+    /// leave the same next-prompt time behind. A deferral written only by the button would re-prompt
+    /// on the next tick — half a second later — for anyone who closed the window instead, which is a
+    /// nag loop rather than a daily reminder.
+    ///
+    /// It is written only when [`Submitter::submit`] ACCEPTED the action. A refusal means another
+    /// dialog is on screen, so the prompt was never raised, and consuming the day for a window
+    /// nobody saw would silently skip it.
+    fn maybe_prompt_for_a_first_profile(
+        view: &TrayView,
+        env: &AppEnvironment,
+        actions: &ActionWorker<TrayAction>,
+    ) {
+        use dig_app_core::account::first_profile::defer_for_a_day;
+        use dig_app_core::account::first_profile::first_profile_prompt;
+        use dig_app_core::account::first_profile::ReminderFile;
+
+        let Some(dir) = super::brand_dir(env) else {
+            return;
+        };
+        let reminder = ReminderFile::new(&dir);
+        let now = std::time::SystemTime::now();
+
+        if !first_profile_prompt(&view.profiles, view.profile_creation, &reminder, now).should_raise()
+        {
+            return;
+        }
+        if actions.submit(TrayAction::CreateFirstProfile) {
+            defer_for_a_day(&reminder, now);
+        }
+    }
+
     fn tick_forever(
         pump: &pump_vigil::Heartbeat,
         link: &TrayLink<Paint>,
@@ -2462,6 +2503,21 @@ mod tray {
 
                 snapshot(status, env, held.session.as_ref(), held.attempt, hotkey)
             };
+
+            // The zero-profile funding prompt (dig_ecosystem#2950). Deliberately HERE, on the state
+            // loop, rather than on the start-up path beside the DID wizard.
+            //
+            // Both halves of what the user asked for fall out of that placement. "Once a day, not
+            // once a launch" needs a check that runs while the app is OPEN, because somebody who
+            // leaves it running for a week gets no start-up to be prompted at. And the prompt needs a
+            // creation reading, which needs an unlocked session — so a start-up check would have had
+            // to OPEN the account to decide, which is the unbidden password window dig_ecosystem#1817
+            // rejected and dig_ecosystem#2377 shipped by accident. Here the account is already open
+            // because the person opened it, and the first tick afterwards raises the prompt.
+            //
+            // No phase is entered around it: it reads one small file and calls `submit`, which never
+            // blocks. Nothing on this path can wedge the tick.
+            maybe_prompt_for_a_first_profile(&latest, env, actions);
 
             // Post only when something actually changed. Rebuilding a native menu every 500 ms would
             // close the menu under the user's cursor while they are reading it. The comparison stays
@@ -2681,6 +2737,9 @@ mod tray {
                 set_profile_visibility(env, session.as_ref(), confirmer, ix, hidden)
             }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
+            TrayAction::CreateFirstProfile => {
+                prompt_for_a_first_profile(session.as_ref(), confirmer)
+            }
             // Both wallet arms re-snapshot LIVE for the same reason `show_status` does: a node that came
             // up — or a lock that dropped the keys — while the menu sat open must be reflected, not
             // replayed from the model the row was drawn from.
@@ -3826,6 +3885,68 @@ mod tray {
     ///
     /// Both sentences come from `dig_app_core::profiles::copy`, which is also where the window's
     /// card reads them — so the notice and the card cannot come to describe different builds.
+    /// Put the zero-profile funding prompt on screen (dig_ecosystem#2950).
+    ///
+    /// Raised by the state loop, never by a click — see
+    /// [`TrayAction::CreateFirstProfile`](dig_app_core::tray_menu::TrayAction::CreateFirstProfile).
+    /// Whether it should be raised at all was decided in the library before this ran; this function
+    /// only draws it.
+    ///
+    /// # Money
+    ///
+    /// **Nothing here spends anything.** The window states a cost and shows an address; the affirming
+    /// control puts that address on the clipboard. There is no mint on this path, which is why the
+    /// prompt can be raised on a schedule without ever taking somebody's money by surprise.
+    ///
+    /// # Why the affirming control is a COPY and not a mint
+    ///
+    /// The user asked for a *"popout to fund your wallet"*, and funding is what this does. A wallet
+    /// at zero profiles has no money in it yet by definition — that is why it is being prompted — so
+    /// a mint control here would refuse for insufficient funds on the very first press, which is the
+    /// dead end #1800 removed. The create control belongs on the profiles card, beside a funded
+    /// balance the person can see (dig_ecosystem#2939).
+    fn prompt_for_a_first_profile(session: Option<&TraySession>, confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::account::first_profile::copy;
+        use dig_app_core::account::first_profile::first_profile_claim;
+        use dig_app_core::account::first_profile::first_profile_cost_mojos;
+        use dig_app_core::confirm::ConfirmDecision;
+
+        // No live session means no address to fund, and a funding window with no address on it is
+        // the trap this app does not ship. The decision that raised this read a session-derived
+        // creation state, so reaching here without one is a lock taken in the gap between the two.
+        let Some(session) = session else { return };
+        let Some(Ok(address)) = session.residency.receiving_address() else {
+            return;
+        };
+
+        let body = copy::body(&address, first_profile_cost_mojos());
+        if confirmer.confirm_claim(&first_profile_claim(&address, &body)) != ConfirmDecision::Approve
+        {
+            // "Remind me later", or the window closed. Both are the same answer and both are
+            // already deferred — the state loop wrote the next prompt time when it raised this,
+            // precisely so that every way out of the window behaves the same.
+            return;
+        }
+
+        match write_clipboard(&address) {
+            true => notify(
+                confirmer,
+                copy::COPIED_TITLE,
+                copy::COPIED_HEADING,
+                copy::COPIED_BODY,
+            ),
+            // A copy that silently did nothing would leave somebody pasting whatever was on the
+            // clipboard before into a send field. The address is repeated so the window is still a
+            // way forward.
+            false => notify_identifier(
+                confirmer,
+                copy::COPIED_TITLE,
+                "DIG could not reach the clipboard. Here is your address (select it to copy).",
+                &address,
+            ),
+        }
+    }
+
     fn explain_profiles(
         env: &AppEnvironment,
         session: Option<&TraySession>,
