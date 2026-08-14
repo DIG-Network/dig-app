@@ -746,6 +746,44 @@ mod tests {
         );
     }
 
+    /// **A node that CAN mint draws no half-offer — silence, not a claim with no control behind it.**
+    ///
+    /// `ProfileCreation::Possible` became reachable in production the moment the binary started
+    /// reading creation off the node (dig_ecosystem#2398), so this state now needs pinning: until
+    /// the create control lands, the card must say NOTHING about creation rather than announce that
+    /// it is available. A missing feature is an omission; a sentence promising one with no control
+    /// beside it is the dead end `professional-ui` forbids outright, and the one
+    /// dig_ecosystem#1800 removed once already.
+    ///
+    /// The fixture is a `Possible` view drawn on the same card as every other state, and the
+    /// assertion is against the sentences a HALF-offer would use — the blocked explanations and the
+    /// still-checking one. A test asserting only "the panel heading is absent" would pass on a card
+    /// that drew a blocked sentence for a capable node, which is the more likely mistake.
+    #[test]
+    fn a_capable_node_draws_no_offer_it_cannot_yet_honour() {
+        let view = TrayView {
+            profile_creation: ProfileCreation::Possible,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let painted = card_says(&view, 960.0);
+
+        assert!(
+            !painted.contains(copy::profiles::CHECKING_CREATION),
+            "a node that already answered is drawn as still being checked: {painted}"
+        );
+        for blocked in CreationBlocked::EVERY {
+            assert!(
+                !painted.contains(copy::profiles::cannot_create(blocked)),
+                "a node that CAN mint is told {blocked:?} is missing: {painted}"
+            );
+        }
+        assert!(
+            !painted.contains(copy::profiles::CREATE_PANEL),
+            "the creation panel is drawn for a capable node with no control inside it, which \
+             promises something this build cannot yet do: {painted}"
+        );
+    }
+
     /// **Nothing on this card offers to create a profile, and the reason is stated.**
     ///
     /// The structural half is the one that matters: there is no `CreateProfile` action to draw, so
