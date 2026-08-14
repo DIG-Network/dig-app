@@ -30,7 +30,7 @@ use dig_account::{
     transfer_status, AccountId, AutoSendPolicy, CustodyPolicy, HotWallet, SystemClock,
     TransferRequest, TransferStatus,
 };
-use dig_app_core::account::boot::unlock_existing_account;
+use dig_app_core::account::boot::{unlock_existing_account, DEFAULT_ACCOUNT_ID};
 use dig_app_core::account::ceremony::PromptedCeremony;
 use dig_app_core::account::money::MoneyPath;
 use dig_app_core::chain::{ControlChainSource, ControlSpendPublisher};
@@ -98,7 +98,10 @@ async fn main() {
         dig_app_core::account::auth::HarnessAuthProvider::new(PromptedCeremony::unlocking(
             "confirm this payment",
         )),
-        AccountId::new("live-send"),
+        // The account the residency was actually opened as. This string is what the confirm ceremony
+        // NAMES to the user while asking them to approve a real payment, so a decorative label here
+        // would have the dialog spend from one account while naming another.
+        AccountId::new(DEFAULT_ACCOUNT_ID),
         dig_wallet_backend::types::Network::Mainnet,
         custody,
         AutoSendPolicy::default(),
