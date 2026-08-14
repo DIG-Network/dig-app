@@ -536,26 +536,33 @@ pub mod copy {
     /// wizard reads — so a card, a notice and that wizard cannot come to disagree about whether a
     /// mint is possible.
     ///
-    /// # The wording is #1820's, and "optional" is the word it settled against
+    /// # These sentences changed when the cause became MEASURED, and the old ones are why
     ///
-    /// A profile is REQUIRED for publishing, signing and messaging, and creating one is *not
-    /// available in this version*. Calling it optional would tell a person they had chosen to go
-    /// without something they have simply not been offered.
+    /// Both used to end *"it is not available in this version. Nothing is missing from your setup
+    /// and there is nothing for you to do"*, which was accurate only while no build could mint at
+    /// all: creation was derived from a hardcoded seam, so the absence really was DIG's rather than
+    /// this machine's. Creation is now read off the connected node (dig_ecosystem#2398), and the
+    /// same two arms mean something entirely different — **a node that is not answering** and **a
+    /// node too old to serve the reads the second half needs**. Telling either of those people that
+    /// nothing is missing from their setup withholds the one action that would fix it.
+    ///
+    /// So each sentence now names the cause and the REMEDY. #1820's finding survives intact and is
+    /// the reason neither says "optional": a profile is REQUIRED for publishing, signing and
+    /// messaging, and calling it optional would tell a person they had chosen to go without
+    /// something they were never offered.
     pub fn cannot_create(blocked: CreationBlocked) -> &'static str {
         match blocked {
             CreationBlocked::NoChainTransport => {
-                "Creating a profile mints a DID and a store on the Chia blockchain, and this \
-                 version of DIG has no way to reach the chain to do it. It is required for \
-                 publishing, signing for an app and messaging, and it is not available in this \
-                 version. Nothing is missing from your setup and there is nothing for you to do — \
-                 when it arrives, this card will offer it."
+                "Creating a profile mints a DID and a store on the Chia blockchain, and DIG could \
+                 not reach the chain to check whether this computer can do it. Your DIG node is \
+                 what reads the chain, so start it — the Home tab shows whether it is running. \
+                 This card offers creation as soon as your node answers."
             }
             CreationBlocked::NoLineageWalk => {
-                "This copy of DIG can reach the chain, and it cannot yet finish the second half of \
-                 creating a profile — so starting one would spend XCH on something it could not \
-                 complete. It is required for publishing, signing for an app and messaging, and it \
-                 is not available in this version. Nothing is missing from your setup and there is \
-                 nothing for you to do — when it arrives, this card will offer it."
+                "Your DIG node answers, and it cannot serve the chain reads the second half of \
+                 creating a profile needs — so beginning one would spend XCH on something that \
+                 could not be finished. Update your DIG node to a newer version and this card will \
+                 offer creation."
             }
         }
     }

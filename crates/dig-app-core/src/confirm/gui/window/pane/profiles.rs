@@ -781,15 +781,41 @@ mod tests {
              fault they do not have"
         );
 
-        for sentence in &said {
-            let lowered = sentence.to_lowercase();
+        // Each blocker names the remedy for ITS OWN cause. Asserted per-arm rather than as "some
+        // remedy word appears somewhere", because the two causes have OPPOSITE remedies — a stopped
+        // node is started, an old one is updated — and a card that offered the wrong one sends a
+        // person to reinstall software that is working, or to restart a node that is already
+        // running. A single sentence carrying both words would satisfy a looser check.
+        let remedies = [
+            (CreationBlocked::NoChainTransport, "start", "update"),
+            (CreationBlocked::NoLineageWalk, "update", "start"),
+        ];
+        for (blocked, remedy, other) in remedies {
+            let lowered = copy::profiles::cannot_create(blocked).to_lowercase();
             assert!(
-                lowered.contains("not available in this version"),
-                "the #1820 wording is missing, so the absence reads as a defect: {lowered}"
+                lowered.contains(remedy),
+                "{blocked:?} does not tell the person to {remedy} anything, so a measured cause \
+                 reads as an absence they can do nothing about: {lowered}"
             );
             assert!(
-                lowered.contains("required"),
-                "a profile is described as something a person chose to go without: {lowered}"
+                !lowered.contains(other),
+                "{blocked:?} sends the reader after the OTHER cause's remedy: {lowered}"
+            );
+        }
+
+        for sentence in &said {
+            let lowered = sentence.to_lowercase();
+            // The claim was true only while creation came from a hardcoded seam. It is now read off
+            // the node, so both arms describe THIS MACHINE — and telling somebody whose node is
+            // merely stopped that the capability is missing from DIG withholds the one action that
+            // would fix it (dig_ecosystem#2398).
+            assert!(
+                !lowered.contains("not available in this version"),
+                "a MEASURED blocker is reported as a missing DIG capability: {lowered}"
+            );
+            assert!(
+                !lowered.contains("nothing for you to do"),
+                "a person with a fixable node is told there is nothing they can do: {lowered}"
             );
             assert!(
                 !lowered.contains("optional"),
