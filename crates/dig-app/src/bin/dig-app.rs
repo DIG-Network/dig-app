@@ -2369,7 +2369,8 @@ mod tray {
         let reminder = ReminderFile::new(&dir);
         let now = std::time::SystemTime::now();
 
-        if !first_profile_prompt(&view.profiles, view.profile_creation, &reminder, now).should_raise()
+        if !first_profile_prompt(&view.profiles, view.profile_creation, &reminder, now)
+            .should_raise()
         {
             return;
         }
@@ -2378,6 +2379,13 @@ mod tray {
         }
     }
 
+    // The tick loop's parameters are each a distinct live handle owned by `main` — the pump, the tray
+    // link, the event proxy, the action worker, the menu receiver, the session, the status, the
+    // environment, the hotkey, the live view, and the model it folds. Bundling them into a context
+    // struct would move the same eleven bindings behind one name without removing a single one, and
+    // this is the hot loop, so the indirection costs a borrow split that `main` currently gets for
+    // free. Revisit if a twelfth appears.
+    #[allow(clippy::too_many_arguments)]
     fn tick_forever(
         pump: &pump_vigil::Heartbeat,
         link: &TrayLink<Paint>,
@@ -3920,7 +3928,8 @@ mod tray {
         };
 
         let body = copy::body(first_profile_cost_mojos());
-        if confirmer.confirm_claim(&first_profile_claim(&address, &body)) != ConfirmDecision::Approve
+        if confirmer.confirm_claim(&first_profile_claim(&address, &body))
+            != ConfirmDecision::Approve
         {
             // "Remind me later", or the window closed. Both are the same answer and both are
             // already deferred — the state loop wrote the next prompt time when it raised this,

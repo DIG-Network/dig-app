@@ -283,8 +283,12 @@ fn main() {
 
             const ADDRESS: &str =
                 "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
-            let body = copy::body(first_profile_cost_mojos());
-            confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body))
+            // A wallet at zero profiles and zero funds: the shortfall IS the whole cost, which is
+            // the state this window exists for.
+            let cost = first_profile_cost_mojos();
+            let body = copy::body(cost, cost);
+            let scannable = QrArt::encode(ADDRESS);
+            confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body, scannable.as_ref()))
         }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
