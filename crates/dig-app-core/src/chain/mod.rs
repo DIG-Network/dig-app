@@ -24,6 +24,12 @@
 //! [`coin_spend`](dig_chainsource_interface::ChainSource::coin_spend), `Ok(None)` means *unspent or
 //! unknown*, which a caller reads as safe to spend.
 //!
+//! An absence is only an answer when the tier that gave it was CAUGHT UP. A present coin may be
+//! believed from any tier — a replica that is behind can only be behind, never ahead — while an
+//! empty answer from `synced: false` is the one reply a stale replica produces indistinguishably
+//! from the chain itself, so it is a [`ChainReadError`]. See `ControlChainSource::believe_absence`
+//! for what that prevents on the mint path.
+//!
 //! # The ONE place that rule is knowingly bent, and why
 //!
 //! [`ChainSource::coin_records_by_puzzle_hash`](dig_chainsource_interface::ChainSource::coin_records_by_puzzle_hash)

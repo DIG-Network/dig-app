@@ -294,6 +294,19 @@ the token-gated push, dig-node 0.110.0 serves them, and `chain::ControlChainSour
 in particular a failed read MUST NOT become `Ok(None)` or an empty `Vec`, because on `coin_spend`
 an absence means *unspent or unknown*, which a caller reads as safe to spend.
 
+**A PRESENT coin MAY be believed from any answering tier; an ABSENCE MAY be believed only from a tier
+reporting `synced: true` (normative).** Every `control.wallet.*` result discloses the tier that
+answered it (`source` / `synced` / `peak_height`). A tier that is behind can only be BEHIND, never
+ahead, so existence is positive evidence it cannot fabricate — but emptiness is the one answer a
+stale replica produces indistinguishably from the chain itself. `coin_record`,
+`coin_records_by_puzzle_hash` and `coin_records_by_parent` therefore MUST return a `ChainReadError`,
+naming the tier, when an empty answer arrives with `synced: false`; a non-empty answer MUST be
+returned unchanged whatever the tier. Believing an unsynced absence lets `mint_status` — which makes
+two separate reads that may land on different tiers within the same second — report a mint that
+CONFIRMED as one that can never confirm, and lets `select_funding_coin` report a funded wallet as
+empty. The rule fails closed: a node stuck on the fallback becomes un-mintable with an honest reason
+rather than mintable behind a lying observer.
+
 ### 3.1d Whole-profile minting (normative)
 
 A DID is never minted alone. A **dig-profile** is a DID singleton PLUS a dig-store launched from that
