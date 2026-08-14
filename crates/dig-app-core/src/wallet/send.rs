@@ -12,7 +12,7 @@
 //!    signed. This step can take as long as a person takes.
 //! 3. **anchor** — [`TransferPlan::pushed_now`](dig_account::TransferPlan::pushed_now) reads the chain
 //!    peak, AFTER the signature and immediately before the push.
-//! 4. **push** — [`SpendPublisher::push`](dig_account::mint::SpendPublisher::push) hands the SIGNED
+//! 4. **push** — [`SpendPublisher::push`] hands the SIGNED
 //!    bytes to the node.
 //!
 //! # Why the peak is read between signing and pushing, and not anywhere else

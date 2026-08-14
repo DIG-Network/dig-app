@@ -55,7 +55,7 @@ pub enum SendProgress {
     ///
     /// **Not a failure.** The bundle may be sitting in a mempool right now, so the money may well be
     /// moving; rebuilding could pay the recipient twice
-    /// ([`SendError::PushUnanswered`](crate::wallet::send::SendError::PushUnanswered)). The only safe
+    /// ([`SendError::PushUnanswered`]). The only safe
     /// thing a person can do is keep watching, and the surface says exactly that.
     Unknown {
         /// The payment coin to watch. It exists even here, which is what makes watching possible.
@@ -291,7 +291,7 @@ impl SendDraft<'_> {
 /// # How often the chain is asked
 ///
 /// [`observe`](Self::observe) is called on every repaint, twice a second, and a status poll is a node
-/// round trip. So a poll happens at most once per [`POLL_INTERVAL`], which is under one Chia block: a
+/// round trip. So a poll happens at most once per `POLL_INTERVAL`, which is under one Chia block: a
 /// faster cadence could only ever return the same answer.
 #[derive(Default)]
 pub struct SendHolder {
