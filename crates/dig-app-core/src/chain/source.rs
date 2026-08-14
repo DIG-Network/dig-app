@@ -196,26 +196,59 @@ impl ControlChainSource {
     /// would break every read on a node that is merely catching up, which is the ordinary state of
     /// a freshly started machine.
     ///
-    /// This is not a new invention. [`resolve_singleton_lineage`](ChainSource::resolve_singleton_lineage)
-    /// already applies it — *the lineage ends here*, on a mint path, reads as **safe to spend** —
-    /// and these three reads were the ones left out. dig-account's own contract says the same from
-    /// the other side ("unknown rather than absent"); this implementation was what violated it.
+    /// # Applied to ONE read, and the other two are a deliberate, documented hole
     ///
-    /// # What it prevents, concretely
+    /// This guard is on [`coin_records_by_puzzle_hash`](ChainSource::coin_records_by_puzzle_hash)
+    /// (`control.wallet.coins`) alone. It is NOT on
+    /// [`coin_record`](ChainSource::coin_record) (`control.wallet.coinById`) or
+    /// [`coin_records_by_parent`](ChainSource::coin_records_by_parent)
+    /// (`control.wallet.coinsByParent`), and that is not an oversight — **on those two the warrant
+    /// is not obtainable, so the guard would not be strict, it would be permanently on.**
     ///
-    /// `mint_status` makes two separate reads. A DID coin read served by a stale tier (`Ok(None)`)
-    /// beside a funding coin read served by the synced one (spent) yields *"the funding coin was
-    /// spent by a different spend; this mint can never confirm"* — **for a mint that confirmed**,
-    /// with real XCH spent and a permanent on-chain identity created. The same line stops
-    /// `select_funding_coin` reporting `InsufficientFunds { available: 0 }` against a funded wallet.
+    /// The cause is producer-side, in dig-node's `crates/dig-wallet/src/sage/routing.rs:31-40`:
+    /// `route(_, scoped_to_wallet = false) => Source::Fallback`. Any read NOT scoped to the wallet
+    /// is routed to the fallback tier whatever the node's own sync state, and the reply then carries
+    /// the LOCAL database's flag (`rpc.rs:577`) even though the database did not answer. So:
     ///
-    /// Measured, not hypothetical: on a live machine with the node synced at peak 9148701, one
-    /// `coinsByParent` answered `{"coins":[],"complete":true,"source":"fallback","synced":false,
-    /// "peak_height":null}` while a `coins` read seconds later returned, from `"source":"db",
-    /// "synced":true`, a coin whose parent was the very id that had just answered empty.
+    /// | read | scoped to the wallet | best `synced` obtainable today |
+    /// |---|---|---|
+    /// | `control.wallet.coins` | yes, by address | `true` |
+    /// | `control.wallet.coinById` | no | `false`, always |
+    /// | `control.wallet.coinsByParent` | no | `false`, always |
     ///
-    /// Fails CLOSED. A node stuck on the fallback becomes un-mintable with an honest reason, rather
-    /// than mintable behind an observer that lies about whether the mint took effect.
+    /// Measured against dig-node 0.118.1 at peak 9148856 with `sync-status: "synced"` and five chia
+    /// peers: `coins` answered `"source":"db","synced":true,"peak_height":9148856`, while
+    /// `coin-by-id` answered `"source":"fallback","synced":false,"peak_height":null` **both for an
+    /// absent coin and for a coin the node's own database held**.
+    ///
+    /// Guarding `coin_record` on those numbers does not narrow anything; it closes profile creation
+    /// permanently. [`ChainReadiness::probe`](crate::account::profile_mint::ChainReadiness::probe)
+    /// establishes that a node can walk a lineage by resolving a launcher id of all zeroes — an id
+    /// chosen precisely because it names no coin, so `Ok(None)` is the proof the call was SERVICED.
+    /// The walk's first read is `coin_record`. Guarded, it returns `Err` on every healthy node, the
+    /// probe answers `NoLineageWalk`, and `ProfileMintAvailability::Possible` becomes unreachable.
+    ///
+    /// # What the remaining guard prevents, concretely
+    ///
+    /// An unsynced empty `coins` answer is what reports a FUNDED wallet as holding nothing, which
+    /// dig-account's `select_funding_coin` turns into `InsufficientFunds { available: 0 }` — a
+    /// money lie told about a wallet the user can see has money in it. Here the warrant is real and
+    /// routinely obtained, so refusing the unwarranted answer costs nothing on a healthy node.
+    ///
+    /// Fails CLOSED, and only where closing is survivable: a node whose wallet tier is genuinely
+    /// behind reports an honest unknown instead of an empty wallet.
+    ///
+    /// # The lie this does NOT yet close, and why it is not closed here
+    ///
+    /// `mint_status` (dig-account 0.13.0, `src/mint/did.rs:236-247`) makes two `coin_record` reads
+    /// and concludes *"the funding coin was spent by a different spend; this mint can never
+    /// confirm"* from `did_record.is_none() && source.is_spent()`. Since `coin_record` cannot carry
+    /// a warrant, a falsely-absent DID coin beside a truthfully-spent funding coin still produces
+    /// that conclusion for a mint that CONFIRMED. The fix belongs on the CONCLUSION rather than on
+    /// the read — guarding the read merely converts the false failure into a false *"the chain could
+    /// not be reached"*, because `ChainMint::look` maps the error to `Sighting::Unreachable` and
+    /// `await_confirmation` ends the watch at twelve consecutive unreachable looks, well inside a
+    /// mainnet confirmation. Tracked for the mint-wiring stage; see `SPEC.md` §3.1c.
     fn believe_absence(
         method: &'static str,
         synced: bool,
@@ -261,17 +294,17 @@ impl ChainSource for ControlChainSource {
                 coin_id: hex::encode(coin_id),
             },
         )?;
-        let Some(coin) = answer.coin.as_ref() else {
-            // See `believe_absence`: only a synced tier's "I have nothing" is the chain's.
-            Self::believe_absence(method::COIN_BY_ID, answer.synced, answer.source)?;
-            self.note_freshness(Freshness {
-                source: answer.source,
-                synced: answer.synced,
-                peak_height: answer.peak_height,
-            });
-            return Ok(None);
-        };
-        let record = Some(coin_record_from(method::COIN_BY_ID, coin)?);
+        // DELIBERATELY UNGUARDED, and the absence is returned as an answer. `control.wallet.coinById`
+        // is not scoped to the wallet, so dig-node routes it to the fallback tier and reports
+        // `synced: false` on EVERY reply — even for a coin its own database holds. There is no
+        // warrant to demand here, only a permanent refusal to obtain; and the first read of the
+        // lineage probe that decides whether a profile can be created at all is this one. See
+        // `believe_absence` for the measurements and for the lie that remains open because of it.
+        let record = answer
+            .coin
+            .as_ref()
+            .map(|c| coin_record_from(method::COIN_BY_ID, c))
+            .transpose()?;
         self.note_freshness(Freshness {
             source: answer.source,
             synced: answer.synced,
@@ -405,12 +438,10 @@ impl ChainSource for ControlChainSource {
                 children.push(coin_record_from(method::COINS_BY_PARENT, record)?);
             }
             if page.complete {
-                // See `believe_absence`. Asked of the WHOLE walk rather than of this page: any row
-                // collected on any page is a present child, and a completed walk that gathered one
-                // is positive evidence whatever tier served the final page.
-                if children.is_empty() {
-                    Self::believe_absence(method::COINS_BY_PARENT, page.synced, page.source)?;
-                }
+                // DELIBERATELY UNGUARDED, for the same reason as `coin_record`: this method is not
+                // scoped to the wallet either, so dig-node routes it to the fallback tier and it can
+                // never report `synced: true`. See `believe_absence`.
+                //
                 // Recorded HERE and nowhere else in the walk: freshness answers "is this coin
                 // really unspent, or is that a stale replica", so a value left behind by a walk
                 // that then failed on a later page would answer it from a read that returned
