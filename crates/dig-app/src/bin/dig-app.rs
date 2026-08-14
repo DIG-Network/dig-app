@@ -1585,7 +1585,27 @@ mod tray {
                 // A poisoned lock says nothing about either network, and "nothing" is not zero.
                 Err(_) => dig_app_core::network::NetworkStanding::default(),
             },
+            // How the send this app is running is going (dig_ecosystem#2819). Every decision about
+            // when to ask the chain, and what its answer MEANS, lives in `wallet::sending`, because
+            // a binary is a test-free zone.
+            send: match status.read() {
+                Ok(status) => send_holder().observe_node(&status.engine),
+                // A poisoned lock cannot say where a payment has got to; the last known state is
+                // still the truest thing available, and it is never a claim that money arrived.
+                Err(_) => send_holder().progress(),
+            },
         }
+    }
+
+    /// The one send this app is running, shared between the repaint that draws it and the worker
+    /// that performs it (dig_ecosystem#2819).
+    ///
+    /// A single instance for the reason the balance poller is one: its poll interval has to span
+    /// repaints, and a per-snapshot holder would forget the transfer it is watching.
+    fn send_holder() -> &'static dig_app_core::wallet::sending::SendHolder {
+        static HOLDER: std::sync::OnceLock<dig_app_core::wallet::sending::SendHolder> =
+            std::sync::OnceLock::new();
+        HOLDER.get_or_init(dig_app_core::wallet::sending::SendHolder::default)
     }
 
     /// The live profile registry for this snapshot.
@@ -2560,6 +2580,15 @@ mod tray {
                 ),
                 confirmer,
             ),
+            // The Wallet pane's send (dig_ecosystem#2819). ONE call: the request arriving here was
+            // already validated by `SendDraft::assess`, and every decision left — is there an
+            // account, is there a node, what did the outcome mean — is made inside `SendHolder`,
+            // under test. This arm runs on the action worker, never the repaint thread, so the
+            // confirm ceremony can hold a person for as long as they need without freezing the
+            // window; that is the same thread every other blocking confirm here already uses.
+            TrayAction::SendXch(request) => {
+                send_holder().send(status, session.as_ref().map(|s| &s.residency), &request)
+            }
             TrayAction::CopyReceiveAddress => copy_receive_address(
                 &snapshot(
                     status,

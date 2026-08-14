@@ -367,7 +367,7 @@ impl SendHolder {
         C: dig_chainsource_interface::ChainSource + ?Sized,
     {
         let mut watched = self.lock();
-        let due = watched.next_poll.is_none_or(|at| now >= at);
+        let due = watched.next_poll.map_or(true, |at| now >= at);
         let Some(pending) = watched.pending.as_ref().filter(|_| due) else {
             return watched.progress.clone();
         };
@@ -379,6 +379,118 @@ impl SendHolder {
         }
         watched.next_poll = Some(now + POLL_INTERVAL);
         watched.progress.clone()
+    }
+
+    /// Perform the whole send the pane asked for, and record how it went.
+    ///
+    /// # Why the shell's arm for this is one call
+    ///
+    /// Everything below is a decision — is there an account, is there a node, what did the failure
+    /// mean — and the tray binary can execute none of it under test (dig_ecosystem#2377). So the
+    /// binary's `TrayAction::SendXch` arm calls this and nothing else. The custody ceremony is the
+    /// PRODUCTION one: the person approves the payment in the app's own prompt, and the account's key
+    /// never leaves this process (§908).
+    ///
+    /// The custody policy is fixed at a zero auto-send allowance, so no amount is small enough to
+    /// leave without a human. Making that configurable is deliberately not done here
+    /// (dig_ecosystem#2881) — raising it is exactly what would let money move unattended.
+    ///
+    /// It BLOCKS for as long as the person takes to decide, so the caller must be a worker thread and
+    /// not the repaint loop.
+    ///
+    /// # Why it takes the shared status rather than an [`EngineState`](crate::engine::EngineState)
+    ///
+    /// The node is read here and the read guard is DROPPED before anything blocks. A caller holding
+    /// that guard across this call would hold it across the confirm ceremony — which has a
+    /// two-minute deadline — and the agent's own tick, which needs the write side, would be stalled
+    /// for the whole time a person was reading the dialog.
+    pub fn send(
+        &self,
+        status: &crate::agent::SharedStatus,
+        residency: Option<&crate::account::residency::AccountResidency>,
+        request: &TransferRequest,
+    ) {
+        use crate::account::auth::HarnessAuthProvider;
+        use crate::account::boot::DEFAULT_ACCOUNT_ID;
+        use crate::account::ceremony::PromptedCeremony;
+        use crate::account::money::MoneyPath;
+        use crate::chain::{ControlChainSource, ControlSpendPublisher};
+        use crate::wallet::send::SendSession;
+        use dig_account::{AccountId, AutoSendPolicy, CustodyPolicy, HotWallet, SystemClock};
+
+        let Some(residency) = residency else {
+            return self.refuse(SendError::Locked);
+        };
+        // Cloned out from under the lock, which is then released — see the docs above.
+        let engine = match status.read() {
+            Ok(status) => status.engine.clone(),
+            // A poisoned status lock says nothing about the node, and a send built against a node
+            // nothing can describe is a send that must not be attempted.
+            Err(_) => crate::engine::EngineState::initial(),
+        };
+        let crate::engine::EngineState::Connected { endpoint, .. } = &engine else {
+            return self.refuse(SendError::PeakUnreadable(
+                dig_account::TransferError::ChainUnreachable(
+                    "no node is connected, so nothing could be built or broadcast".to_string(),
+                ),
+            ));
+        };
+
+        let custody = CustodyPolicy::Hot(HotWallet { auto_send_limit: 0 });
+        let money = match MoneyPath::new(
+            residency.clone(),
+            HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
+            AccountId::new(DEFAULT_ACCOUNT_ID),
+            dig_wallet_backend::types::Network::Mainnet,
+            custody,
+            AutoSendPolicy::default(),
+            std::sync::Arc::new(SystemClock),
+        ) {
+            Ok(money) => money,
+            // The residency locked between the click and this call. Nothing was built.
+            Err(_) => return self.refuse(SendError::Locked),
+        };
+
+        self.signing();
+        let chain = ControlChainSource::new(endpoint);
+        let publisher = ControlSpendPublisher::new(endpoint);
+        let outcome = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(
+                SendSession::new(residency, &money, custody, &chain, &publisher).send(request),
+            ),
+            Err(e) => Err(SendError::Sign(
+                crate::account::money::MoneyPathError::Sign(format!(
+                    "this app could not start the worker the confirmation needs: {e}"
+                )),
+            )),
+        };
+        match outcome {
+            Ok(in_flight) => self.accepted(in_flight.finish()),
+            Err(error) => self.finished(&error),
+        }
+    }
+
+    /// Record a send that never started, in the same shape as one that did.
+    fn refuse(&self, error: SendError) {
+        self.finished(&error);
+    }
+
+    /// Poll the watched transfer against the connected node, if there is one.
+    ///
+    /// A disconnected node changes nothing: the transfer is on the chain's books either way, and the
+    /// surface keeps saying what it last knew rather than inventing a verdict from this app's own
+    /// inability to look.
+    pub fn observe_node(&self, engine: &crate::engine::EngineState) -> SendProgress {
+        match engine {
+            crate::engine::EngineState::Connected { endpoint, .. } => self.observe(
+                &crate::chain::ControlChainSource::new(endpoint),
+                std::time::Instant::now(),
+            ),
+            crate::engine::EngineState::Disconnected { .. } => self.progress(),
+        }
     }
 
     /// Take the lock, recovering from a poisoned one.

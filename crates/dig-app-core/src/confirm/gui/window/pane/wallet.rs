@@ -485,11 +485,14 @@ fn field_error(verdict: &Result<TransferRequest, SendBlocked>, field: Field) -> 
     let Err(blocked) = verdict else {
         return None;
     };
-    let mine = match (blocked, field) {
-        (SendBlocked::BadDestination(_), Field::Destination) => true,
-        (SendBlocked::BadAmount(_) | SendBlocked::NotEnough { .. }, Field::Amount) => true,
-        _ => false,
-    };
+    let mine = matches!(
+        (blocked, field),
+        (SendBlocked::BadDestination(_), Field::Destination)
+            | (
+                SendBlocked::BadAmount(_) | SendBlocked::NotEnough { .. },
+                Field::Amount
+            )
+    );
     mine.then(|| blocked.sentence())
 }
 
