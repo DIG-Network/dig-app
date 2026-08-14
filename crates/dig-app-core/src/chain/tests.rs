@@ -1247,3 +1247,4 @@ fn a_spend_whose_programs_are_not_hex_is_refused_rather_than_emptied() {
         "got {outcome:?}"
     );
 }
+
