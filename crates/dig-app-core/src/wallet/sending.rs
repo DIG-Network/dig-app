@@ -177,9 +177,7 @@ impl SendBlocked {
     /// condition this module does not actually check.
     pub fn sentence(&self) -> String {
         match self {
-            Self::AccountSealed => {
-                "Unlock your account and Send becomes available.".to_string()
-            }
+            Self::AccountSealed => "Unlock your account and Send becomes available.".to_string(),
             Self::AlreadySending => {
                 "One payment is already on its way. Send again once it has settled.".to_string()
             }
@@ -493,7 +491,10 @@ mod tests {
                 detail: "the node did not answer".to_string(),
             },
         ] {
-            assert!(progress.in_flight(), "{progress:?} is not treated as running");
+            assert!(
+                progress.in_flight(),
+                "{progress:?} is not treated as running"
+            );
             assert_eq!(
                 ready(&balance, &progress).assess(),
                 Err(SendBlocked::AlreadySending),
@@ -560,7 +561,10 @@ mod tests {
             ("", AmountProblem::Empty),
             ("lots", AmountProblem::NotANumber),
             ("-1", AmountProblem::NotANumber),
-            ("0.0000000000001", AmountProblem::TooManyDecimals { allowed: 12 }),
+            (
+                "0.0000000000001",
+                AmountProblem::TooManyDecimals { allowed: 12 },
+            ),
         ] {
             let draft = SendDraft {
                 amount: typed,

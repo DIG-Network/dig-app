@@ -134,8 +134,12 @@ pub fn parse_asset_amount(asset: Asset, typed: &str) -> Result<u64, AmountProble
     // "5" under twelve places is 500_000_000_000 base units, and every step of that is an integer.
     let scaled_fraction: u128 = match fraction.is_empty() {
         true => 0,
-        false => fraction.parse::<u128>().map_err(|_| AmountProblem::TooLarge)?
-            * 10u128.pow(decimals - fraction.len() as u32),
+        false => {
+            fraction
+                .parse::<u128>()
+                .map_err(|_| AmountProblem::TooLarge)?
+                * 10u128.pow(decimals - fraction.len() as u32)
+        }
     };
     whole
         .checked_mul(10u128.pow(decimals))
@@ -264,7 +268,10 @@ mod tests {
     fn a_short_fraction_is_scaled_rather_than_added_as_written() {
         assert_eq!(parse_asset_amount(Asset::Xch, "0.000000000001"), Ok(1));
         assert_eq!(parse_asset_amount(Asset::Xch, "0.1"), Ok(100_000_000_000));
-        assert_eq!(parse_asset_amount(Asset::Xch, "2.25"), Ok(2_250_000_000_000));
+        assert_eq!(
+            parse_asset_amount(Asset::Xch, "2.25"),
+            Ok(2_250_000_000_000)
+        );
         assert_eq!(parse_asset_amount(Asset::Dig, "0.001"), Ok(1));
         assert_eq!(parse_asset_amount(Asset::Dig, "12.5"), Ok(12_500));
     }
@@ -306,7 +313,10 @@ mod tests {
                 "{text:?} was accepted as an amount"
             );
         }
-        assert_eq!(parse_asset_amount(Asset::Xch, ""), Err(AmountProblem::Empty));
+        assert_eq!(
+            parse_asset_amount(Asset::Xch, ""),
+            Err(AmountProblem::Empty)
+        );
         assert_eq!(
             parse_asset_amount(Asset::Xch, "   "),
             Err(AmountProblem::Empty),
@@ -332,7 +342,10 @@ mod tests {
             parse_asset_amount(Asset::Xch, "99999999999999999999999999"),
             Err(AmountProblem::TooLarge)
         );
-        assert_eq!(parse_asset_amount(Asset::Dig, "18446744073709551.615"), Ok(u64::MAX));
+        assert_eq!(
+            parse_asset_amount(Asset::Dig, "18446744073709551.615"),
+            Ok(u64::MAX)
+        );
         assert_eq!(
             parse_asset_amount(Asset::Dig, "18446744073709551.616"),
             Err(AmountProblem::TooLarge)

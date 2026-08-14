@@ -627,16 +627,86 @@ pub(crate) mod wallet {
         "Reading your balance from your node. A balance is a blockchain lookup, so this usually \
          takes a few seconds.";
 
-    /// The glance-level word on the sending card.
-    pub(crate) const SENDING_BADGE: &str = "Not available yet";
-    /// Why there is no send button, and what still works without one.
+    /// The label above the destination field.
+    pub(crate) const SEND_TO_LABEL: &str = "Pay to";
+    /// What an empty destination field expects. A shape, never a plausible address.
+    pub(crate) const SEND_TO_PLACEHOLDER: &str = "xch1…";
+    /// The sentence under the destination field while nothing is wrong with it.
+    pub(crate) const SEND_TO_HINT: &str =
+        "The address you are paying. Money sent to a mistyped address cannot be recovered by \
+         anyone, so check it against the one you were given.";
+    /// The label above the amount field.
+    pub(crate) const SEND_AMOUNT_LABEL: &str = "Amount";
+    /// What an empty amount field expects.
+    pub(crate) const SEND_AMOUNT_PLACEHOLDER: &str = "0.00";
+    /// The sentence under the amount field while nothing is wrong with it.
     ///
-    /// Deliberately no control at all, not a disabled one: a greyed **Send** is a promise the app
-    /// cannot keep, and a person who finds it will look for the condition that enables it.
-    pub(crate) const SENDING_BODY: &str =
-        "DIG will not show a button that moves money until the path behind it is finished, so there \
-         is nothing to press here yet. Receiving works now — anything sent to the address above \
-         arrives in this account, and your recovery phrase restores it.";
+    /// It names the asset because the tab shows two figures and only one of them can be sent from
+    /// here: a person who has just read their $DIG balance would otherwise reasonably type it in.
+    pub(crate) const SEND_AMOUNT_HINT: &str =
+        "In XCH. $DIG cannot be sent from here yet — only the XCH above it.";
+    /// The control that starts a payment.
+    pub(crate) const SEND_BUTTON: &str = "Send XCH";
+
+    /// What the fee costs, stated before the person presses anything.
+    ///
+    /// A FIXED figure rather than an estimate, so what is shown is exactly what will be paid — see
+    /// [`DEFAULT_SEND_FEE_MOJOS`](crate::wallet::send::DEFAULT_SEND_FEE_MOJOS).
+    pub(crate) fn send_fee(fee: &str) -> String {
+        format!("A network fee of {fee} XCH is added. That is the whole cost of sending.")
+    }
+
+    /// The glance-level word while the confirmation is in front of the person.
+    pub(crate) const SEND_SIGNING_BADGE: &str = "Waiting for you";
+    /// Said while the confirmation is up.
+    pub(crate) const SEND_SIGNING_BODY: &str =
+        "DIG is asking you to approve this payment. Nothing is sent until you do, and closing the \
+         request sends nothing.";
+
+    /// The glance-level word for a payment a mempool has taken but the chain has not settled.
+    pub(crate) const SEND_PENDING_BADGE: &str = "On its way";
+    /// Said while a pushed payment is waiting to settle.
+    ///
+    /// The block count is what makes the wait legible: a Chia block is roughly 19 seconds, so a
+    /// screen that only said "waiting" would be indistinguishable from a hang after a minute.
+    pub(crate) fn send_pending_body(blocks: u32) -> String {
+        format!(
+            "The network has taken this payment and is settling it. {blocks} block(s) have been \
+             produced since it was sent; a few more and it is final."
+        )
+    }
+
+    /// The glance-level word for a payment whose fate nobody can state yet.
+    pub(crate) const SEND_UNKNOWN_BADGE: &str = "Not known yet";
+    /// Said when the node never answered the broadcast.
+    ///
+    /// It says *keep watching* and never *it did not send*, because the payment may be in a mempool
+    /// right now — and sending it again is the one action that could pay the recipient twice.
+    pub(crate) fn send_unknown_body(detail: &str) -> String {
+        format!(
+            "Your node did not answer when DIG sent this payment, so whether it went out is not yet \
+             known ({detail}). It may already be settling. DIG is watching the coin below and will \
+             say when the chain decides — do not send it again in the meantime."
+        )
+    }
+
+    /// The glance-level word for money that has arrived.
+    pub(crate) const SEND_CONFIRMED_BADGE: &str = "Arrived";
+    /// Said once the payment coin is buried on chain.
+    pub(crate) const SEND_CONFIRMED_BODY: &str =
+        "This payment is settled on chain. It cannot be reversed, by DIG or by anyone.";
+
+    /// The glance-level word for a payment that never left.
+    pub(crate) const SEND_FAILED_BADGE: &str = "Not sent";
+    /// The lead-in above the verbatim reason a send failed.
+    pub(crate) const SEND_FAILED_BODY: &str =
+        "Nothing was sent and no money has moved. The reason, as it was given:";
+
+    /// The label on the payment coin a person can look up themselves.
+    pub(crate) const SEND_COIN_LABEL: &str = "Payment coin";
+    /// The label on the block height a payment settled at.
+    pub(crate) const SEND_HEIGHT_LABEL: &str = "Settled at block";
+
     /// The aside under the sending copy.
     pub(crate) const SENDING_HINT: &str =
         "Reading DIG content never needs an account or a wallet at all.";
@@ -826,7 +896,12 @@ mod tests {
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
             wallet::BALANCE_PENDING,
-            wallet::SENDING_BODY,
+            wallet::SEND_TO_HINT,
+            wallet::SEND_AMOUNT_HINT,
+            wallet::SEND_SIGNING_BODY,
+            wallet::SEND_UNKNOWN_BADGE,
+            wallet::SEND_CONFIRMED_BODY,
+            wallet::SEND_FAILED_BODY,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
             content::USAGE_UNKNOWN,

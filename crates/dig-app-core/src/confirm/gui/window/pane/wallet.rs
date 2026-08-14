@@ -1,11 +1,18 @@
-//! The Wallet tab: where money arrives, what is held, and what this wallet still cannot do.
+//! The Wallet tab: where money arrives, what is held, and where it goes.
 //!
 //! # Why receiving leads
 //!
-//! Receiving is the only thing this wallet does today, and the address is the only value on the tab a
-//! person takes to another device. So the address and its code are the first card, the balances sit
-//! under them, and the card that reserves sending's place is last — a page ordered by what a person
-//! can actually do, rather than by what a wallet usually looks like.
+//! The address is the only value on the tab a person takes to another device, and it is what a wallet
+//! with nothing in it needs first. So the address and its code are the first card, the balances sit
+//! under them, and sending — which needs both of the facts above it — is last: a page ordered by what
+//! a person can do, in the order they can do it.
+//!
+//! # Nothing here decides whether money may move
+//!
+//! Whether a send can be started, and what a finished one MEANT, is
+//! [`crate::wallet::sending`]'s answer. This module draws that answer and returns the intent
+//! ([`TrayAction::SendXch`]); it re-derives no rule, because a rule living in a pane is a rule no
+//! test can put a wrong input in front of.
 //!
 //! # The rule this pane cannot break
 //!
@@ -29,21 +36,27 @@
 //! node, and a node says things like *rpc error 500 after 30s*. Those numerals arrive inside a
 //! sentence beginning `Not known —`, never beside an asset label.
 
+use dig_account::TransferRequest;
+
 use super::action;
 use super::card;
 use super::copy;
 use super::data::{self, Readout, Tone, Value};
-use super::facts::PaneFacts;
+use super::facts::{AccountKind, PaneFacts};
+use super::field;
 use super::flow::Flow;
 use super::identity;
 use super::text;
-use crate::confirm::gui::render::space;
+use crate::confirm::gui::paint;
+use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
     address_line, as_of_sentence, format_amount, is_syncing, unknown_reason, AddressReading,
     BalanceReading, Balances,
 };
+use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
+use crate::wallet::sending::{SendBlocked, SendDraft, SendProgress};
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
 
@@ -58,10 +71,13 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     holdings_card(flow, t, &facts.balance, facts);
     flow.gap(space::S4);
-    sending_card(flow, t);
+    let sent = sending_card(flow, t, facts);
     // The tab's own verbs, LAST and in a card of their own — but only where the model offers one
     // this pane has not already drawn. See [`spare_verbs`].
-    spare_verbs_card(flow, t, tab, drew_copy_control(facts))
+    //
+    // A press on Send wins over anything below it: both cannot happen in one frame, and an `or` here
+    // would drop the intent a person actually expressed if a verb were ever pressed alongside it.
+    sent.or(spare_verbs_card(flow, t, tab, drew_copy_control(facts)))
 }
 
 /// The address money arrives at: the code, the value, and the way to lift it off the screen.
@@ -233,37 +249,291 @@ fn figures(held: &Balances) -> Vec<Readout> {
     ]
 }
 
-/// The place sending will occupy (dig_ecosystem#2207), holding no control at all.
+/// Sending: what the last payment came to, and the form for the next one (dig_ecosystem#2819).
 ///
-/// A card rather than silence: sending is the thing a person expects of a wallet, and a page that
-/// does not mention it reads as one where the button is hidden somewhere. A card rather than a
-/// disabled button, for the reason in [`copy::wallet::SENDING_BODY`] — a greyed **Send** sends
-/// somebody looking for the condition that ungreys it.
-fn sending_card(flow: &mut Flow, t: &Tokens) {
+/// # Why the state sits ABOVE the form rather than replacing it
+///
+/// A payment that is settling, or that has just settled, is the newest thing on the page and belongs
+/// where a person looks first. But it must not take the form away: what stops a second send while one
+/// is running is the **Send** control being refused with its reason
+/// ([`SendBlocked::AlreadySending`]), which is a sentence a person can read, where a vanished form is
+/// a page that appears to have lost a feature.
+fn sending_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayAction> {
+    let live = flow.live();
     flow.place(|ui, at| {
-        (
-            card::card(ui, at, t, Some(copy::wallet::SENDING_CARD), |inner| {
-                inner.place(|ui, at| {
-                    (
-                        data::badge(
-                            ui,
-                            at.left_top(),
-                            t,
-                            copy::wallet::SENDING_BADGE,
-                            Tone::Neutral,
-                        )
-                        .height(),
-                        (),
-                    )
-                });
-                inner.gap(space::S3);
-                inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::SENDING_BODY), ()));
+        let (height, pressed) =
+            card::interactive_card(ui, at, t, live, Some(copy::wallet::SENDING_CARD), |inner| {
+                if !matches!(facts.send, SendProgress::Idle) {
+                    outcome(inner, t, &facts.send);
+                    inner.gap(space::S4);
+                }
+                let pressed = send_form(inner, t, facts);
                 inner.gap(space::S2);
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SENDING_HINT), ()));
-            }),
+                pressed
+            });
+        (height, pressed.flatten())
+    })
+}
+
+/// What became of the payment in flight, drawn as the state it actually is.
+///
+/// Each state gets its own badge word, its own sentence and its own facts, because they call for
+/// different things: waiting, doing nothing, watching, or reading a reason. The two that a surface is
+/// most tempted to merge are kept furthest apart — `Unknown` is not a failure, and says so.
+fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
+    let (word, tone, body) = match send {
+        SendProgress::Idle => return,
+        SendProgress::Signing => (
+            copy::wallet::SEND_SIGNING_BADGE,
+            Tone::Neutral,
+            copy::wallet::SEND_SIGNING_BODY.to_string(),
+        ),
+        SendProgress::Pending {
+            blocks_since_push, ..
+        } => (
+            copy::wallet::SEND_PENDING_BADGE,
+            Tone::Neutral,
+            copy::wallet::send_pending_body(*blocks_since_push),
+        ),
+        SendProgress::Unknown { detail, .. } => (
+            copy::wallet::SEND_UNKNOWN_BADGE,
+            Tone::Warn,
+            copy::wallet::send_unknown_body(detail),
+        ),
+        SendProgress::Confirmed { .. } => (
+            copy::wallet::SEND_CONFIRMED_BADGE,
+            Tone::Good,
+            copy::wallet::SEND_CONFIRMED_BODY.to_string(),
+        ),
+        SendProgress::Failed { reason } => (
+            copy::wallet::SEND_FAILED_BADGE,
+            Tone::Warn,
+            format!("{} {reason}", copy::wallet::SEND_FAILED_BODY),
+        ),
+    };
+
+    flow.place(|ui, at| (data::badge(ui, at.left_top(), t, word, tone).height(), ()));
+    flow.gap(space::S3);
+    flow.place(|ui, at| (text::body(ui, at, t, &body), ()));
+
+    let facts = outcome_facts(send);
+    if !facts.is_empty() {
+        flow.gap(space::S3);
+        flow.place(|ui, at| (data::readouts(ui, at, t, &facts), ()));
+    }
+}
+
+/// The identifiers a person can take away from a payment: the coin, and the block it settled at.
+///
+/// A payment coin id is what makes an unknown outcome watchable by somebody other than this app, and
+/// it is the one thing worth carrying to a block explorer — so it is shown for every state that has
+/// one, not only the happy ones.
+fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
+    match send {
+        SendProgress::Idle | SendProgress::Signing | SendProgress::Failed { .. } => Vec::new(),
+        SendProgress::Pending {
+            payment_coin_id, ..
+        }
+        | SendProgress::Unknown {
+            payment_coin_id, ..
+        } => vec![Readout::new(
+            copy::wallet::SEND_COIN_LABEL,
+            Value::Identifier(payment_coin_id.clone()),
+        )],
+        SendProgress::Confirmed {
+            payment_coin_id,
+            confirmed_height,
+        } => vec![
+            Readout::new(
+                copy::wallet::SEND_COIN_LABEL,
+                Value::Identifier(payment_coin_id.clone()),
+            ),
+            Readout::new(
+                copy::wallet::SEND_HEIGHT_LABEL,
+                Value::Word(confirmed_height.to_string()),
+            ),
+        ],
+    }
+}
+
+/// The two fields, the fee, and the control — or the reason the control cannot be pressed.
+///
+/// The typed values live in egui's per-frame store keyed off this pane's own id, the same way the
+/// Content tab's add-a-store field does, so the caret and the text survive the pane being rebuilt
+/// every frame without this module holding state of its own.
+fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayAction> {
+    let element = egui::Id::new("dig-window-wallet-send");
+    let live = flow.live();
+    let (mut destination, mut amount) = typed(flow, element);
+
+    let verdict = SendDraft {
+        destination: &destination,
+        amount: &amount,
+        account_open: matches!(facts.account, Some(AccountKind::Unlocked)),
+        balance: &facts.balance,
+        progress: &facts.send,
+    }
+    .assess();
+
+    flow.place(|ui, at| {
+        (
+            field::text_field(
+                ui,
+                at,
+                t,
+                live,
+                &field::Field {
+                    label: copy::wallet::SEND_TO_LABEL,
+                    placeholder: copy::wallet::SEND_TO_PLACEHOLDER,
+                    help: copy::wallet::SEND_TO_HINT,
+                    error: field_error(&verdict, Field::Destination),
+                    id: element.with("to"),
+                },
+                &mut destination,
+            ),
             (),
         )
     });
+    flow.gap(space::S3);
+    flow.place(|ui, at| {
+        (
+            field::text_field(
+                ui,
+                at,
+                t,
+                live,
+                &field::Field {
+                    label: copy::wallet::SEND_AMOUNT_LABEL,
+                    placeholder: copy::wallet::SEND_AMOUNT_PLACEHOLDER,
+                    help: copy::wallet::SEND_AMOUNT_HINT,
+                    error: field_error(&verdict, Field::Amount),
+                    id: element.with("amount"),
+                },
+                &mut amount,
+            ),
+            (),
+        )
+    });
+    remember(flow, element, &destination, &amount);
+
+    flow.gap(space::S2);
+    // The fee is drawn through the one formatter that knows XCH has twelve decimal places. A figure
+    // divided here would be the money lie this pane's module doc forbids, in the one place a person
+    // is deciding what a payment costs.
+    let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
+    flow.place(|ui, at| (text::caption(ui, at, t, &copy::wallet::send_fee(&fee)), ()));
+    flow.gap(space::S3);
+
+    let pressed = flow.place(|ui, at| {
+        let hit = paint::button_at(
+            ui,
+            egui::Rect::from_min_size(
+                at.left_top(),
+                egui::Vec2::new(
+                    paint::button_width(ui, copy::wallet::SEND_BUTTON),
+                    paint::BUTTON_HEIGHT,
+                ),
+            ),
+            element.with("submit"),
+            copy::wallet::SEND_BUTTON,
+            match verdict.is_ok() {
+                // The one thing a person comes to this card to do, so it leads — but only while it
+                // can actually be pressed. A bright control that refuses is the defect
+                // `action::weigh` describes.
+                true => Weight::Primary,
+                false => Weight::Ghost,
+            },
+            verdict.is_ok() && live,
+            t,
+        )
+        .clicked();
+        (paint::BUTTON_HEIGHT, hit)
+    });
+
+    // The reason the control is refused, under the control. `professional-ui`'s never-trap rule: a
+    // greyed button whose condition is unstated sends a person looking for it. Field-level problems
+    // are already attached to their own field, so they are not repeated here.
+    if let Err(blocked) = &verdict {
+        if state_of(blocked) {
+            flow.gap(space::S2);
+            let sentence = blocked.sentence();
+            flow.place(|ui, at| (text::caption(ui, at, t, &sentence), ()));
+        }
+    }
+
+    match pressed {
+        true => verdict.ok().map(TrayAction::SendXch),
+        false => None,
+    }
+}
+
+/// Which input a refusal belongs to.
+enum Field {
+    /// The destination.
+    Destination,
+    /// The amount.
+    Amount,
+}
+
+/// The error to attach to `field`, if the draft's refusal is about that field.
+///
+/// A refusal has ONE home. Attaching every reason to every control would put "unlock your account"
+/// under the amount box, and `professional-ui` is explicit that an error belongs to the control that
+/// caused it.
+fn field_error(verdict: &Result<TransferRequest, SendBlocked>, field: Field) -> Option<String> {
+    let Err(blocked) = verdict else {
+        return None;
+    };
+    let mine = match (blocked, field) {
+        (SendBlocked::BadDestination(_), Field::Destination) => true,
+        (SendBlocked::BadAmount(_) | SendBlocked::NotEnough { .. }, Field::Amount) => true,
+        _ => false,
+    };
+    mine.then(|| blocked.sentence())
+}
+
+/// Whether a refusal is about the STATE of the wallet rather than about a field.
+///
+/// The two empty-field states count as state rather than as field errors: a form that complained
+/// about an empty box the moment it was drawn would be scolding somebody for opening it.
+fn state_of(blocked: &SendBlocked) -> bool {
+    matches!(
+        blocked,
+        SendBlocked::AccountSealed
+            | SendBlocked::AlreadySending
+            | SendBlocked::NoDestination
+            | SendBlocked::BadAmount(crate::amount::AmountProblem::Empty)
+    )
+}
+
+/// What is currently typed into the two fields.
+///
+/// Reached through a zero-height block because a [`Flow`] hands out its `Ui` only inside one — which
+/// is the same reason the Content tab's field reads its own store from inside its draw call.
+fn typed(flow: &mut Flow, element: egui::Id) -> (String, String) {
+    flow.place(|ui, _| {
+        (
+            0.0,
+            ui.ctx().data(|d| {
+                (
+                    d.get_temp(element.with("to-text")).unwrap_or_default(),
+                    d.get_temp(element.with("amount-text")).unwrap_or_default(),
+                )
+            }),
+        )
+    })
+}
+
+/// Keep what was typed, so the next frame draws it back.
+fn remember(flow: &mut Flow, element: egui::Id, destination: &str, amount: &str) {
+    flow.place(|ui, _| {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(element.with("to-text"), destination.to_owned());
+            d.insert_temp(element.with("amount-text"), amount.to_owned());
+        });
+        (0.0, ())
+    })
 }
 
 /// Whatever the model puts on this tab that the pane has not already drawn as a control.
@@ -861,6 +1131,253 @@ mod tests {
                 .iter()
                 .any(|a| a.id == TrayAction::CopyReceiveAddress),
             "a sealed account lost the only copy control on the tab"
+        );
+    }
+
+    /// An unlocked, funded view, so the send form is drawn in the state a person actually uses it in.
+    fn sendable(send: SendProgress) -> TrayView {
+        TrayView {
+            running: true,
+            node_connected: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            balance: BalanceReading::Known {
+                balances: Balances {
+                    xch_mojos: 1_000_000_000_000,
+                    dig_units: 0,
+                },
+                as_of: crate::wallet::engine::BalanceAsOf::Replica {
+                    height: 7_000_000,
+                    caught_up: true,
+                },
+            },
+            send,
+            ..TrayView::default()
+        }
+    }
+
+    /// Every state a send can be in, as the pane must be able to draw them.
+    ///
+    /// Hand-written because two variants carry strings, and checked against the enum by
+    /// [`every_send_state_lists_every_arm`] so it cannot quietly shrink.
+    fn every_send_state() -> Vec<SendProgress> {
+        vec![
+            SendProgress::Idle,
+            SendProgress::Signing,
+            SendProgress::Pending {
+                payment_coin_id: "c0ffee".to_string(),
+                blocks_since_push: 3,
+            },
+            SendProgress::Unknown {
+                payment_coin_id: "decaf0".to_string(),
+                detail: "the node did not answer".to_string(),
+            },
+            SendProgress::Confirmed {
+                payment_coin_id: "5e771ed".to_string(),
+                confirmed_height: 9_146_483,
+            },
+            SendProgress::Failed {
+                reason: "the network rejected the transfer: DOUBLE_SPEND".to_string(),
+            },
+        ]
+    }
+
+    /// **The state list these guards run over is the whole enum.**
+    #[test]
+    fn every_send_state_lists_every_arm() {
+        fn arm(send: &SendProgress) -> u8 {
+            match send {
+                SendProgress::Idle => 0,
+                SendProgress::Signing => 1,
+                SendProgress::Pending { .. } => 2,
+                SendProgress::Unknown { .. } => 3,
+                SendProgress::Confirmed { .. } => 4,
+                SendProgress::Failed { .. } => 5,
+            }
+        }
+        let mut arms: Vec<u8> = every_send_state().iter().map(arm).collect();
+        arms.sort_unstable();
+        arms.dedup();
+        assert_eq!(arms, (0..6).collect::<Vec<u8>>());
+    }
+
+    /// **Each send state is drawn as ITSELF, and an unknown outcome is never drawn as a failure**
+    /// (dig_ecosystem#2819).
+    ///
+    /// The badge word is what a person takes at a glance, so every state must own one. The pair that
+    /// matters is `Unknown` against `Failed`: the bundle behind an unknown may be in a mempool right
+    /// now, and a screen calling that "Not sent" invites the one action that can pay twice. Asserted
+    /// as *this word present AND every other state's word absent*, because a card that printed all
+    /// six badges would satisfy a presence-only check.
+    #[test]
+    fn each_send_state_is_drawn_as_itself_and_an_unknown_outcome_is_not_a_failure() {
+        let words = [
+            (1_usize, copy::wallet::SEND_SIGNING_BADGE),
+            (2, copy::wallet::SEND_PENDING_BADGE),
+            (3, copy::wallet::SEND_UNKNOWN_BADGE),
+            (4, copy::wallet::SEND_CONFIRMED_BADGE),
+            (5, copy::wallet::SEND_FAILED_BADGE),
+        ];
+        for (index, word) in words {
+            let said = painted_pane(&sendable(every_send_state()[index].clone()), 900.0);
+            assert!(
+                said.iter().any(|line| line.contains(word)),
+                "{:?} never drew its own badge: {said:?}",
+                every_send_state()[index]
+            );
+            for (other, sibling) in words {
+                assert!(
+                    other == index || !said.iter().any(|line| line.contains(sibling)),
+                    "{:?} was also drawn as {sibling:?}",
+                    every_send_state()[index]
+                );
+            }
+        }
+
+        // Idle draws none of them: a wallet that has sent nothing must not report an outcome.
+        let idle = painted_pane(&sendable(SendProgress::Idle), 900.0);
+        for (_, word) in words {
+            assert!(
+                !idle.iter().any(|line| line.contains(word)),
+                "a wallet that has sent nothing reported {word:?}: {idle:?}"
+            );
+        }
+    }
+
+    /// **A pending send shows how long it has been waiting, and only a confirmation says it
+    /// arrived.**
+    ///
+    /// The money-lie guard for this card. `Awaiting` is the ordinary answer for several blocks, and a
+    /// surface that greeted it with the settled word would tell a person their payment is final while
+    /// it is still reversible by a reorg.
+    #[test]
+    fn a_pending_send_never_reads_as_arrived_and_says_how_far_along_it_is() {
+        let pending = painted_pane(
+            &sendable(SendProgress::Pending {
+                payment_coin_id: "c0ffee".to_string(),
+                blocks_since_push: 3,
+            }),
+            900.0,
+        );
+        assert!(
+            !pending
+                .iter()
+                .any(|line| line.contains(copy::wallet::SEND_CONFIRMED_BADGE)),
+            "a payment still settling was drawn as arrived: {pending:?}"
+        );
+        assert!(
+            pending.iter().any(|line| line.contains("3 block")),
+            "the wait was drawn without saying how long it has been: {pending:?}"
+        );
+        assert!(
+            pending.iter().any(|line| line.contains("c0ffee")),
+            "the payment coin a person can look up was not shown: {pending:?}"
+        );
+    }
+
+    /// **The fee is drawn through the shared formatter, never as its raw mojo count**
+    /// (dig_ecosystem#2295, dig_ecosystem#2885).
+    ///
+    /// `DEFAULT_SEND_FEE_MOJOS` is 1,000,000 mojos, which is 0.000001 XCH. A card that printed the
+    /// base-unit figure beside `XCH` would overstate the cost by a factor of 10^12 — the defect that
+    /// shipped in the custody dialog, on the surface where a person decides what to pay. Both halves
+    /// are asserted: the correct figure present, and the raw count absent.
+    #[test]
+    fn the_fee_is_shown_in_xch_and_never_as_a_raw_mojo_count() {
+        let said = painted_pane(&sendable(SendProgress::Idle), 900.0);
+        let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
+        assert_eq!(fee, "0.000001", "the fixture no longer pins a real fee");
+        assert!(
+            said.iter().any(|line| line.contains(&fee)),
+            "the card never states what sending costs: {said:?}"
+        );
+        assert!(
+            !said
+                .iter()
+                .any(|line| line.contains(&DEFAULT_SEND_FEE_MOJOS.to_string())),
+            "the fee was drawn as its raw mojo count, which overstates it a trillion times: {said:?}"
+        );
+    }
+
+    /// **A refused Send says WHY, in every state that refuses it** (`professional-ui`, never trap).
+    ///
+    /// Three actors that differ only in the reason: a sealed account, a send already running, and an
+    /// empty form. A greyed control whose condition is unstated sends a person looking for it, so the
+    /// sentence is drawn beneath it — and the sentences must differ, or three situations wear one
+    /// answer.
+    #[test]
+    fn a_refused_send_states_the_condition_that_would_lift_it() {
+        let sealed = SendDraft {
+            destination: "",
+            amount: "",
+            account_open: false,
+            balance: &BalanceReading::Pending,
+            progress: &SendProgress::Idle,
+        }
+        .assess()
+        .expect_err("a sealed account cannot send");
+        let sealed_said = painted_pane(
+            &TrayView {
+                running: true,
+                account: Some(AccountState::Locked),
+                ..TrayView::default()
+            },
+            900.0,
+        );
+        assert!(
+            sealed_said
+                .iter()
+                .any(|line| line.contains(&sealed.sentence())),
+            "a locked wallet drew a Send it will not honour, with no reason: {sealed_said:?}"
+        );
+
+        let running = painted_pane(&sendable(SendProgress::Signing), 900.0);
+        let already = SendBlocked::AlreadySending.sentence();
+        assert!(
+            running.iter().any(|line| line.contains(&already)),
+            "a second send was offered mid-payment with nothing said about it: {running:?}"
+        );
+        assert_ne!(
+            sealed.sentence(),
+            already,
+            "two different refusals wear one sentence"
+        );
+    }
+
+    /// **A press on Send returns the transfer that was typed, and nothing else does.**
+    ///
+    /// The pane's whole contract with the shell: it returns an INTENT, already validated, and the
+    /// shell only forwards it. Asserted through `assess` rather than a synthetic click because the
+    /// value returned is the thing under test — that it carries the typed amount and the fixed fee,
+    /// and that it exists only when the draft is sendable.
+    #[test]
+    fn the_pane_returns_a_validated_transfer_and_only_when_one_is_sendable() {
+        let balance = BalanceReading::Known {
+            balances: Balances {
+                xch_mojos: 1_000_000_000_000,
+                dig_units: 0,
+            },
+            as_of: crate::wallet::engine::BalanceAsOf::Replica {
+                height: 7_000_000,
+                caught_up: true,
+            },
+        };
+        let draft = SendDraft {
+            destination: ADDRESS,
+            amount: "0.5",
+            account_open: true,
+            balance: &balance,
+            progress: &SendProgress::Idle,
+        };
+        let request = draft.assess().expect("a funded, well-formed draft");
+        assert_eq!(
+            TrayAction::SendXch(request),
+            TrayAction::SendXch(
+                dig_account::TransferRequest::to_address(ADDRESS, 500_000_000_000)
+                    .expect("a mainnet address")
+                    .with_fee(DEFAULT_SEND_FEE_MOJOS)
+            ),
+            "the action carried something other than the amount and fee the card showed"
         );
     }
 
