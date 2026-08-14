@@ -555,19 +555,27 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
 ///
 /// **Still none, and the reason is now narrow and specific.**
 ///
-/// Do not plan work from the text this replaced. It claimed the workspace pinned
-/// `dig-node-control-interface` 0.9 and that dig-node served neither `coin_spend` nor
-/// `resolve_singleton_lineage`; all three statements are false. The pin is 0.10, dig-node serves
-/// `coin_spend`, and [`dig_app_core::chain::ControlChainSource`] now serves
-/// `resolve_singleton_lineage` by delegating to the ecosystem's one hardened
-/// `walk_singleton_lineage` (dig_ecosystem#2572).
+/// Do not plan work from any version-claim in this comment's history: it has been wrong twice, and
+/// the pins move under it. As of this revision the lock holds dig-account **0.13.0**,
+/// dig-chainsource-interface **0.3.1** and dig-node-control-interface **0.15.0** — read `Cargo.lock`
+/// rather than this sentence.
 ///
-/// What is missing here is WIRING, not capability. Nothing in this binary constructs a
-/// [`dig_app_core::chain::ControlChainSource`] or a publisher yet, so there is no live reader to
-/// hand a minter — and a value invented here would be exactly the drift
-/// [`MintSeams`] exists to prevent. Returning the seams rather than an availability flag is what
-/// keeps that honest: the wizard reads its gate off this same value, so no line here can report a
-/// mint as possible while the wizard holds a minter that refuses (dig_ecosystem#2377).
+/// **The chain half is no longer what is missing.** [`dig_app_core::chain::ControlChainSource`]
+/// serves every read a mint needs, including `resolve_singleton_lineage` via the ecosystem's one
+/// hardened `walk_singleton_lineage` (dig_ecosystem#2572), and the shell now MEASURES whether the
+/// connected node services them — that reading is `TrayView::mint_chain`.
+///
+/// What this function returns is still `NoChainTransport`, deliberately, and it is a statement about
+/// the DID-ONLY wizard rather than about the chain. A DID is never minted alone: a whole dig-profile
+/// is a DID singleton PLUS a store launched from it, and wiring a live minter HERE would let the
+/// first-run wizard spend real XCH on the half that strands a user at
+/// `DidConfirmedStoreNotLaunched`. The whole-profile ceremony has its own door
+/// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]), and that is where creation will be
+/// wired when a creation control exists to gate.
+///
+/// Returning the seams rather than an availability flag is what keeps this honest: the wizard reads
+/// its gate off this same value, so no line here can report a mint as possible while the wizard
+/// holds a minter that refuses (dig_ecosystem#2377).
 ///
 /// The WHOLE-PROFILE gate is a different question and a different type
 /// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]); a DID-only seam says nothing about
@@ -3099,8 +3107,9 @@ mod tray {
     /// # It reports the READING, and the reading comes from the snapshot
     ///
     /// The body used to be a constant, so a machine whose node serves both mint reads was still told
-    /// *"on-chain minting is not available in this version"* — false on that machine
-    /// (dig_ecosystem#2398). The reading is taken off the same `TrayView` the menu was built from,
+    /// that DIG itself could not mint — false on that machine (dig_ecosystem#2398). The sentence is
+    /// not quoted here: copy lives in dig-app-core, where a test can read it, and this file is the
+    /// one target no test reaches (`the_binary_states_nothing_about_minting_availability`). The reading is taken off the same `TrayView` the menu was built from,
     /// for the reason [`copy_receive_address`] reads its address there: what the window says is then
     /// what the row was drawn for, rather than a second answer taken a tick later. `None` — nobody
     /// has asked yet — is a distinct sentence, not a blocker.

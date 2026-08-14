@@ -46,14 +46,22 @@
 //! (and in `SPEC.md` §3.1b) rather than left to be rediscovered by whoever first asks this source
 //! about a CAT. The related mainnet-only `"xch"` address HRP is documented at the method.
 //!
-//! # Not wired up yet, on purpose
+//! # Measured, and what the measurement is allowed to decide
 //!
 //! [`readiness`] measures — off the painting thread — whether the connected node can service the
-//! reads a whole-profile mint needs. Nothing consumes that measurement at this revision:
-//! [`NodeChainReadiness`] has no caller outside its own module, and the shell still hardcodes the
-//! seam it hands the wizard. The poller already owns its cadence; what it lacks is a caller, and
-//! only once that caller and a creation control land together will a reading decide where the
-//! shell offers profile creation (dig_ecosystem#2398).
+//! reads a whole-profile mint needs. The shell now takes that reading every repaint and carries it
+//! on `TrayView::mint_chain` (dig_ecosystem#2398).
+//!
+//! Exactly ONE surface consumes it: the tray's DID explainer, which without it named a cause nobody
+//! had measured — telling a machine whose node serves both reads that *on-chain minting is not
+//! available in this version*. The explainer gates nothing and offers no control, which is what
+//! makes it safe to speak from a reading.
+//!
+//! A reading still does NOT decide availability. That is read off
+//! [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams), which needs a mint door the
+//! poller cannot hold, and the shell is held to it mechanically by
+//! `the_binary_cannot_open_the_profile_creation_gate`. Profile creation becomes offerable when a
+//! creation control lands WITH it, not when a reading turns green.
 //!
 //! Saying that plainly is the rule [`readiness`] itself argues, turned on this file: an unmeasured
 //! node is not a measured absence, and a seam nobody reads is not a seam in use.

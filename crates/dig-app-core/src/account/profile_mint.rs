@@ -521,7 +521,19 @@ where
     /// dig-account's ceremony mints at an index AND funds from that same index's wallet, so it
     /// cannot express the divergent case: passing the target would spend from a brand-new profile's
     /// empty wallet, and passing the funding index would mint at the wrong one. Carried over from
-    /// [`ChainMint`](crate::account::chain_mint::ChainMint) verbatim (dig_ecosystem#2496).
+    /// [`ChainMint`](crate::account::chain_mint::ChainMint) verbatim.
+    ///
+    /// # The upstream this used to defer to has SHIPPED, and this refusal is not what it fixed
+    ///
+    /// The citation here was dig_ecosystem#2496, as though a dig-account release would remove the
+    /// need for it. That release happened — 0.13 exposes `wallet_ops_at(ix)` — and the ceremony
+    /// still funds from the index it mints at, so the refusal stands unchanged.
+    ///
+    /// It is therefore a real, reachable state rather than a defensive one, and it is exactly the
+    /// state a SECOND profile begins in: the target is the next free index and the money is at the
+    /// active one. The message is the remedy — fund the target's address first — and any surface
+    /// that offers profile creation MUST get the user through that step before calling
+    /// [`begin`](ProfileMintDoor::begin), rather than letting them start a mint that will refuse.
     fn refuse_divergent_indices(&self) -> Result<(), MintError> {
         if self.funding.ix() == self.target.ix() {
             return Ok(());

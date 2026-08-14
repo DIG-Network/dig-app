@@ -153,11 +153,20 @@ impl AccountResidency {
 
     /// Fail closed unless the live active profile is the one this unlock's wallet derives at.
     ///
-    /// `UnlockedAccount::wallet_ops` derives at the index the account was OPENED at and dig-account
-    /// 0.8 exposes no `wallet_ops_at(ix)` (tracked as dig_ecosystem#2496), so after a switch the
-    /// wallet seam can only answer for the OLD profile. Answering anyway would show the previous
-    /// profile's receive address under the new profile's name — the money-lie class — so every money
-    /// accessor refuses instead, and says which two indices disagree.
+    /// `UnlockedAccount::wallet_ops` derives at the index the account was OPENED at, so after a
+    /// switch the wallet seam can only answer for the OLD profile. Answering anyway would show the
+    /// previous profile's receive address under the new profile's name — the money-lie class — so
+    /// every money accessor refuses instead, and says which two indices disagree.
+    ///
+    /// # Why this survives `wallet_ops_at(ix)` existing
+    ///
+    /// This used to cite dig_ecosystem#2496 as the missing upstream API. That API SHIPPED —
+    /// dig-account 0.13's `wallet_ops_at(ix)` derives at a requested index, and
+    /// [`enrolled_public_keys`](Self::enrolled_public_keys) calls it — so the refusal is no longer
+    /// waiting on anything. It stays because the two facts are different: deriving AT an index on
+    /// demand is not the same as the OPENED slot agreeing with the active profile, and it is the
+    /// disagreement, not the derivation, that would put one profile's address under another's name.
+    /// Re-deriving here to paper over the mismatch would hide a state the caller should see.
     fn wallet_agrees_with_the_active_profile(&self) -> AccountResult<()> {
         let active = self.active_ix();
         if active == self.wallet_slot.ix() {

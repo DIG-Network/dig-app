@@ -218,20 +218,22 @@ pub enum CreationBlocked {
     /// The chain answers ordinary reads and cannot walk a singleton lineage, so a mint started here
     /// could never be finished.
     ///
-    /// # The reason, stated against the code rather than against the previous comment
+    /// # What this arm means now that the walk exists
     ///
-    /// The mint itself exists: this workspace pins dig-account **0.11.3**, whose
-    /// `begin_profile_mint` / `advance_profile_mint` / `profile_mint_status` ceremony is real and has
-    /// minted a profile on Chia mainnet. What is missing is one READ. Phase B
-    /// (`advance_profile_mint` → `launch_store`) calls `dig_did::walk_did_lineage_to_tip`, whose
-    /// first operation is `ChainSource::resolve_singleton_lineage`, and
-    /// [`ControlChainSource`](crate::chain::ControlChainSource) answers that with `Unsupported`
-    /// pending the canonical walk in a forthcoming `dig-chainsource-interface` release
-    /// (dig_ecosystem#2572).
+    /// It is no longer a statement about this build. `ControlChainSource` serves
+    /// `resolve_singleton_lineage` by delegating to `dig-chainsource-interface` 0.3.1's hardened
+    /// `walk_singleton_lineage` (dig_ecosystem#2572, shipped), and dig-account 0.13's
+    /// `begin_profile_mint` / `advance_profile_mint` / `profile_mint_status` ceremony is real and
+    /// mainnet-proven. The prose this replaced described a workspace pinning dig-account 0.11.3
+    /// against a source that answered `Unsupported`; both halves of that are now false, and reading
+    /// it as current is what nearly mis-planned dig_ecosystem#2398.
     ///
-    /// So a build in this state can PUSH the DID half and can never launch the store — every user
-    /// stranded at `ProfileMintStatus::DidConfirmedStoreNotLaunched`, which dig-account itself calls
-    /// the state that costs money to get wrong. Withholding the offer is the cheaper error.
+    /// It remains a reachable arm because it is a statement about the NODE, measured at runtime by
+    /// [`ChainReadiness::probe`](crate::account::profile_mint::ChainReadiness::probe): a node too
+    /// old to serve `coin_record` and `coin_spend` cannot walk a lineage, and a build talking to one
+    /// can PUSH the DID half and never launch the store — stranding the user at
+    /// `ProfileMintStatus::DidConfirmedStoreNotLaunched`, which dig-account itself calls the state
+    /// that costs money to get wrong. Withholding the offer is the cheaper error.
     ///
     /// Named to match [`ProfileMintSeams::NoLineageWalk`](crate::account::profile_mint::ProfileMintSeams::NoLineageWalk),
     /// which is where the fact is measured.
@@ -252,18 +254,22 @@ impl CreationBlocked {
 ///
 /// # There is no `Possible` arm YET, and this type is shaped so that adding one is a body change
 ///
-/// The user's standing direction is that creating a profile MUST become real. It cannot be made real
-/// here YET, and exactly ONE thing is now in the way (dig_ecosystem#2398): this workspace pins
-/// dig-account **0.11.3**, whose profile-mint ceremony is real and mainnet-proven, and the store
-/// half of that ceremony walks a singleton lineage that
-/// [`ControlChainSource`](crate::chain::ControlChainSource) answers with `Unsupported` pending
-/// a forthcoming `dig-chainsource-interface` release (dig_ecosystem#2572). Until that read lands,
-/// a `Possible` arm
-/// would be a claim this crate cannot honour — and dig_ecosystem#2377 measured exactly what that
-/// costs: flipping one availability constant early opened an undismissible dead end AND a start-up
-/// password window, **neither catchable by a test**, because both live in the binary.
+/// The user's standing direction is that creating a profile MUST become real. What stands in the way
+/// is no longer a missing READ: the lineage walk shipped (dig_ecosystem#2572), dig-account 0.13's
+/// profile-mint ceremony is mainnet-proven, and a healthy node answers both probes — so
+/// [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams) really can report
+/// `Possible` today. The prose this replaced said the opposite, from a workspace pin two minors old.
 ///
-/// So the arm is absent and the SHAPE is ready for it. Consumers ask
+/// What is missing is the CONTROL: the surface that gets a user through funding the target index's
+/// address before a mint that would otherwise refuse (see
+/// `ProfileMint::refuse_divergent_indices`), and the wizard behind it. Until those land, this crate
+/// answering `Possible` to a shell that has no control to draw would be the drift
+/// dig_ecosystem#2377 measured — flipping one availability constant early opened an undismissible
+/// dead end AND a start-up password window, **neither catchable by a test**, because both live in
+/// the binary.
+///
+/// So the SHAPE is ready and the binary does not reach for it, which
+/// `the_binary_cannot_open_the_profile_creation_gate` holds mechanically. Consumers ask
 /// [`blocked`](Self::blocked) — an `Option`, whose `None` is already spelled *creation is possible* —
 /// and render [`copy::cannot_create`] from the REASON. Nothing matches this enum exhaustively. The
 /// day the lineage walk lands, the work is: add `Possible`, derive it from
