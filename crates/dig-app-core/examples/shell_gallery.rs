@@ -99,6 +99,8 @@ fn gallery_view() -> TrayView {
         profile_creation: dig_app_core::profiles::ProfileCreation::of(
             dig_app_core::account::chain_mint::MintAvailability::NoChainTransport,
         ),
+        // A fixture takes no reading (dig_ecosystem#2398).
+        mint_chain: None,
         ..TrayView::default()
     }
 }

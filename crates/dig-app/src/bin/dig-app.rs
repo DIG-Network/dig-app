@@ -555,19 +555,27 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
 ///
 /// **Still none, and the reason is now narrow and specific.**
 ///
-/// Do not plan work from the text this replaced. It claimed the workspace pinned
-/// `dig-node-control-interface` 0.9 and that dig-node served neither `coin_spend` nor
-/// `resolve_singleton_lineage`; all three statements are false. The pin is 0.10, dig-node serves
-/// `coin_spend`, and [`dig_app_core::chain::ControlChainSource`] now serves
-/// `resolve_singleton_lineage` by delegating to the ecosystem's one hardened
-/// `walk_singleton_lineage` (dig_ecosystem#2572).
+/// Do not plan work from any version-claim in this comment's history: it has been wrong twice, and
+/// the pins move under it. As of this revision the lock holds dig-account **0.13.0**,
+/// dig-chainsource-interface **0.3.1** and dig-node-control-interface **0.15.0** — read `Cargo.lock`
+/// rather than this sentence.
 ///
-/// What is missing here is WIRING, not capability. Nothing in this binary constructs a
-/// [`dig_app_core::chain::ControlChainSource`] or a publisher yet, so there is no live reader to
-/// hand a minter — and a value invented here would be exactly the drift
-/// [`MintSeams`] exists to prevent. Returning the seams rather than an availability flag is what
-/// keeps that honest: the wizard reads its gate off this same value, so no line here can report a
-/// mint as possible while the wizard holds a minter that refuses (dig_ecosystem#2377).
+/// **The chain half is no longer what is missing.** [`dig_app_core::chain::ControlChainSource`]
+/// serves every read a mint needs, including `resolve_singleton_lineage` via the ecosystem's one
+/// hardened `walk_singleton_lineage` (dig_ecosystem#2572), and the shell now MEASURES whether the
+/// connected node services them — that reading is `TrayView::mint_chain`.
+///
+/// What this function returns is still `NoChainTransport`, deliberately, and it is a statement about
+/// the DID-ONLY wizard rather than about the chain. A DID is never minted alone: a whole dig-profile
+/// is a DID singleton PLUS a store launched from it, and wiring a live minter HERE would let the
+/// first-run wizard spend real XCH on the half that strands a user at
+/// `DidConfirmedStoreNotLaunched`. The whole-profile ceremony has its own door
+/// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]), and that is where creation will be
+/// wired when a creation control exists to gate.
+///
+/// Returning the seams rather than an availability flag is what keeps this honest: the wizard reads
+/// its gate off this same value, so no line here can report a mint as possible while the wizard
+/// holds a minter that refuses (dig_ecosystem#2377).
 ///
 /// The WHOLE-PROFILE gate is a different question and a different type
 /// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]); a DID-only seam says nothing about
@@ -1555,12 +1563,18 @@ mod tray {
             // This account's profiles (dig_ecosystem#2403). Every decision about what the reading
             // MEANS lives in `dig_app_core::profiles`, because a binary is a test-free zone.
             profiles: profiles_reading(env, session),
-            // Derived from the SAME `mint_seams()` the start-up wizard's gate reads, so there is no
-            // line here that could report a profile as creatable while every minter refuses
-            // (dig_ecosystem#2377).
-            profile_creation: dig_app_core::profiles::ProfileCreation::of(
-                super::mint_seams().availability(),
-            ),
+            // What the node ANSWERED about whether a whole profile can be minted here
+            // (dig_ecosystem#2398) — never what this binary asserts. See `profile_creation_of`.
+            profile_creation: profile_creation_of(status, session),
+            // What the node itself says about servicing a mint (dig_ecosystem#2398). Read for the
+            // DID explainer, which without it names a cause nobody measured. The SAME poller feeds
+            // `profile_creation` above, so the explainer and the gate can never disagree about what
+            // the node said.
+            mint_chain: match status.read() {
+                Ok(status) => mint_chain_poller().observe(&status.engine),
+                // A poisoned lock says nothing about the node, and "nothing" is not a blocker.
+                Err(_) => None,
+            },
             // Where this node stands on BOTH networks (dig_ecosystem#2569). The poller owns the
             // cadence, and every decision about what the readings MEAN lives in
             // `dig_app_core::network`, because a binary is a test-free zone.
@@ -1685,6 +1699,94 @@ mod tray {
         static ENROLMENT: std::sync::OnceLock<dig_app_core::wallet::enrol::KeyEnrolment> =
             std::sync::OnceLock::new();
         ENROLMENT.get_or_init(dig_app_core::wallet::enrol::KeyEnrolment::default)
+    }
+
+    /// The process-wide chain-readiness cache (dig_ecosystem#2398).
+    ///
+    /// One instance for the reason [`balance_poller`] is one: [`snapshot`] runs about twice a
+    /// second and a reading is two node round trips. The poller owns its own cadence and answers
+    /// from cache in between; every decision about what a reading MEANS lives in
+    /// `dig_app_core::chain`, because a binary is a test-free zone.
+    fn mint_chain_poller() -> &'static dig_app_core::chain::NodeChainReadiness {
+        static POLLER: std::sync::OnceLock<dig_app_core::chain::NodeChainReadiness> =
+            std::sync::OnceLock::new();
+        POLLER.get_or_init(dig_app_core::chain::NodeChainReadiness::default)
+    }
+
+    /// Whether a whole profile can be created here — READ off the node, never asserted
+    /// (dig_ecosystem#2398).
+    ///
+    /// # Every arm is a measurement, and the absent one is spelled `Unknown`
+    ///
+    /// There is no constant in this file whose value opens the gate. The answer is
+    /// [`ProfileMintSeams::availability`] applied to a reading
+    /// [`NodeChainReadiness`](dig_app_core::chain::NodeChainReadiness) took by asking a live node
+    /// three questions on a worker thread — so a build whose node is stopped, or too old to walk a
+    /// singleton lineage, reports those as the different facts they are, and a build nobody has
+    /// asked yet reports `Unknown` rather than a cause nobody observed (dig_ecosystem#2690).
+    ///
+    /// `profiles.rs`'s `the_binary_cannot_open_the_profile_creation_gate` holds that property
+    /// mechanically: the five names that would let this file SHORT-CIRCUIT the chain from reading to
+    /// `Possible` are banned from the whole crate's source.
+    ///
+    /// # Why a door is built here at all when nothing is minted
+    ///
+    /// [`ProfileMintSeams::Wired`] carries the door, and `Wired` is the only arm that answers
+    /// `Possible`. That is the design: an availability that could be produced without a door would
+    /// be an offer with no ceremony behind it. Building the real door — over the live registry, the
+    /// live residency, a real chain source and a real publisher — is what makes the offer
+    /// answerable, and it costs nothing until [`ProfileMintDoor::begin`] is called, which this
+    /// function never does.
+    ///
+    /// # Money
+    ///
+    /// Nothing here spends. The chain source cannot broadcast by construction, the publisher is
+    /// constructed and dropped unused, and no seed is derived: a `ProfileMinter` is taken per mint
+    /// call inside the door, never here.
+    fn profile_creation_of(
+        status: &SharedStatus,
+        session: Option<&TraySession>,
+    ) -> dig_app_core::profiles::ProfileCreation {
+        use dig_app_core::account::profile_mint::ProfileMint;
+        use dig_app_core::account::profile_mint::ProfileMintSeams;
+        use dig_app_core::profiles::ProfileCreation;
+
+        // No unlocked account means no registry to mint into and no residency to derive from, so
+        // nothing about this machine's node has been measured FOR creation. `Unknown` withholds the
+        // offer exactly as a blocker would, and unlike a blocker it names no cause: telling a locked
+        // user their chain is unreachable would send them to fix a node that is answering fine.
+        let Some(live) = session else {
+            return ProfileCreation::Unknown;
+        };
+
+        // A poisoned lock says nothing about the node, and "nothing" is not a blocker.
+        let Ok(status) = status.read() else {
+            return ProfileCreation::Unknown;
+        };
+        let Some(reading) = mint_chain_poller().observe(&status.engine) else {
+            // Either nothing is connected or the first probe has not landed. Both are *not asked
+            // yet*, which `of_reading(None)` spells; neither is a measured absence.
+            return ProfileCreation::of_reading(None);
+        };
+        let Some(endpoint) = status.engine.endpoint() else {
+            return ProfileCreation::Unknown;
+        };
+
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+        let publisher = dig_app_core::chain::ControlSpendPublisher::new(endpoint);
+        // Every money decision the door carries — which wallet pays, which index is created, the
+        // network and the fee — is answered inside `for_session`, under test. This file chooses
+        // none of them.
+        let door = ProfileMint::for_session(
+            live.residency.profiles(),
+            &live.residency,
+            &chain,
+            &publisher,
+        );
+
+        ProfileCreation::of_reading(Some(
+            ProfileMintSeams::from_readiness(reading, &door).availability(),
+        ))
     }
 
     fn network_poller() -> &'static dig_app_core::network::NodeNetworkStanding {
@@ -2556,7 +2658,19 @@ mod tray {
             TrayAction::PairAnApp => pair_an_app(session.as_ref(), confirmer),
             TrayAction::ManagePairedApps => manage_paired_apps(session.as_ref(), confirmer),
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
-            TrayAction::AboutDid => explain_did(confirmer),
+            // Re-snapshots LIVE for the reason the wallet arms do: a node that came up while the
+            // menu sat open must be reflected rather than replayed from the model the row was drawn
+            // from. It costs no round trip — `mint_chain` is answered from the poller's cache.
+            TrayAction::AboutDid => explain_did(
+                &snapshot(
+                    status,
+                    env,
+                    session.as_ref(),
+                    OpenAttempt::NotAttempted,
+                    hotkey,
+                ),
+                confirmer,
+            ),
             // The three profile arms (dig_ecosystem#2403). Each re-reads the registry LIVE for the
             // reason the wallet arms re-snapshot: the row was drawn from a view up to a tick old,
             // and a list that moved in between must decide the outcome rather than the picture.
@@ -3059,11 +3173,19 @@ mod tray {
 
     /// What an on-chain DID is, what it would cost, and why the account is complete without one.
     ///
-    /// Minting a `did:chia:` is a real mainnet spend, and no code path in this build can make one — see
-    /// [`dig_app_core::account::mint`] for why — so the tray offers no way to mint one at all (see
-    /// [`tray_menu::TrayAction::AboutDid`]). It offers this
-    /// explanation instead, which is something it can actually deliver — the honest alternative both to a
-    /// button that fails obscurely and to a permanently-greyed row (§3.7).
+    /// Minting a `did:chia:` is a real mainnet spend and this build offers no control that starts one,
+    /// so the tray offers this explanation instead of a button that fails obscurely or a permanently
+    /// greyed row (§3.7).
+    ///
+    /// # It reports the READING, and the reading comes from the snapshot
+    ///
+    /// The body used to be a constant, so a machine whose node serves both mint reads was still told
+    /// that DIG itself could not mint — false on that machine (dig_ecosystem#2398). The sentence is
+    /// not quoted here: copy lives in dig-app-core, where a test can read it, and this file is the
+    /// one target no test reaches (`the_binary_states_nothing_about_minting_availability`). The reading is taken off the same `TrayView` the menu was built from,
+    /// for the reason [`copy_receive_address`] reads its address there: what the window says is then
+    /// what the row was drawn for, rather than a second answer taken a tick later. `None` — nobody
+    /// has asked yet — is a distinct sentence, not a blocker.
     ///
     /// # The words come from the core, and that is the point
     ///
@@ -3075,8 +3197,8 @@ mod tray {
     /// enumeration. Do not reintroduce a literal in this function.
     ///
     /// [`journey::did_explainer`]: dig_app_core::account::journey::did_explainer
-    fn explain_did(confirmer: &dyn NativeConfirmer) {
-        let notice = dig_app_core::account::journey::did_explainer();
+    fn explain_did(view: &TrayView, confirmer: &dyn NativeConfirmer) {
+        let notice = dig_app_core::account::journey::did_explainer(view.mint_chain.as_ref());
         notify(confirmer, notice.title, notice.heading, &notice.body);
     }
 

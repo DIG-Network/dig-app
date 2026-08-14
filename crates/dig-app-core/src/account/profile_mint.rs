@@ -61,6 +61,20 @@ use crate::account::residency::AccountResidency;
 /// coin that does not exist.
 const PROBE_LAUNCHER_ID: Bytes32 = Bytes32::new([0; 32]);
 
+/// The farmer fee a surface-built mint pays, PER BUNDLE, in mojos.
+///
+/// A whole profile is two bundles, so a user pays twice this plus two singleton mojos — see
+/// [`ProfileMint::cost_mojos`], which derives the total from the same [`MintOptions`] the mint is
+/// charged under, so a displayed cost can never come to be lower than what is spent.
+///
+/// # Why a constant and not a preference
+///
+/// A fee is a bid for inclusion, not a price, and a person has no way to judge one. The value is
+/// small enough that being wrong costs a fraction of a cent and large enough to clear an ordinary
+/// mempool; it is bounded above by dig-account's own `MAX_MINT_FEE_MOJOS` ceiling, which refuses
+/// anything higher, so this cannot become a way to drain a wallet through a config file.
+pub const DEFAULT_MINT_FEE_MOJOS: u64 = 10_000;
+
 /// Whether this build can mint a WHOLE profile — both halves — and, when it cannot, which half is
 /// out of reach.
 ///
@@ -495,6 +509,43 @@ where
         }
     }
 
+    /// The door a SURFACE builds: mainnet, at [`DEFAULT_MINT_FEE_MOJOS`], funding from the profile
+    /// whose wallet is live and creating the next free one.
+    ///
+    /// # Why the surface does not get to choose these
+    ///
+    /// `new` takes eight arguments because a mint has eight distinct authorities, and four of them
+    /// are DECISIONS — which wallet pays, which index is created, which network's signature domain
+    /// is used, and what is paid to the farmer. A binary is a test-free zone, so a binary that
+    /// answered them would be answering money questions no test can execute. Here they are answered
+    /// once, from the session, under test.
+    ///
+    /// The two slots are read from the SAME [`ProfileSession`] the door writes to, so a mint can
+    /// never be journalled against a registry other than the one its indices were read from.
+    ///
+    /// # Money
+    ///
+    /// Constructing this spends nothing; [`ProfileMintDoor::begin`] does. On mainnet the total is
+    /// [`cost_mojos`](Self::cost_mojos) — two bundles at [`DEFAULT_MINT_FEE_MOJOS`] plus two
+    /// singleton mojos.
+    pub fn for_session(
+        session: &'a ProfileSession,
+        residency: &'a AccountResidency,
+        chain: &'a C,
+        publisher: &'a P,
+    ) -> Self {
+        Self::new(
+            session,
+            residency,
+            session.wallet_slot(),
+            session.next_mint_target(),
+            chain,
+            publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(DEFAULT_MINT_FEE_MOJOS),
+        )
+    }
+
     /// The total a whole profile costs, in mojos: two bundles' fees plus the two singleton mojos.
     ///
     /// Derived from the SAME [`MintOptions`] the mint is charged under, so a displayed cost cannot
@@ -521,7 +572,19 @@ where
     /// dig-account's ceremony mints at an index AND funds from that same index's wallet, so it
     /// cannot express the divergent case: passing the target would spend from a brand-new profile's
     /// empty wallet, and passing the funding index would mint at the wrong one. Carried over from
-    /// [`ChainMint`](crate::account::chain_mint::ChainMint) verbatim (dig_ecosystem#2496).
+    /// [`ChainMint`](crate::account::chain_mint::ChainMint) verbatim.
+    ///
+    /// # The upstream this used to defer to has SHIPPED, and this refusal is not what it fixed
+    ///
+    /// The citation here was dig_ecosystem#2496, as though a dig-account release would remove the
+    /// need for it. That release happened — 0.13 exposes `wallet_ops_at(ix)` — and the ceremony
+    /// still funds from the index it mints at, so the refusal stands unchanged.
+    ///
+    /// It is therefore a real, reachable state rather than a defensive one, and it is exactly the
+    /// state a SECOND profile begins in: the target is the next free index and the money is at the
+    /// active one. The message is the remedy — fund the target's address first — and any surface
+    /// that offers profile creation MUST get the user through that step before calling
+    /// [`begin`](ProfileMintDoor::begin), rather than letting them start a mint that will refuse.
     fn refuse_divergent_indices(&self) -> Result<(), MintError> {
         if self.funding.ix() == self.target.ix() {
             return Ok(());

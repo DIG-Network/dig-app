@@ -217,6 +217,8 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
         // produce: a picture that contradicts the product, which is the one thing a gallery must
         // never do.
         profile_creation: ProfileCreation::of(MintAvailability::NoChainTransport),
+        // A fixture takes no reading (dig_ecosystem#2398).
+        mint_chain: None,
         window_host: WindowHost::Available,
         cache: Some(CacheSnapshot {
             cap_bytes: GIB,

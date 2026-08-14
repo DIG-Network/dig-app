@@ -12,23 +12,30 @@
 //! [`HostedStoresReading`](crate::hosted_stores::HostedStoresReading) already use, for the same
 //! reason: there is then no path that turns an unknown into an empty list.
 //!
-//! # Why creation is a value derived from the mint seam
+//! # Why creation is a value READ off the node rather than asserted
 //!
-//! A profile is a DID singleton plus a store plus a seeded SMT, and creating one is a MINT. dig-app
-//! already has exactly one place that answers whether this build can mint —
-//! [`MintSeams::availability`](crate::account::chain_mint::MintSeams::availability), which the
-//! start-up wizard's gate reads — and [`ProfileCreation::of`] is a **function of that value**. That
-//! is deliberate and is the whole design of dig_ecosystem#2377: two independent checks are how a
-//! surface comes to advertise a capability whose implementation refuses, which is the dead end
-//! dig_ecosystem#1800 removed once already.
+//! A profile is a DID singleton plus a store plus a seeded SMT, and creating one is a MINT — so
+//! whether it can be done is a property of the machine, not of the build. [`ProfileCreation`] is a
+//! **function of** what the connected node answered
+//! ([`ProfileMintSeams::availability`](crate::account::profile_mint::ProfileMintSeams::availability),
+//! taken off a [`ChainReadiness`](crate::account::profile_mint::ChainReadiness) probe), never a
+//! second opinion beside it. That is the whole design of dig_ecosystem#2377: two independent checks
+//! are how a surface comes to advertise a capability whose implementation refuses, which is the
+//! dead end dig_ecosystem#1800 removed once already.
 //!
-//! [`ProfileCreation`] has no *possible* arm. That is not pessimism, it is the build: this
-//! workspace pins dig-account **0.11.3**, whose profile-mint ceremony is real, but the store half of
-//! that ceremony walks a singleton lineage and
-//! [`ControlChainSource`](crate::chain::ControlChainSource) cannot serve that read yet
-//! (dig_ecosystem#2572). So a mint started on this build could be paid for and never finished. An
-//! arm claiming otherwise would be a state nothing can reach, which this crate has already decided
-//! is worse than no state at all (`pane::state`'s epitaph for `Unwired`).
+//! # The two seams are NOT interchangeable, and [`ProfileCreation::of`] is the narrow one
+//!
+//! [`MintSeams`](crate::account::chain_mint::MintSeams) answers *can a DID be minted?* — the
+//! narrower question the first-run wizard asks. A profile is a DID **and** a store, and the store
+//! half needs a read the DID half does not, so a seam that can mint a DID says nothing about whether
+//! a profile can be completed. [`ProfileCreation::of`] reads that narrow seam and therefore can
+//! never answer [`Possible`](ProfileCreation::Possible) — deliberately, because a wired DID-only
+//! seam opening creation would let a DID be minted alone, and a user left holding one has spent real
+//! XCH on an identity with no store.
+//!
+//! [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only door to `Possible`, and it
+//! opens only for a node that answered a peak read, a singleton-lineage probe and a coin-spend
+//! probe. `the_binary_cannot_open_the_profile_creation_gate` holds the binary to the derived route.
 
 use dig_account::registry::{ProfileEntry, ProfileRegistry, ProfileVisibility};
 use dig_account::ProfileIx;
@@ -218,20 +225,22 @@ pub enum CreationBlocked {
     /// The chain answers ordinary reads and cannot walk a singleton lineage, so a mint started here
     /// could never be finished.
     ///
-    /// # The reason, stated against the code rather than against the previous comment
+    /// # What this arm means now that the walk exists
     ///
-    /// The mint itself exists: this workspace pins dig-account **0.11.3**, whose
-    /// `begin_profile_mint` / `advance_profile_mint` / `profile_mint_status` ceremony is real and has
-    /// minted a profile on Chia mainnet. What is missing is one READ. Phase B
-    /// (`advance_profile_mint` → `launch_store`) calls `dig_did::walk_did_lineage_to_tip`, whose
-    /// first operation is `ChainSource::resolve_singleton_lineage`, and
-    /// [`ControlChainSource`](crate::chain::ControlChainSource) answers that with `Unsupported`
-    /// pending the canonical walk in a forthcoming `dig-chainsource-interface` release
-    /// (dig_ecosystem#2572).
+    /// It is no longer a statement about this build. `ControlChainSource` serves
+    /// `resolve_singleton_lineage` by delegating to `dig-chainsource-interface` 0.3.1's hardened
+    /// `walk_singleton_lineage` (dig_ecosystem#2572, shipped), and dig-account 0.13's
+    /// `begin_profile_mint` / `advance_profile_mint` / `profile_mint_status` ceremony is real and
+    /// mainnet-proven. The prose this replaced described a workspace pinning dig-account 0.11.3
+    /// against a source that answered `Unsupported`; both halves of that are now false, and reading
+    /// it as current is what nearly mis-planned dig_ecosystem#2398.
     ///
-    /// So a build in this state can PUSH the DID half and can never launch the store — every user
-    /// stranded at `ProfileMintStatus::DidConfirmedStoreNotLaunched`, which dig-account itself calls
-    /// the state that costs money to get wrong. Withholding the offer is the cheaper error.
+    /// It remains a reachable arm because it is a statement about the NODE, measured at runtime by
+    /// [`ChainReadiness::probe`](crate::account::profile_mint::ChainReadiness::probe): a node too
+    /// old to serve `coin_record` and `coin_spend` cannot walk a lineage, and a build talking to one
+    /// can PUSH the DID half and never launch the store — stranding the user at
+    /// `ProfileMintStatus::DidConfirmedStoreNotLaunched`, which dig-account itself calls the state
+    /// that costs money to get wrong. Withholding the offer is the cheaper error.
     ///
     /// Named to match [`ProfileMintSeams::NoLineageWalk`](crate::account::profile_mint::ProfileMintSeams::NoLineageWalk),
     /// which is where the fact is measured.
@@ -252,18 +261,22 @@ impl CreationBlocked {
 ///
 /// # There is no `Possible` arm YET, and this type is shaped so that adding one is a body change
 ///
-/// The user's standing direction is that creating a profile MUST become real. It cannot be made real
-/// here YET, and exactly ONE thing is now in the way (dig_ecosystem#2398): this workspace pins
-/// dig-account **0.11.3**, whose profile-mint ceremony is real and mainnet-proven, and the store
-/// half of that ceremony walks a singleton lineage that
-/// [`ControlChainSource`](crate::chain::ControlChainSource) answers with `Unsupported` pending
-/// a forthcoming `dig-chainsource-interface` release (dig_ecosystem#2572). Until that read lands,
-/// a `Possible` arm
-/// would be a claim this crate cannot honour — and dig_ecosystem#2377 measured exactly what that
-/// costs: flipping one availability constant early opened an undismissible dead end AND a start-up
-/// password window, **neither catchable by a test**, because both live in the binary.
+/// The user's standing direction is that creating a profile MUST become real. What stands in the way
+/// is no longer a missing READ: the lineage walk shipped (dig_ecosystem#2572), dig-account 0.13's
+/// profile-mint ceremony is mainnet-proven, and a healthy node answers both probes — so
+/// [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams) really can report
+/// `Possible` today. The prose this replaced said the opposite, from a workspace pin two minors old.
 ///
-/// So the arm is absent and the SHAPE is ready for it. Consumers ask
+/// What is missing is the CONTROL: the surface that gets a user through funding the target index's
+/// address before a mint that would otherwise refuse (see
+/// `ProfileMint::refuse_divergent_indices`), and the wizard behind it. Until those land, this crate
+/// answering `Possible` to a shell that has no control to draw would be the drift
+/// dig_ecosystem#2377 measured — flipping one availability constant early opened an undismissible
+/// dead end AND a start-up password window, **neither catchable by a test**, because both live in
+/// the binary.
+///
+/// So the SHAPE is ready and the binary does not reach for it, which
+/// `the_binary_cannot_open_the_profile_creation_gate` holds mechanically. Consumers ask
 /// [`blocked`](Self::blocked) — an `Option`, whose `None` is already spelled *creation is possible* —
 /// and render [`copy::cannot_create`] from the REASON. Nothing matches this enum exhaustively. The
 /// day the lineage walk lands, the work is: add `Possible`, derive it from
@@ -490,9 +503,10 @@ pub mod copy {
     /// Said while nobody has yet measured whether this node can service a profile mint.
     ///
     /// Names the READ, not an outcome, exactly as the card's list-pending sentence does — and for a
-    /// sharper reason: every sentence in [`cannot_create`] ends *there is nothing for you to do*,
-    /// which is the worst thing to tell somebody whose node is merely stopped. An unmeasured node and
-    /// an unreachable one are different facts (dig_ecosystem#2690).
+    /// sharper reason: every sentence in [`cannot_create`] names a CAUSE and the remedy for it, and
+    /// nobody has yet measured which cause applies. Borrowing one of them here would hand a person a
+    /// specific thing to go fix on the strength of a guess. An unmeasured node and an unreachable one
+    /// are different facts (dig_ecosystem#2690).
     ///
     /// Lives here, beside [`cannot_create`], because the window's card and the tray's About notice
     /// both read it — one sentence, so the two surfaces cannot come to describe different builds.
@@ -530,26 +544,33 @@ pub mod copy {
     /// wizard reads — so a card, a notice and that wizard cannot come to disagree about whether a
     /// mint is possible.
     ///
-    /// # The wording is #1820's, and "optional" is the word it settled against
+    /// # These sentences changed when the cause became MEASURED, and the old ones are why
     ///
-    /// A profile is REQUIRED for publishing, signing and messaging, and creating one is *not
-    /// available in this version*. Calling it optional would tell a person they had chosen to go
-    /// without something they have simply not been offered.
+    /// Both used to end *"it is not available in this version. Nothing is missing from your setup
+    /// and there is nothing for you to do"*, which was accurate only while no build could mint at
+    /// all: creation was derived from a hardcoded seam, so the absence really was DIG's rather than
+    /// this machine's. Creation is now read off the connected node (dig_ecosystem#2398), and the
+    /// same two arms mean something entirely different — **a node that is not answering** and **a
+    /// node too old to serve the reads the second half needs**. Telling either of those people that
+    /// nothing is missing from their setup withholds the one action that would fix it.
+    ///
+    /// So each sentence now names the cause and the REMEDY. #1820's finding survives intact and is
+    /// the reason neither says "optional": a profile is REQUIRED for publishing, signing and
+    /// messaging, and calling it optional would tell a person they had chosen to go without
+    /// something they were never offered.
     pub fn cannot_create(blocked: CreationBlocked) -> &'static str {
         match blocked {
             CreationBlocked::NoChainTransport => {
-                "Creating a profile mints a DID and a store on the Chia blockchain, and this \
-                 version of DIG has no way to reach the chain to do it. It is required for \
-                 publishing, signing for an app and messaging, and it is not available in this \
-                 version. Nothing is missing from your setup and there is nothing for you to do — \
-                 when it arrives, this card will offer it."
+                "Creating a profile mints a DID and a store on the Chia blockchain, and DIG could \
+                 not reach the chain to check whether this computer can do it. Your DIG node is \
+                 what reads the chain, so start it — the Home tab shows whether it is running. \
+                 This card offers creation as soon as your node answers."
             }
             CreationBlocked::NoLineageWalk => {
-                "This copy of DIG can reach the chain, and it cannot yet finish the second half of \
-                 creating a profile — so starting one would spend XCH on something it could not \
-                 complete. It is required for publishing, signing for an app and messaging, and it \
-                 is not available in this version. Nothing is missing from your setup and there is \
-                 nothing for you to do — when it arrives, this card will offer it."
+                "Your DIG node answers, and it cannot serve the chain reads the second half of \
+                 creating a profile needs — so beginning one would spend XCH on something that \
+                 could not be finished. Update your DIG node to a newer version and this card will \
+                 offer creation."
             }
         }
     }
@@ -708,13 +729,19 @@ mod tests {
         );
     }
 
-    /// **The shipped binary cannot open the profile-creation gate.**
+    /// **The shipped binary cannot ASSERT the profile-creation gate open.**
     ///
     /// Makes impossible: the dig_ecosystem#2377 defect, in its exact original shape. That incident
     /// was one constant flipped in `src/bin/dig-app.rs` — a file no test can execute — which opened
     /// an undismissible dead end AND a start-up password window, neither catchable by a test.
-    /// `ProfileCreation::Possible` now EXISTS, so that one-line flip is once again writable; the only
-    /// thing standing between it and a shipped dead end is that the binary never reaches for it.
+    ///
+    /// # It now permits the DERIVED route and forbids the ASSERTED one
+    ///
+    /// The binary reads creation from a node probe (`ProfileCreation::of_reading`), so a blanket ban
+    /// on the doors would be unsatisfiable. What is banned instead is every name that would let a
+    /// binary produce `Possible` WITHOUT a node having answered — see [`CREATION_GATE_OPENERS`],
+    /// which lists one per link of that chain. The one-constant flip stays unexpressible, because
+    /// after this change there is no constant in the binary whose value alone opens the gate.
     ///
     /// So this reads the binary's SOURCE, which is the one way a test can see into those files at
     /// all. It reads the WHOLE crate, every `.rs` under `src/` at any depth, because the entry
@@ -770,27 +797,57 @@ mod tests {
         );
     }
 
-    /// The spellings that would open the profile-creation gate from the binary crate.
+    /// The spellings that would open the profile-creation gate from the binary crate **without a
+    /// measurement standing behind it**.
     ///
-    /// `of_reading` is on the list even though it is the seam the wiring will eventually use, and
-    /// FOR that reason: it answers [`ProfileCreation::Possible`] for
-    /// `Some(ProfileMintAvailability::Possible)`, so one line reaching it in a file no test executes
-    /// re-creates dig_ecosystem#2377 in its exact original shape. Landing the wiring therefore means
-    /// editing this list in the same diff as the create control, which is the point of the guard.
+    /// # What this list is aimed at, now that the wiring has landed
+    ///
+    /// It used to ban `of_reading` and `of_profile_mint` outright, because while the binary reached
+    /// for neither, banning the doors was the cheapest way to ban the outcome. The binary now calls
+    /// `of_reading`, so those two came OFF the list — and the guard's job did not shrink, it
+    /// narrowed: what it forbids is a `Possible` **asserted** in a file no test can execute, rather
+    /// than one **derived** from a probe of a real node and a real mint door.
+    ///
+    /// That distinction is the whole property. `of_reading` cannot answer
+    /// [`ProfileCreation::Possible`] out of thin air: it needs a
+    /// [`ProfileMintAvailability::Possible`](crate::account::profile_mint::ProfileMintAvailability),
+    /// which comes only from a `ProfileMintSeams::Wired`, which
+    /// [`from_readiness`](crate::account::profile_mint::ProfileMintSeams::from_readiness) builds only
+    /// from a `ChainReadiness::WalksLineages` — a value produced only by
+    /// [`ChainReadiness::probe`](crate::account::profile_mint::ChainReadiness::probe) asking a live
+    /// chain three questions. So every name a binary could write to SHORT-CIRCUIT that chain is
+    /// banned here instead, one per link:
+    ///
+    /// - `ProfileCreation::Possible` — the outcome itself, asserted.
+    /// - `ProfileMintAvailability::Possible` and `MintAvailability::Possible` — the availability,
+    ///   asserted beside the seams rather than read off them, which is dig_ecosystem#2377 exactly.
+    /// - `ProfileMintSeams::Wired` — a wired seam built without a probe.
+    /// - `ChainReadiness::WalksLineages` — a reading asserted without asking a node.
+    ///
+    /// With all five banned, the one-constant flip that caused dig_ecosystem#2377 stays
+    /// unexpressible: there is no constant in `src/bin/dig-app.rs` whose value alone opens the gate,
+    /// because the gate now opens on what a node ANSWERED. `MintAvailability::Possible` stays banned
+    /// even though creation no longer reads the DID-only seam, so the original flip — `mint_seams()`
+    /// returning `Possible` — remains unwritable too.
     ///
     /// # The residual, stated rather than papered over
     ///
     /// This list is HAND-maintained, and nothing mechanical can complete it: a text scan cannot tell
     /// a function that CONSTRUCTS [`ProfileCreation::Possible`] from one that merely matches on it,
-    /// which is most of this module. So any new public function that can answer `Possible` must be
-    /// added here by hand — and dig_ecosystem#2690 is the proof that the step gets missed, because
-    /// `of_reading` was added in that change and this list was not.
+    /// which is most of this module. So any new route to `Possible` must be added here by hand — and
+    /// dig_ecosystem#2690 is the proof that the step gets missed, because `of_reading` was added in
+    /// that change and this list was not.
     ///
-    /// What keeps the residual small is that
-    /// [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only place `Possible` is ever
-    /// constructed; a new route has to go through it, so it is one name to watch rather than many.
-    const CREATION_GATE_OPENERS: [&str; 3] =
-        ["ProfileCreation::Possible", "of_profile_mint", "of_reading"];
+    /// What keeps the residual small is that every link above is a single named type, and
+    /// [`of_profile_mint`](ProfileCreation::of_profile_mint) remains the only place `Possible` is
+    /// ever constructed.
+    const CREATION_GATE_OPENERS: [&str; 5] = [
+        "ProfileCreation::Possible",
+        "ProfileMintAvailability::Possible",
+        "MintAvailability::Possible",
+        "ProfileMintSeams::Wired",
+        "ChainReadiness::WalksLineages",
+    ];
 
     /// Which openers `source` reaches for OUTSIDE its comments.
     ///
@@ -832,9 +889,13 @@ mod tests {
     #[test]
     fn the_gate_guard_catches_an_opener_and_tolerates_a_mention() {
         for opener in CREATION_GATE_OPENERS {
-            assert_eq!(
-                vec![opener],
-                openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")),
+            // `contains` rather than an equality against a one-element vector, because two of the
+            // openers genuinely nest — `MintAvailability::Possible` is a suffix of
+            // `ProfileMintAvailability::Possible` — so planting the longer one legitimately names
+            // both. What matters is that the scan NAMES the planted opener; over-naming a nested
+            // spelling withholds the offer just as firmly.
+            assert!(
+                openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")).contains(&opener),
                 "the scan missed `{opener}` in source that plainly reaches for it, so the guard \
                  built on it cannot speak for the binary crate"
             );
@@ -849,11 +910,21 @@ mod tests {
             );
         }
 
-        assert!(
-            openers_reached_in("fn wire() { let _ = ProfileCreation::of(seam); }").is_empty(),
-            "the call the shipped binary actually makes was read as an opener, which makes the \
-             guard unsatisfiable rather than protective"
-        );
+        // The calls the shipped binary genuinely makes, which must NOT read as openers or the guard
+        // would be unsatisfiable rather than protective — and the first person to hit it would
+        // delete it. These are the DERIVED route: each one needs a reading that only a probe of a
+        // live node produces, so permitting them does not permit an assertion.
+        for permitted in [
+            "fn wire() { let _ = ProfileCreation::of(seam); }",
+            "fn wire() { let _ = ProfileCreation::of_reading(availability); }",
+            "fn wire() { let _ = ProfileMintSeams::from_readiness(reading, &door).availability(); }",
+        ] {
+            assert!(
+                openers_reached_in(permitted).is_empty(),
+                "`{permitted}` was read as an opener, but it derives its answer from a reading \
+                 rather than asserting one; banning it makes the guard unsatisfiable"
+            );
+        }
     }
 
     /// Every `.rs` file in the binary crate, at any depth.

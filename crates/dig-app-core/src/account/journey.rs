@@ -23,6 +23,7 @@ use crate::account::mint::{
     WaitProgress, WaitSurface, POLL_EVERY_SECS,
 };
 use crate::account::phrase_vault::PhraseVault;
+use crate::account::profile_mint::ChainReadiness;
 use crate::account::recovery::RecoveryPhrase;
 use crate::account::second_factor::journey::Clock;
 use crate::confirm::{
@@ -1424,11 +1425,24 @@ pub fn waiting_screen(progress: &WaitProgress) -> WizardNotice {
 /// its words inside
 /// `nothing_shown_before_a_spend_may_promise_a_cost_screen_that_does_not_exist`, so the promise this
 /// screen used to make is now unmakeable rather than merely removed (dig_ecosystem#2560).
-pub fn did_explainer() -> WizardNotice {
+/// # It reports what was MEASURED, and the four answers are four different sentences
+///
+/// The body used to be `explainer_body(NoChainTransport)` — a constant. That was accurate only
+/// while the binary hardcoded its seam, and it went false the moment a node could answer: a machine
+/// whose node serves both mint reads was still told *"on-chain minting is not available in this
+/// version"*. `chain` is the reading [`NodeChainReadiness`](crate::chain::NodeChainReadiness) took
+/// off the painting thread, and `None` means nobody has asked yet — which is NOT a blocker and must
+/// not be rendered as one (dig_ecosystem#2690).
+///
+/// Every answer still withholds the offer, because there is no control to offer: this screen names
+/// what is missing, it does not gate anything. That is why it may safely say *your node can do
+/// this* without becoming the availability drift dig_ecosystem#2377 measured — no capability is
+/// read off this function, and nothing branches on its words.
+pub fn did_explainer(chain: Option<&ChainReadiness>) -> WizardNotice {
     WizardNotice {
         title: copy::did::EXPLAINER_TITLE,
         heading: copy::did::EXPLAINER_HEADING,
-        body: copy::did::explainer_body(CreationBlocked::NoChainTransport),
+        body: copy::did::explainer_body_for(chain),
         identifier: None,
     }
 }
@@ -1696,6 +1710,7 @@ mod copy {
 
     /// The DID step, from the offer through every way the wait can end.
     pub(super) mod did {
+        use crate::account::profile_mint::ChainReadiness;
         use crate::profiles::CreationBlocked;
 
         /// The offer window's title.
@@ -1893,6 +1908,30 @@ mod copy {
             "one — when it can, this is where you will start it.",
         );
 
+        /// The middle sentence before any node has been asked.
+        ///
+        /// It names no cause, because none has been measured. Telling somebody their version cannot
+        /// mint, when the truth is that nothing has looked yet, sends them to wait for a release
+        /// when what they need is to start their node (dig_ecosystem#2690).
+        pub const EXPLAINER_NOT_MEASURED: &str = concat!(
+            "It is what turns the wallet on this computer into a full DIG Account. DIG has not yet ",
+            "been able to ask your node whether it can create one — if your node is not running, ",
+            "starting it is what lets DIG find out.",
+        );
+        /// The middle sentence when the node CAN mint and DIG has no control to start one.
+        ///
+        /// # This sentence exists because the one it replaced became false
+        ///
+        /// A build whose node answers both mint reads was still told *"on-chain minting is not
+        /// available in this version"* — a statement about DIG that was, on such a machine, simply
+        /// untrue. The honest version names the half that is actually missing. It promises no date
+        /// and offers no control, so it cannot become the dead end dig_ecosystem#1800 removed.
+        pub const EXPLAINER_NO_CONTROL_YET: &str = concat!(
+            "It is what turns the wallet on this computer into a full DIG Account. Your node can ",
+            "do this — DIG does not yet offer the step that starts it, so nothing here will spend ",
+            "anything yet.",
+        );
+
         /// The tray explainer's body, selected by WHY this build cannot mint.
         ///
         /// Composed rather than written twice, for the reason [`unavailable_body`] is: only the
@@ -1901,6 +1940,25 @@ mod copy {
             let middle = match why {
                 CreationBlocked::NoChainTransport => EXPLAINER_NO_TRANSPORT,
                 CreationBlocked::NoLineageWalk => EXPLAINER_NO_LINEAGE,
+            };
+            format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
+        }
+
+        /// The tray explainer's body for the reading the poller took, `None` meaning *not asked*.
+        ///
+        /// Routed through [`explainer_body`] for the two blocked answers rather than composing a
+        /// second time, so the shared opening and closing cannot come to differ between the two
+        /// entry points — which is the drift the copy guard below exists to catch.
+        pub fn explainer_body_for(chain: Option<&ChainReadiness>) -> String {
+            let middle = match chain {
+                None => EXPLAINER_NOT_MEASURED,
+                Some(ChainReadiness::WalksLineages) => EXPLAINER_NO_CONTROL_YET,
+                Some(ChainReadiness::NoChainTransport { .. }) => {
+                    return explainer_body(CreationBlocked::NoChainTransport)
+                }
+                Some(ChainReadiness::NoLineageWalk { .. }) => {
+                    return explainer_body(CreationBlocked::NoLineageWalk)
+                }
             };
             format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
         }
@@ -2283,6 +2341,72 @@ mod tests {
         );
     }
 
+    /// **A machine whose node CAN mint is never told this version cannot.**
+    ///
+    /// Makes impossible: the shipped constant. `did_explainer` composed its body from
+    /// `CreationBlocked::NoChainTransport` unconditionally, so every reading produced the sentence
+    /// *"On-chain minting is not available in this version"* — a claim about DIG that is false on a
+    /// node serving both mint reads, which is the ordinary state of a healthy machine.
+    ///
+    /// The fixture varies ONE thing, the reading, and keeps a truthful control: the same sentence
+    /// must STILL appear for a genuinely transport-less node. A test that merely banned the string
+    /// would pass against an implementation that had deleted it everywhere, including where it is
+    /// true — and deleting an honest sentence is not the deliverable.
+    #[test]
+    fn a_node_that_can_mint_is_never_told_this_version_cannot() {
+        const THE_FALSE_CLAIM: &str = "not available in this version";
+
+        let walks = did_explainer(Some(&ChainReadiness::WalksLineages)).body;
+        assert!(
+            !walks.contains(THE_FALSE_CLAIM),
+            "a node that answered both mint reads was told the version cannot mint: {walks}"
+        );
+
+        let unreachable = did_explainer(Some(&ChainReadiness::NoChainTransport {
+            why: "the node is not running".into(),
+        }))
+        .body;
+        assert!(
+            unreachable.contains(THE_FALSE_CLAIM),
+            "the sentence must survive where it is TRUE, or this rule is a deletion: {unreachable}"
+        );
+    }
+
+    /// **An unmeasured node is reported as unmeasured, not as a blocked one.**
+    ///
+    /// Makes impossible: rendering `None` as any of the three measured readings. A person whose node
+    /// is merely stopped, told *this version cannot mint*, goes to wait for a release when what they
+    /// need is to start their node (dig_ecosystem#2690). The four readings must be four distinct
+    /// bodies, so the fixture compares all four rather than asserting one — a pair that collapsed
+    /// would name a cause nobody observed, and no single-body assertion can see that.
+    #[test]
+    fn each_reading_of_the_node_gets_its_own_explanation() {
+        let bodies = [
+            ("not asked", did_explainer(None).body),
+            (
+                "walks lineages",
+                did_explainer(Some(&ChainReadiness::WalksLineages)).body,
+            ),
+            (
+                "no transport",
+                did_explainer(Some(&ChainReadiness::NoChainTransport { why: "x".into() })).body,
+            ),
+            (
+                "no lineage walk",
+                did_explainer(Some(&ChainReadiness::NoLineageWalk { why: "x".into() })).body,
+            ),
+        ];
+
+        for (i, (name, body)) in bodies.iter().enumerate() {
+            for (other_name, other) in &bodies[i + 1..] {
+                assert_ne!(
+                    body, other,
+                    "`{name}` and `{other_name}` share a body, so one of them explains the wrong                      thing"
+                );
+            }
+        }
+    }
+
     /// Every sentence of every screen the DID step can show, named so a rule can be held over all of
     /// them at once.
     ///
@@ -2308,6 +2432,14 @@ mod tests {
             (
                 "the tray's DID explainer (no lineage walk)",
                 copy::did::explainer_body(CreationBlocked::NoLineageWalk),
+            ),
+            (
+                "the tray's DID explainer (nobody has asked yet)",
+                copy::did::explainer_body_for(None),
+            ),
+            (
+                "the tray's DID explainer (the node can mint)",
+                copy::did::explainer_body_for(Some(&ChainReadiness::WalksLineages)),
             ),
             ("the decline screen", copy::did::later_body()),
             (

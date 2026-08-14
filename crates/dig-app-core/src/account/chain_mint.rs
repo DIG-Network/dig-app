@@ -259,11 +259,16 @@ where
             };
         };
 
-        // dig-account 0.8's `begin_did_mint` mints at `ix` AND funds from that same index's wallet,
-        // so it cannot express a mint paid for by one profile and created at another. That is fine
-        // for the FIRST profile, where the two indices coincide at ROOT, and it is the only mint
-        // reachable today. Refuse the divergent case loudly rather than paying from a wallet the user
-        // did not intend or minting at the wrong index (dig_ecosystem#2496 tracks the upstream API).
+        // `begin_did_mint` mints at `ix` AND funds from that same index's wallet, so it cannot
+        // express a mint paid for by one profile and created at another. That is invisible for the
+        // FIRST profile, where the two indices coincide at ROOT. Refuse the divergent case loudly
+        // rather than paying from a wallet the user did not intend or minting at the wrong index.
+        //
+        // This used to cite dig_ecosystem#2496 as a pending upstream. It SHIPPED in dig-account 0.13
+        // and is closed — `wallet_ops_at(ix)` exists. It does not dissolve this refusal: deriving a
+        // wallet at an index is not the same as dig-account's ceremony accepting a funding index
+        // that differs from its target, which it still does not. A SECOND profile therefore hits
+        // this message, and the message IS the remedy: fund the target's address first.
         if self.funding.ix() != self.target.ix() {
             return Submission::Refused {
                 reason: format!(

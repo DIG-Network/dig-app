@@ -322,15 +322,12 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
 fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation) {
-    // `ProfileCreation::Possible` now EXISTS and is reachable from
-    // `ProfileCreation::of_profile_mint` given a wired seam — but the create control itself is the
-    // next unit of work, so this branch still draws nothing. That is deliberate rather than
-    // forgotten, and it is safe only because the shipped binary cannot produce `Possible`: it never
-    // calls `of_profile_mint`, which the source guard
-    // `the_binary_cannot_open_the_profile_creation_gate` holds it to. Drawing a panel that said
-    // "you can create one" with no control would be a dead end, which is the one thing
-    // `professional-ui` forbids outright — so the honest placeholder is nothing at all until the
-    // control lands beside it.
+    // `ProfileCreation::Possible` is now REACHABLE in the shipped binary: it wires a real mint seam,
+    // so `of_profile_mint` can genuinely report a capable node. The create control is the next unit
+    // of work, so what keeps that from becoming a dead end is the `Possible => return` arm below —
+    // this panel draws NOTHING rather than announcing a capability with no control, which is the one
+    // thing `professional-ui` forbids outright. The safety is that arm, not an unreachable variant;
+    // deleting it would ship the dead end.
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
         // a blocked cause here would tell a person with a stopped node that nothing is missing from
@@ -746,6 +743,44 @@ mod tests {
         );
     }
 
+    /// **A node that CAN mint draws no half-offer — silence, not a claim with no control behind it.**
+    ///
+    /// `ProfileCreation::Possible` became reachable in production the moment the binary started
+    /// reading creation off the node (dig_ecosystem#2398), so this state now needs pinning: until
+    /// the create control lands, the card must say NOTHING about creation rather than announce that
+    /// it is available. A missing feature is an omission; a sentence promising one with no control
+    /// beside it is the dead end `professional-ui` forbids outright, and the one
+    /// dig_ecosystem#1800 removed once already.
+    ///
+    /// The fixture is a `Possible` view drawn on the same card as every other state, and the
+    /// assertion is against the sentences a HALF-offer would use — the blocked explanations and the
+    /// still-checking one. A test asserting only "the panel heading is absent" would pass on a card
+    /// that drew a blocked sentence for a capable node, which is the more likely mistake.
+    #[test]
+    fn a_capable_node_draws_no_offer_it_cannot_yet_honour() {
+        let view = TrayView {
+            profile_creation: ProfileCreation::Possible,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let painted = card_says(&view, 960.0);
+
+        assert!(
+            !painted.contains(copy::profiles::CHECKING_CREATION),
+            "a node that already answered is drawn as still being checked: {painted}"
+        );
+        for blocked in CreationBlocked::EVERY {
+            assert!(
+                !painted.contains(copy::profiles::cannot_create(blocked)),
+                "a node that CAN mint is told {blocked:?} is missing: {painted}"
+            );
+        }
+        assert!(
+            !painted.contains(copy::profiles::CREATE_PANEL),
+            "the creation panel is drawn for a capable node with no control inside it, which \
+             promises something this build cannot yet do: {painted}"
+        );
+    }
+
     /// **Nothing on this card offers to create a profile, and the reason is stated.**
     ///
     /// The structural half is the one that matters: there is no `CreateProfile` action to draw, so
@@ -781,15 +816,41 @@ mod tests {
              fault they do not have"
         );
 
-        for sentence in &said {
-            let lowered = sentence.to_lowercase();
+        // Each blocker names the remedy for ITS OWN cause. Asserted per-arm rather than as "some
+        // remedy word appears somewhere", because the two causes have OPPOSITE remedies — a stopped
+        // node is started, an old one is updated — and a card that offered the wrong one sends a
+        // person to reinstall software that is working, or to restart a node that is already
+        // running. A single sentence carrying both words would satisfy a looser check.
+        let remedies = [
+            (CreationBlocked::NoChainTransport, "start", "update"),
+            (CreationBlocked::NoLineageWalk, "update", "start"),
+        ];
+        for (blocked, remedy, other) in remedies {
+            let lowered = copy::profiles::cannot_create(blocked).to_lowercase();
             assert!(
-                lowered.contains("not available in this version"),
-                "the #1820 wording is missing, so the absence reads as a defect: {lowered}"
+                lowered.contains(remedy),
+                "{blocked:?} does not tell the person to {remedy} anything, so a measured cause \
+                 reads as an absence they can do nothing about: {lowered}"
             );
             assert!(
-                lowered.contains("required"),
-                "a profile is described as something a person chose to go without: {lowered}"
+                !lowered.contains(other),
+                "{blocked:?} sends the reader after the OTHER cause's remedy: {lowered}"
+            );
+        }
+
+        for sentence in &said {
+            let lowered = sentence.to_lowercase();
+            // The claim was true only while creation came from a hardcoded seam. It is now read off
+            // the node, so both arms describe THIS MACHINE — and telling somebody whose node is
+            // merely stopped that the capability is missing from DIG withholds the one action that
+            // would fix it (dig_ecosystem#2398).
+            assert!(
+                !lowered.contains("not available in this version"),
+                "a MEASURED blocker is reported as a missing DIG capability: {lowered}"
+            );
+            assert!(
+                !lowered.contains("nothing for you to do"),
+                "a person with a fixable node is told there is nothing they can do: {lowered}"
             );
             assert!(
                 !lowered.contains("optional"),

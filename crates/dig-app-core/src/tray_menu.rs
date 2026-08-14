@@ -324,6 +324,17 @@ pub struct TrayView {
     /// That single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
     /// surface comes to advertise a create control whose implementation refuses.
     pub profile_creation: crate::profiles::ProfileCreation,
+    /// What the connected node last said about its ability to service a profile mint, or `None`
+    /// when nobody has asked it yet (dig_ecosystem#2398).
+    ///
+    /// Polled on its own cadence by [`NodeChainReadiness`](crate::chain::NodeChainReadiness), for
+    /// the reason the balance is: this snapshot is taken twice a second and the reading is two node
+    /// round trips.
+    ///
+    /// It is a READING, not a capability. Nothing gates on it — the one surface that consumes it is
+    /// the DID explainer, which needs it in order to stop naming a cause nobody measured. A mint's
+    /// availability is read off `ProfileMintSeams`, which needs a door this field cannot hold.
+    pub mint_chain: Option<crate::account::profile_mint::ChainReadiness>,
     /// Where this node stands on the DIG and Chia networks (dig_ecosystem#2569).
     ///
     /// Polled on its own cadence by [`NodeNetworkStanding`](crate::network::NodeNetworkStanding), for
@@ -397,6 +408,7 @@ impl TrayView {
             installed_apps,
             profiles,
             profile_creation,
+            mint_chain,
             network,
             enrolment,
             send,
@@ -469,6 +481,7 @@ impl TrayView {
             // field the pane draws from cannot escape this comparison, which destructures with no
             // `..` precisely so that it cannot.
             && profile_creation == &other.profile_creation
+            && mint_chain == &other.mint_chain
             // The header strip RENDERS all three of these, on every tab. Without this arm the first
             // real peer count would never replace nothing at all until some unrelated field moved —
             // the freeze `balance`, `hosted_stores` and `profiles` each needed this same arm to
@@ -2303,6 +2316,12 @@ mod tests {
             ("network", |v| {
                 v.network.dig_peers = crate::network::PeerCount::Known(6)
             }),
+            // A reading that moved from unmeasured to measured changes what the DID explainer says,
+            // so a view that did not repaint would keep showing "DIG has not yet been able to ask
+            // your node" after the node had answered (dig_ecosystem#2398).
+            ("mint_chain", |v| {
+                v.mint_chain = Some(crate::account::profile_mint::ChainReadiness::WalksLineages)
+            }),
         ];
 
         for (field, mutate) in &cases {
@@ -2323,7 +2342,7 @@ mod tests {
         // The table is only a guard if it is complete. `renders_same_as` destructures exhaustively, so
         // the field count is fixed at compile time; this pins the table to it.
         assert_eq!(
-            20,
+            21,
             cases.len(),
             "TrayView gained or lost a field — add or remove its case above"
         );
@@ -2489,6 +2508,9 @@ mod tests {
             // pre-first-poll default rather than varying them. `network::tests` and the header's own
             // suite exercise the states.
             network: crate::network::NetworkStanding::default(),
+            // Pinned to "nobody has asked" for the same reason: the tray draws no mint surface, and
+            // the explainer's own suite exercises every reading.
+            mint_chain: None,
             // Nothing has been asked of a node in this fixture, which is what the default states.
             enrolment: crate::wallet::enrol::Enrolment::default(),
             // This suite is about the MENU, which offers no send at all — a form is a window's job.

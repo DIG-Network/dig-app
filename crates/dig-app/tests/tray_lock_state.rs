@@ -87,6 +87,8 @@ fn view_for(state: AccountState) -> TrayView {
         // so they are pinned to the state every real account is in.
         profiles: dig_app_core::profiles::ProfilesReading::Known(Vec::new()),
         profile_creation: dig_app_core::profiles::ProfileCreation::default(),
+        // A fixture takes no reading (dig_ecosystem#2398).
+        mint_chain: None,
         // The network strip is a WINDOW surface; this suite exercises the tray, so it is pinned to
         // the pre-first-poll default.
         network: dig_app_core::network::NetworkStanding::default(),
