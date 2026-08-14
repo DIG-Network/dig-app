@@ -69,6 +69,8 @@ pub enum SendProgress {
         payment_coin_id: String,
         /// The height it confirmed at.
         confirmed_height: u32,
+        /// Whose word this verdict rests on (dig_ecosystem#2891).
+        source: VerdictSource,
     },
     /// The transfer is over and will never settle.
     ///
@@ -88,6 +90,8 @@ pub enum SendProgress {
         reason: String,
         /// The payment coin, present exactly when this transfer had been pushed.
         payment_coin_id: Option<String>,
+        /// Whose word this verdict rests on (dig_ecosystem#2891).
+        source: VerdictSource,
     },
     /// The attempt fell over part-way and this app does not know how far it got.
     ///
@@ -107,6 +111,57 @@ pub enum SendProgress {
         /// Where the attempt was when it stopped, for the person and for a bug report.
         detail: String,
     },
+}
+
+/// Whose word a send's verdict rests on (dig_ecosystem#2891).
+///
+/// # Why a verdict has to carry this
+///
+/// The send path pushes a bundle to a node and then asks THAT SAME node whether it confirmed —
+/// which `dig_account::ConfirmedTransfer`'s own contract forbids ("pass a trusted or aggregating
+/// `ChainSource`, never the same unvetted node the bundle was pushed to"). By default the endpoint
+/// is loopback-pinned, so the answer comes from the user's own machine and the question does not
+/// arise. A user-configured remote node (§5.3 permits one) is a different matter: a hostile read
+/// source can report the payment coin absent and a source coin spent, which renders as *"Not sent —
+/// nothing was sent"*, unblocks the form, and invites a second payment that can settle alongside
+/// the first.
+///
+/// Refusing to render such a verdict would be the other available answer, and it is the wrong one:
+/// it would leave a person with a form they cannot use and no statement at all. So the verdict is
+/// shown WITH the name of whoever supplied it, which is the same distinction the balance card
+/// already draws with [`BalanceAsOf`](crate::wallet::engine::BalanceAsOf) — deliberately the same
+/// vocabulary, so a person meets one idea rather than two.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VerdictSource {
+    /// Decided in this app, with no chain read involved — a build, gate or push refusal.
+    Local,
+    /// Read from the node's OWN replica: the node answered from chain state it holds itself.
+    Replica,
+    /// Read from a third-party HTTPS oracle the node consulted on our behalf.
+    ///
+    /// The one arm that names a party outside the trust boundary, and so the one a person needs to
+    /// see beside a verdict about their money.
+    Oracle,
+    /// The node did not say where its answer came from — an older node, or a read that recorded
+    /// nothing. Unknown provenance is not the same as good provenance, so it gets its own arm.
+    #[default]
+    Undisclosed,
+}
+
+impl VerdictSource {
+    /// Read a source out of the freshness a [`ControlChainSource`](crate::chain::ControlChainSource)
+    /// recorded for its last answer.
+    ///
+    /// `None` — no read happened, or the node disclosed nothing — is [`Undisclosed`](Self::Undisclosed)
+    /// rather than anything reassuring.
+    pub fn of_freshness(freshness: Option<crate::chain::Freshness>) -> Self {
+        use dig_node_control_interface::results::WalletReadSource;
+        match freshness.and_then(|f| f.source) {
+            Some(WalletReadSource::Db) => Self::Replica,
+            Some(WalletReadSource::Fallback) => Self::Oracle,
+            None => Self::Undisclosed,
+        }
+    }
 }
 
 impl SendProgress {
@@ -142,6 +197,9 @@ impl SendProgress {
             // not exist.
             | SendError::PushNotSent(_)
             | SendError::Rejected { .. } => Self::Failed {
+                // Decided in this process, before any chain was consulted — so there is no third
+                // party whose word this rests on.
+                source: VerdictSource::Local,
                 reason: error.to_string(),
                 // No push survived, so there is no coin to look up. `None` is what lets the surface
                 // say "no money has moved" here and NOT say it after a proof of death.
@@ -163,11 +221,13 @@ impl SendProgress {
             TransferStatus::Confirmed(settled) => Self::Confirmed {
                 payment_coin_id: settled.payment_coin_id().to_string(),
                 confirmed_height: settled.confirmed_height(),
+                source: VerdictSource::Undisclosed,
             },
             // A proof of death: the transfer WAS pushed, so the coin id goes with it.
             TransferStatus::Failed { reason } => Self::Failed {
                 reason: reason.clone(),
                 payment_coin_id: Some(pending.payment_coin_id().to_string()),
+                source: VerdictSource::Undisclosed,
             },
         }
     }
@@ -597,7 +657,7 @@ impl SendHolder {
         };
 
         let mut held = self.gate.lock().unwrap_or_else(|e| e.into_inner());
-        if held.as_ref().is_none_or(|gate| gate.address != address) {
+        if !held.as_ref().is_some_and(|gate| gate.address == address) {
             let money = MoneyPath::new(
                 residency.clone(),
                 HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
@@ -676,12 +736,35 @@ impl SendHolder {
     /// inability to look.
     pub fn observe_node(&self, engine: &crate::engine::EngineState) -> SendProgress {
         match engine {
-            crate::engine::EngineState::Connected { endpoint, .. } => self.observe(
-                &crate::chain::ControlChainSource::new(endpoint),
-                std::time::Instant::now(),
-            ),
+            crate::engine::EngineState::Connected { endpoint, .. } => {
+                let chain = crate::chain::ControlChainSource::new(endpoint);
+                self.observe(&chain, std::time::Instant::now());
+                // Stamped AFTER the read, because the freshness being read is the one that read
+                // recorded (dig_ecosystem#2891). Reading it first would attribute this verdict to
+                // whoever answered the PREVIOUS poll.
+                self.attribute(VerdictSource::of_freshness(chain.last_freshness()))
+            }
             crate::engine::EngineState::Disconnected { .. } => self.progress(),
         }
+    }
+
+    /// Name whoever supplied the verdict now being shown, and return the stamped state.
+    ///
+    /// Only a verdict carries a source, because only a verdict is a claim about what the chain did.
+    /// A [`Local`](VerdictSource::Local) verdict is never overwritten: it was decided in this process
+    /// before any chain was consulted, and a later poll's provenance says nothing about it.
+    fn attribute(&self, source: VerdictSource) -> SendProgress {
+        let mut watched = self.lock();
+        match &mut watched.progress {
+            SendProgress::Confirmed { source: held, .. }
+            | SendProgress::Failed { source: held, .. }
+                if *held != VerdictSource::Local =>
+            {
+                *held = source;
+            }
+            _ => {}
+        }
+        watched.progress.clone()
     }
 
     /// Take the lock, recovering from a poisoned one.
@@ -853,10 +936,12 @@ mod tests {
             SendProgress::Confirmed {
                 payment_coin_id: "aa".to_string(),
                 confirmed_height: 7_000_000,
+                source: VerdictSource::Undisclosed,
             },
             SendProgress::Failed {
                 reason: "the network rejected the transfer".to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Undisclosed,
             },
         ] {
             assert!(!progress.in_flight(), "{progress:?} blocks a fresh send");
@@ -1038,6 +1123,7 @@ mod tests {
             SendProgress::Failed {
                 reason: rejected.to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             }
         );
         assert_eq!(
@@ -1045,6 +1131,7 @@ mod tests {
             SendProgress::Failed {
                 reason: SendError::Locked.to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             }
         );
         assert_eq!(
@@ -1052,6 +1139,7 @@ mod tests {
             SendProgress::Failed {
                 reason: SendError::WalletBehindActiveProfile("slot 3".to_string()).to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             }
         );
         assert!(!SendProgress::of_error(&rejected).in_flight());
@@ -1111,14 +1199,62 @@ mod tests {
             dig_account::CustodyPolicy::Hot(dig_account::HotWallet { auto_send_limit: 0 });
         let holder = SendHolder::default();
 
-        holder
-            .gate_for(&residency, custody)
-            .expect("the gate is built while the account is open");
+        drop(
+            holder
+                .gate_for(&residency, custody)
+                .expect("the gate is built while the account is open"),
+        );
         crate::session_lock::SessionKeys::lock_all(&residency);
 
         assert!(
             matches!(holder.gate_for(&residency, custody), Err(SendError::Locked)),
             "a relocked account was served the gate built for its earlier unlock"
+        );
+    }
+
+    /// **A verdict read off a third-party oracle says so, and one decided locally is not overwritten**
+    /// (dig_ecosystem#2891).
+    ///
+    /// The send path asks the same node it pushed to, so a settled-or-failed verdict is only as good
+    /// as whoever supplied it. The nearest wrong implementation stamps every verdict with whatever
+    /// the last read disclosed — including the ones this app decided by itself before any chain was
+    /// consulted, which would attribute a local refusal to a remote party and make the readout a lie
+    /// in the opposite direction.
+    ///
+    /// The fixture varies ONE thing and keeps an honest control: the same `Oracle` attribution is
+    /// applied to a chain-derived verdict (which must take it) and to a locally-decided one (which
+    /// must not). A test that only checked the first would pass for the implementation that stamps
+    /// everything.
+    #[test]
+    fn an_oracle_verdict_is_named_as_one_and_a_local_refusal_keeps_its_own_provenance() {
+        let from_chain = SendHolder::default();
+        from_chain.lock().progress = SendProgress::Confirmed {
+            payment_coin_id: "5e771ed".to_string(),
+            confirmed_height: 9_146_483,
+            source: VerdictSource::Undisclosed,
+        };
+        assert!(
+            matches!(
+                from_chain.attribute(VerdictSource::Oracle),
+                SendProgress::Confirmed {
+                    source: VerdictSource::Oracle,
+                    ..
+                }
+            ),
+            "a settled verdict must name whoever supplied it"
+        );
+
+        let decided_here = SendHolder::default();
+        decided_here.finished(&SendError::Locked);
+        assert!(
+            matches!(
+                decided_here.attribute(VerdictSource::Oracle),
+                SendProgress::Failed {
+                    source: VerdictSource::Local,
+                    ..
+                }
+            ),
+            "a refusal this app made before any chain read was attributed to a third party"
         );
     }
 }

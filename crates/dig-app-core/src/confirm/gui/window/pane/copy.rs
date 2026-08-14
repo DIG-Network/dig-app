@@ -768,6 +768,20 @@ pub(crate) mod wallet {
         )
     }
 
+    /// The label on whoever supplied a send's verdict (dig_ecosystem#2891).
+    pub(crate) const SEND_SOURCE_LABEL: &str = "Checked with";
+    /// Said when the verdict needed no chain read at all.
+    pub(crate) const SEND_SOURCE_LOCAL: &str = "This app";
+    /// Said when the node answered out of chain state it holds itself.
+    pub(crate) const SEND_SOURCE_REPLICA: &str = "Your node";
+    /// Said when the node relayed a third party's answer.
+    ///
+    /// The wording matches the balance card's own, so a person meets one idea and not two.
+    pub(crate) const SEND_SOURCE_ORACLE: &str = "A public chain service, not your node";
+    /// Said when the node did not disclose where its answer came from. Unknown provenance is stated
+    /// plainly rather than left blank, because a blank reads as "your node".
+    pub(crate) const SEND_SOURCE_UNDISCLOSED: &str = "Your node did not say";
+
     /// The label on the payment coin a person can look up themselves.
     pub(crate) const SEND_COIN_LABEL: &str = "Payment coin";
     /// The label on the block height a payment settled at.

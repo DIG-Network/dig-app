@@ -300,6 +300,7 @@ mod tests {
     use super::*;
     use crate::account::active_profile::WalletSlot;
     use crate::account::auth::{AuthCeremony, CeremonyError, HarnessAuthProvider};
+    use crate::wallet::sending::VerdictSource;
     use async_trait::async_trait;
     use chia_protocol::{Bytes32, Coin, SpendBundle};
     use dig_account::mint::MIN_CONFIRMATION_DEPTH;
@@ -915,6 +916,7 @@ mod tests {
             SendProgress::Confirmed {
                 payment_coin_id: coin_id.to_string(),
                 confirmed_height: PEAK,
+                source: VerdictSource::Undisclosed,
             }
         );
         assert!(
@@ -994,6 +996,7 @@ mod tests {
             SendProgress::Confirmed {
                 payment_coin_id: coin_id.to_string(),
                 confirmed_height: PEAK,
+                source: VerdictSource::Undisclosed,
             }
         );
         assert!(
@@ -1054,6 +1057,7 @@ mod tests {
             SendProgress::Failed {
                 reason: rejected.to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             },
             "a rejected bundle is still being polled, so a coin that cannot exist is being looked for"
         );

@@ -64,7 +64,7 @@ use crate::wallet::overview::{
     BalanceReading, Balances,
 };
 use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
-use crate::wallet::sending::{SendBlocked, SendDraft, SendProgress};
+use crate::wallet::sending::{SendBlocked, SendDraft, SendProgress, VerdictSource};
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
 
@@ -628,6 +628,7 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
         SendProgress::Failed {
             reason,
             payment_coin_id: None,
+            ..
         } => (
             copy::wallet::SEND_FAILED_BADGE,
             Tone::Warn,
@@ -636,6 +637,7 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
         SendProgress::Failed {
             reason,
             payment_coin_id: Some(_),
+            ..
         } => (
             copy::wallet::SEND_DIED_BADGE,
             Tone::Warn,
@@ -683,19 +685,29 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
         | SendProgress::Unknown {
             payment_coin_id, ..
         }
-        // A payment that died AFTER being pushed has a real coin, and that is exactly when a person
-        // most needs something to look up. Withholding it here left them with a verdict and no way
-        // to check it.
-        | SendProgress::Failed {
-            payment_coin_id: Some(payment_coin_id),
-            ..
-        } => vec![Readout::new(
+        => vec![Readout::new(
             copy::wallet::SEND_COIN_LABEL,
             Value::Identifier(payment_coin_id.clone()),
         )],
+        // A payment that died AFTER being pushed has a real coin, and that is exactly when a person
+        // most needs something to look up. Withholding it here left them with a verdict and no way
+        // to check it. The source goes with it: this is the verdict a hostile read source would
+        // manufacture to unblock the form and invite a second payment (dig_ecosystem#2891).
+        SendProgress::Failed {
+            payment_coin_id: Some(payment_coin_id),
+            source,
+            ..
+        } => vec![
+            Readout::new(
+                copy::wallet::SEND_COIN_LABEL,
+                Value::Identifier(payment_coin_id.clone()),
+            ),
+            verdict_source_readout(*source),
+        ],
         SendProgress::Confirmed {
             payment_coin_id,
             confirmed_height,
+            source,
         } => vec![
             Readout::new(
                 copy::wallet::SEND_COIN_LABEL,
@@ -705,8 +717,30 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
                 copy::wallet::SEND_HEIGHT_LABEL,
                 Value::Word(confirmed_height.to_string()),
             ),
+            verdict_source_readout(*source),
         ],
     }
+}
+
+/// Name whoever supplied a verdict, beside the verdict itself (dig_ecosystem#2891).
+///
+/// A settled-or-failed verdict is a claim about what the chain did, and the send path asks the same
+/// node it pushed to. A person cannot judge that claim without knowing whose word it is, so the
+/// source is a readout rather than a footnote — and it uses the balance card's own vocabulary,
+/// because "your node" versus "a public chain service" is one idea a person should meet once.
+fn verdict_source_readout(source: VerdictSource) -> Readout {
+    Readout::new(
+        copy::wallet::SEND_SOURCE_LABEL,
+        Value::Word(
+            match source {
+                VerdictSource::Local => copy::wallet::SEND_SOURCE_LOCAL,
+                VerdictSource::Replica => copy::wallet::SEND_SOURCE_REPLICA,
+                VerdictSource::Oracle => copy::wallet::SEND_SOURCE_ORACLE,
+                VerdictSource::Undisclosed => copy::wallet::SEND_SOURCE_UNDISCLOSED,
+            }
+            .to_string(),
+        ),
+    )
 }
 
 /// The two fields, the fee, and the control — or the reason the control cannot be pressed.
@@ -1825,14 +1859,17 @@ mod tests {
             SendProgress::Confirmed {
                 payment_coin_id: "5e771ed".to_string(),
                 confirmed_height: 9_146_483,
+                source: VerdictSource::Undisclosed,
             },
             SendProgress::Failed {
                 reason: "the network rejected the transfer: DOUBLE_SPEND".to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             },
             SendProgress::Failed {
                 reason: "a source coin was spent elsewhere".to_string(),
                 payment_coin_id: Some("5e771ed".to_string()),
+                source: VerdictSource::Oracle,
             },
             SendProgress::Abandoned {
                 detail: "this app stopped part-way through the payment".to_string(),
@@ -2107,5 +2144,32 @@ mod tests {
         assert!(drawn
             .iter()
             .all(|action| action.weight != Weight::Primary || action.enabled));
+    }
+
+    /// **Every verdict source reaches the person as a distinct sentence** (dig_ecosystem#2891).
+    ///
+    /// The nearest wrong implementation renders the two that matter — the node's own replica and a
+    /// public oracle — identically, or leaves the undisclosed case blank. A blank reads as "your
+    /// node", which is the reassuring answer and the one nothing has established.
+    #[test]
+    fn each_verdict_source_is_said_differently_and_none_is_left_blank() {
+        use copy::wallet as said;
+        let sentences = [
+            said::SEND_SOURCE_LOCAL,
+            said::SEND_SOURCE_REPLICA,
+            said::SEND_SOURCE_ORACLE,
+            said::SEND_SOURCE_UNDISCLOSED,
+        ];
+        for sentence in sentences {
+            assert!(!sentence.trim().is_empty(), "a blank source reads as trust");
+        }
+        let mut distinct: Vec<&str> = sentences.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            sentences.len(),
+            "two sources say the same thing, so a person cannot tell them apart"
+        );
     }
 }
