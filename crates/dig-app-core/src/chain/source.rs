@@ -184,6 +184,60 @@ impl ControlChainSource {
         *self.last_freshness.lock().expect("freshness mutex") = Some(freshness);
     }
 
+    /// Whether an EMPTY answer from a tier reporting this freshness may be read as an absence.
+    ///
+    /// # The rule, stated as what is allowed
+    ///
+    /// **A PRESENT coin may be believed from any tier; an ABSENCE may be believed only from a
+    /// synced one.** Existence is positive evidence a stale replica cannot fabricate — it can only
+    /// be BEHIND, never ahead — so a non-empty answer needs no freshness warrant. Emptiness is the
+    /// one answer a behind replica produces indistinguishably from the chain itself, so it needs
+    /// one. The asymmetry is the whole content of the rule: distrusting the unsynced tier outright
+    /// would break every read on a node that is merely catching up, which is the ordinary state of
+    /// a freshly started machine.
+    ///
+    /// This is not a new invention. [`resolve_singleton_lineage`](ChainSource::resolve_singleton_lineage)
+    /// already applies it — *the lineage ends here*, on a mint path, reads as **safe to spend** —
+    /// and these three reads were the ones left out. dig-account's own contract says the same from
+    /// the other side ("unknown rather than absent"); this implementation was what violated it.
+    ///
+    /// # What it prevents, concretely
+    ///
+    /// `mint_status` makes two separate reads. A DID coin read served by a stale tier (`Ok(None)`)
+    /// beside a funding coin read served by the synced one (spent) yields *"the funding coin was
+    /// spent by a different spend; this mint can never confirm"* — **for a mint that confirmed**,
+    /// with real XCH spent and a permanent on-chain identity created. The same line stops
+    /// `select_funding_coin` reporting `InsufficientFunds { available: 0 }` against a funded wallet.
+    ///
+    /// Measured, not hypothetical: on a live machine with the node synced at peak 9148701, one
+    /// `coinsByParent` answered `{"coins":[],"complete":true,"source":"fallback","synced":false,
+    /// "peak_height":null}` while a `coins` read seconds later returned, from `"source":"db",
+    /// "synced":true`, a coin whose parent was the very id that had just answered empty.
+    ///
+    /// Fails CLOSED. A node stuck on the fallback becomes un-mintable with an honest reason, rather
+    /// than mintable behind an observer that lies about whether the mint took effect.
+    fn believe_absence(
+        method: &'static str,
+        synced: bool,
+        source: Option<WalletReadSource>,
+    ) -> Result<(), ChainReadError> {
+        if synced {
+            return Ok(());
+        }
+        Err(ChainReadError::transport(
+            method,
+            format!(
+                "the tier that answered reported synced=false (source: {}), so its empty answer \
+                 cannot be told apart from the chain genuinely holding nothing",
+                match source {
+                    Some(WalletReadSource::Db) => "db",
+                    Some(WalletReadSource::Fallback) => "fallback",
+                    None => "undisclosed",
+                }
+            ),
+        ))
+    }
+
     /// One OPEN control read, with every failure mapped onto the arm whose remedy is correct.
     ///
     /// The single door to the wire, so no read can accidentally acquire a different error mapping
@@ -207,11 +261,17 @@ impl ChainSource for ControlChainSource {
                 coin_id: hex::encode(coin_id),
             },
         )?;
-        let record = answer
-            .coin
-            .as_ref()
-            .map(|c| coin_record_from(method::COIN_BY_ID, c))
-            .transpose()?;
+        let Some(coin) = answer.coin.as_ref() else {
+            // See `believe_absence`: only a synced tier's "I have nothing" is the chain's.
+            Self::believe_absence(method::COIN_BY_ID, answer.synced, answer.source)?;
+            self.note_freshness(Freshness {
+                source: answer.source,
+                synced: answer.synced,
+                peak_height: answer.peak_height,
+            });
+            return Ok(None);
+        };
+        let record = Some(coin_record_from(method::COIN_BY_ID, coin)?);
         self.note_freshness(Freshness {
             source: answer.source,
             synced: answer.synced,
@@ -294,6 +354,11 @@ impl ChainSource for ControlChainSource {
                 coin_record_from(method::COINS, c)
             })
             .collect::<Result<_, _>>()?;
+        if records.is_empty() {
+            // See `believe_absence`. An unsynced empty list here is what reports a funded wallet as
+            // holding nothing, which dig-account turns into `InsufficientFunds { available: 0 }`.
+            Self::believe_absence(method::COINS, answer.synced, answer.source)?;
+        }
         self.note_freshness(Freshness {
             source: answer.source,
             synced: answer.synced,
@@ -340,6 +405,12 @@ impl ChainSource for ControlChainSource {
                 children.push(coin_record_from(method::COINS_BY_PARENT, record)?);
             }
             if page.complete {
+                // See `believe_absence`. Asked of the WHOLE walk rather than of this page: any row
+                // collected on any page is a present child, and a completed walk that gathered one
+                // is positive evidence whatever tier served the final page.
+                if children.is_empty() {
+                    Self::believe_absence(method::COINS_BY_PARENT, page.synced, page.source)?;
+                }
                 // Recorded HERE and nowhere else in the walk: freshness answers "is this coin
                 // really unspent, or is that a stale replica", so a value left behind by a walk
                 // that then failed on a later page would answer it from a read that returned
