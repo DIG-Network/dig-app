@@ -9,8 +9,8 @@
 //! No session is constructed here, deliberately: the property belongs to `send`'s signature (it takes
 //! `self` by value), so a generic function that merely HOLDS a session is enough to ask the question,
 //! and asking it that way keeps the answer free of any fixture's own failures.
-use dig_account::mint::SpendPublisher;
 use dig_account::{AuthProvider, TransferRequest};
+use dig_app_core::chain::DetailedSpendPublisher;
 use dig_app_core::wallet::send::SendSession;
 use dig_chainsource_interface::ChainSource;
 
@@ -19,7 +19,7 @@ async fn two_sends_from_one_session<C, Pub, P>(
     request: &TransferRequest,
 ) where
     C: ChainSource + ?Sized,
-    Pub: SpendPublisher + ?Sized,
+    Pub: DetailedSpendPublisher + ?Sized,
     P: AuthProvider,
 {
     let _first = session.send(request).await;

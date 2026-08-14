@@ -105,6 +105,10 @@ impl SendProgress {
             | SendError::Build(_)
             | SendError::Sign(_)
             | SendError::PeakUnreadable(_)
+            // Provably never broadcast — see `PublishFailure::may_have_reached_a_mempool`. It is a
+            // failure precisely so the person is not left unable to send over a bundle that does
+            // not exist.
+            | SendError::PushNotSent(_)
             | SendError::Rejected { .. } => Self::Failed {
                 reason: error.to_string(),
             },

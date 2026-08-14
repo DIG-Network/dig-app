@@ -12,8 +12,18 @@
 //!    signed. This step can take as long as a person takes.
 //! 3. **anchor** — [`TransferPlan::pushed_now`](dig_account::TransferPlan::pushed_now) reads the chain
 //!    peak, AFTER the signature and immediately before the push.
-//! 4. **push** — [`SpendPublisher::push`] hands the SIGNED
-//!    bytes to the node.
+//! 4. **push** — [`DetailedSpendPublisher::push_detailed`] hands the SIGNED bytes to the node.
+//!
+//! # Why the push goes through the DETAILED seam
+//!
+//! The flattening [`SpendPublisher::push`](dig_account::mint::SpendPublisher::push) reports every
+//! failure as one `ChainUnavailable`, and this module has to tell two very different situations
+//! apart: a push that provably never left (no control token, an older node, a node that refused the
+//! credential) and one nobody can rule on (nothing answered, or the answer never came). The first is
+//! a plain failure — nothing was sent, and the person may simply try again. The second is
+//! [`SendError::PushUnanswered`], which holds the Send control closed because a second transfer
+//! could pay the recipient twice. Flattened, all six become the second, and Send is dead for the
+//! rest of the process on the two most likely first-run faults.
 //!
 //! # Why the peak is read between signing and pushing, and not anywhere else
 //!
@@ -47,7 +57,7 @@
 //! already-signed [`SpendBundle`](chia_protocol::SpendBundle) and nothing else; the node signs
 //! nothing and is never asked to.
 
-use dig_account::mint::{PushOutcome, SpendPublisher};
+use dig_account::mint::PushOutcome;
 use dig_account::{AuthProvider, TransferResult};
 use dig_account::{
     CustodyPolicy, PendingTransfer, SpendOpClass, TransferError, TransferRequest, TransferStatus,
@@ -56,6 +66,7 @@ use dig_chainsource_interface::ChainSource;
 
 use crate::account::money::{MoneyPath, MoneyPathError};
 use crate::account::residency::AccountResidency;
+use crate::chain::{DetailedSpendPublisher, PublishFailure};
 
 /// The fee every send in this app pays, in mojos (0.000001 XCH).
 ///
@@ -70,8 +81,18 @@ pub const DEFAULT_SEND_FEE_MOJOS: u64 = 1_000_000;
 
 /// Why a send did not reach the chain.
 ///
-/// Every variant except [`PushUnanswered`](Self::PushUnanswered) means **no bundle was broadcast**,
-/// so the user's money has not moved and nothing needs watching.
+/// # The one distinction that matters, and it is exact in both directions
+///
+/// [`PushUnanswered`](Self::PushUnanswered) is the ONLY variant whose outcome is unknown: a bundle
+/// may be in a mempool, so it must be watched and must never be rebuilt. Every OTHER variant means
+/// **no bundle was broadcast** — the money has not moved, nothing needs watching, and offering the
+/// form again is safe.
+///
+/// The converse half is what [`PushNotSent`](Self::PushNotSent) exists for. Before it, a push that
+/// was refused locally or declined by the node arrived here as `PushUnanswered` too, which made the
+/// sentence above true only one way round: an unknown outcome was always `PushUnanswered`, but a
+/// `PushUnanswered` was frequently a plain, knowable failure — and each one held the Send control
+/// closed for the rest of the process over a bundle that had provably never left.
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     /// The account is locked. Nothing was built, nothing was signed, nothing was pushed.
@@ -107,6 +128,18 @@ pub enum SendError {
         reason: String,
     },
 
+    /// The bundle was **not broadcast**, and could not have been: it never went out, or the node
+    /// ANSWERED declining to take it.
+    ///
+    /// Every one of these is decided before a mempool could hold anything —
+    /// [`PublishFailure::may_have_reached_a_mempool`] is where that judgement is made and why. A
+    /// person sees a plain failure and the form comes back, because there is nothing in flight for a
+    /// second send to collide with. The two most likely of them on a first run — no control token
+    /// and a dig-node too old to serve the method — are precisely why this is not folded into
+    /// [`PushUnanswered`](Self::PushUnanswered).
+    #[error("the transfer was not broadcast: {0}")]
+    PushNotSent(#[source] PublishFailure),
+
     /// The push was never JUDGED: the node could not be asked, or did not answer.
     ///
     /// The outcome is UNKNOWN, not "no". The bundle may be in a mempool already, so this carries the
@@ -138,7 +171,7 @@ pub enum SendError {
 pub struct SendSession<'a, C, Pub, P>
 where
     C: ChainSource + ?Sized,
-    Pub: SpendPublisher + ?Sized,
+    Pub: DetailedSpendPublisher + ?Sized,
     P: AuthProvider,
 {
     residency: &'a AccountResidency,
@@ -151,7 +184,7 @@ where
 impl<'a, C, Pub, P> SendSession<'a, C, Pub, P>
 where
     C: ChainSource + ?Sized,
-    Pub: SpendPublisher + ?Sized,
+    Pub: DetailedSpendPublisher + ?Sized,
     P: AuthProvider,
 {
     /// Assemble a session over the live account, its money gate, and the node's two chain seams.
@@ -203,15 +236,21 @@ where
             .pushed_now(self.chain)
             .map_err(SendError::PeakUnreadable)?;
 
-        match self.publisher.push(&bundle) {
+        match self.publisher.push_detailed(&bundle) {
             Ok(PushOutcome::Accepted | PushOutcome::AlreadyInMempool) => {
                 Ok(InFlightSend { pending })
             }
             Ok(PushOutcome::Rejected { reason }) => Err(SendError::Rejected { reason }),
-            Err(unavailable) => Err(SendError::PushUnanswered {
-                pending: Box::new(pending),
-                detail: unavailable.to_string(),
-            }),
+            // The bundle may be in a mempool, so the transfer survives to be POLLED. Rebuilding it
+            // is the one action that can pay the recipient twice.
+            Err(failure) if failure.may_have_reached_a_mempool() => {
+                Err(SendError::PushUnanswered {
+                    pending: Box::new(pending),
+                    detail: failure.to_string(),
+                })
+            }
+            // It provably never left, so there is nothing to watch and the form may come back.
+            Err(failure) => Err(SendError::PushNotSent(failure)),
         }
     }
 }
@@ -263,7 +302,7 @@ mod tests {
     use crate::account::auth::{AuthCeremony, CeremonyError, HarnessAuthProvider};
     use async_trait::async_trait;
     use chia_protocol::{Bytes32, Coin, SpendBundle};
-    use dig_account::mint::{ChainUnavailable, MIN_CONFIRMATION_DEPTH};
+    use dig_account::mint::MIN_CONFIRMATION_DEPTH;
     use dig_account::{
         AccountId, AuthFactors, AutoSendPolicy, HotWallet, ProfileIx, SpendDecision, SpendSummary,
         SystemClock,
@@ -383,12 +422,12 @@ mod tests {
     /// A publisher that journals its pushes and answers with a scripted outcome.
     struct ScriptedPublisher {
         journal: Journal,
-        answer: RefCell<Option<Result<PushOutcome, ChainUnavailable>>>,
+        answer: RefCell<Option<Result<PushOutcome, PublishFailure>>>,
         pushed: RefCell<Vec<SpendBundle>>,
     }
 
     impl ScriptedPublisher {
-        fn answering(journal: Journal, answer: Result<PushOutcome, ChainUnavailable>) -> Self {
+        fn answering(journal: Journal, answer: Result<PushOutcome, PublishFailure>) -> Self {
             Self {
                 journal,
                 answer: RefCell::new(Some(answer)),
@@ -405,8 +444,8 @@ mod tests {
         }
     }
 
-    impl SpendPublisher for ScriptedPublisher {
-        fn push(&self, bundle: &SpendBundle) -> Result<PushOutcome, ChainUnavailable> {
+    impl DetailedSpendPublisher for ScriptedPublisher {
+        fn push_detailed(&self, bundle: &SpendBundle) -> Result<PushOutcome, PublishFailure> {
             self.journal.lock().unwrap().push(Step::Pushed);
             self.pushed.borrow_mut().push(bundle.clone());
             self.answer
@@ -520,6 +559,14 @@ mod tests {
             spent_height: None,
             timestamp: None,
             coinbase: false,
+        }
+    }
+
+    /// A push whose fate is genuinely undecidable: the bytes may have gone out before the connection
+    /// died.
+    fn unanswered() -> PublishFailure {
+        PublishFailure::Unreachable {
+            detail: "the node did not answer".to_string(),
         }
     }
 
@@ -651,7 +698,7 @@ mod tests {
         let chain = bench.chain();
         let publisher = ScriptedPublisher::answering(
             bench.journal.clone(),
-            Err(ChainUnavailable::new("the node did not answer")),
+            Err(unanswered()),
         );
 
         let error = bench
@@ -787,7 +834,7 @@ mod tests {
         let chain = bench.chain();
         let publisher = ScriptedPublisher::answering(
             bench.journal.clone(),
-            Err(ChainUnavailable::new("the node did not answer")),
+            Err(unanswered()),
         );
 
         let error = bench
@@ -805,7 +852,7 @@ mod tests {
             progress,
             SendProgress::Unknown {
                 payment_coin_id: coin_id,
-                detail: "the node did not answer".to_string(),
+                detail: unanswered().to_string(),
             },
             "an unknown outcome was flattened into a failure, which invites the one action that can \
              pay the recipient twice"
@@ -979,7 +1026,7 @@ mod tests {
                 &chain,
                 &ScriptedPublisher::answering(
                     bench.journal.clone(),
-                    Err(ChainUnavailable::new("the node did not answer")),
+                    Err(unanswered()),
                 ),
             )
             .send(&request())
@@ -1013,6 +1060,99 @@ mod tests {
             },
             "a rejected bundle is still being polled, so a coin that cannot exist is being looked for"
         );
+    }
+
+    /// **A push that provably never left leaves Send usable; one whose fate is unknown holds it
+    /// closed** (dig_ecosystem#2819).
+    ///
+    /// The PAIR is the property, and neither half proves anything alone: a test of only the definite
+    /// side passes against an implementation that calls every failure definite — which is the
+    /// double-payment defect — and a test of only the unknown side passes against the flattening one
+    /// this replaces, which is the defect being fixed. So both sides are asserted against each other,
+    /// varying nothing but the publisher's answer.
+    ///
+    /// Every variant is run rather than one from each side, because the classification is the
+    /// deliverable and a per-variant mistake is invisible to a sample. The two consequences asserted
+    /// are the ones a person actually experiences: whether the error says a bundle may exist, and
+    /// whether the **Send** control is still offered.
+    #[tokio::test]
+    async fn a_push_that_never_left_leaves_send_usable_and_an_unanswered_one_holds_it_closed() {
+        use crate::wallet::sending::SendProgress;
+
+        let never_left = [
+            PublishFailure::NoToken,
+            PublishFailure::Unserializable {
+                detail: "not encodable".to_string(),
+            },
+            PublishFailure::Unsupported {
+                detail: "no such method".to_string(),
+            },
+            PublishFailure::Unauthorized {
+                detail: "unknown token".to_string(),
+            },
+        ];
+        let may_be_live = [
+            unanswered(),
+            PublishFailure::NodeCouldNotAnswer {
+                detail: "timed out forwarding the bundle".to_string(),
+            },
+        ];
+
+        for failure in never_left {
+            let bench = Bench::funded();
+            let chain = bench.chain();
+            let publisher =
+                ScriptedPublisher::answering(bench.journal.clone(), Err(failure.clone()));
+            let error = bench
+                .session(&chain, &publisher)
+                .send(&request())
+                .await
+                .expect_err("a failed push is not a completed send");
+
+            assert!(
+                matches!(&error, SendError::PushNotSent(reported) if *reported == failure),
+                "{failure:?} was not reported as a bundle that never left, got {error:?}"
+            );
+            let progress = SendProgress::of_error(&error);
+            assert!(
+                matches!(progress, SendProgress::Failed { .. }),
+                "{failure:?} was shown as something other than a plain failure: {progress:?}"
+            );
+            assert!(
+                !progress.in_flight(),
+                "{failure:?} left Send refused for a bundle that was never broadcast"
+            );
+        }
+
+        for failure in may_be_live {
+            let bench = Bench::funded();
+            let chain = bench.chain();
+            let publisher =
+                ScriptedPublisher::answering(bench.journal.clone(), Err(failure.clone()));
+            let error = bench
+                .session(&chain, &publisher)
+                .send(&request())
+                .await
+                .expect_err("an unanswered push is not a completed send");
+
+            let SendError::PushUnanswered { pending, .. } = &error else {
+                panic!("{failure:?} was called a definite failure, which invites a second send: {error:?}");
+            };
+            let coin_id = pending.payment_coin_id().to_string();
+            let progress = SendProgress::of_error(&error);
+            assert_eq!(
+                progress,
+                SendProgress::Unknown {
+                    payment_coin_id: coin_id,
+                    detail: failure.to_string(),
+                },
+                "{failure:?} lost the coin id a person is told to watch"
+            );
+            assert!(
+                progress.in_flight(),
+                "{failure:?} offered a second send while a bundle may be in a mempool"
+            );
+        }
     }
 
     /// The wallet slot the money path derives at is the one this bench asserts against — a guard so a

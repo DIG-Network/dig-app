@@ -90,6 +90,45 @@ pub enum PublishFailure {
     },
 }
 
+impl PublishFailure {
+    /// Whether these bytes could conceivably be sitting in a mempool despite this failure.
+    ///
+    /// This is the question the SEND path turns into what a person is told, and the two answers lead
+    /// to opposite advice. `false` means the bundle provably never left — the caller may say *nothing
+    /// was sent* and offer the form again. `true` means nobody knows, and the only safe move is to
+    /// watch the payment coin, because building a second transfer can pay the recipient twice.
+    ///
+    /// # Why each variant falls where it does
+    ///
+    /// Four of them are decided BEFORE any bundle could be in flight: [`NoToken`](Self::NoToken) is
+    /// refused locally with no byte on the wire, [`Unserializable`](Self::Unserializable) never
+    /// produced bytes to send, and [`Unsupported`](Self::Unsupported) and
+    /// [`Unauthorized`](Self::Unauthorized) are the node's own ANSWER declining to serve or to accept
+    /// the credential — an answer that arrives instead of a broadcast, not after one.
+    ///
+    /// The other two cannot be decided from here. [`Unreachable`](Self::Unreachable) covers a
+    /// connection that may have dropped after the request was written, and
+    /// [`NodeCouldNotAnswer`](Self::NodeCouldNotAnswer) is a node that took the bundle and then said
+    /// something unusable — including the timeout case, where it may already have forwarded it.
+    ///
+    /// # The direction the uncertainty is resolved in
+    ///
+    /// Deliberately towards `true`. A variant misplaced on the unknown side costs a person a wait; one
+    /// misplaced on the definite side tells them nothing was sent while a bundle is live, which is the
+    /// double-payment this whole flow exists to prevent. A new variant therefore belongs on the
+    /// unknown side until someone can show it cannot be in flight — and the match below has no
+    /// wildcard, so adding one forces that judgement rather than inheriting a neighbour's.
+    pub fn may_have_reached_a_mempool(&self) -> bool {
+        match self {
+            Self::NoToken
+            | Self::Unserializable { .. }
+            | Self::Unsupported { .. }
+            | Self::Unauthorized { .. } => false,
+            Self::Unreachable { .. } | Self::NodeCouldNotAnswer { .. } => true,
+        }
+    }
+}
+
 impl std::fmt::Display for PublishFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -156,12 +195,32 @@ impl ControlSpendPublisher {
             timeout,
         }
     }
+}
 
+/// A publisher that keeps the REASON a push did not reach a mempool.
+///
+/// # Why this exists beside [`SpendPublisher`]
+///
+/// `SpendPublisher` is dig-account's seam and reports one failure: [`ChainUnavailable`], a sentence.
+/// That is the right shape for the MINT, which retries the whole ceremony either way. It is the wrong
+/// shape for a SEND, where the reason decides what a person is told and what they may do next: a push
+/// refused for a missing token sent nothing and the form should come straight back, while a push
+/// nobody answered may be settling right now and a second send could pay the recipient twice
+/// (`may_have_reached_a_mempool` is where that line is drawn).
+///
+/// So the send path is generic over THIS trait, and the flattening `SpendPublisher` impl stays for
+/// the callers that genuinely cannot act on the difference. Both are the same one operation — push an
+/// already-signed bundle — and this trait adds no capability beyond keeping the diagnosis.
+pub trait DetailedSpendPublisher {
     /// Push `bundle`, keeping the typed reason a push did not reach a judgement.
     ///
     /// `Ok` means the mempool ANSWERED — including [`PushOutcome::Rejected`], which is a judgement
     /// and therefore a success of this call. `Err` means it never did; see [`PublishFailure`].
-    pub fn push_detailed(&self, bundle: &SpendBundle) -> Result<PushOutcome, PublishFailure> {
+    fn push_detailed(&self, bundle: &SpendBundle) -> Result<PushOutcome, PublishFailure>;
+}
+
+impl DetailedSpendPublisher for ControlSpendPublisher {
+    fn push_detailed(&self, bundle: &SpendBundle) -> Result<PushOutcome, PublishFailure> {
         // Refused locally, before a byte goes out. A token-less push cannot succeed, and sending it
         // anyway would turn a knowable local fault into whatever the node's refusal happens to look
         // like -- which is the same shape an absent node produces.
