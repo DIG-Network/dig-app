@@ -768,6 +768,24 @@ pub(crate) mod wallet {
         )
     }
 
+    /// The glance-level word for a stuck payment the person released themselves.
+    pub(crate) const SEND_RELEASED_BADGE: &str = "You released this";
+    /// Said after a person releases a payment whose fate this app never learned
+    /// (dig_ecosystem#2894).
+    ///
+    /// It attributes the claim to THEM and repeats what this app knows, which is nothing. Saying
+    /// anything about where the money went would be this app borrowing the person's certainty.
+    pub(crate) const SEND_RELEASED_BODY: &str =
+        "You checked this payment yourself and released the form. DIG never found out what became          of it, so this is your finding and not its own — the coin id is below if you want to look          again.";
+    /// The call to action on the control that releases a stuck form.
+    pub(crate) const SEND_RELEASE_ACTION: &str = "I checked this myself — release the form";
+    /// The instruction above the field that takes the acknowledgement.
+    pub(crate) const SEND_RELEASE_ASK: &str =
+        "Look this payment up first, then type its coin id here to confirm the finding is yours.";
+    /// Said when the typed id is not the payment's.
+    pub(crate) const SEND_RELEASE_MISMATCH: &str =
+        "That is not this payment's coin id, so nothing has been released.";
+
     /// The label on whoever supplied a send's verdict (dig_ecosystem#2891).
     pub(crate) const SEND_SOURCE_LABEL: &str = "Checked with";
     /// Said when the verdict needed no chain read at all.

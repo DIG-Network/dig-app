@@ -650,6 +650,13 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
             Tone::Warn,
             copy::wallet::send_abandoned_body(detail),
         ),
+        // The person's own claim, attributed to them (dig_ecosystem#2894). It must not read as this
+        // app having decided anything: nothing here knows what became of that payment.
+        SendProgress::Released { .. } => (
+            copy::wallet::SEND_RELEASED_BADGE,
+            Tone::Neutral,
+            copy::wallet::SEND_RELEASED_BODY.to_string(),
+        ),
     };
 
     flow.place(|ui, at| (data::badge(ui, at.left_top(), t, word, tone).height(), ()));
@@ -685,6 +692,9 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
         | SendProgress::Unknown {
             payment_coin_id, ..
         }
+        // The coin the person acknowledged, kept in front of them: the claim they made is about
+        // this payment, and it stays checkable after they make it.
+        | SendProgress::Released { payment_coin_id }
         => vec![Readout::new(
             copy::wallet::SEND_COIN_LABEL,
             Value::Identifier(payment_coin_id.clone()),
@@ -1874,6 +1884,9 @@ mod tests {
             SendProgress::Abandoned {
                 detail: "this app stopped part-way through the payment".to_string(),
             },
+            SendProgress::Released {
+                payment_coin_id: "5e771ed".to_string(),
+            },
         ]
     }
 
@@ -1889,12 +1902,13 @@ mod tests {
                 SendProgress::Confirmed { .. } => 4,
                 SendProgress::Failed { .. } => 5,
                 SendProgress::Abandoned { .. } => 6,
+                SendProgress::Released { .. } => 7,
             }
         }
         let mut arms: Vec<u8> = every_send_state().iter().map(arm).collect();
         arms.sort_unstable();
         arms.dedup();
-        assert_eq!(arms, (0..7).collect::<Vec<u8>>());
+        assert_eq!(arms, (0..8).collect::<Vec<u8>>());
     }
 
     /// **Each send state is drawn as ITSELF, and an unknown outcome is never drawn as a failure**

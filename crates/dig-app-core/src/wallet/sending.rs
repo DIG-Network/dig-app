@@ -111,6 +111,26 @@ pub enum SendProgress {
         /// Where the attempt was when it stopped, for the person and for a bug report.
         detail: String,
     },
+    /// A transfer whose fate this app still does not know, which the PERSON has released
+    /// (dig_ecosystem#2894).
+    ///
+    /// # Why the app cannot reach this state on its own
+    ///
+    /// A node that accepts a connection and then drops it leaves the send `Unknown` forever: nothing
+    /// can resolve it, because `Awaiting` establishes nothing while the transfer is unjudged, the
+    /// payment coin never appears, and proof of death needs a spend that will not happen. So the
+    /// form stays shut for the life of the process, which is the safe direction — telling someone
+    /// nothing was sent while a bundle may be live is the double-payment path — and also a trap.
+    ///
+    /// The escape is a claim the PERSON makes, never one this app makes for them: they look the
+    /// payment coin up themselves, and say so by acknowledging its id. This state records that
+    /// claim and whose it was. It asserts nothing about the money — which is why it is not
+    /// [`Failed`](Self::Failed) — and it is not [`in_flight`](Self::in_flight), which is the whole
+    /// point of it.
+    Released {
+        /// The payment coin the person acknowledged, kept so the claim stays checkable.
+        payment_coin_id: String,
+    },
 }
 
 /// Whose word a send's verdict rests on (dig_ecosystem#2891).
@@ -380,6 +400,68 @@ impl SendDraft<'_> {
     }
 }
 
+/// The person's claim that they have checked a stuck payment themselves (dig_ecosystem#2894).
+///
+/// # Why releasing a form needs a rule of its own
+///
+/// A node that accepts a connection and then drops it leaves a send [`SendProgress::Unknown`]
+/// forever, and `Unknown` is [`in_flight`](SendProgress::in_flight), so the form refuses every later
+/// send for the life of the process. That direction is the safe one and must stay — telling someone
+/// nothing was sent while a bundle may be live is how a recipient gets paid twice — but it leaves a
+/// person who has looked the payment up on a block explorer with no way to tell the app so.
+///
+/// The escape must never be a plain dismiss button. A dismiss button is the app inviting the person
+/// to make a warning disappear; this is the person making a CLAIM, and a claim has to be about
+/// something. So the acknowledgement is the payment coin id itself: to release the form you must
+/// name the payment you checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseDraft<'a> {
+    /// What the person typed into the acknowledgement field.
+    pub typed: &'a str,
+    /// The state the send is in right now.
+    pub send: &'a SendProgress,
+}
+
+/// Why a release cannot be made.
+///
+/// A reason and not a bare `false`, for `professional-ui`'s never-trap rule: a control refused
+/// without a stated condition sends a person looking for one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseBlocked {
+    /// There is nothing stuck. The control is not offered at all in this state.
+    NothingStuck,
+    /// The field is empty. Said as an instruction rather than an error — an untouched field is not
+    /// a mistake.
+    NotYetAcknowledged,
+    /// The typed id is not this payment's.
+    WrongCoinId,
+}
+
+impl ReleaseDraft<'_> {
+    /// Whether this claim may be made, and why not when it may not.
+    ///
+    /// Leading and trailing whitespace is forgiven, because a coin id is something a person pastes
+    /// out of a block explorer and a stray space is not a different claim. Nothing else is: a
+    /// prefix, a truncation or a near-miss is refused, since the entire mechanism is that the person
+    /// named THIS payment.
+    pub fn assess(&self) -> Result<(), ReleaseBlocked> {
+        let SendProgress::Unknown {
+            payment_coin_id, ..
+        } = self.send
+        else {
+            return Err(ReleaseBlocked::NothingStuck);
+        };
+        let typed = self.typed.trim();
+        if typed.is_empty() {
+            return Err(ReleaseBlocked::NotYetAcknowledged);
+        }
+        match typed.eq_ignore_ascii_case(payment_coin_id) {
+            true => Ok(()),
+            false => Err(ReleaseBlocked::WrongCoinId),
+        }
+    }
+}
+
 /// The one send this app is running, and everything that moves it along.
 ///
 /// # Why the shell owns a handle and not a state machine
@@ -525,6 +607,35 @@ impl SendHolder {
         watched.pending = None;
         watched.next_poll = None;
         watched.judged = false;
+    }
+
+    /// Release a transfer whose fate is unknown, on the person's own say-so (dig_ecosystem#2894).
+    ///
+    /// Reached only for a claim [`ReleaseDraft::assess`] has already accepted, which is where the
+    /// typed acknowledgement is compared — the same split `SendXch` uses, and for the same reason:
+    /// the rule belongs where a test can put a wrong answer in front of it.
+    ///
+    /// It still re-reads the state here rather than trusting the caller, because the transfer may
+    /// have resolved between the click and this call. Returns whether the release took.
+    pub fn release_acknowledged(&self) -> bool {
+        let mut watched = self.lock();
+        let SendProgress::Unknown {
+            payment_coin_id, ..
+        } = &watched.progress
+        else {
+            // It resolved on its own while the person was looking it up. Their claim is moot and
+            // the real verdict stands — overwriting it would throw away the one thing that IS known.
+            return false;
+        };
+        let payment_coin_id = payment_coin_id.clone();
+        watched.progress = SendProgress::Released { payment_coin_id };
+        // The watch stops with the claim. This app never learned anything about the transfer, so it
+        // has nothing left to poll for — and continuing to poll would let a later read overwrite the
+        // person's own claim with a verdict from the source that stalled in the first place.
+        watched.pending = None;
+        watched.next_poll = None;
+        watched.judged = false;
+        true
     }
 
     /// Record how a send ended.
@@ -1256,5 +1367,140 @@ mod tests {
             ),
             "a refusal this app made before any chain read was attributed to a third party"
         );
+    }
+
+    /// A send stuck on a node that answered nothing — the state the release action exists for.
+    fn stuck_on(coin: &str) -> SendProgress {
+        SendProgress::Unknown {
+            payment_coin_id: coin.to_string(),
+            detail: "the node closed the connection".to_string(),
+        }
+    }
+
+    /// **Releasing a stuck form requires naming the payment, and a near-miss is not naming it**
+    /// (dig_ecosystem#2894).
+    ///
+    /// The nearest wrong implementation is a dismiss button — anything that releases the form
+    /// without the person making a claim about a specific payment. The second-nearest accepts a
+    /// PREFIX, which is exactly what a person produces by copying a truncated id off a screen; that
+    /// reads as a match to a `starts_with` and would release a form on nothing.
+    ///
+    /// The fixture keeps an honest control beside each refusal: the exact id, differing only in case
+    /// and surrounding space, must be ACCEPTED — otherwise a rule that refused everything would
+    /// satisfy every negative assertion below.
+    #[test]
+    fn a_stuck_form_is_released_only_by_naming_the_payment_exactly() {
+        let coin = "5e771ed0c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+        let stuck = stuck_on(coin);
+        let assess = |typed: &str| {
+            ReleaseDraft {
+                typed,
+                send: &stuck,
+            }
+            .assess()
+        };
+
+        assert_eq!(assess(coin), Ok(()), "the exact id is the acknowledgement");
+        assert_eq!(
+            assess(&format!("  {}  ", coin.to_uppercase())),
+            Ok(()),
+            "a pasted id is the same claim whatever its case or surrounding space"
+        );
+        assert_eq!(assess("   "), Err(ReleaseBlocked::NotYetAcknowledged));
+        assert_eq!(
+            assess(&coin[..16]),
+            Err(ReleaseBlocked::WrongCoinId),
+            "a prefix released the form, so a truncated id read off a screen would do"
+        );
+        assert_eq!(
+            assess(&coin.replace("5e771ed0", "5e771ed1")),
+            Err(ReleaseBlocked::WrongCoinId),
+            "a near-miss released the form"
+        );
+    }
+
+    /// **Nothing but a stuck send can be released** (dig_ecosystem#2894).
+    ///
+    /// The nearest wrong implementation compares the id and nothing else, which would let a person
+    /// "release" a payment that has already CONFIRMED — throwing away the one verdict that is known
+    /// and replacing it with their own uncertainty.
+    #[test]
+    fn a_send_that_is_not_stuck_cannot_be_released_however_it_is_acknowledged() {
+        let coin = "5e771ed";
+        for settled in [
+            SendProgress::Idle,
+            SendProgress::Confirmed {
+                payment_coin_id: coin.to_string(),
+                confirmed_height: 9_146_483,
+                source: VerdictSource::Replica,
+            },
+            SendProgress::Pending {
+                payment_coin_id: coin.to_string(),
+                blocks_since_push: 2,
+            },
+        ] {
+            assert_eq!(
+                ReleaseDraft {
+                    typed: coin,
+                    send: &settled,
+                }
+                .assess(),
+                Err(ReleaseBlocked::NothingStuck),
+                "{settled:?} was released, and it was never stuck"
+            );
+        }
+    }
+
+    /// **A release frees the form, claims nothing about the money, and keeps the coin id**
+    /// (dig_ecosystem#2894).
+    ///
+    /// Freeing the form is the entire point, so a release that left `in_flight()` true would fix
+    /// nothing. But the nearest wrong implementation frees it by recording a FAILURE, which renders
+    /// as *"nothing was sent and no money has moved"* — a claim about the user's money made out of
+    /// the user's own uncertainty, and the exact lie this batch exists to remove.
+    #[test]
+    fn a_released_send_frees_the_form_without_saying_where_the_money_went() {
+        let coin = "5e771ed";
+        let holder = SendHolder::default();
+        holder.lock().progress = stuck_on(coin);
+        assert!(
+            holder.progress().in_flight(),
+            "the fixture must start stuck, or this proves nothing"
+        );
+
+        assert!(holder.release_acknowledged(), "an acknowledged claim takes");
+        assert_eq!(
+            holder.progress(),
+            SendProgress::Released {
+                payment_coin_id: coin.to_string()
+            },
+            "a release must be its own state, never a failure or a confirmation"
+        );
+        assert!(!holder.progress().in_flight(), "the form is usable again");
+        assert!(holder.begin(), "and a second send may actually start");
+    }
+
+    /// **A transfer that resolved while the person was checking keeps its real verdict**
+    /// (dig_ecosystem#2894).
+    ///
+    /// The person looks the coin up, comes back, and clicks release — but a poll settled it in the
+    /// meantime. The nearest wrong implementation honours the click, discarding a known confirmation
+    /// in favour of the person's uncertainty. This is why the state is re-read at the moment of
+    /// release rather than trusted from the click.
+    #[test]
+    fn a_release_that_arrives_after_the_chain_answered_does_not_overwrite_the_answer() {
+        let holder = SendHolder::default();
+        let settled = SendProgress::Confirmed {
+            payment_coin_id: "5e771ed".to_string(),
+            confirmed_height: 9_146_483,
+            source: VerdictSource::Replica,
+        };
+        holder.lock().progress = settled.clone();
+
+        assert!(
+            !holder.release_acknowledged(),
+            "the stale click was honoured"
+        );
+        assert_eq!(holder.progress(), settled);
     }
 }
