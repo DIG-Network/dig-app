@@ -50,6 +50,19 @@ impl EngineState {
         matches!(self, EngineState::Connected { .. })
     }
 
+    /// The endpoint of the node currently answering, or `None` when none is.
+    ///
+    /// `None` for a disconnected link rather than the endpoint last tried: an endpoint read from
+    /// here is used to BUILD a chain source and a publisher, and handing back a node that is not
+    /// answering would let a caller aim a read — or a push — at a machine this state already knows
+    /// is unreachable.
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            EngineState::Connected { endpoint, .. } => Some(endpoint),
+            EngineState::Disconnected { .. } => None,
+        }
+    }
+
     /// The node's status snapshot, when connected.
     pub fn status(&self) -> Option<&StatusResult> {
         match self {
@@ -226,6 +239,24 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
         drop(listener);
         endpoint
+    }
+
+    /// **A disconnected link names no endpoint, and a connected one names the node that answered.**
+    ///
+    /// Makes impossible: a caller building a chain source or a spend publisher aimed at a node the
+    /// link already knows is unreachable. The connected leg is what keeps the refusal from being an
+    /// accessor that answers `None` unconditionally, and it asserts the endpoint's VALUE rather than
+    /// its presence, because an accessor returning some other node's address would satisfy
+    /// `is_some()`.
+    #[test]
+    fn only_a_connected_link_names_an_endpoint_and_it_is_the_one_that_answered() {
+        assert_eq!(EngineState::initial().endpoint(), None);
+
+        let connected = EngineState::Connected {
+            endpoint: "http://dig.local:4801".to_owned(),
+            status: Box::new(crate::test_support::node::fake_status_result()),
+        };
+        assert_eq!(connected.endpoint(), Some("http://dig.local:4801"));
     }
 
     #[test]

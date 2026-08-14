@@ -1563,16 +1563,13 @@ mod tray {
             // This account's profiles (dig_ecosystem#2403). Every decision about what the reading
             // MEANS lives in `dig_app_core::profiles`, because a binary is a test-free zone.
             profiles: profiles_reading(env, session),
-            // Derived from the SAME `mint_seams()` the start-up wizard's gate reads, so there is no
-            // line here that could report a profile as creatable while every minter refuses
-            // (dig_ecosystem#2377).
-            profile_creation: dig_app_core::profiles::ProfileCreation::of(
-                super::mint_seams().availability(),
-            ),
+            // What the node ANSWERED about whether a whole profile can be minted here
+            // (dig_ecosystem#2398) — never what this binary asserts. See `profile_creation_of`.
+            profile_creation: profile_creation_of(status, session),
             // What the node itself says about servicing a mint (dig_ecosystem#2398). Read for the
-            // DID explainer alone, which without it names a cause nobody measured; it gates
-            // nothing, and `profile_creation` above is deliberately NOT derived from it — an
-            // availability needs a mint door, which this reading cannot hold.
+            // DID explainer, which without it names a cause nobody measured. The SAME poller feeds
+            // `profile_creation` above, so the explainer and the gate can never disagree about what
+            // the node said.
             mint_chain: match status.read() {
                 Ok(status) => mint_chain_poller().observe(&status.engine),
                 // A poisoned lock says nothing about the node, and "nothing" is not a blocker.
@@ -1714,6 +1711,82 @@ mod tray {
         static POLLER: std::sync::OnceLock<dig_app_core::chain::NodeChainReadiness> =
             std::sync::OnceLock::new();
         POLLER.get_or_init(dig_app_core::chain::NodeChainReadiness::default)
+    }
+
+    /// Whether a whole profile can be created here — READ off the node, never asserted
+    /// (dig_ecosystem#2398).
+    ///
+    /// # Every arm is a measurement, and the absent one is spelled `Unknown`
+    ///
+    /// There is no constant in this file whose value opens the gate. The answer is
+    /// [`ProfileMintSeams::availability`] applied to a reading
+    /// [`NodeChainReadiness`](dig_app_core::chain::NodeChainReadiness) took by asking a live node
+    /// three questions on a worker thread — so a build whose node is stopped, or too old to walk a
+    /// singleton lineage, reports those as the different facts they are, and a build nobody has
+    /// asked yet reports `Unknown` rather than a cause nobody observed (dig_ecosystem#2690).
+    ///
+    /// `profiles.rs`'s `the_binary_cannot_open_the_profile_creation_gate` holds that property
+    /// mechanically: the five names that would let this file SHORT-CIRCUIT the chain from reading to
+    /// `Possible` are banned from the whole crate's source.
+    ///
+    /// # Why a door is built here at all when nothing is minted
+    ///
+    /// [`ProfileMintSeams::Wired`] carries the door, and `Wired` is the only arm that answers
+    /// `Possible`. That is the design: an availability that could be produced without a door would
+    /// be an offer with no ceremony behind it. Building the real door — over the live registry, the
+    /// live residency, a real chain source and a real publisher — is what makes the offer
+    /// answerable, and it costs nothing until [`ProfileMintDoor::begin`] is called, which this
+    /// function never does.
+    ///
+    /// # Money
+    ///
+    /// Nothing here spends. The chain source cannot broadcast by construction, the publisher is
+    /// constructed and dropped unused, and no seed is derived: a `ProfileMinter` is taken per mint
+    /// call inside the door, never here.
+    fn profile_creation_of(
+        status: &SharedStatus,
+        session: Option<&TraySession>,
+    ) -> dig_app_core::profiles::ProfileCreation {
+        use dig_app_core::account::profile_mint::ProfileMint;
+        use dig_app_core::account::profile_mint::ProfileMintSeams;
+        use dig_app_core::profiles::ProfileCreation;
+
+        // No unlocked account means no registry to mint into and no residency to derive from, so
+        // nothing about this machine's node has been measured FOR creation. `Unknown` withholds the
+        // offer exactly as a blocker would, and unlike a blocker it names no cause: telling a locked
+        // user their chain is unreachable would send them to fix a node that is answering fine.
+        let Some(live) = session else {
+            return ProfileCreation::Unknown;
+        };
+
+        // A poisoned lock says nothing about the node, and "nothing" is not a blocker.
+        let Ok(status) = status.read() else {
+            return ProfileCreation::Unknown;
+        };
+        let Some(reading) = mint_chain_poller().observe(&status.engine) else {
+            // Either nothing is connected or the first probe has not landed. Both are *not asked
+            // yet*, which `of_reading(None)` spells; neither is a measured absence.
+            return ProfileCreation::of_reading(None);
+        };
+        let Some(endpoint) = status.engine.endpoint() else {
+            return ProfileCreation::Unknown;
+        };
+
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+        let publisher = dig_app_core::chain::ControlSpendPublisher::new(endpoint);
+        // Every money decision the door carries — which wallet pays, which index is created, the
+        // network and the fee — is answered inside `for_session`, under test. This file chooses
+        // none of them.
+        let door = ProfileMint::for_session(
+            live.residency.profiles(),
+            &live.residency,
+            &chain,
+            &publisher,
+        );
+
+        ProfileCreation::of_reading(Some(
+            ProfileMintSeams::from_readiness(reading, &door).availability(),
+        ))
     }
 
     fn network_poller() -> &'static dig_app_core::network::NodeNetworkStanding {
