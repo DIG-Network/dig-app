@@ -97,10 +97,11 @@ pub enum SendProgress {
     ///
     /// # Why a panic cannot be reported as a failure (dig_ecosystem#2895)
     ///
-    /// [`AbandonedSend`] fires on an unwind from anywhere between building and the push returning,
-    /// and a panic establishes only that this app stopped — never that nothing left. Reporting it as
-    /// [`Failed`](Self::Failed) drew [`SEND_FAILED_BODY`], whose first words are *"Nothing was sent
-    /// and no money has moved"*: a claim about the user's money made out of this app's own crash.
+    /// The drop guard on a send fires on an unwind from anywhere between building and the push
+    /// returning, and a panic establishes only that this app stopped — never that nothing left.
+    /// Reporting it as [`Failed`](Self::Failed) drew the failure copy, whose first words are
+    /// *"Nothing was sent and no money has moved"*: a claim about the user's money made out of this
+    /// app's own crash.
     ///
     /// It is deliberately NOT [`Unknown`](Self::Unknown), which would be the honest word but is
     /// [`in_flight`](Self::in_flight) and carries a payment coin id to watch. A panic yields no coin
@@ -596,7 +597,7 @@ impl SendHolder {
 
     /// Record that an attempt stopped without ever recording its own outcome.
     ///
-    /// Reached only from [`AbandonedSend`]'s unwind. It frees the send slot — the alternative is a
+    /// Reached only from the send guard's unwind. It frees the send slot — the alternative is a
     /// form nobody can use again — while claiming nothing about where the money got to
     /// (dig_ecosystem#2895). Nothing is left to poll: a panic yields no payment coin.
     pub fn abandoned(&self, detail: impl Into<String>) {
