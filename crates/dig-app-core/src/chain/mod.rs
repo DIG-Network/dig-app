@@ -27,8 +27,14 @@
 //! An absence is only an answer when the tier that gave it was CAUGHT UP. A present coin may be
 //! believed from any tier — a replica that is behind can only be behind, never ahead — while an
 //! empty answer from `synced: false` is the one reply a stale replica produces indistinguishably
-//! from the chain itself, so it is a [`ChainReadError`]. See `ControlChainSource::believe_absence`
-//! for what that prevents on the mint path.
+//! from the chain itself.
+//!
+//! That rule is enforced on `coin_records_by_puzzle_hash` and, today, ONLY there. `coin_record` and
+//! `coin_records_by_parent` are not scoped to the wallet, so dig-node routes them to the fallback
+//! tier whatever its sync state and they can never report `synced: true` — a guard on them would not
+//! be strict, it would be permanently on, and permanently on shuts profile creation on every healthy
+//! machine. `ControlChainSource::believe_absence` carries the measurements, the producer-side cause,
+//! and the one lie that stays open because of it.
 //!
 //! # The ONE place that rule is knowingly bent, and why
 //!

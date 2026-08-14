@@ -1290,7 +1290,10 @@ fn unsynced_holding(coin: FakeCoin) -> FakeChain {
 #[test]
 fn an_empty_coins_answer_from_an_unsynced_tier_is_an_unknown() {
     let node = FakeNode::serving_chain(ChainReply::of(unsynced_and_empty()));
-    let outcome = format!("{:?}", source(&node).coin_records_by_puzzle_hash(id(2), false));
+    let outcome = format!(
+        "{:?}",
+        source(&node).coin_records_by_puzzle_hash(id(2), false)
+    );
 
     assert!(
         outcome.starts_with("Err("),
