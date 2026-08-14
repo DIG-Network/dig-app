@@ -552,6 +552,59 @@ pub mod copy {
         )
     }
 
+    /// What the window says when the balance could not be measured AT ALL.
+    ///
+    /// # This is the window that must never become the deposit window
+    ///
+    /// A shortfall is a subtraction, and there is nothing here to subtract from: nobody has read
+    /// this wallet. Rendering that as *you need funds* is the absent-versus-zero collapse that
+    /// showed a funded wallet as empty (dig_ecosystem#2871), and on this screen it would be the app
+    /// telling somebody with money that they have none — a claim about their money that no read
+    /// supports. So this states the cost, states that the balance is unknown, names the node's own
+    /// reason, and asks for nothing.
+    pub fn unmeasured_body(why: &str, cost_mojos: u64) -> String {
+        format!(
+            "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
+             for an app and be found by other people. This account does not have one yet.\n\n\
+             Creating one costs {} mojos. DIG cannot read this wallet's balance at the moment, so \
+             it does not know whether that has already been sent — this is about reading the \
+             balance, not about your money. Anything already sent to the address below is safe.\n\n\
+             Choose {RECHECK} once the node is answering, or {LATER}.\n\n{why}",
+            grouped(cost_mojos)
+        )
+    }
+
+    /// The title over the window shown when the wallet CAN pay.
+    pub const READY_TITLE: &str = "DIG — Create your first profile";
+    /// Its heading.
+    pub const READY_HEADING: &str = "This wallet can pay for a profile";
+
+    /// What that window says on a build with no create-profile ceremony behind it.
+    ///
+    /// # Why a refusal is written down rather than the arm being dropped
+    ///
+    /// The funding half of this feature is real: the prompt watches, the balance is measured, and
+    /// the moment it is sufficient the flow reaches this point by itself. What does not exist yet is
+    /// the ceremony — no surface in this app calls
+    /// [`ProfileMintDoor::begin`](crate::account::profile_mint::ProfileMintDoor::begin), and a
+    /// window that claimed to have started one would be reporting a spend that never happened. The
+    /// honest end of the road is a sentence saying so; a silently missing arm would leave a person
+    /// who has just funded a wallet watching a window close on nothing.
+    ///
+    /// It states the cost again because that is the number they are about to be charged, and it says
+    /// plainly that nothing has been spent.
+    pub fn ready_body(cost_mojos: u64) -> String {
+        format!(
+            "This wallet now holds enough to create a profile, which costs {} mojos.\n\n\
+             This version of DIG cannot run the creation itself yet: the step that mints the DID \
+             and its store is not wired into this app, so nothing was started and NOTHING HAS BEEN \
+             SPENT. Your funds are untouched and stay where they are.\n\n\
+             DIG will stop asking you to add funds. The creation step arrives in a coming version, \
+             and the wallet is already ready for it.",
+            grouped(cost_mojos)
+        )
+    }
+
     /// A mojo count with thousands separators — `20002` is a number nobody reads, and misreading the
     /// one on a funding screen is misreading a price.
     fn grouped(mojos: u64) -> String {

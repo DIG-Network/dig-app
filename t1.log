@@ -1,0 +1,48 @@
+   Compiling dig-app-core v11.2.0 (C:\tmp\worktrees\app2950\crates\dig-app-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.83s
+     Running unittests src\lib.rs (target\debug\deps\dig_app_core-9872de17b2f04fc9.exe)
+
+running 40 tests
+test wallet::node::tests::an_older_node_that_cannot_read_coins_says_so ... ok
+test wallet::node::tests::a_balance_is_readable_with_no_control_token_at_all ... ok
+test wallet::node::tests::an_address_holding_nothing_reads_as_an_empty_list ... ok
+test wallet::node::tests::an_older_node_that_cannot_push_reads_as_an_older_node ... ok
+test wallet::node::tests::a_mempool_refusal_is_an_answer_carrying_its_reason ... ok
+test wallet::node::tests::a_syncing_node_is_reported_as_syncing_not_as_a_failure ... ok
+test wallet::node::tests::an_accepted_push_reports_the_transaction_id ... ok
+test wallet::node::tests::coins_are_readable_with_no_control_token_at_all ... ok
+test wallet::node::tests::a_node_that_serves_coins_yields_the_real_records ... ok
+test wallet::node::tests::an_authorization_refusal_on_the_push_names_the_token_not_the_node ... ok
+test wallet::node::tests::the_balance_budget_covers_the_slowest_read_ever_measured ... ok
+test wallet::node::tests::the_poller_reports_no_node_when_disconnected ... ok
+test wallet::node::tests::an_older_node_that_does_not_serve_the_method_says_so ... ok
+test wallet::node::tests::an_authorization_refusal_on_this_open_read_reads_as_an_older_node ... ok
+test wallet::node::tests::a_failed_read_is_unknown_never_zero ... ok
+test wallet::node::tests::a_node_with_no_chain_source_says_exactly_that ... ok
+test wallet::node::tests::a_dated_zero_from_an_unfinished_replica_is_not_a_balance ... ok
+test wallet::node::tests::an_oracle_answer_is_labelled_as_a_third_party_and_gets_no_height ... ok
+test wallet::node::tests::an_oracle_answer_is_marked_syncing_but_never_called_stale ... ok
+test wallet::node::tests::a_caught_up_replica_shows_a_genuine_zero_as_a_figure ... ok
+test wallet::node::tests::a_behind_replica_says_it_is_still_syncing_on_both_surfaces ... ok
+test wallet::node::tests::a_level_replica_carries_no_syncing_indicator ... ok
+test wallet::node::tests::a_replica_that_has_synced_nothing_yields_no_figure_at_all ... ok
+test wallet::node::tests::a_node_that_discloses_no_tier_says_the_provenance_is_unknown ... ok
+test wallet::node::tests::a_node_that_serves_the_method_yields_a_known_balance ... ok
+test wallet::node::tests::figures_the_node_calls_stale_are_shown_with_their_as_of_height ... ok
+test wallet::node::tests::a_second_observation_inside_the_window_does_not_ask_the_node_again ... ok
+test wallet::node::tests::a_chain_that_could_not_be_read_is_an_error_never_an_empty_list ... ok
+test wallet::node::tests::the_poller_works_without_a_control_token ... ok
+test wallet::node::tests::a_changed_address_invalidates_the_cache ... ok
+test wallet::node::tests::the_poller_reads_a_real_balance_from_a_connected_node ... ok
+test wallet::node::tests::losing_the_address_drops_the_cached_reading ... ok
+test wallet::node::tests::a_recheck_reads_again_where_a_repaint_would_wait_out_the_interval ... ok
+test wallet::node::tests::a_push_with_no_node_listening_is_unreachable_not_a_refusal ... ok
+test wallet::node::tests::nothing_listening_reads_as_no_node ... ok
+test wallet::node::tests::repaints_during_a_slow_read_do_not_stack_more_reads_on_the_node ... ok
+test wallet::node::tests::a_read_slower_than_a_probe_budget_still_yields_a_balance ... ok
+test wallet::node::tests::a_refresh_in_flight_keeps_showing_the_figure_it_is_refreshing ... ok
+test wallet::node::tests::an_unfinished_read_returns_at_once_as_pending_and_lands_later ... ok
+test wallet::node::tests::a_node_that_answers_late_times_out_rather_than_looking_absent ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 1561 filtered out; finished in 4.01s
+
