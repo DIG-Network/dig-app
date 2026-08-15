@@ -144,6 +144,23 @@ pub(crate) fn readouts(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> 
     }
 }
 
+/// Draw a run of readouts as ONE row each, however wide the pane is. Returns the height used.
+///
+/// [`readouts`] pairs items left and right once there is room, which is right for a grid of
+/// unrelated facts — a version beside an uptime. It is wrong for a list whose items are the SAME
+/// kind of thing and are meant to be compared down a column: two assets rendered side by side read
+/// as one flat line rather than as a list, and a third asset appearing in a new place under the
+/// first is a layout that changes shape as the data grows (dig_ecosystem#2967).
+///
+/// So a caller that is drawing a LIST asks for rows, and a caller drawing a grid of facts asks for
+/// [`readouts`]. Same row rendering underneath; the difference is only whether pairing is allowed.
+pub(crate) fn rows(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
+    if items.is_empty() {
+        return 0.0;
+    }
+    one_column(ui, grid_within(at), t, items)
+}
+
 /// Every readout stacked, full width. The narrow-window layout, and the fallback.
 fn one_column(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
     let mut y = at.top();
@@ -299,6 +316,46 @@ fn measure(ui: &mut Ui, at: Rect, t: &Tokens, amount: &str, unit: &str) -> f32 {
     );
     // Baseline-aligned by bottom edge rather than top: a 13 px unit hung off a 15 px number's top
     // reads as a superscript.
+    let unit_top = at.top() + number_size.y - unit_galley.size().y;
+    super::selectable::text(ui, egui::Pos2::new(unit_at, unit_top), unit_galley);
+    number_size.y
+}
+
+/// The ONE figure a pane exists to answer, at [`size::DISPLAY`]. Returns the height used.
+///
+/// # Why only a measure is enlarged
+///
+/// Every other variant falls through to [`value`] at its ordinary size, and that is the honesty
+/// rule rather than a rendering shortcut. A [`Value::Unknown`] is the ABSENCE of a figure, and an
+/// absence set 28 px tall in the position a balance occupies is read as a balance by everyone who
+/// does not stop to read the sentence — which is the same defect as printing `0` for a number
+/// nobody measured (dig_ecosystem#2871, dig_ecosystem#2879), wearing a larger font.
+///
+/// So the size is earned by the value being a reading. A pane that wants a headline gets one only
+/// when it has something to headline, and the not-known case degrades to the sentence in `--faint`
+/// that [`value`] already draws for it.
+pub(crate) fn headline(ui: &mut Ui, at: Rect, t: &Tokens, item: &Value) -> f32 {
+    let Value::Measure { amount, unit } = item else {
+        return value(ui, at, t, item);
+    };
+
+    let number = ui
+        .painter()
+        .layout_no_wrap(amount.clone(), semibold(size::DISPLAY), rgba(t.text));
+    let number_size = number.size();
+    super::selectable::text(ui, at.left_top(), number);
+
+    // `--text-base` against a 28 px figure, bottom-aligned for the reason [`measure`] gives: the
+    // unit is what the number is IN, and a unit hung off the top of a display figure reads as an
+    // exponent — which on a money surface is a different number.
+    let unit_at = at.left() + number_size.x + space::S2;
+    let unit_galley = text::one_line(
+        ui,
+        unit,
+        regular(size::BASE),
+        rgba(t.muted),
+        (at.right() - unit_at).max(0.0),
+    );
     let unit_top = at.top() + number_size.y - unit_galley.size().y;
     super::selectable::text(ui, egui::Pos2::new(unit_at, unit_top), unit_galley);
     number_size.y

@@ -113,6 +113,13 @@ pub mod size {
     pub const LG: f32 = 18.0;
     /// hub's `--text-xl` — the origin-bound heading.
     pub const HEADING: f32 = 22.0;
+    /// hub's `--text-2xl` — the ONE figure a surface exists to answer.
+    ///
+    /// Reserved for a headline VALUE, never for prose: a pane has one question it is opened to
+    /// settle, and this is the size that answers it before anything else is read. The Wallet tab's
+    /// balance is the case it was added for (dig_ecosystem#2967) — a wallet whose balance is set in
+    /// body copy has inverted its own hierarchy.
+    pub const DISPLAY: f32 = 28.0;
 }
 
 /// hub's `--space-*` scale, in logical pixels.
