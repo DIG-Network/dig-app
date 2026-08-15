@@ -2327,6 +2327,11 @@ the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
   session, so the drawn form is stale for the whole of it.
 - A send that fails part-way, including by PANIC, MUST release the send slot. A claimed slot that is
   never released leaves the surface permanently unable to send for a payment that does not exist.
+- The custody gate MUST be held for the lifetime of an unlock, not built per send. The rolling window
+  behind `AutoSendPolicy::max_confirmations_per_period` lives inside the `PolicyAuthorizer` the
+  `MoneyPath` holds, so a gate built per request starts each one with an empty ledger and its ceiling
+  can never be reached. The gate MUST be rebuilt when the receive address it rules against changes,
+  since that address is what the vault outflow rule compares a payee to.
 - There is NO retry or fee bump. A future one MUST use `WalletOps::build_transfer_replacing`, which
   reuses the original inputs; a rebuilt transfer at a higher fee can select a different input set, and
   two bundles spending disjoint inputs can both confirm.
@@ -2341,7 +2346,8 @@ the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
 
 The Wallet tab offers the send, and `dig_app_core::wallet::sending` is the only place that decides
 anything about it. The pane draws that module's answers and returns an intent
-(`TrayAction::SendXch`); the shell forwards the intent and performs the send.
+(`TrayAction::SendXch`, or `TrayAction::ReleaseUnknownSend` for the escape below); the shell forwards
+the intent and performs the send.
 
 - A typed amount MUST be converted to base units by `amount::parse_asset_amount`, the exact inverse of
   `amount::format_asset_amount`. The conversion MUST be integer arithmetic on the digits: a binary
@@ -2357,8 +2363,8 @@ anything about it. The pane draws that module's answers and returns an intent
 - **Send** MUST be refused, with the condition stated on screen, when the account is sealed, when a
   send is in flight, when either field is unusable, or when the amount plus the fee exceeds a MEASURED
   balance. A balance nobody has read MUST NOT refuse a send — that would invent the figure.
-- The six states of `SendProgress` — `Idle`, `Signing`, `Pending`, `Unknown`, `Confirmed` and `Failed` —
-  MUST each be rendered as themselves where they are reached. `Awaiting` MUST NOT be shown as success,
+- The eight states of `SendProgress` — `Idle`, `Signing`, `Pending`, `Unknown`, `Confirmed`, `Failed`,
+  `Abandoned` and `Released` — MUST each be rendered as themselves where they are reached. `Awaiting` MUST NOT be shown as success,
   and an unanswered push MUST be shown as an UNKNOWN outcome to keep watching — never as a failure,
   since rebuilding it can pay the recipient twice. (`Signing` is not currently reachable on screen: the
   action worker holds the session for the whole ceremony and the tray publishes no view while it does,
@@ -2366,6 +2372,21 @@ anything about it. The pane draws that module's answers and returns an intent
   refused by `SendHolder::begin`'s compare-and-set and is dropped without feedback — nothing
   is built, signed or pushed, and the first send is undisturbed. The surface corrects itself
   when the tray republishes and the in-flight state becomes visible.)
+- A send abandoned by a PANIC MUST be reported as `Abandoned` and MUST NOT claim that no money moved.
+  A panic establishes only that this app stopped; it establishes nothing about whether the bundle left
+  the machine. `Abandoned` MUST NOT be `Unknown` either: `Unknown` holds the form shut and offers a
+  payment coin id to watch, and a panic produces no coin id, so the form MUST reopen and the sentence
+  MUST send the person to check before sending again.
+- A send whose fate is UNKNOWN MUST offer an escape, and the escape MUST be a claim the USER makes.
+  Releasing the form MUST require the user to acknowledge the payment coin id exactly
+  (`sending::ReleaseDraft::assess`; a prefix or a near-miss MUST be refused), and MUST produce
+  `Released`, which asserts nothing about the money. The app MUST NOT decide on its own that an
+  unjudged transfer is dead, and a transfer that resolved before the release is applied MUST keep its
+  chain verdict.
+- A `Confirmed` or `Failed` verdict MUST carry the source it was read from (`sending::VerdictSource`,
+  from `ControlChainSource::last_freshness`) and the surface MUST show it, because the send path asks
+  the same node it pushed to. A verdict decided locally before any chain read MUST stay `Local` and
+  MUST NOT be re-attributed by a later poll.
 - `Failed` MUST distinguish its two producers. Reached before any broadcast, the surface MAY state that
   no money has moved. Reached from a proof of death AFTER a push — a source coin observed spent while
   the payment coin is absent — it MUST NOT state that, and it MUST show the payment coin id.

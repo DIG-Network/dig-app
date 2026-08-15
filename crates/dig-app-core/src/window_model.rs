@@ -755,6 +755,9 @@ mod tests {
             // whole of what the user asked for — an *automatic* popout — so a row offering it would
             // be a second, manual way in that the daily cadence knows nothing about.
             | TrayAction::CreateFirstProfile
+            // Never a menu ROW: releasing a stuck send is a control the Wallet pane draws beside
+            // the transfer it refers to, and a menu row would offer it with nothing to point at.
+            | TrayAction::ReleaseUnknownSend
             | TrayAction::OpenWindow
             | TrayAction::OpenLogs
             | TrayAction::Quit => {}

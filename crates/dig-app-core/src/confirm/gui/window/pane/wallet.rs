@@ -64,7 +64,9 @@ use crate::wallet::overview::{
     BalanceReading, Balances,
 };
 use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
-use crate::wallet::sending::{SendBlocked, SendDraft, SendProgress};
+use crate::wallet::sending::{
+    ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendProgress, VerdictSource,
+};
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
 
@@ -548,15 +550,22 @@ fn sending_card(
     flow.place(|ui, at| {
         let (height, pressed) =
             card::interactive_card(ui, at, t, live, Some(copy::wallet::SENDING_CARD), |inner| {
-                if !matches!(facts.send, SendProgress::Idle) {
-                    outcome(inner, t, &facts.send);
-                    inner.gap(space::S4);
-                }
+                let released = match matches!(facts.send, SendProgress::Idle) {
+                    true => None,
+                    false => {
+                        let released = outcome(inner, t, &facts.send);
+                        inner.gap(space::S4);
+                        released
+                    }
+                };
                 let pressed = send_form(inner, t, facts);
                 inner.gap(space::S2);
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SENDING_HINT), ()));
                 let done = closable && close_control(inner, t, live, "dig-window-wallet-send-done");
-                (pressed, done)
+                // A stuck send refuses the Send control, so the two can never both be produced —
+                // but the release is named first regardless, because it is the one a person in that
+                // state is reaching for.
+                (released.or(pressed), done)
             });
         let (pressed, done) = pressed.unwrap_or((None, false));
         (height, (pressed, done))
@@ -596,9 +605,9 @@ fn close_control(flow: &mut Flow, t: &Tokens, live: bool, element: &str) -> bool
 /// Each state gets its own badge word, its own sentence and its own facts, because they call for
 /// different things: waiting, doing nothing, watching, or reading a reason. The two that a surface is
 /// most tempted to merge are kept furthest apart — `Unknown` is not a failure, and says so.
-fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
+fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) -> Option<TrayAction> {
     let (word, tone, body) = match send {
-        SendProgress::Idle => return,
+        SendProgress::Idle => return None,
         SendProgress::Signing => (
             copy::wallet::SEND_SIGNING_BADGE,
             Tone::Neutral,
@@ -628,6 +637,7 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
         SendProgress::Failed {
             reason,
             payment_coin_id: None,
+            ..
         } => (
             copy::wallet::SEND_FAILED_BADGE,
             Tone::Warn,
@@ -636,10 +646,25 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
         SendProgress::Failed {
             reason,
             payment_coin_id: Some(_),
+            ..
         } => (
             copy::wallet::SEND_DIED_BADGE,
             Tone::Warn,
             format!("{} {reason}", copy::wallet::SEND_DIED_BODY),
+        ),
+        // Drawn as its own state and NEVER through `SEND_FAILED_BODY`: this app crashing is not
+        // evidence that no money moved (dig_ecosystem#2895).
+        SendProgress::Abandoned { detail } => (
+            copy::wallet::SEND_ABANDONED_BADGE,
+            Tone::Warn,
+            copy::wallet::send_abandoned_body(detail),
+        ),
+        // The person's own claim, attributed to them (dig_ecosystem#2894). It must not read as this
+        // app having decided anything: nothing here knows what became of that payment.
+        SendProgress::Released { .. } => (
+            copy::wallet::SEND_RELEASED_BADGE,
+            Tone::Neutral,
+            copy::wallet::SEND_RELEASED_BODY.to_string(),
         ),
     };
 
@@ -652,6 +677,94 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) {
         flow.gap(space::S3);
         flow.place(|ui, at| (data::readouts(ui, at, t, &facts), ()));
     }
+
+    release_control(flow, t, send)
+}
+
+/// The escape from a send this app can never resolve (dig_ecosystem#2894).
+///
+/// Drawn ONLY for a stuck send, and only under the coin id it is about — a person has to be able to
+/// read the id before they are asked to type it back. It is not a dismiss button: the field is the
+/// mechanism, because releasing the form is a claim the person makes about a specific payment and
+/// not one this app makes on their behalf.
+fn release_control(flow: &mut Flow, t: &Tokens, send: &SendProgress) -> Option<TrayAction> {
+    if !matches!(send, SendProgress::Unknown { .. }) {
+        return None;
+    }
+    let element = egui::Id::new("dig-window-wallet-release");
+    let live = flow.live();
+    let mut typed = flow.place(|ui, _| {
+        (
+            0.0,
+            ui.ctx().data(|d| {
+                d.get_temp::<String>(element.with("text"))
+                    .unwrap_or_default()
+            }),
+        )
+    });
+
+    let verdict = ReleaseDraft {
+        typed: &typed,
+        send,
+    }
+    .assess();
+
+    flow.gap(space::S4);
+    flow.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SEND_RELEASE_ASK), ()));
+    flow.gap(space::S2);
+    flow.place(|ui, at| {
+        (
+            field::text_field(
+                ui,
+                at,
+                t,
+                live,
+                &field::Field {
+                    label: copy::wallet::SEND_COIN_LABEL,
+                    placeholder: copy::wallet::SEND_RELEASE_PLACEHOLDER,
+                    help: copy::wallet::SEND_RELEASE_HELP,
+                    // Only the mismatch is a mistake. An untouched field is a person who has not
+                    // finished looking yet, and colouring it red would rush them into the one
+                    // decision this control exists to slow down.
+                    error: matches!(verdict, Err(ReleaseBlocked::WrongCoinId))
+                        .then(|| copy::wallet::SEND_RELEASE_MISMATCH.to_string()),
+                    id: element.with("field"),
+                },
+                &mut typed,
+            ),
+            (),
+        )
+    });
+    flow.place(|ui, _| {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(element.with("text"), typed.clone()));
+        (0.0, ())
+    });
+
+    flow.gap(space::S3);
+    let pressed = flow.place(|ui, at| {
+        let hit = paint::button_at(
+            ui,
+            egui::Rect::from_min_size(
+                at.left_top(),
+                egui::Vec2::new(
+                    paint::button_width(ui, copy::wallet::SEND_RELEASE_ACTION),
+                    paint::BUTTON_HEIGHT,
+                ),
+            ),
+            element.with("submit"),
+            copy::wallet::SEND_RELEASE_ACTION,
+            // Never Primary. The payment may be live, so this is the cautious way out of a trap and
+            // not the thing the page wants a person to do.
+            Weight::Ghost,
+            verdict.is_ok() && live,
+            t,
+        )
+        .clicked();
+        (paint::BUTTON_HEIGHT, hit)
+    });
+
+    (pressed && verdict.is_ok()).then_some(TrayAction::ReleaseUnknownSend)
 }
 
 /// The identifiers a person can take away from a payment: the coin, and the block it settled at.
@@ -663,6 +776,9 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
     match send {
         SendProgress::Idle
         | SendProgress::Signing
+        // A panic produces no payment coin, so there is nothing to offer for lookup — which is
+        // exactly why this state cannot be `Unknown`.
+        | SendProgress::Abandoned { .. }
         | SendProgress::Failed {
             payment_coin_id: None,
             ..
@@ -673,19 +789,32 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
         | SendProgress::Unknown {
             payment_coin_id, ..
         }
-        // A payment that died AFTER being pushed has a real coin, and that is exactly when a person
-        // most needs something to look up. Withholding it here left them with a verdict and no way
-        // to check it.
-        | SendProgress::Failed {
-            payment_coin_id: Some(payment_coin_id),
-            ..
-        } => vec![Readout::new(
+        // The coin the person acknowledged, kept in front of them: the claim they made is about
+        // this payment, and it stays checkable after they make it.
+        | SendProgress::Released { payment_coin_id }
+        => vec![Readout::new(
             copy::wallet::SEND_COIN_LABEL,
             Value::Identifier(payment_coin_id.clone()),
         )],
+        // A payment that died AFTER being pushed has a real coin, and that is exactly when a person
+        // most needs something to look up. Withholding it here left them with a verdict and no way
+        // to check it. The source goes with it: this is the verdict a hostile read source would
+        // manufacture to unblock the form and invite a second payment (dig_ecosystem#2891).
+        SendProgress::Failed {
+            payment_coin_id: Some(payment_coin_id),
+            source,
+            ..
+        } => vec![
+            Readout::new(
+                copy::wallet::SEND_COIN_LABEL,
+                Value::Identifier(payment_coin_id.clone()),
+            ),
+            verdict_source_readout(*source),
+        ],
         SendProgress::Confirmed {
             payment_coin_id,
             confirmed_height,
+            source,
         } => vec![
             Readout::new(
                 copy::wallet::SEND_COIN_LABEL,
@@ -695,8 +824,30 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
                 copy::wallet::SEND_HEIGHT_LABEL,
                 Value::Word(confirmed_height.to_string()),
             ),
+            verdict_source_readout(*source),
         ],
     }
+}
+
+/// Name whoever supplied a verdict, beside the verdict itself (dig_ecosystem#2891).
+///
+/// A settled-or-failed verdict is a claim about what the chain did, and the send path asks the same
+/// node it pushed to. A person cannot judge that claim without knowing whose word it is, so the
+/// source is a readout rather than a footnote — and it uses the balance card's own vocabulary,
+/// because "your node" versus "a public chain service" is one idea a person should meet once.
+fn verdict_source_readout(source: VerdictSource) -> Readout {
+    Readout::new(
+        copy::wallet::SEND_SOURCE_LABEL,
+        Value::Word(
+            match source {
+                VerdictSource::Local => copy::wallet::SEND_SOURCE_LOCAL,
+                VerdictSource::Replica => copy::wallet::SEND_SOURCE_REPLICA,
+                VerdictSource::Oracle => copy::wallet::SEND_SOURCE_ORACLE,
+                VerdictSource::Undisclosed => copy::wallet::SEND_SOURCE_UNDISCLOSED,
+            }
+            .to_string(),
+        ),
+    )
 }
 
 /// The two fields, the fee, and the control — or the reason the control cannot be pressed.
@@ -1815,14 +1966,23 @@ mod tests {
             SendProgress::Confirmed {
                 payment_coin_id: "5e771ed".to_string(),
                 confirmed_height: 9_146_483,
+                source: VerdictSource::Undisclosed,
             },
             SendProgress::Failed {
                 reason: "the network rejected the transfer: DOUBLE_SPEND".to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             },
             SendProgress::Failed {
                 reason: "a source coin was spent elsewhere".to_string(),
                 payment_coin_id: Some("5e771ed".to_string()),
+                source: VerdictSource::Oracle,
+            },
+            SendProgress::Abandoned {
+                detail: "this app stopped part-way through the payment".to_string(),
+            },
+            SendProgress::Released {
+                payment_coin_id: "5e771ed".to_string(),
             },
         ]
     }
@@ -1838,12 +1998,14 @@ mod tests {
                 SendProgress::Unknown { .. } => 3,
                 SendProgress::Confirmed { .. } => 4,
                 SendProgress::Failed { .. } => 5,
+                SendProgress::Abandoned { .. } => 6,
+                SendProgress::Released { .. } => 7,
             }
         }
         let mut arms: Vec<u8> = every_send_state().iter().map(arm).collect();
         arms.sort_unstable();
         arms.dedup();
-        assert_eq!(arms, (0..6).collect::<Vec<u8>>());
+        assert_eq!(arms, (0..8).collect::<Vec<u8>>());
     }
 
     /// **Each send state is drawn as ITSELF, and an unknown outcome is never drawn as a failure**
@@ -2093,5 +2255,32 @@ mod tests {
         assert!(drawn
             .iter()
             .all(|action| action.weight != Weight::Primary || action.enabled));
+    }
+
+    /// **Every verdict source reaches the person as a distinct sentence** (dig_ecosystem#2891).
+    ///
+    /// The nearest wrong implementation renders the two that matter — the node's own replica and a
+    /// public oracle — identically, or leaves the undisclosed case blank. A blank reads as "your
+    /// node", which is the reassuring answer and the one nothing has established.
+    #[test]
+    fn each_verdict_source_is_said_differently_and_none_is_left_blank() {
+        use copy::wallet as said;
+        let sentences = [
+            said::SEND_SOURCE_LOCAL,
+            said::SEND_SOURCE_REPLICA,
+            said::SEND_SOURCE_ORACLE,
+            said::SEND_SOURCE_UNDISCLOSED,
+        ];
+        for sentence in sentences {
+            assert!(!sentence.trim().is_empty(), "a blank source reads as trust");
+        }
+        let mut distinct: Vec<&str> = sentences.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            sentences.len(),
+            "two sources say the same thing, so a person cannot tell them apart"
+        );
     }
 }

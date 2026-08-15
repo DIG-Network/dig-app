@@ -950,6 +950,18 @@ pub enum TrayAction {
     /// This action is offered by the Wallet PANE and never by a tray row: a menu cannot hold a form,
     /// and an amount is not something a person picks from a list.
     SendXch(dig_account::TransferRequest),
+    /// Release a send whose fate this app never learned, on the person's own say-so
+    /// (dig_ecosystem#2894).
+    ///
+    /// It carries nothing, for the same reason [`SendXch`](Self::SendXch) carries a validated
+    /// request rather than the raw fields: the rule lives where a test can put a wrong answer in
+    /// front of it. The typed acknowledgement is judged by
+    /// [`ReleaseDraft::assess`](crate::wallet::sending::ReleaseDraft::assess), and this action is
+    /// only ever emitted for a draft that passed — so what reaches the shell is an acknowledged
+    /// release by construction.
+    ///
+    /// Like `SendXch` this is offered by the Wallet PANE only: it needs a field.
+    ReleaseUnknownSend,
     /// Set the node's content-cache size cap to a specific preset (dig_ecosystem#2002).
     ///
     /// Carries the target cap in bytes so the shell forwards it straight to the node's

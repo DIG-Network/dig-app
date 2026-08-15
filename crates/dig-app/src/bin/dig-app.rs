@@ -2770,6 +2770,12 @@ mod tray {
             TrayAction::SendXch(request) => {
                 send_holder().send(status, session.as_ref().map(|s| &s.residency), &request)
             }
+            // The acknowledgement was already judged by `ReleaseDraft::assess` in the pane, so what
+            // arrives here is an accepted claim (dig_ecosystem#2894). The holder still re-reads the
+            // send state, because it may have resolved while the person was looking the coin up.
+            TrayAction::ReleaseUnknownSend => {
+                send_holder().release_acknowledged();
+            }
             TrayAction::CopyReceiveAddress => copy_receive_address(
                 &snapshot(
                     status,

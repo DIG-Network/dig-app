@@ -69,6 +69,8 @@ pub enum SendProgress {
         payment_coin_id: String,
         /// The height it confirmed at.
         confirmed_height: u32,
+        /// Whose word this verdict rests on (dig_ecosystem#2891).
+        source: VerdictSource,
     },
     /// The transfer is over and will never settle.
     ///
@@ -88,7 +90,99 @@ pub enum SendProgress {
         reason: String,
         /// The payment coin, present exactly when this transfer had been pushed.
         payment_coin_id: Option<String>,
+        /// Whose word this verdict rests on (dig_ecosystem#2891).
+        source: VerdictSource,
     },
+    /// The attempt fell over part-way and this app does not know how far it got.
+    ///
+    /// # Why a panic cannot be reported as a failure (dig_ecosystem#2895)
+    ///
+    /// The drop guard on a send fires on an unwind from anywhere between building and the push
+    /// returning, and a panic establishes only that this app stopped — never that nothing left.
+    /// Reporting it as [`Failed`](Self::Failed) drew the failure copy, whose first words are
+    /// *"Nothing was sent and no money has moved"*: a claim about the user's money made out of this
+    /// app's own crash.
+    ///
+    /// It is deliberately NOT [`Unknown`](Self::Unknown), which would be the honest word but is
+    /// [`in_flight`](Self::in_flight) and carries a payment coin id to watch. A panic yields no coin
+    /// id, so `Unknown` would close the form for the process lifetime with nothing to check and no
+    /// escape — `professional-ui`'s trap. So the form reopens and the sentence carries the warning
+    /// instead: a person who may have sent money is told to look before sending again.
+    Abandoned {
+        /// Where the attempt was when it stopped, for the person and for a bug report.
+        detail: String,
+    },
+    /// A transfer whose fate this app still does not know, which the PERSON has released
+    /// (dig_ecosystem#2894).
+    ///
+    /// # Why the app cannot reach this state on its own
+    ///
+    /// A node that accepts a connection and then drops it leaves the send `Unknown` forever: nothing
+    /// can resolve it, because `Awaiting` establishes nothing while the transfer is unjudged, the
+    /// payment coin never appears, and proof of death needs a spend that will not happen. So the
+    /// form stays shut for the life of the process, which is the safe direction — telling someone
+    /// nothing was sent while a bundle may be live is the double-payment path — and also a trap.
+    ///
+    /// The escape is a claim the PERSON makes, never one this app makes for them: they look the
+    /// payment coin up themselves, and say so by acknowledging its id. This state records that
+    /// claim and whose it was. It asserts nothing about the money — which is why it is not
+    /// [`Failed`](Self::Failed) — and it is not [`in_flight`](Self::in_flight), which is the whole
+    /// point of it.
+    Released {
+        /// The payment coin the person acknowledged, kept so the claim stays checkable.
+        payment_coin_id: String,
+    },
+}
+
+/// Whose word a send's verdict rests on (dig_ecosystem#2891).
+///
+/// # Why a verdict has to carry this
+///
+/// The send path pushes a bundle to a node and then asks THAT SAME node whether it confirmed —
+/// which `dig_account::ConfirmedTransfer`'s own contract forbids ("pass a trusted or aggregating
+/// `ChainSource`, never the same unvetted node the bundle was pushed to"). By default the endpoint
+/// is loopback-pinned, so the answer comes from the user's own machine and the question does not
+/// arise. A user-configured remote node (§5.3 permits one) is a different matter: a hostile read
+/// source can report the payment coin absent and a source coin spent, which renders as *"Not sent —
+/// nothing was sent"*, unblocks the form, and invites a second payment that can settle alongside
+/// the first.
+///
+/// Refusing to render such a verdict would be the other available answer, and it is the wrong one:
+/// it would leave a person with a form they cannot use and no statement at all. So the verdict is
+/// shown WITH the name of whoever supplied it, which is the same distinction the balance card
+/// already draws with [`BalanceAsOf`](crate::wallet::engine::BalanceAsOf) — deliberately the same
+/// vocabulary, so a person meets one idea rather than two.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VerdictSource {
+    /// Decided in this app, with no chain read involved — a build, gate or push refusal.
+    Local,
+    /// Read from the node's OWN replica: the node answered from chain state it holds itself.
+    Replica,
+    /// Read from a third-party HTTPS oracle the node consulted on our behalf.
+    ///
+    /// The one arm that names a party outside the trust boundary, and so the one a person needs to
+    /// see beside a verdict about their money.
+    Oracle,
+    /// The node did not say where its answer came from — an older node, or a read that recorded
+    /// nothing. Unknown provenance is not the same as good provenance, so it gets its own arm.
+    #[default]
+    Undisclosed,
+}
+
+impl VerdictSource {
+    /// Read a source out of the freshness a [`ControlChainSource`](crate::chain::ControlChainSource)
+    /// recorded for its last answer.
+    ///
+    /// `None` — no read happened, or the node disclosed nothing — is [`Undisclosed`](Self::Undisclosed)
+    /// rather than anything reassuring.
+    pub fn of_freshness(freshness: Option<crate::chain::Freshness>) -> Self {
+        use dig_node_control_interface::results::WalletReadSource;
+        match freshness.and_then(|f| f.source) {
+            Some(WalletReadSource::Db) => Self::Replica,
+            Some(WalletReadSource::Fallback) => Self::Oracle,
+            None => Self::Undisclosed,
+        }
+    }
 }
 
 impl SendProgress {
@@ -124,6 +218,9 @@ impl SendProgress {
             // not exist.
             | SendError::PushNotSent(_)
             | SendError::Rejected { .. } => Self::Failed {
+                // Decided in this process, before any chain was consulted — so there is no third
+                // party whose word this rests on.
+                source: VerdictSource::Local,
                 reason: error.to_string(),
                 // No push survived, so there is no coin to look up. `None` is what lets the surface
                 // say "no money has moved" here and NOT say it after a proof of death.
@@ -145,11 +242,13 @@ impl SendProgress {
             TransferStatus::Confirmed(settled) => Self::Confirmed {
                 payment_coin_id: settled.payment_coin_id().to_string(),
                 confirmed_height: settled.confirmed_height(),
+                source: VerdictSource::Undisclosed,
             },
             // A proof of death: the transfer WAS pushed, so the coin id goes with it.
             TransferStatus::Failed { reason } => Self::Failed {
                 reason: reason.clone(),
                 payment_coin_id: Some(pending.payment_coin_id().to_string()),
+                source: VerdictSource::Undisclosed,
             },
         }
     }
@@ -302,6 +401,68 @@ impl SendDraft<'_> {
     }
 }
 
+/// The person's claim that they have checked a stuck payment themselves (dig_ecosystem#2894).
+///
+/// # Why releasing a form needs a rule of its own
+///
+/// A node that accepts a connection and then drops it leaves a send [`SendProgress::Unknown`]
+/// forever, and `Unknown` is [`in_flight`](SendProgress::in_flight), so the form refuses every later
+/// send for the life of the process. That direction is the safe one and must stay — telling someone
+/// nothing was sent while a bundle may be live is how a recipient gets paid twice — but it leaves a
+/// person who has looked the payment up on a block explorer with no way to tell the app so.
+///
+/// The escape must never be a plain dismiss button. A dismiss button is the app inviting the person
+/// to make a warning disappear; this is the person making a CLAIM, and a claim has to be about
+/// something. So the acknowledgement is the payment coin id itself: to release the form you must
+/// name the payment you checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseDraft<'a> {
+    /// What the person typed into the acknowledgement field.
+    pub typed: &'a str,
+    /// The state the send is in right now.
+    pub send: &'a SendProgress,
+}
+
+/// Why a release cannot be made.
+///
+/// A reason and not a bare `false`, for `professional-ui`'s never-trap rule: a control refused
+/// without a stated condition sends a person looking for one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseBlocked {
+    /// There is nothing stuck. The control is not offered at all in this state.
+    NothingStuck,
+    /// The field is empty. Said as an instruction rather than an error — an untouched field is not
+    /// a mistake.
+    NotYetAcknowledged,
+    /// The typed id is not this payment's.
+    WrongCoinId,
+}
+
+impl ReleaseDraft<'_> {
+    /// Whether this claim may be made, and why not when it may not.
+    ///
+    /// Leading and trailing whitespace is forgiven, because a coin id is something a person pastes
+    /// out of a block explorer and a stray space is not a different claim. Nothing else is: a
+    /// prefix, a truncation or a near-miss is refused, since the entire mechanism is that the person
+    /// named THIS payment.
+    pub fn assess(&self) -> Result<(), ReleaseBlocked> {
+        let SendProgress::Unknown {
+            payment_coin_id, ..
+        } = self.send
+        else {
+            return Err(ReleaseBlocked::NothingStuck);
+        };
+        let typed = self.typed.trim();
+        if typed.is_empty() {
+            return Err(ReleaseBlocked::NotYetAcknowledged);
+        }
+        match typed.eq_ignore_ascii_case(payment_coin_id) {
+            true => Ok(()),
+            false => Err(ReleaseBlocked::WrongCoinId),
+        }
+    }
+}
+
 /// The one send this app is running, and everything that moves it along.
 ///
 /// # Why the shell owns a handle and not a state machine
@@ -319,6 +480,39 @@ impl SendDraft<'_> {
 #[derive(Default)]
 pub struct SendHolder {
     watched: std::sync::Mutex<Watched>,
+    /// The money gate, kept ACROSS sends (dig_ecosystem#2890).
+    ///
+    /// The rolling window behind `AutoSendPolicy::max_confirmations_per_period` lives inside the
+    /// `PolicyAuthorizer` that [`MoneyPath`](crate::account::money::MoneyPath) holds, so building a
+    /// fresh path per send handed every send an empty ledger and made that ceiling unreachable —
+    /// the exact host mistake `account::money`'s own module doc names. Held here, the ledger
+    /// measures a window.
+    gate: std::sync::Mutex<Option<UnlockGate>>,
+}
+
+/// The money path built for one unlock, and the address that identifies which unlock it belongs to.
+///
+/// # Why the address is the key
+///
+/// A `MoneyPath` decodes the profile's hot-wallet receive address at construction, because that is
+/// what the vault outflow rule compares a payee against. The address is therefore the one piece of
+/// the gate that can go stale — a profile switch moves it — and a gate rebuilt only on a *lock*
+/// would keep comparing against the profile the user just left. Keying on the address means the
+/// ledger survives everything that leaves the gate's own premise intact, and nothing that does not.
+struct UnlockGate {
+    /// The receive address this gate was built against.
+    address: String,
+    /// The gate itself, holding the rolling confirmation ledger.
+    ///
+    /// Behind an [`Arc`](std::sync::Arc) so that "is this the same gate?" is answerable. Replacing
+    /// the gate writes into this same `Option` slot, so the slot's ADDRESS is identical either way —
+    /// a rebuild and a reuse are indistinguishable by reference. `Arc::ptr_eq` distinguishes them,
+    /// which is what lets the reuse test fail when the gate is rebuilt.
+    money: std::sync::Arc<
+        crate::account::money::MoneyPath<
+            crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
+        >,
+    >,
 }
 
 /// How long to leave between chain polls of a pending transfer.
@@ -399,6 +593,50 @@ impl SendHolder {
         watched.pending = Some(pending);
         watched.next_poll = Some(std::time::Instant::now() + POLL_INTERVAL);
         watched.judged = true;
+    }
+
+    /// Record that an attempt stopped without ever recording its own outcome.
+    ///
+    /// Reached only from the send guard's unwind. It frees the send slot — the alternative is a
+    /// form nobody can use again — while claiming nothing about where the money got to
+    /// (dig_ecosystem#2895). Nothing is left to poll: a panic yields no payment coin.
+    pub fn abandoned(&self, detail: impl Into<String>) {
+        let mut watched = self.lock();
+        watched.progress = SendProgress::Abandoned {
+            detail: detail.into(),
+        };
+        watched.pending = None;
+        watched.next_poll = None;
+        watched.judged = false;
+    }
+
+    /// Release a transfer whose fate is unknown, on the person's own say-so (dig_ecosystem#2894).
+    ///
+    /// Reached only for a claim [`ReleaseDraft::assess`] has already accepted, which is where the
+    /// typed acknowledgement is compared — the same split `SendXch` uses, and for the same reason:
+    /// the rule belongs where a test can put a wrong answer in front of it.
+    ///
+    /// It still re-reads the state here rather than trusting the caller, because the transfer may
+    /// have resolved between the click and this call. Returns whether the release took.
+    pub fn release_acknowledged(&self) -> bool {
+        let mut watched = self.lock();
+        let SendProgress::Unknown {
+            payment_coin_id, ..
+        } = &watched.progress
+        else {
+            // It resolved on its own while the person was looking it up. Their claim is moot and
+            // the real verdict stands — overwriting it would throw away the one thing that IS known.
+            return false;
+        };
+        let payment_coin_id = payment_coin_id.clone();
+        watched.progress = SendProgress::Released { payment_coin_id };
+        // The watch stops with the claim. This app never learned anything about the transfer, so it
+        // has nothing left to poll for — and continuing to poll would let a later read overwrite the
+        // person's own claim with a verdict from the source that stalled in the first place.
+        watched.pending = None;
+        watched.next_poll = None;
+        watched.judged = false;
+        true
     }
 
     /// Record how a send ended.
@@ -507,6 +745,49 @@ impl SendHolder {
         }
     }
 
+    /// The money gate for this unlock, built once and reused (dig_ecosystem#2890).
+    ///
+    /// A gate is rebuilt only when the receive address it rules against changes — see [`UnlockGate`]
+    /// for why that, and not a lock, is the right trigger. The returned guard keeps the gate borrowed
+    /// for the whole send, which is safe because [`begin`](Self::begin) admits one send at a time.
+    fn gate_for(
+        &self,
+        residency: &crate::account::residency::AccountResidency,
+        custody: dig_account::CustodyPolicy,
+    ) -> Result<std::sync::MutexGuard<'_, Option<UnlockGate>>, SendError> {
+        use crate::account::auth::HarnessAuthProvider;
+        use crate::account::boot::DEFAULT_ACCOUNT_ID;
+        use crate::account::ceremony::PromptedCeremony;
+        use crate::account::money::MoneyPath;
+
+        // Read before the gate is consulted, so a profile switch is caught here rather than by a
+        // stale address comparison inside a gate that outlived it.
+        let Some(Ok(address)) = residency.receiving_address() else {
+            // The residency locked, or its address stopped deriving, between the click and this
+            // call. Nothing was built.
+            return Err(SendError::Locked);
+        };
+
+        let mut held = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if !held.as_ref().is_some_and(|gate| gate.address == address) {
+            let money = MoneyPath::new(
+                residency.clone(),
+                HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
+                dig_account::AccountId::new(DEFAULT_ACCOUNT_ID),
+                dig_wallet_backend::types::Network::Mainnet,
+                custody,
+                dig_account::AutoSendPolicy::default(),
+                std::sync::Arc::new(dig_account::SystemClock),
+            )
+            .map_err(|_| SendError::Locked)?;
+            *held = Some(UnlockGate {
+                address,
+                money: std::sync::Arc::new(money),
+            });
+        }
+        Ok(held)
+    }
+
     /// Build, gate, sign and push — every step that can fail, and none that record state.
     ///
     /// Split out from [`send`](Self::send) so that recording the outcome happens in exactly one place,
@@ -517,13 +798,9 @@ impl SendHolder {
         residency: Option<&crate::account::residency::AccountResidency>,
         request: &TransferRequest,
     ) -> Result<crate::wallet::send::InFlightSend, SendError> {
-        use crate::account::auth::HarnessAuthProvider;
-        use crate::account::boot::DEFAULT_ACCOUNT_ID;
-        use crate::account::ceremony::PromptedCeremony;
-        use crate::account::money::MoneyPath;
         use crate::chain::{ControlChainSource, ControlSpendPublisher};
         use crate::wallet::send::SendSession;
-        use dig_account::{AccountId, AutoSendPolicy, CustodyPolicy, HotWallet, SystemClock};
+        use dig_account::{CustodyPolicy, HotWallet};
 
         let Some(residency) = residency else {
             return Err(SendError::Locked);
@@ -544,19 +821,11 @@ impl SendHolder {
         };
 
         let custody = CustodyPolicy::Hot(HotWallet { auto_send_limit: 0 });
-        let money = match MoneyPath::new(
-            residency.clone(),
-            HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this payment")),
-            AccountId::new(DEFAULT_ACCOUNT_ID),
-            dig_wallet_backend::types::Network::Mainnet,
-            custody,
-            AutoSendPolicy::default(),
-            std::sync::Arc::new(SystemClock),
-        ) {
-            Ok(money) => money,
-            // The residency locked between the click and this call. Nothing was built.
-            Err(_) => return Err(SendError::Locked),
-        };
+        let held = self.gate_for(residency, custody)?;
+        let money = &held
+            .as_ref()
+            .expect("gate_for leaves a gate in place or returns an error")
+            .money;
 
         let chain = ControlChainSource::new(endpoint);
         let publisher = ControlSpendPublisher::new(endpoint);
@@ -568,9 +837,8 @@ impl SendHolder {
                     "this app could not start the worker the confirmation needs: {e}"
                 )))
             })?;
-        runtime.block_on(
-            SendSession::new(residency, &money, custody, &chain, &publisher).send(request),
-        )
+        runtime
+            .block_on(SendSession::new(residency, money, custody, &chain, &publisher).send(request))
     }
 
     /// Poll the watched transfer against the connected node, if there is one.
@@ -580,12 +848,35 @@ impl SendHolder {
     /// inability to look.
     pub fn observe_node(&self, engine: &crate::engine::EngineState) -> SendProgress {
         match engine {
-            crate::engine::EngineState::Connected { endpoint, .. } => self.observe(
-                &crate::chain::ControlChainSource::new(endpoint),
-                std::time::Instant::now(),
-            ),
+            crate::engine::EngineState::Connected { endpoint, .. } => {
+                let chain = crate::chain::ControlChainSource::new(endpoint);
+                self.observe(&chain, std::time::Instant::now());
+                // Stamped AFTER the read, because the freshness being read is the one that read
+                // recorded (dig_ecosystem#2891). Reading it first would attribute this verdict to
+                // whoever answered the PREVIOUS poll.
+                self.attribute(VerdictSource::of_freshness(chain.last_freshness()))
+            }
             crate::engine::EngineState::Disconnected { .. } => self.progress(),
         }
+    }
+
+    /// Name whoever supplied the verdict now being shown, and return the stamped state.
+    ///
+    /// Only a verdict carries a source, because only a verdict is a claim about what the chain did.
+    /// A [`Local`](VerdictSource::Local) verdict is never overwritten: it was decided in this process
+    /// before any chain was consulted, and a later poll's provenance says nothing about it.
+    fn attribute(&self, source: VerdictSource) -> SendProgress {
+        let mut watched = self.lock();
+        match &mut watched.progress {
+            SendProgress::Confirmed { source: held, .. }
+            | SendProgress::Failed { source: held, .. }
+                if *held != VerdictSource::Local =>
+            {
+                *held = source;
+            }
+            _ => {}
+        }
+        watched.progress.clone()
     }
 
     /// Take the lock, recovering from a poisoned one.
@@ -611,8 +902,10 @@ impl SendHolder {
 /// a payment that never existed, with no way out but a restart. A `Drop` runs on the unwind path
 /// wherever the panic came from, which a `catch_unwind` around one call cannot promise.
 ///
-/// A panicking send is reported as a FAILURE, never as an unknown outcome: the panic is this app's
-/// own fault and says nothing about a bundle, and an unknown outcome would hold the form closed again.
+/// A panicking send is reported as [`SendProgress::Abandoned`] — neither a failure nor an unknown
+/// outcome. It is not a failure because a panic cannot establish that nothing left this machine
+/// (dig_ecosystem#2895), and it is not `Unknown` because that state holds the form closed and offers
+/// a coin id to watch, and a panic produces no coin id to offer.
 struct AbandonedSend<'a> {
     holder: &'a SendHolder,
     /// Whether the attempt is still outstanding. Cleared by [`completed`](Self::completed).
@@ -636,11 +929,8 @@ impl<'a> AbandonedSend<'a> {
 impl Drop for AbandonedSend<'_> {
     fn drop(&mut self) {
         if self.outstanding {
-            self.holder.finished(&SendError::Sign(
-                crate::account::money::MoneyPathError::Sign(
-                    "this app failed part-way through the payment, so nothing was sent".to_string(),
-                ),
-            ));
+            self.holder
+                .abandoned("this app stopped part-way through the payment");
         }
     }
 }
@@ -758,10 +1048,12 @@ mod tests {
             SendProgress::Confirmed {
                 payment_coin_id: "aa".to_string(),
                 confirmed_height: 7_000_000,
+                source: VerdictSource::Undisclosed,
             },
             SendProgress::Failed {
                 reason: "the network rejected the transfer".to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Undisclosed,
             },
         ] {
             assert!(!progress.in_flight(), "{progress:?} blocks a fresh send");
@@ -911,7 +1203,7 @@ mod tests {
             !holder.progress().in_flight(),
             "a panicked send kept the slot, so no further send can ever be started"
         );
-        assert!(matches!(holder.progress(), SendProgress::Failed { .. }));
+        assert!(matches!(holder.progress(), SendProgress::Abandoned { .. }));
 
         // A completed attempt is disarmed, so the guard writes nothing over its outcome.
         assert!(holder.begin(), "the freed slot is offered again");
@@ -943,6 +1235,7 @@ mod tests {
             SendProgress::Failed {
                 reason: rejected.to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             }
         );
         assert_eq!(
@@ -950,6 +1243,7 @@ mod tests {
             SendProgress::Failed {
                 reason: SendError::Locked.to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             }
         );
         assert_eq!(
@@ -957,8 +1251,257 @@ mod tests {
             SendProgress::Failed {
                 reason: SendError::WalletBehindActiveProfile("slot 3".to_string()).to_string(),
                 payment_coin_id: None,
+                source: VerdictSource::Local,
             }
         );
         assert!(!SendProgress::of_error(&rejected).in_flight());
+    }
+
+    /// **The confirmation ledger survives one send and is still there for the next**
+    /// (dig_ecosystem#2890).
+    ///
+    /// The nearest wrong implementation — and the one that shipped — builds a `MoneyPath` inside
+    /// `perform`, so every send hands the `PolicyAuthorizer` an empty rolling window and
+    /// `max_confirmations_per_period` can never be reached. No assertion about a send's OUTCOME can
+    /// see that, because a per-request gate and a per-unlock gate approve identically until the
+    /// ceiling would have bitten. So the fixture asks the question directly: is the gate the SAME
+    /// gate?
+    ///
+    /// Identity is `Arc::ptr_eq`, deliberately. The first version of this test compared the address
+    /// of the retained field and passed even when the gate was rebuilt on every call — a rebuild
+    /// writes into the same `Option` slot, so the address is the same either way. Measured: with the
+    /// cache condition forced to always rebuild, the address form stayed GREEN and this form fails.
+    #[test]
+    fn the_money_gate_is_built_once_per_unlock_and_reused_by_every_later_send() {
+        let residency = crate::test_support::test_residency();
+        let custody =
+            dig_account::CustodyPolicy::Hot(dig_account::HotWallet { auto_send_limit: 0 });
+        let holder = SendHolder::default();
+
+        let first = {
+            let held = holder
+                .gate_for(&residency, custody)
+                .expect("an unlocked residency yields a gate");
+            std::sync::Arc::clone(&held.as_ref().expect("a gate is present").money)
+        };
+        let second = {
+            let held = holder
+                .gate_for(&residency, custody)
+                .expect("the same unlocked residency yields a gate");
+            std::sync::Arc::clone(&held.as_ref().expect("a gate is present").money)
+        };
+
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "a second send got a fresh gate, so it also got a fresh confirmation ledger"
+        );
+    }
+
+    /// **A locked residency yields no gate, and leaves no gate behind to be reused**
+    /// (dig_ecosystem#2890).
+    ///
+    /// The control on the test above. Caching a gate is only safe while the premise it was built on
+    /// still holds, and the nearest wrong implementation of the cache hands back the retained gate
+    /// without re-checking that the account is still open — which would let a relocked account keep
+    /// spending through a gate built when it was not.
+    #[test]
+    fn a_locked_residency_is_refused_rather_than_served_a_retained_gate() {
+        let residency = crate::test_support::test_residency();
+        let custody =
+            dig_account::CustodyPolicy::Hot(dig_account::HotWallet { auto_send_limit: 0 });
+        let holder = SendHolder::default();
+
+        drop(
+            holder
+                .gate_for(&residency, custody)
+                .expect("the gate is built while the account is open"),
+        );
+        crate::session_lock::SessionKeys::lock_all(&residency);
+
+        assert!(
+            matches!(holder.gate_for(&residency, custody), Err(SendError::Locked)),
+            "a relocked account was served the gate built for its earlier unlock"
+        );
+    }
+
+    /// **A verdict read off a third-party oracle says so, and one decided locally is not overwritten**
+    /// (dig_ecosystem#2891).
+    ///
+    /// The send path asks the same node it pushed to, so a settled-or-failed verdict is only as good
+    /// as whoever supplied it. The nearest wrong implementation stamps every verdict with whatever
+    /// the last read disclosed — including the ones this app decided by itself before any chain was
+    /// consulted, which would attribute a local refusal to a remote party and make the readout a lie
+    /// in the opposite direction.
+    ///
+    /// The fixture varies ONE thing and keeps an honest control: the same `Oracle` attribution is
+    /// applied to a chain-derived verdict (which must take it) and to a locally-decided one (which
+    /// must not). A test that only checked the first would pass for the implementation that stamps
+    /// everything.
+    #[test]
+    fn an_oracle_verdict_is_named_as_one_and_a_local_refusal_keeps_its_own_provenance() {
+        let from_chain = SendHolder::default();
+        from_chain.lock().progress = SendProgress::Confirmed {
+            payment_coin_id: "5e771ed".to_string(),
+            confirmed_height: 9_146_483,
+            source: VerdictSource::Undisclosed,
+        };
+        assert!(
+            matches!(
+                from_chain.attribute(VerdictSource::Oracle),
+                SendProgress::Confirmed {
+                    source: VerdictSource::Oracle,
+                    ..
+                }
+            ),
+            "a settled verdict must name whoever supplied it"
+        );
+
+        let decided_here = SendHolder::default();
+        decided_here.finished(&SendError::Locked);
+        assert!(
+            matches!(
+                decided_here.attribute(VerdictSource::Oracle),
+                SendProgress::Failed {
+                    source: VerdictSource::Local,
+                    ..
+                }
+            ),
+            "a refusal this app made before any chain read was attributed to a third party"
+        );
+    }
+
+    /// A send stuck on a node that answered nothing — the state the release action exists for.
+    fn stuck_on(coin: &str) -> SendProgress {
+        SendProgress::Unknown {
+            payment_coin_id: coin.to_string(),
+            detail: "the node closed the connection".to_string(),
+        }
+    }
+
+    /// **Releasing a stuck form requires naming the payment, and a near-miss is not naming it**
+    /// (dig_ecosystem#2894).
+    ///
+    /// The nearest wrong implementation is a dismiss button — anything that releases the form
+    /// without the person making a claim about a specific payment. The second-nearest accepts a
+    /// PREFIX, which is exactly what a person produces by copying a truncated id off a screen; that
+    /// reads as a match to a `starts_with` and would release a form on nothing.
+    ///
+    /// The fixture keeps an honest control beside each refusal: the exact id, differing only in case
+    /// and surrounding space, must be ACCEPTED — otherwise a rule that refused everything would
+    /// satisfy every negative assertion below.
+    #[test]
+    fn a_stuck_form_is_released_only_by_naming_the_payment_exactly() {
+        let coin = "5e771ed0c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00";
+        let stuck = stuck_on(coin);
+        let assess = |typed: &str| {
+            ReleaseDraft {
+                typed,
+                send: &stuck,
+            }
+            .assess()
+        };
+
+        assert_eq!(assess(coin), Ok(()), "the exact id is the acknowledgement");
+        assert_eq!(
+            assess(&format!("  {}  ", coin.to_uppercase())),
+            Ok(()),
+            "a pasted id is the same claim whatever its case or surrounding space"
+        );
+        assert_eq!(assess("   "), Err(ReleaseBlocked::NotYetAcknowledged));
+        assert_eq!(
+            assess(&coin[..16]),
+            Err(ReleaseBlocked::WrongCoinId),
+            "a prefix released the form, so a truncated id read off a screen would do"
+        );
+        assert_eq!(
+            assess(&coin.replace("5e771ed0", "5e771ed1")),
+            Err(ReleaseBlocked::WrongCoinId),
+            "a near-miss released the form"
+        );
+    }
+
+    /// **Nothing but a stuck send can be released** (dig_ecosystem#2894).
+    ///
+    /// The nearest wrong implementation compares the id and nothing else, which would let a person
+    /// "release" a payment that has already CONFIRMED — throwing away the one verdict that is known
+    /// and replacing it with their own uncertainty.
+    #[test]
+    fn a_send_that_is_not_stuck_cannot_be_released_however_it_is_acknowledged() {
+        let coin = "5e771ed";
+        for settled in [
+            SendProgress::Idle,
+            SendProgress::Confirmed {
+                payment_coin_id: coin.to_string(),
+                confirmed_height: 9_146_483,
+                source: VerdictSource::Replica,
+            },
+            SendProgress::Pending {
+                payment_coin_id: coin.to_string(),
+                blocks_since_push: 2,
+            },
+        ] {
+            assert_eq!(
+                ReleaseDraft {
+                    typed: coin,
+                    send: &settled,
+                }
+                .assess(),
+                Err(ReleaseBlocked::NothingStuck),
+                "{settled:?} was released, and it was never stuck"
+            );
+        }
+    }
+
+    /// **A release frees the form, claims nothing about the money, and keeps the coin id**
+    /// (dig_ecosystem#2894).
+    ///
+    /// Freeing the form is the entire point, so a release that left `in_flight()` true would fix
+    /// nothing. But the nearest wrong implementation frees it by recording a FAILURE, which renders
+    /// as *"nothing was sent and no money has moved"* — a claim about the user's money made out of
+    /// the user's own uncertainty, and the exact lie this batch exists to remove.
+    #[test]
+    fn a_released_send_frees_the_form_without_saying_where_the_money_went() {
+        let coin = "5e771ed";
+        let holder = SendHolder::default();
+        holder.lock().progress = stuck_on(coin);
+        assert!(
+            holder.progress().in_flight(),
+            "the fixture must start stuck, or this proves nothing"
+        );
+
+        assert!(holder.release_acknowledged(), "an acknowledged claim takes");
+        assert_eq!(
+            holder.progress(),
+            SendProgress::Released {
+                payment_coin_id: coin.to_string()
+            },
+            "a release must be its own state, never a failure or a confirmation"
+        );
+        assert!(!holder.progress().in_flight(), "the form is usable again");
+        assert!(holder.begin(), "and a second send may actually start");
+    }
+
+    /// **A transfer that resolved while the person was checking keeps its real verdict**
+    /// (dig_ecosystem#2894).
+    ///
+    /// The person looks the coin up, comes back, and clicks release — but a poll settled it in the
+    /// meantime. The nearest wrong implementation honours the click, discarding a known confirmation
+    /// in favour of the person's uncertainty. This is why the state is re-read at the moment of
+    /// release rather than trusted from the click.
+    #[test]
+    fn a_release_that_arrives_after_the_chain_answered_does_not_overwrite_the_answer() {
+        let holder = SendHolder::default();
+        let settled = SendProgress::Confirmed {
+            payment_coin_id: "5e771ed".to_string(),
+            confirmed_height: 9_146_483,
+            source: VerdictSource::Replica,
+        };
+        holder.lock().progress = settled.clone();
+
+        assert!(
+            !holder.release_acknowledged(),
+            "the stale click was honoured"
+        );
+        assert_eq!(holder.progress(), settled);
     }
 }

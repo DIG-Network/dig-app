@@ -752,6 +752,63 @@ pub(crate) mod wallet {
          elsewhere, so the network can no longer include it. This payment did not reach the \
          recipient. The reason, as it was given:";
 
+    /// The glance-level word for a payment this app lost track of part-way through.
+    pub(crate) const SEND_ABANDONED_BADGE: &str = "Lost track";
+    /// Said when DIG itself fell over mid-payment (dig_ecosystem#2895).
+    ///
+    /// It claims only what a crash establishes. This app stopping proves nothing about whether the
+    /// bundle left the machine, so the sentence must not borrow [`SEND_FAILED_BODY`]'s promise that
+    /// no money moved — and it must send the person to look before they send again, because the form
+    /// is open and repeating the payment is the one action that could pay twice.
+    pub(crate) fn send_abandoned_body(detail: &str) -> String {
+        format!(
+            "DIG stopped part-way through this payment ({detail}), so it cannot say whether the \
+             payment was sent. Check your balance and this wallet's recent history before sending \
+             again — sending twice is how a payment goes out twice."
+        )
+    }
+
+    /// The glance-level word for a stuck payment the person released themselves.
+    pub(crate) const SEND_RELEASED_BADGE: &str = "You released this";
+    /// Said after a person releases a payment whose fate this app never learned
+    /// (dig_ecosystem#2894).
+    ///
+    /// It attributes the claim to THEM and repeats what this app knows, which is nothing. Saying
+    /// anything about where the money went would be this app borrowing the person's certainty.
+    pub(crate) const SEND_RELEASED_BODY: &str = concat!(
+        "You checked this payment yourself and released the form. DIG never found out what ",
+        "became of it, so this is your finding and not its own — the coin id is below if you ",
+        "want to look again."
+    );
+    /// The call to action on the control that releases a stuck form.
+    pub(crate) const SEND_RELEASE_ACTION: &str = "I checked this myself — release the form";
+    /// The instruction above the field that takes the acknowledgement.
+    pub(crate) const SEND_RELEASE_ASK: &str =
+        "Look this payment up first, then type its coin id here to confirm the finding is yours.";
+    /// The greyed prompt in the acknowledgement field.
+    pub(crate) const SEND_RELEASE_PLACEHOLDER: &str = "Paste the coin id shown above";
+    /// The help under the acknowledgement field, saying what releasing does and does not mean.
+    pub(crate) const SEND_RELEASE_HELP: &str =
+        "Releasing only lets you send again. It does not cancel the payment, and DIG still does \
+         not know whether it went through.";
+    /// Said when the typed id is not the payment's.
+    pub(crate) const SEND_RELEASE_MISMATCH: &str =
+        "That is not this payment's coin id, so nothing has been released.";
+
+    /// The label on whoever supplied a send's verdict (dig_ecosystem#2891).
+    pub(crate) const SEND_SOURCE_LABEL: &str = "Checked with";
+    /// Said when the verdict needed no chain read at all.
+    pub(crate) const SEND_SOURCE_LOCAL: &str = "This app";
+    /// Said when the node answered out of chain state it holds itself.
+    pub(crate) const SEND_SOURCE_REPLICA: &str = "Your node";
+    /// Said when the node relayed a third party's answer.
+    ///
+    /// The wording matches the balance card's own, so a person meets one idea and not two.
+    pub(crate) const SEND_SOURCE_ORACLE: &str = "A public chain service, not your node";
+    /// Said when the node did not disclose where its answer came from. Unknown provenance is stated
+    /// plainly rather than left blank, because a blank reads as "your node".
+    pub(crate) const SEND_SOURCE_UNDISCLOSED: &str = "Your node did not say";
+
     /// The label on the payment coin a person can look up themselves.
     pub(crate) const SEND_COIN_LABEL: &str = "Payment coin";
     /// The label on the block height a payment settled at.
@@ -952,6 +1009,12 @@ mod tests {
             wallet::SEND_UNKNOWN_BADGE,
             wallet::SEND_CONFIRMED_BODY,
             wallet::SEND_FAILED_BODY,
+            wallet::SEND_DIED_BODY,
+            wallet::SEND_RELEASED_BODY,
+            wallet::SEND_RELEASE_ASK,
+            wallet::SEND_RELEASE_HELP,
+            wallet::SEND_RELEASE_MISMATCH,
+            settings::NOTIFY_COST,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
             content::USAGE_UNKNOWN,
@@ -1021,6 +1084,17 @@ mod tests {
         // The two profile sentences that are built rather than constant.
         said.push(profiles::unreadable("the stored registry is not JSON"));
         said.push(crate::profiles::copy::switching("“home”", "“work”"));
+        // The send sentences that interpolate a measured value, and so can only be functions
+        // (dig_ecosystem#2893). Each is given the argument it is drawn with rather than a token
+        // string: `send_unknown_body` splices the node's own words mid-sentence, so a fixture of
+        // `""` would leave the guard reading a sentence the reader never sees.
+        said.push(wallet::send_pending_body(3));
+        said.push(wallet::send_unknown_body("the node closed the connection"));
+        said.push(wallet::send_fee("0.00001"));
+        said.push(wallet::send_abandoned_body("the confirmation fell over"));
+        said.push(content::add_field_error(63));
+        said.push(protection::second_factor_needs("Two-factor codes"));
+        said.push(protection::pairing_needs("Paired apps"));
         said
     }
 
@@ -1295,6 +1369,147 @@ mod tests {
             said[2].to_lowercase().contains("node"),
             "a running agent with no node does not name the node: {}",
             said[2]
+        );
+    }
+
+    /// **A send DIG lost track of promises nothing about the money** (dig_ecosystem#2895).
+    ///
+    /// The panic path used to be rendered through [`wallet::SEND_FAILED_BODY`], whose first words
+    /// are a promise — *nothing was sent, no money has moved* — that a crash cannot support. The
+    /// control is the other half: `SEND_FAILED_BODY` is asserted to still MAKE that promise, so this
+    /// cannot be satisfied by the promise having been softened everywhere, which would take it away
+    /// from the one state that has earned it (a send that provably never left).
+    #[test]
+    fn a_send_this_app_lost_track_of_does_not_promise_the_money_is_safe() {
+        let said = wallet::send_abandoned_body("the confirmation fell over").to_lowercase();
+        for promise in ["nothing was sent", "no money has moved"] {
+            assert!(
+                !said.contains(promise),
+                "a crash cannot establish {promise:?}, and this sentence claims it: {said}"
+            );
+            assert!(
+                wallet::SEND_FAILED_BODY.to_lowercase().contains(promise),
+                "the state that HAS earned this promise no longer makes it, so the assertion above \
+                 proves nothing"
+            );
+        }
+        assert!(
+            said.contains("before sending again"),
+            "the form reopens after this state, so the sentence must send the person to look first"
+        );
+    }
+
+    /// This module's own source, read at compile time so the guard below can ask what the file
+    /// actually contains rather than what someone remembered to list.
+    const OWN_SOURCE: &str = include_str!("copy.rs");
+
+    /// Every copy item in this file whose literal is WRAPPED across source lines.
+    ///
+    /// # Why wrapped literals specifically
+    ///
+    /// A wrapped literal is the entire defect class
+    /// [`no_sentence_carries_its_own_indentation`](tests::no_sentence_carries_its_own_indentation)
+    /// exists for: a continuation that loses its trailing `\` silently swallows the source's own
+    /// indentation and renders a run of spaces mid-sentence. A single-line literal cannot do it, so
+    /// demanding that every one-word label be enumerated would be noise around the real rule.
+    ///
+    /// # Why the item KIND is not consulted
+    ///
+    /// dig_ecosystem#2893: the enumeration below is hand-written, and the two copy FUNCTIONS
+    /// dig-app#167 added were wrapped, user-facing, and invisible to it. Copy that interpolates a
+    /// measured value can only be a function, and there will be more of it — so the scope rule is
+    /// "does this literal wrap", never "is this a `const`".
+    fn wrapped_copy_items() -> Vec<String> {
+        let mut items = Vec::new();
+        let mut current: Option<String> = None;
+        let mut open = false;
+        for line in OWN_SOURCE.lines() {
+            // The guard's own test module quotes copy in assertion messages; it defines no copy.
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            if let Some(name) = declared_item(line) {
+                current = Some(name);
+                open = false;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            // An odd number of unescaped quotes on a line means the literal continues onto the
+            // next one — which is exactly the shape that can lose its `\`.
+            if unescaped_quotes(line) % 2 == 1 {
+                open = !open;
+                if open {
+                    if let Some(name) = current.clone() {
+                        if !items.contains(&name) {
+                            items.push(name);
+                        }
+                    }
+                }
+            }
+        }
+        items
+    }
+
+    /// The name of the copy item a line declares, if it declares one.
+    fn declared_item(line: &str) -> Option<String> {
+        let rest = line.trim_start().strip_prefix("pub(crate) ")?;
+        let rest = rest
+            .strip_prefix("const ")
+            .or_else(|| rest.strip_prefix("fn "))?;
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// Quotes on `line` that actually open or close a literal, escapes discounted.
+    fn unescaped_quotes(line: &str) -> usize {
+        let bytes = line.as_bytes();
+        (0..bytes.len())
+            .filter(|&i| bytes[i] == b'"' && (i == 0 || bytes[i - 1] != b'\\'))
+            .count()
+    }
+
+    /// The source text of [`every_sentence`], so the guard can see which items it names.
+    fn every_sentence_source() -> String {
+        let start = OWN_SOURCE
+            .find("fn every_sentence() -> Vec<String> {")
+            .expect("the enumeration this guard checks still exists");
+        let body = &OWN_SOURCE[start..];
+        let end = body
+            .find("\n    }\n")
+            .expect("the enumeration is a normally-indented function");
+        body[..end].to_string()
+    }
+
+    /// **Every wrapped sentence in this file is reachable by the whitespace guard.**
+    ///
+    /// dig_ecosystem#2893. The whitespace guard is only as wide as [`every_sentence`], and that list
+    /// is written by hand — so its passing said nothing about copy nobody had added to it. Two
+    /// user-facing sentences shipped outside it in dig-app#167.
+    ///
+    /// This asserts the LIST, not the sentences: it fails the moment a wrapped literal is added
+    /// without being enumerated, which is the only moment at which the omission is cheap to fix.
+    #[test]
+    fn every_wrapped_sentence_is_reachable_by_the_whitespace_guard() {
+        let enumerated = every_sentence_source();
+        let wrapped = wrapped_copy_items();
+        assert!(
+            wrapped.len() > 20,
+            "the scanner found almost nothing, so it is measuring itself rather than the file: \
+             {wrapped:?}"
+        );
+        let missing: Vec<&String> = wrapped
+            .iter()
+            .filter(|name| !enumerated.contains(name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these copy items wrap a literal and no guard ever reads them — add them to \
+             `every_sentence`: {missing:?}"
         );
     }
 }
