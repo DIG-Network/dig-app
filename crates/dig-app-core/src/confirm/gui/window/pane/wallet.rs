@@ -280,14 +280,18 @@ fn send_refusal(facts: &PaneFacts) -> Option<String> {
 ///
 /// The sentence is [`address_line`]'s, so a refused Receive names the remedy for THIS account's
 /// state — set up an account, choose a password, unlock — rather than a generic unavailability.
+///
+/// # Why it carries no prefix
+///
+/// It briefly had one, matching [`copy::wallet::BALANCE_NOT_KNOWN`]'s *"Not known —"*. That pairing
+/// works there because `unknown_reason` writes CLAUSES to complete, and it fails here because
+/// `address_line` writes whole sentences: the result read *"No address yet — Your address is not
+/// shown because your account is locked"*, which states the same fact twice and capitalises
+/// mid-sentence. The sentence is already self-contained, so it is shown as it is.
 fn receive_refusal(facts: &PaneFacts) -> Option<String> {
     match address_of(facts) {
         AddressReading::Known(_) => None,
-        unavailable => Some(format!(
-            "{} {}",
-            copy::wallet::RECEIVE_REFUSED,
-            address_line(&unavailable)
-        )),
+        unavailable => Some(address_line(&unavailable)),
     }
 }
 

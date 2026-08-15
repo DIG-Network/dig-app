@@ -603,12 +603,10 @@ pub(crate) mod wallet {
     /// scrolled down to the code cannot see the button that opened it.
     pub(crate) const CLOSE_BUTTON: &str = "Done";
 
-    /// Said under the Receive control when there is no address to disclose.
-    ///
-    /// The reason itself comes from [`crate::wallet::overview::address_line`] — this is only the
-    /// clause it completes, so the sentence under a refused control reads the same way the sentence
-    /// under a refused Send does.
-    pub(crate) const RECEIVE_REFUSED: &str = "No address yet —";
+    // A refused Receive carries NO prefix constant: `wallet::overview::address_line` already writes
+    // a whole sentence for each account state, and prefixing it produced "No address yet — Your
+    // address is not shown because your account is locked" — the same fact twice, capitalised
+    // mid-sentence. See `pane::wallet::receive_refusal`.
     /// The card that reserves the place sending will take (dig_ecosystem#2207).
     pub(crate) const SENDING_CARD: &str = "Sending";
     /// The card holding the tab's own verbs.
