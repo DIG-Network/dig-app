@@ -2590,10 +2590,32 @@ most once, on this machine*.
 | Failure | What forbids it |
 |---|---|
 | installing dig-app against a node with a ledger toasts its whole history | an `ArrivalCursor` with no position ADOPTS the node's `latest` in silence |
-| a restart re-announces | the cursor is persisted (`arrival-cursor.json`, written whole via a rename) before anything is drawn |
+| a restart re-announces | the cursor is persisted (`arrival-record.json`, written whole via a rename) before anything is drawn |
 | the client resumes past an arrival it never saw | the cursor advances to `page.cursor` — the last row RECEIVED — and never to `latest`, which the node reads after the page |
-| a node whose ledger was rebuilt replays old toasts | the cursor never moves backwards |
+| a node whose ledger was rebuilt replays old toasts | the cursor never moves backwards, AND the coin id — not the `seq` — decides announcing |
 | an amount the client cannot read becomes a wrong figure | `amount` crosses the wire as a decimal string and an unparseable one is refused, never defaulted |
+
+**De-duplication is by coin id, not by `seq` (#2959).** `arrivals.seq` is `AUTOINCREMENT` in the
+node's database: a per-database ordinal, not a property of the coin, stable only while that one
+`wallet.sqlite` survives. A rebuilt, restored or replaced node database renumbers every arrival, so a
+client keyed on `seq` alone re-announces money it has already reported — and a notification that money
+arrived is a claim about money. dig-app therefore MUST keep the cursor as the PAGING instrument and
+make the coin id the ANNOUNCING one.
+
+The record (`ArrivalAnnouncer`, persisted whole as `arrival-record.json`) holds the cursor together
+with the coin ids already announced. An arrival is announced only when the cursor passes it AND its
+coin id is unknown to that record. The set is bounded to the most recent **512** coin ids by insertion
+order; every eviction raises `pruned_below_height` to the evicted coin's `confirmed_height`, and an
+arrival at or below that horizon is treated as ALREADY ANNOUNCED. Pruning therefore cannot resurrect an
+old notification.
+
+**The record fails closed in the opposite direction from an empty set.** An absent or unparseable coin
+set MUST be read as *already announced*, never as *nothing announced yet*: it is an ADOPT state, in
+which the next page is suppressed entirely and that page's highest `confirmed_height` becomes the
+horizon. This mirrors an unread `ArrivalCursor`, which announces nothing and jumps to `page.latest`.
+Reading it as an empty set would announce the node's whole ledger on a single corrupt file — the exact
+defect the record exists to prevent. The cursor and the coin set share ONE file for the same reason: a
+cursor that survived a lost coin set would page past arrivals the set could no longer recognise.
 
 A sweep drains pages until the node has nothing more (bounded per sweep; the remainder is picked up by
 the next sweep, because the cursor advanced over exactly what was read), saves the cursor, and only

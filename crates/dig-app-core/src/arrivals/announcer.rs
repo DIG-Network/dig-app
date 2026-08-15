@@ -239,7 +239,7 @@ mod tests {
         let evicted = arrival(1, 1, 5_000_001);
         for seq in 1..=(RETAINED_COINS as u64 + 8) {
             let announced = announcer.advance(&page(
-                vec![arrival(seq, seq as u64, 5_000_000 + seq as u32)],
+                vec![arrival(seq, seq, 5_000_000 + seq as u32)],
                 seq - 1,
                 seq,
             ));
@@ -311,7 +311,7 @@ mod tests {
         announcer.advance(&page(vec![], 0, 4));
         assert_eq!(
             announcer
-                .advance(&page(vec![arrival(5, 5, 5_412_5)], 4, 5))
+                .advance(&page(vec![arrival(5, 5, 5_412_500)], 4, 5))
                 .len(),
             1
         );
@@ -319,7 +319,7 @@ mod tests {
         let json = serde_json::to_string(&announcer).expect("serializable");
         let mut restarted: ArrivalAnnouncer = serde_json::from_str(&json).expect("deserializable");
         let again = restarted.advance(&ArrivalPage {
-            arrivals: vec![arrival(1, 5, 5_412_5)],
+            arrivals: vec![arrival(1, 5, 5_412_500)],
             cursor: 1,
             latest: 1,
         });
