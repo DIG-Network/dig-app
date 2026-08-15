@@ -587,11 +587,12 @@ pub mod copy {
     /// both times a second copy of the conversion was what let it through.
     pub fn body(balance_mojos: u64, shortfall_mojos: u64, cost_mojos: u64) -> String {
         format!(
-            "A profile is your on-chain identity — a DID and a store — that lets you publish, sign              for an app and be found by other people. This account does not have one yet.
-
-             Creating one costs {}. This wallet holds {}, so it needs {} more before it can. Scan              the code or send XCH to the address below; DIG will notice when it arrives.
-
-             This window creates nothing and spends nothing. Reading the DIG Network never needs a              profile.",
+            "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
+             for an app and be found by other people. This account does not have one yet.\n\n\
+             Creating one costs {}. This wallet holds {}, so it needs {} more before it can. Scan \
+             the code or send XCH to the address below; DIG will notice when it arrives.\n\n\
+             This window creates nothing and spends nothing. Reading the DIG Network never needs a \
+             profile.",
             xch(cost_mojos),
             xch(balance_mojos),
             xch(shortfall_mojos)
@@ -1465,5 +1466,50 @@ mod tests {
             claim.identifier.expect("an identifier"),
             address
         ));
+    }
+
+    /// **No rendered copy string bakes source indentation into user-facing text.**
+    ///
+    /// A raw multi-line literal carries its source indentation into the rendered output, showing
+    /// ragged gaps and extra spaces mid-sentence. `cargo fmt` can reflow continuations and
+    /// reintroduce indentation with nobody editing the copy itself, so every copy function that
+    /// renders a message must be guarded by this assertion. Use `\` line continuations and
+    /// `\n\n\` paragraph breaks instead of raw strings.
+    #[test]
+    fn no_copy_string_carries_source_indentation() {
+        let cost = first_profile_cost_mojos();
+
+        let functions_and_outputs = vec![
+            ("body", copy::body(0, cost, cost)),
+            ("still_short", copy::still_short(100, "14:32:07")),
+            (
+                "cannot_measure",
+                copy::cannot_measure("DIG could not read this wallet.", "14:32:07"),
+            ),
+            ("checked_recently", copy::checked_recently(5)),
+            (
+                "unmeasured_body",
+                copy::unmeasured_body("DIG could not reach a node.", cost),
+            ),
+            ("ready_body", copy::ready_body(cost)),
+        ];
+
+        for (func_name, output) in functions_and_outputs {
+            // Assert no run of 2+ consecutive spaces.
+            assert!(
+                !output.contains("  "),
+                "{}() has consecutive spaces in its output: {:?}",
+                func_name,
+                output
+            );
+
+            // Assert no newline immediately followed by a space (source indentation after a line break).
+            assert!(
+                !output.contains("\n "),
+                "{}() has source indentation after a line break: {:?}",
+                func_name,
+                output
+            );
+        }
     }
 }
