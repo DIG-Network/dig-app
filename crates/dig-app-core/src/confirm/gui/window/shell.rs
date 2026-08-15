@@ -660,6 +660,13 @@ struct ShellApp {
     view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
     /// Where a clicked row's verb goes — see [`super::AppWindow::act`].
     act: Arc<dyn Fn(TrayAction) + Send + Sync>,
+    /// The chain write happening right now, if any — see [`crate::transaction`].
+    ///
+    /// Read every frame rather than pushed at the shell, because the writer is a worker thread that
+    /// has no way to reach this window and must never block waiting for one.
+    transactions: crate::transaction::Feed,
+    /// The sheet that draws [`ShellApp::transactions`], and whether it has been put away.
+    chain_status: super::chain_status::ChainStatus,
     /// Which tab is showing.
     ///
     /// Held here rather than derived per frame because the model is REBUILT every frame from a view
@@ -681,6 +688,8 @@ impl ShellApp {
             theme_store,
             prompt: None,
             closing: false,
+            transactions: crate::transaction::Feed::app(),
+            chain_status: super::chain_status::ChainStatus::default(),
             view,
             act,
             // A caller that names no tab gets the shipping behaviour; only a gallery names one.
@@ -718,6 +727,14 @@ impl ShellApp {
         let t = self.theme.tokens();
         let prompt_is_up = self.prompt.is_some();
         self.paint_shell(ctx, &t, prompt_is_up);
+        // After the shell, so it floats over the panes; before the prompt, so a consent surface is
+        // still the only thing reachable while one is up. Suppressed entirely under a prompt for the
+        // same reason the chrome's controls are: a live-looking control over a scrimmed window is
+        // the wrong signal on the window that authorises spending.
+        if !prompt_is_up {
+            self.chain_status
+                .draw(ctx, ctx.screen_rect(), &t, &self.transactions);
+        }
         self.show_prompt(ctx, ctx.screen_rect());
         self.dismiss_a_bar_clicked_away_from(ctx);
     }
@@ -1514,16 +1531,19 @@ mod tests {
             install_fonts(&ctx);
             let dispatched: Arc<Mutex<Vec<TrayAction>>> = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&dispatched);
+            let mut app = ShellApp::new(
+                Theme::Light,
+                store.clone(),
+                Arc::new(move || view.clone()),
+                Arc::new(move |action| sink.lock().expect("the sink is not poisoned").push(action)),
+                None,
+            );
+            // Detached from the process-wide feed on purpose: these tests run in one process, in
+            // parallel, and a shared feed would let one test's transaction appear in another's
+            // window. The app itself still uses `Feed::app`.
+            app.transactions = crate::transaction::Feed::detached();
             Self {
-                app: ShellApp::new(
-                    Theme::Light,
-                    store.clone(),
-                    Arc::new(move || view.clone()),
-                    Arc::new(move |action| {
-                        sink.lock().expect("the sink is not poisoned").push(action)
-                    }),
-                    None,
-                ),
+                app,
                 ctx,
                 jobs,
                 queue,
@@ -4361,6 +4381,88 @@ mod tests {
             slots.drag.width() > 0.0,
             "there is nowhere left to drag the window by its header at {SHELL_MIN} px"
         );
+    }
+
+    /// **A chain write in flight leaves every window control still working** (dig_ecosystem#2995).
+    ///
+    /// This is the incident, expressed as a property. The window froze because a two-bundle mainnet
+    /// ceremony ran on the painting thread; the fix is worth nothing if the surface that reports it
+    /// takes the app hostage instead, which is what a modal over a scrim would do.
+    ///
+    /// # Why the fixture is a PUSHED transaction and not a building one
+    ///
+    /// `Pushed` is the state that lasts — a bundle sits in the mempool for a block or more, and it
+    /// is the state the person is looking at when they decide whether this app is responding. The
+    /// momentary states would pass this test against an implementation that traps the user for the
+    /// whole wait.
+    #[test]
+    fn the_window_stays_usable_while_a_transaction_is_in_flight() {
+        let mut shelf = Shelf::open();
+        shelf.app.transactions.publish(
+            crate::transaction::Transaction::starting(
+                "Creating your profile",
+                Some(crate::transaction::Money {
+                    amount_mojos: 20_002,
+                    fee_mojos: 1,
+                }),
+            )
+            .at(crate::transaction::Stage::Pushed {
+                id: "0xe4e2b74f915e7f4a739b305aa086aa657a09a8a4df231d9307bb265c528ecc12"
+                    .to_string(),
+            }),
+        );
+        shelf.settle();
+
+        assert!(
+            shelf
+                .press_chrome("Minimize")
+                .contains(&egui::ViewportCommand::Minimized(true)),
+            "a transaction in flight made the window unresponsive, which is the freeze this              surface exists to end"
+        );
+
+        // And nothing is scrimmed: the shell's input blocker — the widget that makes a modal a
+        // modal by eating every click aimed under it — must not exist for a transaction. A control
+        // that still answers proves this frame; the absent blocker proves the DESIGN, and the two
+        // fail in different ways.
+        shelf.frame(Vec::new());
+        assert!(
+            shelf.ctx.read_response(scrim_blocker()).is_none(),
+            "the transaction surface scrimmed the window, which is the freeze with nicer pixels"
+        );
+    }
+
+    /// **The sheet says what is happening, in the transaction's own words.**
+    ///
+    /// Reads the painted text, because the property is what a person can SEE. Asserting the feed
+    /// would only prove the value was stored, which the transaction module already proves.
+    #[test]
+    fn the_sheet_shows_the_stage_and_denies_a_confirmation_it_does_not_have() {
+        let id = "0xe4e2b74f915e7f4a739b305aa086aa657a09a8a4df231d9307bb265c528ecc12";
+        let mut shelf = Shelf::open();
+        shelf.app.transactions.publish(
+            crate::transaction::Transaction::starting("Creating your profile", None)
+                .at(crate::transaction::Stage::Pushed { id: id.to_string() }),
+        );
+        shelf.settle();
+
+        let said = shelf
+            .words()
+            .into_iter()
+            .map(|(word, _)| word)
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            said.contains("Creating your profile"),
+            "the sheet does not say what is happening: {said}"
+        );
+        assert!(
+            said.contains("NOT confirmed"),
+            "the sheet lets a broadcast read as a confirmation: {said}"
+        );
+        assert!(said.contains(id), "the sheet drops the id: {said}");
     }
 
     /// **The maximise control is labelled with what it will DO, never with the state it is in.**
