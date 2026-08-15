@@ -1,62 +1,67 @@
-//! Where the arrival cursor lives between runs.
+//! Where the record of what has been announced lives between runs.
 //!
 //! The whole promise of this module is that a restart does not re-announce yesterday's payments, and
 //! that promise is only as durable as the file below. So it is deliberately small and deliberately
-//! fail-closed: every way of failing to READ the cursor produces an UNREAD one, which the next page
+//! fail-closed: every way of failing to READ the record produces an UNREAD one, which the next page
 //! ADOPTS in silence. The cost is one missed toast; the cost of the opposite — treating an
 //! unreadable file as "nothing has been announced yet, start from the beginning" — is toasting the
 //! node's whole ledger the first time the file is corrupted.
+//!
+//! The cursor and the announced-coin record live in ONE file for the same reason. A cursor that
+//! survived a lost coin record would page past arrivals the record could no longer recognise, so
+//! they fail together or not at all.
 
 use std::path::{Path, PathBuf};
 
-use super::ArrivalCursor;
+use super::ArrivalAnnouncer;
 
-/// The cursor file name under the brand data directory, beside `agent.json`.
+/// The record's file name under the brand data directory, beside `agent.json`.
 ///
-/// Named for what it now holds. The file that lived here before dig-app started consuming
-/// `control.wallet.arrivals` held a whole coin ledger under the name `arrivals.json`; loading one of
-/// those as a cursor would fail to parse and be read as UNREAD, which adopts silently — the correct
-/// outcome for an upgrade, and the reason no migration is needed.
-const CURSOR_FILE: &str = "arrival-cursor.json";
+/// Named for what it now holds. Each earlier name held something this one is a superset of — a whole
+/// coin ledger as `arrivals.json` before dig-app consumed `control.wallet.arrivals`, then a bare
+/// cursor as `arrival-cursor.json` before #2959 — and every one of them loads as UNREAD here, which
+/// adopts silently. That is the correct outcome for an upgrade, and the reason no migration is
+/// needed at any of these steps.
+const RECORD_FILE: &str = "arrival-record.json";
 
-/// The cursor path under a resolved brand data directory.
+/// The record path under a resolved brand data directory.
 pub fn path_in(brand_dir: &Path) -> PathBuf {
-    brand_dir.join(CURSOR_FILE)
+    brand_dir.join(RECORD_FILE)
 }
 
-/// Read the cursor at `path`.
+/// Read the record at `path`.
 ///
 /// A missing file is the ordinary first-run case. A file that cannot be read or parsed is treated
-/// the same way, with a warning: see the module docs for why an unreadable cursor must not become an
+/// the same way, with a warning: see the module docs for why an unreadable record must not become an
 /// announcing one.
-pub fn load(path: &Path) -> ArrivalCursor {
+pub fn load(path: &Path) -> ArrivalAnnouncer {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ArrivalCursor::unread(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ArrivalAnnouncer::unread(),
         Err(e) => {
-            tracing::warn!(error = %e, "the arrival cursor could not be read; starting unread");
-            return ArrivalCursor::unread();
+            tracing::warn!(error = %e, "the arrival record could not be read; starting unread");
+            return ArrivalAnnouncer::unread();
         }
     };
     match serde_json::from_slice(&bytes) {
-        Ok(cursor) => cursor,
+        Ok(record) => record,
         Err(e) => {
-            tracing::warn!(error = %e, "the arrival cursor is not valid JSON; starting unread");
-            ArrivalCursor::unread()
+            tracing::warn!(error = %e, "the arrival record is not valid JSON; starting unread");
+            ArrivalAnnouncer::unread()
         }
     }
 }
 
-/// Write `cursor` to `path`, creating the parent directory if needed.
+/// Write `record` to `path`, creating the parent directory if needed.
 ///
 /// Written through a temporary file and renamed into place: a process killed mid-write would
 /// otherwise leave a truncated file, which loads as unread and re-adopts — losing the record of what
 /// has already been announced. A rename is the cheapest thing that makes the file always whole.
-pub fn save(path: &Path, cursor: &ArrivalCursor) -> std::io::Result<()> {
+pub fn save(path: &Path, record: &ArrivalAnnouncer) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
+    let json = serde_json::to_vec(record).map_err(std::io::Error::other)?;
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, json)?;
     std::fs::rename(&temporary, path)
@@ -75,7 +80,7 @@ mod tests {
                 coin_id: format!("{seq:064x}"),
                 asset_id: None,
                 amount: 1,
-                confirmed_height: 5_412_000,
+                confirmed_height: 5_412_000 + *seq as u32,
             })
             .collect();
         let cursor = arrivals.last().map_or(after_seq, |a| a.seq);
@@ -86,11 +91,11 @@ mod tests {
         }
     }
 
-    /// **A missing cursor is a first run, not an error.**
+    /// **A missing record is a first run, not an error.**
     #[test]
-    fn a_missing_cursor_is_an_unread_one() {
+    fn a_missing_record_is_an_unread_one() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(&path_in(dir.path())), ArrivalCursor::unread());
+        assert_eq!(load(&path_in(dir.path())), ArrivalAnnouncer::unread());
     }
 
     /// **The record of what has been announced survives the process that announced it.**
@@ -99,7 +104,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(&dir.path().join("DigNetwork"));
 
-        let mut first = ArrivalCursor::unread();
+        let mut first = ArrivalAnnouncer::unread();
         first.advance(&page(&[], 0, 4));
         assert_eq!(
             first.advance(&page(&[5], 4, 5)).len(),
@@ -111,25 +116,52 @@ mod tests {
         let mut second = load(&path);
         assert!(
             second.advance(&page(&[5], 4, 5)).is_empty(),
-            "the reloaded cursor re-announced a payment it had already announced"
+            "the reloaded record re-announced a payment it had already announced"
         );
     }
 
-    /// **A corrupt cursor starts unread and therefore SILENT, never announcing a whole ledger.**
+    /// **A record whose coin set is missing still suppresses, even with a readable cursor.**
     ///
-    /// This is also the upgrade path: the pre-#2548-fix file at the old name held a coin ledger, and
-    /// any leftover unreadable content must adopt rather than replay.
+    /// This is the asymmetry #2959 turns on, and the cursor cannot stand in for it: the position
+    /// below is perfectly readable and sits at 5, so the cursor alone would hand rows 6..=8 straight
+    /// to the toast. An absent coin set means ALREADY ANNOUNCED, not "nothing announced yet", so the
+    /// page is adopted in silence. The tail is the control — an arrival above the adopted horizon
+    /// must still be announced, or this test would pass against a record that never says anything.
     #[test]
-    fn a_corrupt_cursor_adopts_silently_rather_than_announcing_the_ledger() {
+    fn a_record_with_a_readable_cursor_and_no_coin_set_adopts_in_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        std::fs::write(&path, br#"{"cursor":{"position":5}}"#).unwrap();
+
+        let mut record = load(&path);
+        assert_eq!(record.position(), Some(5), "the fixture must have a cursor");
+        assert!(
+            record.advance(&page(&[6, 7, 8], 5, 8)).is_empty(),
+            "a record with no coin set announced arrivals its cursor had not seen"
+        );
+        assert_eq!(
+            record.advance(&page(&[9], 8, 9)).len(),
+            1,
+            "the adopted horizon suppressed everything after it, not just the adopted page"
+        );
+    }
+
+    /// **A corrupt record starts unread and therefore SILENT, never announcing a whole ledger.**
+    ///
+    /// This is also the upgrade path: the pre-#2548-fix file at the oldest name held a coin ledger
+    /// and the pre-#2959 one held a bare cursor, and any leftover unreadable content must adopt
+    /// rather than replay.
+    #[test]
+    fn a_corrupt_record_adopts_silently_rather_than_announcing_the_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(dir.path());
         std::fs::write(&path, br#"{"baseline_height":100,"seen":{"a":1}}"#).unwrap();
 
-        let mut cursor = load(&path);
-        assert_eq!(cursor.position(), None);
+        let mut record = load(&path);
+        assert_eq!(record.position(), None);
         assert!(
-            cursor.advance(&page(&[1, 2, 3], 0, 3)).is_empty(),
-            "an unreadable cursor announced the node's whole ledger"
+            record.advance(&page(&[1, 2, 3], 0, 3)).is_empty(),
+            "an unreadable record announced the node's whole ledger"
         );
     }
 
@@ -138,15 +170,15 @@ mod tests {
     fn saving_leaves_only_the_finished_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(dir.path());
-        let mut cursor = ArrivalCursor::unread();
-        cursor.advance(&page(&[], 0, 7));
-        save(&path, &cursor).expect("saved");
+        let mut record = ArrivalAnnouncer::unread();
+        record.advance(&page(&[], 0, 7));
+        save(&path, &record).expect("saved");
 
         assert!(path.exists());
         assert!(
             !path.with_extension("json.tmp").exists(),
             "the temporary file was left behind"
         );
-        assert_eq!(load(&path), cursor);
+        assert_eq!(load(&path), record);
     }
 }
