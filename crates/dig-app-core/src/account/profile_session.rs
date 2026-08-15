@@ -697,6 +697,14 @@ pub mod test_support {
         dig_did::did_string_from_launcher_id(id(tag, 1))
     }
 
+    /// The store id a fixture profile at `ix` will carry, in the `0x…` form every DIG surface
+    /// prints — derived the same way [`registry_json`] derives it, so a test names it without
+    /// embedding a literal that could drift from the fixture it is meant to describe.
+    pub fn expected_store_id(ix: ProfileIx) -> String {
+        let tag = u8::try_from(ix.0 % 251).unwrap_or(0).saturating_add(1);
+        hex_id(id(tag, 3))
+    }
+
     /// A registry holding `profiles`, active on the FIRST of them.
     pub fn registry_with(profiles: &[(ProfileIx, Option<&str>)]) -> ProfileRegistry {
         let active = profiles.first().expect("at least one profile").0;

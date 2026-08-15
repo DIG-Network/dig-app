@@ -134,11 +134,18 @@ fn unread(reading: &ProfilesReading) -> PaneState {
     }
 }
 
-/// One profile: its name and badges, its DID with a way to lift it off the screen, and its verbs.
+/// One profile: its name and badges, the two ids that constitute it, and its verbs.
 ///
-/// The DID is shown in FULL, wrapped, in the identifier face beside a copy control — the same
+/// # Why both ids, and why in full
+///
+/// A profile is a DID singleton **and** a dig-store: the DID is who it is, the store is where its
+/// content lives, and a card naming only the first describes half of the thing. They are drawn as
+/// adjacent rows for that reason — the store belongs to the identity above it, not to the card.
+///
+/// Both are shown in FULL, wrapped, in the identifier face beside a copy control — the same
 /// treatment the DIG ID gets one card up, and for the same reason: nobody transcribes a
-/// `did:chia:…` string, and truncating it hides characters the reader has no other way to reach.
+/// `did:chia:…` string or a 32-byte launcher id, and truncating either hides characters the reader
+/// has no other way to reach.
 fn profile_row(
     flow: &mut Flow,
     t: &Tokens,
@@ -149,6 +156,8 @@ fn profile_row(
     let badges = badges_of(profile);
     let did = profile.did.clone();
     let element = did_element(profile);
+    let store = profile.store_id.clone();
+    let store_slot = store_element(profile);
     let actions = verbs.for_profile(profile);
     let live = flow.live();
 
@@ -169,6 +178,25 @@ fn profile_row(
                         copy::profiles::DID_LABEL,
                         &Value::Identifier(did.clone()),
                         element,
+                        live,
+                    ),
+                    (),
+                )
+            });
+            // The store rides directly under the DID because they are the two halves of ONE
+            // profile: the DID is who it is, the store is where its content lives. Separating them
+            // with anything would invite reading the store as a property of the row rather than of
+            // the identity above it.
+            inner.gap(space::S2);
+            inner.place(|ui, at| {
+                (
+                    identity::copyable(
+                        ui,
+                        at,
+                        t,
+                        copy::profiles::STORE_LABEL,
+                        &Value::Identifier(store.clone()),
+                        store_slot,
                         live,
                     ),
                     (),
@@ -222,6 +250,14 @@ fn badges_of(profile: &ProfileRow) -> Vec<(&'static str, Tone)> {
 /// dig_ecosystem#2074 records.
 fn did_element(profile: &ProfileRow) -> egui::Id {
     egui::Id::new(("dig-window-copy-profile-did", profile.ix.0))
+}
+
+/// The element id of a profile's store-id copy control.
+///
+/// Its own namespace, not [`did_element`]'s: two copy controls in one row sharing an id would make
+/// egui treat them as one widget, and pressing either would report the other's value copied.
+fn store_element(profile: &ProfileRow) -> egui::Id {
+    egui::Id::new(("dig-window-copy-profile-store", profile.ix.0))
 }
 
 /// The model's profile rows, sorted by what each one IS.
@@ -382,7 +418,9 @@ fn create_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::profile_session::test_support::{expected_did, session_with};
+    use crate::account::profile_session::test_support::{
+        expected_did, expected_store_id, session_with,
+    };
     use crate::profiles::{CreationBlocked, ProfilesUnknown};
     use crate::tray_menu::{AccountState, TrayView};
     use crate::window_model::TabId;
@@ -571,6 +609,14 @@ mod tests {
                 assert!(
                     said.contains(&expected_did(ix)),
                     "at {width} px profile {ix} is in the registry and not on the card: {said}"
+                );
+                // In FULL, at every width. A 66-character store id beside a 60-odd-character DID is
+                // exactly the pair that overflows the narrow card, and a truncation introduced to
+                // relieve that would hide characters the reader has no other way to reach.
+                assert!(
+                    said.contains(&expected_store_id(ix)),
+                    "at {width} px profile {ix}'s store id never reached the card in full, so the \
+                     half of the profile that holds its content is unnameable: {said}"
                 );
             }
             assert!(
