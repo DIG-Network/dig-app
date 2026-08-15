@@ -540,6 +540,110 @@ impl Tone {
 mod tests {
     use super::*;
 
+    /// **A headline enlarges a reading and REFUSES to enlarge an absence** (dig_ecosystem#2967).
+    ///
+    /// The money-lie guard for the display size. A balance nobody has measured must never occupy
+    /// the position and the weight of one that has been — that is the same defect as printing `0`
+    /// for an unmeasured figure (dig_ecosystem#2871, dig_ecosystem#2879) wearing a larger font, and
+    /// it is the exact mistake a `headline` written as "draw everything bigger" would make.
+    ///
+    /// Both halves are asserted, and neither alone is sufficient:
+    ///
+    /// - an absence drawn by [`headline`] comes out at EXACTLY the height [`value`] gives it, so it
+    ///   was not enlarged at all — an implementation that scaled it by any amount fails;
+    /// - a measure drawn by [`headline`] comes out TALLER than [`value`] gives it, which is the
+    ///   control. Without it, a `headline` that enlarged nothing whatsoever would pass the first
+    ///   assertion perfectly.
+    #[test]
+    fn a_headline_enlarges_a_reading_and_never_an_absence() {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let reading = Value::Measure {
+            amount: "12.5".into(),
+            unit: "$DIG".into(),
+        };
+        let absence = Value::Unknown(
+            "Not known — your account is locked, so DIG cannot tell which address to read.".into(),
+        );
+
+        let measured = std::cell::Cell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("headline-test")).show(ctx, |ui| {
+                    let t = crate::confirm::gui::theme::Theme::Light.tokens();
+                    let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+                    measured.set((
+                        headline(ui, at, &t, &reading),
+                        value(ui, at, &t, &reading),
+                        headline(ui, at, &t, &absence),
+                        value(ui, at, &t, &absence),
+                    ));
+                });
+            });
+        }
+
+        let (big_reading, plain_reading, big_absence, plain_absence) = measured.get();
+        assert!(
+            big_reading > plain_reading,
+            "a headline reading ({big_reading} px) was no taller than an ordinary one \
+             ({plain_reading} px), so this test cannot tell an enlarging headline from one that \
+             does nothing"
+        );
+        assert_eq!(
+            big_absence, plain_absence,
+            "a not-known balance was drawn at headline size, where it reads as a figure"
+        );
+    }
+
+    /// **A list of rows stays one per line however wide the pane gets** (dig_ecosystem#2967).
+    ///
+    /// [`readouts`] pairs items side by side above `TWO_COLUMN_AT`, which is right for a grid of
+    /// unrelated facts and wrong for a list: it turned the wallet's two assets into a single flat
+    /// line, and would put a third asset in a new place under the first.
+    ///
+    /// Asserted as a COMPARISON against `readouts` at the same width, because a bare "rows is tall"
+    /// check passes at any width where pairing would not have happened anyway — which is most of
+    /// them. 900 px is comfortably over the pairing threshold, so the two must disagree here.
+    #[test]
+    fn a_list_of_rows_never_pairs_its_items_side_by_side() {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let items = [
+            Readout::new(
+                "Chia",
+                Value::Measure {
+                    amount: "0.25".into(),
+                    unit: "XCH".into(),
+                },
+            ),
+            Readout::new(
+                "DIG token",
+                Value::Measure {
+                    amount: "12.5".into(),
+                    unit: "$DIG".into(),
+                },
+            ),
+        ];
+
+        let measured = std::cell::Cell::new((0.0_f32, 0.0_f32));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("rows-test")).show(ctx, |ui| {
+                    let t = crate::confirm::gui::theme::Theme::Light.tokens();
+                    let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 400.0));
+                    measured.set((rows(ui, at, &t, &items), readouts(ui, at, &t, &items)));
+                });
+            });
+        }
+
+        let (listed, paired) = measured.get();
+        assert!(
+            listed > paired,
+            "at 900 px a two-asset list ({listed} px) was no taller than the same items paired \
+             ({paired} px), so rows is pairing them too"
+        );
+    }
+
     /// **An unknown figure cannot be expressed as a number.**
     ///
     /// The rule that makes skeleton-first safe, asserted on the TYPE rather than on a screenshot: a

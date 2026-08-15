@@ -1486,6 +1486,99 @@ mod tests {
         );
     }
 
+    /// **Every disclosed card closes from the control that opened it** (`professional-ui`, HARD
+    /// RULE 1: never trap the user).
+    ///
+    /// A disclosure is a blocking element in miniature — it takes over the space below the verbs —
+    /// so it needs a way out. There are two, and this pins the one a person reaches for first:
+    /// pressing the verb again. The Done control inside the card is the second, and is what a
+    /// reader who scrolled past the verb row can see.
+    ///
+    /// Asserted over BOTH verbs and in both directions, because a toggle written as "open the one
+    /// pressed" is the nearest wrong implementation and it traps whichever card is showing.
+    #[test]
+    fn every_disclosed_card_closes_from_the_control_that_opened_it() {
+        for (verb, opened) in [
+            (Verb::Send, Disclosed::Send),
+            (Verb::Receive, Disclosed::Receive),
+        ] {
+            assert_eq!(
+                Disclosed::Nothing.toggled(verb),
+                opened,
+                "{verb:?} did not open its own card"
+            );
+            assert_eq!(
+                opened.toggled(verb),
+                Disclosed::Nothing,
+                "{verb:?} could not close the card it had just opened, so a person who opened it \
+                 has no way back to the tab"
+            );
+        }
+        // And the two are mutually exclusive: opening one closes the other rather than stacking a
+        // 220 px code above the send form on a 480 px window.
+        assert_eq!(Disclosed::Receive.toggled(Verb::Send), Disclosed::Send);
+        assert_eq!(Disclosed::Send.toggled(Verb::Receive), Disclosed::Receive);
+    }
+
+    /// **A refused verb says WHY, and the two verbs never wear each other's reason.**
+    ///
+    /// The never-trap rule applied to the verb row: a greyed control whose condition is unstated
+    /// sends a person looking for it. Both refusals are drawn under the row, so they must be
+    /// distinguishable — a locked account cannot send AND cannot show an address, and telling
+    /// somebody "unlock to send" when the missing thing is the address names the wrong remedy.
+    ///
+    /// The unlocked, funded actor is the control: without it a pair of functions that refused
+    /// unconditionally would satisfy every assertion above.
+    #[test]
+    fn a_refused_verb_states_its_own_condition_and_a_working_one_states_nothing() {
+        let sealed = facts_with(TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        });
+        let send = send_refusal(&sealed).expect("a locked account cannot send");
+        let receive = receive_refusal(&sealed).expect("a locked account has no address to show");
+        assert!(!send.trim().is_empty() && !receive.trim().is_empty());
+        assert_ne!(
+            send, receive,
+            "the two refused verbs wear one sentence, so the row names the wrong remedy for one \
+             of them"
+        );
+
+        let working = facts_with(sendable(SendProgress::Idle));
+        assert_eq!(send_refusal(&working), None, "a funded wallet refused Send");
+        assert_eq!(
+            receive_refusal(&working),
+            None,
+            "a wallet holding an address refused Receive"
+        );
+    }
+
+    /// **A payment in flight draws its card without anybody opening it** (dig_ecosystem#2967).
+    ///
+    /// The one place the disclosure must not be obeyed. A settling payment is the newest thing on
+    /// the tab, and putting it behind a control means a person who closed the send card — or who
+    /// returned to the app after it was closed — sees a wallet reporting nothing about the money
+    /// that is currently moving.
+    ///
+    /// Asserted over every non-`Idle` state, with `Idle` as the control: without that half, a card
+    /// drawn unconditionally would pass, and the code would once again be permanent furniture.
+    #[test]
+    fn a_payment_in_flight_is_drawn_whether_or_not_its_card_was_opened() {
+        for send in every_send_state() {
+            let said = painted_pane_with(&sendable(send.clone()), 900.0, Disclosed::Nothing);
+            let drawn = said
+                .iter()
+                .any(|line| line.contains(copy::wallet::SENDING_CARD));
+            assert_eq!(
+                drawn,
+                !matches!(send, SendProgress::Idle),
+                "with the card closed, {send:?} drew the sending card = {drawn}: a payment in \
+                 flight must appear on its own, and an idle wallet must not"
+            );
+        }
+    }
+
     /// An unlocked, funded view, so the send form is drawn in the state a person actually uses it in.
     fn sendable(send: SendProgress) -> TrayView {
         TrayView {
