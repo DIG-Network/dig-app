@@ -1333,7 +1333,8 @@ pub fn details_text(view: &TrayView) -> String {
 /// it is not gated on an account, because using another app is not a custody action.
 ///
 /// The **Wallet** submenu (dig_ecosystem#1841) carries the receive address, the balance reading, and the
-/// explainer — and nothing that moves money, since the money path is parked (#1702). Its parent label is
+/// explainer — and nothing that moves money: sending lives in the window's Wallet tab, where a refusal
+/// can be stated against the control it is about, not in a tray row. Its parent label is
 /// deliberately the bare word: unlike the cache figure below, a balance is the user's own money, and a
 /// tray spine is read by anyone standing behind them.
 ///
