@@ -770,6 +770,13 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   any moment — so a closed disclosure MUST retain the menu's copy row, and an open one MUST drop it
   rather than offer the same verb twice. A payment already in flight is NOT subject to any
   disclosure: it MUST be drawn whether or not its card was opened.
+- **A disclosed card MUST draw its own way out, and a card showing money in motion MUST NOT.** The
+  control that opened a card is not sufficient: the disclosure survives a state change, so a verb
+  refused after its card was opened would otherwise leave a card nothing on the surface can close.
+  Every disclosed card therefore carries a close control of its own, at every width. The converse is
+  equally binding — a card drawn because a payment is IN FLIGHT rather than because somebody opened
+  it MUST NOT offer to dismiss it, and MUST NOT draw a close control that fails to close anything.
+  A person may never reach a state where money is moving and the surface says nothing about it.
 - **A row MUST NOT name a remedy the user's state cannot perform.** "Unlock first" is correct for a locked
   account, meaningless on a host that cannot hold an account, wrong for an account that has never been
   given a password, and actively misleading for one that cannot be opened — where unlocking is precisely
