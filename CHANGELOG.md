@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [11.2.0] - 2026-08-15
+
+### Features
+- **app:** Raise the zero-profile fund-and-create prompt on a daily cadence (#171)
+
 ## [11.1.0] - 2026-08-14
 
 ### Features
