@@ -770,13 +770,20 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   any moment — so a closed disclosure MUST retain the menu's copy row, and an open one MUST drop it
   rather than offer the same verb twice. A payment already in flight is NOT subject to any
   disclosure: it MUST be drawn whether or not its card was opened.
-- **A disclosed card MUST draw its own way out, and a card showing money in motion MUST NOT.** The
-  control that opened a card is not sufficient: the disclosure survives a state change, so a verb
-  refused after its card was opened would otherwise leave a card nothing on the surface can close.
-  Every disclosed card therefore carries a close control of its own, at every width. The converse is
-  equally binding — a card drawn because a payment is IN FLIGHT rather than because somebody opened
-  it MUST NOT offer to dismiss it, and MUST NOT draw a close control that fails to close anything.
-  A person may never reach a state where money is moving and the surface says nothing about it.
+- **A close control MUST appear exactly where pressing it would visibly close the card, and nowhere
+  else.** One rule, and both of its edges are defects that have shipped.
+  - A card a person disclosed MUST carry a close control **of its own**, at every width, whenever
+    nothing else is holding the card on screen. The control that opened it is NOT sufficient: the
+    disclosure survives a state change, so a verb refused after its card was opened would otherwise
+    leave a card nothing on the surface can close.
+  - A card that is on screen because a payment is IN FLIGHT MUST NOT offer to dismiss it — **whether
+    or not it was also disclosed.** This is not a rule about which reason drew the card: since
+    nothing on the send path clears a disclosure, the ordinary path is in-flight AND disclosed, and
+    a control drawn there would clear the disclosure while the card stayed exactly where it was. A
+    close control that fails to close anything is the same defect as one that hides money in motion,
+    and an implementation MUST NOT draw one.
+  A person may never reach a state where money is moving and the surface says nothing about it, nor a
+  state where a control appears to do something and does not.
 - **A row MUST NOT name a remedy the user's state cannot perform.** "Unlock first" is correct for a locked
   account, meaningless on a host that cannot hold an account, wrong for an account that has never been
   given a password, and actively misleading for one that cannot be opened — where unlocking is precisely
