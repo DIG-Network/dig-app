@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.0.0] - 2026-08-15
+
+### Features
+- **session:** 24h idle lock policy, deposit re-raise cap, single XCH renderer (#172)
+
 ## [11.2.0] - 2026-08-15
 
 ### Features
