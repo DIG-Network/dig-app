@@ -725,30 +725,57 @@ pub mod copy {
     /// Its heading.
     pub const READY_HEADING: &str = "This wallet can pay for a profile";
 
-    /// What that window says on a build with no create-profile ceremony behind it.
+    /// The affirming control on the ready window. It SPENDS, so it says so.
     ///
-    /// # Why a refusal is written down rather than the arm being dropped
+    /// Named for what pressing it does rather than for agreement: `OK` on a window that charges
+    /// money is the shape of a control somebody presses to make a window go away.
+    pub const CREATE: &str = "Create my profile";
+    /// The declining control. Nothing is started and the funds stay where they are.
+    pub const NOT_NOW: &str = "Not now";
+
+    /// What the ready window says: the offer, and exactly what pressing it costs.
     ///
-    /// The funding half of this feature is real: the prompt watches, the balance is measured, and
-    /// the moment it is sufficient the flow reaches this point by itself. What does not exist yet is
-    /// the ceremony — no surface in this app calls
-    /// [`ProfileMintDoor::begin`](crate::account::profile_mint::ProfileMintDoor::begin), and a
-    /// window that claimed to have started one would be reporting a spend that never happened. The
-    /// honest end of the road is a sentence saying so; a silently missing arm would leave a person
-    /// who has just funded a wallet watching a window close on nothing.
+    /// # This sentence changed the moment the ceremony landed, and it had to
     ///
-    /// It states the cost again because that is the number they are about to be charged, and it says
-    /// plainly that nothing has been spent.
+    /// It used to promise that *nothing has been spent* and that creation *arrives in a coming
+    /// version*. Both were true of a build with no ceremony behind it and both became false the
+    /// instant an affirming control could reach
+    /// [`ProfileMintDoor::begin`](crate::account::profile_mint::ProfileMintDoor::begin) — a
+    /// reassurance left standing beside a button that spends real XCH is the app lying about money.
+    ///
+    /// The promise survives only where it is still true: this WINDOW spends nothing, and declining
+    /// spends nothing. Pressing [`CREATE`] does.
     pub fn ready_body(cost_mojos: u64) -> String {
         format!(
-            "This wallet now holds enough to create a profile, which costs {}.\n\n\
-             This version of DIG cannot run the creation itself yet: the step that mints the DID \
-             and its store is not wired into this app, so nothing was started and NOTHING HAS BEEN \
-             SPENT. Your funds are untouched and stay where they are.\n\n\
-             DIG will stop asking you to add funds. The creation step arrives in a coming version, \
-             and the wallet is already ready for it.",
+            "This wallet now holds enough to create a profile. Creating one costs {}, taken from \
+             this wallet when you choose {CREATE}.\n\n\
+             DIG will submit two transactions — your identity, then its store — and wait for the \
+             blockchain to confirm both. That usually takes a few minutes, and DIG shows you where \
+             it has got to. You can close the progress window at any time without cancelling \
+             anything: a creation that has started carries on, and DIG picks it up again.\n\n\
+             Choosing {NOT_NOW} spends nothing and changes nothing.",
             xch(cost_mojos)
         )
+    }
+
+    /// The offer itself: the window whose affirming control spends real XCH.
+    ///
+    /// Public for the reason [`super::first_profile_claim`] is — the screenshot gallery photographs
+    /// THIS window rather than a retyped copy of it.
+    ///
+    /// `refusal_is_default` is **true**, unlike the funding claim's: there the affirming control
+    /// re-reads a balance, and here it spends. A bare Enter must not buy anything.
+    pub fn create_offer(body: &str) -> crate::confirm::ClaimPrompt<'_> {
+        crate::confirm::ClaimPrompt {
+            title: READY_TITLE,
+            heading: READY_HEADING,
+            body,
+            affirm: CREATE,
+            decline: Some(NOT_NOW),
+            refusal_is_default: true,
+            scannable: None,
+            identifier: None,
+        }
     }
 }
 
@@ -1058,13 +1085,20 @@ mod tests {
         );
     }
 
-    /// The end-of-watch window says the wallet can pay, repeats the cost, and denies a spend.
+    /// **The ready window OFFERS the creation, states what pressing it costs, and no longer
+    /// promises that nothing will be spent.**
     ///
-    /// The denial is the load-bearing half. This build has no creation ceremony behind it, so a
-    /// window that read as *your profile is being created* would report a spend that never happened
-    /// — the one class of claim this app may not make.
+    /// The negative half is what changed and is the load-bearing one. This window's affirming
+    /// control now reaches `ProfileMintDoor::begin`, so the reassurance it used to carry — *nothing
+    /// was started and NOTHING HAS BEEN SPENT* — became a sentence sitting beside a button that
+    /// spends real XCH. A stale promise on a money window is the one defect class that stops a
+    /// release, and it is exactly the kind that survives a feature landing because nobody re-reads
+    /// the copy.
+    ///
+    /// The forward-looking promise goes for the same reason: creation no longer *arrives in a
+    /// coming version*, it is on the screen.
     #[test]
-    fn the_ready_window_promises_no_creation_and_no_spend() {
+    fn the_ready_window_offers_the_creation_and_drops_the_stale_no_spend_promise() {
         let body = copy::ready_body(first_profile_cost_mojos());
 
         assert!(
@@ -1072,13 +1106,41 @@ mod tests {
             "the cost is missing: {body}"
         );
         assert!(
-            body.contains("NOTHING HAS BEEN SPENT"),
-            "the window does not say that nothing was spent: {body}"
+            body.contains(copy::CREATE),
+            "the window must name the control that spends: {body}"
         );
-        assert!(
-            !body.contains("created your profile") && !body.contains("Creating your profile"),
-            "the window claims a creation this build cannot perform: {body}"
-        );
+        for stale in [
+            "NOTHING HAS BEEN SPENT",
+            "coming version",
+            "cannot run the creation",
+            "untouched",
+        ] {
+            assert!(
+                !body.contains(stale),
+                "the window still carries {stale:?}, which is false now that it can spend: {body}"
+            );
+        }
+    }
+
+    /// **The offer's default answer is the REFUSAL.**
+    ///
+    /// Makes impossible: a bare Enter buying a profile. The funding claim next door sets
+    /// `refusal_is_default: false` — correctly, since its affirming control only re-reads a balance
+    /// — and copying that posture onto a window that spends is a one-word difference nothing else
+    /// would catch. Both controls are asserted present too, because a window with no decline is the
+    /// trap `professional-ui` forbids.
+    #[test]
+    fn the_create_offer_never_spends_on_a_bare_enter() {
+        let body = copy::ready_body(first_profile_cost_mojos());
+        let offer = copy::create_offer(&body);
+
+        assert!(offer.refusal_is_default, "Enter must not buy a profile");
+        assert_eq!(offer.affirm, copy::CREATE);
+        assert_eq!(offer.decline, Some(copy::NOT_NOW));
+
+        // Control: the funding claim, whose affirming control spends nothing, keeps the opposite
+        // posture — so this is a real distinction rather than a blanket rule.
+        assert!(!first_profile_claim("xch1example", &body, None).refusal_is_default);
     }
 
     /// Two answerable presses can never carry the same read time.

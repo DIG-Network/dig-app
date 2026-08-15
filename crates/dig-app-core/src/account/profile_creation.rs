@@ -29,6 +29,10 @@ use dig_account::ProfileIx;
 use crate::account::profile_mint::ProfileMintDoor;
 use crate::account::profile_session::MintDoorError;
 
+/// The profile's content, re-exported so the one binary that builds a seed reaches it beside the
+/// driver that consumes it rather than through a second dependency path.
+pub use dig_account::mint::ProfileSeed as Seed;
+
 /// A profile ceremony the driver can drive.
 ///
 /// # Why this exists beside [`ProfileMintDoor`], which is already a trait

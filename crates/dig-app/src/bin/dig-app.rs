@@ -3993,7 +3993,7 @@ mod tray {
 
             let body = match funding_step(&MintFunds::of_balance(&reading), &latch, cost) {
                 FundingStep::Ready => {
-                    say_the_wallet_can_pay(confirmer, cost);
+                    offer_to_create_a_profile(status, session, confirmer, cost);
                     return DepositWatch::Funded;
                 }
                 FundingStep::Deposit {
@@ -4013,6 +4013,12 @@ mod tray {
             )))
         };
 
+        // The offer is built HERE so `recheck` needs neither the tray status nor the session: the
+        // recheck control's job is to re-read a balance, and handing it the two authorities a mint
+        // needs would put the spending path inside a function whose whole contract is that it does
+        // not spend.
+        let offer = || offer_to_create_a_profile(status, session, confirmer, cost);
+
         watch_for_the_deposit(draw, || {
             recheck(
                 confirmer,
@@ -4020,6 +4026,7 @@ mod tray {
                 &latch,
                 cost,
                 &mut last_read_at.borrow_mut(),
+                &offer,
             )
         });
     }
@@ -4036,6 +4043,7 @@ mod tray {
         latch: &dig_app_core::account::first_profile::FundingLatch,
         cost: u64,
         last_read_at: &mut Option<std::time::SystemTime>,
+        offer: &dyn Fn(),
     ) -> bool {
         use dig_app_core::account::first_profile::copy;
         use dig_app_core::account::first_profile::funding_step;
@@ -4061,7 +4069,7 @@ mod tray {
 
         match funding_step(&MintFunds::of_balance(&reading), latch, cost) {
             FundingStep::Ready => {
-                say_the_wallet_can_pay(confirmer, cost);
+                offer();
                 true
             }
             FundingStep::Deposit {
@@ -4087,26 +4095,124 @@ mod tray {
         }
     }
 
-    /// The end of the funding watch: the wallet can pay, and this build stops there.
+    /// The end of the funding watch: the wallet can pay, so OFFER the creation and run it if the
+    /// person says yes (dig_ecosystem#2989).
     ///
-    /// # Why this is a sentence and not a wizard
+    /// # This is the one path in the app that spends the user's XCH on a profile
     ///
-    /// The creation ceremony is not wired into this app — nothing calls
-    /// [`ProfileMintDoor::begin`](dig_app_core::account::profile_mint::ProfileMintDoor::begin), and
-    /// the DID-only first-run wizard must NOT be borrowed for it, because a DIG profile is a DID
-    /// singleton **and** a store and minting the DID alone strands the account half-created
-    /// (dig_ecosystem#2398). So the honest end of the road is to say the wallet is ready, repeat the
-    /// cost, and state plainly that nothing was spent. Reporting a creation that did not happen
-    /// would be the app lying about money, which is the one defect class that stops a release.
+    /// The offer's affirming control reaches
+    /// [`ProfileMintDoor::begin`](dig_app_core::account::profile_mint::ProfileMintDoor::begin), so
+    /// only an explicit approval starts anything: a timeout, a dismissal, a shell with no confirmer
+    /// and a decline all spend nothing, which is why every non-`Approve` answer returns here rather
+    /// than falling through.
+    ///
+    /// # Assembly only — every decision was taken under test
+    ///
+    /// This file is executable by no test, so it chooses nothing: the door answers the money
+    /// questions inside `ProfileMint::for_session`, the poll cadence and fault tolerance come from
+    /// [`Watch`](dig_app_core::account::profile_creation::Watch), and the words come from the copy
+    /// modules. What is written here is the wiring between them.
+    ///
+    /// # Never traps the person
+    ///
+    /// Progress is REPORTED, never held behind a modal that must be answered: closing DIG's windows
+    /// does not cancel a creation, because the journal entry is persisted before anything is pushed
+    /// and the ceremony resumes from the chain. A window implying otherwise would say that dismissing
+    /// it destroys a DID they have already paid for.
     #[cfg(feature = "tray")]
-    fn say_the_wallet_can_pay(confirmer: &dyn NativeConfirmer, cost: u64) {
+    fn offer_to_create_a_profile(
+        status: &SharedStatus,
+        live: &TraySession,
+        confirmer: &dyn NativeConfirmer,
+        cost: u64,
+    ) {
         use dig_app_core::account::first_profile::copy;
+        use dig_app_core::account::profile_creation::copy as creation_copy;
+        use dig_app_core::account::profile_creation::{create_profile, Creation, Watch};
+        use dig_app_core::account::profile_mint::ProfileMint;
+        use dig_app_core::confirm::ConfirmDecision;
+
+        let body = copy::ready_body(cost);
+        if confirmer.confirm_claim(&copy::create_offer(&body)) != ConfirmDecision::Approve {
+            return;
+        }
+
+        // A reachable node is still needed. Losing it in the gap since the offer was drawn is an
+        // outage, and the honest answer is to say so having spent nothing.
+        let Ok(reading) = status.read() else {
+            return say_the_creation_could_not_start(confirmer, "DIG could not read its own state.");
+        };
+        let Some(endpoint) = reading.engine.endpoint() else {
+            return say_the_creation_could_not_start(
+                confirmer,
+                "DIG is not connected to your node right now.",
+            );
+        };
+
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+        let publisher = dig_app_core::chain::ControlSpendPublisher::new(endpoint);
+        let door = ProfileMint::for_session(live.residency.profiles(), &live.residency, &chain, &publisher);
+
+        let outcome = create_profile(
+            &door,
+            &profile_seed(),
+            None,
+            Watch::default(),
+            &mut || std::thread::sleep(CREATION_POLL_INTERVAL),
+            &mut |step| {
+                tracing::info!(target: "dig_app::profile", step = ?step, "profile creation progressed");
+            },
+        );
+
+        match outcome {
+            Creation::Created { profile, .. } => notify(
+                confirmer,
+                creation_copy::CREATED_TITLE,
+                creation_copy::CREATED_HEADING,
+                &creation_copy::created_body(&profile),
+            ),
+            Creation::Stopped(stopped) => notify(
+                confirmer,
+                creation_copy::STOPPED_TITLE,
+                creation_copy::STOPPED_HEADING,
+                &creation_copy::stopped_body(&stopped),
+            ),
+        }
+    }
+
+    /// How long to wait between asking the chain how a creation is doing.
+    ///
+    /// A Chia block is roughly 18.75 seconds, so polling faster than this only asks the same node
+    /// the same question about the same unchanged peak.
+    #[cfg(feature = "tray")]
+    const CREATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The seed the first profile is created from.
+    ///
+    /// Deliberately empty: nothing on this path has asked the person for a display name or a bio,
+    /// and inventing one would put words in their profile they never typed. The profile's fields are
+    /// editable afterwards; a fabricated identity is not undoable in the same way.
+    #[cfg(feature = "tray")]
+    fn profile_seed() -> dig_app_core::account::profile_creation::Seed {
+        dig_app_core::account::profile_creation::Seed::new()
+    }
+
+    /// Said when an approved creation could not START — nothing was pushed and nothing was spent.
+    ///
+    /// Distinct from every stopped-creation window, which describe a ceremony that DID begin. The
+    /// difference is the whole content: this one may honestly promise the funds are untouched.
+    #[cfg(feature = "tray")]
+    fn say_the_creation_could_not_start(confirmer: &dyn NativeConfirmer, why: &str) {
+        use dig_app_core::account::profile_creation::copy;
 
         notify(
             confirmer,
-            copy::READY_TITLE,
-            copy::READY_HEADING,
-            &copy::ready_body(cost),
+            copy::STOPPED_TITLE,
+            copy::STOPPED_HEADING,
+            &format!(
+                "{why}\n\nNothing was submitted to the blockchain and no money left your wallet. \
+                 DIG will offer again once it can."
+            ),
         );
     }
 
