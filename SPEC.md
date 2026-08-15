@@ -1996,6 +1996,11 @@ NOT render as `0 XCH`. The balance figure MUST come from the `FundingStep::Depos
 made from, so only a MEASURED balance can ever be stated; the unmeasured window states no balance at
 all, not even zero.
 
+**Every other money figure in the same flow MUST use that same conversion and unit.** The recheck
+answer's shortfall, the unknown-balance window's cost and the wallet-can-pay window's cost MUST be
+stated in XCH, never in mojos: they describe the same quantities as the deposit window, and a flow
+that answers in a second unit contradicts itself about a price.
+
 **Sufficiency is hysteretic (MUST).** Once a balance has been seen to cover the cost, the flow MUST
 NOT return to a deposit window (`FundingLatch`) — the ceremony re-checks and refuses honestly, whereas
 the opposite error asks a funded person to send money twice. The threshold is `>= cost`.

@@ -488,6 +488,13 @@ pub fn first_profile_claim<'a>(
 /// the figure the ceremony charges — [`first_profile_cost_mojos`], derived from the door's own
 /// arithmetic. A placeholder here would be the app lying about money, which is the one class of
 /// defect that stops a release outright.
+///
+/// # One unit for the whole flow: XCH (dig_ecosystem#2950)
+///
+/// Every money figure this module renders goes through `chain_mint::xch`, the crate's single
+/// mojos-to-XCH conversion. The deposit body and the three windows a person reaches FROM it — the
+/// recheck answer, the unknown-balance window, the wallet-can-pay window — all describe the same
+/// quantity, so quoting one of them in mojos makes the flow contradict itself about a price.
 pub mod copy {
     use crate::account::chain_mint::xch;
 
@@ -521,10 +528,10 @@ pub mod copy {
     /// it is what proves the read ran.
     pub fn still_short(shortfall_mojos: u64, read_at: &str) -> String {
         format!(
-            "Checked at {read_at}: this wallet is still {} mojos short of what a profile costs. \
+            "Checked at {read_at}: this wallet is still {} short of what a profile costs. \
              Nothing has arrived yet, or what has arrived is not spendable — a transfer becomes \
              spendable once the blockchain confirms it, which usually takes a few minutes.",
-            grouped(shortfall_mojos)
+            xch(shortfall_mojos)
         )
     }
 
@@ -605,11 +612,11 @@ pub mod copy {
         format!(
             "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
              for an app and be found by other people. This account does not have one yet.\n\n\
-             Creating one costs {} mojos. DIG cannot read this wallet's balance at the moment, so \
+             Creating one costs {}. DIG cannot read this wallet's balance at the moment, so \
              it does not know whether that has already been sent — this is about reading the \
              balance, not about your money. Anything already sent to the address below is safe.\n\n\
              Choose {RECHECK} once the node is answering, or {LATER}.\n\n{why}",
-            grouped(cost_mojos)
+            xch(cost_mojos)
         )
     }
 
@@ -634,28 +641,14 @@ pub mod copy {
     /// plainly that nothing has been spent.
     pub fn ready_body(cost_mojos: u64) -> String {
         format!(
-            "This wallet now holds enough to create a profile, which costs {} mojos.\n\n\
+            "This wallet now holds enough to create a profile, which costs {}.\n\n\
              This version of DIG cannot run the creation itself yet: the step that mints the DID \
              and its store is not wired into this app, so nothing was started and NOTHING HAS BEEN \
              SPENT. Your funds are untouched and stay where they are.\n\n\
              DIG will stop asking you to add funds. The creation step arrives in a coming version, \
              and the wallet is already ready for it.",
-            grouped(cost_mojos)
+            xch(cost_mojos)
         )
-    }
-
-    /// A mojo count with thousands separators — `20002` is a number nobody reads, and misreading the
-    /// one on a funding screen is misreading a price.
-    fn grouped(mojos: u64) -> String {
-        let digits = mojos.to_string();
-        let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-        for (i, digit) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
-                out.push(',');
-            }
-            out.push(digit);
-        }
-        out
     }
 }
 
@@ -955,7 +948,10 @@ mod tests {
             body.contains(WHY),
             "the node's own reason is missing: {body}"
         );
-        assert!(body.contains("20,002"), "the cost is missing: {body}");
+        assert!(
+            body.contains("0.000000020002 XCH"),
+            "the cost is missing: {body}"
+        );
         assert!(
             !body.contains("short") && !body.contains("needs"),
             "an unmeasured balance was rendered as a shortfall: {body}"
@@ -971,7 +967,10 @@ mod tests {
     fn the_ready_window_promises_no_creation_and_no_spend() {
         let body = copy::ready_body(first_profile_cost_mojos());
 
-        assert!(body.contains("20,002"), "the cost is missing: {body}");
+        assert!(
+            body.contains("0.000000020002 XCH"),
+            "the cost is missing: {body}"
+        );
         assert!(
             body.contains("NOTHING HAS BEEN SPENT"),
             "the window does not say that nothing was spent: {body}"
@@ -1157,6 +1156,54 @@ mod tests {
             !body.contains("1599179999973"),
             "the balance was printed in mojos with an XCH label: {body}"
         );
+    }
+
+    /// **Every figure in this flow is XCH — the recheck answer included (dig_ecosystem#2950).**
+    ///
+    /// The defect this pins: a person read `0.000000020002 XCH` on the deposit window, pressed
+    /// [`copy::RECHECK`], and was answered in grouped mojos. Same flow, same quantity, two units —
+    /// the confusion class behind dig_ecosystem#2879. So the three neighbours of the deposit body
+    /// are asserted TOGETHER, because a fix applied to one of them reads as complete on its own.
+    ///
+    /// The expected strings are computed from the requirement — a mojo is 10^-12 XCH, so 20,002
+    /// mojos IS `0.000000020002 XCH` — and never read off what the code emits. The absence of the
+    /// grouped form is asserted alongside, since a body that states BOTH units would satisfy every
+    /// positive assertion here while being exactly the screen the user complained about.
+    #[test]
+    fn the_recheck_answer_and_both_cost_windows_speak_xch_not_mojos() {
+        const COST: u64 = 20_002;
+        const IN_XCH: &str = "0.000000020002 XCH";
+        const GROUPED_MOJOS: &str = "20,002";
+
+        assert_eq!(
+            first_profile_cost_mojos(),
+            COST,
+            "the fixture no longer matches what a profile costs"
+        );
+
+        let sentences = [
+            ("still_short", copy::still_short(COST, "14:32:07")),
+            (
+                "unmeasured_body",
+                copy::unmeasured_body("DIG could not reach a node.", COST),
+            ),
+            ("ready_body", copy::ready_body(COST)),
+        ];
+
+        for (which, sentence) in sentences {
+            assert!(
+                sentence.contains(IN_XCH),
+                "{which} did not state {COST} mojos as {IN_XCH}: {sentence}"
+            );
+            assert!(
+                !sentence.contains(GROUPED_MOJOS),
+                "{which} still quotes grouped mojos beside the XCH figure: {sentence}"
+            );
+            assert!(
+                !sentence.contains("mojos"),
+                "{which} still names mojos as its unit: {sentence}"
+            );
+        }
     }
 
     /// **The unmeasured window states no balance at all — not even zero.**
