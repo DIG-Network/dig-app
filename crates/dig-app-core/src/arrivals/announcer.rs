@@ -17,7 +17,7 @@
 //! # Why the set is bounded, and why pruning cannot resurrect a notification
 //!
 //! Remembering every coin id ever announced grows without limit on a long-lived wallet, so only the
-//! most recent [`RETAINED_COINS`] are kept by insertion order. Eviction alone would let an old coin
+//! most recent `RETAINED_COINS` are kept by insertion order. Eviction alone would let an old coin
 //! look new again, so each eviction raises a horizon: `pruned_below_height` is the highest
 //! `confirmed_height` ever evicted, and **an arrival is suppressed if its coin id is retained OR its
 //! `confirmed_height` is at or below the horizon.** An evicted coin does not become new — it falls
