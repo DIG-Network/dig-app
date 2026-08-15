@@ -3941,10 +3941,11 @@ mod tray {
         use dig_app_core::account::first_profile::first_profile_claim;
         use dig_app_core::account::first_profile::first_profile_cost_mojos;
         use dig_app_core::account::first_profile::funding_step;
+        use dig_app_core::account::first_profile::watch_for_the_deposit;
+        use dig_app_core::account::first_profile::DepositWatch;
         use dig_app_core::account::first_profile::FundingLatch;
         use dig_app_core::account::first_profile::FundingStep;
         use dig_app_core::account::first_profile::MintFunds;
-        use dig_app_core::confirm::ConfirmDecision;
         use dig_app_core::confirm::QrArt;
         use dig_app_core::wallet::overview::BalanceReading;
 
@@ -3967,7 +3968,10 @@ mod tray {
             .flatten();
         let cost = first_profile_cost_mojos();
         let latch = FundingLatch::new();
-        let mut last_read_at: Option<std::time::SystemTime> = None;
+        // Shared by the two closures below — the draw records the forced first read, the recheck
+        // records its own — so the throttle sees one timeline rather than two.
+        let last_read_at: std::cell::RefCell<Option<std::time::SystemTime>> =
+            std::cell::RefCell::new(None);
 
         // The freshest cached reading, at the poller's own cadence: this is the same figure the tray
         // is showing, because it is the same poller.
@@ -3983,15 +3987,19 @@ mod tray {
             Err(_) => BalanceReading::default(),
         };
 
-        loop {
+        // One drawing of the window: read the balance, write the copy that fits what was read, ask.
+        let draw = || {
             let mut reading = observed();
             if matches!(MintFunds::of_balance(&reading), MintFunds::Unmeasured) {
                 reading = read_now();
-                last_read_at = Some(std::time::SystemTime::now());
+                *last_read_at.borrow_mut() = Some(std::time::SystemTime::now());
             }
 
             let body = match funding_step(&MintFunds::of_balance(&reading), &latch, cost) {
-                FundingStep::Ready => return say_the_wallet_can_pay(confirmer, cost),
+                FundingStep::Ready => {
+                    say_the_wallet_can_pay(confirmer, cost);
+                    return DepositWatch::Funded;
+                }
                 FundingStep::Deposit {
                     balance_mojos,
                     shortfall_mojos,
@@ -4002,24 +4010,22 @@ mod tray {
                 FundingStep::Unmeasured => copy::unmeasured_body(&unread_reason(&reading), cost),
             };
 
-            match confirmer.confirm_claim(&first_profile_claim(&address, &body, scannable.as_ref()))
-            {
-                ConfirmDecision::Approve => {
-                    if recheck(confirmer, &read_now, &latch, cost, &mut last_read_at) {
-                        return;
-                    }
-                }
-                // The window's own two-minute deadline elapsed. THIS is the automatic path the user
-                // asked for: nobody pressed anything, so the loop re-reads and redraws with whatever
-                // the balance now is.
-                ConfirmDecision::Timeout => continue,
-                // "Remind me later", Escape, or the frame's X — all one answer, and all already
-                // deferred: the state loop wrote the next prompt time when it raised this, precisely
-                // so every way out behaves the same. `Unavailable` is a host with no desktop session
-                // to draw on, where continuing would spin.
-                ConfirmDecision::Deny | ConfirmDecision::Unavailable => return,
-            }
-        }
+            DepositWatch::Answered(confirmer.confirm_claim(&first_profile_claim(
+                &address,
+                &body,
+                scannable.as_ref(),
+            )))
+        };
+
+        watch_for_the_deposit(draw, || {
+            recheck(
+                confirmer,
+                &read_now,
+                &latch,
+                cost,
+                &mut last_read_at.borrow_mut(),
+            )
+        });
     }
 
     /// Answer a press of "Recheck balance". Returns whether the whole flow is finished.

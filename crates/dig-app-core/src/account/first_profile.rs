@@ -50,6 +50,7 @@ use serde::Serialize;
 use crate::account::profile_mint::whole_profile_cost_mojos;
 use crate::account::profile_mint::DEFAULT_MINT_FEE_MOJOS;
 use crate::confirm::ClaimPrompt;
+use crate::confirm::ConfirmDecision;
 use crate::confirm::QrArt;
 use crate::profiles::ProfileCreation;
 use crate::profiles::ProfilesReading;
@@ -90,6 +91,68 @@ pub fn recheck_allowed(last_read_at: Option<SystemTime>, now: SystemTime) -> Res
     match now.duration_since(last) {
         Ok(since) if since < RECHECK_THROTTLE => Err(since.as_secs()),
         _ => Ok(()),
+    }
+}
+
+/// How many CONSECUTIVE self-dismissals of the deposit window are watched automatically.
+///
+/// The window carries its own two-minute deadline, so five of them is about ten minutes of watching
+/// with nobody touching anything — enough to cover a realistic funding round trip (open another
+/// wallet or a phone, send, come back), which is the whole reason the automatic re-draw exists.
+///
+/// It is BOUNDED because the window is not free while it is up. The tray's action worker is a single
+/// slot held for the whole of a handler, and the tick that runs the idle auto-lock takes the session
+/// with a `try_lock` it skips on contention: an unbounded re-raise therefore keeps key material
+/// resident past the idle window and silently swallows "Lock now". Returning gives both back, and
+/// nothing is lost — the daily reminder was already written when this prompt was raised, so the
+/// prompt comes back on its own cadence.
+pub const DEPOSIT_SELF_DISMISSALS_WATCHED: u32 = 5;
+
+/// What one drawing of the deposit window produced.
+pub enum DepositWatch {
+    /// The window was drawn, and the user — or its own deadline — answered.
+    Answered(ConfirmDecision),
+    /// Nothing was asked, because the wallet can now pay. The flow is over.
+    Funded,
+}
+
+/// Drive the deposit window until it is done, re-drawing while it self-dismisses.
+///
+/// `draw` produces one drawing of the window; `recheck` answers a press of "Recheck balance" and
+/// returns whether the whole flow is finished. Every exit path RETURNS, which is the property that
+/// matters to the rest of the app (see [`DEPOSIT_SELF_DISMISSALS_WATCHED`]).
+///
+/// An `Approve` RESETS the count, deliberately: a press is a live human standing at the window, and
+/// the bound exists to end an UNATTENDED watch, not to time out somebody who is still there. The
+/// throttle in [`recheck_allowed`] is what stops that becoming a way to hammer the node.
+pub fn watch_for_the_deposit(
+    mut draw: impl FnMut() -> DepositWatch,
+    mut recheck: impl FnMut() -> bool,
+) {
+    let mut self_dismissals = 0;
+    loop {
+        let DepositWatch::Answered(decision) = draw() else {
+            return;
+        };
+        match decision {
+            ConfirmDecision::Approve => {
+                self_dismissals = 0;
+                if recheck() {
+                    return;
+                }
+            }
+            // The window's own two-minute deadline elapsed: nobody pressed anything, so re-read and
+            // redraw with whatever the balance now is — up to the bound.
+            ConfirmDecision::Timeout => {
+                self_dismissals += 1;
+                if self_dismissals >= DEPOSIT_SELF_DISMISSALS_WATCHED {
+                    return;
+                }
+            }
+            // "Remind me later", Escape, or the frame's X — all one answer, and all already deferred.
+            // `Unavailable` is a host with no desktop session to draw on, where continuing would spin.
+            ConfirmDecision::Deny | ConfirmDecision::Unavailable => return,
+        }
     }
 }
 
@@ -1511,5 +1574,139 @@ mod tests {
                 output
             );
         }
+    }
+
+    /// A deposit window that answers from a script, counting how many times it was drawn.
+    ///
+    /// It gives up after [`RUNAWAY`] drawings so an unbounded re-raise fails as a WRONG COUNT rather
+    /// than as a hung test — a hang is indistinguishable from a dead runner, and this defect is
+    /// precisely "the loop never returns".
+    struct WindowScript {
+        answers: std::sync::Mutex<std::collections::VecDeque<ConfirmDecision>>,
+        /// The answer once the script runs out — the self-dismissal, since that is what a window
+        /// nobody is touching does forever.
+        then: ConfirmDecision,
+        drawings: std::sync::Mutex<u32>,
+    }
+
+    /// Far above any legitimate bound, so exceeding it can only mean the loop is unbounded.
+    const RUNAWAY: u32 = 50;
+
+    impl WindowScript {
+        fn answering(answers: &[ConfirmDecision], then: ConfirmDecision) -> Self {
+            Self {
+                answers: std::sync::Mutex::new(answers.iter().copied().collect()),
+                then,
+                drawings: std::sync::Mutex::new(0),
+            }
+        }
+
+        fn drawings(&self) -> u32 {
+            *self.drawings.lock().unwrap()
+        }
+    }
+
+    impl crate::confirm::NativeConfirmer for WindowScript {
+        fn confirm_pair(&self, _prompt: &crate::confirm::PairPrompt<'_>) -> ConfirmDecision {
+            unreachable!("the deposit window never pairs")
+        }
+        fn confirm_connect(&self, _prompt: &crate::confirm::ConnectPrompt<'_>) -> ConfirmDecision {
+            unreachable!("the deposit window never connects")
+        }
+        fn confirm_sign(&self, _prompt: &crate::confirm::SignPrompt<'_>) -> ConfirmDecision {
+            unreachable!("the deposit window never signs")
+        }
+        fn confirm_claim(&self, _prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
+            let mut drawings = self.drawings.lock().unwrap();
+            *drawings += 1;
+            if *drawings > RUNAWAY {
+                return ConfirmDecision::Deny;
+            }
+            self.answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(self.then)
+        }
+    }
+
+    /// Run the watch against `window`, counting a recheck press as `recheck_finishes`.
+    fn watch(window: &WindowScript, recheck_finishes: bool) -> u32 {
+        use crate::confirm::NativeConfirmer;
+
+        watch_for_the_deposit(
+            || {
+                DepositWatch::Answered(
+                    window.confirm_claim(&first_profile_claim("xch1t", "b", None)),
+                )
+            },
+            || recheck_finishes,
+        );
+        window.drawings()
+    }
+
+    /// **A window nobody touches stops re-raising itself** (dig_ecosystem#2950).
+    ///
+    /// While it is up, the tray's single action slot is held and the tick that runs the idle
+    /// auto-lock skips its `try_lock`, so an unbounded watch keeps key material resident and drops
+    /// "Lock now" silently. The count is the observable: finite, and exactly the bound.
+    #[test]
+    fn an_unattended_deposit_window_stops_re_raising_itself() {
+        let window = WindowScript::answering(&[], ConfirmDecision::Timeout);
+
+        assert_eq!(
+            watch(&window, false),
+            DEPOSIT_SELF_DISMISSALS_WATCHED,
+            "a window that only ever self-dismisses must be drawn exactly the bounded number of \
+             times and then let go of the session"
+        );
+    }
+
+    /// **A press of "Recheck balance" resets the bound**, because a bound on an UNATTENDED watch must
+    /// not time out somebody who is standing at the window.
+    #[test]
+    fn a_recheck_press_resets_the_self_dismissal_bound() {
+        let mut script =
+            vec![ConfirmDecision::Timeout; DEPOSIT_SELF_DISMISSALS_WATCHED as usize - 1];
+        script.push(ConfirmDecision::Approve);
+        let window = WindowScript::answering(&script, ConfirmDecision::Timeout);
+
+        assert_eq!(
+            watch(&window, false),
+            DEPOSIT_SELF_DISMISSALS_WATCHED * 2,
+            "four self-dismissals and a press, then a FULL fresh run of self-dismissals — without \
+             the reset the press would not clear the four already counted, and the watch would end \
+             one drawing later at six"
+        );
+    }
+
+    /// **A recheck that finishes the flow returns at once**, drawing the window only the once.
+    #[test]
+    fn a_recheck_that_finishes_the_flow_returns() {
+        let window = WindowScript::answering(&[ConfirmDecision::Approve], ConfirmDecision::Timeout);
+
+        assert_eq!(watch(&window, true), 1);
+    }
+
+    /// **"Remind me later" returns immediately** — the deferral was written when the prompt was
+    /// raised, so there is nothing left to do.
+    #[test]
+    fn a_deferral_returns_immediately() {
+        let window = WindowScript::answering(&[ConfirmDecision::Deny], ConfirmDecision::Timeout);
+
+        assert_eq!(watch(&window, false), 1);
+    }
+
+    /// **A wallet that can already pay is asked nothing at all.**
+    #[test]
+    fn a_funded_wallet_draws_no_deposit_window() {
+        let window = WindowScript::answering(&[], ConfirmDecision::Timeout);
+
+        watch_for_the_deposit(
+            || DepositWatch::Funded,
+            || unreachable!("nothing to recheck"),
+        );
+
+        assert_eq!(window.drawings(), 0);
     }
 }
