@@ -1619,13 +1619,18 @@ mod tests {
                 Disclosed::Send,
             ),
         ] {
-            let said = painted_pane_with(&view, 900.0, open);
-            assert!(
-                said.iter()
-                    .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
-                "{what} drew no way out, so a reader who scrolled past the verb row is stuck with \
-                 it: {said:?}"
-            );
+            // Both widths: 480 is the shell's own minimum and the width at which `action::buttons`
+            // wraps the verb row onto a second line, so it is where a control is likeliest to be
+            // pushed somewhere it cannot be reached.
+            for width in [480.0, 900.0] {
+                let said = painted_pane_with(&view, width, open);
+                assert!(
+                    said.iter()
+                        .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
+                    "at {width} px {what} drew no way out, so a reader who scrolled past the verb \
+                     row is stuck with it: {said:?}"
+                );
+            }
         }
 
         let resting = painted_pane_with(&sendable(SendProgress::Idle), 900.0, Disclosed::Nothing);
