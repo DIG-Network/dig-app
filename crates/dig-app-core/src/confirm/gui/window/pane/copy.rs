@@ -521,7 +521,7 @@ pub(crate) mod profiles {
     /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
     /// because the shell says the same thing in a native notice and two constants stating one fact
     /// is how the account state machine came to have two sentence sets that drifted (#2357).
-    pub(crate) fn cannot_create(blocked: CreationBlocked) -> &'static str {
+    pub(crate) fn cannot_create(blocked: CreationBlocked) -> String {
         crate::profiles::copy::cannot_create(blocked)
     }
 

@@ -56,7 +56,7 @@ pub(crate) fn card(
             card::interactive_card(ui, at, t, live, Some(copy::profiles::CARD), |inner| {
                 let mut hit = list(inner, t, &reading, &verbs);
                 inner.gap(space::S4);
-                create_panel(inner, t, creation);
+                hit = hit.or(create_panel(inner, t, creation, &verbs));
                 if !verbs.about.is_empty() {
                     inner.gap(space::S3);
                     hit = hit
@@ -236,6 +236,13 @@ struct ProfileVerbs {
     /// at the foot of the card, away from the rows, where it cannot be mistaken for a control that
     /// acts on one of them.
     about: Vec<Action<TrayAction>>,
+    /// The create control, drawn INSIDE the create panel so the sentence explaining what creating a
+    /// profile costs and does is the thing it sits under.
+    ///
+    /// Empty in every state but [`ProfileCreation::Possible`], because that is the only state in
+    /// which the model builds the row at all — the offer is withheld by the MODEL, and this pane
+    /// draws what it is given (dig_ecosystem#2939).
+    create: Vec<Action<TrayAction>>,
 }
 
 impl ProfileVerbs {
@@ -249,12 +256,14 @@ impl ProfileVerbs {
         let mut verbs = Self {
             per_profile: Vec::new(),
             about: Vec::new(),
+            create: Vec::new(),
         };
         for action in section_actions(tab) {
             match action.id {
                 TrayAction::SetActiveProfile { .. } | TrayAction::SetProfileVisibility { .. } => {
                     verbs.per_profile.push(action)
                 }
+                TrayAction::CreateProfile => verbs.create.push(action),
                 _ => verbs.about.push(action),
             }
         }
@@ -321,32 +330,49 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// A recessed panel INSIDE the card rather than a card of its own: it is about the same subject the
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
-fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation) {
-    // `ProfileCreation::Possible` is now REACHABLE in the shipped binary: it wires a real mint seam,
-    // so `of_profile_mint` can genuinely report a capable node. The create control is the next unit
-    // of work, so what keeps that from becoming a dead end is the `Possible => return` arm below —
-    // this panel draws NOTHING rather than announcing a capability with no control, which is the one
-    // thing `professional-ui` forbids outright. The safety is that arm, not an unreachable variant;
-    // deleting it would ship the dead end.
+/// The panel says one of two things, and never both:
+///
+/// * a state that WITHHOLDS the offer explains itself — what is still being checked, or which
+///   measured fact is in the way and what to do about it;
+/// * a state that can honour it draws the CONTROL, under the sentence saying what a profile is.
+///
+/// The panel used to draw nothing at all for a capable node, which was right while there was no
+/// control: announcing a capability with nothing to press is the dead end `professional-ui` forbids
+/// outright. The control exists now, so silence would be the opposite defect — a card that can offer
+/// something and does not say so.
+///
+/// Note what carries the safety. It is NOT this match: the offer is withheld by the MODEL, which
+/// builds no `CreateProfile` row unless `ProfileCreation::is_possible()`. So a mistake here draws an
+/// empty panel, never a live control on a node that cannot honour it.
+fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation, verbs: &ProfileVerbs) -> Option<TrayAction> {
+    let live = flow.live();
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
         // a blocked cause here would tell a person with a stopped node that nothing is missing from
         // their setup (dig_ecosystem#2690).
-        ProfileCreation::Unknown => copy::profiles::CHECKING_CREATION,
+        ProfileCreation::Unknown => copy::profiles::CHECKING_CREATION.to_string(),
         ProfileCreation::Blocked(blocked) => copy::profiles::cannot_create(blocked),
-        // The create control is the next unit of work in this same PR; until it is drawn beside it, a
-        // panel announcing that creation is possible would be a dead end, which `professional-ui`
-        // forbids outright.
-        ProfileCreation::Possible => return,
+        // What a profile IS, reused rather than rewritten: the control's own label says what
+        // pressing it does, and the funding window it opens states the cost. A second sentence here
+        // promising that creation COMPLETES would be false — nothing in this build runs the ceremony
+        // yet (dig_ecosystem#2952).
+        ProfileCreation::Possible => crate::profiles::copy::WHAT_A_PROFILE_IS.to_string(),
     };
+    let mut pressed = None;
     flow.place(|ui, at| {
         (
             card::panel(ui, at, t, Some(copy::profiles::CREATE_PANEL), |inner| {
-                inner.place(|ui, at| (text::body(ui, at, t, sentence), ()));
+                inner.place(|ui, at| (text::body(ui, at, t, &sentence), ()));
+                if !verbs.create.is_empty() {
+                    inner.gap(space::S3);
+                    pressed =
+                        inner.place(|ui, at| action::buttons(ui, at, t, live, &verbs.create));
+                }
             }),
             (),
         )
     });
+    pressed
 }
 
 #[cfg(test)]

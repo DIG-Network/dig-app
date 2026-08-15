@@ -1832,8 +1832,19 @@ mod copy {
         /// sentence rather than letting a screen fall back to a reason that is not the true one.
         pub fn unavailable_body(why: CreationBlocked) -> String {
             let because = match why {
-                CreationBlocked::NoChainTransport => MINTING_UNAVAILABLE_NO_TRANSPORT,
-                CreationBlocked::NoLineageWalk => MINTING_UNAVAILABLE_NO_LINEAGE,
+                CreationBlocked::NoChainTransport => MINTING_UNAVAILABLE_NO_TRANSPORT.to_string(),
+                CreationBlocked::NoLineageWalk => MINTING_UNAVAILABLE_NO_LINEAGE.to_string(),
+                // NOT reachable from the first-run wizard, and the sentence exists anyway. That
+                // wizard runs only on an account with no profile at all, where the funding index
+                // and the target index are both `ProfileIx::ROOT` and so cannot diverge. What the
+                // arm buys is a TOTAL match — a screen can never fall back to a reason that is not
+                // the true one — and a real string for the guards that walk `CreationBlocked::EVERY`.
+                CreationBlocked::FundingElsewhere { funding, target } => format!(
+                    "This account's XCH is held by profile {funding}, and creating profile \
+                     {target} is paid for from profile {target}'s own wallet — so DIG will not \
+                     begin it and nothing has been spent. Move funds to profile {target}'s address \
+                     and DIG will offer it here.",
+                ),
             };
             format!("{WHAT_A_DID_IS_FOR}\n\n{because}\n\n{UNTIL_THEN_EVERYTHING_ELSE}")
         }
@@ -1938,8 +1949,17 @@ mod copy {
         /// middle sentence differs, and it is the only thing the exhaustive match chooses.
         pub fn explainer_body(why: CreationBlocked) -> String {
             let middle = match why {
-                CreationBlocked::NoChainTransport => EXPLAINER_NO_TRANSPORT,
-                CreationBlocked::NoLineageWalk => EXPLAINER_NO_LINEAGE,
+                CreationBlocked::NoChainTransport => EXPLAINER_NO_TRANSPORT.to_string(),
+                CreationBlocked::NoLineageWalk => EXPLAINER_NO_LINEAGE.to_string(),
+                // Unreachable from the first-run wizard for the reason given at `unavailable_body`
+                // — an unprofiled account's two indices are both ROOT — and written out so the
+                // match stays total.
+                CreationBlocked::FundingElsewhere { funding, target } => format!(
+                    "It is what turns the wallet on this computer into a full DIG Account. This \
+                     account's XCH is held by profile {funding} and profile {target} is paid for \
+                     from its own wallet, so DIG will not begin it until funds reach profile \
+                     {target}'s address.",
+                ),
             };
             format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
         }

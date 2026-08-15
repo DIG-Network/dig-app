@@ -245,16 +245,54 @@ pub enum CreationBlocked {
     /// Named to match [`ProfileMintSeams::NoLineageWalk`](crate::account::profile_mint::ProfileMintSeams::NoLineageWalk),
     /// which is where the fact is measured.
     NoLineageWalk,
+    /// The node is healthy and the CEREMONY would refuse: this account's money is at one profile's
+    /// index and the next profile would be created at another.
+    ///
+    /// # Why this carries bare indices and not the seam's authority tokens
+    ///
+    /// [`WalletSlot`](crate::account::active_profile::WalletSlot) and
+    /// [`MintTarget`](crate::account::active_profile::MintTarget) exist so that *which index a
+    /// wallet opens at* can only be answered by the registry — neither has a bare constructor, and
+    /// that is what stops an unvouched index moving somebody's money. A copy layer needs the
+    /// NUMBER, to write it into a sentence; handing it an authority token to print would spend that
+    /// guarantee on a formatting job and put the token in reach of code that has no business
+    /// holding one. `ProfileIx` is `pub struct ProfileIx(pub u32)` — freely constructible, and a
+    /// number is all a sentence needs.
+    ///
+    /// The remedy is the payload: *move funds to profile N's address first*, mirroring what
+    /// `ProfileMint::refuse_divergent_indices` says at the door. A sentence that cannot name N
+    /// tells a person they are blocked without telling them where to go.
+    FundingElsewhere {
+        /// The profile whose wallet holds the money today.
+        funding: ProfileIx,
+        /// The profile that would be created, and so the address to fund.
+        target: ProfileIx,
+    },
 }
 
 impl CreationBlocked {
-    /// Every reason, in one place.
+    /// One REPRESENTATIVE reason per arm, in one place.
     ///
     /// Surfaces that must be checked against ALL of them — the copy guards, the pane's rendering
     /// tests — read this rather than keeping their own array, because an array copied into three
     /// files is three places to forget a new variant. Adding one here is what makes those checks
     /// widen with it.
-    pub const EVERY: [Self; 2] = [Self::NoChainTransport, Self::NoLineageWalk];
+    ///
+    /// # It enumerates ARMS, not values, and that is a real limit
+    ///
+    /// [`FundingElsewhere`](Self::FundingElsewhere) carries a payload, so no finite array can hold
+    /// its states. The representative here is the commonest one — money at ROOT, the second profile
+    /// next — which is enough for a sweep asking *does every arm get a sentence*. It is NOT enough
+    /// for a guard asserting the sentence VARIES with the payload: that needs its own case, built
+    /// from two different payloads, because every element of `EVERY` yields one fixed string.
+    pub const EVERY: [Self; 3] = [
+        Self::NoChainTransport,
+        Self::NoLineageWalk,
+        Self::FundingElsewhere {
+            funding: ProfileIx::ROOT,
+            target: ProfileIx(1),
+        },
+    ];
 }
 
 /// Whether this build can create a profile.
@@ -386,6 +424,15 @@ impl ProfileCreation {
             ProfileMintAvailability::NoLineageWalk => Self::Blocked(CreationBlocked::NoLineageWalk),
             ProfileMintAvailability::NoChainTransport => {
                 Self::Blocked(CreationBlocked::NoChainTransport)
+            }
+            // The two indices are unwrapped to bare numbers HERE, at the boundary between the seam
+            // and the copy: below this line nothing needs the authority the tokens carry, and above
+            // it nothing may fabricate one.
+            ProfileMintAvailability::FundingElsewhere(divergence) => {
+                Self::Blocked(CreationBlocked::FundingElsewhere {
+                    funding: divergence.funding.ix(),
+                    target: divergence.target.ix(),
+                })
             }
         }
     }
@@ -527,9 +574,9 @@ pub mod copy {
     ///
     /// Matching here makes the mapping exhaustive, testable, and impossible for the binary to get
     /// wrong: a new arm breaks this compile rather than quietly falling into a catch-all.
-    pub fn about_creation(creation: super::ProfileCreation) -> Option<&'static str> {
+    pub fn about_creation(creation: super::ProfileCreation) -> Option<String> {
         match creation {
-            super::ProfileCreation::Unknown => Some(CHECKING_CREATION),
+            super::ProfileCreation::Unknown => Some(CHECKING_CREATION.to_string()),
             super::ProfileCreation::Blocked(blocked) => Some(cannot_create(blocked)),
             // Creation is possible: the Account tab's card carries the control, and a notice cannot
             // explain an absence there is none of.
@@ -558,20 +605,37 @@ pub mod copy {
     /// the reason neither says "optional": a profile is REQUIRED for publishing, signing and
     /// messaging, and calling it optional would tell a person they had chosen to go without
     /// something they were never offered.
-    pub fn cannot_create(blocked: CreationBlocked) -> &'static str {
+    /// # The third sentence names an INDEX, which is why this returns an owned string
+    ///
+    /// [`CreationBlocked::FundingElsewhere`] is a fact about this account rather than about the
+    /// build, and its remedy is *put the money at profile N's address*. A `&'static str` cannot
+    /// carry N, and a sentence that drops it would tell somebody they are blocked and leave out the
+    /// one thing they need to act.
+    pub fn cannot_create(blocked: CreationBlocked) -> String {
         match blocked {
             CreationBlocked::NoChainTransport => {
                 "Creating a profile mints a DID and a store on the Chia blockchain, and DIG could \
                  not reach the chain to check whether this computer can do it. Your DIG node is \
                  what reads the chain, so start it — the Home tab shows whether it is running. \
                  This card offers creation as soon as your node answers."
+                    .to_string()
             }
             CreationBlocked::NoLineageWalk => {
                 "Your DIG node answers, and it cannot serve the chain reads the second half of \
                  creating a profile needs — so beginning one would spend XCH on something that \
                  could not be finished. Update your DIG node to a newer version and this card will \
                  offer creation."
+                    .to_string()
             }
+            // Deliberately free of the words the other two arms' remedies are keyed on — this
+            // cause is neither started nor updated, and a card carrying all three verbs would let a
+            // per-arm remedy check pass on a sentence that answers every fault at once.
+            CreationBlocked::FundingElsewhere { funding, target } => format!(
+                "Your DIG node is working. Creating a profile pays for it from that profile's own \
+                 wallet, and this account's XCH is held by profile {funding}, so a new profile {target} \
+                 cannot be paid for yet. Move funds to profile {target}'s address first and this \
+                 card will offer creation."
+            ),
         }
     }
 
