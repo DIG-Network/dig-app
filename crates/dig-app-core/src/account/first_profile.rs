@@ -745,14 +745,24 @@ pub mod copy {
     ///
     /// The promise survives only where it is still true: this WINDOW spends nothing, and declining
     /// spends nothing. Pressing [`CREATE`] does.
+    ///
+    /// # The resumption promise had to go, and its replacement is a warning
+    ///
+    /// It also used to say that a started creation *carries on, and DIG picks it up again*. Nothing
+    /// picks it up: the driver always starts at
+    /// [`begin`](crate::account::profile_mint::ProfileMintDoor::begin) and there is no advance-only
+    /// path in this build. Told they could close it safely, a person would close it — and be left
+    /// having paid for a creation this version cannot continue. So the sentence says the opposite of
+    /// what it said, because the truth is the opposite.
     pub fn ready_body(cost_mojos: u64) -> String {
         format!(
             "This wallet now holds enough to create a profile. Creating one costs {}, taken from \
              this wallet when you choose {CREATE}.\n\n\
              DIG will submit two transactions — your identity, then its store — and wait for the \
-             blockchain to confirm both. That usually takes a few minutes, and DIG shows you where \
-             it has got to. You can close the progress window at any time without cancelling \
-             anything: a creation that has started carries on, and DIG picks it up again.\n\n\
+             blockchain to confirm both. That usually takes a few minutes. Leave DIG running until \
+             it says the profile is ready: this version can only START a creation, so one that is \
+             interrupted cannot yet be picked back up, and the money it has already spent stays \
+             spent.\n\n\
              Choosing {NOT_NOW} spends nothing and changes nothing.",
             xch(cost_mojos)
         )
@@ -1120,6 +1130,38 @@ mod tests {
                 "the window still carries {stale:?}, which is false now that it can spend: {body}"
             );
         }
+    }
+
+    /// **The offer does not promise that an interrupted creation will be picked back up.**
+    ///
+    /// Makes impossible: telling somebody it is safe to close the window, immediately above a
+    /// control that spends real XCH on a creation nothing resumes. `create_profile` is the only
+    /// driver, it always starts at `ProfileMintDoor::begin`, and there is no advance-only path in
+    /// this build — so *"a creation that has started carries on, and DIG picks it up again"* was an
+    /// instruction to lose money.
+    ///
+    /// The positive half is what keeps this from passing on an empty string, and it is also the
+    /// only reason the negative half is safe to make: a window that merely dropped the promise
+    /// would leave a person with no idea that quitting costs them.
+    #[test]
+    fn the_offer_does_not_promise_a_resumption_this_build_cannot_do() {
+        let body = copy::ready_body(first_profile_cost_mojos());
+
+        for promise in [
+            "picks it up again",
+            "carries on",
+            "close the progress window at any time",
+            "without cancelling anything",
+        ] {
+            assert!(
+                !body.contains(promise),
+                "the offer promised {promise:?}, and nothing resumes a stopped creation: {body}"
+            );
+        }
+        assert!(
+            body.contains("Leave DIG running") && body.contains("cannot yet be picked back up"),
+            "the offer must say what an interruption actually costs: {body}"
+        );
     }
 
     /// **The offer's default answer is the REFUSAL.**

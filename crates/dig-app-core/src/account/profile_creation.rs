@@ -65,6 +65,15 @@ pub trait Ceremony {
         evidence: Self::Evidence,
         label: Option<String>,
     ) -> Result<ProfileIx, MintDoorError>;
+
+    /// Where the mint stands, read WITHOUT spending, pushing or writing.
+    ///
+    /// The driver asks this only when [`begin`](Self::begin) has just failed, because the two
+    /// refusals it can fail with — *refused* and *journal* — mean **nothing was pushed** on a first
+    /// attempt and mean **a mint is already under way** once one has been started, and the error
+    /// alone cannot tell those apart. Guessing the first of those is the sentence that invites a
+    /// second paid creation.
+    fn standing(&self) -> Result<CreationStep, MintError>;
 }
 
 impl<D: ProfileMintDoor + ?Sized> Ceremony for D {
@@ -88,6 +97,10 @@ impl<D: ProfileMintDoor + ?Sized> Ceremony for D {
     ) -> Result<ProfileIx, MintDoorError> {
         ProfileMintDoor::record(self, &did, &store, label)
     }
+
+    fn standing(&self) -> Result<CreationStep, MintError> {
+        ProfileMintDoor::status(self).map(|status| Reached::of_status(status).into_step())
+    }
 }
 
 /// What one ceremony call answered.
@@ -105,6 +118,20 @@ pub enum Reached<E> {
         /// The same facts as plain values, for a surface to draw.
         profile: ConfirmedProfile,
     },
+}
+
+impl<E> Reached<E> {
+    /// The step alone, with the evidence dropped.
+    ///
+    /// For reading a ceremony's position without being able to act on it — [`Ceremony::standing`]
+    /// answers a question about MONEY, and answering it must not hand anybody something
+    /// [`Ceremony::record`] would accept.
+    fn into_step(self) -> CreationStep {
+        match self {
+            Self::Underway(step) => step,
+            Self::Confirmed { profile, .. } => CreationStep::Confirmed(profile),
+        }
+    }
 }
 
 impl
@@ -266,6 +293,14 @@ impl Spent {
     ///
     /// * `InsufficientFunds`, `Locked`, `FeeAboveCeiling`, `Build`, `Journal`, `Refused` — every one
     ///   of these is decided BEFORE a bundle is built or pushed, so nothing left the wallet.
+    ///
+    /// # Two of those are only conditionally true, which is why this is not the last word
+    ///
+    /// `Journal` and `Refused` are decided before a push *on a first attempt*. Once a creation has
+    /// been started they mean the opposite — **a mint is already under way, and it was paid for** —
+    /// and this function cannot tell the two apart, because `reached` is `None` in both. So a
+    /// failed [`Ceremony::begin`] does not stop here: see
+    /// [`of_a_failed_beginning`](Self::of_a_failed_beginning), which asks the door.
     /// * `Rejected` — *"the mempool declined it. The user's funds did not move"*.
     /// * `ChainUnreachable` — *"the outcome is UNKNOWN, never no"*.
     ///
@@ -313,6 +348,53 @@ impl Spent {
             },
         }
     }
+
+    /// The verdict for a [`Ceremony::begin`] that failed — the one place the DOOR is consulted
+    /// rather than the error alone.
+    ///
+    /// # Why a second read, on this path only
+    ///
+    /// `begin` is the only call that can fail with `reached == None` while a paid-for mint already
+    /// exists: its two refusals are ambiguous exactly as [`of_error`](Self::of_error) records.
+    /// [`Ceremony::standing`] is the read built for this question — it spends, pushes and writes
+    /// nothing — so the app asks it instead of guessing.
+    ///
+    /// # Every uncertain answer becomes [`Unknown`](Self::Unknown), deliberately
+    ///
+    /// A `standing` that itself fails is not evidence of an untouched wallet; it is the absence of
+    /// evidence, and an unread door cannot be reported as an empty one. Being over-cautious about
+    /// somebody's money costs them nothing — the window says *check before starting another* — while
+    /// a wrong [`Nothing`](Self::Nothing) invites a second paid creation. So a `Nothing` survives
+    /// here only from the errors that are unconditional: an unaffordable wallet, a locked account, a
+    /// fee above the ceiling, an unbuildable bundle, or a mempool that said no.
+    fn of_a_failed_beginning<C>(ceremony: &C, fault: &MintDoorError) -> Self
+    where
+        C: Ceremony + ?Sized,
+    {
+        let from_the_error_alone = Self::of(None, fault);
+        let ambiguous = matches!(
+            &fault.mint,
+            Some(MintError::Refused(_) | MintError::Journal(_))
+        );
+        if !ambiguous || !matches!(from_the_error_alone, Self::Nothing) {
+            return from_the_error_alone;
+        }
+
+        match ceremony.standing() {
+            Ok(_) => Self::Unknown {
+                detail: format!(
+                    "DIG could not start this creation because one has already been started for \
+                     this account, and that one may already have been paid for.\n\n{fault}"
+                ),
+            },
+            Err(why) => Self::Unknown {
+                detail: format!(
+                    "DIG could not start this creation, and could not read whether one is already \
+                     under way for this account.\n\n{fault}\n{why}"
+                ),
+            },
+        }
+    }
 }
 
 /// How the creation ended.
@@ -327,7 +409,13 @@ pub enum Creation {
         /// Its on-chain evidence, as plain values.
         profile: ConfirmedProfile,
     },
-    /// The creation did not finish. It is resumable — the journal entry is persisted.
+    /// The creation did not finish.
+    ///
+    /// The journal entry is persisted, so what was started is not forgotten — but **this build
+    /// cannot pick it back up.** [`create_profile`] is the only thing that drives a ceremony and it
+    /// always starts at [`Ceremony::begin`]; there is no advance-only path anywhere. Saying
+    /// otherwise on a screen is what dig_ecosystem#2989's gates stopped, and the copy in
+    /// [`copy::stopped_body`] says the true thing instead.
     Stopped(Stopped),
 }
 
@@ -361,10 +449,22 @@ impl Default for Watch {
     /// ticking every few seconds needs a budget in the hundreds rather than the tens. Six hundred
     /// polls at a five-second tick is about fifty minutes — long enough for a congested mempool,
     /// short enough that a surface is not held forever.
+    ///
+    /// # The fault tolerance matches the poll budget, and a smaller number bought nothing
+    ///
+    /// It used to be twenty, which at a five-second tick is a hundred seconds: an ordinary node
+    /// blip was enough to abandon a creation that had **already been paid for**. Abandoning early
+    /// buys no safety and saves no money — the mint is on chain either way, the loop is already
+    /// bounded by `polls`, and every one of these faults is by definition an UNKNOWN outcome, which
+    /// re-asking is the only thing that can resolve. So the overall budget is the only bound, and
+    /// exhausting it is still reported honestly rather than as a failure.
+    ///
+    /// A DECIDED fault is unaffected: it never reaches this counter, because re-asking cannot
+    /// change an answer the registry or the account has already given.
     fn default() -> Self {
         Self {
             polls: 600,
-            tolerated_faults: 20,
+            tolerated_faults: 600,
         }
     }
 }
@@ -410,7 +510,9 @@ where
 
     let begun = match ceremony.begin(seed) {
         Ok(begun) => begun,
-        Err(fault) => return stop(None, &fault),
+        Err(fault) => {
+            return stopped_with(Spent::of_a_failed_beginning(ceremony, &fault), None, &fault)
+        }
     };
 
     let mut answer = begun;
@@ -473,10 +575,17 @@ where
     })
 }
 
-/// The one construction of a stopped creation, so its money verdict has a single derivation.
+/// A creation that stopped mid-flight, whose money verdict follows from the stage and the fault.
 fn stop(reached: Option<CreationStep>, fault: &MintDoorError) -> Creation {
+    stopped_with(Spent::of(reached.as_ref(), fault), reached, fault)
+}
+
+/// The one construction of a stopped creation, so every field but the verdict has a single
+/// derivation — and so the two verdicts that exist ([`Spent::of`] and
+/// [`Spent::of_a_failed_beginning`]) are the only difference between the paths.
+fn stopped_with(spent: Spent, reached: Option<CreationStep>, fault: &MintDoorError) -> Creation {
     Creation::Stopped(Stopped {
-        spent: Spent::of(reached.as_ref(), fault),
+        spent,
         reached,
         why: fault.to_string(),
         may_be_forgotten: fault.may_be_forgotten(),
@@ -569,14 +678,16 @@ pub mod copy {
         )
     }
 
-    /// What a stopped creation says: how far it got, what is known about the money, and that it can
-    /// be resumed.
+    /// What a stopped creation says: how far it got, what is known about the money, and what this
+    /// build can and cannot do about it.
     ///
-    /// # Resumable, and said so plainly
+    /// # It used to promise a resumption that does not exist
     ///
-    /// The journal entry is persisted before anything is pushed, so a stopped creation is a paused
-    /// one. A window implying the money is lost would be wrong AND would invite a second mint, which
-    /// is the expensive mistake on this path.
+    /// The journal entry is persisted, so nothing is forgotten — but nothing picks it up either, and
+    /// *"DIG saved where this got to, so it can carry on from here"* read as though it would. The
+    /// true sentence is narrower and has to be said in the same breath as the warning: what was
+    /// started is on the blockchain, this version can only START a creation, and a person who reads
+    /// *carry on* as *I can press Create again* is the person who pays twice.
     pub fn stopped_body(stopped: &Stopped) -> String {
         let progress = match &stopped.reached {
             Some(step) => step_line(step),
@@ -596,14 +707,22 @@ pub mod copy {
                  stranded, so do not."
                 .to_owned(),
         };
-        let forgotten = match stopped.may_be_forgotten {
-            true => {
+        let carrying_on = match (stopped.may_be_forgotten, &stopped.spent) {
+            (true, _) => {
                 "\n\nDIG could not save its record of this creation on this computer, so a \
-                     restart will not remember it. Do not start another one."
+                 restart will not remember it. Do not start another one."
             }
-            false => "\n\nDIG saved where this got to, so it can carry on from here.",
+            (false, Spent::Nothing) => {
+                "\n\nNothing was started, so there is nothing for DIG to carry on from."
+            }
+            (false, _) => {
+                "\n\nDIG has kept its record of what it started, but it cannot carry on from \
+                 there: this version can only START a creation, not pick up one that stopped. Do \
+                 not start another one — what has been started is on the blockchain, and a later \
+                 version of DIG will be able to continue it."
+            }
         };
-        format!("{progress}\n\n{money}\n\n{}{forgotten}", stopped.why)
+        format!("{progress}\n\n{money}\n\n{}{carrying_on}", stopped.why)
     }
 }
 
@@ -643,6 +762,20 @@ mod tests {
         }
     }
 
+    /// What the real door answers about an index with nothing journalled: dig-account's
+    /// `profile_mint_status` looks the index up in the registry's in-progress list and fails with
+    /// [`MintError::Journal`] when it is not there.
+    fn nothing_journalled() -> RefCell<Option<Result<CreationStep, MintError>>> {
+        RefCell::new(Some(Err(MintError::Journal(
+            "no mint is journalled at profile 1".to_owned(),
+        ))))
+    }
+
+    /// A door that reports a creation already under way at `step`.
+    fn already_under_way(step: CreationStep) -> RefCell<Option<Result<CreationStep, MintError>>> {
+        RefCell::new(Some(Ok(step)))
+    }
+
     fn fault(mint: MintError) -> MintDoorError {
         MintDoorError {
             mint: Some(mint),
@@ -669,6 +802,16 @@ mod tests {
         advanced: std::cell::Cell<usize>,
         /// What `record` answers.
         record_fails: Option<MintError>,
+        /// What the DOOR says is already under way, which is what a failed `begin` consults.
+        ///
+        /// The default is the real door's answer for an index with nothing journalled — dig-account
+        /// returns `MintError::Journal("no mint is journalled at profile …")` — so a fixture has to
+        /// opt IN to the started-mint case rather than fall into it.
+        ///
+        /// Held the way `begins` is, rather than as a plain value, because `MintError` is not
+        /// `Clone` and this double must be able to express ANY of them: a fixture that could only
+        /// vary the Ok side could not tell an unreadable door from an empty one.
+        standing: RefCell<Option<Result<CreationStep, MintError>>>,
     }
 
     impl ScriptedCeremony {
@@ -682,6 +825,7 @@ mod tests {
                 records: std::cell::Cell::default(),
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
+            standing: nothing_journalled(),
             }
         }
 
@@ -694,6 +838,7 @@ mod tests {
                 records: std::cell::Cell::default(),
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
+            standing: nothing_journalled(),
             }
         }
 
@@ -737,6 +882,7 @@ mod tests {
                 records: std::cell::Cell::default(),
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
+            standing: nothing_journalled(),
             }
         }
     }
@@ -762,6 +908,13 @@ mod tests {
                     .clone()
                     .expect("an exhausted script has a repeating answer")),
             }
+        }
+
+        fn standing(&self) -> Result<CreationStep, MintError> {
+            self.standing
+                .borrow_mut()
+                .take()
+                .expect("standing is read at most once, on a failed begin")
         }
 
         fn record(&self, (): (), _label: Option<String>) -> Result<ProfileIx, MintDoorError> {
@@ -884,10 +1037,6 @@ mod tests {
             (MintError::Rejected("DOUBLE_SPEND".into()), Spent::Nothing),
             (MintError::Locked, Spent::Nothing),
             (
-                MintError::Journal("already in progress".into()),
-                Spent::Nothing,
-            ),
-            (
                 MintError::ChainUnreachable("connection refused".into()),
                 Spent::Unknown {
                     detail: "connection refused".to_owned(),
@@ -906,6 +1055,141 @@ mod tests {
             assert_eq!(ceremony.records.get(), 0);
             assert_eq!(ceremony.advanced.get(), 0, "a refused begin is not polled");
             assert!(steps.is_empty(), "nothing happened, so nothing is reported");
+        }
+    }
+
+    /// **A `begin` refused while a creation may already be under way NEVER says nothing was
+    /// spent.**
+    ///
+    /// Makes impossible: the sentence *"No money left your wallet"* shown to somebody whose first
+    /// creation is already paid for. `Refused` and `Journal` are pre-push refusals on a FIRST
+    /// attempt and mean the opposite once a mint has been started, and the error carries nothing
+    /// that separates the two — so the driver asks [`Ceremony::standing`], and every uncertain
+    /// answer falls to [`Spent::Unknown`].
+    ///
+    /// # The fixture varies the door, not the error, because the fix is a SECOND READ
+    ///
+    /// An implementation that never consulted the door returns [`Spent::Nothing`] for both of the
+    /// first two legs — they differ only in what `standing` answers and in nothing the error knows.
+    /// The second leg is the state measured on this branch: the journal sits at profile 0, the
+    /// target has moved to profile 1, so the door's own read at the target says *nothing is
+    /// journalled here* while a paid mint exists one index below. Reading that absence as an
+    /// untouched wallet is the defect.
+    ///
+    /// The third leg is the control. Without it an implementation that answered `Unknown` to
+    /// everything would pass, and the honest reassurance a person is owed when their wallet really
+    /// is untouched would be gone.
+    #[test]
+    fn a_beginning_refused_while_a_creation_may_be_under_way_never_says_nothing_was_spent() {
+        let cases: Vec<(&str, MintError, RefCell<Option<Result<CreationStep, MintError>>>, bool)> = vec![
+            (
+                "the door says a creation is already under way",
+                MintError::Journal("a mint is already in progress there".into()),
+                already_under_way(submitted()),
+                false,
+            ),
+            (
+                "the journal is at another index, so the door at the target reads empty",
+                MintError::Refused(
+                    "This mint would pay from profile 0 but create profile 1".into(),
+                ),
+                nothing_journalled(),
+                false,
+            ),
+            (
+                "an unaffordable wallet is decided without any door at all",
+                MintError::InsufficientFunds {
+                    required: 20_002,
+                    available: 5,
+                },
+                nothing_journalled(),
+                true,
+            ),
+        ];
+
+        for (what, error, standing, nothing_is_honest) in cases {
+            let ceremony = ScriptedCeremony {
+                standing,
+                ..ScriptedCeremony::refusing(error)
+            };
+
+            let (outcome, _) = drive(&ceremony, Watch::default());
+
+            let Creation::Stopped(stopped) = outcome else {
+                panic!("a refused beginning is not a created profile");
+            };
+            let body = copy::stopped_body(&stopped);
+            match nothing_is_honest {
+                true => {
+                    assert_eq!(stopped.spent, Spent::Nothing, "{what}");
+                    assert!(body.contains("No money left your wallet"), "{what}");
+                }
+                false => {
+                    assert!(
+                        matches!(stopped.spent, Spent::Unknown { .. }),
+                        "{what}: reported {:?} about somebody's money",
+                        stopped.spent
+                    );
+                    assert!(
+                        !body.contains("No money left your wallet"),
+                        "{what}: the window promised untouched funds"
+                    );
+                }
+            }
+            assert_eq!(ceremony.advanced.get(), 0, "a refused begin is not polled");
+        }
+    }
+
+    /// **A node blip long enough to trip the old tolerance no longer abandons a paid-for mint.**
+    ///
+    /// Twenty-five consecutive unreachable polls is about two minutes at the production tick — past
+    /// the ~100 seconds that used to end the watch, and well inside the fifty-minute budget. The
+    /// mint is already paid for at this point, so giving up on it buys nothing and costs the person
+    /// the window that was going to tell them it finished.
+    ///
+    /// The counterpart legs — that a DECIDED fault still stops at once, and that the overall budget
+    /// still bounds the loop — are asserted by `a_decided_refusal_is_not_retried` and
+    /// `a_mint_that_never_confirms_is_never_recorded`, which is why this one may use the real
+    /// default.
+    #[test]
+    fn an_ordinary_node_blip_does_not_abandon_a_paid_mint() {
+        let flaky = ScriptedCeremony::with_faults_before_each_answer(25);
+
+        let (outcome, _) = drive(&flaky, Watch::default());
+
+        assert!(
+            matches!(outcome, Creation::Created { .. }),
+            "two minutes of an unreachable node threw away a mint that then confirmed"
+        );
+    }
+
+    /// **No stopped-creation window promises a resumption this build cannot perform.**
+    ///
+    /// Makes impossible: *"DIG saved where this got to, so it can carry on from here"* beside a
+    /// creation nothing will pick up. [`create_profile`] is the only driver and it always starts at
+    /// [`Ceremony::begin`]; a person who reads *carry on* as *press Create again* pays twice, and on
+    /// this branch the second press is refused for good besides.
+    #[test]
+    fn no_stopped_window_promises_a_resumption() {
+        for spent in [
+            Spent::Unknown {
+                detail: "no route to host".to_owned(),
+            },
+            Spent::Committed,
+        ] {
+            let body = copy::stopped_body(&Stopped {
+                reached: Some(submitted()),
+                spent,
+                why: "the node stopped answering".to_owned(),
+                may_be_forgotten: false,
+            });
+            for promise in ["carry on from here", "picks it up", "DIG saved where this got to"] {
+                assert!(!body.contains(promise), "a stopped creation said {promise:?}");
+            }
+            assert!(
+                body.contains("cannot carry on") && body.contains("Do not start another one"),
+                "the window must say plainly that this version cannot continue it"
+            );
         }
     }
 
@@ -929,6 +1213,7 @@ mod tests {
             records: std::cell::Cell::default(),
             advanced: std::cell::Cell::default(),
             record_fails: None,
+            standing: nothing_journalled(),
         };
 
         let (outcome, _) = drive(&ceremony, Watch::default());
@@ -996,6 +1281,7 @@ mod tests {
             records: std::cell::Cell::default(),
             advanced: std::cell::Cell::default(),
             record_fails: None,
+            standing: nothing_journalled(),
         };
 
         let (outcome, _) = drive(
