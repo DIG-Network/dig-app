@@ -44,8 +44,11 @@ use std::sync::Arc;
 
 use chia_protocol::Bytes32;
 use dig_account::mint::SpendPublisher;
-use dig_account::mint::{MintError, MintNetwork, MintOptions, ProfileMintStatus, ProfileSeed};
+use dig_account::mint::{
+    ConfirmedStore, MintError, MintNetwork, MintOptions, MintedDid, ProfileMintStatus, ProfileSeed,
+};
 use dig_account::registry::journal::MintStage;
+use dig_account::ProfileIx;
 use dig_chainsource_interface::ChainSource;
 
 use crate::account::active_profile::{MintTarget, WalletSlot};
@@ -153,6 +156,34 @@ pub trait ProfileMintDoor {
 
     /// How alive the in-flight bundle looks, or `None` when no bundle is in flight.
     fn liveness(&self) -> Option<MintLiveness>;
+
+    /// Record the confirmed profile in the registry, returning the index it took.
+    ///
+    /// # Why this takes the EVIDENCE and not a coin id
+    ///
+    /// [`MintedDid`] and [`ConfirmedStore`] have no public producer. The only place a host can
+    /// obtain either is [`ProfileMintStatus::Confirmed`], and that variant is reached only from a
+    /// chain read of a coin buried under dig-account's confirmation depth. So a profile cannot be
+    /// recorded from a push receipt — **provided no sibling method is ever added that takes a bare
+    /// coin id.** One would destroy the property for every caller at once.
+    ///
+    /// Recording the account's FIRST profile also makes it active, because
+    /// [`ProfileRegistry::record_minted`](dig_account::ProfileRegistry::record_minted) sets the
+    /// active slot when there is none. There is deliberately no separate switch call here: two
+    /// expressions of "which profile is active" is how they come to disagree.
+    ///
+    /// # Money
+    ///
+    /// This spends nothing — the spending already happened. It writes the registry, so it can fail
+    /// with `mint: None` and a refused persist, which means the profile EXISTS on chain and this
+    /// machine will not remember it. That is neither a success nor a failure and must be reported as
+    /// itself.
+    fn record(
+        &self,
+        did: &MintedDid,
+        store: &ConfirmedStore,
+        label: Option<String>,
+    ) -> Result<ProfileIx, MintDoorError>;
 
     /// The divergence [`begin`](Self::begin) would refuse on, or `None` when it would not refuse.
     ///
@@ -746,6 +777,23 @@ where
     fn liveness(&self) -> Option<MintLiveness> {
         liveness_of(self.session, self.target.ix(), self.chain)
     }
+
+    fn record(
+        &self,
+        did: &MintedDid,
+        store: &ConfirmedStore,
+        label: Option<String>,
+    ) -> Result<ProfileIx, MintDoorError> {
+        let ix = self.target.ix();
+        // No minter is derived, so the lock-ordering rule `begin` and `advance` obey — take the
+        // account mutex BEFORE the registry write lock — has nothing to bind here.
+        self.session.with_journal(|registry| {
+            registry
+                .record_minted(ix, did, store, label)
+                .map(|_| ix)
+                .map_err(|why| MintError::Journal(why.to_string()))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -965,6 +1013,16 @@ mod tests {
         }
         fn liveness(&self) -> Option<MintLiveness> {
             None
+        }
+        fn record(
+            &self,
+            _did: &MintedDid,
+            _store: &ConfirmedStore,
+            _label: Option<String>,
+        ) -> Result<ProfileIx, MintDoorError> {
+            // Unreachable from these tests by construction: reaching it needs mint evidence, which
+            // has no public producer. The double cannot fabricate one, and that is the point.
+            unreachable!("the seam tests never confirm a mint")
         }
     }
 
