@@ -65,10 +65,7 @@ use dig_app_core::form_factor::FormFactor;
 #[cfg(feature = "tray")]
 use dig_app_core::loopback::{PairedAppsControl, SignReauthGate};
 #[cfg(feature = "tray")]
-use dig_app_core::session_lock::{
-    panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
-    SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
-};
+use dig_app_core::session_lock::{SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT};
 #[cfg(feature = "tray")]
 use dig_app_core::sign_service;
 #[cfg(feature = "tray")]
@@ -82,13 +79,11 @@ use dig_app_core::Os;
 use std::sync::Arc;
 
 /// The live session-lock wiring the tray drives once the APP-SIGN channel is up: the shared
-/// [`SessionLock`] (lock-now / idle poll / OS screen-lock all act on it, and the sign path
-/// re-authenticates through it) plus the OS screen-lock subscription guard, kept alive for as long as
-/// the tray runs.
+/// [`SessionLock`], which lock-now and the idle poll both act on and which the sign path
+/// re-authenticates through.
 #[cfg(feature = "tray")]
 struct TraySession {
     lock: TraySessionLock,
-    _screen_guard: Box<dyn ScreenLockGuard>,
     /// The live account behind this session, so the tray can address its phrase vault. Held here
     /// because [`SessionLock`] deliberately exposes only lock/unlock, not the keys it guards.
     residency: AccountResidency,
@@ -425,14 +420,6 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     // Take the paired-app handle before the router is moved onto the serving thread.
     let paired_apps = router.control();
 
-    // Subscribe to OS screen-lock events, containing any callback panic before it can cross the
-    // extern-"system" FFI boundary (WSEC-D adversarial hardening). The returned guard lives in the
-    // TraySession so the subscription stays alive for the whole tray lifetime.
-    let lock_for_screen = Arc::clone(&lock);
-    let screen_guard = PlatformScreenLockSource::new().start(panic_safe_lock_callback(move || {
-        lock_for_screen.on_screen_locked();
-    }));
-
     std::thread::Builder::new()
         .name("dig-app-sign".to_string())
         .spawn(move || {
@@ -446,7 +433,6 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     Ok(TraySession {
         lock,
         residency,
-        _screen_guard: screen_guard,
         account: AccountFacts {
             profile_id,
             recoverable,
