@@ -144,6 +144,23 @@ pub(crate) fn readouts(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> 
     }
 }
 
+/// Draw a run of readouts as ONE row each, however wide the pane is. Returns the height used.
+///
+/// [`readouts`] pairs items left and right once there is room, which is right for a grid of
+/// unrelated facts — a version beside an uptime. It is wrong for a list whose items are the SAME
+/// kind of thing and are meant to be compared down a column: two assets rendered side by side read
+/// as one flat line rather than as a list, and a third asset appearing in a new place under the
+/// first is a layout that changes shape as the data grows (dig_ecosystem#2967).
+///
+/// So a caller that is drawing a LIST asks for rows, and a caller drawing a grid of facts asks for
+/// [`readouts`]. Same row rendering underneath; the difference is only whether pairing is allowed.
+pub(crate) fn rows(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
+    if items.is_empty() {
+        return 0.0;
+    }
+    one_column(ui, grid_within(at), t, items)
+}
+
 /// Every readout stacked, full width. The narrow-window layout, and the fallback.
 fn one_column(ui: &mut Ui, at: Rect, t: &Tokens, items: &[Readout]) -> f32 {
     let mut y = at.top();
@@ -299,6 +316,46 @@ fn measure(ui: &mut Ui, at: Rect, t: &Tokens, amount: &str, unit: &str) -> f32 {
     );
     // Baseline-aligned by bottom edge rather than top: a 13 px unit hung off a 15 px number's top
     // reads as a superscript.
+    let unit_top = at.top() + number_size.y - unit_galley.size().y;
+    super::selectable::text(ui, egui::Pos2::new(unit_at, unit_top), unit_galley);
+    number_size.y
+}
+
+/// The ONE figure a pane exists to answer, at [`size::DISPLAY`]. Returns the height used.
+///
+/// # Why only a measure is enlarged
+///
+/// Every other variant falls through to [`value`] at its ordinary size, and that is the honesty
+/// rule rather than a rendering shortcut. A [`Value::Unknown`] is the ABSENCE of a figure, and an
+/// absence set 28 px tall in the position a balance occupies is read as a balance by everyone who
+/// does not stop to read the sentence — which is the same defect as printing `0` for a number
+/// nobody measured (dig_ecosystem#2871, dig_ecosystem#2879), wearing a larger font.
+///
+/// So the size is earned by the value being a reading. A pane that wants a headline gets one only
+/// when it has something to headline, and the not-known case degrades to the sentence in `--faint`
+/// that [`value`] already draws for it.
+pub(crate) fn headline(ui: &mut Ui, at: Rect, t: &Tokens, item: &Value) -> f32 {
+    let Value::Measure { amount, unit } = item else {
+        return value(ui, at, t, item);
+    };
+
+    let number = ui
+        .painter()
+        .layout_no_wrap(amount.clone(), semibold(size::DISPLAY), rgba(t.text));
+    let number_size = number.size();
+    super::selectable::text(ui, at.left_top(), number);
+
+    // `--text-base` against a 28 px figure, bottom-aligned for the reason [`measure`] gives: the
+    // unit is what the number is IN, and a unit hung off the top of a display figure reads as an
+    // exponent — which on a money surface is a different number.
+    let unit_at = at.left() + number_size.x + space::S2;
+    let unit_galley = text::one_line(
+        ui,
+        unit,
+        regular(size::BASE),
+        rgba(t.muted),
+        (at.right() - unit_at).max(0.0),
+    );
     let unit_top = at.top() + number_size.y - unit_galley.size().y;
     super::selectable::text(ui, egui::Pos2::new(unit_at, unit_top), unit_galley);
     number_size.y
@@ -482,6 +539,110 @@ impl Tone {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A headline enlarges a reading and REFUSES to enlarge an absence** (dig_ecosystem#2967).
+    ///
+    /// The money-lie guard for the display size. A balance nobody has measured must never occupy
+    /// the position and the weight of one that has been — that is the same defect as printing `0`
+    /// for an unmeasured figure (dig_ecosystem#2871, dig_ecosystem#2879) wearing a larger font, and
+    /// it is the exact mistake a `headline` written as "draw everything bigger" would make.
+    ///
+    /// Both halves are asserted, and neither alone is sufficient:
+    ///
+    /// - an absence drawn by [`headline`] comes out at EXACTLY the height [`value`] gives it, so it
+    ///   was not enlarged at all — an implementation that scaled it by any amount fails;
+    /// - a measure drawn by [`headline`] comes out TALLER than [`value`] gives it, which is the
+    ///   control. Without it, a `headline` that enlarged nothing whatsoever would pass the first
+    ///   assertion perfectly.
+    #[test]
+    fn a_headline_enlarges_a_reading_and_never_an_absence() {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let reading = Value::Measure {
+            amount: "12.5".into(),
+            unit: "$DIG".into(),
+        };
+        let absence = Value::Unknown(
+            "Not known — your account is locked, so DIG cannot tell which address to read.".into(),
+        );
+
+        let measured = std::cell::Cell::new((0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("headline-test")).show(ctx, |ui| {
+                    let t = crate::confirm::gui::theme::Theme::Light.tokens();
+                    let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(400.0, 400.0));
+                    measured.set((
+                        headline(ui, at, &t, &reading),
+                        value(ui, at, &t, &reading),
+                        headline(ui, at, &t, &absence),
+                        value(ui, at, &t, &absence),
+                    ));
+                });
+            });
+        }
+
+        let (big_reading, plain_reading, big_absence, plain_absence) = measured.get();
+        assert!(
+            big_reading > plain_reading,
+            "a headline reading ({big_reading} px) was no taller than an ordinary one \
+             ({plain_reading} px), so this test cannot tell an enlarging headline from one that \
+             does nothing"
+        );
+        assert_eq!(
+            big_absence, plain_absence,
+            "a not-known balance was drawn at headline size, where it reads as a figure"
+        );
+    }
+
+    /// **A list of rows stays one per line however wide the pane gets** (dig_ecosystem#2967).
+    ///
+    /// [`readouts`] pairs items side by side above `TWO_COLUMN_AT`, which is right for a grid of
+    /// unrelated facts and wrong for a list: it turned the wallet's two assets into a single flat
+    /// line, and would put a third asset in a new place under the first.
+    ///
+    /// Asserted as a COMPARISON against `readouts` at the same width, because a bare "rows is tall"
+    /// check passes at any width where pairing would not have happened anyway — which is most of
+    /// them. 900 px is comfortably over the pairing threshold, so the two must disagree here.
+    #[test]
+    fn a_list_of_rows_never_pairs_its_items_side_by_side() {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let items = [
+            Readout::new(
+                "Chia",
+                Value::Measure {
+                    amount: "0.25".into(),
+                    unit: "XCH".into(),
+                },
+            ),
+            Readout::new(
+                "DIG token",
+                Value::Measure {
+                    amount: "12.5".into(),
+                    unit: "$DIG".into(),
+                },
+            ),
+        ];
+
+        let measured = std::cell::Cell::new((0.0_f32, 0.0_f32));
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("rows-test")).show(ctx, |ui| {
+                    let t = crate::confirm::gui::theme::Theme::Light.tokens();
+                    let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 400.0));
+                    measured.set((rows(ui, at, &t, &items), readouts(ui, at, &t, &items)));
+                });
+            });
+        }
+
+        let (listed, paired) = measured.get();
+        assert!(
+            listed > paired,
+            "at 900 px a two-asset list ({listed} px) was no taller than the same items paired \
+             ({paired} px), so rows is pairing them too"
+        );
+    }
 
     /// **An unknown figure cannot be expressed as a number.**
     ///

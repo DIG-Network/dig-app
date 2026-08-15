@@ -760,6 +760,30 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   be the tab's own heading — page content, not a row, because "open the wallet window" is meaningless
   inside the wallet window. Either way the no-account case says there is nothing to show rather than
   presenting a lone explainer, and a greyed balance is forbidden for the reason all greyed rows are.
+- **On the Wallet TAB the balance MUST come before the tab's controls, and the address MAY be
+  disclosed.** The reading is the first content on the tab and is set at the display size, so the
+  question the tab exists to answer is what a glance lands on. The receive address and its scannable
+  code MAY sit behind a `Receive` control rather than being drawn permanently — an address is wanted
+  for seconds at a time, and a code drawn permanently above the balance inverts the tab's own
+  hierarchy. Two rules bind that disclosure: the control MUST state, in place, the reason it is
+  refused when no address can be shown; and the tab MUST offer exactly ONE way to copy the address at
+  any moment — so a closed disclosure MUST retain the menu's copy row, and an open one MUST drop it
+  rather than offer the same verb twice. A payment already in flight is NOT subject to any
+  disclosure: it MUST be drawn whether or not its card was opened.
+- **A close control MUST appear exactly where pressing it would visibly close the card, and nowhere
+  else.** One rule, and both of its edges are defects that have shipped.
+  - A card a person disclosed MUST carry a close control **of its own**, at every width, whenever
+    nothing else is holding the card on screen. The control that opened it is NOT sufficient: the
+    disclosure survives a state change, so a verb refused after its card was opened would otherwise
+    leave a card nothing on the surface can close.
+  - A card that is on screen because a payment is IN FLIGHT MUST NOT offer to dismiss it — **whether
+    or not it was also disclosed.** This is not a rule about which reason drew the card: since
+    nothing on the send path clears a disclosure, the ordinary path is in-flight AND disclosed, and
+    a control drawn there would clear the disclosure while the card stayed exactly where it was. A
+    close control that fails to close anything is the same defect as one that hides money in motion,
+    and an implementation MUST NOT draw one.
+  A person may never reach a state where money is moving and the surface says nothing about it, nor a
+  state where a control appears to do something and does not.
 - **A row MUST NOT name a remedy the user's state cannot perform.** "Unlock first" is correct for a locked
   account, meaningless on a host that cannot hold an account, wrong for an account that has never been
   given a password, and actively misleading for one that cannot be opened — where unlocking is precisely

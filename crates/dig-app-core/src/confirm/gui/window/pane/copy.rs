@@ -576,11 +576,37 @@ pub(crate) mod qr {
 
 /// The Wallet pane.
 pub(crate) mod wallet {
-    /// The card carrying the address and its code. First on the tab, because receiving is the one
-    /// thing this wallet can do today.
+    /// The card carrying the address and its code — now DISCLOSED by the Receive control rather
+    /// than drawn permanently at the top of the tab (dig_ecosystem#2967).
     pub(crate) const RECEIVE_CARD: &str = "Receive";
-    /// The card carrying the balances.
-    pub(crate) const HOLDINGS_CARD: &str = "What you hold";
+    /// The card that leads the tab: the headline figure and the assets under it.
+    ///
+    /// Named for the question it answers rather than for what it contains. A person opens this tab
+    /// to learn what they have, and the first words on it should be that question's title.
+    pub(crate) const BALANCE_CARD: &str = "Balance";
+
+    /// The control that discloses the receive card.
+    ///
+    /// Bare "Receive", not "Show my address": the pair reads `Send` / `Receive`, which is the verb
+    /// pair every wallet uses, and a control named for its mechanism rather than its purpose breaks
+    /// that recognition.
+    pub(crate) const RECEIVE_BUTTON: &str = "Receive";
+    /// The control that discloses the send form.
+    ///
+    /// "Send", where the form's own submit is "Send XCH" — one opens the form, the other commits
+    /// the payment, and the two must not read as the same control.
+    pub(crate) const SEND_BUTTON_OPEN: &str = "Send";
+    /// The control that closes a disclosed card.
+    ///
+    /// Present even though the control that opened it also closes it: `professional-ui`'s never-trap
+    /// rule wants the way out to be VISIBLE from inside the thing it exits, and a person who
+    /// scrolled down to the code cannot see the button that opened it.
+    pub(crate) const CLOSE_BUTTON: &str = "Done";
+
+    // A refused Receive carries NO prefix constant: `wallet::overview::address_line` already writes
+    // a whole sentence for each account state, and prefixing it produced "No address yet — Your
+    // address is not shown because your account is locked" — the same fact twice, capitalised
+    // mid-sentence. See `pane::wallet::receive_refusal`.
     /// The card that reserves the place sending will take (dig_ecosystem#2207).
     pub(crate) const SENDING_CARD: &str = "Sending";
     /// The card holding the tab's own verbs.

@@ -77,6 +77,15 @@ foreach ($state in @('unsupported', 'absent', 'locked', 'unopenable', 'needs-pas
     }
 }
 
+# The Wallet tab with nothing to show. Every control on it is refused in this state, so it is the one
+# picture that proves the never-trap rule holds there: the balance says WHY there is no figure rather
+# than showing a zero, each greyed verb states its own condition in place, and the menu's copy row
+# survives because no disclosed card is drawing one (dig_ecosystem#2967).
+$shots += @{
+    file = 'wallet-locked.png'
+    args = @('wallet', 'light', "$WIDE", "$TALL", 'locked')
+}
+
 # The second-factor row is the one control on the Account tab that appears and disappears with a
 # setting rather than with the account's state, so both sides of it are photographed rather than
 # described. It lives on Account since dig_ecosystem#2358 merged the Security tab into it.
