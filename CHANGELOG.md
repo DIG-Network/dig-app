@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.4.0] - 2026-08-15
+
+### Features
+- **profile:** Drive a whole-profile creation from confirmed on-chain evidence (#177)
+
 ## [12.3.0] - 2026-08-15
 
 ### Features
