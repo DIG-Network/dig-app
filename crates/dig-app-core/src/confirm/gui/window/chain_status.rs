@@ -196,6 +196,7 @@ fn act(label: String, weight: Weight, id: Press, element: &str) -> action::Actio
 
 /// The sheet's content: what is happening, what it costs, and what may be pressed.
 fn body(flow: &mut Flow, t: &Tokens, current: &Transaction) -> Option<Press> {
+    let settled = current.is_settled();
     let stage = current.stage.clone();
     let money = current.money.clone();
     let title = current.what.clone();
@@ -219,7 +220,7 @@ fn body(flow: &mut Flow, t: &Tokens, current: &Transaction) -> Option<Press> {
             }
 
             inner.gap(space::S4);
-            let hit = inner.place(|ui, at| action::buttons(ui, at, t, true, &controls(&stage)));
+            let hit = inner.place(|ui, at| action::buttons(ui, at, t, true, &controls(settled)));
 
             if !stage.is_settled() {
                 inner.gap(space::S3);
@@ -235,8 +236,12 @@ fn body(flow: &mut Flow, t: &Tokens, current: &Transaction) -> Option<Press> {
 ///
 /// There is ALWAYS exactly one control, in every state: an in-flight write can be put away, and a
 /// settled one can be cleared. A state with no control is a surface a person cannot leave.
-fn controls(stage: &Stage) -> Vec<action::Action<Press>> {
-    match stage.is_settled() {
+///
+/// Takes the TRANSACTION's settledness, never the stage's: a mid-ceremony confirmation is a proved
+/// bundle inside an unfinished ceremony, and offering to clear it would drop a surface that is still
+/// holding the person's money.
+fn controls(settled: bool) -> Vec<action::Action<Press>> {
+    match settled {
         true => vec![act(
             DISMISS.to_string(),
             Weight::Primary,
@@ -295,7 +300,7 @@ mod tests {
     #[test]
     fn every_stage_offers_a_way_out() {
         for stage in every_stage() {
-            let controls = controls(&stage);
+            let controls = controls(stage.is_settled());
             assert_eq!(
                 controls.len(),
                 1,
@@ -313,7 +318,7 @@ mod tests {
     #[test]
     fn an_in_flight_write_is_hidden_and_a_finished_one_is_dismissed() {
         for stage in every_stage() {
-            let offered = controls(&stage)[0].id;
+            let offered = controls(stage.is_settled())[0].id;
             match stage.is_settled() {
                 true => assert_eq!(offered, Press::Dismiss, "{stage:?} offered the wrong verb"),
                 false => assert_eq!(offered, Press::Hide, "{stage:?} offered the wrong verb"),
@@ -350,15 +355,17 @@ mod tests {
             "Creating your profile",
             Some(Money {
                 amount_mojos: 20_002,
-                fee_mojos: 1,
+                fee_mojos: None,
             }),
         );
         feed.publish(tx.at(Stage::Pushed {
             id: "0xabc".to_string(),
         }));
 
-        let mut status = ChainStatus::default();
-        status.hidden = true;
+        let mut status = ChainStatus {
+            hidden: true,
+            ..Default::default()
+        };
         assert_eq!(
             feed.read().map(|t| t.stage),
             Some(Stage::Pushed {
@@ -368,7 +375,8 @@ mod tests {
         );
 
         // And a new write always arrives visible, whatever the last one left behind.
-        feed.clear_if_settled();
+        // Hidden again, and now with NOTHING in flight: the next write must not inherit the last
+        // one's dismissal, or a spend would start silently.
         status.hidden = true;
         let ctx = egui::Context::default();
         let full = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 600.0));

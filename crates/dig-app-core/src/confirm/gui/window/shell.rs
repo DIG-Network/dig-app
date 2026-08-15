@@ -4403,7 +4403,7 @@ mod tests {
                 "Creating your profile",
                 Some(crate::transaction::Money {
                     amount_mojos: 20_002,
-                    fee_mojos: 1,
+                    fee_mojos: None,
                 }),
             )
             .at(crate::transaction::Stage::Pushed {

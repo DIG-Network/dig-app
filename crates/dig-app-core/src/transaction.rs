@@ -143,6 +143,18 @@ pub struct Transaction {
     /// `None` is not free — it is UNKNOWN, and the surface says nothing rather than showing a zero.
     /// A displayed `0 XCH` on a spend is the money lie this whole module exists to avoid.
     pub money: Option<Money>,
+    /// Whether more bundles follow this one in the same ceremony.
+    ///
+    /// # Why a settled STAGE is not a settled ceremony
+    ///
+    /// Creating a profile is two chain writes: a DID is minted, and only once that coin is on chain
+    /// can the store be launched from it. So the ceremony reaches a genuine, chain-proved
+    /// [`Stage::Confirmed`] halfway through, and a surface that read that as the end would offer to
+    /// clear a ceremony still holding the person's money — the same class of error as calling a
+    /// broadcast a confirmation, one level up.
+    ///
+    /// [`Transaction::is_settled`] is therefore the only settledness a surface may ask about.
+    pub more_to_come: bool,
 }
 
 impl Transaction {
@@ -152,16 +164,39 @@ impl Transaction {
             what: what.into(),
             stage: Stage::Building,
             money,
+            more_to_come: false,
         }
     }
 
-    /// The same write, at a new stage.
+    /// The same write, at a new stage, with nothing left to do after it.
     pub fn at(&self, stage: Stage) -> Self {
         Self {
             what: self.what.clone(),
             stage,
             money: self.money.clone(),
+            more_to_come: false,
         }
+    }
+
+    /// The same write, at a new stage, with further bundles still to come.
+    ///
+    /// Renaming `what` as well as moving the stage, because in a multi-bundle ceremony the phases
+    /// are different things happening: a person watching wants to know that their identity is on
+    /// chain and their store is next, not merely that "it" progressed.
+    pub fn mid_ceremony(&self, what: impl Into<String>, stage: Stage) -> Self {
+        Self {
+            what: what.into(),
+            stage,
+            money: self.money.clone(),
+            more_to_come: true,
+        }
+    }
+
+    /// Whether this write is over — nothing more will happen, and nothing more is owed.
+    ///
+    /// The ONE settledness question a surface may ask; see [`Transaction::more_to_come`].
+    pub fn is_settled(&self) -> bool {
+        self.stage.is_settled() && !self.more_to_come
     }
 }
 
@@ -170,8 +205,12 @@ impl Transaction {
 pub struct Money {
     /// What is being moved or committed, in mojos.
     pub amount_mojos: u64,
-    /// The network fee, in mojos.
-    pub fee_mojos: u64,
+    /// The network fee, in mojos, when the caller actually knows it.
+    ///
+    /// `None` is *not known*, and it renders as silence. A zero here would be a claim that the
+    /// transaction is free, made by a caller that had no fee to pass — the same shape of lie as
+    /// drawing an unmeasured balance as `0 XCH`.
+    pub fee_mojos: Option<u64>,
 }
 
 impl Money {
@@ -180,18 +219,18 @@ impl Money {
         format_asset_amount(Asset::Xch, self.amount_mojos)
     }
 
-    /// The fee as a person reads it, whole-coin.
-    pub fn fee(&self) -> String {
-        format_asset_amount(Asset::Xch, self.fee_mojos)
+    /// The fee as a person reads it, whole-coin — or `None` when it was never measured.
+    pub fn fee(&self) -> Option<String> {
+        self.fee_mojos
+            .map(|mojos| format_asset_amount(Asset::Xch, mojos))
     }
 
-    /// One line naming both, because a person deciding about a spend needs both at once.
+    /// The cost, in one line, saying only what is known.
     pub fn line(&self) -> String {
-        format!(
-            "{} XCH, plus a {} XCH network fee",
-            self.amount(),
-            self.fee()
-        )
+        match self.fee() {
+            Some(fee) => format!("{} XCH, including a {fee} XCH network fee", self.amount()),
+            None => format!("{} XCH", self.amount()),
+        }
     }
 }
 
@@ -249,9 +288,7 @@ impl Feed {
     /// class of lie as showing it as done.
     pub fn clear_if_settled(&self) {
         if let Ok(mut slot) = self.current.lock() {
-            let settled = slot
-                .as_ref()
-                .is_some_and(|current| current.stage.is_settled());
+            let settled = slot.as_ref().is_some_and(Transaction::is_settled);
             if settled {
                 *slot = None;
             }
@@ -345,16 +382,83 @@ mod tests {
     /// is free. `None` is the absence of a measurement, not a zero.
     #[test]
     fn a_cost_is_stated_in_full_or_not_at_all() {
-        let money = Money {
+        let known = Money {
             amount_mojos: 20_002,
-            fee_mojos: 1,
+            fee_mojos: Some(1),
         };
-        let line = money.line();
-        assert!(line.contains(&money.amount()), "{line}");
-        assert!(line.contains(&money.fee()), "{line}");
+        let line = known.line();
+        assert!(line.contains(&known.amount()), "{line}");
+        assert!(
+            line.contains(&known.fee().expect("a known fee")),
+            "a known fee was not shown: {line}"
+        );
+
+        // An unmeasured fee is SILENT, never a zero — a zero would say the transaction is free.
+        let unmeasured = Money {
+            amount_mojos: 20_002,
+            fee_mojos: None,
+        };
+        assert!(
+            !unmeasured.line().contains("fee"),
+            "an unmeasured fee was rendered anyway: {}",
+            unmeasured.line()
+        );
+        assert!(
+            unmeasured.line().contains(&unmeasured.amount()),
+            "the amount went missing with the fee: {}",
+            unmeasured.line()
+        );
 
         let unknown = Transaction::starting("Creating your profile", None);
         assert_eq!(unknown.money, None);
+    }
+
+    /// **A chain-proved bundle inside an unfinished ceremony is NOT a finished transaction.**
+    ///
+    /// Creating a profile mints a DID and then launches a store from that DID's coin, so the
+    /// ceremony reaches a real `Stage::Confirmed` — with a real height — while still holding the
+    /// person's money and still owing them a store. A surface reading stage-settledness would offer
+    /// to clear it there, and the feed would forget a ceremony in flight.
+    ///
+    /// The fixture is the halfway point specifically: the same values at the END of the ceremony
+    /// must settle, and both halves are asserted, because a `more_to_come` that was always true
+    /// would satisfy the first alone and never let anything finish.
+    #[test]
+    fn a_mid_ceremony_confirmation_does_not_settle_the_transaction() {
+        let feed = Feed::detached();
+        let started = Transaction::starting("Creating your profile", None);
+
+        let halfway = started.mid_ceremony(
+            "Creating your profile — launching your store",
+            Stage::Confirmed {
+                height: 9_154_450,
+                made: "your identity".to_string(),
+            },
+        );
+        assert!(
+            halfway.stage.is_confirmed(),
+            "the fixture must be chain-proved, or it tests nothing"
+        );
+        assert!(
+            !halfway.is_settled(),
+            "a ceremony still owing a store read as finished"
+        );
+
+        feed.publish(halfway);
+        feed.clear_if_settled();
+        assert!(
+            feed.read().is_some(),
+            "a ceremony in flight was forgotten because one of its bundles confirmed"
+        );
+
+        let finished = started.at(Stage::Confirmed {
+            height: 9_154_458,
+            made: "your profile".to_string(),
+        });
+        assert!(finished.is_settled(), "a finished ceremony never settles");
+        feed.publish(finished);
+        feed.clear_if_settled();
+        assert_eq!(feed.read(), None);
     }
 
     /// **A feed hands back exactly what was published, and one feed cannot read another.**

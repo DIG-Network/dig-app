@@ -32,6 +32,7 @@ pub mod auth;
 pub mod boot;
 pub mod ceremony;
 pub mod chain_mint;
+pub mod creation_progress;
 pub mod did;
 pub mod first_profile;
 pub mod journey;
