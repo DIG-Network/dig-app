@@ -1988,6 +1988,14 @@ interval-bypassing read (`wallet::node::NodeBalance::read_now`) before anything 
 balance still unmeasured after that may draw a window, and that window MUST state the reading's own
 reason and MUST NOT state a shortfall or a zero.
 
+**The deposit window states three figures, in XCH (MUST).** What a profile costs, what the wallet
+holds, and what is still needed — so nobody has to divide by 10^12 or subtract to know how much to
+send. All three MUST be rendered by the crate's single mojos-to-XCH conversion, exactly (never
+rounded, and never rounded up): 20,002 mojos is `0.000000020002 XCH`, and a nonzero requirement MUST
+NOT render as `0 XCH`. The balance figure MUST come from the `FundingStep::Deposit` the decision was
+made from, so only a MEASURED balance can ever be stated; the unmeasured window states no balance at
+all, not even zero.
+
 **Sufficiency is hysteretic (MUST).** Once a balance has been seen to cover the cost, the flow MUST
 NOT return to a deposit window (`FundingLatch`) — the ceremony re-checks and refuses honestly, whereas
 the opposite error asks a funded person to send money twice. The threshold is `>= cost`.
