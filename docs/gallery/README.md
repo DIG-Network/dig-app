@@ -91,5 +91,3 @@ renderer's own framebuffer after the real frame is drawn.
 A pane taller than the window scrolls, and these are captures of the window — so a tall pane is shown
 cut off at the bottom edge, exactly as a person sees it. For a whole-pane view of one pane, use
 `pane_preview`, which draws the pane without the shell's chrome.
-
-<!-- #2967: wallet tab redesign in progress -->
