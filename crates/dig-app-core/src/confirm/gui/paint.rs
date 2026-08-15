@@ -398,19 +398,106 @@ pub fn theme_toggle(ui: &mut Ui, label: &str, t: &Tokens) -> Response {
     text_control(ui, label, t, ControlAlign::Centred)
 }
 
-/// How wide a [`theme_toggle`] has to be for `label`.
+/// Which glyph a window control draws (dig_ecosystem#2997).
 ///
-/// Exposed for the same reason [`button_width`] is: a caller placing chrome controls absolutely has
-/// to know a control's real extent BEFORE it places the next one. A constant per control was what
-/// the chrome used before, and a constant is a guess that is wrong the first time a label is
-/// re-worded or translated — a slot narrower than its label leaves the control's hit area
-/// overlapping its neighbour's, which on a chrome row means Close and Maximize sharing pixels.
-pub fn text_control_width(ui: &Ui, label: &str) -> f32 {
-    ui.painter()
-        .layout_no_wrap(label.to_owned(), regular(size::SM), Color32::WHITE)
-        .size()
-        .x
-        + CONTROL_PAD.x
+/// A closed enum, not a character: the glyphs are STROKED, so nothing here depends on a font
+/// shipping a symbol, and the four shapes are the four things this chrome can do. A general icon
+/// system is deliberately not what this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowIcon {
+    /// A single horizontal bar, low in the box — the universal minimise.
+    Minimize,
+    /// An empty square — grow to fill the screen.
+    Maximize,
+    /// Two offset squares — come back out of maximised.
+    Restore,
+    /// A cross.
+    Close,
+}
+
+/// How much of the control's box the glyph occupies.
+///
+/// A glyph drawn edge to edge in its hit area reads as a filled button rather than a mark; this
+/// leaves a margin on every side while keeping the HIT area the full slot, which is what keeps the
+/// target comfortably clickable (`professional-ui`) even though the mark is small.
+const ICON_INSET: f32 = 9.0;
+
+/// The id a window control senses under, derived from its NAME.
+///
+/// Exposed so a caller — and a test — can reach a control by the same word a screen reader
+/// announces, instead of by hunting for painted text. An icon paints no text at all, so a harness
+/// that looked for words would find nothing and a chrome test would stop reaching its control while
+/// still passing.
+pub fn window_control_id(name: &str) -> egui::Id {
+    egui::Id::new(("dig-app-window-control", name))
+}
+
+/// A window-chrome control drawn as a stroked glyph, with an accessible NAME.
+///
+/// # The name is not decoration
+///
+/// An icon-only control is unreachable by assistive technology and unaddressable by a test harness
+/// unless it carries a name, which `professional-ui` states explicitly. The name is supplied here
+/// three ways at once: as the widget's accessibility label, as its tooltip on hover, and as the
+/// widget id — so a screen reader, a person hovering, and a test all learn the same word, and the
+/// word cannot drift between them because there is only one of it.
+///
+/// The chrome drew words before this (dig_ecosystem#2569's fix for a window with no controls at
+/// all). Turning them into glyphs must not take anything away: all four controls survive, at the
+/// same or larger hit area, and only their MARK changed.
+pub fn window_control(
+    ui: &mut Ui,
+    rect: Rect,
+    icon: WindowIcon,
+    name: &str,
+    t: &Tokens,
+) -> Response {
+    let response = ui
+        .interact(rect, window_control_id(name), Sense::click())
+        .on_hover_text(name);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
+
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(radius::SM),
+            rgba(t.dig_wash.over(t.surface)),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    // `--muted` for the same reason a text control's label takes it: this is the control's content,
+    // and it carries the 4.5:1 bar rather than the 3:1 one a mere border would (#2038).
+    let stroke = Stroke::new(1.4_f32, rgba(t.muted));
+    let box_ = rect.shrink(ICON_INSET);
+    let painter = ui.painter();
+    match icon {
+        WindowIcon::Minimize => {
+            painter.hline(box_.left()..=box_.right(), box_.bottom(), stroke);
+        }
+        WindowIcon::Maximize => {
+            painter.rect_stroke(box_, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+        }
+        WindowIcon::Restore => {
+            let back = Rect::from_min_max(
+                Pos2::new(box_.left() + 3.0, box_.top()),
+                Pos2::new(box_.right(), box_.bottom() - 3.0),
+            );
+            let front = Rect::from_min_max(
+                Pos2::new(box_.left(), box_.top() + 3.0),
+                Pos2::new(box_.right() - 3.0, box_.bottom()),
+            );
+            painter.rect_stroke(back, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+            painter.rect_filled(front, CornerRadius::ZERO, rgba(t.surface));
+            painter.rect_stroke(front, CornerRadius::ZERO, stroke, StrokeKind::Inside);
+        }
+        WindowIcon::Close => {
+            painter.line_segment([box_.left_top(), box_.right_bottom()], stroke);
+            painter.line_segment([box_.right_top(), box_.left_bottom()], stroke);
+        }
+    }
+    response
 }
 
 /// A text control sitting INSIDE the body's text column — the reveal-while-typing switch.

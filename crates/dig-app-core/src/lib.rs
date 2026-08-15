@@ -95,6 +95,7 @@ pub mod sign_service;
 pub mod single_instance;
 pub mod spend_summary;
 pub mod storage;
+pub mod transaction;
 pub mod tray_menu;
 pub mod wallet;
 pub mod whitelist;

@@ -75,6 +75,7 @@ use egui::{Key, Rect, Vec2};
 use super::super::paint;
 use super::super::render::{rgba, semibold, size, space};
 use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
+use super::pane;
 use super::panes::{self, Click};
 use super::{
     install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, Job, Outcome, Overstay,
@@ -659,6 +660,13 @@ struct ShellApp {
     view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
     /// Where a clicked row's verb goes — see [`super::AppWindow::act`].
     act: Arc<dyn Fn(TrayAction) + Send + Sync>,
+    /// The chain write happening right now, if any — see [`crate::transaction`].
+    ///
+    /// Read every frame rather than pushed at the shell, because the writer is a worker thread that
+    /// has no way to reach this window and must never block waiting for one.
+    transactions: crate::transaction::Feed,
+    /// The sheet that draws [`ShellApp::transactions`], and whether it has been put away.
+    chain_status: super::chain_status::ChainStatus,
     /// Which tab is showing.
     ///
     /// Held here rather than derived per frame because the model is REBUILT every frame from a view
@@ -680,6 +688,8 @@ impl ShellApp {
             theme_store,
             prompt: None,
             closing: false,
+            transactions: crate::transaction::Feed::app(),
+            chain_status: super::chain_status::ChainStatus::default(),
             view,
             act,
             // A caller that names no tab gets the shipping behaviour; only a gallery names one.
@@ -704,6 +714,11 @@ impl ShellApp {
             return;
         }
 
+        // The Settings pane operates the theme (dig_ecosystem#2997) and the shell owns it, so a
+        // choice made on the last frame is applied at the top of this one — before anything reads
+        // `self.theme` — and republished so the chooser shows what is actually being painted.
+        self.apply_a_chosen_theme(ctx);
+
         // Admitted BEFORE the shell is drawn so that the scrim and the pane agree with each other
         // within a single frame: a prompt admitted afterwards would show for one frame over an
         // unscrimmed, live-looking shell.
@@ -712,8 +727,41 @@ impl ShellApp {
         let t = self.theme.tokens();
         let prompt_is_up = self.prompt.is_some();
         self.paint_shell(ctx, &t, prompt_is_up);
+        // After the shell, so it floats over the panes; before the prompt, so a consent surface is
+        // still the only thing reachable while one is up. Suppressed entirely under a prompt for the
+        // same reason the chrome's controls are: a live-looking control over a scrimmed window is
+        // the wrong signal on the window that authorises spending.
+        if !prompt_is_up {
+            self.chain_status
+                .draw(ctx, ctx.screen_rect(), &t, &self.transactions);
+        }
         self.show_prompt(ctx, ctx.screen_rect());
         self.dismiss_a_bar_clicked_away_from(ctx);
+    }
+
+    /// Take up a theme the Settings pane recorded, persist it, and say which one is in force.
+    ///
+    /// # Why the shell writes and the pane does not
+    ///
+    /// There is one [`ThemeChoice`] and it belongs to the shell, which is what makes a stored theme
+    /// and a painted theme incapable of disagreeing. A pane that wrote the file itself would be a
+    /// second writer of the same preference, and the first divergence would be a window painting
+    /// one theme while the file said the other — with the file winning at the next restart, so the
+    /// person's choice would appear to take and then silently revert.
+    ///
+    /// A failed WRITE does not stop the switch: the person asked for this theme and the app can
+    /// honour it for this session even when it cannot remember it. The failure is logged rather
+    /// than surfaced because the loss is a preference, not a fact about their money.
+    fn apply_a_chosen_theme(&mut self, ctx: &egui::Context) {
+        if let Some(chosen) = pane::settings::appearance::Exchange::take_request(ctx) {
+            if chosen != self.theme {
+                self.theme = chosen;
+                if let Err(err) = self.theme_store.write(self.theme) {
+                    tracing::debug!(%err, "could not persist the app window theme preference");
+                }
+            }
+        }
+        pane::settings::appearance::Exchange::publish(ctx, self.theme);
     }
 
     /// Escape, and the window manager's own close.
@@ -1072,33 +1120,27 @@ impl ShellApp {
         }
 
         let maximized = window_is_maximized(ui.ctx());
-        let theme_label = match self.theme {
-            Theme::Light => "Dark theme",
-            Theme::Dark => "Light theme",
-        };
-        let slots = ChromeSlots::lay_out(ui, bar, theme_label, maximize_label(maximized));
+        let slots = ChromeSlots::lay_out(bar);
 
-        // Words, not glyphs: an unlabelled cross, dash and square are three more things to decode,
-        // and all three are invisible to a screen reader.
-        if self.control(ui, slots.close, "Close", t).clicked() {
+        // Glyphs, each carrying the same word it used to say — see [`paint::window_control`] for why
+        // the name survives the switch to icons (dig_ecosystem#2997).
+        if self.control(ui, slots.close, paint::WindowIcon::Close, "Close", t) {
             self.closing = true;
         }
-        if self
-            .control(ui, slots.maximize, maximize_label(maximized), t)
-            .clicked()
-        {
+        let (maximize_icon, maximize_name) = maximize_control(maximized);
+        if self.control(ui, slots.maximize, maximize_icon, maximize_name, t) {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
         }
-        if self.control(ui, slots.minimize, "Minimize", t).clicked() {
+        if self.control(
+            ui,
+            slots.minimize,
+            paint::WindowIcon::Minimize,
+            "Minimize",
+            t,
+        ) {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        }
-        if self.control(ui, slots.theme, theme_label, t).clicked() {
-            self.theme = self.theme.toggled();
-            if let Err(err) = self.theme_store.write(self.theme) {
-                tracing::debug!(%err, "could not persist the app window theme preference");
-            }
         }
 
         // The strip senses clicks as well as drags so a double-click can toggle maximise, which is
@@ -1118,9 +1160,15 @@ impl ShellApp {
     }
 
     /// One chrome control, drawn in the slot [`ChromeSlots`] measured for it.
-    fn control(&self, ui: &mut egui::Ui, slot: Rect, label: &str, t: &Tokens) -> egui::Response {
-        let mut slot_ui = ui.new_child(egui::UiBuilder::new().max_rect(slot));
-        paint::theme_toggle(&mut slot_ui, label, t)
+    fn control(
+        &self,
+        ui: &mut egui::Ui,
+        slot: Rect,
+        icon: paint::WindowIcon,
+        name: &str,
+        t: &Tokens,
+    ) -> bool {
+        paint::window_control(ui, slot, icon, name, t).clicked()
     }
 
     /// Dim the whole window, and swallow every click that lands on it.
@@ -1276,6 +1324,17 @@ fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon
 const CONTROL_HEIGHT: f32 = 30.0;
 /// The gap above a chrome control, which is what centres it in the bar.
 const CONTROL_TOP: f32 = (CHROME_HEIGHT - CONTROL_HEIGHT) / 2.0;
+/// How wide an icon control's hit area is.
+///
+/// Wider than it is tall, so the row reads as a titlebar rather than as three buttons, while the
+/// target stays comfortably larger than the mark inside it (`professional-ui`).
+///
+/// It is NARROWER than the text control it replaces — a `Minimize` label measured about 72 px wide
+/// by 27 tall, against 40 by 30 here — so the switch to glyphs did cost some pointer reach, and a
+/// comment claiming otherwise was corrected rather than the number. 40 x 30 still clears WCAG 2.2
+/// 2.5.8's 24 x 24 minimum with room to spare, which is the bar that actually governs, and the row
+/// only reads as chrome at this width. Reach was traded deliberately, not preserved.
+const CONTROL_WIDTH: f32 = 40.0;
 
 /// Where every chrome control sits, and what is left over for the drag strip.
 ///
@@ -1291,9 +1350,6 @@ const CONTROL_TOP: f32 = (CHROME_HEIGHT - CONTROL_HEIGHT) / 2.0;
 /// by a drag strip is a window with no way out.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ChromeSlots {
-    /// The theme toggle, leftmost of the four: it is not a WINDOW control, and grouping it with the
-    /// three that are would invite the eye to read it as one.
-    theme: Rect,
     /// Minimize, first of the three window controls.
     minimize: Rect,
     /// Maximize — or Restore, when the window is already maximised.
@@ -1305,24 +1361,31 @@ struct ChromeSlots {
 }
 
 impl ChromeSlots {
-    /// Measure the row against the labels it is actually going to draw.
-    fn lay_out(ui: &egui::Ui, bar: Rect, theme_label: &str, maximize_label: &str) -> Self {
+    /// Place the row's three square slots, right to left.
+    ///
+    /// No longer measured against a label: an icon control's mark is stroked to a fixed box, so its
+    /// slot is a constant square and the whole row is decided by arithmetic that cannot be thrown
+    /// off by a re-worded or translated label. The measured-width machinery this replaces existed
+    /// because the labels were TEXT (dig_ecosystem#2569); the reason went with the words.
+    ///
+    /// The slot is [`CONTROL_WIDTH`] by [`CONTROL_HEIGHT`] — 40 by 30, not a square — which is
+    /// TALLER but NARROWER than the `Minimize` text control it replaces (about 72 by 27). See
+    /// [`CONTROL_WIDTH`] for why that trade was taken and why it still clears the accessibility
+    /// floor.
+    fn lay_out(bar: Rect) -> Self {
         let mut right = bar.right() - space::S3;
-        let mut slot = |label: &str| {
-            let width = paint::text_control_width(ui, label);
+        let mut slot = || {
             let rect = Rect::from_min_size(
-                egui::Pos2::new(right - width, bar.top() + CONTROL_TOP),
-                Vec2::new(width, CONTROL_HEIGHT),
+                egui::Pos2::new(right - CONTROL_WIDTH, bar.top() + CONTROL_TOP),
+                Vec2::new(CONTROL_WIDTH, CONTROL_HEIGHT),
             );
-            right = rect.left() - space::S2;
+            right = rect.left() - space::S1;
             rect
         };
-        let close = slot("Close");
-        let maximize = slot(maximize_label);
-        let minimize = slot("Minimize");
-        let theme = slot(theme_label);
+        let close = slot();
+        let maximize = slot();
+        let minimize = slot();
         Self {
-            theme,
             minimize,
             maximize,
             close,
@@ -1331,16 +1394,15 @@ impl ChromeSlots {
             // its header. That is recoverable; a strip laid OVER the controls is not.
             drag: Rect::from_min_max(
                 bar.left_top(),
-                egui::Pos2::new((theme.left() - space::S2).max(bar.left()), bar.bottom()),
+                egui::Pos2::new((minimize.left() - space::S2).max(bar.left()), bar.bottom()),
             ),
         }
     }
 
     /// Every control slot, for the tests that must hold all of them to the same rule.
     #[cfg(test)]
-    fn controls(&self) -> [(&'static str, Rect); 4] {
+    fn controls(&self) -> [(&'static str, Rect); 3] {
         [
-            ("theme", self.theme),
             ("minimize", self.minimize),
             ("maximize", self.maximize),
             ("close", self.close),
@@ -1348,16 +1410,14 @@ impl ChromeSlots {
     }
 }
 
-/// What the maximize control says, given whether the window is maximised right now.
+/// The maximise control's glyph AND its name, which must always describe the same action.
 ///
-/// The label is the state's INVERSE — what pressing it will do — because a control labelled with the
-/// state it is already in is a control a person presses expecting nothing to change. It is also the
-/// only thing that makes the maximise reversible in the one direction that matters: a window
-/// maximised by a control called *Maximize* that still says *Maximize* offers no way back.
-fn maximize_label(maximized: bool) -> &'static str {
+/// Returned together so they cannot be chosen independently: a square glyph announced as *Restore*
+/// tells a sighted person and a screen-reader user two different things about the same button.
+fn maximize_control(maximized: bool) -> (paint::WindowIcon, &'static str) {
     match maximized {
-        true => "Restore",
-        false => "Maximize",
+        true => (paint::WindowIcon::Restore, "Restore"),
+        false => (paint::WindowIcon::Maximize, "Maximize"),
     }
 }
 
@@ -1478,16 +1538,19 @@ mod tests {
             install_fonts(&ctx);
             let dispatched: Arc<Mutex<Vec<TrayAction>>> = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&dispatched);
+            let mut app = ShellApp::new(
+                Theme::Light,
+                store.clone(),
+                Arc::new(move || view.clone()),
+                Arc::new(move |action| sink.lock().expect("the sink is not poisoned").push(action)),
+                None,
+            );
+            // Detached from the process-wide feed on purpose: these tests run in one process, in
+            // parallel, and a shared feed would let one test's transaction appear in another's
+            // window. The app itself still uses `Feed::app`.
+            app.transactions = crate::transaction::Feed::detached();
             Self {
-                app: ShellApp::new(
-                    Theme::Light,
-                    store.clone(),
-                    Arc::new(move || view.clone()),
-                    Arc::new(move |action| {
-                        sink.lock().expect("the sink is not poisoned").push(action)
-                    }),
-                    None,
-                ),
+                app,
                 ctx,
                 jobs,
                 queue,
@@ -1645,14 +1708,24 @@ mod tests {
             said
         }
 
-        /// Where the chrome painted `word`, failing loudly when it painted no such control.
+        /// Where the control NAMED `word` sensed, or `None` when the chrome offered no such control.
+        ///
+        /// Resolved through [`paint::window_control_id`] — the control's accessible name — rather
+        /// than by hunting for painted text. Since dig_ecosystem#2997 the window controls paint no
+        /// text at all, so a harness that searched for words would find nothing and every chrome
+        /// test would stop reaching its control. Asking by name is also the only addressing that
+        /// stays true to what a screen reader announces.
+        fn control_rect(&mut self, word: &str) -> Option<Rect> {
+            self.frame(Vec::new());
+            self.ctx
+                .read_response(paint::window_control_id(word))
+                .map(|response| response.rect)
+        }
+
+        /// Where the chrome drew `word`, failing loudly when it drew no such control.
         fn control_at(&mut self, word: &str) -> egui::Pos2 {
-            let words = self.words();
-            words
-                .iter()
-                .find(|(said, _)| said == word)
-                .unwrap_or_else(|| panic!("the chrome drew no {word:?} control: {words:?}"))
-                .1
+            self.control_rect(word)
+                .unwrap_or_else(|| panic!("the chrome drew no {word:?} control"))
                 .center()
         }
 
@@ -4095,18 +4168,21 @@ mod tests {
     /// thing — what the platform says about this window — and holds everything else, so a chrome
     /// that hardcoded `Maximized(true)` fails here while still passing the test above.
     ///
-    /// `Restore` is asserted to be DRAWN rather than merely returned by [`maximize_label`]: a label
-    /// function the chrome does not consult is not a label.
+    /// `Restore` is asserted to be REACHABLE rather than merely returned by [`maximize_control`]: a
+    /// name the chrome does not consult is not a name.
     #[test]
     fn a_maximised_window_offers_restore_and_restoring_un_maximises_it() {
         let mut shelf = Shelf::open();
         shelf.maximized = Some(true);
         shelf.settle();
 
-        let words: Vec<String> = shelf.words().into_iter().map(|(said, _)| said).collect();
         assert!(
-            !words.iter().any(|said| said == "Maximize"),
-            "an already-maximised window still offers to maximise itself: {words:?}"
+            shelf.control_rect("Maximize").is_none(),
+            "an already-maximised window still offers to maximise itself"
+        );
+        assert!(
+            shelf.control_rect("Restore").is_some(),
+            "a maximised window offers no way back"
         );
 
         let restore = shelf.press_chrome("Restore");
@@ -4161,48 +4237,44 @@ mod tests {
         }
     }
 
-    /// **Every chrome control keeps its own pixels at the narrowest width the window allows.**
+    /// **Every chrome control keeps its own HIT AREA at the narrowest width the window allows.**
     ///
-    /// Four text controls in a 480 px bar is where a slot narrower than its label stops being
-    /// hypothetical: the control still draws and still senses, it simply does so on top of its
-    /// neighbour, and the person aiming at Close presses Maximize.
+    /// Three icon controls in a 480 px bar. A control that overlaps its neighbour still draws and
+    /// still senses; it simply answers for a click aimed at the other one, and the person aiming at
+    /// Close presses Maximize.
     ///
-    /// # Asserted on DRAWN INK, not on the slot rectangles
+    /// # Asserted on what SENSED, not on the slot rectangles and not on drawn ink
     ///
-    /// An earlier version of this test compared the rectangles [`ChromeSlots`] returns. It passed
-    /// with every slot pinned to a fixed 72 px — the arithmetic this layout replaced — because a
-    /// text control allocates its OWN size from its label and merely STARTS at its slot. Four
-    /// disjoint 72 px slots therefore produce four controls that overlap, and a test that only reads
-    /// the slots cannot see it. So this drives the real chrome and measures the pixels it painted.
+    /// An earlier version compared the rectangles [`ChromeSlots`] returns, and passed while the
+    /// controls overlapped, because a text control allocated its OWN size from its label and merely
+    /// STARTED at its slot. A later version measured painted words, which icons do not have. Both
+    /// were proxies. What decides which control a click reaches is the rectangle each one
+    /// interacted over, so that is what is read back here — through the same name a screen reader
+    /// announces.
     #[test]
     fn no_two_chrome_controls_share_pixels_at_the_narrowest_width() {
         let mut shelf = Shelf::open();
         shelf.size = Vec2::new(SHELL_MIN, SHELL_HEIGHT);
         shelf.settle();
 
-        let painted = shelf.words();
-        // The chrome is the top band; everything below it belongs to the strip and the panes.
-        let in_chrome = |at: &Rect| at.top() < CHROME_HEIGHT;
-        let placed = |word: &str| {
-            painted
-                .iter()
-                .find(|(said, at)| said == word && in_chrome(at))
-                .unwrap_or_else(|| {
-                    panic!("the chrome drew no {word:?} at {SHELL_MIN} px: {painted:?}")
-                })
-                .1
-        };
+        let controls: Vec<(&str, Rect)> = ["Minimize", "Maximize", "Close"]
+            .into_iter()
+            .map(|name| {
+                let at = shelf
+                    .control_rect(name)
+                    .unwrap_or_else(|| panic!("the chrome offered no {name:?} at {SHELL_MIN} px"));
+                (name, at)
+            })
+            .collect();
 
-        let controls = [
-            ("Dark theme", placed("Dark theme")),
-            ("Minimize", placed("Minimize")),
-            ("Maximize", placed("Maximize")),
-            ("Close", placed("Close")),
-        ];
         for (i, (name, rect)) in controls.iter().enumerate() {
             assert!(
                 rect.right() <= SHELL_MIN && rect.left() >= 0.0,
                 "the {name} control at {rect:?} is drawn outside the {SHELL_MIN} px bar"
+            );
+            assert!(
+                rect.top() >= 0.0 && rect.bottom() <= CHROME_HEIGHT,
+                "the {name} control at {rect:?} leaves the {CHROME_HEIGHT} px chrome band"
             );
             for (other, other_rect) in &controls[i + 1..] {
                 assert!(
@@ -4213,64 +4285,90 @@ mod tests {
         }
     }
 
-    /// **Each slot holds its control, the slots are disjoint, and the drag strip clears them all.**
+    /// **An icon control is at least as big a target as the words it replaced** (dig_ecosystem#2997).
+    ///
+    /// The rule this protects is `professional-ui`'s: turning a label into a glyph must not shrink
+    /// what a person has to hit. The bound is taken from the control the change actually removed
+    /// text from — a 30 px-tall slot — rather than from a number invented here, and BOTH dimensions
+    /// are checked, because a 40x8 strip satisfies an area bound while being unhittable.
+    #[test]
+    fn every_icon_control_keeps_a_comfortable_hit_target() {
+        let mut shelf = Shelf::open();
+        shelf.size = Vec2::new(SHELL_MIN, SHELL_HEIGHT);
+        shelf.settle();
+
+        for name in ["Minimize", "Maximize", "Close"] {
+            let at = shelf
+                .control_rect(name)
+                .unwrap_or_else(|| panic!("the chrome offered no {name:?} control"));
+            assert!(
+                at.width() >= CONTROL_HEIGHT && at.height() >= CONTROL_HEIGHT,
+                "the {name} control is {}x{} px, under the {CONTROL_HEIGHT} px target it replaced",
+                at.width(),
+                at.height()
+            );
+        }
+    }
+
+    /// **The theme is no longer operated from the chrome, and the Settings pane operates it.**
+    ///
+    /// Two halves, and only together do they mean anything (dig_ecosystem#2997): a chrome that has
+    /// dropped the toggle while nothing else offers one is a preference a person can no longer
+    /// change, which is a worse outcome than the crowded header. So this asserts the control is
+    /// GONE from the chrome and that the shell answers the Settings pane's request.
+    #[test]
+    fn the_theme_moved_out_of_the_chrome_and_into_settings() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+
+        // Asserted on the PIXELS the chrome painted, not on whether a named control answers.
+        // The toggle this replaced was a TEXT control and never carried a window-control name, so
+        // asking for one by name would report it absent even when it was still there — a check that
+        // passes against the very code it is supposed to reject.
+        let in_chrome: Vec<String> = shelf
+            .words()
+            .into_iter()
+            .filter(|(_, at)| at.top() < CHROME_HEIGHT)
+            .map(|(said, _)| said)
+            .collect();
+        for gone in ["Dark theme", "Light theme"] {
+            assert!(
+                !in_chrome.iter().any(|said| said == gone),
+                "the chrome still draws a {gone:?} control: {in_chrome:?}"
+            );
+        }
+
+        let started = shelf.app.theme;
+        pane::settings::appearance::Exchange::request(&shelf.ctx, started.toggled());
+        shelf.settle();
+        assert_eq!(
+            shelf.app.theme,
+            started.toggled(),
+            "the shell ignored the theme the Settings pane recorded"
+        );
+        assert_eq!(
+            pane::settings::appearance::Exchange::in_force_now(&shelf.ctx),
+            Some(started.toggled()),
+            "the shell did not republish the theme it is painting, so the chooser cannot show it"
+        );
+    }
+
+    /// **Each slot is disjoint from the others and the drag strip clears them all.**
     ///
     /// Derived from the leftmost control rather than declared, so it cannot come to overlap one. On
     /// an undecorated window a strip laid over Close is how Close stops working — and the converse,
     /// a strip of zero width, is a window that cannot be moved.
     #[test]
-    fn every_chrome_slot_fits_its_control_and_the_drag_strip_clears_them_all() {
-        let ctx = egui::Context::default();
-        install_fonts(&ctx);
+    fn every_chrome_slot_is_disjoint_and_the_drag_strip_clears_them_all() {
         let bar = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, CHROME_HEIGHT));
-        let mut slots = None;
-        for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::Area::new(egui::Id::new("chrome-slots-test")).show(ctx, |ui| {
-                    slots = Some(ChromeSlots::lay_out(ui, bar, "Dark theme", "Maximize"));
-                });
-            });
-        }
-        let slots = slots.expect("the layout must have run");
+        let slots = ChromeSlots::lay_out(bar);
 
-        // Every slot must be at least as wide as the control it holds, and the slots must be
-        // disjoint. Those two together are what make the HIT AREAS disjoint — which is the property
-        // that matters and the one drawn glyphs cannot show, because a text control allocates from
-        // its label and merely starts at its slot, so an under-sized slot puts one control's
-        // clickable area on top of its neighbour while the two words still look fine.
-        //
-        // The required width is re-measured from the label here rather than taken from the layout,
-        // so this is an independent check and not the arithmetic agreeing with itself.
-        let required = |label: &str| {
-            let mut width = 0.0;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::Area::new(egui::Id::new("chrome-width-test")).show(ctx, |ui| {
-                    width = paint::text_control_width(ui, label);
-                });
-            });
-            width
-        };
-        for (name, label) in [
-            ("theme", "Dark theme"),
-            ("minimize", "Minimize"),
-            ("maximize", "Maximize"),
-            ("close", "Close"),
-        ] {
-            let slot = slots
-                .controls()
-                .into_iter()
-                .find(|(named, _)| *named == name)
-                .expect("every named slot exists")
-                .1;
-            assert!(
-                slot.width() >= required(label),
-                "the {name} slot is {} px but {label:?} needs {} px, so the control spills over its                  neighbour's hit area",
-                slot.width(),
-                required(label)
-            );
-        }
         let controls = slots.controls();
         for (i, (name, rect)) in controls.iter().enumerate() {
+            assert!(
+                bar.contains_rect(*rect),
+                "the {name} slot {rect:?} is not inside the {bar:?} bar"
+            );
             for (other, other_rect) in &controls[i + 1..] {
                 assert!(
                     !rect.intersects(*other_rect),
@@ -4292,15 +4390,97 @@ mod tests {
         );
     }
 
+    /// **A chain write in flight leaves every window control still working** (dig_ecosystem#2995).
+    ///
+    /// This is the incident, expressed as a property. The window froze because a two-bundle mainnet
+    /// ceremony ran on the painting thread; the fix is worth nothing if the surface that reports it
+    /// takes the app hostage instead, which is what a modal over a scrim would do.
+    ///
+    /// # Why the fixture is a PUSHED transaction and not a building one
+    ///
+    /// `Pushed` is the state that lasts — a bundle sits in the mempool for a block or more, and it
+    /// is the state the person is looking at when they decide whether this app is responding. The
+    /// momentary states would pass this test against an implementation that traps the user for the
+    /// whole wait.
+    #[test]
+    fn the_window_stays_usable_while_a_transaction_is_in_flight() {
+        let mut shelf = Shelf::open();
+        shelf.app.transactions.publish(
+            crate::transaction::Transaction::starting(
+                "Creating your profile",
+                Some(crate::transaction::Money {
+                    amount_mojos: 20_002,
+                    fee_mojos: None,
+                }),
+            )
+            .at(crate::transaction::Stage::Pushed {
+                id: "0xe4e2b74f915e7f4a739b305aa086aa657a09a8a4df231d9307bb265c528ecc12"
+                    .to_string(),
+            }),
+        );
+        shelf.settle();
+
+        assert!(
+            shelf
+                .press_chrome("Minimize")
+                .contains(&egui::ViewportCommand::Minimized(true)),
+            "a transaction in flight made the window unresponsive, which is the freeze this              surface exists to end"
+        );
+
+        // And nothing is scrimmed: the shell's input blocker — the widget that makes a modal a
+        // modal by eating every click aimed under it — must not exist for a transaction. A control
+        // that still answers proves this frame; the absent blocker proves the DESIGN, and the two
+        // fail in different ways.
+        shelf.frame(Vec::new());
+        assert!(
+            shelf.ctx.read_response(scrim_blocker()).is_none(),
+            "the transaction surface scrimmed the window, which is the freeze with nicer pixels"
+        );
+    }
+
+    /// **The sheet says what is happening, in the transaction's own words.**
+    ///
+    /// Reads the painted text, because the property is what a person can SEE. Asserting the feed
+    /// would only prove the value was stored, which the transaction module already proves.
+    #[test]
+    fn the_sheet_shows_the_stage_and_denies_a_confirmation_it_does_not_have() {
+        let id = "0xe4e2b74f915e7f4a739b305aa086aa657a09a8a4df231d9307bb265c528ecc12";
+        let mut shelf = Shelf::open();
+        shelf.app.transactions.publish(
+            crate::transaction::Transaction::starting("Creating your profile", None)
+                .at(crate::transaction::Stage::Pushed { id: id.to_string() }),
+        );
+        shelf.settle();
+
+        let said = shelf
+            .words()
+            .into_iter()
+            .map(|(word, _)| word)
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            said.contains("Creating your profile"),
+            "the sheet does not say what is happening: {said}"
+        );
+        assert!(
+            said.contains("NOT confirmed"),
+            "the sheet lets a broadcast read as a confirmation: {said}"
+        );
+        assert!(said.contains(id), "the sheet drops the id: {said}");
+    }
+
     /// **The maximise control is labelled with what it will DO, never with the state it is in.**
     ///
     /// A control that says `Maximize` on an already-maximised window offers no way back, which is
     /// the trap in a smaller shape. The unreported case defaults to the recoverable direction.
     #[test]
     fn the_maximise_label_names_the_action_and_not_the_state() {
-        assert_eq!(maximize_label(false), "Maximize");
-        assert_eq!(maximize_label(true), "Restore");
-        assert_ne!(maximize_label(true), maximize_label(false));
+        assert_eq!(maximize_control(false).1, "Maximize");
+        assert_eq!(maximize_control(true).1, "Restore");
+        assert_ne!(maximize_control(true), maximize_control(false));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |_| {});
