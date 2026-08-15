@@ -56,7 +56,7 @@ pub(crate) fn card(
             card::interactive_card(ui, at, t, live, Some(copy::profiles::CARD), |inner| {
                 let mut hit = list(inner, t, &reading, &verbs);
                 inner.gap(space::S4);
-                create_panel(inner, t, creation);
+                hit = hit.or(create_panel(inner, t, creation, &verbs));
                 if !verbs.about.is_empty() {
                     inner.gap(space::S3);
                     hit = hit
@@ -236,6 +236,13 @@ struct ProfileVerbs {
     /// at the foot of the card, away from the rows, where it cannot be mistaken for a control that
     /// acts on one of them.
     about: Vec<Action<TrayAction>>,
+    /// The create control, drawn INSIDE the create panel so the sentence explaining what creating a
+    /// profile costs and does is the thing it sits under.
+    ///
+    /// Empty in every state but [`ProfileCreation::Possible`], because that is the only state in
+    /// which the model builds the row at all — the offer is withheld by the MODEL, and this pane
+    /// draws what it is given (dig_ecosystem#2939).
+    create: Vec<Action<TrayAction>>,
 }
 
 impl ProfileVerbs {
@@ -249,12 +256,14 @@ impl ProfileVerbs {
         let mut verbs = Self {
             per_profile: Vec::new(),
             about: Vec::new(),
+            create: Vec::new(),
         };
         for action in section_actions(tab) {
             match action.id {
                 TrayAction::SetActiveProfile { .. } | TrayAction::SetProfileVisibility { .. } => {
                     verbs.per_profile.push(action)
                 }
+                TrayAction::CreateProfile => verbs.create.push(action),
                 _ => verbs.about.push(action),
             }
         }
@@ -321,32 +330,53 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// A recessed panel INSIDE the card rather than a card of its own: it is about the same subject the
 /// list is, and a person reading an empty list needs the explanation without changing where they are
 /// looking.
-fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation) {
-    // `ProfileCreation::Possible` is now REACHABLE in the shipped binary: it wires a real mint seam,
-    // so `of_profile_mint` can genuinely report a capable node. The create control is the next unit
-    // of work, so what keeps that from becoming a dead end is the `Possible => return` arm below —
-    // this panel draws NOTHING rather than announcing a capability with no control, which is the one
-    // thing `professional-ui` forbids outright. The safety is that arm, not an unreachable variant;
-    // deleting it would ship the dead end.
+/// The panel says one of two things, and never both:
+///
+/// * a state that WITHHOLDS the offer explains itself — what is still being checked, or which
+///   measured fact is in the way and what to do about it;
+/// * a state that can honour it draws the CONTROL, under the sentence saying what a profile is.
+///
+/// The panel used to draw nothing at all for a capable node, which was right while there was no
+/// control: announcing a capability with nothing to press is the dead end `professional-ui` forbids
+/// outright. The control exists now, so silence would be the opposite defect — a card that can offer
+/// something and does not say so.
+///
+/// Note what carries the safety. It is NOT this match: the offer is withheld by the MODEL, which
+/// builds no `CreateProfile` row unless `ProfileCreation::is_possible()`. So a mistake here draws an
+/// empty panel, never a live control on a node that cannot honour it.
+fn create_panel(
+    flow: &mut Flow,
+    t: &Tokens,
+    creation: ProfileCreation,
+    verbs: &ProfileVerbs,
+) -> Option<TrayAction> {
+    let live = flow.live();
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
         // a blocked cause here would tell a person with a stopped node that nothing is missing from
         // their setup (dig_ecosystem#2690).
-        ProfileCreation::Unknown => copy::profiles::CHECKING_CREATION,
+        ProfileCreation::Unknown => copy::profiles::CHECKING_CREATION.to_string(),
         ProfileCreation::Blocked(blocked) => copy::profiles::cannot_create(blocked),
-        // The create control is the next unit of work in this same PR; until it is drawn beside it, a
-        // panel announcing that creation is possible would be a dead end, which `professional-ui`
-        // forbids outright.
-        ProfileCreation::Possible => return,
+        // What a profile IS, reused rather than rewritten: the control's own label says what
+        // pressing it does, and the funding window it opens states the cost. A second sentence here
+        // promising that creation COMPLETES would be false — nothing in this build runs the ceremony
+        // yet (dig_ecosystem#2952).
+        ProfileCreation::Possible => crate::profiles::copy::WHAT_A_PROFILE_IS.to_string(),
     };
+    let mut pressed = None;
     flow.place(|ui, at| {
         (
             card::panel(ui, at, t, Some(copy::profiles::CREATE_PANEL), |inner| {
-                inner.place(|ui, at| (text::body(ui, at, t, sentence), ()));
+                inner.place(|ui, at| (text::body(ui, at, t, &sentence), ()));
+                if !verbs.create.is_empty() {
+                    inner.gap(space::S3);
+                    pressed = inner.place(|ui, at| action::buttons(ui, at, t, live, &verbs.create));
+                }
             }),
             (),
         )
     });
+    pressed
 }
 
 #[cfg(test)]
@@ -718,7 +748,7 @@ mod tests {
         );
         for blocked in CreationBlocked::EVERY {
             assert!(
-                !painted.contains(copy::profiles::cannot_create(blocked)),
+                !painted.contains(&copy::profiles::cannot_create(blocked)),
                 "{blocked:?} was stated as a cause on a node nobody had measured: {painted}"
             );
         }
@@ -731,7 +761,7 @@ mod tests {
         };
         let measured_says = card_says(&measured, 960.0);
         assert!(
-            measured_says.contains(copy::profiles::cannot_create(
+            measured_says.contains(&copy::profiles::cannot_create(
                 CreationBlocked::NoChainTransport
             )),
             "a measured blocker stopped being explained: {measured_says}"
@@ -743,21 +773,19 @@ mod tests {
         );
     }
 
-    /// **A node that CAN mint draws no half-offer — silence, not a claim with no control behind it.**
+    /// **A node that CAN honour the offer DRAWS the control** (dig_ecosystem#2939, #2946).
     ///
-    /// `ProfileCreation::Possible` became reachable in production the moment the binary started
-    /// reading creation off the node (dig_ecosystem#2398), so this state now needs pinning: until
-    /// the create control lands, the card must say NOTHING about creation rather than announce that
-    /// it is available. A missing feature is an omission; a sentence promising one with no control
-    /// beside it is the dead end `professional-ui` forbids outright, and the one
-    /// dig_ecosystem#1800 removed once already.
+    /// This replaces `a_capable_node_draws_no_offer_it_cannot_yet_honour`, which was correct while
+    /// the card had no control to draw and is wrong by design now that it has one. Its negative
+    /// legs are kept — no blocked sentence and no still-checking sentence for a node that already
+    /// answered — and the POSITIVE leg is new, which is the half dig_ecosystem#2946 was filed
+    /// about: a test asserting only absences passes just as happily on a pane that painted
+    /// NOTHING AT ALL, and painting nothing is what a regression here actually produces.
     ///
-    /// The fixture is a `Possible` view drawn on the same card as every other state, and the
-    /// assertion is against the sentences a HALF-offer would use — the blocked explanations and the
-    /// still-checking one. A test asserting only "the panel heading is absent" would pass on a card
-    /// that drew a blocked sentence for a capable node, which is the more likely mistake.
+    /// Proved load-bearing by stubbing the panel's render to draw nothing and watching this fail;
+    /// the old test stayed green through the same mutation.
     #[test]
-    fn a_capable_node_draws_no_offer_it_cannot_yet_honour() {
+    fn a_capable_node_draws_the_control_it_can_honour() {
         let view = TrayView {
             profile_creation: ProfileCreation::Possible,
             ..view_with(ProfilesReading::Known(Vec::new()))
@@ -765,31 +793,74 @@ mod tests {
         let painted = card_says(&view, 960.0);
 
         assert!(
+            painted.contains(crate::tray_menu::CREATE_PROFILE_LABEL),
+            "a node that can honour creation drew no way to reach it: {painted}"
+        );
+        assert!(
+            painted.contains(copy::profiles::CREATE_PANEL),
+            "the control was drawn outside the panel that explains what it is for: {painted}"
+        );
+        assert!(
             !painted.contains(copy::profiles::CHECKING_CREATION),
             "a node that already answered is drawn as still being checked: {painted}"
         );
         for blocked in CreationBlocked::EVERY {
             assert!(
-                !painted.contains(copy::profiles::cannot_create(blocked)),
+                !painted.contains(&copy::profiles::cannot_create(blocked)),
                 "a node that CAN mint is told {blocked:?} is missing: {painted}"
             );
         }
+    }
+
+    /// **A card that cannot honour the offer draws no control — for a MEASURED blocker and for an
+    /// unmeasured node alike** (dig_ecosystem#2939, #2690).
+    ///
+    /// The other direction of the test above, and the one that matters for money: the control leads
+    /// to a funding window, so drawing it where the ceremony would refuse walks somebody toward a
+    /// spend that cannot proceed.
+    ///
+    /// `Unknown` is the leg that would be missed. It answers `blocked() == None` exactly as
+    /// `Possible` does, so any gate written against `blocked()` rather than against the ARM draws
+    /// the control for a node nobody has spoken to.
+    #[test]
+    fn a_card_that_cannot_honour_creation_draws_no_control() {
+        let mut withheld = vec![ProfileCreation::Unknown];
+        withheld.extend(CreationBlocked::EVERY.map(ProfileCreation::Blocked));
+
+        for creation in withheld {
+            let view = TrayView {
+                profile_creation: creation,
+                ..view_with(ProfilesReading::Known(Vec::new()))
+            };
+            let painted = card_says(&view, 960.0);
+            assert!(
+                !painted.contains(crate::tray_menu::CREATE_PROFILE_LABEL),
+                "{creation:?} drew a control leading to a funding window it cannot honour: {painted}"
+            );
+        }
+
+        // Control: the SAME card, the one arm that CAN honour it, so "never draws a control"
+        // cannot pass this.
+        let capable = TrayView {
+            profile_creation: ProfileCreation::Possible,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
         assert!(
-            !painted.contains(copy::profiles::CREATE_PANEL),
-            "the creation panel is drawn for a capable node with no control inside it, which \
-             promises something this build cannot yet do: {painted}"
+            card_says(&capable, 960.0).contains(crate::tray_menu::CREATE_PROFILE_LABEL),
+            "no state draws the control, so the withholding above proves nothing"
         );
     }
 
-    /// **Nothing on this card offers to create a profile, and the reason is stated.**
+    /// **Where the card offers no way to create a profile, it says WHY — one cause, one sentence,
+    /// one remedy.**
     ///
-    /// The structural half is the one that matters: there is no `CreateProfile` action to draw, so
-    /// this cannot be flipped on by a mistaken `enabled: true`. What is asserted here is the half a
-    /// person reads — that the absence is explained rather than left as a missing button.
+    /// The structural half is held by `a_card_that_cannot_honour_creation_draws_no_control`: the
+    /// model builds no `CreateProfile` row for these arms, so the absence cannot be flipped on by a
+    /// mistaken `enabled: true`. What is asserted here is the half a person reads — that the
+    /// absence is explained rather than left as a missing button.
     ///
-    /// Both `ProfileCreation` values are drawn, because the two missing pieces need different
-    /// sentences and a card that showed one of them for both would send half its readers after the
-    /// wrong fault.
+    /// Every blocked arm is drawn, because the missing pieces need different sentences and a card
+    /// that showed one of them for all would send most of its readers after the wrong fault.
     #[test]
     fn the_card_explains_why_it_offers_no_way_to_create_a_profile() {
         let mut said = Vec::new();
@@ -805,7 +876,7 @@ mod tests {
             };
             let painted = card_says(&view, 960.0);
             assert!(
-                painted.contains(copy::profiles::cannot_create(blocked)),
+                painted.contains(&copy::profiles::cannot_create(blocked)),
                 "{blocked:?} did not reach the card as its own sentence: {painted}"
             );
             said.push(copy::profiles::cannot_create(blocked));

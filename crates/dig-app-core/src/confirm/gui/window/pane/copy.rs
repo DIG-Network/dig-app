@@ -521,7 +521,7 @@ pub(crate) mod profiles {
     /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
     /// because the shell says the same thing in a native notice and two constants stating one fact
     /// is how the account state machine came to have two sentence sets that drifted (#2357).
-    pub(crate) fn cannot_create(blocked: CreationBlocked) -> &'static str {
+    pub(crate) fn cannot_create(blocked: CreationBlocked) -> String {
         crate::profiles::copy::cannot_create(blocked)
     }
 
@@ -989,11 +989,6 @@ mod tests {
             crate::profiles::copy::WHAT_A_PROFILE_IS,
             crate::profiles::copy::ABOUT_HEADING,
         ];
-        // Both arms of the create explainer, enumerated rather than sampled: the two missing pieces
-        // get two sentences and a sweep that visits one of them is a sweep for one of them. The
-        // indentation guard below found a real defect in exactly these two the day they were
-        // written, which is why they are here rather than trusted.
-        all.extend(crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create));
         all.extend(TabId::all().into_iter().map(lead));
         all.extend(
             super::super::facts::AccountKind::ALL
@@ -1008,6 +1003,11 @@ mod tests {
         ]);
 
         let mut said: Vec<String> = all.into_iter().map(str::to_owned).collect();
+        // Every arm of the create explainer, enumerated rather than sampled: a sweep that visits
+        // one of them is a sweep for one of them. The indentation guard below found a real defect
+        // in exactly these the day they were written, which is why they are here rather than
+        // trusted. Built rather than constant since dig_ecosystem#2939 gave one arm a payload.
+        said.extend(crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create));
         // Every reason a store list can be missing, enumerated from the reading's own list rather
         // than sampled — a sweep that visits some of the sentences is a sweep for some of them.
         said.extend(

@@ -701,6 +701,8 @@ mod tests {
             [(0_u32, true), (0, false), (1, true), (1, false)]
                 .map(|(ix, hidden)| TrayAction::SetProfileVisibility { ix, hidden }),
         );
+        // A real menu row now (dig_ecosystem#2939), offered only where creation is possible.
+        all.push(TrayAction::CreateProfile);
         all
     }
 
@@ -733,6 +735,7 @@ mod tests {
             | TrayAction::SetActiveProfile { .. }
             | TrayAction::SetProfileVisibility { .. }
             | TrayAction::AboutProfiles
+            | TrayAction::CreateProfile
             | TrayAction::CopyReceiveAddress
             | TrayAction::AboutWallet
             | TrayAction::SetCacheCap { .. }

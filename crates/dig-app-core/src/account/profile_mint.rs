@@ -110,6 +110,26 @@ pub enum ProfileMintAvailability {
     NoLineageWalk,
     /// No way to read coins or push a bundle at all.
     NoChainTransport,
+    /// The chain is fine and the CEREMONY would refuse: the money is at one index and the new
+    /// profile would be created at another (see [`ProfileMint::divergence`]).
+    ///
+    /// A property of the ACCOUNT rather than of the build or the node — the state every account
+    /// with at least one profile is already in — which is why it is the one arm carrying a payload:
+    /// the remedy names an index, and a sentence that cannot name it is not a remedy.
+    FundingElsewhere(FundingElsewhere),
+}
+
+/// A mint whose funding index and target index differ, with both named.
+///
+/// Carries the authority tokens rather than bare indices because this is the SEAM's answer, and the
+/// seam is talking to code that may act on it. A copy layer that only prints a number takes a bare
+/// `ProfileIx` instead — see `CreationBlocked::FundingElsewhere`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FundingElsewhere {
+    /// The profile whose wallet holds the money.
+    pub funding: WalletSlot,
+    /// The profile that would be created.
+    pub target: MintTarget,
 }
 
 /// The one door a profile mint may be driven through, as a seam a surface can hold.
@@ -133,6 +153,19 @@ pub trait ProfileMintDoor {
 
     /// How alive the in-flight bundle looks, or `None` when no bundle is in flight.
     fn liveness(&self) -> Option<MintLiveness>;
+
+    /// The divergence [`begin`](Self::begin) would refuse on, or `None` when it would not refuse.
+    ///
+    /// # Why a surface ASKS the door instead of comparing two indices itself
+    ///
+    /// The comparison is one rule with one home ([`ProfileMint::divergence`]). A card that
+    /// re-derived it would be a second expression of the same capability, which is the drift
+    /// dig_ecosystem#2377 measured and dig_ecosystem#2957 is still open about: the two answers
+    /// disagree eventually, and the disagreement ships as a control that offers what the
+    /// implementation refuses.
+    ///
+    /// Costs nothing, spends nothing, and writes nothing — it reads two indices already decided.
+    fn funding_elsewhere(&self) -> Option<FundingElsewhere>;
 }
 
 /// What the CHAIN answered about minting here — the half of [`ProfileMintSeams`] that needs no door.
@@ -302,9 +335,23 @@ impl<'a> ProfileMintSeams<'a> {
 
     /// Whether a whole profile can be minted here — derived from the seams, never asserted beside
     /// them.
+    ///
+    /// # A wired chain is not by itself a possible mint
+    ///
+    /// The three seam arms measure the CHAIN. The ceremony has one more refusal that the chain
+    /// cannot see: it funds from the index it mints at, so an account whose money sits at a
+    /// different index than the one being created is refused at
+    /// [`begin`](ProfileMintDoor::begin) however healthy the node is. That is not an edge case —
+    /// it is every account holding at least one profile.
+    ///
+    /// So the wired arm ASKS the door rather than answering for it. Deriving it here rather than
+    /// re-comparing two indices is what keeps one rule in one place (dig_ecosystem#2377).
     pub fn availability(&self) -> ProfileMintAvailability {
         match self {
-            Self::Wired { .. } => ProfileMintAvailability::Possible,
+            Self::Wired { mint } => match mint.funding_elsewhere() {
+                None => ProfileMintAvailability::Possible,
+                Some(divergence) => ProfileMintAvailability::FundingElsewhere(divergence),
+            },
             Self::NoLineageWalk { .. } => ProfileMintAvailability::NoLineageWalk,
             Self::NoChainTransport { .. } => ProfileMintAvailability::NoChainTransport,
         }
@@ -603,14 +650,30 @@ where
     /// that offers profile creation MUST get the user through that step before calling
     /// [`begin`](ProfileMintDoor::begin), rather than letting them start a mint that will refuse.
     fn refuse_divergent_indices(&self) -> Result<(), MintError> {
-        if self.funding.ix() == self.target.ix() {
+        let Some(FundingElsewhere { funding, target }) = self.divergence() else {
             return Ok(());
-        }
+        };
         Err(MintError::Refused(format!(
-            "This mint would pay from profile {} but create profile {}, and DIG cannot yet fund \
-             one profile's mint from another's wallet. Move funds to profile {}'s address first.",
-            self.funding, self.target, self.target
+            "This mint would pay from profile {funding} but create profile {target}, and DIG \
+             cannot yet fund one profile's mint from another's wallet. Move funds to profile \
+             {target}'s address first.",
         )))
+    }
+
+    /// Whether this mint's money and its target sit at DIFFERENT indices — the ONE place that
+    /// comparison is made.
+    ///
+    /// Both the refusal at [`begin`](ProfileMintDoor::begin) and the offer a surface draws are
+    /// functions of this, so a card can never come to offer a mint the ceremony would refuse. `None`
+    /// is *this mint would not refuse for this reason*; it says nothing about the chain.
+    pub fn divergence(&self) -> Option<FundingElsewhere> {
+        match self.funding.ix() == self.target.ix() {
+            true => None,
+            false => Some(FundingElsewhere {
+                funding: self.funding,
+                target: self.target,
+            }),
+        }
     }
 }
 
@@ -643,6 +706,10 @@ where
                 &self.options,
             )
         })
+    }
+
+    fn funding_elsewhere(&self) -> Option<FundingElsewhere> {
+        self.divergence()
     }
 
     fn advance(&self) -> Result<ProfileMintStatus, MintDoorError> {
@@ -684,10 +751,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::profile_session::test_support::session_with;
+    use crate::account::profile_session::test_support::{registry_with, session_with};
     use dig_account::registry::journal::{
         MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,
     };
+    use dig_account::registry::ProfileRegistry;
+    use dig_account::ProfileIx;
     use dig_chainsource_interface::{
         ChainSourceError, CoinRecord, MockChainSource, SingletonLineage,
     };
@@ -849,12 +918,35 @@ mod tests {
     }
 
     /// A mint door that records whether anything asked it to spend.
+    ///
+    /// `divergence` is a knob rather than a constant so the seam's fourth arm can be exercised
+    /// without standing up a real account: the two authority tokens have no bare constructor, and
+    /// the ONE the tests can build honestly is `WalletSlot::unprofiled()` beside a `MintTarget`
+    /// taken from a registry that already holds a profile.
     #[derive(Default)]
     struct CountingDoor {
         begins: std::cell::Cell<usize>,
+        divergence: Option<FundingElsewhere>,
+    }
+
+    impl CountingDoor {
+        /// A door whose money is at ROOT and whose target is the next free index of `registry`.
+        fn paying_from_elsewhere(registry: &ProfileRegistry) -> Self {
+            Self {
+                begins: std::cell::Cell::default(),
+                divergence: Some(FundingElsewhere {
+                    funding: WalletSlot::unprofiled(),
+                    target: MintTarget::next_free(registry),
+                }),
+            }
+        }
     }
 
     impl ProfileMintDoor for CountingDoor {
+        fn funding_elsewhere(&self) -> Option<FundingElsewhere> {
+            self.divergence
+        }
+
         fn begin(&self, _seed: &ProfileSeed) -> Result<ProfileMintStatus, MintDoorError> {
             self.begins.set(self.begins.get() + 1);
             Ok(ProfileMintStatus::DidPending {
@@ -1025,14 +1117,69 @@ mod tests {
         );
     }
 
+    /// **A healthy node whose money sits at another index reads as `FundingElsewhere`, NOT as
+    /// `Possible`** (dig_ecosystem#2939).
+    ///
+    /// Makes impossible: the card offering profile creation to every account that already holds
+    /// one. `begin` refuses whenever funding and target differ, and that is the state EVERY
+    /// second-and-later profile starts in — so a seam answering only about the chain calls the
+    /// refusing case possible, and the person is walked into a ceremony that cannot start.
+    ///
+    /// # Why the fixture varies the DOOR and not the chain
+    ///
+    /// The defect is invisible to every chain knob: this node is perfectly healthy, and the three
+    /// existing probe tests would pass unchanged against it. What differs is the account — one
+    /// profile already exists, so the next free index is not the wallet's. The control leg is the
+    /// same wired chain with a door funding at its own target, which must still be `Possible`, so
+    /// an implementation that refused every wired seam cannot pass either.
+    #[test]
+    fn a_mint_funded_from_another_profile_is_not_reported_as_possible() {
+        let registry = registry_with(&[(ProfileIx::ROOT, Some("home"))]);
+        let elsewhere = CountingDoor::paying_from_elsewhere(&registry);
+
+        let seams = ProfileMintSeams::probe(&elsewhere, &WalksLineages);
+
+        assert_eq!(
+            seams.availability(),
+            ProfileMintAvailability::FundingElsewhere(FundingElsewhere {
+                funding: WalletSlot::unprofiled(),
+                target: MintTarget::next_free(&registry),
+            }),
+            "an account whose money is at one index and whose next profile is at another was told \
+             a mint is possible, and `begin` refuses it"
+        );
+        assert_eq!(
+            elsewhere.begins.get(),
+            0,
+            "deciding availability must never ask the mint to spend"
+        );
+
+        // Control: the SAME wired chain, a door with nothing diverging.
+        assert_eq!(
+            ProfileMintSeams::probe(&CountingDoor::default(), &WalksLineages).availability(),
+            ProfileMintAvailability::Possible,
+            "the control must genuinely be offered, or the refusal above proves nothing"
+        );
+    }
+
     /// **The availability and the obtainable door cannot disagree, in EITHER direction.**
     ///
     /// Makes impossible: the dig_ecosystem#2377 defect, where the gate lived in one expression and
     /// the capability in another, so a one-line edit to the gate opened a dead end. Asserted over
-    /// all three arms so neither "always `Some`" nor "always `None`" survives.
+    /// all four arms so neither "always `Some`" nor "always `None`" survives.
+    ///
+    /// # The rule is about the CHAIN, and `FundingElsewhere` is why that had to be said out loud
+    ///
+    /// A door is offered exactly when the chain can carry the ceremony. `FundingElsewhere` is a
+    /// refusal `begin` makes, not an absent seam: an account with a mint ALREADY IN FLIGHT must
+    /// still be able to `advance` and `status` it, and taking the door away would strand exactly
+    /// the person who has already spent money. So that arm keeps its door and withholds only the
+    /// OFFER — which is the surface's job, and is `is_possible()`, never `door().is_some()`.
     #[test]
     fn availability_and_the_door_agree_on_every_arm() {
         let door = CountingDoor::default();
+        let registry = registry_with(&[(ProfileIx::ROOT, Some("home"))]);
+        let elsewhere = CountingDoor::paying_from_elsewhere(&registry);
         let refusing = TwoKnobChain {
             peak: Some(PEAK),
             walks: false,
@@ -1041,19 +1188,34 @@ mod tests {
 
         for seams in [
             ProfileMintSeams::probe(&door, &WalksLineages),
+            ProfileMintSeams::probe(&elsewhere, &WalksLineages),
             ProfileMintSeams::probe(&door, &refusing),
             ProfileMintSeams::NoChainTransport {
                 why: "the node is not running".into(),
             },
         ] {
-            let possible = seams.availability() == ProfileMintAvailability::Possible;
+            let chain_carries_it = !matches!(
+                seams.availability(),
+                ProfileMintAvailability::NoLineageWalk | ProfileMintAvailability::NoChainTransport
+            );
             assert_eq!(
-                possible,
+                chain_carries_it,
                 seams.door().is_some(),
-                "a {:?} build must offer a door exactly when it reports Possible",
+                "a {:?} build must offer a door exactly when the chain can carry the ceremony",
                 seams.availability()
             );
         }
+
+        // The other half, which the loop above deliberately does NOT cover: a door that survives
+        // its arm must not be mistaken for an offer.
+        assert!(
+            !matches!(
+                ProfileMintSeams::probe(&elsewhere, &WalksLineages).availability(),
+                ProfileMintAvailability::Possible
+            ),
+            "a divergent mint kept its door AND was reported possible, which is the offer the \
+             ceremony refuses"
+        );
     }
 
     /// **An unreachable chain is `Unknown` — never `ProvablyDead` and never `Waiting`.**

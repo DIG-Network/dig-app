@@ -878,6 +878,24 @@ pub enum TrayAction {
     ///
     /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
     AboutProfiles,
+    /// Take the person to the funding check for a profile, on demand.
+    ///
+    /// # The verb is deliberately NARROWER than "create a profile"
+    ///
+    /// Pressing this raises the same funding window the first-profile prompt raises on its daily
+    /// cadence — it reads the balance, shows the address to send XCH to, and says plainly that this
+    /// build does not yet run the ceremony itself. Nothing here spends, signs or mints; there is
+    /// still no call to `ProfileMintDoor::begin` anywhere in production.
+    ///
+    /// So the label says *funding*, not *create*. A row reading "Create a profile" that lands on a
+    /// window explaining creation is not wired would be a control that refuses one screen later —
+    /// the dead end `professional-ui` forbids and dig_ecosystem#1800 removed once already. When
+    /// dig_ecosystem#2952 wires the ceremony, the widened verb lands WITH it.
+    ///
+    /// Offered ONLY where `ProfileCreation::is_possible()` — a live node answered both probes AND
+    /// the ceremony would not refuse on divergent indices (dig_ecosystem#2939). Never derived from
+    /// `blocked().is_none()`, which reads an unmeasured node as a capable one.
+    CreateProfile,
     /// Put the zero-profile funding prompt on screen (dig_ecosystem#2950).
     ///
     /// # The one action here that NO menu row offers
@@ -1655,6 +1673,16 @@ pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
             ],
         })
         .collect();
+    // Keyed on the ARM. `blocked().is_none()` answers `None` for `Unknown` too, and offering this
+    // against a node nobody has spoken to is the fail-open direction on a path that leads to a
+    // money window (dig_ecosystem#2690).
+    if view.profile_creation.is_possible() {
+        rows.push(MenuRow::action(
+            TrayAction::CreateProfile,
+            CREATE_PROFILE_LABEL,
+            true,
+        ));
+    }
     if !rows.is_empty() {
         rows.push(MenuRow::Separator);
     }
@@ -1669,6 +1697,13 @@ pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
 /// The explainer row's label. Names the concept a person is about to read about, and — per rule 3 —
 /// promises an explanation rather than an act.
 pub const PROFILES_LABEL: &str = "About DIG profiles…";
+
+/// The create control's label.
+///
+/// Names what pressing it DOES today — open the funding check — rather than the subject it belongs
+/// to. See [`TrayAction::CreateProfile`] for why the verb is narrower than the card's heading, and
+/// dig_ecosystem#2952 for the change that widens it.
+pub const CREATE_PROFILE_LABEL: &str = "Set up funding for a profile…";
 
 /// **Wallet** — what the account can do with money, which today is receive and understand.
 ///
