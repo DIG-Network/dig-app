@@ -915,13 +915,18 @@ pub enum TrayAction {
     /// would be a confidently wrong string to hand someone who means to pay you. Offered only where an
     /// address can exist; see `wallet_actions`.
     CopyReceiveAddress,
-    /// Show the wallet: the receive address, the balance (or precisely why it is not known), and what the
-    /// wallet cannot do yet.
+    /// Show the wallet: the receive address, the balance (or precisely why it is not known), and where
+    /// sending lives.
     ///
-    /// There is deliberately no `Send`: spending needs the money path, which is parked (#1702). Because no
-    /// [`TrayAction`] can move funds, "the tray cannot spend" is STRUCTURAL rather than one
-    /// `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid) follows
-    /// for minting (dig_ecosystem#1841).
+    /// There is deliberately no send ROW. That is a statement about menus, not about the app: a menu
+    /// cannot hold a form, and an amount is not something a person picks from a list — the same reason
+    /// [`SendXch`](Self::SendXch) is emitted by the Wallet PANE and never by a tray row.
+    ///
+    /// The stronger claim this comment used to make — that no [`TrayAction`] can move funds, so "the tray
+    /// cannot spend" is STRUCTURAL — **expired** when [`SendXch`](Self::SendXch) landed
+    /// (dig_ecosystem#2819). Do not rely on it as an invariant; a `TrayAction` CAN now carry a spend, and
+    /// what keeps it off this menu is the row inventory, not the type. The window's body was corrected
+    /// alongside this comment, because it was telling users the same expired thing (dig_ecosystem#2988).
     AboutWallet,
     /// Send XCH from this wallet — the transfer a person filled in on the Wallet tab, ready to build
     /// (dig_ecosystem#2819).
