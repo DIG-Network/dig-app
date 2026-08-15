@@ -337,7 +337,7 @@ fn env_os_of<T>(_agent: &T) -> Os {
 /// account's default profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path
 /// re-authenticates after a lock, restores any persisted pairings/whitelist/nonce ledger, serves the
 /// two loopback listeners on a background thread (the OS event loop keeps the main thread), and hands
-/// the tray the [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on
+/// the tray the [`TraySession`] it drives (lock-now / idle poll). Returns `None` on
 /// any deferral.
 #[cfg(feature = "tray")]
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
@@ -652,7 +652,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     );
 
     match outcome {
-        // Re-open through the normal unlock path so the session, signer, sealer and screen-lock guard
+        // Re-open through the normal unlock path so the session, signer and sealer
         // are assembled exactly as on every other unlock — one code path, no special-cased first run.
         FirstRunOutcome::WalletCreated | FirstRunOutcome::IdentityReady => start_sign_service(env),
         // A person who chose to stop must not be shown an error; only a genuine failure gets one.
@@ -808,7 +808,7 @@ fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opt
         );
         return None;
     }
-    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+    // Re-open through the normal boot path so the session, signer and sealer are
     // assembled exactly as on every other start — one code path, no special-cased restore.
     let session = start_sign_service(env);
     if session.is_some() {
@@ -915,7 +915,7 @@ impl AccountCustodian for ShellCustodian<'_> {
         if open_account(&self.brand_dir, Seeding::Restore(phrase)).is_none() {
             return false;
         }
-        // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+        // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
         let session = start_sign_service(self.env);
         let live = session.is_some();

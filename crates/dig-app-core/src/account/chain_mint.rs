@@ -252,7 +252,7 @@ where
         }
 
         // Derived here, per call. A locked account produces no minter, so a mint attempted after a
-        // lock-now, an idle timeout or an OS screen lock cannot even be built (module docs).
+        // lock-now or an idle timeout cannot even be built (module docs).
         let Some(minter) = self.residency.profile_minter() else {
             return Submission::Refused {
                 reason: "Your DIG Account is locked. Unlock it and try again.".to_owned(),

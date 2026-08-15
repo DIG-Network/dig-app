@@ -101,11 +101,15 @@ pub fn recheck_allowed(last_read_at: Option<SystemTime>, now: SystemTime) -> Res
 /// wallet or a phone, send, come back), which is the whole reason the automatic re-draw exists.
 ///
 /// It is BOUNDED because the window is not free while it is up. The tray's action worker is a single
-/// slot held for the whole of a handler, and the tick that runs the idle auto-lock takes the session
-/// with a `try_lock` it skips on contention: an unbounded re-raise therefore keeps key material
-/// resident past the idle window and silently swallows "Lock now". Returning gives both back, and
-/// nothing is lost — the daily reminder was already written when this prompt was raised, so the
-/// prompt comes back on its own cadence.
+/// slot held for the whole of a handler, so an unbounded re-raise silently swallows **"Lock now"** —
+/// and since the idle window is a full day (dig_ecosystem#2953), `Lock now` is the only immediate way
+/// a person can re-seal their session. Eating it is eating the escape hatch.
+///
+/// The same re-raise also outlasts the idle auto-lock (the tick takes the session with a `try_lock` it
+/// skips on contention), which keeps key material resident past the window — a smaller concern now
+/// that the window is 24 hours, but the same fix answers both. Returning gives both back, and nothing
+/// is lost: the daily reminder was already written when this prompt was raised, so the prompt comes
+/// back on its own cadence.
 pub const DEPOSIT_SELF_DISMISSALS_WATCHED: u32 = 5;
 
 /// What one drawing of the deposit window produced.

@@ -110,7 +110,7 @@ sealing container (DIGOP1) and the DEK derivation contract (HKDF-SHA256 over `DE
 `IDENTITY_IKM_VERSION` / `PROFILE_DEK_LABEL`, from `dig-constants`) are UNCHANGED — only the seed
 SOURCE moved (random-per-profile → master-seed-at-index). The unlocked account is housed in a
 harness-side lockable RESIDENCY that hands out live-view signer + sealer capabilities: a session lock
-(idle timeout / lock-now / OS screen lock) drops the residency and thereby relocks the running sign +
+(idle timeout / lock-now) drops the residency and thereby relocks the running sign +
 seal paths at once. **Migration is a clean pre-release cutover** (§ back-compat): because a master
 seed cannot reproduce a pre-existing random per-profile scalar, no byte-identical DEK exists to carry
 an old at-rest profile onto a seed index — and dig-app is pre-release with no persisted users, so old
@@ -284,7 +284,7 @@ neither may be relaxed:
 **Current state:** the mint itself is implemented and proven. `dig-account` 0.6.0 exposes
 `UnlockedAccount::profile_minter`, and `account::chain_mint::ChainMint` drives `begin_did_mint` →
 `mint_status` end to end through a Chia consensus validator. The minter is derived from the residency
-per call and never retained, so a mint observes lock-now, the idle timeout and the OS screen lock
+per call and never retained, so a mint observes lock-now and the idle timeout
 exactly as the money signer does.
 
 The chain TRANSPORT now exists. `dig-node-control-interface` 0.10 declares five OPEN chain reads plus
@@ -1893,7 +1893,7 @@ yields no residency and the signing channel stays down until a Linux unlock UX l
 The unlocked account is never held as a snapshot: it lives in the shared, lockable
 `account::residency::AccountResidency` (§3.6) — a single `Arc<Mutex<Option<UnlockedAccount>>>` that
 hands out LIVE-VIEW signer + sealer capabilities re-reading the account on every operation. A session
-lock (idle timeout / lock-now / OS screen lock) drops the residency (`lock_all`), which relocks BOTH
+lock (idle timeout / lock-now) drops the residency (`lock_all`), which relocks BOTH
 the identity sign path AND the money path at once — there is no lock that leaves a running capability
 able to sign. The private key never crosses this boundary (#908, Model A): the harness collects a
 password, `dig-account` seals/unlocks the seed, and callers receive only capability handles.
@@ -2095,7 +2095,7 @@ may declare one truthfully; anything arriving from outside the process (a dapp, 
 `Undeclared`, which can never auto-approve and is routed to the human instead.
 
 The signer is drawn from the shared, lockable account residency and built AFTER the ceremony, so a lock
-(lock-now / idle timeout / OS screen lock) that lands while the confirm window is open fails the sign
+(lock-now / idle timeout) that lands while the confirm window is open fails the sign
 closed. The residency is the SAME lockable seed home the identity signer reads — a locked account
 refuses to sign money AND identity.
 
@@ -2438,24 +2438,41 @@ custody key, so it enforces the two invariants every 0x0010 signing path enforce
   without an explicit human approval. A declined / timed-out / no-confirmer (headless) outcome returns
   the `DENIED` error code and never touches the key.
 
-### 3.6 Session lock (idle · OS-screen-lock · lock-now · tiered re-auth)
+### 3.6 Session lock (lock-now · 24-hour idle · process exit · tiered re-auth)
 
 An unlocked profile keeps its data-encryption key (DEK) resident in the in-memory session (§3.1).
-dig-app MUST drop that DEK — re-sealing the session — on any of three triggers, so key material never
-outlives the user's presence at the machine:
+Once a session is unlocked it MUST stay unlocked until one of exactly three things happens, and no
+others:
 
-1. **Idle auto-lock.** After a configurable idle window with no noted activity
-   (`DEFAULT_IDLE_TIMEOUT` = 5 minutes) the session locks. The shell drives the check from its refresh
+1. **One-tap lock-now.** An explicit lock action (a tray item) locks IMMEDIATELY, with NO confirmation
+   prompt. Because the idle window is a full day, this is the only IMMEDIATE lock available to a
+   person short of quitting the app, so it MUST remain offered at the TOP level of the tray menu
+   whenever the account is unlocked — never demoted into a submenu.
+2. **24 hours with no USER activity.** After an idle window with no noted activity
+   (`DEFAULT_IDLE_TIMEOUT` = 24 hours) the session locks. The shell drives the check from its refresh
    tick; noting activity resets the window.
-2. **OS screen lock.** When the OS session/screen locks, the session locks. The platform event is
-   observed natively per OS — Windows `WM_WTSSESSION_CHANGE`/`WTS_SESSION_LOCK` (via
-   `WTSRegisterSessionNotification`) and macOS `com.apple.screenIsLocked` (distributed notification) —
-   behind a single `ScreenLockSource` seam. The Linux logind lock signal is deferred with the Linux
-   unlock UX (dig_ecosystem#962); until then Linux relies on idle auto-lock + lock-now.
-3. **One-tap lock-now.** An explicit lock action (a tray item) locks IMMEDIATELY, with NO confirmation
-   prompt.
+3. **The app was closed and reopened.** Structural rather than a code path: the DEK lives only in the
+   in-memory residency, so process exit drops it and a fresh process starts LOCKED. An implementation
+   MUST NOT persist an unlocked session across a restart.
 
-All three drop the SAME key material: every unlocked profile DEK, via a whole-session lock.
+**What counts as activity (MUST).** Only USER interaction notes activity — a tray/window menu click,
+and an already-authorised sign passing through the re-auth gate. Background work MUST NEVER note
+activity: not the refresh tick, not status polls, not repaints, not node reads, not notifications. A
+content read is not evidence of a person at the machine, and an idle clock fed by the app's own work
+never elapses, which would make the window dead code that merely resembles a control. The refresh tick
+therefore only READS the clock (`poll_idle`) and never feeds it.
+
+**Rationale for the 24-hour window.** It governs how often a person retypes a password to authorise
+their OWN LOCAL actions, not whether a remote party can act for them: the node never holds the user's
+key and signing is local and per-operation, so the window widens only the unattended-machine exposure
+on a device the user already controls. It is a MAXIMUM, not a promise of liveness — nothing keeps the
+process alive to honour it, and an app closed at hour 3 has already lost its session under rule 3.
+
+**Locking the OS screen is NOT a trigger.** A person who locks their machine to step away has not
+asked dig-app to forget their session, and re-locking behind that is friction with no custody benefit.
+No platform screen-lock listener may be wired; a source-scanning regression test enforces the absence.
+
+All three triggers drop the SAME key material: every unlocked profile DEK, via a whole-session lock.
 
 **Tiered re-authentication (MUST — frictionless consumption, §6.0).** A lock gates the KEY, not
 content. Reading/browsing DIG content never touches the identity key, so a lock MUST NOT interrupt or
@@ -2466,13 +2483,11 @@ signing paths consult. Once a re-unlock succeeds the owed re-auth clears and the
 The lifecycle is a pure, seamed controller (`session_lock::SessionLock` over a `SessionKeys` DEK-drop
 seam — implemented by the master-HD `account::residency::AccountResidency` — and a `MonotonicClock`),
 so every trigger + the tiered
-re-auth is unit-tested without a real keystore or OS; the native `ScreenLockSource` listeners are thin
-adapters validated behind the seam.
+re-auth is unit-tested without a real keystore or OS.
 
 The tray shell drives one `SessionLock` over the SAME live session the APP-SIGN signer holds (so a
 lock the tray triggers is the lock the signer sees): the "Lock now" menu item calls `lock_now`, the
-refresh tick calls `poll_idle` (interaction notes activity), and the `ScreenLockSource` callback —
-wrapped so a panic cannot unwind across the OS `extern "system"` boundary — calls `on_screen_locked`.
+refresh tick calls `poll_idle`, and a tray interaction notes activity.
 The `sign.request` path consults the lock through a `SignReauthGate` immediately before it signs: when
 a re-auth is owed it re-unlocks ONLY the signing (active) profile's identity — never every profile's
 DEK — via the §3.1 single-profile unlock path, so the re-auth restores the smallest key residency that

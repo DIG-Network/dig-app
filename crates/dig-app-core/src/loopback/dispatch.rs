@@ -279,7 +279,7 @@ impl ProfileConnectInfo {
 /// (WSEC-D, `SPEC.md` §5.6, dig_ecosystem#967).
 ///
 /// A profile stays unlocked only while its DEK lives in the in-memory session; the session-lock
-/// lifecycle drops that DEK on idle / OS screen-lock / one-tap lock-now. When it has, the next
+/// lifecycle drops that DEK on idle / one-tap lock-now. When it has, the next
 /// signature must RE-AUTHENTICATE (re-unlock the DEK) before it can proceed. This seam is how the
 /// transport-free router asks "is a re-auth owed, and if so did it succeed?" without depending on the
 /// session-lock controller or the keystore directly.
