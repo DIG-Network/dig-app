@@ -289,9 +289,9 @@ impl AccountResidency {
     }
 
     /// Build the LIVE money signer for the default profile on `network`, through the CURRENT account —
-    /// or `None` once the residency is locked. Read on every call so a lock (lock-now / idle timeout /
-    /// an idle timeout) that drops the account between the confirm ceremony and this call fails the
-    /// sign closed rather than signing under a snapshot the user meant to relock.
+    /// or `None` once the residency is locked. Read on every call so a lock (lock-now / idle timeout)
+    /// that drops the account between the confirm ceremony and this call fails the sign closed rather
+    /// than signing under a snapshot the user meant to relock.
     ///
     /// The returned [`LocalMoneySigner`] holds the master key inside dig-account's vetted signer and
     /// exposes signing only — the seed never crosses this boundary. Since `dig-account` 0.5.0 building

@@ -33,9 +33,12 @@ const FORBIDDEN: &[&str] = &[
     "screenIsLocked",
     "on_screen_locked",
     "ScreenLockSource",
+    "PlatformScreenLockSource",
+    "ScreenLockGuard",
+    "panic_safe_lock_callback",
 ];
 
-/// The `src/` trees that make up the app: the core crate and the binary crate that wires it.
+/// The `src/` trees that make up the app: the core crate and the binary crates that wire it.
 fn scanned_source_roots() -> Vec<PathBuf> {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -44,6 +47,7 @@ fn scanned_source_roots() -> Vec<PathBuf> {
     vec![
         workspace.join("dig-app-core").join("src"),
         workspace.join("dig-app").join("src"),
+        workspace.join("dign").join("src"),
     ]
 }
 
@@ -67,6 +71,7 @@ fn rust_sources(root: &Path) -> Vec<PathBuf> {
 #[test]
 fn no_source_file_wires_an_os_screen_lock_trigger() {
     let mut offences = Vec::new();
+    let mut scanned = 0;
     for root in scanned_source_roots() {
         assert!(
             root.is_dir(),
@@ -74,6 +79,7 @@ fn no_source_file_wires_an_os_screen_lock_trigger() {
             root.display()
         );
         for file in rust_sources(&root) {
+            scanned += 1;
             let text = std::fs::read_to_string(&file).expect("a source file is readable");
             for (line_no, line) in text.lines().enumerate() {
                 for token in FORBIDDEN {
@@ -84,6 +90,11 @@ fn no_source_file_wires_an_os_screen_lock_trigger() {
             }
         }
     }
+
+    assert!(
+        scanned >= 100,
+        "the screen-lock guard scanned only {scanned} source files; a scan that reads almost nothing passes for the wrong reason"
+    );
 
     assert!(
         offences.is_empty(),
