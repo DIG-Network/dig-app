@@ -513,12 +513,18 @@ fn figures(held: &Balances) -> Vec<Readout> {
 /// # When the close control is drawn, and why it takes BOTH conditions
 ///
 /// It appears only where pressing it will visibly close this card: the card was disclosed by a
-/// person AND there is no payment to report. Both halves are load-bearing, and each on its own is a
-/// defect the other prevents.
+/// person AND there is no payment to report.
 ///
-/// Without `disclosed`, a card on screen purely because a payment is in flight would offer to
-/// dismiss it — a wallet that lets somebody hide money in motion is the money-lie this pane exists
-/// to avoid.
+/// The idle half is the one doing the work. `disclosed` is, as the caller stands today, already
+/// implied by it — [`draw`] shows this card when `disclosed_send || send != Idle`, so a card that
+/// is drawn while idle can only have been drawn because somebody opened it, and the two spellings
+/// are equivalent. A mutation dropping `disclosed` therefore changes no behaviour and no test
+/// catches it, which is the correct outcome rather than a coverage gap.
+///
+/// It is kept because that equivalence is the CALLER's property, not this function's: it holds only
+/// while the draw condition stays a disjunction with `disclosed_send` on one side. Stating both
+/// conditions here keeps this function correct on its own terms if that ever changes, and says out
+/// loud what the control means.
 ///
 /// Without the idle check, the ORDINARY path grows a control that does nothing. Nothing on the send
 /// path clears the disclosure — the submit does not touch it — so a person who opens the form and
