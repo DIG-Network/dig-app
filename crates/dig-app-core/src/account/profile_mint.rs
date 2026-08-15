@@ -752,11 +752,11 @@ where
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{registry_with, session_with};
-    use dig_account::registry::ProfileRegistry;
-    use dig_account::ProfileIx;
     use dig_account::registry::journal::{
         MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,
     };
+    use dig_account::registry::ProfileRegistry;
+    use dig_account::ProfileIx;
     use dig_chainsource_interface::{
         ChainSourceError, CoinRecord, MockChainSource, SingletonLineage,
     };
@@ -1196,8 +1196,7 @@ mod tests {
         ] {
             let chain_carries_it = !matches!(
                 seams.availability(),
-                ProfileMintAvailability::NoLineageWalk
-                    | ProfileMintAvailability::NoChainTransport
+                ProfileMintAvailability::NoLineageWalk | ProfileMintAvailability::NoChainTransport
             );
             assert_eq!(
                 chain_carries_it,

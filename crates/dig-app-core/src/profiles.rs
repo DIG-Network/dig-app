@@ -612,6 +612,13 @@ pub mod copy {
     /// carry N, and a sentence that drops it would tell somebody they are blocked and leave out the
     /// one thing they need to act.
     pub fn cannot_create(blocked: CreationBlocked) -> String {
+        /// How a profile at `ix` is NAMED to a person: counting from one, as
+        /// `ProfileRow::display_name` does. An HD index is an implementation detail nobody has
+        /// been shown.
+        fn ordinal(ix: super::ProfileIx) -> u32 {
+            ix.0.saturating_add(1)
+        }
+
         match blocked {
             CreationBlocked::NoChainTransport => {
                 "Creating a profile mints a DID and a store on the Chia blockchain, and DIG could \
@@ -630,12 +637,21 @@ pub mod copy {
             // Deliberately free of the words the other two arms' remedies are keyed on — this
             // cause is neither started nor updated, and a card carrying all three verbs would let a
             // per-arm remedy check pass on a sentence that answers every fault at once.
-            CreationBlocked::FundingElsewhere { funding, target } => format!(
-                "Your DIG node is working. Creating a profile pays for it from that profile's own \
-                 wallet, and this account's XCH is held by profile {funding}, so a new profile {target} \
-                 cannot be paid for yet. Move funds to profile {target}'s address first and this \
-                 card will offer creation."
-            ),
+            CreationBlocked::FundingElsewhere { funding, target } => {
+                // ORDINALS, not raw indices. The list above this sentence names an unlabelled
+                // profile by `ProfileRow::display_name`, which counts from one — so "profile 0"
+                // here would point a reader at a row this card calls "profile 1". The door's own
+                // refusal string still prints the raw index; it is not user-facing today, and
+                // reconciling the two is a follow-up rather than a silent change to a message
+                // existing tests pin.
+                let (funding, target) = (ordinal(funding), ordinal(target));
+                format!(
+                    "Your DIG node is working. Creating a profile pays for it from that \
+                     profile's own wallet, and this account's XCH is held by profile {funding}, \
+                     so a new profile {target} cannot be paid for yet. Move funds to profile \
+                     {target}'s address first and this card will offer creation."
+                )
+            }
         }
     }
 

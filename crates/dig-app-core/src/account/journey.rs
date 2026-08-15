@@ -1839,12 +1839,17 @@ mod copy {
                 // and the target index are both `ProfileIx::ROOT` and so cannot diverge. What the
                 // arm buys is a TOTAL match — a screen can never fall back to a reason that is not
                 // the true one — and a real string for the guards that walk `CreationBlocked::EVERY`.
-                CreationBlocked::FundingElsewhere { funding, target } => format!(
-                    "This account's XCH is held by profile {funding}, and creating profile \
-                     {target} is paid for from profile {target}'s own wallet — so DIG will not \
-                     begin it and nothing has been spent. Move funds to profile {target}'s address \
-                     and DIG will offer it here.",
-                ),
+                CreationBlocked::FundingElsewhere { funding, target } => {
+                    // Ordinals, matching the profiles card and `ProfileRow::display_name`:
+                    // an HD index is not a name a person has ever been shown.
+                    let (funding, target) = (funding.0 + 1, target.0 + 1);
+                    format!(
+                        "This account's XCH is held by profile {funding}, and creating profile \
+                         {target} is paid for from profile {target}'s own wallet — so DIG will not \
+                         begin it and nothing has been spent. Move funds to profile {target}'s address \
+                         and DIG will offer it here.",
+                    )
+                }
             };
             format!("{WHAT_A_DID_IS_FOR}\n\n{because}\n\n{UNTIL_THEN_EVERYTHING_ELSE}")
         }
@@ -1954,12 +1959,17 @@ mod copy {
                 // Unreachable from the first-run wizard for the reason given at `unavailable_body`
                 // — an unprofiled account's two indices are both ROOT — and written out so the
                 // match stays total.
-                CreationBlocked::FundingElsewhere { funding, target } => format!(
-                    "It is what turns the wallet on this computer into a full DIG Account. This \
-                     account's XCH is held by profile {funding} and profile {target} is paid for \
-                     from its own wallet, so DIG will not begin it until funds reach profile \
-                     {target}'s address.",
-                ),
+                CreationBlocked::FundingElsewhere { funding, target } => {
+                    // Ordinals, matching the profiles card and `ProfileRow::display_name`:
+                    // an HD index is not a name a person has ever been shown.
+                    let (funding, target) = (funding.0 + 1, target.0 + 1);
+                    format!(
+                        "It is what turns the wallet on this computer into a full DIG Account. This \
+                         account's XCH is held by profile {funding} and profile {target} is paid for \
+                         from its own wallet, so DIG will not begin it until funds reach profile \
+                         {target}'s address.",
+                    )
+                }
             };
             format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
         }

@@ -344,7 +344,12 @@ fn section_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
 /// Note what carries the safety. It is NOT this match: the offer is withheld by the MODEL, which
 /// builds no `CreateProfile` row unless `ProfileCreation::is_possible()`. So a mistake here draws an
 /// empty panel, never a live control on a node that cannot honour it.
-fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation, verbs: &ProfileVerbs) -> Option<TrayAction> {
+fn create_panel(
+    flow: &mut Flow,
+    t: &Tokens,
+    creation: ProfileCreation,
+    verbs: &ProfileVerbs,
+) -> Option<TrayAction> {
     let live = flow.live();
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
@@ -365,8 +370,7 @@ fn create_panel(flow: &mut Flow, t: &Tokens, creation: ProfileCreation, verbs: &
                 inner.place(|ui, at| (text::body(ui, at, t, &sentence), ()));
                 if !verbs.create.is_empty() {
                     inner.gap(space::S3);
-                    pressed =
-                        inner.place(|ui, at| action::buttons(ui, at, t, live, &verbs.create));
+                    pressed = inner.place(|ui, at| action::buttons(ui, at, t, live, &verbs.create));
                 }
             }),
             (),
