@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.6.0] - 2026-08-15
+
+### Features
+- **profiles:** Show a profile's store id beside its DID (#180)- **window:** Off-thread chain writes with an honest status sheet, and icon window controls (#179)
+
 ## [12.4.0] - 2026-08-15
 
 ### Features
