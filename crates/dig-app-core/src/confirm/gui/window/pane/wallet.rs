@@ -86,20 +86,30 @@ pub(crate) fn draw(
         Disclosed::store(flow, open);
     }
 
-    if open == Disclosed::Receive {
+    // Asked ONCE and used for both the card and the verb filter below, so the two cannot come to
+    // disagree about whether the receive card is on screen. Consulting `open` alone would gap for a
+    // card that then early-returns on an address it cannot show, leaving a hole and a stale-open bit.
+    let showing_receive = drew_copy_control(facts, open);
+    if showing_receive {
         flow.gap(space::S4);
         if receive_card(flow, t, facts) {
-            Disclosed::store(flow, Disclosed::Nothing);
+            open = Disclosed::Nothing;
+            Disclosed::store(flow, open);
         }
     }
 
     // The sending card is drawn when its verb is open, AND whenever a payment is in flight whether
     // or not anybody opened it. A settling payment is the newest thing on the tab and must not be
     // reachable only by remembering to press something.
-    let sent = match open == Disclosed::Send || !matches!(facts.send, SendProgress::Idle) {
+    let disclosed_send = open == Disclosed::Send;
+    let sent = match disclosed_send || !matches!(facts.send, SendProgress::Idle) {
         true => {
             flow.gap(space::S4);
-            sending_card(flow, t, facts)
+            let (sent, done) = sending_card(flow, t, facts, disclosed_send);
+            if done {
+                Disclosed::store(flow, Disclosed::Nothing);
+            }
+            sent
         }
         false => None,
     };
@@ -110,12 +120,10 @@ pub(crate) fn draw(
     //
     // A press on Send wins over anything below it: both cannot happen in one frame, and an `or` here
     // would drop the intent a person actually expressed if a verb were ever pressed alongside it.
-    sent.or(spare_verbs_card(
-        flow,
-        t,
-        tab,
-        drew_copy_control(facts, open),
-    ))
+    // `showing_receive`, not a fresh `drew_copy_control(facts, open)`: closing the card above moves
+    // `open` on, and re-asking would report no copy control on the very frame one was drawn — putting
+    // the menu's row back beside it and offering the same verb twice.
+    sent.or(spare_verbs_card(flow, t, tab, showing_receive))
 }
 
 /// Which of the tab's two disclosed cards is showing.
@@ -318,26 +326,7 @@ fn receive_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> bool {
         let (height, done) =
             card::interactive_card(ui, at, t, live, Some(copy::wallet::RECEIVE_CARD), |inner| {
                 known_address(inner, t, &address);
-                inner.gap(space::S4);
-                inner.place(|ui, at| {
-                    let hit = paint::button_at(
-                        ui,
-                        egui::Rect::from_min_size(
-                            at.left_top(),
-                            egui::Vec2::new(
-                                paint::button_width(ui, copy::wallet::CLOSE_BUTTON),
-                                paint::BUTTON_HEIGHT,
-                            ),
-                        ),
-                        egui::Id::new("dig-window-wallet-receive-done"),
-                        copy::wallet::CLOSE_BUTTON,
-                        Weight::Ghost,
-                        live,
-                        t,
-                    )
-                    .clicked();
-                    (paint::BUTTON_HEIGHT, hit)
-                })
+                close_control(inner, t, live, "dig-window-wallet-receive-done")
             });
         (height, done.unwrap_or(false))
     })
@@ -510,7 +499,26 @@ fn figures(held: &Balances) -> Vec<Readout> {
 /// is running is the **Send** control being refused with its reason
 /// ([`SendBlocked::AlreadySending`]), which is a sentence a person can read, where a vanished form is
 /// a page that appears to have lost a feature.
-fn sending_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayAction> {
+///
+/// Reports the action pressed, and whether the reader asked to close the card.
+///
+/// # Why the close control is drawn only when the card was DISCLOSED
+///
+/// `disclosed` is false when this card is on screen because a payment is in flight rather than
+/// because anybody opened it, and a payment in flight must not be dismissible — a wallet that lets
+/// somebody hide money in motion is the money-lie this pane exists to avoid. Drawing a `Done` that
+/// visibly failed to close anything would be the other half of the same defect.
+///
+/// When the card IS disclosed the control is always drawn, including while the account is sealed.
+/// That case is the reason this parameter exists: `Disclosed::Send` survives in egui's store, so an
+/// account sealing under an open form leaves the verb that opened it refused — and without a control
+/// in here, a card nothing on the tab can close (`professional-ui`, HARD RULE 1).
+fn sending_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    facts: &PaneFacts,
+    disclosed: bool,
+) -> (Option<TrayAction>, bool) {
     let live = flow.live();
     flow.place(|ui, at| {
         let (height, pressed) =
@@ -522,9 +530,40 @@ fn sending_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayAc
                 let pressed = send_form(inner, t, facts);
                 inner.gap(space::S2);
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SENDING_HINT), ()));
-                pressed
+                let done =
+                    disclosed && close_control(inner, t, live, "dig-window-wallet-send-done");
+                (pressed, done)
             });
-        (height, pressed.flatten())
+        let (pressed, done) = pressed.unwrap_or((None, false));
+        (height, (pressed, done))
+    })
+}
+
+/// The control that closes a disclosed card. Reports whether it was pressed.
+///
+/// Shared by both disclosed cards so they cannot drift into two ways of saying the same thing, and
+/// so neither can be given one while the other is left without — which is exactly how the send card
+/// shipped without an escape while the receive card had one.
+fn close_control(flow: &mut Flow, t: &Tokens, live: bool, element: &str) -> bool {
+    flow.gap(space::S4);
+    flow.place(|ui, at| {
+        let hit = paint::button_at(
+            ui,
+            egui::Rect::from_min_size(
+                at.left_top(),
+                egui::Vec2::new(
+                    paint::button_width(ui, copy::wallet::CLOSE_BUTTON),
+                    paint::BUTTON_HEIGHT,
+                ),
+            ),
+            egui::Id::new(element),
+            copy::wallet::CLOSE_BUTTON,
+            Weight::Ghost,
+            live,
+            t,
+        )
+        .clicked();
+        (paint::BUTTON_HEIGHT, hit)
     })
 }
 
@@ -1534,6 +1573,90 @@ mod tests {
         assert_eq!(Disclosed::Send.toggled(Verb::Receive), Disclosed::Receive);
     }
 
+    /// **Every disclosed card DRAWS a way out, including one whose verb has since been refused**
+    /// (`professional-ui`, HARD RULE 1).
+    ///
+    /// The companion to `every_disclosed_card_closes_from_the_control_that_opened_it`, and the half
+    /// that guard could not see: it exercises `Disclosed::toggled` and never renders anything, so
+    /// the send card shipped with no `Done` at all and every test stayed green.
+    ///
+    /// The third actor is the one that makes this more than a presence check. `Disclosed::Send`
+    /// survives in egui's store, so an account sealing under an open form leaves the verb that
+    /// opened it refused — and with no control inside the card, nothing on the tab can close it.
+    ///
+    /// `Disclosed::Nothing` is the control: without it, a pane that drew a `Done` unconditionally —
+    /// on a resting tab with no card open — would pass every assertion above.
+    #[test]
+    fn every_disclosed_card_draws_a_way_out_even_when_its_verb_is_refused() {
+        let sealed = TrayView {
+            running: true,
+            account: Some(AccountState::Locked),
+            ..TrayView::default()
+        };
+        for (what, view, open) in [
+            (
+                "the receive card",
+                sendable(SendProgress::Idle),
+                Disclosed::Receive,
+            ),
+            (
+                "the send card",
+                sendable(SendProgress::Idle),
+                Disclosed::Send,
+            ),
+            // The trap: the form is open and the verb that opened it now refuses.
+            (
+                "a sealed wallet's open send card",
+                sealed.clone(),
+                Disclosed::Send,
+            ),
+        ] {
+            let said = painted_pane_with(&view, 900.0, open);
+            assert!(
+                said.iter()
+                    .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
+                "{what} drew no way out, so a reader who scrolled past the verb row is stuck with \
+                 it: {said:?}"
+            );
+        }
+
+        let resting = painted_pane_with(&sendable(SendProgress::Idle), 900.0, Disclosed::Nothing);
+        assert!(
+            !resting
+                .iter()
+                .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
+            "a tab with nothing open drew a close control, so the assertions above cannot tell a \
+             disclosed card's escape from one drawn unconditionally: {resting:?}"
+        );
+    }
+
+    /// **A payment in flight is NOT dismissible.**
+    ///
+    /// The other side of the escape rule, and the reason `sending_card` takes `disclosed` rather
+    /// than always drawing its control. A card on screen because money is moving must not offer to
+    /// hide it — and a `Done` that visibly failed to close anything would be the same defect
+    /// wearing a working-looking control.
+    #[test]
+    fn a_payment_in_flight_offers_no_control_to_hide_it() {
+        for send in every_send_state() {
+            if matches!(send, SendProgress::Idle) {
+                continue;
+            }
+            let said = painted_pane_with(&sendable(send.clone()), 900.0, Disclosed::Nothing);
+            assert!(
+                said.iter()
+                    .any(|line| line.contains(copy::wallet::SENDING_CARD)),
+                "{send:?} did not draw its card at all, so this test proves nothing: {said:?}"
+            );
+            assert!(
+                !said
+                    .iter()
+                    .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
+                "{send:?} offered a control to hide money in motion: {said:?}"
+            );
+        }
+    }
+
     /// **A refused verb says WHY, and the two verbs never wear each other's reason.**
     ///
     /// The never-trap rule applied to the verb row: a greyed control whose condition is unstated
@@ -1557,6 +1680,23 @@ mod tests {
             send, receive,
             "the two refused verbs wear one sentence, so the row names the wrong remedy for one \
              of them"
+        );
+
+        // Both sentences are captioned under the row as an unlabelled pair, so each has to name its
+        // OWN subject to be readable — the reader has nothing else tying a sentence to a control.
+        // That holds today by luck rather than by rule: these sentences were written for other
+        // surfaces, where a label supplied the subject. Asserted so a future reword that drops the
+        // subject reddens here instead of shipping two sentences under two buttons with no way to
+        // tell which is which.
+        assert!(
+            send.contains(copy::wallet::SEND_BUTTON_OPEN),
+            "the Send refusal never names Send, so under an unlabelled caption it could be read as \
+             belonging to Receive: {send:?}"
+        );
+        assert!(
+            receive.contains("address"),
+            "the Receive refusal never names the address, so under an unlabelled caption it could \
+             be read as belonging to Send: {receive:?}"
         );
 
         let working = facts_with(sendable(SendProgress::Idle));
