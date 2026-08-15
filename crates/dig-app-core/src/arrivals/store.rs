@@ -98,7 +98,33 @@ mod tests {
         assert_eq!(load(&path_in(dir.path())), ArrivalAnnouncer::unread());
     }
 
-    /// **The record of what has been announced survives the process that announced it.**
+    /// One arrival naming its coin independently of its `seq`, which the helper above cannot do.
+    ///
+    /// The helper derives the coin id FROM the seq, so it cannot express the same coin returning at a
+    /// different position — which is the only shape that can see the coin set through a file.
+    fn arrival_of(seq: u64, coin: u64, height: u32) -> Arrival {
+        Arrival {
+            seq,
+            coin_id: format!("{coin:064x}"),
+            asset_id: None,
+            amount: 1,
+            confirmed_height: height,
+        }
+    }
+
+    /// **The record of what has been announced survives the process that announced it — coin set
+    /// included.**
+    ///
+    /// This is the only test that crosses [`save`]/[`load`], so it is the only place a coin set that
+    /// silently failed to serialize can be caught, and its fixture has to be able to SEE the set. A
+    /// coin replayed at or below the persisted cursor proves nothing: `ArrivalCursor`'s floor discards
+    /// that row before `AnnouncedCoins::admit` is ever consulted, so the assertion is answered by the
+    /// cursor alone and a `#[serde(skip)]` on the coin set would leave it green while every restart
+    /// re-announced the ledger. The coin therefore returns ABOVE the cursor — the same correction the
+    /// in-memory tests in [`super::super::announcer`] already carry.
+    ///
+    /// The second coin is the control: without it, "suppressed" is equally satisfied by a reloaded
+    /// record that announces nothing at all.
     #[test]
     fn what_was_announced_is_still_known_after_a_reload() {
         let dir = tempfile::tempdir().unwrap();
@@ -113,10 +139,25 @@ mod tests {
         );
         save(&path, &first).expect("saved");
 
+        // The node's table is rebuilt and replays coin 5 at a far higher seq, with a genuinely new
+        // coin behind it.
         let mut second = load(&path);
-        assert!(
-            second.advance(&page(&[5], 4, 5)).is_empty(),
-            "the reloaded record re-announced a payment it had already announced"
+        let announced = second.advance(&ArrivalPage {
+            arrivals: vec![
+                arrival_of(300, 5, 5_412_005),
+                arrival_of(301, 0xbbb, 5_412_600),
+            ],
+            cursor: 301,
+            latest: 301,
+        });
+        assert_eq!(
+            announced
+                .iter()
+                .map(|a| a.coin_id.clone())
+                .collect::<Vec<_>>(),
+            vec![arrival_of(0, 0xbbb, 0).coin_id],
+            "the reloaded record re-announced a payment it had already announced, \
+             or suppressed a genuinely new coin"
         );
     }
 
