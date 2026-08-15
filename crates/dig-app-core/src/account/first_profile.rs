@@ -568,8 +568,7 @@ pub mod copy {
             "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
              for an app and be found by other people. This account does not have one yet.\n\n\
              Creating one costs {} mojos, and this wallet needs {} more before it can. Scan the \
-             code or send XCH to the address below; DIG will notice when it arrives and open the \
-             profile wizard by itself.\n\n\
+             code or send XCH to the address below; DIG will notice when it arrives.\n\n\
              This window creates nothing and spends nothing. Reading the DIG Network never needs a \
              profile.",
             grouped(cost_mojos),
