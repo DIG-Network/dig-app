@@ -24,6 +24,7 @@
 //!   whose correctness a screenshot cannot settle, since a camera has to read it |
 //! | `first-profile` | the zero-profile fund-and-create prompt (dig_ecosystem#2950) — the one window
 //!   nobody can reach by clicking, since the state loop raises it on a schedule |
+//! | `first-profile-ready` | the same prompt when the wallet holds enough to create a profile |
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
@@ -289,6 +290,29 @@ fn main() {
             let body = copy::body(cost, cost);
             let scannable = QrArt::encode(ADDRESS);
             confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body, scannable.as_ref()))
+        }
+        // The same prompt, when the wallet can now pay — showing what is about to be charged and
+        // that nothing has been spent yet. Built with the ready-state constants and copy, not a
+        // re-typed second implementation.
+        "first-profile-ready" => {
+            use dig_app_core::account::first_profile::copy;
+            use dig_app_core::account::first_profile::first_profile_cost_mojos;
+
+            const ADDRESS: &str =
+                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+            // A wallet at zero profiles, but with enough funds: the ready state.
+            let cost = first_profile_cost_mojos();
+            let body = copy::ready_body(cost);
+            confirmer.confirm_claim(&ClaimPrompt {
+                title: copy::READY_TITLE,
+                heading: copy::READY_HEADING,
+                body: &body,
+                affirm: "OK",
+                decline: None,
+                refusal_is_default: false,
+                scannable: None,
+                identifier: Some(ADDRESS),
+            })
         }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
