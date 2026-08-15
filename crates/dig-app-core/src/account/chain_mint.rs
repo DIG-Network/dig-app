@@ -73,9 +73,6 @@ use crate::account::did::MintEvidence;
 use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission, UnavailableMinter};
 use crate::account::residency::AccountResidency;
 
-/// Mojos in one XCH. Used only to render a shortfall a person can read.
-const MOJOS_PER_XCH: u64 = 1_000_000_000_000;
-
 /// Whether this build can mint a DID at all.
 ///
 /// Modelled as a value rather than left implicit because it decides whether the startup wizard is
@@ -375,19 +372,17 @@ fn submission_failure(error: MintError) -> Submission {
 /// dropped — but never the leading digit, and never rounded UP: a shortfall reported as smaller than
 /// it is would send somebody to fund an amount that still does not cover the mint.
 ///
-/// Shared crate-wide rather than duplicated (dig_ecosystem#2950): this crate has already put a money
-/// figure on screen through the wrong divisor twice — a `$DIG` row using the CAT divisor
-/// (dig_ecosystem#2879) and a send dialog reading 50,000,000 mojos out as `50000000 XCH` — and both
-/// survived because a second conversion existed for a test to agree with. There is exactly one
-/// mojos-to-XCH rendering in this crate, and this is it.
+/// It DELEGATES to [`crate::amount::format_units`], which is the crate's one mojos-to-XCH conversion
+/// (dig_ecosystem#2957); this function only appends the unit. It used to divide by its own
+/// `MOJOS_PER_XCH` constant, which made it a second implementation of the same arithmetic — and this crate has put a
+/// money figure on screen through the wrong divisor twice (a `$DIG` row using the CAT divisor,
+/// dig_ecosystem#2879, and a send dialog reading 50,000,000 mojos out as `50000000 XCH`), both times
+/// because a second conversion existed for a test to agree with.
 pub(crate) fn xch(mojos: u64) -> String {
-    let whole = mojos / MOJOS_PER_XCH;
-    let fraction = mojos % MOJOS_PER_XCH;
-    if fraction == 0 {
-        return format!("{whole} XCH");
-    }
-    let decimals = format!("{fraction:012}");
-    format!("{whole}.{} XCH", decimals.trim_end_matches('0'))
+    format!(
+        "{} XCH",
+        crate::amount::format_units(u128::from(mojos), crate::amount::XCH_DECIMALS)
+    )
 }
 
 /// A 32-byte chain id as lowercase hex with the `0x` prefix every Chia explorer uses.
@@ -413,6 +408,10 @@ impl SpendPublisher for NoPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mojos in one XCH, DERIVED from the crate's decimal count rather than written out again — the
+    /// production code no longer holds this constant, because it no longer does the division.
+    const MOJOS_PER_XCH: u64 = 10u64.pow(crate::amount::XCH_DECIMALS);
     use chia_protocol::CoinSpend;
     use chia_protocol::{Bytes32, Coin, SpendBundle};
     use chia_sdk_test::Simulator;
@@ -889,6 +888,49 @@ mod tests {
         assert_eq!(xch(0), "0 XCH");
         assert_eq!(xch(1), "0.000000000001 XCH");
         assert_eq!(xch(MOJOS_PER_XCH + 5_000_000), "1.000005 XCH");
+    }
+
+    /// **The rendered STRING is pinned, not the arithmetic** (dig_ecosystem#2957).
+    ///
+    /// Equality between the two renderers is not enough on its own: the send dialog's `50000000 XCH`
+    /// defect survived precisely because its test asserted the same wrong string the code produced.
+    /// These are literals a person could read aloud, including the exact figure that went wrong.
+    #[test]
+    fn the_xch_renderer_produces_the_literal_strings_a_person_reads() {
+        assert_eq!(xch(0), "0 XCH");
+        assert_eq!(xch(1), "0.000000000001 XCH");
+        assert_eq!(xch(1_000_000_000_000), "1 XCH");
+        assert_eq!(xch(1_000_005_000_000), "1.000005 XCH");
+        // The send dialog once read this out as `50000000 XCH` — a divisor short by twelve places.
+        assert_eq!(xch(50_000_000), "0.00005 XCH");
+        assert_eq!(xch(u64::MAX), "18446744.073709551615 XCH");
+    }
+
+    /// **There is one conversion, and this proves it byte for byte.**
+    ///
+    /// `xch` delegates to [`crate::amount::format_units`], so the claim that this crate holds a single
+    /// mojos-to-XCH rendering is true by construction. This checks the boundaries where a hand-written
+    /// second copy would most plausibly diverge: the carry either side of a whole XCH, the smallest
+    /// representable amount, and the top of the `u64` range.
+    #[test]
+    fn the_xch_renderer_is_byte_identical_to_the_crates_one_conversion() {
+        for mojos in [
+            0,
+            1,
+            MOJOS_PER_XCH - 1,
+            MOJOS_PER_XCH,
+            MOJOS_PER_XCH + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                xch(mojos),
+                format!(
+                    "{} XCH",
+                    crate::amount::format_units(u128::from(mojos), crate::amount::XCH_DECIMALS)
+                ),
+                "{mojos} mojos rendered differently by the two spellings"
+            );
+        }
     }
 
     /// The transport-less publisher refuses rather than reporting a phantom success.

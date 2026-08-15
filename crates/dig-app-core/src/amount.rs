@@ -54,6 +54,12 @@ pub fn format_asset_amount(asset: Asset, base_units: u64) -> String {
 /// and must render CATs there is no [`Asset`] variant for, and the confirm window's spend summary is
 /// XCH-only by construction. Deliberately `pub(crate)` — it is the one way to reach the arithmetic
 /// without naming an asset, and outside the crate that hatch would be the next wrong divisor.
+///
+/// **This is the crate's ONLY base-units-to-decimal conversion, and that is now true by construction**
+/// (dig_ecosystem#2957): every caller reaches the divisor through here, including
+/// [`crate::account::chain_mint::xch`], which used to divide by its own `MOJOS_PER_XCH` and now only
+/// appends the unit to this function's output. Two implementations agreeing today is not the same
+/// property — it is the state both wrong-divisor incidents started from.
 pub(crate) fn format_units(base_units: u128, decimals: u32) -> String {
     let divisor = 10u128.pow(decimals);
     let whole = base_units / divisor;

@@ -127,6 +127,11 @@ pub const DEPOSIT_SELF_DISMISSALS_WATCHED: u32 = 5;
 /// window still ends on the tighter one.
 pub const DEPOSIT_DRAWINGS_MAX: u32 = 20;
 
+/// The total cap is a BACKSTOP, not a replacement: an unattended window must still end on the tighter
+/// consecutive bound. Checked at compile time, because the relationship between the two constants is a
+/// property of the constants themselves and a build that violated it should not exist.
+const _: () = assert!(DEPOSIT_DRAWINGS_MAX > DEPOSIT_SELF_DISMISSALS_WATCHED);
+
 /// What one drawing of the deposit window produced.
 pub enum DepositWatch {
     /// The window was drawn, and the user — or its own deadline — answered.
@@ -1726,17 +1731,6 @@ mod tests {
             DEPOSIT_DRAWINGS_MAX,
             "a window answered `Approve` forever, against a recheck that never finishes, must stop \
              at the TOTAL cap — the consecutive bound can never trip, because every press resets it"
-        );
-    }
-
-    /// **The total cap is a backstop, not a replacement** — it is deliberately far above the
-    /// consecutive bound, so an UNATTENDED window still ends on the tighter of the two.
-    #[test]
-    fn the_total_cap_sits_above_the_consecutive_bound() {
-        assert!(
-            DEPOSIT_DRAWINGS_MAX > DEPOSIT_SELF_DISMISSALS_WATCHED,
-            "an unattended watch must trip the consecutive bound first; the two answer different \
-             failure modes and collapsing them would silently loosen the unattended case"
         );
     }
 
