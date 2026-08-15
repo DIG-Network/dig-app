@@ -110,7 +110,12 @@ pub(crate) fn draw(
     //
     // A press on Send wins over anything below it: both cannot happen in one frame, and an `or` here
     // would drop the intent a person actually expressed if a verb were ever pressed alongside it.
-    sent.or(spare_verbs_card(flow, t, tab, drew_copy_control(facts, open)))
+    sent.or(spare_verbs_card(
+        flow,
+        t,
+        tab,
+        drew_copy_control(facts, open),
+    ))
 }
 
 /// Which of the tab's two disclosed cards is showing.
@@ -154,7 +159,12 @@ impl Disclosed {
 
     /// What is open right now.
     fn load(flow: &mut Flow) -> Self {
-        flow.place(|ui, _| (0.0, ui.data(|d| d.get_temp(Self::element())).unwrap_or_default()))
+        flow.place(|ui, _| {
+            (
+                0.0,
+                ui.data(|d| d.get_temp(Self::element())).unwrap_or_default(),
+            )
+        })
     }
 
     /// Remember what is open, so the next frame draws it.
