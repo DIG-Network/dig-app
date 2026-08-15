@@ -2013,10 +2013,16 @@ mod tests {
     /// in different words. So the test is a COUPLING: it establishes from the pane's own source that
     /// a `Send` verb ships, and only then requires this window to be free of denial. Withdraw Send
     /// and the control fails first, naming the real reason rather than the copy.
+    ///
+    /// The anchor is `id: Verb::Send` — the field assignment that BUILDS the button — rather than the
+    /// bare name, which also occurs in that file's prose and its tests. Anchoring on the bare name
+    /// would let the shipped row be deleted while a doc mention kept this control green, which is the
+    /// vacuity a coupling test exists to avoid.
     #[test]
     fn the_window_never_denies_a_send_the_app_ships() {
         assert!(
-            WALLET_PANE_SOURCE.contains("enum Verb") && WALLET_PANE_SOURCE.contains("Verb::Send"),
+            WALLET_PANE_SOURCE.contains("enum Verb")
+                && WALLET_PANE_SOURCE.contains("id: Verb::Send"),
             "the Wallet tab no longer ships a Send verb — this window's copy must be revisited \
              before this guard is relaxed"
         );
