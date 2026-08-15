@@ -1,11 +1,19 @@
 //! The Wallet tab: where money arrives, what is held, and where it goes.
 //!
-//! # Why receiving leads
+//! # Why the balance leads
 //!
-//! The address is the only value on the tab a person takes to another device, and it is what a wallet
-//! with nothing in it needs first. So the address and its code are the first card, the balances sit
-//! under them, and sending — which needs both of the facts above it — is last: a page ordered by what
-//! a person can do, in the order they can do it.
+//! A wallet exists to answer *how much do I have?*, so that answer is the first thing on the tab and
+//! is set at [`crate::confirm::gui::render::size::DISPLAY`]. The two verbs follow it, and each one's
+//! card is DISCLOSED by pressing it rather than drawn permanently.
+//!
+//! This inverts what the tab shipped with, and the header that justified the old order is worth
+//! keeping as a warning. It read: *the address is the only value on the tab a person takes to
+//! another device, and it is what a wallet with nothing in it needs first* — so the address and its
+//! ~270 px code were the first card and the balance sat below the fold in body-sized type. Each
+//! clause was true. The conclusion did not follow: a value needed for seconds a few times a month
+//! had been given the space a person looks at every time they open the tab. And the sentence that
+//! closed it, *"receiving is the one thing this wallet can do today"*, stopped being true when
+//! sending shipped, while the layout it justified stayed (dig_ecosystem#2967).
 //!
 //! # Nothing here decides whether money may move
 //!
