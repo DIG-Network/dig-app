@@ -365,6 +365,11 @@ pub enum FundingStep {
     Unmeasured,
     /// The wallet is short by this much, and cannot pay for a mint yet.
     Deposit {
+        /// What the wallet actually holds, as measured. Carried on the variant rather than read
+        /// again at the window, so the figure on screen is the one this decision was made from —
+        /// and so a deposit window can only be built from a [`MintFunds::Measured`] reading, never
+        /// from a balance nobody read (dig_ecosystem#2871).
+        balance_mojos: u64,
         /// How many more mojos are needed. Never zero: at zero the step is
         /// [`Ready`](Self::Ready).
         shortfall_mojos: u64,
@@ -395,6 +400,7 @@ pub fn funding_step(funds: &MintFunds, latch: &FundingLatch, cost_mojos: u64) ->
             FundingStep::Ready
         }
         None => FundingStep::Deposit {
+            balance_mojos: *spendable_mojos,
             shortfall_mojos: cost_mojos - spendable_mojos,
         },
     }
@@ -483,6 +489,8 @@ pub fn first_profile_claim<'a>(
 /// arithmetic. A placeholder here would be the app lying about money, which is the one class of
 /// defect that stops a release outright.
 pub mod copy {
+    use crate::account::chain_mint::xch;
+
     /// The window title.
     pub const TITLE: &str = "DIG — Create your first profile";
     /// The question being put to the user.
@@ -563,16 +571,23 @@ pub mod copy {
     /// address needs and what prose wrapping at an arbitrary column destroys. An early revision put
     /// it in both, and the photograph showed the same 62 characters twice, one of them broken across
     /// a line: two addresses on a funding screen is an invitation to copy the wrong one.
-    pub fn body(shortfall_mojos: u64, cost_mojos: u64) -> String {
+    /// # Three figures, all in XCH (dig_ecosystem#2950)
+    ///
+    /// The balance is stated beside the cost because a person deciding how much to send has to do
+    /// the subtraction otherwise, and the unit is XCH because that is the unit of the wallet they
+    /// will send FROM. Every one is rendered by [`xch`], this crate's single mojos-to-XCH
+    /// conversion: a money figure has twice reached a screen here through the wrong divisor, and
+    /// both times a second copy of the conversion was what let it through.
+    pub fn body(balance_mojos: u64, shortfall_mojos: u64, cost_mojos: u64) -> String {
         format!(
-            "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
-             for an app and be found by other people. This account does not have one yet.\n\n\
-             Creating one costs {} mojos, and this wallet needs {} more before it can. Scan the \
-             code or send XCH to the address below; DIG will notice when it arrives.\n\n\
-             This window creates nothing and spends nothing. Reading the DIG Network never needs a \
-             profile.",
-            grouped(cost_mojos),
-            grouped(shortfall_mojos)
+            "A profile is your on-chain identity — a DID and a store — that lets you publish, sign              for an app and be found by other people. This account does not have one yet.
+
+             Creating one costs {}. This wallet holds {}, so it needs {} more before it can. Scan              the code or send XCH to the address below; DIG will notice when it arrives.
+
+             This window creates nothing and spends nothing. Reading the DIG Network never needs a              profile.",
+            xch(cost_mojos),
+            xch(balance_mojos),
+            xch(shortfall_mojos)
         )
     }
 
@@ -892,7 +907,9 @@ mod tests {
 
         match funding_step(&funds, &FundingLatch::new(), first_profile_cost_mojos()) {
             FundingStep::Ready => {}
-            FundingStep::Deposit { shortfall_mojos } => panic!(
+            FundingStep::Deposit {
+                shortfall_mojos, ..
+            } => panic!(
                 "a wallet holding 1.599 XCH was asked for {shortfall_mojos} more mojos before it \
                  could create a profile"
             ),
@@ -1060,21 +1077,104 @@ mod tests {
             "the prompt's cost is not the door's cost"
         );
 
-        // Asserted in the GROUPED spelling, because that is the one on screen. Checking the bare
-        // digits would pass against a body that had lost its separators, and a mis-grouped price is
-        // the way a money screen misleads without saying anything false.
-        let body = copy::body(cost - 2, cost);
-        assert!(
-            body.contains("20,002"),
-            "the prompt does not state its cost legibly: {body}"
-        );
-        assert!(
-            body.contains("20,000"),
-            "the prompt does not state the SHORTFALL, which is the actionable half: {body}"
-        );
         assert_eq!(
             cost, 20_002,
             "the whole-profile cost moved; the copy must move with it"
+        );
+
+        // The expected strings are computed from the requirement — 20,002 mojos IS
+        // 0.000000020002 XCH, because a mojo is 10^-12 XCH — and NOT read off what the code emits.
+        // The send dialog shipped `50000000 XCH` for 50,000,000 mojos precisely because its test
+        // agreed with the code instead of with the arithmetic (dig_ecosystem#2950).
+        let body = copy::body(2, cost - 2, cost);
+        assert!(
+            body.contains("0.000000020002 XCH"),
+            "the prompt does not state its cost in XCH: {body}"
+        );
+        assert!(
+            body.contains("0.000000000002 XCH"),
+            "the prompt does not state the BALANCE the user has: {body}"
+        );
+        assert!(
+            body.contains("0.00000002 XCH"),
+            "the prompt does not state the SHORTFALL, which is the actionable half: {body}"
+        );
+    }
+
+    /// **A figure a person is asked to send is never truncated to nothing.**
+    ///
+    /// The whole cost of a profile is 20,002 mojos — six orders of magnitude below the two decimal
+    /// places money is usually shown to. A renderer that rounded, or that formatted to a fixed
+    /// short precision, would put `0 XCH` on a window whose entire purpose is to say that something
+    /// is still owed, and the person would read *nothing is needed* and close it.
+    #[test]
+    fn a_nonzero_requirement_is_never_rendered_as_zero() {
+        let cost = first_profile_cost_mojos();
+
+        for (balance, shortfall) in [(1, cost - 1), (2, cost - 2), (cost - 1, 1)] {
+            let body = copy::body(balance, shortfall, cost);
+            assert!(
+                !body.contains("0 XCH"),
+                "a figure collapsed to zero on a window asking for money: {body}"
+            );
+        }
+
+        // The one figure that may legitimately read as zero is a balance that WAS measured and is
+        // genuinely empty. That is a fact about the wallet, not a rounding artefact — and it is the
+        // state the gallery photographs.
+        assert!(
+            copy::body(0, cost, cost).contains("0 XCH"),
+            "a measured empty wallet did not say so"
+        );
+
+        // One mojo is the smallest thing that can be owed, and the case a rounding renderer loses
+        // first.
+        assert!(
+            copy::body(cost - 1, 1, cost).contains("0.000000000001 XCH"),
+            "a one-mojo shortfall did not survive being written down"
+        );
+    }
+
+    /// **A real wallet's balance reads as the XCH it holds.**
+    ///
+    /// 1,599,179,999,973 mojos is a live figure from this project's own funded test wallet. Divided
+    /// by the CAT divisor it would read as 1,599,179.999973 — the class of error that showed a `$DIG`
+    /// holding nobody had (dig_ecosystem#2879) — and undivided it would read as one and a half
+    /// trillion XCH.
+    #[test]
+    fn a_real_balance_reads_as_the_xch_it_is() {
+        let cost = first_profile_cost_mojos();
+        let balance = 1_599_179_999_973_u64;
+        // Not a shortfall this wallet actually has — it could pay many times over — but the body is
+        // asked to render that balance, and the string it produces is the thing under test.
+        let body = copy::body(balance, cost, cost);
+
+        assert!(
+            body.contains("1.599179999973 XCH"),
+            "a 1.599 XCH balance was not rendered as 1.599 XCH: {body}"
+        );
+        assert!(
+            !body.contains("1599179999973"),
+            "the balance was printed in mojos with an XCH label: {body}"
+        );
+    }
+
+    /// **The unmeasured window states no balance at all — not even zero.**
+    ///
+    /// Nobody read this wallet, so there is no figure to state. `0 XCH` here would be the app
+    /// telling somebody with money that they have none (dig_ecosystem#2871/#2879), which is a claim
+    /// about their money that no read supports.
+    #[test]
+    fn the_unmeasured_window_states_no_balance_figure() {
+        let body = copy::unmeasured_body("DIG could not reach a node.", first_profile_cost_mojos());
+
+        assert!(
+            !body.contains("0 XCH"),
+            "an unread balance was rendered as zero: {body}"
+        );
+        assert!(
+            !body.contains("holds"),
+            "the unmeasured window claimed what the wallet holds: {body}"
         );
     }
 
@@ -1124,7 +1224,10 @@ mod tests {
                 &FundingLatch::new(),
                 cost
             ),
-            FundingStep::Deposit { shortfall_mojos: 1 }
+            FundingStep::Deposit {
+                balance_mojos: cost - 1,
+                shortfall_mojos: 1
+            }
         );
         assert_eq!(
             funding_step(
@@ -1143,6 +1246,7 @@ mod tests {
                 cost
             ),
             FundingStep::Deposit {
+                balance_mojos: 0,
                 shortfall_mojos: cost
             }
         );
@@ -1187,6 +1291,7 @@ mod tests {
         assert_eq!(
             funding_step(&MintFunds::Measured { spendable_mojos: 0 }, &latch, cost),
             FundingStep::Deposit {
+                balance_mojos: 0,
                 shortfall_mojos: cost
             },
             "a reset latch must forget, or the flow could never ask for funds again"
@@ -1265,7 +1370,11 @@ mod tests {
     #[test]
     fn the_prompt_shows_the_receiving_address_exactly_once() {
         let address = "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
-        let body = copy::body(1_000, first_profile_cost_mojos());
+        let body = copy::body(
+            first_profile_cost_mojos() - 1_000,
+            1_000,
+            first_profile_cost_mojos(),
+        );
         let qr = QrArt::encode(address);
         let claim = first_profile_claim(address, &body, qr.as_ref());
 
@@ -1288,7 +1397,11 @@ mod tests {
     #[test]
     fn the_qr_and_the_identifier_carry_the_same_address() {
         let address = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
-        let body = copy::body(1_000, first_profile_cost_mojos());
+        let body = copy::body(
+            first_profile_cost_mojos() - 1_000,
+            1_000,
+            first_profile_cost_mojos(),
+        );
         let qr = QrArt::encode(address);
         let claim = first_profile_claim(address, &body, qr.as_ref());
 

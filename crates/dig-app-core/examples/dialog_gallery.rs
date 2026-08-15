@@ -287,7 +287,7 @@ fn main() {
             // A wallet at zero profiles and zero funds: the shortfall IS the whole cost, which is
             // the state this window exists for.
             let cost = first_profile_cost_mojos();
-            let body = copy::body(cost, cost);
+            let body = copy::body(0, cost, cost);
             let scannable = QrArt::encode(ADDRESS);
             confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body, scannable.as_ref()))
         }

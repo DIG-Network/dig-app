@@ -374,7 +374,13 @@ fn submission_failure(error: MintError) -> Submission {
 /// Twelve decimal places is the full precision of a mojo and unreadable, so trailing zeros are
 /// dropped — but never the leading digit, and never rounded UP: a shortfall reported as smaller than
 /// it is would send somebody to fund an amount that still does not cover the mint.
-fn xch(mojos: u64) -> String {
+///
+/// Shared crate-wide rather than duplicated (dig_ecosystem#2950): this crate has already put a money
+/// figure on screen through the wrong divisor twice — a `$DIG` row using the CAT divisor
+/// (dig_ecosystem#2879) and a send dialog reading 50,000,000 mojos out as `50000000 XCH` — and both
+/// survived because a second conversion existed for a test to agree with. There is exactly one
+/// mojos-to-XCH rendering in this crate, and this is it.
+pub(crate) fn xch(mojos: u64) -> String {
     let whole = mojos / MOJOS_PER_XCH;
     let fraction = mojos % MOJOS_PER_XCH;
     if fraction == 0 {

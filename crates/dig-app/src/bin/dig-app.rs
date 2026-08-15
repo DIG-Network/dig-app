@@ -3992,7 +3992,10 @@ mod tray {
 
             let body = match funding_step(&MintFunds::of_balance(&reading), &latch, cost) {
                 FundingStep::Ready => return say_the_wallet_can_pay(confirmer, cost),
-                FundingStep::Deposit { shortfall_mojos } => copy::body(shortfall_mojos, cost),
+                FundingStep::Deposit {
+                    balance_mojos,
+                    shortfall_mojos,
+                } => copy::body(balance_mojos, shortfall_mojos, cost),
                 // Reached only when the forced read above ALSO failed to measure anything. It reads
                 // the original reading rather than the narrowed one for its reason: `MintFunds`
                 // deliberately keeps no cause, and the cause is the whole content of this window.
@@ -4059,7 +4062,9 @@ mod tray {
                 say_the_wallet_can_pay(confirmer, cost);
                 true
             }
-            FundingStep::Deposit { shortfall_mojos } => {
+            FundingStep::Deposit {
+                shortfall_mojos, ..
+            } => {
                 notify(
                     confirmer,
                     copy::RECHECK_TITLE,
