@@ -41,6 +41,7 @@ pub mod mint;
 pub mod money;
 pub mod password;
 pub mod phrase_vault;
+pub mod profile_creation;
 pub mod profile_mint;
 pub mod profile_session;
 pub mod recovery;

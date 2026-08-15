@@ -833,8 +833,17 @@ mod tests {
     /// rather than a line nobody notices.
     ///
     /// It is not a ban on ever opening it — it is a ban on opening it without also landing the create
-    /// control, the verb and the wizard the arm implies. When those land, this test changes with
-    /// them, and the change is the point.
+    /// control, the verb and the wizard the arm implies.
+    ///
+    /// # Those have now LANDED, and the ban stands unchanged (dig_ecosystem#2989)
+    ///
+    /// The binary offers profile creation and runs it: `offer_to_create_a_profile` draws the offer,
+    /// builds the real door, and drives
+    /// [`create_profile`](crate::account::profile_creation::create_profile) to a recorded profile.
+    /// The list below did NOT need to grow for it, and that is the property working rather than a
+    /// coincidence — the offer is reached from `FundingStep::Ready`, which is a measured balance, and
+    /// the door is built exactly as `profile_creation_of` builds it, from a probe of a live node. A
+    /// binary that can spend still cannot ASSERT that it may.
     #[test]
     fn the_binary_cannot_open_the_profile_creation_gate() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

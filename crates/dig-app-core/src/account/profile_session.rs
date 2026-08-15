@@ -620,9 +620,13 @@ impl std::fmt::Debug for ProfileSession {
 
 /// Building registries with CONFIRMED profiles in them, for the tests of every module that switches.
 ///
-/// dig-account's mint evidence (`MintedDid`, `ConfirmedStore`) is crate-private to dig-account and
-/// `ProfileMinter::mint` is still `todo!()`, so no consumer — production or test — can call
-/// `record_minted`. The one door left open is the deserialize path, which is not a loophole: it is
+/// dig-account's mint evidence (`MintedDid`, `ConfirmedStore`) has no public producer, so no test
+/// can construct one and therefore no test can call `record_minted` — that is the unforgeability
+/// property, not a gap. (Production reaches it through
+/// [`ProfileMintDoor::record`](crate::account::profile_mint::ProfileMintDoor::record), from a
+/// `ProfileMintStatus::Confirmed` the chain produced. There is no `ProfileMinter::mint`; the
+/// ceremony is the three calls the door wraps.) The one door left open here is the deserialize path,
+/// which is not a loophole: it is
 /// the SAME path production loads a real registry through, and dig-account re-checks all four
 /// invariants on it. A fixture that got past those checks is a registry the production loader would
 /// also accept.
