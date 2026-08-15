@@ -500,6 +500,59 @@ impl NodeBalance {
             .unwrap_or(BalanceReading::Pending)
     }
 
+    /// The balance for `address` read NOW, ignoring how recently the last one was taken.
+    ///
+    /// Answers what [`observe`](Self::observe) answers once its interval HAS lapsed — the same read,
+    /// against the same node, recorded in the same cache — so a figure obtained here and the figure
+    /// the tray is showing can never come from two different reads of two different moments.
+    ///
+    /// # It changes WHEN, never WHAT counts as funded
+    ///
+    /// The reading is a [`BalanceReading`] built by the same [`WalletOverview::read`] as every other
+    /// one: an arrival still confirming is still not spendable here, and a node that cannot answer
+    /// still yields [`Unknown`](BalanceReading::Unknown) rather than a zero. Nothing about this path
+    /// relaxes a gate; it only refuses to wait out an interval when a person has explicitly asked.
+    ///
+    /// # Why this one BLOCKS when `observe` must not
+    ///
+    /// `observe` is called from the paint loop twice a second, so it may never wait. This is called
+    /// from a window a person is looking at, having pressed a control whose whole purpose is to
+    /// produce a fresh answer — and returning the stale figure immediately is precisely the
+    /// invisible no-op that control exists to rule out. So it waits for the read it triggered, bounded
+    /// by the poller's own [`timeout`](Self::new): a wedged node costs one timeout, never a hang.
+    ///
+    /// A read already in flight is waited on rather than duplicated — it is as fresh as one started
+    /// here would be, and stacking a second read on a node that is already thinking is what the
+    /// in-flight guard exists to prevent.
+    pub fn read_now(&self, link: &EngineState, address: Option<&str>) -> BalanceReading {
+        let Some(address) = address else {
+            self.lock().cached = None;
+            return BalanceReading::default();
+        };
+
+        self.start_read(&mut self.lock(), link, address);
+
+        // Bounded by the read's own budget plus a margin, so this returns even if the worker is
+        // wedged somewhere the timeout does not cover. Polling rather than a condvar keeps the
+        // worker's locking exactly as it is; the wait is measured in seconds, so a 20 ms tick is
+        // free.
+        let deadline = Instant::now() + self.timeout + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            let state = self.lock();
+            if state.in_flight.as_deref() != Some(address) {
+                return state
+                    .reading_for(address)
+                    .map(|(reading, _)| reading)
+                    .unwrap_or(BalanceReading::Pending);
+            }
+            drop(state);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Still reading. `Pending` is the honest answer — and it is NOT zero, so a caller deciding
+        // whether a wallet can pay still sees "unmeasured" rather than "empty".
+        BalanceReading::Pending
+    }
+
     /// Begin a read for `address` unless one is already under way for it.
     ///
     /// A disconnected link needs no thread: the answer involves no I/O and is recorded immediately,
@@ -1526,6 +1579,76 @@ mod tests {
             node.request_count() >= 4,
             "no re-read ever completed, so nothing above was actually exercised: {} calls",
             node.request_count()
+        );
+    }
+
+    /// **A recheck asks the node again inside the refresh interval; an ordinary repaint does not.**
+    ///
+    /// The property is that [`NodeBalance::read_now`] bypasses the interval, and the nearest wrong
+    /// implementation — `read_now` delegating to [`NodeBalance::observe`] — is invisible to any test
+    /// that only inspects the RETURNED reading, because both return the same figure. So the
+    /// assertion is at the SERVER: what distinguishes the two is whether a second read happened at
+    /// all.
+    ///
+    /// The control in the first half is what keeps that count meaningful. Without it a poller that
+    /// ignored its interval entirely — reading on every observation — would also reach four, and
+    /// would pass while quietly turning the twice-a-second repaint into twice-a-second chain reads.
+    /// Two calls per read, so one read is two and two reads are four.
+    #[test]
+    fn a_recheck_reads_again_where_a_repaint_would_wait_out_the_interval() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: XCH_MOJOS,
+            dig: DIG_UNITS,
+            synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
+        });
+        // Long enough that nothing in this test can lapse it: every re-read below is a bypass or a
+        // bug, never an expiry.
+        let poller = NodeBalance::with_token_reader(
+            Duration::from_secs(600),
+            Duration::from_secs(5),
+            fake_token,
+        );
+        let link = connected_to(&node);
+
+        let first = settle(&poller, &link);
+        assert!(matches!(first, BalanceReading::Known { .. }));
+        assert_eq!(
+            node.request_count(),
+            2,
+            "the first read is one pair of calls"
+        );
+
+        // The control: repainting inside the interval must not go near the node.
+        for _ in 0..5 {
+            assert_eq!(poller.observe(&link, Some(ADDRESS)), first);
+        }
+        assert_eq!(
+            node.request_count(),
+            2,
+            "an ordinary observation inside the refresh interval must not re-read"
+        );
+
+        // The property: the same interval, the same address, and a read happens anyway.
+        let rechecked = poller.read_now(&link, Some(ADDRESS));
+        assert_eq!(
+            rechecked, first,
+            "a recheck answers with what the node said"
+        );
+        assert_eq!(
+            node.request_count(),
+            4,
+            "a recheck must ask the node again rather than answer from the cache it just bypassed"
+        );
+
+        // ...and it landed in the SHARED cache, so the tray cannot now be showing an older figure
+        // than the window that rechecked. A `Pending` here would mean the recheck read into a
+        // private cache and left `observe` waiting for its own read.
+        assert_eq!(
+            poller.observe(&link, Some(ADDRESS)),
+            first,
+            "the recheck's reading must be the one every other surface now sees"
         );
     }
 

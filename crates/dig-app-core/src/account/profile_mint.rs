@@ -75,6 +75,27 @@ const PROBE_LAUNCHER_ID: Bytes32 = Bytes32::new([0; 32]);
 /// anything higher, so this cannot become a way to drain a wallet through a config file.
 pub const DEFAULT_MINT_FEE_MOJOS: u64 = 10_000;
 
+/// What a WHOLE profile costs at `fee` per bundle, in mojos: two bundles' fees plus the two
+/// singleton mojos.
+///
+/// # Why this is a free function and not only a method
+///
+/// [`ProfileMint::cost_mojos`] delegates here, and so does every surface that must PRINT the cost
+/// before a door exists — the zero-profile funding prompt asks for money on a locked account, where
+/// there is no session to build a mint from. Two expressions of one price is how a screen comes to
+/// promise a cost lower than the one charged (the shape dig_ecosystem#2377 measured on availability),
+/// so there is exactly one, and both callers reach it.
+///
+/// Saturating throughout: a fee near `u64::MAX` is refused by dig-account's own `MAX_MINT_FEE_MOJOS`
+/// ceiling long before it arrives here, and a displayed cost that WRAPPED would show a small number
+/// for a large spend.
+pub const fn whole_profile_cost_mojos(fee: u64) -> u64 {
+    /// The singleton each half of a profile creates, in mojos.
+    const SINGLETON_MOJOS_PER_HALF: u64 = 1;
+    fee.saturating_add(SINGLETON_MOJOS_PER_HALF)
+        .saturating_mul(2)
+}
+
 /// Whether this build can mint a WHOLE profile — both halves — and, when it cannot, which half is
 /// out of reach.
 ///
@@ -551,11 +572,7 @@ where
     /// Derived from the SAME [`MintOptions`] the mint is charged under, so a displayed cost cannot
     /// come to be lower than what is spent.
     pub fn cost_mojos(&self) -> u64 {
-        const SINGLETON_MOJOS_PER_HALF: u64 = 1;
-        self.options
-            .fee
-            .saturating_add(SINGLETON_MOJOS_PER_HALF)
-            .saturating_mul(2)
+        whole_profile_cost_mojos(self.options.fee)
     }
 
     /// dig-account's minter, derived fresh.

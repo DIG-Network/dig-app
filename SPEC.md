@@ -1967,6 +1967,53 @@ made an unconditional wall: a user who declines it keeps a usable app.
 MUST NOT record a DID, report an identity as ready, or show a success screen from a submission — only
 from a chain sighting that confirms it, and the evidence from that sighting is what is recorded.
 
+#### 3.2-n The zero-profile funding watch (normative, dig_ecosystem#2950)
+
+An account holding no profiles is prompted, automatically, to fund its wallet for its first one.
+
+**When it is raised (MUST).** Only when the profile registry ANSWERED and holds nothing, a whole
+profile can really be minted here (`profiles::ProfileCreation::is_possible`, derived from a live node
+probe — an unmeasured node withholds exactly as a measured blocker does), and the prompt is not
+deferred. Raising it writes the next-prompt time, so every way out of the window — the decline
+control, Escape, the frame close, a crash — yields the same cadence: **once per `REMINDER_INTERVAL`
+(24 h), persisted, until a profile exists.**
+
+**It is a watch (MUST).** While open, the window re-reads the balance each time its confirm deadline
+elapses and redraws with the CURRENT shortfall. A deadline expiry MUST continue the watch; only an
+explicit refusal (or a host with no confirmer) ends it.
+
+**An unmeasured balance MUST NOT draw a deposit window.** A shortfall is a subtraction, and
+`MintFunds::Unmeasured` carries no figure to subtract from. An unmeasured reading MUST force one
+interval-bypassing read (`wallet::node::NodeBalance::read_now`) before anything is drawn; only a
+balance still unmeasured after that may draw a window, and that window MUST state the reading's own
+reason and MUST NOT state a shortfall or a zero.
+
+**The deposit window states three figures, in XCH (MUST).** What a profile costs, what the wallet
+holds, and what is still needed — so nobody has to divide by 10^12 or subtract to know how much to
+send. All three MUST be rendered by the crate's single mojos-to-XCH conversion, exactly (never
+rounded, and never rounded up): 20,002 mojos is `0.000000020002 XCH`, and a nonzero requirement MUST
+NOT render as `0 XCH`. The balance figure MUST come from the `FundingStep::Deposit` the decision was
+made from, so only a MEASURED balance can ever be stated; the unmeasured window states no balance at
+all, not even zero.
+
+**Every other money figure in the same flow MUST use that same conversion and unit.** The recheck
+answer's shortfall, the unknown-balance window's cost and the wallet-can-pay window's cost MUST be
+stated in XCH, never in mojos: they describe the same quantities as the deposit window, and a flow
+that answers in a second unit contradicts itself about a price.
+
+**Sufficiency is hysteretic (MUST).** Once a balance has been seen to cover the cost, the flow MUST
+NOT return to a deposit window (`FundingLatch`) — the ceremony re-checks and refuses honestly, whereas
+the opposite error asks a funded person to send money twice. The threshold is `>= cost`.
+
+**The recheck control MUST answer (MUST).** It is rate-limited to `RECHECK_THROTTLE` (5 s), and each
+of its four outcomes — throttled, still short, could not measure, can pay — MUST produce a visible
+answer naming the moment of the read. Silence is prohibited.
+
+**Nothing on this path spends (MUST).** The prompt states a cost and shows a receiving address. This
+version has no creation ceremony behind it: on a sufficient balance the flow MUST say the wallet can
+pay, repeat the cost, and state that nothing was spent — and MUST NOT report a creation, or borrow the
+DID-only first-run wizard, which would mint a DID without its store (§3.1d).
+
 ### 3.3 Wallet
 
 The wallet is user-identity state and lives in dig-app (migrated out of the engine). It is a

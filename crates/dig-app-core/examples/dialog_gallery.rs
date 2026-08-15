@@ -22,6 +22,9 @@
 //! | `claim` | the enrolment retention either/or |
 //! | `qr` | the two-factor enrolment window WITH its scannable QR (dig_ecosystem#1849) — the one window
 //!   whose correctness a screenshot cannot settle, since a camera has to read it |
+//! | `first-profile` | the zero-profile fund-and-create prompt (dig_ecosystem#2950) — the one window
+//!   nobody can reach by clicking, since the state loop raises it on a schedule |
+//! | `first-profile-ready` | the same prompt when the wallet holds enough to create a profile |
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
@@ -262,6 +265,55 @@ fn main() {
             wizard::draw(confirmer.as_ref(), &screen);
             return;
         }
+        // The zero-profile funding prompt (dig_ecosystem#2950) — the window the state loop raises,
+        // by itself, once a day, on an account that has no profiles yet.
+        //
+        // Photographed here because it is the ONE window in the app nobody can reach by clicking:
+        // raising it needs an unlocked account with zero profiles AND a node answering both mint
+        // probes, which is not a state a person can arrange on demand. Without this arm the only
+        // evidence it renders correctly would be its assertions, and an assertion cannot see a
+        // sentence that wraps into an unreadable column or a cost that fell off the bottom.
+        //
+        // The address is a FIXED published-format example and the cost comes from
+        // `first_profile_cost_mojos`, so what is photographed is the real arithmetic rather than a
+        // number typed into a screenshot.
+        "first-profile" => {
+            use dig_app_core::account::first_profile::copy;
+            use dig_app_core::account::first_profile::first_profile_claim;
+            use dig_app_core::account::first_profile::first_profile_cost_mojos;
+
+            const ADDRESS: &str =
+                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+            // A wallet at zero profiles and zero funds: the shortfall IS the whole cost, which is
+            // the state this window exists for.
+            let cost = first_profile_cost_mojos();
+            let body = copy::body(0, cost, cost);
+            let scannable = QrArt::encode(ADDRESS);
+            confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body, scannable.as_ref()))
+        }
+        // The same prompt, when the wallet can now pay — showing what is about to be charged and
+        // that nothing has been spent yet. Built with the ready-state constants and copy, not a
+        // re-typed second implementation.
+        "first-profile-ready" => {
+            use dig_app_core::account::first_profile::copy;
+            use dig_app_core::account::first_profile::first_profile_cost_mojos;
+
+            const ADDRESS: &str =
+                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+            // A wallet at zero profiles, but with enough funds: the ready state.
+            let cost = first_profile_cost_mojos();
+            let body = copy::ready_body(cost);
+            confirmer.confirm_claim(&ClaimPrompt {
+                title: copy::READY_TITLE,
+                heading: copy::READY_HEADING,
+                body: &body,
+                affirm: "OK",
+                decline: None,
+                refusal_is_default: false,
+                scannable: None,
+                identifier: Some(ADDRESS),
+            })
+        }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
         "authorization" => confirmer.confirm_reveal(&RevealPrompt {
             secret: "your 24-word DIG recovery phrase",
@@ -349,7 +401,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, did-wizard, authorization, destroy, unopenable, input, passphrase, open or bar"
+                "unknown window `{other}` — expected notice, claim, did-wizard, first-profile, authorization, destroy, unopenable, input, passphrase, open or bar"
             );
             std::process::exit(2);
         }
