@@ -68,7 +68,10 @@ pub trait Ceremony {
 }
 
 impl<D: ProfileMintDoor + ?Sized> Ceremony for D {
-    type Evidence = (dig_account::mint::MintedDid, dig_account::mint::ConfirmedStore);
+    type Evidence = (
+        dig_account::mint::MintedDid,
+        dig_account::mint::ConfirmedStore,
+    );
 
     fn begin(&self, seed: &ProfileSeed) -> Result<Reached<Self::Evidence>, MintDoorError> {
         ProfileMintDoor::begin(self, seed).map(Reached::of_status)
@@ -104,7 +107,12 @@ pub enum Reached<E> {
     },
 }
 
-impl Reached<(dig_account::mint::MintedDid, dig_account::mint::ConfirmedStore)> {
+impl
+    Reached<(
+        dig_account::mint::MintedDid,
+        dig_account::mint::ConfirmedStore,
+    )>
+{
     /// The ONE mapping from dig-account's ladder to the driver's vocabulary.
     ///
     /// [`ProfileMintStatus`] is `#[non_exhaustive]`, so a stage this build has never heard of is
@@ -450,7 +458,10 @@ where
     }
 
     Creation::Stopped(Stopped {
-        spent: match reached.as_ref().is_some_and(CreationStep::money_certainly_moved) {
+        spent: match reached
+            .as_ref()
+            .is_some_and(CreationStep::money_certainly_moved)
+        {
             true => Spent::Committed,
             false => Spent::Unknown {
                 detail: "the chain had not confirmed it yet".to_owned(),
@@ -572,7 +583,9 @@ pub mod copy {
             None => "Nothing was submitted to the blockchain.".to_owned(),
         };
         let money = match &stopped.spent {
-            Spent::Nothing => "No money left your wallet. Your funds are where they were.".to_owned(),
+            Spent::Nothing => {
+                "No money left your wallet. Your funds are where they were.".to_owned()
+            }
             Spent::Unknown { detail } => format!(
                 "DIG cannot tell whether this has cost you anything yet: what it submitted may \
                  still be included by the blockchain. Do NOT start a second creation — check this \
@@ -584,8 +597,10 @@ pub mod copy {
                 .to_owned(),
         };
         let forgotten = match stopped.may_be_forgotten {
-            true => "\n\nDIG could not save its record of this creation on this computer, so a \
-                     restart will not remember it. Do not start another one.",
+            true => {
+                "\n\nDIG could not save its record of this creation on this computer, so a \
+                     restart will not remember it. Do not start another one."
+            }
             false => "\n\nDIG saved where this got to, so it can carry on from here.",
         };
         format!("{progress}\n\n{money}\n\n{}{forgotten}", stopped.why)
@@ -831,7 +846,11 @@ mod tests {
 
         let (outcome, steps) = drive(&ceremony, watch);
 
-        assert_eq!(ceremony.records.get(), 0, "a pushed bundle is not a profile");
+        assert_eq!(
+            ceremony.records.get(),
+            0,
+            "a pushed bundle is not a profile"
+        );
         assert_eq!(
             ceremony.advanced.get(),
             500,
@@ -1049,7 +1068,11 @@ mod tests {
                 why: "the node stopped answering".to_owned(),
                 may_be_forgotten: false,
             });
-            for promise in ["NOTHING HAS BEEN SPENT", "No money left your wallet", "untouched"] {
+            for promise in [
+                "NOTHING HAS BEEN SPENT",
+                "No money left your wallet",
+                "untouched",
+            ] {
                 assert!(
                     !body.contains(promise),
                     "a creation that may have spent money said {promise:?}"

@@ -24,7 +24,15 @@
 //!   whose correctness a screenshot cannot settle, since a camera has to read it |
 //! | `first-profile` | the zero-profile fund-and-create prompt (dig_ecosystem#2950) — the one window
 //!   nobody can reach by clicking, since the state loop raises it on a schedule |
-//! | `first-profile-ready` | the same prompt when the wallet holds enough to create a profile |
+//! | `first-profile-ready` | the same prompt when the wallet holds enough — the OFFER whose affirming
+//!   control spends real XCH (dig_ecosystem#2989) |
+//! | `creating-submitted` | the identity submitted and nothing yet proven |
+//! | `creating-did-confirmed` | the identity on chain, its store not yet launched |
+//! | `creating-store-submitted` | the store submitted against a confirmed identity |
+//! | `created` | the one success window, naming the evidence |
+//! | `creation-stopped` | a creation that stopped with the money UNKNOWN — the window whose
+//!   wording decides whether somebody pays twice |
+//! | `creation-stopped-spent` | one that stopped with both halves partly on chain |
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
 //! | `input` | the native recovery-phrase FIELD (dig_ecosystem#1798) |
@@ -291,27 +299,116 @@ fn main() {
             let scannable = QrArt::encode(ADDRESS);
             confirmer.confirm_claim(&first_profile_claim(ADDRESS, &body, scannable.as_ref()))
         }
-        // The same prompt, when the wallet can now pay — showing what is about to be charged and
-        // that nothing has been spent yet. Built with the ready-state constants and copy, not a
-        // re-typed second implementation.
+        // The same prompt, when the wallet can now pay — the OFFER (dig_ecosystem#2989). This is the
+        // one window in this gallery whose affirming control spends real XCH in production, so what
+        // a photograph has to show is that the cost is legible and that a real decline stands beside
+        // it. Drawn through `copy::create_offer`, the same builder the binary calls, so the controls
+        // and the default answer are the product's rather than this file's.
+        //
+        // Answering it here reaches nothing: this example only ever DRAWS.
         "first-profile-ready" => {
             use dig_app_core::account::first_profile::copy;
             use dig_app_core::account::first_profile::first_profile_cost_mojos;
 
-            const ADDRESS: &str =
-                "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
-            // A wallet at zero profiles, but with enough funds: the ready state.
-            let cost = first_profile_cost_mojos();
-            let body = copy::ready_body(cost);
-            confirmer.confirm_claim(&ClaimPrompt {
-                title: copy::READY_TITLE,
-                heading: copy::READY_HEADING,
+            let body = copy::ready_body(first_profile_cost_mojos());
+            confirmer.confirm_claim(&copy::create_offer(&body))
+        }
+        // The creation itself, one window per state (dig_ecosystem#2989).
+        //
+        // These are photographed because they are the windows a person reads while their money is in
+        // the air, and the two stopped ones carry the sentences that decide whether they start a
+        // SECOND paid creation. Every body comes from `profile_creation::copy`, built from the plain
+        // evidence values the production caller passes — the evidence types themselves have no
+        // public producer, and adding one so a gallery could fake a confirmation would destroy the
+        // property that a profile cannot be recorded without a chain read.
+        "creating-submitted"
+        | "creating-did-confirmed"
+        | "creating-store-submitted"
+        | "created"
+        | "creation-stopped"
+        | "creation-stopped-spent" => {
+            use dig_app_core::account::profile_creation::{
+                copy, ConfirmedProfile, CreationStep, Spent, Stopped,
+            };
+
+            // Full-length fixture ids, since how they wrap is part of what a screenshot checks.
+            const DID: &str =
+                "did:chia:1galleryfixturedid000000000000000000000000000000000000000000";
+            const DID_COIN: &str =
+                "0x9f2c41a7e5b8d03c6a1f7e94b2d8c05e3a7f61b9d4c28e07a5f3b1c9d6e024f80";
+            const STORE: &str =
+                "0x3b7d05e1c4a92680d5e3c1a7b94f062d8e15c30a7b9f42d68c05e1a3b7d94f0a";
+
+            let profile = ConfirmedProfile {
+                did: DID.to_owned(),
+                did_coin_id: DID_COIN.to_owned(),
+                did_confirmed_height: 5_412_009,
+                store_launcher_id: STORE.to_owned(),
+                store_confirmed_height: 5_412_013,
+            };
+            let stopped = |spent| Stopped {
+                reached: Some(CreationStep::DidSubmitted {
+                    did_coin_id: DID_COIN.to_owned(),
+                }),
+                spent,
+                why: "chain unreachable: connection refused".to_owned(),
+                may_be_forgotten: false,
+            };
+
+            let (heading, body) = match which.as_str() {
+                "creating-submitted" => (
+                    copy::RUNNING_HEADING,
+                    copy::step_line(&CreationStep::DidSubmitted {
+                        did_coin_id: DID_COIN.to_owned(),
+                    }),
+                ),
+                "creating-did-confirmed" => (
+                    copy::RUNNING_HEADING,
+                    copy::step_line(&CreationStep::DidConfirmed {
+                        did: DID.to_owned(),
+                        did_coin_id: DID_COIN.to_owned(),
+                        confirmed_height: 5_412_009,
+                    }),
+                ),
+                "creating-store-submitted" => (
+                    copy::RUNNING_HEADING,
+                    copy::step_line(&CreationStep::StoreSubmitted {
+                        did: DID.to_owned(),
+                        store_launcher_id: STORE.to_owned(),
+                    }),
+                ),
+                "created" => (copy::CREATED_HEADING, copy::created_body(&profile)),
+                "creation-stopped" => (
+                    copy::STOPPED_HEADING,
+                    copy::stopped_body(&stopped(Spent::Unknown {
+                        detail: "connection refused".to_owned(),
+                    })),
+                ),
+                _ => (
+                    copy::STOPPED_HEADING,
+                    copy::stopped_body(&Stopped {
+                        reached: Some(CreationStep::DidConfirmed {
+                            did: DID.to_owned(),
+                            did_coin_id: DID_COIN.to_owned(),
+                            confirmed_height: 5_412_009,
+                        }),
+                        spent: Spent::Committed,
+                        why: "chain unreachable: connection refused".to_owned(),
+                        may_be_forgotten: false,
+                    }),
+                ),
+            };
+            let title = match which.as_str() {
+                "created" => copy::CREATED_TITLE,
+                "creation-stopped" | "creation-stopped-spent" => copy::STOPPED_TITLE,
+                _ => copy::TITLE,
+            };
+            confirmer.show_notice(&NoticePrompt {
+                title,
+                heading,
                 body: &body,
-                affirm: "OK",
-                decline: None,
-                refusal_is_default: false,
-                scannable: None,
-                identifier: Some(ADDRESS),
+                acknowledge: "OK",
+                identifier: None,
             })
         }
         // The reveal gate: an authorization, which keeps the warning icon honestly.
@@ -401,7 +498,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, did-wizard, first-profile, authorization, destroy, unopenable, input, passphrase, open or bar"
+                "unknown window `{other}` — expected notice, claim, did, first-profile, first-profile-ready, creating-submitted, creating-did-confirmed, creating-store-submitted, created, creation-stopped, creation-stopped-spent, authorization, destroy, unopenable, input, passphrase, open or bar"
             );
             std::process::exit(2);
         }

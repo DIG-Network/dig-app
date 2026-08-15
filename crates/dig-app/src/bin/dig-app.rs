@@ -4140,7 +4140,10 @@ mod tray {
         // A reachable node is still needed. Losing it in the gap since the offer was drawn is an
         // outage, and the honest answer is to say so having spent nothing.
         let Ok(reading) = status.read() else {
-            return say_the_creation_could_not_start(confirmer, "DIG could not read its own state.");
+            return say_the_creation_could_not_start(
+                confirmer,
+                "DIG could not read its own state.",
+            );
         };
         let Some(endpoint) = reading.engine.endpoint() else {
             return say_the_creation_could_not_start(
@@ -4151,7 +4154,12 @@ mod tray {
 
         let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
         let publisher = dig_app_core::chain::ControlSpendPublisher::new(endpoint);
-        let door = ProfileMint::for_session(live.residency.profiles(), &live.residency, &chain, &publisher);
+        let door = ProfileMint::for_session(
+            live.residency.profiles(),
+            &live.residency,
+            &chain,
+            &publisher,
+        );
 
         let outcome = create_profile(
             &door,
