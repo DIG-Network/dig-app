@@ -30,6 +30,7 @@
 //! surprise, and a person who would have declined has already been interrupted. So the elevation,
 //! the restart and the chord Windows gives up are all said in the card, before the button.
 
+pub(crate) mod appearance;
 pub(crate) mod prefs;
 pub(crate) mod probe;
 
@@ -96,6 +97,10 @@ pub(crate) fn draw(
     shortcut_card(flow, t, &mut session);
     flow.gap(space::S4);
     notifications_card(flow, t, &mut session);
+    flow.gap(space::S4);
+    // Last of the cards: it changes nothing but how the window looks, so it sits below the settings
+    // that change what DIG does (dig_ecosystem#2997).
+    appearance::card(flow, t);
     flow.place(|ui, _| (0.0, session.store(ui)));
 
     pressed
