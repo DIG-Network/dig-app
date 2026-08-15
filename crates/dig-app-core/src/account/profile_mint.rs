@@ -752,6 +752,7 @@ where
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{registry_with, session_with};
+    use dig_account::registry::ProfileRegistry;
     use dig_account::ProfileIx;
     use dig_account::registry::journal::{
         MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,

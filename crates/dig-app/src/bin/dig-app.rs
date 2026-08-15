@@ -2731,7 +2731,11 @@ mod tray {
                 set_profile_visibility(env, session.as_ref(), confirmer, ix, hidden)
             }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
-            TrayAction::CreateFirstProfile => {
+            // The same window the daily cadence raises, reached on demand. Routed to the SAME
+            // function rather than to a second flow: two ways in that read the balance differently
+            // is how one of them comes to quote a figure the other does not (dig_ecosystem#2957).
+            // Nothing here spends — see `prompt_for_a_first_profile`.
+            TrayAction::CreateFirstProfile | TrayAction::CreateProfile => {
                 prompt_for_a_first_profile(status, session.as_ref(), confirmer)
             }
             // Both wallet arms re-snapshot LIVE for the same reason `show_status` does: a node that came

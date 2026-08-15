@@ -1132,7 +1132,7 @@ mod tests {
         let unreachable =
             copy::about_creation(ProfileCreation::Blocked(CreationBlocked::NoChainTransport));
 
-        assert_eq!(Some(copy::CHECKING_CREATION), checking);
+        assert_eq!(Some(copy::CHECKING_CREATION.to_string()), checking);
         assert_eq!(
             Some(copy::cannot_create(CreationBlocked::NoChainTransport)),
             unreachable

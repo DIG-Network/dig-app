@@ -744,7 +744,7 @@ mod tests {
         );
         for blocked in CreationBlocked::EVERY {
             assert!(
-                !painted.contains(copy::profiles::cannot_create(blocked)),
+                !painted.contains(&copy::profiles::cannot_create(blocked)),
                 "{blocked:?} was stated as a cause on a node nobody had measured: {painted}"
             );
         }
@@ -757,7 +757,7 @@ mod tests {
         };
         let measured_says = card_says(&measured, 960.0);
         assert!(
-            measured_says.contains(copy::profiles::cannot_create(
+            measured_says.contains(&copy::profiles::cannot_create(
                 CreationBlocked::NoChainTransport
             )),
             "a measured blocker stopped being explained: {measured_says}"
@@ -796,7 +796,7 @@ mod tests {
         );
         for blocked in CreationBlocked::EVERY {
             assert!(
-                !painted.contains(copy::profiles::cannot_create(blocked)),
+                !painted.contains(&copy::profiles::cannot_create(blocked)),
                 "a node that CAN mint is told {blocked:?} is missing: {painted}"
             );
         }
@@ -831,7 +831,7 @@ mod tests {
             };
             let painted = card_says(&view, 960.0);
             assert!(
-                painted.contains(copy::profiles::cannot_create(blocked)),
+                painted.contains(&copy::profiles::cannot_create(blocked)),
                 "{blocked:?} did not reach the card as its own sentence: {painted}"
             );
             said.push(copy::profiles::cannot_create(blocked));
