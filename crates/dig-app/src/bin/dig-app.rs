@@ -3885,10 +3885,6 @@ mod tray {
         }
     }
 
-    /// Explain what a profile is and why this version cannot create one.
-    ///
-    /// Both sentences come from `dig_app_core::profiles::copy`, which is also where the window's
-    /// card reads them — so the notice and the card cannot come to describe different builds.
     /// Put the zero-profile funding prompt on screen (dig_ecosystem#2950).
     ///
     /// Raised by the state loop, never by a click — see
@@ -3898,11 +3894,16 @@ mod tray {
     ///
     /// # Money
     ///
-    /// **Nothing here spends anything.** The window states a cost and shows an address; the affirming
-    /// control asks the node for a fresh balance. There is no mint on this path — no surface in this
-    /// app calls [`ProfileMintDoor::begin`](dig_app_core::account::profile_mint::ProfileMintDoor::begin)
-    /// yet — which is why the prompt can be raised on a schedule without ever taking somebody's money
-    /// by surprise.
+    /// **This path CAN spend, and the claim that it could not is gone** (dig_ecosystem#2989). While
+    /// the wallet cannot pay, the window states a cost and shows an address and the affirming
+    /// control only asks the node for a fresh balance. Once it can pay, the same watch raises the
+    /// OFFER, whose affirming control reaches
+    /// [`ProfileMintDoor::begin`](dig_app_core::account::profile_mint::ProfileMintDoor::begin).
+    ///
+    /// What makes it safe to raise on a SCHEDULE is therefore not the absence of a mint — it is that
+    /// the offer discloses the cost, names its control *Create my profile*, and sets
+    /// `refusal_is_default`, so a prompt a person did not go looking for cannot take their money on
+    /// a stray Enter.
     ///
     /// # It is a WATCH, not a single question
     ///

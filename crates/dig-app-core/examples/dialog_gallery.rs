@@ -32,6 +32,7 @@
 //! | `created` | the one success window, naming the evidence |
 //! | `creation-stopped` | a creation that stopped with the money UNKNOWN — the window whose
 //!   wording decides whether somebody pays twice |
+//! | `creation-stopped-refused` | one refused at the start while another was already under way |
 //! | `creation-stopped-spent` | one that stopped with both halves partly on chain |
 //! | `authorization` | the reveal gate |
 //! | `destroy` | the replace/remove authorization (dig_ecosystem#1799) |
@@ -326,6 +327,7 @@ fn main() {
         | "creating-store-submitted"
         | "created"
         | "creation-stopped"
+        | "creation-stopped-refused"
         | "creation-stopped-spent" => {
             use dig_app_core::account::profile_creation::{
                 copy, ConfirmedProfile, CreationStep, Spent, Stopped,
@@ -384,6 +386,22 @@ fn main() {
                         detail: "connection refused".to_owned(),
                     })),
                 ),
+                // The window a person reaches when `begin` itself was refused while a creation was
+                // already under way (dig_ecosystem#2989). Nothing was reached, so the only thing on
+                // screen is the money sentence — which is exactly why it is photographed: this is
+                // the state that used to read "No money left your wallet" over a paid-for mint.
+                "creation-stopped-refused" => (
+                    copy::STOPPED_HEADING,
+                    copy::stopped_body(&Stopped {
+                        reached: None,
+                        spent: Spent::Unknown {
+                            detail: "DIG could not start this creation because one has already                                      been started for this account, and that one may already have                                      been paid for."
+                                .to_owned(),
+                        },
+                        why: "a mint is already in progress there".to_owned(),
+                        may_be_forgotten: false,
+                    }),
+                ),
                 _ => (
                     copy::STOPPED_HEADING,
                     copy::stopped_body(&Stopped {
@@ -400,7 +418,9 @@ fn main() {
             };
             let title = match which.as_str() {
                 "created" => copy::CREATED_TITLE,
-                "creation-stopped" | "creation-stopped-spent" => copy::STOPPED_TITLE,
+                "creation-stopped" | "creation-stopped-refused" | "creation-stopped-spent" => {
+                    copy::STOPPED_TITLE
+                }
                 _ => copy::TITLE,
             };
             confirmer.show_notice(&NoticePrompt {
@@ -498,7 +518,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown window `{other}` — expected notice, claim, did, first-profile, first-profile-ready, creating-submitted, creating-did-confirmed, creating-store-submitted, created, creation-stopped, creation-stopped-spent, authorization, destroy, unopenable, input, passphrase, open or bar"
+                "unknown window `{other}` — expected notice, claim, did, first-profile, first-profile-ready, creating-submitted, creating-did-confirmed, creating-store-submitted, created, creation-stopped, creation-stopped-refused, creation-stopped-spent, authorization, destroy, unopenable, input, passphrase, open or bar"
             );
             std::process::exit(2);
         }

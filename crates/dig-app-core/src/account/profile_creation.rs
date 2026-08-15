@@ -762,17 +762,23 @@ mod tests {
         }
     }
 
+    /// The one answer [`ScriptedCeremony::standing`] is scripted with.
+    ///
+    /// Held the way `begins` is because `MintError` is not `Clone`; named because a fixture list
+    /// carrying it inline is unreadable.
+    type ScriptedStanding = RefCell<Option<Result<CreationStep, MintError>>>;
+
     /// What the real door answers about an index with nothing journalled: dig-account's
     /// `profile_mint_status` looks the index up in the registry's in-progress list and fails with
     /// [`MintError::Journal`] when it is not there.
-    fn nothing_journalled() -> RefCell<Option<Result<CreationStep, MintError>>> {
+    fn nothing_journalled() -> ScriptedStanding {
         RefCell::new(Some(Err(MintError::Journal(
             "no mint is journalled at profile 1".to_owned(),
         ))))
     }
 
     /// A door that reports a creation already under way at `step`.
-    fn already_under_way(step: CreationStep) -> RefCell<Option<Result<CreationStep, MintError>>> {
+    fn already_under_way(step: CreationStep) -> ScriptedStanding {
         RefCell::new(Some(Ok(step)))
     }
 
@@ -811,7 +817,7 @@ mod tests {
         /// Held the way `begins` is, rather than as a plain value, because `MintError` is not
         /// `Clone` and this double must be able to express ANY of them: a fixture that could only
         /// vary the Ok side could not tell an unreadable door from an empty one.
-        standing: RefCell<Option<Result<CreationStep, MintError>>>,
+        standing: ScriptedStanding,
     }
 
     impl ScriptedCeremony {
@@ -825,7 +831,7 @@ mod tests {
                 records: std::cell::Cell::default(),
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
-            standing: nothing_journalled(),
+                standing: nothing_journalled(),
             }
         }
 
@@ -838,7 +844,7 @@ mod tests {
                 records: std::cell::Cell::default(),
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
-            standing: nothing_journalled(),
+                standing: nothing_journalled(),
             }
         }
 
@@ -882,7 +888,7 @@ mod tests {
                 records: std::cell::Cell::default(),
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
-            standing: nothing_journalled(),
+                standing: nothing_journalled(),
             }
         }
     }
@@ -1081,7 +1087,7 @@ mod tests {
     /// is untouched would be gone.
     #[test]
     fn a_beginning_refused_while_a_creation_may_be_under_way_never_says_nothing_was_spent() {
-        let cases: Vec<(&str, MintError, RefCell<Option<Result<CreationStep, MintError>>>, bool)> = vec![
+        let cases: Vec<(&str, MintError, ScriptedStanding, bool)> = vec![
             (
                 "the door says a creation is already under way",
                 MintError::Journal("a mint is already in progress there".into()),
@@ -1183,8 +1189,15 @@ mod tests {
                 why: "the node stopped answering".to_owned(),
                 may_be_forgotten: false,
             });
-            for promise in ["carry on from here", "picks it up", "DIG saved where this got to"] {
-                assert!(!body.contains(promise), "a stopped creation said {promise:?}");
+            for promise in [
+                "carry on from here",
+                "picks it up",
+                "DIG saved where this got to",
+            ] {
+                assert!(
+                    !body.contains(promise),
+                    "a stopped creation said {promise:?}"
+                );
             }
             assert!(
                 body.contains("cannot carry on") && body.contains("Do not start another one"),

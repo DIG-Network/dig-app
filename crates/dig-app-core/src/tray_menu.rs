@@ -857,24 +857,18 @@ pub enum TrayAction {
         /// `true` to hide it from this host's lists, `false` to show it again.
         hidden: bool,
     },
-    /// EXPLAIN what a dig-profile is, what creating one would cost, and why this version cannot
-    /// create one (dig_ecosystem#2403).
+    /// EXPLAIN what a dig-profile is and what creating one costs (dig_ecosystem#2403).
     ///
-    /// There is deliberately **no `CreateProfile` action**, and because no [`TrayAction`] can create
-    /// a profile, "this build cannot create one" is STRUCTURAL rather than one `enabled: true` away
-    /// from being wrong.
+    /// # It is an explainer, and the reason changed when the ceremony landed
     ///
-    /// # Why, now that the crate underneath CAN mint
+    /// It used to be the honest surface because nothing in this shell COULD create a profile:
+    /// dig-account's mint was `todo!()`, and then it was implemented but had no ceremony here to
+    /// disclose the cost and take consent. Both of those expired — dig_ecosystem#2989 landed the
+    /// ceremony, and the funded first-profile window now offers it.
     ///
-    /// The original reason — dig-account's `ProfileMinter::mint` being `todo!()` — **expired**: as of
-    /// dig-account 0.11 the mint is implemented, so the absence of a verb here is no longer a fact
-    /// about that crate. What is still missing is in THIS shell: a mint spends real money across two
-    /// bundles, and there is no ceremony to disclose the cost, take consent, and report the outcome.
-    /// A verb without one would take a person's money on a click, which is a worse dead end than the
-    /// one #1800 removed.
-    ///
-    /// The verb and that ceremony must therefore land together — see dig_ecosystem#2398 — and until
-    /// they do, the honest surface is an explainer rather than a control.
+    /// What did not change is that this row is not the way in. Creating costs real XCH from a wallet
+    /// that has to be funded FIRST, so the path runs through [`CreateProfile`](Self::CreateProfile)'s
+    /// funding check; a concept explainer that quietly spent money would be the worse dead end.
     ///
     /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
     AboutProfiles,
@@ -883,14 +877,14 @@ pub enum TrayAction {
     /// # The verb is deliberately NARROWER than "create a profile"
     ///
     /// Pressing this raises the same funding window the first-profile prompt raises on its daily
-    /// cadence — it reads the balance, shows the address to send XCH to, and says plainly that this
-    /// build does not yet run the ceremony itself. Nothing here spends, signs or mints; there is
-    /// still no call to `ProfileMintDoor::begin` anywhere in production.
+    /// cadence — it reads the balance and shows the address to send XCH to. Pressing THIS row still
+    /// spends nothing: what it opens is the funding check.
     ///
-    /// So the label says *funding*, not *create*. A row reading "Create a profile" that lands on a
-    /// window explaining creation is not wired would be a control that refuses one screen later —
-    /// the dead end `professional-ui` forbids and dig_ecosystem#1800 removed once already. When
-    /// dig_ecosystem#2952 wires the ceremony, the widened verb lands WITH it.
+    /// So the label says *funding*, not *create*, and it still should. The ceremony behind the
+    /// funded window landed in dig_ecosystem#2989, but a row promising *create* would still be one
+    /// screen short of the truth — the wallet has to be able to pay before anything can be created,
+    /// and a row that led to *you need funds* would be the refuses-one-screen-later dead end
+    /// `professional-ui` forbids and dig_ecosystem#1800 removed once already.
     ///
     /// Offered ONLY where `ProfileCreation::is_possible()` — a live node answered both probes AND
     /// the ceremony would not refuse on divergent indices (dig_ecosystem#2939). Never derived from
@@ -1635,9 +1629,9 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
 /// # What this builder decides, and what it deliberately does not
 ///
 /// It decides which of the two per-profile verbs each row gets, and it never emits a THIRD verb for
-/// creating one. That absence is structural: see [`TrayAction::AboutProfiles`] for why no action in
-/// this shell can mint a profile, which is what makes "this build cannot create one" a property of
-/// the code rather than of an `enabled: false` somebody could flip.
+/// creating one. Creating runs through the funding check instead — see
+/// [`TrayAction::CreateProfile`], whose label says *funding* precisely because a row cannot promise
+/// a creation the wallet may not be able to pay for.
 ///
 /// It does NOT decide how the list is drawn, or which profile a row is ABOUT beyond the index it
 /// carries. The pane reads the profiles themselves from
