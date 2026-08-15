@@ -31,6 +31,7 @@
 //! | Installing dig-app on a node with a ledger toasts its whole history | a cursor with no position ADOPTS the node's `latest` in silence |
 //! | A restart re-announces | the cursor is persisted before anything is drawn |
 //! | The client resumes past an arrival it never saw | the cursor advances to the last row RECEIVED, never to `latest` |
+//! | A rebuilt node database replays its history at new `seq`s and re-announces it | the coin id, not the `seq`, decides announcing — see [`announcer`] |
 //!
 //! # A payment that lands while dig-app is CLOSED is announced when it next opens
 //!
@@ -43,8 +44,11 @@
 //! recorded by the catch-up that follows, but at or below the arrival baseline that catch-up arms
 //! only if the wallet had never synced before. See dig-node's `sage::arrivals`.
 
+pub mod announcer;
 pub mod store;
 pub mod watch;
+
+pub use announcer::ArrivalAnnouncer;
 
 use dig_events_protocol::AssetId;
 use serde::{Deserialize, Serialize};
