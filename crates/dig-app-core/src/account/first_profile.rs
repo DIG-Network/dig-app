@@ -575,7 +575,7 @@ pub mod copy {
     ///
     /// The balance is stated beside the cost because a person deciding how much to send has to do
     /// the subtraction otherwise, and the unit is XCH because that is the unit of the wallet they
-    /// will send FROM. Every one is rendered by [`xch`], this crate's single mojos-to-XCH
+    /// will send FROM. Every one is rendered by `chain_mint::xch`, this crate's single mojos-to-XCH
     /// conversion: a money figure has twice reached a screen here through the wrong divisor, and
     /// both times a second copy of the conversion was what let it through.
     pub fn body(balance_mojos: u64, shortfall_mojos: u64, cost_mojos: u64) -> String {
