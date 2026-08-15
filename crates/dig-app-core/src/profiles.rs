@@ -56,6 +56,15 @@ pub struct ProfileRow {
     pub ix: ProfileIx,
     /// Its canonical `did:chia:…` string, recomputed by dig-account from the launcher id on load.
     pub did: String,
+    /// The launcher id of the store this profile's content lives in, in the `0x…` form every DIG
+    /// surface prints.
+    ///
+    /// Not an `Option`. A profile is a DID **and** a store, and
+    /// [`ProfileAnchor::from_confirmed`](dig_account::registry::ProfileAnchor::from_confirmed) is
+    /// the anchor's only constructor and demands evidence of both — so an entry that reached this
+    /// row has a store id, and a nullable field here would invent an absent case the registry
+    /// cannot produce.
+    pub store_id: String,
     /// The user's own name for it, when they gave one.
     pub label: Option<String>,
     /// Whether the user has hidden it from this host's lists. A LOCAL view preference: the profile
@@ -93,6 +102,9 @@ impl ProfileRow {
         Self {
             ix: entry.ix(),
             did: entry.anchor().did().to_string(),
+            // From the SAME anchor as the DID, so a row can never pair one profile's identity with
+            // another's store.
+            store_id: format!("0x{}", hex::encode(entry.anchor().store_launcher_id())),
             label: entry.label().map(str::to_owned),
             hidden: entry.visibility() == ProfileVisibility::HiddenFromLists,
             active: active == Some(entry.ix()),

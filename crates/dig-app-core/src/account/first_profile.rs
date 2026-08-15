@@ -844,6 +844,7 @@ mod tests {
         ProfilesReading::Known(vec![ProfileRow {
             ix: ProfileIx::ROOT,
             did: "did:chia:1example".to_owned(),
+            store_id: "0xexamplestore".to_owned(),
             label: None,
             hidden: false,
             active: true,

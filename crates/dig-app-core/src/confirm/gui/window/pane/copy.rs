@@ -475,6 +475,12 @@ pub(crate) mod profiles {
     pub(crate) const HIDDEN_BADGE: &str = "Hidden here";
     /// The readout naming a profile's on-chain identity.
     pub(crate) const DID_LABEL: &str = "DID";
+    /// The readout naming where a profile's content lives.
+    ///
+    /// *Store* is the ecosystem's canonical word for the on-chain singleton that holds content
+    /// (SYSTEM.md, "Object vocabulary"), and it is already the word the creation window uses when it
+    /// reports the same id. `store_launcher_id` is the field's name, not the thing's.
+    pub(crate) const STORE_LABEL: &str = "Store";
 
     /// Said while the profile list is still being read.
     ///
