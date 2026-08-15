@@ -2,21 +2,34 @@
 //!
 //! The account stays unlocked only as long as its master seed / data-encryption keys live in the
 //! in-memory [`AccountResidency`](crate::account::residency::AccountResidency) (SPEC §3.1). Leaving
-//! that key resident indefinitely opens two windows an attacker can walk into: someone who reaches the
-//! unattended machine while the user is away, and the boot-unlock residency window where an OS
-//! keychain auto-unlock leaves the DEK resident for hours. This module closes both by **dropping the
-//! DEK** — re-sealing the session — on three triggers, and requiring re-authentication only when the
-//! next operation actually needs the key.
+//! that key resident indefinitely opens a window an attacker can walk into: someone who reaches the
+//! unattended machine while the user is away. This module closes it by **dropping the DEK** —
+//! re-sealing the session — and requiring re-authentication only when the next operation actually
+//! needs the key.
 //!
-//! # The three lock triggers (all drop the DEK)
+//! # The lock policy: exactly three triggers (dig_ecosystem#2953)
 //!
-//! - **Idle auto-lock** — [`SessionLock::poll_idle`] locks once no activity has been noted for the
-//!   configured [`idle_timeout`](SessionLock::idle_timeout). The tray drives it from its refresh tick.
-//! - **OS screen lock** — [`SessionLock::on_screen_locked`] locks when the OS session/screen locks.
-//!   The platform event arrives through the [`ScreenLockSource`] seam (Windows / macOS wired now;
-//!   Linux deferred behind dig_ecosystem#962).
+//! Once a session is unlocked it stays unlocked until one of these, and nothing else:
+//!
 //! - **One-tap lock-now** — [`SessionLock::lock_now`] locks immediately, with NO confirmation prompt
-//!   (a tray action a user hits on the way out).
+//!   (a tray action a user hits on the way out). With a 24-hour idle window this is the only
+//!   *immediate* lock, so it must stay offered at the top level of the tray menu.
+//! - **24 hours of no USER activity** — [`SessionLock::poll_idle`] locks once no activity has been
+//!   noted for the configured [`idle_timeout`](SessionLock::idle_timeout), defaulting to
+//!   [`DEFAULT_IDLE_TIMEOUT`]. The tray drives it from its refresh tick. What counts as activity is a
+//!   contract in its own right — see [`SessionLock::note_activity`].
+//! - **The app was closed and reopened** — structural, not a code path here. The DEK lives only in the
+//!   in-memory residency, so process exit drops it and a fresh process starts locked.
+//!
+//! Locking the OS screen is deliberately NOT a trigger: a person who locks their machine to go to
+//! lunch has not asked dig-app to forget their session. `tests/no_os_screen_lock_trigger.rs` keeps a
+//! platform listener from being re-introduced.
+//!
+//! # Bounds this module must not drift across
+//!
+//! Nothing may ever persist an unlocked session across a restart. "Closed and reopened re-locks" is
+//! true *by construction* only because the key material is memory-resident and unserialised; writing
+//! it anywhere durable would silently delete the strictest of the three triggers.
 //!
 //! # Frictionless consumption is preserved (§6.0)
 //!
@@ -33,13 +46,27 @@
 //! app calls [`SessionLock::note_resumed`] once a re-unlock succeeds to
 //! clear the owed re-auth and restart the idle clock.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// The default idle window before a foreground session auto-locks (SPEC §3.1 walk-away window).
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// The default idle window before an unattended session auto-locks: **24 hours** (SPEC §3.6).
+///
+/// # Why a day, and why that is defensible
+///
+/// This window governs how often a person retypes a password to authorise their OWN LOCAL actions —
+/// not whether a remote party can act for them. Under §908 the node never holds the user's key, and
+/// signing is local and per-operation, so a longer window widens only the unattended-machine window on
+/// a device the user already controls; it grants no remote capability at all. The cost of a short one
+/// is real and constant: a password prompt in front of every ordinary action, which trains people to
+/// type it reflexively.
+///
+/// # It is a maximum, not a promise of liveness
+///
+/// Nothing keeps the process alive to honour the full day. An app closed at hour 3 has already lost
+/// the session — process exit is the third and stricter rule — so 24 hours is the ceiling on an
+/// untouched, still-running app, never a guarantee the session will last that long.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The in-memory key material a lock event drops. Implemented by the master-HD
 /// [`AccountResidency`](crate::account::residency::AccountResidency) in production (dropping the
@@ -93,10 +120,9 @@ impl MonotonicClock for SystemClock {
 /// The session-lock lifecycle controller: owns the idle clock and the "re-auth owed" flag, and drives
 /// the [`SessionKeys`] DEK drop on each lock trigger.
 ///
-/// One controller governs the whole session (all profiles lock together): a walk-away or a screen
-/// lock should not leave any profile's key resident. It is cheap to share behind an `Arc` — the tray
-/// tick calls [`poll_idle`](Self::poll_idle), a menu action calls [`lock_now`](Self::lock_now), and
-/// the [`ScreenLockSource`] callback calls [`on_screen_locked`](Self::on_screen_locked).
+/// One controller governs the whole session (all profiles lock together): a walk-away should not
+/// leave any profile's key resident. It is cheap to share behind an `Arc` — the tray tick calls
+/// [`poll_idle`](Self::poll_idle) and a menu action calls [`lock_now`](Self::lock_now).
 pub struct SessionLock<K: SessionKeys, C: MonotonicClock> {
     keys: K,
     clock: C,
@@ -128,9 +154,25 @@ impl<K: SessionKeys, C: MonotonicClock> SessionLock<K, C> {
         self.idle_timeout
     }
 
-    /// Record user/session activity, resetting the idle clock. Signing and other interactive
-    /// operations call this. Reads MAY call it too — it never prompts and never blocks; it only
-    /// postpones the idle deadline.
+    /// Record **user** activity, resetting the idle clock.
+    ///
+    /// # Only a human at the machine may call this
+    ///
+    /// "No activity" means no person, not no work. A tray app polls constantly, and an idle clock fed
+    /// by the app's own work never elapses — the 24-hour timeout would become dead code that merely
+    /// *looks* like a security control. So background work MUST NEVER call this: not the refresh
+    /// tick, not status polls, not repaints, not node reads, not notifications. A content read in
+    /// particular is not evidence of presence; with a day-long window a background read stream would
+    /// hold the session open forever.
+    ///
+    /// The two legitimate call sites, and there are no others:
+    ///
+    /// - a tray/window menu click (`dig-app.rs`, the tray event loop),
+    /// - `SessionReauthGate::authorize_sign` on an already-authorised sign
+    ///   ([`crate::sign_service`]), which is user-driven by definition.
+    ///
+    /// The refresh tick calls only [`poll_idle`](Self::poll_idle), which READS the clock and never
+    /// feeds it. That asymmetry is what makes the timeout real.
     pub fn note_activity(&self) {
         *self
             .last_activity
@@ -145,13 +187,6 @@ impl<K: SessionKeys, C: MonotonicClock> SessionLock<K, C> {
         self.keys.lock_all();
         self.reauth_owed.store(true, Ordering::SeqCst);
         had_keys
-    }
-
-    /// Lock in response to an OS screen/session-lock event. Semantically identical to
-    /// [`lock_now`](Self::lock_now) — separated so the trigger reads clearly at the call site and can
-    /// diverge later if a screen lock ever wants different handling.
-    pub fn on_screen_locked(&self) -> bool {
-        self.lock_now()
     }
 
     /// Lock if the session has been idle at least [`idle_timeout`](Self::idle_timeout). Idempotent and
@@ -186,325 +221,6 @@ impl<K: SessionKeys, C: MonotonicClock> SessionLock<K, C> {
     pub fn note_resumed(&self) {
         self.reauth_owed.store(false, Ordering::SeqCst);
         self.note_activity();
-    }
-}
-
-/// A source of OS screen/session-lock events — the seam behind which each platform's native listener
-/// lives (Windows `WM_WTSSESSION_CHANGE` / macOS `com.apple.screenIsLocked`). Wiring it to a
-/// [`SessionLock`] is a one-liner: `source.start(move || lock.on_screen_locked())`.
-///
-/// The platform-agnostic lifecycle is tested against a fake source; the real listeners are thin
-/// adapters that translate a native lock notification into the callback.
-pub trait ScreenLockSource {
-    /// Begin delivering lock events to `on_lock`. Delivery continues until the returned guard is
-    /// dropped, so the caller keeps the guard alive for as long as it wants lock events.
-    fn start(self, on_lock: Box<dyn Fn() + Send + 'static>) -> Box<dyn ScreenLockGuard>;
-}
-
-/// An opaque handle that keeps an OS screen-lock subscription alive; dropping it unsubscribes.
-pub trait ScreenLockGuard: Send {}
-
-/// Wrap a lock callback so a panic inside it degrades to a logged no-op instead of unwinding.
-///
-/// The OS listeners deliver lock events through an `extern "system"` callback (the Windows window
-/// procedure), and a panic that unwinds across that FFI boundary is undefined behaviour — in practice
-/// a process abort. Containing the panic HERE — before the callback is handed to
-/// [`ScreenLockSource::start`] — means a screen lock can never take the whole app down: the worst a
-/// broken lock trigger can do is fail to lock (logged), which the idle poll + one-tap lock-now still
-/// cover. (WSEC-D adversarial hardening, dig_ecosystem#967.)
-pub fn panic_safe_lock_callback(
-    on_lock: impl Fn() + Send + 'static,
-) -> Box<dyn Fn() + Send + 'static> {
-    Box::new(move || {
-        if catch_unwind(AssertUnwindSafe(&on_lock)).is_err() {
-            tracing::error!("a screen-lock callback panicked; ignoring it (session left as-is)");
-        }
-    })
-}
-
-/// The Windows screen-lock listener (`WTSRegisterSessionNotification` → `WM_WTSSESSION_CHANGE` with
-/// `WTS_SESSION_LOCK`), delivering a lock event through the [`ScreenLockSource`] seam.
-#[cfg(windows)]
-pub use platform::WindowsScreenLockSource as PlatformScreenLockSource;
-
-/// The macOS screen-lock listener (the `com.apple.screenIsLocked` distributed notification),
-/// delivering a lock event through the [`ScreenLockSource`] seam.
-#[cfg(target_os = "macos")]
-pub use platform::MacScreenLockSource as PlatformScreenLockSource;
-
-/// The Linux screen-lock listener is deferred behind the Linux unlock-UX work (dig_ecosystem#962):
-/// the logind `Lock`/session `PrepareForSleep` D-Bus signals wire in there. Until then Linux has no
-/// OS-lock trigger, so idle auto-lock + one-tap lock-now (both platform-agnostic) are the coverage.
-#[cfg(all(not(windows), not(target_os = "macos")))]
-pub use platform::NoopScreenLockSource as PlatformScreenLockSource;
-
-#[cfg(windows)]
-mod platform {
-    use super::{ScreenLockGuard, ScreenLockSource};
-    use std::sync::mpsc::{self, Sender};
-    use std::thread::{self, JoinHandle};
-
-    use windows::core::{w, PCWSTR};
-    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::RemoteDesktop::{
-        WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW,
-        PostMessageW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, GWLP_USERDATA, MSG,
-        WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_OVERLAPPED,
-    };
-
-    /// The `wParam` value of `WM_WTSSESSION_CHANGE` signalling the session locked.
-    const WTS_SESSION_LOCK: usize = 0x7;
-
-    /// The boxed lock callback, reached from the window proc via the window's `GWLP_USERDATA` pointer.
-    type LockCallback = Box<dyn Fn() + Send + 'static>;
-
-    /// A [`ScreenLockSource`] backed by a hidden message-only window subscribed to Terminal Services
-    /// session-change notifications. On each `WTS_SESSION_LOCK` it invokes the callback.
-    pub struct WindowsScreenLockSource;
-
-    impl WindowsScreenLockSource {
-        /// Build the Windows listener.
-        pub fn new() -> Self {
-            Self
-        }
-    }
-
-    impl Default for WindowsScreenLockSource {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    /// Owns the message-pump thread; dropping it posts `WM_CLOSE` to the window (which destroys it and
-    /// quits the pump) and joins the thread, unsubscribing from session notifications.
-    struct WindowsGuard {
-        hwnd: isize,
-        pump: Option<JoinHandle<()>>,
-    }
-
-    impl ScreenLockGuard for WindowsGuard {}
-
-    impl Drop for WindowsGuard {
-        fn drop(&mut self) {
-            if self.hwnd != 0 {
-                // PostMessage is thread-safe; WM_CLOSE → DefWindowProc → DestroyWindow → WM_DESTROY →
-                // PostQuitMessage, which ends the pump's GetMessage loop on its own thread.
-                unsafe {
-                    let _ = PostMessageW(HWND(self.hwnd as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-            }
-            if let Some(pump) = self.pump.take() {
-                let _ = pump.join();
-            }
-        }
-    }
-
-    impl ScreenLockSource for WindowsScreenLockSource {
-        fn start(self, on_lock: LockCallback) -> Box<dyn ScreenLockGuard> {
-            let (hwnd_tx, hwnd_rx) = mpsc::channel::<isize>();
-            let pump = thread::spawn(move || unsafe { run_pump(on_lock, &hwnd_tx) });
-            // Block until the pump publishes its window handle (or 0 if window creation failed).
-            let hwnd = hwnd_rx.recv().unwrap_or(0);
-            Box::new(WindowsGuard {
-                hwnd,
-                pump: Some(pump),
-            })
-        }
-    }
-
-    /// Create the hidden window, subscribe to session notifications, publish the window handle, then
-    /// pump messages until the window is destroyed.
-    unsafe fn run_pump(on_lock: LockCallback, hwnd_tx: &Sender<isize>) {
-        let instance = match GetModuleHandleW(PCWSTR::null()) {
-            Ok(handle) => handle,
-            Err(_) => {
-                let _ = hwnd_tx.send(0);
-                return;
-            }
-        };
-        let class_name = w!("DigAppSessionLockWindow");
-        let wnd_class = WNDCLASSW {
-            lpfnWndProc: Some(wnd_proc),
-            hInstance: instance.into(),
-            lpszClassName: class_name,
-            ..Default::default()
-        };
-        RegisterClassW(&wnd_class);
-
-        // Leak the boxed callback into the window's USERDATA; it is reclaimed on WM_DESTROY.
-        let callback_ptr = Box::into_raw(Box::new(on_lock));
-        let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
-            class_name,
-            w!("dig-app session lock"),
-            WS_OVERLAPPED,
-            0,
-            0,
-            0,
-            0,
-            None,
-            None,
-            HINSTANCE::from(instance),
-            None,
-        );
-        let hwnd = match hwnd {
-            Ok(handle) => handle,
-            Err(_) => {
-                drop(Box::from_raw(callback_ptr));
-                let _ = hwnd_tx.send(0);
-                return;
-            }
-        };
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, callback_ptr as isize);
-        let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
-        let _ = hwnd_tx.send(hwnd.0 as isize);
-
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            DispatchMessageW(&msg);
-        }
-        let _ = WTSUnRegisterSessionNotification(hwnd);
-    }
-
-    /// The window procedure: fires the callback on a session-lock notification and reclaims the boxed
-    /// callback on destroy.
-    unsafe extern "system" fn wnd_proc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        match msg {
-            WM_WTSSESSION_CHANGE if wparam.0 == WTS_SESSION_LOCK => {
-                let callback_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const LockCallback;
-                if !callback_ptr.is_null() {
-                    (*callback_ptr)();
-                }
-                LRESULT(0)
-            }
-            WM_DESTROY => {
-                let callback_ptr = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) as *mut LockCallback;
-                if !callback_ptr.is_null() {
-                    drop(Box::from_raw(callback_ptr));
-                }
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-mod platform {
-    use std::ptr::NonNull;
-
-    use block2::RcBlock;
-    use objc2::rc::Retained;
-    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
-    use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
-
-    use super::{ScreenLockGuard, ScreenLockSource};
-
-    /// The system-wide distributed notification the login/screen-saver window posts when the screen
-    /// locks. Undocumented-but-stable; the paired `com.apple.screenIsUnlocked` drives resume UX
-    /// elsewhere.
-    const SCREEN_IS_LOCKED: &str = "com.apple.screenIsLocked";
-
-    /// A [`ScreenLockSource`] backed by the macOS distributed notification `com.apple.screenIsLocked`,
-    /// observed on the default distributed notification center. On each notification it invokes the
-    /// callback.
-    pub struct MacScreenLockSource;
-
-    impl MacScreenLockSource {
-        /// Build the macOS listener.
-        pub fn new() -> Self {
-            Self
-        }
-    }
-
-    impl Default for MacScreenLockSource {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    /// Keeps the notification observer registered; dropping it removes the observer.
-    struct MacGuard {
-        center: Retained<NSDistributedNotificationCenter>,
-        observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
-    }
-
-    // The Retained handles are only created and dropped on the thread that owns the guard; wrapping
-    // them Send lets the guard live beside the rest of the app state.
-    unsafe impl Send for MacGuard {}
-    impl ScreenLockGuard for MacGuard {}
-
-    impl Drop for MacGuard {
-        fn drop(&mut self) {
-            // `removeObserver:` is typed `&AnyObject`; the observer token is a `ProtocolObject`, so go
-            // through `msg_send!` (which accepts any `Message`) rather than fight the deref chain.
-            unsafe {
-                let _: () = objc2::msg_send![&self.center, removeObserver: &*self.observer];
-            }
-        }
-    }
-
-    impl ScreenLockSource for MacScreenLockSource {
-        fn start(self, on_lock: Box<dyn Fn() + Send + 'static>) -> Box<dyn ScreenLockGuard> {
-            // The notification center invokes this block for each screen-lock event; the notification
-            // itself is unused — the event is the signal.
-            let block = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-                on_lock();
-            });
-            unsafe {
-                let center = NSDistributedNotificationCenter::defaultCenter();
-                let name = NSString::from_str(SCREEN_IS_LOCKED);
-                let observer = center.addObserverForName_object_queue_usingBlock(
-                    Some(&name),
-                    None,
-                    None,
-                    &block,
-                );
-                Box::new(MacGuard { center, observer })
-            }
-        }
-    }
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-mod platform {
-    use super::{ScreenLockGuard, ScreenLockSource};
-
-    /// The no-op screen-lock source used where no OS-lock event is wired (Linux, deferred behind
-    /// dig_ecosystem#962). It registers nothing and never fires — idle auto-lock and one-tap lock-now
-    /// still apply.
-    pub struct NoopScreenLockSource;
-
-    impl NoopScreenLockSource {
-        /// Build the no-op listener.
-        pub fn new() -> Self {
-            Self
-        }
-    }
-
-    impl Default for NoopScreenLockSource {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
-    struct NoopGuard;
-    impl ScreenLockGuard for NoopGuard {}
-
-    impl ScreenLockSource for NoopScreenLockSource {
-        fn start(self, _on_lock: Box<dyn Fn() + Send + 'static>) -> Box<dyn ScreenLockGuard> {
-            Box::new(NoopGuard)
-        }
     }
 }
 
@@ -563,8 +279,13 @@ mod tests {
         }
     }
 
+    /// A short, TEST-LOCAL idle window. Deliberately not [`DEFAULT_IDLE_TIMEOUT`]: the lifecycle tests
+    /// below are about *how* the deadline behaves, and a five-minute figure keeps their arithmetic
+    /// readable. The shipped window is exercised by the two day-long tests at the end of this module.
+    const TEST_IDLE_WINDOW: Duration = Duration::from_secs(300);
+
     fn lock_with(keys: FakeKeys, clock: ManualClock) -> SessionLock<FakeKeys, ManualClock> {
-        SessionLock::new(keys, clock, Duration::from_secs(300))
+        SessionLock::new(keys, clock, TEST_IDLE_WINDOW)
     }
 
     #[test]
@@ -648,19 +369,6 @@ mod tests {
     }
 
     #[test]
-    fn os_screen_lock_drops_the_dek() {
-        let keys = FakeKeys::unlocked();
-        let lock = lock_with(keys.clone(), ManualClock::default());
-
-        assert!(lock.on_screen_locked());
-        assert!(
-            !keys.is_any_unlocked(),
-            "an OS screen lock re-sealed the session"
-        );
-        assert!(lock.reauth_required());
-    }
-
-    #[test]
     fn a_read_after_lock_does_not_prompt_but_the_next_sign_reauthenticates() {
         // Model the tiered contract: a read never consults the lock; a sign does. After a lock the
         // read still proceeds untouched while the sign is told to re-authenticate.
@@ -714,8 +422,8 @@ mod tests {
     }
 
     #[test]
-    fn default_idle_timeout_is_five_minutes() {
-        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(300));
+    fn default_idle_timeout_is_twenty_four_hours() {
+        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(24 * 60 * 60));
         let lock = SessionLock::new(
             FakeKeys::unlocked(),
             SystemClock::new(),
@@ -724,90 +432,38 @@ mod tests {
         assert_eq!(lock.idle_timeout(), DEFAULT_IDLE_TIMEOUT);
     }
 
-    /// A fake [`ScreenLockSource`] that hands the caller a trigger to simulate OS lock events, so the
-    /// seam wiring is testable without a real OS notification.
-    struct FakeScreenLockSource;
-
-    struct FakeGuard;
-    impl ScreenLockGuard for FakeGuard {}
-
-    impl FakeScreenLockSource {
-        /// Register `on_lock` and return a closure that fires a simulated OS lock event.
-        fn wire(self, on_lock: Box<dyn Fn() + Send + 'static>) -> impl Fn() {
-            move || on_lock()
-        }
-    }
-
-    impl ScreenLockSource for FakeScreenLockSource {
-        fn start(self, _on_lock: Box<dyn Fn() + Send + 'static>) -> Box<dyn ScreenLockGuard> {
-            Box::new(FakeGuard)
-        }
+    /// A session built on the shipped default, so these two tests exercise the window a user actually
+    /// gets rather than a test-local one.
+    fn default_windowed_lock(
+        keys: FakeKeys,
+        clock: ManualClock,
+    ) -> SessionLock<FakeKeys, ManualClock> {
+        SessionLock::new(keys, clock, DEFAULT_IDLE_TIMEOUT)
     }
 
     #[test]
-    fn a_screen_lock_source_callback_drives_the_lock() {
+    fn a_session_idle_for_twenty_three_hours_fifty_nine_minutes_is_still_unlocked() {
         let keys = FakeKeys::unlocked();
-        let lock = Arc::new(lock_with(keys.clone(), ManualClock::default()));
+        let clock = ManualClock::default();
+        let lock = default_windowed_lock(keys.clone(), clock.clone());
 
-        // Wire the source callback to the controller exactly as production does.
-        let lock_for_cb = Arc::clone(&lock);
-        let fire = FakeScreenLockSource.wire(Box::new(move || {
-            lock_for_cb.on_screen_locked();
-        }));
-
-        assert!(keys.is_any_unlocked());
-        fire(); // the OS "locked"
-        assert!(
-            !keys.is_any_unlocked(),
-            "the source callback dropped the DEK"
-        );
-        assert!(lock.reauth_required());
+        // Derived from the constant, not from a literal 86_400: the test must track a future change to
+        // the window rather than silently pin the number it was written against.
+        clock.advance(DEFAULT_IDLE_TIMEOUT - Duration::from_secs(60));
+        assert!(!lock.poll_idle(), "one minute short of the day-long window");
+        assert!(keys.is_any_unlocked(), "the DEK is still resident");
+        assert!(!lock.reauth_required());
     }
 
     #[test]
-    fn a_panic_in_the_lock_callback_is_swallowed_not_propagated() {
-        // A screen-lock callback that panics must NOT unwind (across the OS extern-"system" boundary
-        // it would abort the process). The panic-safe wrapper contains it, so calling the wrapped
-        // callback returns normally.
-        let wrapped = panic_safe_lock_callback(|| panic!("the OS lock handler blew up"));
-        wrapped(); // must not panic / abort
-    }
-
-    #[test]
-    fn the_panic_safe_wrapper_still_runs_a_well_behaved_callback() {
-        // The containment must be transparent to a callback that does NOT panic — it still fires and
-        // drives the lock exactly as an unwrapped callback would.
+    fn a_session_idle_for_exactly_twenty_four_hours_locks() {
         let keys = FakeKeys::unlocked();
-        let lock = Arc::new(lock_with(keys.clone(), ManualClock::default()));
-        let lock_for_cb = Arc::clone(&lock);
+        let clock = ManualClock::default();
+        let lock = default_windowed_lock(keys.clone(), clock.clone());
 
-        let wrapped = panic_safe_lock_callback(move || {
-            lock_for_cb.on_screen_locked();
-        });
-        wrapped();
-
-        assert!(
-            !keys.is_any_unlocked(),
-            "the wrapped callback still locked the session"
-        );
+        clock.advance(DEFAULT_IDLE_TIMEOUT);
+        assert!(lock.poll_idle(), "the day-long idle deadline elapsed");
+        assert!(!keys.is_any_unlocked(), "idle auto-lock dropped the DEK");
         assert!(lock.reauth_required());
-    }
-
-    #[test]
-    fn screen_lock_source_start_returns_a_live_guard() {
-        // The production seam: start() returns a guard that keeps the subscription alive until drop.
-        let guard = FakeScreenLockSource.start(Box::new(|| {}));
-        drop(guard); // dropping unsubscribes without panicking
-    }
-
-    /// The Linux/other platform source is the no-op (dig_ecosystem#962): it registers nothing and its
-    /// guard drops cleanly. On Windows/macOS the real listener needs a live OS session, so its
-    /// behaviour is verified by the native-backends CI build + the seam tests above, not here.
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    #[test]
-    fn platform_noop_source_registers_nothing_and_drops_cleanly() {
-        let source = PlatformScreenLockSource::new();
-        let guard = source.start(Box::new(|| panic!("the no-op source must never fire")));
-        drop(guard);
     }
 }

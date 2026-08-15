@@ -1477,6 +1477,13 @@ fn full(view: &TrayView) -> MenuModel {
 /// also what makes "unlock/lock" literally true of this row.
 ///
 /// The row is therefore present in every state, and the trimmed menu is four rows in every state.
+///
+/// # `Lock now` must never be trimmed off the top level (dig_ecosystem#2953)
+///
+/// The idle window is 24 hours, so `Lock now` is the only *immediate* way to re-seal a session short
+/// of quitting the app. A future tidy-up that demoted it into a submenu would leave the one escape
+/// hatch a click deeper than the state it escapes from;
+/// `lock_now_is_offered_at_the_top_level_whenever_the_account_is_unlocked` fails if that happens.
 pub(crate) fn urgent_account_row(account: &AccountState) -> Option<MenuRow> {
     match account {
         // The one honestly-disabled row left on the top level, and it names its own reason (rule 3).
@@ -3254,6 +3261,37 @@ mod tests {
         let unlocked = build(&view(AccountState::Unlocked { recoverable: true }));
         assert!(!unlocked.is_enabled(TrayAction::Unlock));
         assert!(unlocked.is_enabled(TrayAction::LockNow));
+    }
+
+    /// **Policy (dig_ecosystem#2953).** With a 24-hour idle window, `Lock now` is the only immediate
+    /// lock a person has, so it must sit on the TOP level — not merely somewhere in the model.
+    ///
+    /// `is_enabled` searches recursively and would stay green if a future menu tidy-up demoted the row
+    /// into a submenu, which is exactly the regression this guards: it walks `rows` directly, without
+    /// descending, so a demotion is observable.
+    #[test]
+    fn lock_now_is_offered_at_the_top_level_whenever_the_account_is_unlocked() {
+        for recoverable in [true, false] {
+            for host in [WindowHost::Available, WindowHost::Unavailable] {
+                let mut v = view(AccountState::Unlocked { recoverable });
+                v.window_host = host;
+                let top_level_lock_now = build(&v).rows.iter().any(|row| {
+                    matches!(
+                        row,
+                        MenuRow::Action {
+                            action: TrayAction::LockNow,
+                            enabled: true,
+                            ..
+                        }
+                    )
+                });
+                assert!(
+                    top_level_lock_now,
+                    "an unlocked account ({host:?}, recoverable={recoverable}) must offer `Lock now` \
+                     on the top level: with a 24-hour idle window it is the only immediate lock"
+                );
+            }
+        }
     }
 
     #[test]

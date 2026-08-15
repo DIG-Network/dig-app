@@ -45,7 +45,7 @@ use crate::session_lock::{SessionLock, SystemClock};
 use crate::wallet::state::WalletStore;
 use crate::whitelist::WhitelistStore;
 
-/// The shared session-lock controller the tray drives (lock-now / idle poll / OS screen-lock) and the
+/// The shared session-lock controller the tray drives (lock-now / idle poll) and the
 /// sign path re-authenticates through — the SAME `Arc`, so a lock the tray triggers is the lock the
 /// signer sees. It locks the master-HD [`AccountResidency`](crate::account::residency::AccountResidency),
 /// dropping the unlocked account so the live-view signer + sealer relock at once. Timed with the

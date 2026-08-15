@@ -12,7 +12,7 @@
 //! [`AccountResidency`] closes that gap on the harness side: it OWNS the sole `UnlockedAccount` behind a
 //! shared lock, and hands out LIVE-VIEW capabilities ([`ResidencySigner`], [`ResidencySealer`]) that
 //! re-read the account on every operation and FAIL CLOSED once it is locked. So a lock-now / idle
-//! timeout / OS screen lock that drops the residency ([`SessionKeys::lock_all`]) immediately relocks
+//! timeout that drops the residency ([`SessionKeys::lock_all`]) immediately relocks
 //! the running sign + seal paths over the master-HD account, without relying on dig-account's deferred
 //! capability relock. The signer never forges when locked, and the sealer fails closed when locked.
 //!
@@ -289,9 +289,9 @@ impl AccountResidency {
     }
 
     /// Build the LIVE money signer for the default profile on `network`, through the CURRENT account —
-    /// or `None` once the residency is locked. Read on every call so a lock (lock-now / idle timeout /
-    /// OS screen lock) that drops the account between the confirm ceremony and this call fails the
-    /// sign closed rather than signing under a snapshot the user meant to relock.
+    /// or `None` once the residency is locked. Read on every call so a lock (lock-now / idle timeout)
+    /// that drops the account between the confirm ceremony and this call fails the sign closed rather
+    /// than signing under a snapshot the user meant to relock.
     ///
     /// The returned [`LocalMoneySigner`] holds the master key inside dig-account's vetted signer and
     /// exposes signing only — the seed never crosses this boundary. Since `dig-account` 0.5.0 building
@@ -312,7 +312,7 @@ impl AccountResidency {
     ///
     /// Read on every call, exactly as [`money_signer`](Self::money_signer) is, and for the same
     /// reason: a mint spends real XCH, so a minter derived once and kept would go on spending after a
-    /// lock-now, an idle timeout or an OS screen lock. dig-account 0.6.0 makes
+    /// lock-now or an idle timeout. dig-account 0.6.0 makes
     /// [`UnlockedAccount::profile_minter`] the single door to a minter precisely so the capability
     /// observes the unlock; deriving it here per call keeps that property whole rather than trading it
     /// for a cached handle.
@@ -339,7 +339,7 @@ impl AccountResidency {
     /// TOGETHER, under a single lock acquisition (dig_ecosystem#2059).
     ///
     /// Calling those two methods separately reads the residency TWICE, so a lock landing between the
-    /// calls — an idle timeout, `Lock now`, an OS screen lock — can make "was unlocked" and "no address"
+    /// calls — an idle timeout or `Lock now` — can make "was unlocked" and "no address"
     /// true of two DIFFERENT moments: an ordinary lock race, not a defect. A caller that then reasons
     /// "unlocked yet no address ⇒ derivation is broken" would alarm a user who merely locked their
     /// account. This method closes that gap by taking the lock exactly once, so

@@ -65,10 +65,7 @@ use dig_app_core::form_factor::FormFactor;
 #[cfg(feature = "tray")]
 use dig_app_core::loopback::{PairedAppsControl, SignReauthGate};
 #[cfg(feature = "tray")]
-use dig_app_core::session_lock::{
-    panic_safe_lock_callback, PlatformScreenLockSource, ScreenLockGuard, ScreenLockSource,
-    SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT,
-};
+use dig_app_core::session_lock::{SessionLock, SystemClock, DEFAULT_IDLE_TIMEOUT};
 #[cfg(feature = "tray")]
 use dig_app_core::sign_service;
 #[cfg(feature = "tray")]
@@ -82,13 +79,11 @@ use dig_app_core::Os;
 use std::sync::Arc;
 
 /// The live session-lock wiring the tray drives once the APP-SIGN channel is up: the shared
-/// [`SessionLock`] (lock-now / idle poll / OS screen-lock all act on it, and the sign path
-/// re-authenticates through it) plus the OS screen-lock subscription guard, kept alive for as long as
-/// the tray runs.
+/// [`SessionLock`], which lock-now and the idle poll both act on and which the sign path
+/// re-authenticates through.
 #[cfg(feature = "tray")]
 struct TraySession {
     lock: TraySessionLock,
-    _screen_guard: Box<dyn ScreenLockGuard>,
     /// The live account behind this session, so the tray can address its phrase vault. Held here
     /// because [`SessionLock`] deliberately exposes only lock/unlock, not the keys it guards.
     residency: AccountResidency,
@@ -342,7 +337,7 @@ fn env_os_of<T>(_agent: &T) -> Os {
 /// account's default profile, wires the session-lock (WSEC-D, dig_ecosystem#967) so the sign path
 /// re-authenticates after a lock, restores any persisted pairings/whitelist/nonce ledger, serves the
 /// two loopback listeners on a background thread (the OS event loop keeps the main thread), and hands
-/// the tray the [`TraySession`] it drives (lock-now / idle poll / OS screen-lock). Returns `None` on
+/// the tray the [`TraySession`] it drives (lock-now / idle poll). Returns `None` on
 /// any deferral.
 #[cfg(feature = "tray")]
 fn start_sign_service(env: &AppEnvironment) -> Option<TraySession> {
@@ -425,14 +420,6 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     // Take the paired-app handle before the router is moved onto the serving thread.
     let paired_apps = router.control();
 
-    // Subscribe to OS screen-lock events, containing any callback panic before it can cross the
-    // extern-"system" FFI boundary (WSEC-D adversarial hardening). The returned guard lives in the
-    // TraySession so the subscription stays alive for the whole tray lifetime.
-    let lock_for_screen = Arc::clone(&lock);
-    let screen_guard = PlatformScreenLockSource::new().start(panic_safe_lock_callback(move || {
-        lock_for_screen.on_screen_locked();
-    }));
-
     std::thread::Builder::new()
         .name("dig-app-sign".to_string())
         .spawn(move || {
@@ -446,7 +433,6 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     Ok(TraySession {
         lock,
         residency,
-        _screen_guard: screen_guard,
         account: AccountFacts {
             profile_id,
             recoverable,
@@ -666,7 +652,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     );
 
     match outcome {
-        // Re-open through the normal unlock path so the session, signer, sealer and screen-lock guard
+        // Re-open through the normal unlock path so the session, signer and sealer
         // are assembled exactly as on every other unlock — one code path, no special-cased first run.
         FirstRunOutcome::WalletCreated | FirstRunOutcome::IdentityReady => start_sign_service(env),
         // A person who chose to stop must not be shown an error; only a genuine failure gets one.
@@ -822,7 +808,7 @@ fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opt
         );
         return None;
     }
-    // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+    // Re-open through the normal boot path so the session, signer and sealer are
     // assembled exactly as on every other start — one code path, no special-cased restore.
     let session = start_sign_service(env);
     if session.is_some() {
@@ -929,7 +915,7 @@ impl AccountCustodian for ShellCustodian<'_> {
         if open_account(&self.brand_dir, Seeding::Restore(phrase)).is_none() {
             return false;
         }
-        // Re-open through the normal boot path so the session, signer, sealer and screen-lock guard are
+        // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
         let session = start_sign_service(self.env);
         let live = session.is_some();

@@ -113,13 +113,30 @@ impl ArrivalSource for ControlPlaneSource {
     }
 }
 
+/// The highest `confirmed_height` this client will believe.
+///
+/// Chosen with generations of headroom rather than tuned: Chia mainnet is around 5.4 million blocks
+/// and advances roughly 32 blocks an hour, so ~280,000 blocks a year — this bound is about 350 years
+/// of chain away, and a bound a live chain could actually reach would be a worse bug than the one it
+/// guards against. What it does refuse is an absurd figure, which matters because
+/// [`super::announcer`] turns the highest height it sees while adopting into a permanent horizon: one
+/// row near `u32::MAX` would silently suppress every future notification, persist that, and survive
+/// a switch back to an honest node.
+const MAX_PLAUSIBLE_HEIGHT: u32 = 100_000_000;
+
 /// One of the node's ledger rows as an [`Arrival`].
 ///
-/// The only thing that can fail is the amount. The contract carries it as a DECIMAL STRING because
-/// the ledger holds the full `u64` range and a JSON number would round it, so a client has to parse
-/// it — and a value it cannot parse is refused rather than defaulted. A zero or a saturated maximum
-/// standing in for an unreadable figure is a wrong claim about how much money arrived, which is
-/// exactly what this feature must never make.
+/// Two things can fail, and both are [`ArrivalSourceError::Malformed`] rather than
+/// [`ArrivalSourceError::Unavailable`]: they mean the two sides of the contract disagree, which a
+/// retry does not fix.
+///
+/// The contract carries the AMOUNT as a DECIMAL STRING because the ledger holds the full `u64` range
+/// and a JSON number would round it, so a client has to parse it — and a value it cannot parse is
+/// refused rather than defaulted. A zero or a saturated maximum standing in for an unreadable figure
+/// is a wrong claim about how much money arrived, which is exactly what this feature must never make.
+///
+/// The HEIGHT is bounded by [`MAX_PLAUSIBLE_HEIGHT`] for the reason recorded there: it feeds the
+/// announcer's horizon, so one implausible value silences the feature permanently.
 fn arrival_from(record: &WalletArrivalRecord) -> Result<Arrival, ArrivalSourceError> {
     let amount = record.amount.parse::<u64>().map_err(|e| {
         ArrivalSourceError::Malformed(format!(
@@ -127,6 +144,12 @@ fn arrival_from(record: &WalletArrivalRecord) -> Result<Arrival, ArrivalSourceEr
             record.seq
         ))
     })?;
+    if record.confirmed_height > MAX_PLAUSIBLE_HEIGHT {
+        return Err(ArrivalSourceError::Malformed(format!(
+            "arrival {} claims height {}, which no chain has reached",
+            record.seq, record.confirmed_height
+        )));
+    }
     Ok(Arrival {
         seq: record.seq,
         coin_id: record.coin_id.clone(),
@@ -146,10 +169,10 @@ pub struct ArrivalWatch {
     state: Arc<Mutex<WatchState>>,
     refresh: Duration,
     timeout: Duration,
-    /// Where the durable cursor lives. `None` on a host whose brand directory cannot be resolved,
-    /// which disables the watch entirely — a cursor that cannot be persisted cannot promise that a
+    /// Where the durable record lives. `None` on a host whose brand directory cannot be resolved,
+    /// which disables the watch entirely — a record that cannot be persisted cannot promise that a
     /// restart will not re-announce, and an un-keepable promise is worse than a missing toast.
-    cursor_path: Option<std::path::PathBuf>,
+    record_path: Option<std::path::PathBuf>,
     /// Where the user's preference lives. Read on the worker thread at read time, not per repaint,
     /// and not cached: turning notifications off in Settings takes effect on the next read rather
     /// than at the next restart, and this file is touched six times a minute at most.
@@ -173,28 +196,28 @@ impl ArrivalWatch {
     #[cfg(test)]
     fn with_token_reader(
         refresh: Duration,
-        cursor_path: Option<std::path::PathBuf>,
+        record_path: Option<std::path::PathBuf>,
         read_token: fn() -> Option<String>,
     ) -> Self {
         Self {
             read_token,
-            ..Self::new(refresh, Duration::from_secs(5), cursor_path, None)
+            ..Self::new(refresh, Duration::from_secs(5), record_path, None)
         }
     }
 
     /// A watch reading at most every `refresh`, allowing `timeout` per read, persisting to
-    /// `cursor_path` and honouring the preference in `config_path`.
+    /// `record_path` and honouring the preference in `config_path`.
     pub fn new(
         refresh: Duration,
         timeout: Duration,
-        cursor_path: Option<std::path::PathBuf>,
+        record_path: Option<std::path::PathBuf>,
         config_path: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(WatchState::default())),
             refresh,
             timeout,
-            cursor_path,
+            record_path,
             config_path,
             read_token: control::load_control_token,
         }
@@ -205,10 +228,10 @@ impl ArrivalWatch {
         let config_path = crate::environment::AppEnvironment::from_host()
             .config_path()
             .ok();
-        let cursor_path = config_path
+        let record_path = config_path
             .as_ref()
             .and_then(|config| config.parent().map(super::store::path_in));
-        Self::new(WATCH_INTERVAL, WATCH_READ_TIMEOUT, cursor_path, config_path)
+        Self::new(WATCH_INTERVAL, WATCH_READ_TIMEOUT, record_path, config_path)
     }
 
     /// Notice, at most every `refresh`, whether the node has recorded money arriving — and toast if
@@ -217,7 +240,7 @@ impl ArrivalWatch {
     /// Takes no address: the node's ledger already covers every address the wallet watches, which is
     /// strictly more than the one address the tray happens to be displaying.
     pub fn observe(&self, link: &EngineState) {
-        let Some(cursor_path) = self.cursor_path.clone() else {
+        let Some(record_path) = self.record_path.clone() else {
             return;
         };
         let EngineState::Connected { endpoint, .. } = link else {
@@ -242,7 +265,7 @@ impl ArrivalWatch {
         std::thread::spawn(move || {
             sweep(
                 &source,
-                &cursor_path,
+                &record_path,
                 notifications_wanted(config_path.as_deref()),
                 notify::native_notifier().as_ref(),
             );
@@ -279,46 +302,46 @@ fn notifications_wanted(config_path: Option<&std::path::Path>) -> bool {
 /// One drain → account → announce cycle, with no threading and no clock.
 ///
 /// Split out so the whole behaviour is testable against a scripted source and a recording notifier.
-/// The cursor is loaded, pages are drained until the node has nothing more (or the per-sweep page cap
-/// is reached), the cursor is written back, and only then is anything shown.
+/// The record is loaded, pages are drained until the node has nothing more (or the per-sweep page
+/// cap is reached), the record is written back, and only then is anything shown.
 ///
 /// # Two orderings that are deliberate
 ///
-/// **The cursor is saved BEFORE the toast is drawn.** A crash between the two costs a toast; the
+/// **The record is saved BEFORE the toast is drawn.** A crash between the two costs a toast; the
 /// other order costs a duplicate announcement on the next run, and a duplicate claim about money is
 /// worse than a missing one.
 ///
-/// **A failed save abandons the whole sweep.** Announcing arrivals whose cursor did not persist
+/// **A failed save abandons the whole sweep.** Announcing arrivals whose record did not persist
 /// means announcing them again next time, so nothing is said at all.
 pub fn sweep(
     source: &dyn ArrivalSource,
-    cursor_path: &std::path::Path,
+    record_path: &std::path::Path,
     notifications_enabled: bool,
     notifier: &dyn NativeNotifier,
 ) {
-    let mut cursor = super::store::load(cursor_path);
+    let mut record = super::store::load(record_path);
     let mut announceable: Vec<Arrival> = Vec::new();
 
     for _ in 0..MAX_PAGES_PER_SWEEP {
-        let page = match source.arrivals_since(cursor.position().unwrap_or(0)) {
+        let page = match source.arrivals_since(record.position().unwrap_or(0)) {
             Ok(page) => page,
             // Not an error a surface reports: a node that is briefly unreachable is the ordinary
             // case, and the honest response is to say nothing about money. Whatever was already
-            // drained stays in hand — its cursor is saved below, so it is neither lost nor repeated.
+            // drained stays in hand — its record is saved below, so it is neither lost nor repeated.
             Err(e) => {
                 tracing::debug!(reason = %e, "the node's arrival ledger could not be read");
                 break;
             }
         };
         let empty = page.arrivals.is_empty();
-        announceable.extend(cursor.advance(&page));
+        announceable.extend(record.advance(&page));
         if empty {
             break;
         }
     }
 
-    if let Err(e) = super::store::save(cursor_path, &cursor) {
-        tracing::warn!(error = %e, "the arrival cursor could not be saved; nothing announced");
+    if let Err(e) = super::store::save(record_path, &record) {
+        tracing::warn!(error = %e, "the arrival record could not be saved; nothing announced");
         return;
     }
     notify::announce_arrivals(&announceable, notifications_enabled, notifier);
@@ -432,7 +455,7 @@ mod tests {
         let path = super::super::store::path_in(dir.path());
         let notifier = Recorder::default();
 
-        // A fresh process: no cursor, no memory of any coin. It adopts the node's head in silence.
+        // A fresh process: no record, no memory of any coin. It adopts the node's head in silence.
         let before = Ledger::of(&[1], 50);
         sweep(&before, &path, true, &notifier);
         assert!(notifier.shown().is_empty(), "the adoption announced");
@@ -759,6 +782,46 @@ mod tests {
         assert_eq!(arrival_from(&good).expect("readable").amount, 42);
     }
 
+    /// **An implausible confirmed height is refused, not carried through.**
+    ///
+    /// A height near `u32::MAX` is not a cosmetic wrong number: the announcer turns the highest
+    /// height in an adopted page into a permanent, PERSISTED horizon, so one such row from a hostile
+    /// or broken node silences every future notification on this machine and keeps doing so after a
+    /// switch back to an honest node.
+    ///
+    /// The control is a real mainnet-scale height, which must still cross — otherwise the guard
+    /// would be satisfied by a mapper that refuses everything, and the feature would be just as dead.
+    #[test]
+    fn an_implausible_confirmed_height_is_refused_rather_than_adopted_as_a_horizon() {
+        let hostile = WalletArrivalRecord {
+            seq: 4,
+            coin_id: "ab".repeat(32),
+            puzzle_hash: "cc".repeat(32),
+            amount: "1000".into(),
+            asset_id: None,
+            confirmed_height: u32::MAX - 1,
+        };
+        assert!(
+            matches!(
+                arrival_from(&hostile),
+                Err(ArrivalSourceError::Malformed(_))
+            ),
+            "a height no chain has reached was accepted: {:?}",
+            arrival_from(&hostile)
+        );
+
+        let plausible = WalletArrivalRecord {
+            confirmed_height: 5_412_009,
+            ..hostile
+        };
+        assert_eq!(
+            arrival_from(&plausible)
+                .expect("a mainnet-scale height must cross")
+                .confirmed_height,
+            5_412_009
+        );
+    }
+
     // ----------------------------------------------------------------------------------------
     // The throttle
     // ----------------------------------------------------------------------------------------
@@ -792,17 +855,17 @@ mod tests {
     #[test]
     fn a_second_observe_inside_the_interval_does_not_read_again() {
         let dir = tempfile::tempdir().unwrap();
-        let cursor = super::super::store::path_in(dir.path());
+        let record = super::super::store::path_in(dir.path());
         let node = FakeNode::serving_arrivals(ArrivalsReply::Pages(vec![FakeArrivalPage::of(&[])]));
         let link = connected_to(&node);
         let watch = ArrivalWatch::with_token_reader(
             Duration::from_secs(600),
-            Some(cursor.clone()),
+            Some(record.clone()),
             no_token,
         );
 
         watch.observe(&link);
-        assert!(settled(&cursor), "the first sweep never finished");
+        assert!(settled(&record), "the first sweep never finished");
         let after_first = node.request_count();
         assert_eq!(after_first, 1, "an empty ledger is one call");
 
@@ -822,10 +885,10 @@ mod tests {
     #[test]
     fn a_watch_with_no_node_reads_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let cursor = super::super::store::path_in(dir.path());
+        let record = super::super::store::path_in(dir.path());
         let watch = ArrivalWatch::with_token_reader(
             Duration::from_millis(1),
-            Some(cursor.clone()),
+            Some(record.clone()),
             no_token,
         );
 
@@ -834,14 +897,14 @@ mod tests {
         });
         std::thread::sleep(Duration::from_millis(150));
         assert!(
-            !cursor.exists(),
-            "a cursor was written without any node call"
+            !record.exists(),
+            "a record was written without any node call"
         );
     }
 
     /// **A watch with nowhere to persist reads nothing at all.**
     ///
-    /// A cursor that cannot be written cannot promise a restart will not re-announce, and an
+    /// A record that cannot be written cannot promise a restart will not re-announce, and an
     /// un-keepable promise about somebody's money is worse than a missing toast.
     #[test]
     fn a_watch_that_cannot_persist_does_not_read() {
