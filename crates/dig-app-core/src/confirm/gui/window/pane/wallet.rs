@@ -510,17 +510,27 @@ fn figures(held: &Balances) -> Vec<Readout> {
 ///
 /// Reports the action pressed, and whether the reader asked to close the card.
 ///
-/// # Why the close control is drawn only when the card was DISCLOSED
+/// # When the close control is drawn, and why it takes BOTH conditions
 ///
-/// `disclosed` is false when this card is on screen because a payment is in flight rather than
-/// because anybody opened it, and a payment in flight must not be dismissible — a wallet that lets
-/// somebody hide money in motion is the money-lie this pane exists to avoid. Drawing a `Done` that
-/// visibly failed to close anything would be the other half of the same defect.
+/// It appears only where pressing it will visibly close this card: the card was disclosed by a
+/// person AND there is no payment to report. Both halves are load-bearing, and each on its own is a
+/// defect the other prevents.
 ///
-/// When the card IS disclosed the control is always drawn, including while the account is sealed.
-/// That case is the reason this parameter exists: `Disclosed::Send` survives in egui's store, so an
-/// account sealing under an open form leaves the verb that opened it refused — and without a control
-/// in here, a card nothing on the tab can close (`professional-ui`, HARD RULE 1).
+/// Without `disclosed`, a card on screen purely because a payment is in flight would offer to
+/// dismiss it — a wallet that lets somebody hide money in motion is the money-lie this pane exists
+/// to avoid.
+///
+/// Without the idle check, the ORDINARY path grows a control that does nothing. Nothing on the send
+/// path clears the disclosure — the submit does not touch it — so a person who opens the form and
+/// sends from it still has `Disclosed::Send` set for the whole flight. The card would then draw a
+/// `Done` while also being drawn for the `send != Idle` reason, and pressing it would clear the
+/// disclosure and leave the card exactly where it was. That is the "control that visibly failed to
+/// close anything" this doc used to name as a defect while the code committed it.
+///
+/// The case the parameter was added for still holds, because a sealed account has nothing in
+/// flight: `Disclosed::Send` survives in egui's store, so an account sealing under an open form
+/// leaves the verb that opened it refused — and without a control in here, a card nothing on the
+/// tab can close (`professional-ui`, HARD RULE 1).
 fn sending_card(
     flow: &mut Flow,
     t: &Tokens,
@@ -528,6 +538,7 @@ fn sending_card(
     disclosed: bool,
 ) -> (Option<TrayAction>, bool) {
     let live = flow.live();
+    let closable = disclosed && matches!(facts.send, SendProgress::Idle);
     flow.place(|ui, at| {
         let (height, pressed) =
             card::interactive_card(ui, at, t, live, Some(copy::wallet::SENDING_CARD), |inner| {
@@ -538,8 +549,7 @@ fn sending_card(
                 let pressed = send_form(inner, t, facts);
                 inner.gap(space::S2);
                 inner.place(|ui, at| (text::caption(ui, at, t, copy::wallet::SENDING_HINT), ()));
-                let done =
-                    disclosed && close_control(inner, t, live, "dig-window-wallet-send-done");
+                let done = closable && close_control(inner, t, live, "dig-window-wallet-send-done");
                 (pressed, done)
             });
         let (pressed, done) = pressed.unwrap_or((None, false));
@@ -1643,30 +1653,42 @@ mod tests {
         );
     }
 
-    /// **A payment in flight is NOT dismissible.**
+    /// **A payment in flight is NOT dismissible — including on the path a person actually takes.**
     ///
-    /// The other side of the escape rule, and the reason `sending_card` takes `disclosed` rather
-    /// than always drawing its control. A card on screen because money is moving must not offer to
-    /// hide it — and a `Done` that visibly failed to close anything would be the same defect
-    /// wearing a working-looking control.
+    /// The other side of the escape rule. A card on screen because money is moving must not offer
+    /// to hide it, and a `Done` that visibly failed to close anything is the same defect wearing a
+    /// working-looking control.
+    ///
+    /// **BOTH disclosure states, and the second one is the whole point.** An earlier version of
+    /// this test forced `Disclosed::Nothing`, which only covers a card drawn *solely* because a
+    /// payment is in flight — a state nobody reaches by sending. The ORDINARY path is: open the
+    /// form, send from it. Nothing on the send path clears the disclosure, so `Disclosed::Send` is
+    /// still set for the whole flight, and the version that gated on `disclosed` alone drew a
+    /// `Done` there that closed nothing visible. The security gate found that; this actor is what
+    /// would have caught it.
     #[test]
     fn a_payment_in_flight_offers_no_control_to_hide_it() {
         for send in every_send_state() {
             if matches!(send, SendProgress::Idle) {
                 continue;
             }
-            let said = painted_pane_with(&sendable(send.clone()), 900.0, Disclosed::Nothing);
-            assert!(
-                said.iter()
-                    .any(|line| line.contains(copy::wallet::SENDING_CARD)),
-                "{send:?} did not draw its card at all, so this test proves nothing: {said:?}"
-            );
-            assert!(
-                !said
-                    .iter()
-                    .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
-                "{send:?} offered a control to hide money in motion: {said:?}"
-            );
+            for open in [Disclosed::Nothing, Disclosed::Send] {
+                let said = painted_pane_with(&sendable(send.clone()), 900.0, open);
+                assert!(
+                    said.iter()
+                        .any(|line| line.contains(copy::wallet::SENDING_CARD)),
+                    "{send:?} at {open:?} did not draw its card at all, so this proves nothing: \
+                     {said:?}"
+                );
+                assert!(
+                    !said
+                        .iter()
+                        .any(|line| line.contains(copy::wallet::CLOSE_BUTTON)),
+                    "{send:?} at {open:?} offered a control to hide money in motion — or, with the \
+                     card open, one that would clear the disclosure and visibly close nothing: \
+                     {said:?}"
+                );
+            }
         }
     }
 
