@@ -1327,8 +1327,13 @@ const CONTROL_TOP: f32 = (CHROME_HEIGHT - CONTROL_HEIGHT) / 2.0;
 /// How wide an icon control's hit area is.
 ///
 /// Wider than it is tall, so the row reads as a titlebar rather than as three buttons, while the
-/// target stays comfortably larger than the mark inside it (`professional-ui`). It is also wider
-/// than the old `Minimize` text control was, so nothing lost reach in the switch to glyphs.
+/// target stays comfortably larger than the mark inside it (`professional-ui`).
+///
+/// It is NARROWER than the text control it replaces — a `Minimize` label measured about 72 px wide
+/// by 27 tall, against 40 by 30 here — so the switch to glyphs did cost some pointer reach, and a
+/// comment claiming otherwise was corrected rather than the number. 40 x 30 still clears WCAG 2.2
+/// 2.5.8's 24 x 24 minimum with room to spare, which is the bar that actually governs, and the row
+/// only reads as chrome at this width. Reach was traded deliberately, not preserved.
 const CONTROL_WIDTH: f32 = 40.0;
 
 /// Where every chrome control sits, and what is left over for the drag strip.
@@ -1363,8 +1368,10 @@ impl ChromeSlots {
     /// off by a re-worded or translated label. The measured-width machinery this replaces existed
     /// because the labels were TEXT (dig_ecosystem#2569); the reason went with the words.
     ///
-    /// A square that is [`CONTROL_HEIGHT`] on a side is a larger hit target than the old
-    /// `Minimize` control had, so the switch to icons takes nothing away from a pointer either.
+    /// The slot is [`CONTROL_WIDTH`] by [`CONTROL_HEIGHT`] — 40 by 30, not a square — which is
+    /// TALLER but NARROWER than the `Minimize` text control it replaces (about 72 by 27). See
+    /// [`CONTROL_WIDTH`] for why that trade was taken and why it still clears the accessibility
+    /// floor.
     fn lay_out(bar: Rect) -> Self {
         let mut right = bar.right() - space::S3;
         let mut slot = || {

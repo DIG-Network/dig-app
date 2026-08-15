@@ -226,10 +226,22 @@ impl Money {
     }
 
     /// The cost, in one line, saying only what is known.
+    ///
+    /// # Why the figure is never bare
+    ///
+    /// Both arms NAME what the number is. A currency figure drawn on a spend surface with no noun
+    /// sits directly under a coin id, and a person has no way to tell a cost from a balance, from an
+    /// amount sent, or from what is left — three readings of one string, two of them alarming. The
+    /// fee-bearing arm always had its noun; the unmeasured arm did not, and production takes that
+    /// arm every time (`creation_progress.rs` passes `fee_mojos: None`), so the labelled form was
+    /// unreachable in the shipped app.
     pub fn line(&self) -> String {
         match self.fee() {
-            Some(fee) => format!("{} XCH, including a {fee} XCH network fee", self.amount()),
-            None => format!("{} XCH", self.amount()),
+            Some(fee) => format!(
+                "This costs {} XCH, including a {fee} XCH network fee",
+                self.amount()
+            ),
+            None => format!("This costs {} XCH", self.amount()),
         }
     }
 }
@@ -408,6 +420,23 @@ mod tests {
             "the amount went missing with the fee: {}",
             unmeasured.line()
         );
+
+        // NEITHER arm may draw a naked currency figure. The line sits under a coin id on a spend
+        // surface, so an unlabelled number reads as a cost, a balance, an amount sent or a
+        // remainder with equal plausibility — and the arm production actually takes is the
+        // unmeasured one, which is how the unlabelled form reached a screenshot.
+        for money in [&known, &unmeasured] {
+            let line = money.line();
+            let figure = money.amount();
+            let before = line
+                .split(&figure)
+                .next()
+                .expect("the amount is in its own line");
+            assert!(
+                before.contains("costs"),
+                "a currency figure was drawn with nothing naming it: {line}"
+            );
+        }
 
         let unknown = Transaction::starting("Creating your profile", None);
         assert_eq!(unknown.money, None);
