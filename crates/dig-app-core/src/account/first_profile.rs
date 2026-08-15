@@ -10,7 +10,7 @@
 //! Three obligations, and each is a separate way to get this wrong:
 //!
 //! 1. **It must be raisable at all.** The first-run wizard's gate reads the DID-only
-//!    [`MintSeams`](crate::account::mint::MintSeams), which the binary hardcodes to
+//!    [`MintSeams`](crate::account::chain_mint::MintSeams), which the binary hardcodes to
 //!    `NoChainTransport` — deliberately, because a wired DID-only seam would let the wizard mint a
 //!    DID *alone*, and a DIG profile is a DID singleton **and** a store. So this prompt is driven
 //!    from the WHOLE-PROFILE seam instead
