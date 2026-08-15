@@ -430,6 +430,52 @@ fn refuse(problem: &str) -> ! {
     std::process::exit(2);
 }
 
+/// A chain write to photograph, named on the command line.
+///
+/// The values are the incident's own (dig_ecosystem#2995): the coin ids and heights below are what
+/// the chain actually recorded, so a capture shows an id of the real length rather than a short
+/// placeholder that would wrap differently.
+fn transaction_fixture(named: &str) -> Option<dig_app_core::transaction::Transaction> {
+    use dig_app_core::transaction::{Money, Stage, Transaction};
+
+    let base = Transaction::starting(
+        "Creating your profile",
+        Some(Money {
+            amount_mojos: 20_002,
+            fee_mojos: None,
+        }),
+    );
+    let did_coin = "0xe4e2b74f915e7f4a739b305aa086aa657a09a8a4df231d9307bb265c528ecc12";
+    Some(match named {
+        "building" => base,
+        "pushed" => base.mid_ceremony(
+            "Creating your profile",
+            Stage::Pushed {
+                id: format!("Identity coin {did_coin}"),
+            },
+        ),
+        "halfway" => base.mid_ceremony(
+            "Creating your profile — launching your store",
+            Stage::Confirmed {
+                height: 9_154_450,
+                made: "Your identity exists. DIG is now launching your store.".to_string(),
+            },
+        ),
+        "confirmed" => base.at(Stage::Confirmed {
+            height: 9_154_458,
+            made: "Your profile is on chain.".to_string(),
+        }),
+        "failed" => base.at(Stage::Failed {
+            why: "DIG lost its connection to the node.
+
+DIG cannot tell whether money left your                   wallet."
+                .to_string(),
+            next: dig_app_core::account::creation_progress::KEEP_DIG_RUNNING.to_string(),
+        }),
+        _ => return None,
+    })
+}
+
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
     // Flags are taken out before the positionals are read, so `--second-factor` cannot shift the
@@ -440,7 +486,7 @@ fn main() {
     // positional list; leaving only the flag itself out while keeping the value shifts the output
     // path along by one and writes the fixture name as an extra file in the working directory.
     let args: Vec<&String> = {
-        let value_flags: &[&str] = &["--profiles"];
+        let value_flags: &[&str] = &["--profiles", "--transaction"];
         let mut skip_next = false;
         all.iter()
             .filter(|argument| {
@@ -493,6 +539,20 @@ fn main() {
             None => refuse("--profiles needs one of: none two hidden switched"),
         },
     };
+
+    // A chain write to photograph (dig_ecosystem#2995). Published to the app's own feed, which is
+    // where the shell reads it from, so the picture is the real surface rather than a mock of it.
+    if let Some(at) = all.iter().position(|argument| argument == "--transaction") {
+        match all.get(at + 1).map(String::as_str) {
+            Some(named) => match transaction_fixture(named) {
+                Some(fixture) => dig_app_core::transaction::Feed::app().publish(fixture),
+                None => {
+                    refuse("--transaction needs one of: building pushed halfway confirmed failed")
+                }
+            },
+            None => refuse("--transaction needs one of: building pushed halfway confirmed failed"),
+        }
+    }
 
     // A live capture takes its readings ONCE, before the window opens, so every frame of the
     // capture shows the same instant — and so a node that is not there stops the run here, with no

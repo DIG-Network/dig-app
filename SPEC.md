@@ -1091,9 +1091,17 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   be present and reachable, the maximize control MUST also RESTORE — labelled with the action it will
   perform, never with the state it is in — and the header MUST answer a double-click by toggling maximize.
   A window that can be maximized and not un-maximized, or moved and not minimized, is the trap the
-  never-trap rule forbids in a smaller shape. Each control's slot MUST be measured from the label it
-  carries, and the drag strip MUST be derived so that it cannot overlap a control's hit area: a strip that
-  swallows Close leaves a window with no way out.
+  never-trap rule forbids in a smaller shape. The controls MAY be drawn as icons, and where they are, each
+  one MUST carry an accessible NAME — the same word for assistive technology, for a hover, and for
+  whatever addresses it in a test — because an unnamed glyph is a control a screen reader cannot announce
+  and a harness cannot reach. An icon control's hit area MUST NOT be smaller than the labelled control it
+  replaced. The slots MUST be disjoint and the drag strip MUST be derived so that it cannot overlap a
+  control's hit area: a strip that swallows Close leaves a window with no way out.
+- **The theme is a SETTING, not a window control (MUST).** The choice between the light and dark themes
+  MUST be operated from the Settings tab, alongside the other persisted preferences, and MUST NOT occupy a
+  slot in the window chrome — those slots act on the window, while a theme outlives it and applies to every
+  window the app draws. Wherever it is operated, the preference MUST have exactly ONE writer, so a stored
+  theme and a painted theme cannot disagree and a person's choice cannot appear to take and then revert.
 - **Text the window displays MUST be selectable (MUST).** Addresses, DIDs, coin ids, store ids and error
   text are useless uncopied and dangerous retyped, so selectability MUST be a property of the drawing path
   every readout goes through rather than an annotation on individual call sites — a per-site opt-in leaves
@@ -1269,6 +1277,33 @@ testable without a desktop.
   (§3.1c), and this group is not one of the verbs that earns a spine row. Hosts with no window
   (`WindowHost::Unavailable`) also have no elevation route, so the beacon's own CLI is the conforming
   interface there.
+
+### 3.1c-v Reporting a chain write (normative, dig_ecosystem#2995)
+
+Every write dig-app makes to the chain — a profile mint, a store launch, a send — MUST be visible while it
+happens, and MUST be described in terms of what the chain has actually proved.
+
+- **A chain write MUST NOT run on the thread that paints (MUST).** A mainnet ceremony takes minutes, and a
+  window that stops repainting for its duration is indistinguishable from a crashed program. The
+  implementation MUST perform the write on a worker and MUST NOT block a painting thread on its completion,
+  because the reported progress is worth nothing on a thread that cannot draw it.
+- **A broadcast MUST NOT be reported as a confirmation (MUST).** A pushed bundle is an acceptance into a
+  mempool; a confirmation MUST come from a chain sighting and MUST carry the height it was seen at. The
+  surface MUST say, in words and not only in structure, that a pushed transaction is not yet confirmed, and
+  MUST show the id a person can look it up by. Colour MUST NOT say more than the words do — a broadcast
+  MUST NOT be coloured as a success.
+- **A multi-bundle ceremony MUST NOT be reported as finished by one bundle (MUST).** Creating a profile
+  confirms a DID and only then launches a store, so it reaches a genuine chain-proved confirmation halfway
+  through. That confirmation MUST be shown as the fact it is AND MUST NOT settle the ceremony.
+- **The surface MUST be dismissible, and dismissing MUST NOT touch the transaction (MUST).** It MUST NOT
+  hold the app for the length of a confirmation — that is the freeze it exists to end — so it MUST NOT
+  scrim or otherwise disable the window. While a write is in flight the surface MUST remain reachable, and
+  the implementation MUST NOT forget a write that has not settled.
+- **Every state MUST offer an action, and a failure MUST name a next step (MUST).** Where an interrupted
+  ceremony cannot be resumed, the failure MUST say so and MUST tell the person what NOT to do, rather than
+  implying a retry that would pay twice.
+- **A cost MUST be stated wherever money moves, and an unmeasured cost MUST be silent (MUST).** A fee or an
+  amount that was never measured MUST NOT render as zero, which is a claim that the transaction is free.
 
 ### 3.1c-iv The settings the window WRITES (normative)
 
