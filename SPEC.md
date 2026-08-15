@@ -1988,6 +1988,13 @@ interval-bypassing read (`wallet::node::NodeBalance::read_now`) before anything 
 balance still unmeasured after that may draw a window, and that window MUST state the reading's own
 reason and MUST NOT state a shortfall or a zero.
 
+**The deposit watch MUST be bounded in total, not only when unattended.** Re-drawing the window holds
+the shell's single action slot, so the watch MUST end after a bounded number of drawings
+(`DEPOSIT_DRAWINGS_MAX`) however they were answered, in addition to the tighter bound on CONSECUTIVE
+self-dismissals (`DEPOSIT_SELF_DISMISSALS_WATCHED`). A press of "Recheck balance" MUST reset the
+consecutive bound — it exists to end an unattended watch — and MUST NOT reset the total, which is what
+bounds a watch somebody keeps answering.
+
 **The deposit window states three figures, in XCH (MUST).** What a profile costs, what the wallet
 holds, and what is still needed — so nobody has to divide by 10^12 or subtract to know how much to
 send. All three MUST be rendered by the crate's single mojos-to-XCH conversion, exactly (never

@@ -112,6 +112,21 @@ pub fn recheck_allowed(last_read_at: Option<SystemTime>, now: SystemTime) -> Res
 /// back on its own cadence.
 pub const DEPOSIT_SELF_DISMISSALS_WATCHED: u32 = 5;
 
+/// How many drawings of the deposit window are watched in TOTAL, however they are answered.
+///
+/// [`DEPOSIT_SELF_DISMISSALS_WATCHED`] counts CONSECUTIVE self-dismissals and a press of "Recheck
+/// balance" resets it — correctly, because that bound exists to end an *unattended* watch. But it
+/// means a person pressing recheck against a wallet that never funds is never bounded at all, and the
+/// costs named on that constant (the held action slot, the swallowed `Lock now`) are the same whether
+/// the window is attended or not. This is the backstop for that case, and the two bounds answer
+/// different failure modes rather than one being a weaker form of the other.
+///
+/// Twenty is well past any legitimate funding round trip: the window carries its own two-minute
+/// deadline, so twenty drawings is at least forty minutes, and reaching it via `Approve` means twenty
+/// deliberate presses. It is deliberately much larger than the consecutive bound so an unattended
+/// window still ends on the tighter one.
+pub const DEPOSIT_DRAWINGS_MAX: u32 = 20;
+
 /// What one drawing of the deposit window produced.
 pub enum DepositWatch {
     /// The window was drawn, and the user — or its own deadline — answered.
@@ -126,18 +141,30 @@ pub enum DepositWatch {
 /// returns whether the whole flow is finished. Every exit path RETURNS, which is the property that
 /// matters to the rest of the app (see [`DEPOSIT_SELF_DISMISSALS_WATCHED`]).
 ///
-/// An `Approve` RESETS the count, deliberately: a press is a live human standing at the window, and
-/// the bound exists to end an UNATTENDED watch, not to time out somebody who is still there. The
-/// throttle in [`recheck_allowed`] is what stops that becoming a way to hammer the node.
+/// Two bounds run at once, and they answer different failure modes:
+///
+/// - [`DEPOSIT_SELF_DISMISSALS_WATCHED`] counts CONSECUTIVE self-dismissals, and an `Approve` RESETS
+///   it deliberately — a press is a live human standing at the window, and that bound exists to end
+///   an UNATTENDED watch, not to time out somebody who is still there.
+/// - [`DEPOSIT_DRAWINGS_MAX`] counts EVERY drawing and nothing resets it, so the attended case is
+///   bounded too. Without it, a person pressing "Recheck balance" against a wallet that never funds
+///   holds the tray's single action slot indefinitely.
+///
+/// The throttle in [`recheck_allowed`] bounds node READS; it never bounded this loop.
 pub fn watch_for_the_deposit(
     mut draw: impl FnMut() -> DepositWatch,
     mut recheck: impl FnMut() -> bool,
 ) {
     let mut self_dismissals = 0;
+    let mut drawings = 0;
     loop {
         let DepositWatch::Answered(decision) = draw() else {
             return;
         };
+        drawings += 1;
+        if drawings >= DEPOSIT_DRAWINGS_MAX {
+            return;
+        }
         match decision {
             ConfirmDecision::Approve => {
                 self_dismissals = 0;
@@ -1681,6 +1708,35 @@ mod tests {
             "four self-dismissals and a press, then a FULL fresh run of self-dismissals — without \
              the reset the press would not clear the four already counted, and the watch would end \
              one drawing later at six"
+        );
+    }
+
+    /// **An attended window is bounded too** (dig_ecosystem#2956).
+    ///
+    /// `DEPOSIT_SELF_DISMISSALS_WATCHED` counts CONSECUTIVE self-dismissals and an `Approve` resets
+    /// it, so a person who keeps pressing "Recheck balance" against a wallet that never funds holds
+    /// the tray's single action slot forever — measured at 51 drawings, stopped only by [`RUNAWAY`].
+    /// The total cap is the backstop for exactly that case.
+    #[test]
+    fn a_forever_attended_deposit_window_stops_at_the_total_drawings_cap() {
+        let window = WindowScript::answering(&[], ConfirmDecision::Approve);
+
+        assert_eq!(
+            watch(&window, false),
+            DEPOSIT_DRAWINGS_MAX,
+            "a window answered `Approve` forever, against a recheck that never finishes, must stop \
+             at the TOTAL cap — the consecutive bound can never trip, because every press resets it"
+        );
+    }
+
+    /// **The total cap is a backstop, not a replacement** — it is deliberately far above the
+    /// consecutive bound, so an UNATTENDED window still ends on the tighter of the two.
+    #[test]
+    fn the_total_cap_sits_above_the_consecutive_bound() {
+        assert!(
+            DEPOSIT_DRAWINGS_MAX > DEPOSIT_SELF_DISMISSALS_WATCHED,
+            "an unattended watch must trip the consecutive bound first; the two answer different \
+             failure modes and collapsing them would silently loosen the unattended case"
         );
     }
 
