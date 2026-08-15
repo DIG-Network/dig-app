@@ -4127,11 +4127,12 @@ mod tray {
         confirmer: &dyn NativeConfirmer,
         cost: u64,
     ) {
+        use dig_app_core::account::creation_progress;
         use dig_app_core::account::first_profile::copy;
-        use dig_app_core::account::profile_creation::copy as creation_copy;
-        use dig_app_core::account::profile_creation::{create_profile, Creation, Watch};
+        use dig_app_core::account::profile_creation::{create_profile, Watch};
         use dig_app_core::account::profile_mint::ProfileMint;
         use dig_app_core::confirm::ConfirmDecision;
+        use dig_app_core::transaction::Feed;
 
         let body = copy::ready_body(cost);
         if confirmer.confirm_claim(&copy::create_offer(&body)) != ConfirmDecision::Approve {
@@ -4153,40 +4154,48 @@ mod tray {
             );
         };
 
-        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
-        let publisher = dig_app_core::chain::ControlSpendPublisher::new(endpoint);
-        let door = ProfileMint::for_session(
-            live.residency.profiles(),
-            &live.residency,
-            &chain,
-            &publisher,
-        );
+        // Everything the ceremony needs, taken OWNED before the worker starts, so nothing it does
+        // borrows from the thread that is about to go back to painting.
+        // Owned, because `endpoint()` borrows the status snapshot and the snapshot is dropped the
+        // moment this function returns — which it now does long before the ceremony ends.
+        let endpoint = endpoint.to_owned();
+        let residency = live.residency.clone();
+        let feed = Feed::app();
+        let base = creation_progress::starting(cost);
+        feed.publish(base.clone());
 
-        let outcome = create_profile(
-            &door,
-            &profile_seed(),
-            None,
-            Watch::default(),
-            &mut || std::thread::sleep(CREATION_POLL_INTERVAL),
-            &mut |step| {
-                tracing::info!(target: "dig_app::profile", step = ?step, "profile creation progressed");
-            },
-        );
+        // The ceremony leaves this thread here, and this is the whole fix (dig_ecosystem#2995).
+        //
+        // It used to run inline, which meant the thread that paints the window spent a two-bundle
+        // mainnet ceremony inside `create_profile` — several minutes in which the window did not
+        // repaint, could not be moved, and was indistinguishable from a crashed program. The person
+        // who watched that had no way to know their money was fine, and the obvious response to a
+        // frozen window is to force-quit, which is the one thing an unfinished creation cannot
+        // survive.
+        //
+        // Detached rather than joined, deliberately: joining it here would be the freeze again.
+        // Progress goes to the feed, the window reads the feed every frame, and nothing waits.
+        std::thread::spawn(move || {
+            let chain = dig_app_core::chain::ControlChainSource::new(&endpoint);
+            let publisher = dig_app_core::chain::ControlSpendPublisher::new(&endpoint);
+            let door =
+                ProfileMint::for_session(residency.profiles(), &residency, &chain, &publisher);
 
-        match outcome {
-            Creation::Created { profile, .. } => notify(
-                confirmer,
-                creation_copy::CREATED_TITLE,
-                creation_copy::CREATED_HEADING,
-                &creation_copy::created_body(&profile),
-            ),
-            Creation::Stopped(stopped) => notify(
-                confirmer,
-                creation_copy::STOPPED_TITLE,
-                creation_copy::STOPPED_HEADING,
-                &creation_copy::stopped_body(&stopped),
-            ),
-        }
+            let outcome = create_profile(
+                &door,
+                &profile_seed(),
+                None,
+                Watch::default(),
+                &mut || std::thread::sleep(CREATION_POLL_INTERVAL),
+                &mut |step| {
+                    tracing::info!(target: "dig_app::profile", step = ?step, "profile creation progressed");
+                    feed.publish(creation_progress::of_step(&base, step));
+                },
+            );
+
+            tracing::info!(target: "dig_app::profile", ?outcome, "profile creation finished");
+            feed.publish(creation_progress::of_outcome(&base, &outcome));
+        });
     }
 
     /// How long to wait between asking the chain how a creation is doing.
