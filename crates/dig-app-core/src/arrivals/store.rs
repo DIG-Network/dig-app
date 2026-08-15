@@ -146,22 +146,52 @@ mod tests {
         );
     }
 
-    /// **A corrupt record starts unread and therefore SILENT, never announcing a whole ledger.**
+    /// **A record that cannot be PARSED starts unread and therefore SILENT.**
     ///
-    /// This is also the upgrade path: the pre-#2548-fix file at the oldest name held a coin ledger
-    /// and the pre-#2959 one held a bare cursor, and any leftover unreadable content must adopt
-    /// rather than replay.
+    /// The fixture is truncated JSON, which is what a process killed mid-write leaves behind, and it
+    /// is deliberately not merely *unexpected* JSON: every field of the record is
+    /// `#[serde(default)]` and unknown keys are ignored, so a fixture like an older file's
+    /// `{"baseline_height":100}` PARSES cleanly and never reaches the parse-failure branch this test
+    /// exists to cover. Right outcome, wrong reason — and the branch left uncovered.
     #[test]
-    fn a_corrupt_record_adopts_silently_rather_than_announcing_the_ledger() {
+    fn an_unparseable_record_adopts_silently_rather_than_announcing_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = path_in(dir.path());
+        std::fs::write(&path, br#"{"cursor":{"position":5},"announced":"#).unwrap();
+
+        let mut record = load(&path);
+        assert_eq!(
+            record.position(),
+            None,
+            "the fixture must have failed to parse"
+        );
+        assert!(
+            record.advance(&page(&[1, 2, 3], 0, 3)).is_empty(),
+            "an unparseable record announced the node's whole ledger"
+        );
+    }
+
+    /// **A record that PARSES but carries nothing is the same fail-closed state.**
+    ///
+    /// This is the real upgrade path and a distinct branch from the one above: the pre-#2548-fix file
+    /// at the oldest name held a coin ledger and the pre-#2959 one held a bare cursor, and both parse
+    /// here — every field defaults and unknown keys are ignored — leaving an ADOPT state rather than
+    /// a parse failure. It must still adopt in silence rather than replay.
+    #[test]
+    fn a_record_that_parses_to_nothing_adopts_silently() {
         let dir = tempfile::tempdir().unwrap();
         let path = path_in(dir.path());
         std::fs::write(&path, br#"{"baseline_height":100,"seen":{"a":1}}"#).unwrap();
 
         let mut record = load(&path);
-        assert_eq!(record.position(), None);
+        assert_eq!(
+            record.position(),
+            None,
+            "the fixture must parse to an empty record"
+        );
         assert!(
             record.advance(&page(&[1, 2, 3], 0, 3)).is_empty(),
-            "an unreadable record announced the node's whole ledger"
+            "a record carrying nothing announced the node's whole ledger"
         );
     }
 

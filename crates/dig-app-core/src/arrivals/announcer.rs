@@ -305,6 +305,17 @@ mod tests {
     }
 
     /// **The record survives its own JSON**, which is what makes a restart silent.
+    ///
+    /// This is the ONLY cover for the coin set's persistence, so its fixture has to be able to see
+    /// the set. A coin replayed BELOW the persisted cursor proves nothing: `ArrivalCursor`'s floor
+    /// filters that row before [`AnnouncedCoins::admit`] is ever consulted, so the assertion is
+    /// answered by the cursor and a set that silently failed to serialize — a `#[serde(skip)]`, a
+    /// renamed field — would leave this green while every restart re-announced the ledger. The coin
+    /// therefore returns ABOVE the cursor, the same correction
+    /// [`a_rebuilt_ledger_reissuing_low_seqs_does_not_re_announce_the_same_coin`] already carries.
+    ///
+    /// The second coin is the control: without it "suppressed" is equally satisfied by a reloaded
+    /// record that announces nothing at all.
     #[test]
     fn a_reloaded_record_still_recognises_the_coins_it_announced() {
         let mut announcer = ArrivalAnnouncer::unread();
@@ -319,10 +330,14 @@ mod tests {
         let json = serde_json::to_string(&announcer).expect("serializable");
         let mut restarted: ArrivalAnnouncer = serde_json::from_str(&json).expect("deserializable");
         let again = restarted.advance(&ArrivalPage {
-            arrivals: vec![arrival(1, 5, 5_412_500)],
-            cursor: 1,
-            latest: 1,
+            arrivals: vec![arrival(300, 5, 5_412_500), arrival(301, 0xbbb, 5_412_600)],
+            cursor: 301,
+            latest: 301,
         });
-        assert!(again.is_empty(), "a restart re-announced coin 5");
+        assert_eq!(
+            again.iter().map(|a| a.coin_id.clone()).collect::<Vec<_>>(),
+            vec![arrival(0, 0xbbb, 0).coin_id],
+            "a restart re-announced coin 5, or suppressed a genuinely new coin"
+        );
     }
 }
