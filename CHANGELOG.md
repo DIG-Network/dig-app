@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.3.0] - 2026-08-15
+
+### Features
+- **wallet:** Make the send path stop claiming what it does not know (#168)
+
 ## [12.2.0] - 2026-08-15
 
 ### Features
