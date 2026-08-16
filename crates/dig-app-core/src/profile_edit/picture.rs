@@ -16,6 +16,11 @@
 //! reading it — so the check happens against the file's METADATA first. Without that, dragging a
 //! multi-gigabyte file onto the form allocates it before anything says no.
 //!
+//! That ordering is invisible from a return value alone: `intake`'s own refusal carries the same two
+//! numbers, so a test asserting *"too long"* passes on both placements. It is observable in ONE
+//! respect, and the refusal is written to make it so — this module knows the file's NAME and `intake`
+//! cannot, so the early refusal says which file, and that is what the test reads.
+//!
 //! # There is no second intake here
 //!
 //! The decode, the bomb refusal, the fit-within and the encoding are all
@@ -47,15 +52,25 @@ fn chosen_within(path: &Path, bounds: DecodeBounds) -> Result<String, String> {
         .map_err(|e| unreadable(path, &e))?
         .len();
     if len > bounds.max_input_bytes as u64 {
-        return Err(crate::profile_image::IntakeError::InputTooLong {
-            len: len as usize,
-            limit: bounds.max_input_bytes,
-        }
-        .to_string());
+        return Err(too_long(path, len, bounds.max_input_bytes));
     }
 
     let bytes = std::fs::read(path).map_err(|e| unreadable(path, &e))?;
     Ok(intake(&bytes, bounds).map_err(|e| e.to_string())?.to_url())
+}
+
+/// The sentence for a file too long to open, taken from its length rather than from its contents.
+///
+/// It NAMES the file, which is the one thing
+/// [`IntakeError::InputTooLong`](crate::profile_image::IntakeError::InputTooLong) cannot do — that
+/// error is over a byte slice with no provenance. So the naming is both the better message (a person
+/// who dragged in several files learns which one) and the only outward evidence that the length was
+/// read before the file was.
+fn too_long(path: &Path, len: u64, limit: usize) -> String {
+    format!(
+        "{} is {len} bytes, larger than the {limit} this app will open. Choose a smaller image.",
+        named(path)
+    )
 }
 
 /// The sentence for a file the filesystem would not hand over.
@@ -64,12 +79,15 @@ fn chosen_within(path: &Path, bounds: DecodeBounds) -> Result<String, String> {
 /// it is somewhere this user cannot read — are both ones a person resolves by looking at that file
 /// rather than at DIG.
 fn unreadable(path: &Path, error: &std::io::Error) -> String {
-    format!(
-        "DIG could not open {}: {error}",
-        path.file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-    )
+    format!("DIG could not open {}: {error}", named(path))
+}
+
+/// The file's own name, for a sentence a person reads — never the whole path, which on a Windows
+/// profile directory is longer than the message it is part of.
+fn named(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
 }
 
 #[cfg(test)]
@@ -113,13 +131,18 @@ mod tests {
         assert!(draft.is_committable());
     }
 
-    /// **A file larger than the bound is refused from its length, before it is read.**
+    /// **A file larger than the bound is refused from its LENGTH, before its bytes are read.**
     ///
-    /// The fixture is what makes this see the ordering: the file is 100 bytes of text that is not an
-    /// image at all, against a bound of 10. An implementation that read the file and then let
-    /// `intake` apply the bound would answer *"not a supported image"* — a refusal, and the wrong
-    /// one. Only a check taken from the metadata first can say TOO LONG about bytes it never looked
-    /// at.
+    /// # Why this asserts the file's name and not the two numbers
+    ///
+    /// The nearest wrong implementation is not "no bound at all" — it is the bound applied one layer
+    /// down, inside `intake`, after the whole file is in memory. That implementation refuses the same
+    /// input with the same two numbers in the same words, so *"the message says 100 bytes"* passes on
+    /// BOTH and pins nothing. (Written that way first, and the revert-proof caught it.)
+    ///
+    /// The name is the one thing that cannot survive being moved: `intake` takes a `&[u8]` and has no
+    /// path to name. So a refusal carrying `huge.bin` can only have been decided here, from the
+    /// metadata.
     #[test]
     fn an_over_long_file_is_refused_from_its_length_and_not_from_its_bytes() {
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -132,16 +155,22 @@ mod tests {
         };
         let refusal = chosen_within(&path, tiny).expect_err("a 100-byte file under a 10-byte bound");
         assert!(
-            refusal.contains("100 bytes"),
-            "the refusal did not come from the file's length — it read the bytes first: {refusal}"
+            refusal.contains("huge.bin"),
+            "the refusal does not name the file, so it was decided from the bytes rather than from \
+             the length: {refusal}"
         );
+        assert!(refusal.contains("100"), "{refusal}");
 
         // The control: the SAME file, under the real bound, is refused for what it IS. Without this
-        // the assertion above would also pass on an implementation that refuses everything.
+        // the assertion above would also pass on an implementation that refuses everything by length.
         let by_content = chosen(&path).expect_err("a text file is not an image");
         assert!(
             by_content.contains("supported image"),
             "an ordinary non-image was not refused for its content: {by_content}"
+        );
+        assert!(
+            !by_content.contains("huge.bin"),
+            "a content refusal claimed to be a length refusal: {by_content}"
         );
     }
 
