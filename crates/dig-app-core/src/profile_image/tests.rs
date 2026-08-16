@@ -344,3 +344,68 @@ fn the_bomb_fixture_is_a_well_formed_png_header_and_not_merely_garbage() {
         .expect("the header parses cleanly");
     assert_eq!(dimensions, (60_000, 60_000));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The preview a form draws (dig_ecosystem#3028)
+// ---------------------------------------------------------------------------------------------
+
+/// **A preview shows the image that will actually be STORED, at the size it will be stored.**
+///
+/// Measured against the round trip rather than against the source, because that is the property a
+/// person is reading off the screen: they picked a 1200x600 photograph and what goes on chain is the
+/// 500x250 normalisation, so a preview of the ORIGINAL would show them something the network never
+/// sees.
+#[test]
+fn a_preview_is_of_the_normalised_image_the_slot_will_hold() {
+    let stored = intake(&opaque_png(1200, 600), DecodeBounds::LOCAL_PICK).expect("a real picture");
+    let shown = preview(&stored.to_url()).expect("the stored value previews");
+
+    assert_eq!((shown.width, shown.height), (500, 250));
+    assert_eq!(
+        (shown.width, shown.height),
+        stored_dimensions(&stored),
+        "the preview and the stored bytes are different images"
+    );
+    assert_eq!(shown.rgba.len(), 500 * 250 * 4);
+}
+
+/// **A bomb somebody PASTED into the field is refused by the preview, not decoded on the painting
+/// thread.**
+///
+/// The fixture is a header declaring 60,000x60,000 with no pixels behind it — the same one the
+/// intake bomb tests use — wrapped as a well-formed `data:image/png;base64,` value. That matters
+/// twice over: the value is one the field genuinely accepts as *shaped* like an image, so the
+/// preview is the only thing standing between the paste and the decoder, and a preview written with
+/// no bounds at all would answer this with a 60,000-pixel-wide allocation rather than with `None`.
+///
+/// The control below is what stops this passing on a preview that refuses everything.
+#[test]
+fn a_pasted_bomb_is_refused_by_the_preview() {
+    let bomb = format!(
+        "data:image/png;base64,{}",
+        STANDARD.encode(bomb_header(60_000, 60_000))
+    );
+    assert_eq!(preview(&bomb), None, "a declared 60,000px image was decoded");
+
+    let honest = intake(&opaque_png(64, 64), DecodeBounds::LOCAL_PICK).expect("a real picture");
+    assert!(
+        preview(&honest.to_url()).is_some(),
+        "the preview refuses an ordinary picture too, so the refusal above proves nothing"
+    );
+}
+
+/// Anything that is not a `data:` URL of an accepted type previews as nothing — including the SVG
+/// this module refuses by name everywhere else.
+#[test]
+fn only_an_accepted_data_url_previews() {
+    for value in [
+        "",
+        "me.png",
+        "https://example.com/me.png",
+        "data:image/svg+xml;base64,PHN2Zy8+",
+        "data:image/png;base64,not-base64!!",
+        "data:image/png;base64,",
+    ] {
+        assert_eq!(preview(value), None, "{value} previewed as an image");
+    }
+}

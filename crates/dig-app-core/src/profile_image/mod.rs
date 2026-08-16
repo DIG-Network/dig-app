@@ -424,5 +424,49 @@ fn has_transparency(image: &DynamicImage) -> bool {
     image.to_rgba8().pixels().any(|pixel| pixel.0[3] != u8::MAX)
 }
 
+/// The RGBA pixels of an image, ready for a renderer to upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewPixels {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// `width * height * 4` bytes, RGBA, row-major.
+    pub rgba: Vec<u8>,
+}
+
+/// Decode a stored `data:` URL far enough to SHOW it, under the peer-facing bound.
+///
+/// # Why the tight bound and not the one the value was written with
+///
+/// A value in an image slot did not necessarily come from [`intake`] on this machine: it may have
+/// been pasted, or read from a profile another client wrote. Anything this app's own writer produced
+/// fits inside [`FIT_BOX`], so [`DecodeBounds::RECEIVED`] cannot refuse a picture this app made — and
+/// it does refuse a bomb somebody pasted, which is the case a preview would otherwise decode on the
+/// painting thread.
+///
+/// Returns `None` for anything that is not a decodable image of an accepted type. A preview is a
+/// courtesy; the value is still whatever it is, and [`ProfileDraft::problem`] is what judges it.
+///
+/// [`ProfileDraft::problem`]: crate::profile_edit::ProfileDraft::problem
+pub fn preview(data_url: &str) -> Option<PreviewPixels> {
+    let payload = ACCEPTED_MIME_TYPES.iter().find_map(|mime| {
+        data_url.strip_prefix(&format!("data:{mime};base64,"))
+    })?;
+    let bytes = STANDARD.decode(payload).ok()?;
+    let bounds = DecodeBounds::RECEIVED;
+    if bytes.len() > bounds.max_input_bytes {
+        return None;
+    }
+    let format = sniff_format(&bytes).ok()?;
+    let image = decode_within(&bytes, format, bounds).ok()?;
+    let rgba = image.to_rgba8();
+    Some(PreviewPixels {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
+}
+
 #[cfg(test)]
 mod tests;
