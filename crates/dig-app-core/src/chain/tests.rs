@@ -1440,3 +1440,30 @@ fn a_present_coin_is_believed_even_from_an_unsynced_tier() {
         "an unsynced tier that reports a coin has reported a coin: {held:?}"
     );
 }
+
+/// The diagnostic probe must render each chain read WHOLE, never through a lossy projection.
+///
+/// dig_ecosystem#3048: `chain_probe` printed `resolve_singleton_lineage(coin_id).err()`, and
+/// `.err()` maps every `Ok` to `None`. Two opposite outcomes — an authenticated lineage and a
+/// genuine absence — therefore printed the same word, and the success of a real mainnet DID and a
+/// real mainnet DataLayer store was read for a day as the walk answering "no lineage exists".
+///
+/// The nearest wrong implementation this rules out is the one that shipped: a probe that keeps
+/// printing a `Result` but discards its `Ok` payload. Asserting the printed rows carry the result
+/// itself is the only level this is reachable at — the probe needs a live node, so no fixture in
+/// this suite can run it, and the defect is invisible to a reader who sees `{:?}` of *something*.
+#[test]
+fn the_chain_probe_prints_whole_results_rather_than_projecting_them() {
+    let probe = include_str!("../../examples/chain_probe.rs");
+
+    for lossy in [".err()", ".ok()"] {
+        assert!(
+            !probe.contains(lossy),
+            "chain_probe must print each read whole; `{lossy}` collapses an answer into a silence"
+        );
+    }
+    assert!(
+        probe.contains("source.resolve_singleton_lineage(coin_id)"),
+        "the lineage row must print the resolved lineage itself"
+    );
+}
