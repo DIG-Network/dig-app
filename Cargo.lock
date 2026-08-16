@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "12.7.0"
+version = "12.8.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "12.7.0"
+version = "12.8.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2019,11 +2019,13 @@ dependencies = [
  "dispatch2",
  "eframe",
  "egui",
+ "flate2",
  "futures-util",
  "hex",
  "hex-literal",
  "hkdf",
  "hmac",
+ "image",
  "keyring",
  "libc",
  "objc2 0.6.4",
@@ -2425,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "12.7.0"
+version = "12.8.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -3811,6 +3813,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

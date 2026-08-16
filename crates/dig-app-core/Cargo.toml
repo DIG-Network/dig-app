@@ -105,6 +105,8 @@ qrcodegen.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
+# Profile-image intake (#3010): bounded decode, fit-within-500x500 resize, PNG/JPEG re-encode.
+image.workspace = true
 # Profiles (U5) — the canonical `did:chia:` profile FORMAT (consumed, never reinvented) + hex
 # encoding for the human-readable registry.
 dig-identity.workspace = true
@@ -178,6 +180,7 @@ dig-app-core = { path = ".", features = ["profile-test-support"] }
 # that is the ABSENCE of an API has no runtime witness, so the compiler has to be the assertion.
 trybuild = "1"
 png.workspace = true
+flate2.workspace = true
 tempfile.workspace = true
 rand_chacha.workspace = true
 # The IPC contract's ENGINE half (the same one dig-node runs) + base64 — used by the #1211 headline
