@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use chia_protocol::Bytes32;
 use dig_account::edit::{EditError, ProfileContentSource, ProfileEdit};
-use dig_account::mint::{MintNetwork, SpendPublisher};
+use dig_account::mint::SpendPublisher;
 use dig_account::registry::ProfileAnchor;
 use dig_account::ProfileIx;
 use dig_chainsource_interface::ChainSource;
@@ -50,6 +50,10 @@ use super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSna
 use super::draft::SlotChange;
 use super::field::ProfileField;
 use crate::account::residency::AccountResidency;
+
+/// The signing domain an edit is committed under, re-exported so the shell can name mainnet without
+/// taking a direct dig-account dependency for one constructor.
+pub use dig_account::mint::MintNetwork;
 
 /// The node's body store, seen as the content source dig-account reads a profile through.
 ///

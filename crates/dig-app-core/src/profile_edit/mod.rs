@@ -41,7 +41,7 @@ pub mod service;
 
 use std::collections::BTreeMap;
 
-pub use adapter::{AccountEditSeam, NodeProfileContent};
+pub use adapter::{AccountEditSeam, MintNetwork, NodeProfileContent};
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
 pub use commit::{CommitOutcome, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};
