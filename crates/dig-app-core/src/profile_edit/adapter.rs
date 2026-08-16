@@ -10,7 +10,7 @@
 //!
 //! # §908 — the node signs nothing
 //!
-//! [`ProfileEditor::commit_edit`] builds the store-recreation spend and signs it in THIS process,
+//! `ProfileEditor::commit_edit` builds the store-recreation spend and signs it in THIS process,
 //! from the unlocked account's own seed, and hands the publisher an already-signed bundle. Nothing in
 //! this file takes a key, a seed or a phrase, and the two seams it reaches the node through
 //! ([`ChainSource`] reads, [`SpendPublisher`] pushes) have nowhere to put one.
@@ -32,8 +32,8 @@
 //! `fetch_profile_slots` returns `(slot id, encoded value)` PAIRS and the persisted artifact is
 //! canonical DPB BYTES, so something must decode one into the other. That framing is a byte contract
 //! with golden vectors, and a second implementation of a byte contract is a future drift bug
-//! (Appendix B) — so the crate that owns the format does the decoding, in
-//! [`slots_of`](self::slots_of) and nowhere else. No type from it crosses any public API here.
+//! (Appendix B) — so the crate that owns the format does the decoding, in `slots_of` and
+//! nowhere else. No type from it crosses any public API here.
 
 use std::sync::Arc;
 

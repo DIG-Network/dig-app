@@ -6,14 +6,14 @@
 //! outlives a frame, and a worker thread. The window is rebuilt from a snapshot every repaint, so
 //! anything the pane owns is either recomputed (a chain read, twice a second) or lost.
 //!
-//! This is the same shape [`Feed`](crate::transaction::Feed) uses, for the same reason and with the
+//! This is the same shape [`Feed`] uses, for the same reason and with the
 //! same cost: one process-wide value the binary installs once and every surface reads. And with the
 //! same escape — [`EditService::detached`] — so a test never sees another test's profile.
 //!
 //! # What it will not do
 //!
 //! It does not decide whether the editor is OFFERED. That is
-//! [`ProfileEditing`](super::offer::ProfileEditing), built from the seams and carried on the
+//! [`ProfileEditing`], built from the seams and carried on the
 //! view like every other enablement, so the tray and the window answer that question identically.
 //! What this owns is the doing.
 
