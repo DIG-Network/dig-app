@@ -11,6 +11,8 @@
 //! - [`account`] — the master-HD custody harness: one master seed per account, N profiles derived at
 //!   HD indices, the enroll/unlock lifecycle, and the lockable [`account::residency::AccountResidency`].
 //! - [`wallet`] — the per-profile wallet host (spend building + signing stays local).
+//! - [`profile_image`] — bounded image intake for profile pictures: refuse a decompression bomb
+//!   at the header, resize to fit within 500x500, store the base64 of the RESIZED encoding.
 //! - [`storage`] — per-user AppData layout, DIGOP1-sealed at rest (NC-2 / NC-3).
 //! - [`ipc`] — the per-user IPC endpoint address (named pipe / Unix socket) the session dials.
 //! - [`session`] — the identity-authenticated engine session over that channel: the begin→attach
@@ -84,9 +86,6 @@ pub mod notify;
 pub mod paired_apps;
 pub mod pairing;
 pub mod pairing_code;
-/// Profile-image intake (dig_ecosystem#3010): bounded decode, fit-within-500x500 resize, and the
-/// base64 data URL that is stored. Outside the `gui` feature on purpose — it is pure bytes-to-bytes,
-/// so the decompression-bomb bound is testable headlessly.
 pub mod profile_image;
 pub mod profiles;
 pub mod sealer;
