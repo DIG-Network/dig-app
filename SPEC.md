@@ -2745,6 +2745,52 @@ follows, and is an arrival unless that catch-up is the wallet's first (see dig-n
 replica. Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no
 oracle leg — polling it discloses nothing off-machine.
 
+### 3.8 Profile-image intake (#3010)
+
+Every image a person attaches to a profile is **normalised, never stored as offered**. The bytes
+recorded in a profile SMT slot are the base64 of the **resized** encoding; the original is discarded.
+
+**Normalisation.** The image is scaled to fit within **500x500** with its aspect ratio unchanged —
+a fit-within, never a fill or a crop, so a 1000x500 image becomes 500x250 and neither dimension
+exceeds 500. An image already inside the box is left at its own size: upscaling adds bytes and no
+information. No image is refused for being too large in the *output* sense; the bound is a
+normalisation.
+
+**Accepted formats.** PNG and JPEG, and nothing else. The format is determined by **sniffing the
+bytes**; a declared MIME type is advisory on every path and attacker-chosen on the received one.
+`image/svg+xml` is refused by name — an SVG is a script-bearing document, not a bitmap. The decoder
+build links no other format, so a format outside this pair cannot be parsed at all.
+
+**Bounded decode (SECURITY-CRITICAL).** The size bound is on the output; the attack is on the input.
+Resizing requires decoding, and a decompression bomb is a small file declaring dimensions that
+allocate gigabytes before any pixel is resized — so intake MUST refuse on the **header**, before a
+pixel buffer is allocated, against a per-side limit, a **total-pixel** cap (not implied by the side
+limits) and an input-length cap. `image::Limits::max_alloc` is documented as non-strict and MUST NOT
+be relied on alone; the strict `max_image_width`/`max_image_height` pair carries the decoder-side
+half of the bound.
+
+Two profiles, and one MUST NOT be used for the other:
+
+| Profile | Per side | Total pixels | Input bytes | Applies to |
+|---|---|---|---|---|
+| `LOCAL_PICK` | 8192 | 8192 x 8192 | 256 MiB | a file the user browsed to or dragged in |
+| `RECEIVED` | 512 | 512 x 512 | 4 MiB | an image inside a body from an untrusted peer |
+
+The received profile is tight *because* of the normalisation rule: a conforming writer never emits
+more than 500 on a side, so anything larger did not come from one. Verified content is not safe
+content — a body that hashes correctly to the on-chain root can still carry a hostile image.
+
+**Output codec, which the size budget depends on.** PNG when any resized pixel is less than fully
+opaque, JPEG quality 85 otherwise — decided from the resized pixels, not from the source's colour
+type. This pins the worst case at a 500x500 RGBA PNG (≈1,000,200 bytes, ≈1,333,600 base64) and any
+deviation from it invalidates the slot-size budget derived from that number.
+
+**Refusals.** Each is stated in the user's terms — an unsupported file names what is supported, an
+over-bound file states the dimensions it declared and the limit. A raw decoder error is never
+surfaced.
+
+**Custody (§908).** Pure bytes-to-bytes. Nothing on this path holds, derives or uses a key.
+
 ---
 
 ## 4. Form factors
@@ -3571,6 +3617,7 @@ day one; the security-critical subsystems are implemented by later work units to
 | `wallet` | per-profile wallet state (address/coins/balance, DIGOP1-sealed per-profile), engine broadcast seam (`WalletEngine`), signed bundle encoding | U5 |
 | `events` | event-driven wallet UI seam: `EventFeed`/`EventSink` + `EventDriver` (cursor/filter, `catch_up` backfill, graceful resync) + reactive `WalletView` (§3.7) | #1008 |
 | `notify` | debounced native funds-activity notifications off the event stream (§3.7, #970) | #970 |
+| `profile_image` | profile-image intake (#3010): bounded decode, fit-within-500x500 resize, PNG/JPEG re-encode, base64 data URL — outside the `gui` feature, pure bytes-to-bytes | #3010 |
 | `gateway` | route each command (local vs proxy-to-engine) + dispatch over the `EngineProxy` / `LocalIdentity` / `LinkOpener` seams; catalogued `ErrorCode` + `--json` envelopes | U7 |
 
 The `dig-app` binary is the tray / menu-bar shell over the `agent` core (Windows system tray · macOS
