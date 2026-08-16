@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.7.0] - 2026-08-16
+
+### Features
+- **window:** Unlock in the header, status readings under the sidebar, DIG Mark, cleaner controls (#181)
+
 ## [12.6.0] - 2026-08-15
 
 ### Features
