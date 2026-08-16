@@ -450,9 +450,9 @@ pub struct PreviewPixels {
 ///
 /// [`ProfileDraft::problem`]: crate::profile_edit::ProfileDraft::problem
 pub fn preview(data_url: &str) -> Option<PreviewPixels> {
-    let payload = ACCEPTED_MIME_TYPES.iter().find_map(|mime| {
-        data_url.strip_prefix(&format!("data:{mime};base64,"))
-    })?;
+    let payload = ACCEPTED_MIME_TYPES
+        .iter()
+        .find_map(|mime| data_url.strip_prefix(&format!("data:{mime};base64,")))?;
     let bytes = STANDARD.decode(payload).ok()?;
     let bounds = DecodeBounds::RECEIVED;
     if bytes.len() > bounds.max_input_bytes {

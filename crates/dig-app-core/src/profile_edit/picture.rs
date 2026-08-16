@@ -153,7 +153,8 @@ mod tests {
             max_input_bytes: 10,
             ..DecodeBounds::LOCAL_PICK
         };
-        let refusal = chosen_within(&path, tiny).expect_err("a 100-byte file under a 10-byte bound");
+        let refusal =
+            chosen_within(&path, tiny).expect_err("a 100-byte file under a 10-byte bound");
         assert!(
             refusal.contains("huge.bin"),
             "the refusal does not name the file, so it was decided from the bytes rather than from \

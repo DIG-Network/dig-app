@@ -305,6 +305,15 @@ eframe = { version = "0.31", default-features = false, features = ["glow", "wayl
 # Pinned to the line `eframe` 0.31 resolves so the EventLoopBuilder the `with_any_thread`
 # extension traits are applied to is the SAME type eframe builds the window from.
 winit = "0.30"
+# The system's own "choose a file" dialog, for the profile editor's picture fields
+# (dig_ecosystem#3028). Drag-and-drop arrives free through `eframe`, but a drop-only affordance is a
+# dead end for anyone who cannot drag — `professional-ui`'s never-trap rule — so a browse control is
+# not optional and egui has no dialog of its own.
+#
+# `default-features = false` drops the async executor and the GTK3 backend: the Linux path is
+# `xdg-portal`, which talks to the desktop's own file chooser over D-Bus and pulls in no toolkit.
+# Windows and macOS call their native APIs with no extra graph either way.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 # Decoder for the embedded DIG brand mark the tray paints (`dig-app::brand`). This is NOT a new
 # dependency for the tray stack: `tray-icon` and `muda` already depend on `png` on Linux and macOS to
 # load their own icons, so on those targets it is a graph we are already carrying, and it is a small

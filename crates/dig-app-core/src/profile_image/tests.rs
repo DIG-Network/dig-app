@@ -385,7 +385,11 @@ fn a_pasted_bomb_is_refused_by_the_preview() {
         "data:image/png;base64,{}",
         STANDARD.encode(bomb_header(60_000, 60_000))
     );
-    assert_eq!(preview(&bomb), None, "a declared 60,000px image was decoded");
+    assert_eq!(
+        preview(&bomb),
+        None,
+        "a declared 60,000px image was decoded"
+    );
 
     let honest = intake(&opaque_png(64, 64), DecodeBounds::LOCAL_PICK).expect("a real picture");
     assert!(
