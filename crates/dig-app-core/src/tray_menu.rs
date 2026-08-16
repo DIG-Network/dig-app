@@ -915,13 +915,18 @@ pub enum TrayAction {
     /// would be a confidently wrong string to hand someone who means to pay you. Offered only where an
     /// address can exist; see `wallet_actions`.
     CopyReceiveAddress,
-    /// Show the wallet: the receive address, the balance (or precisely why it is not known), and what the
-    /// wallet cannot do yet.
+    /// Show the wallet: the receive address, the balance (or precisely why it is not known), and where
+    /// sending lives.
     ///
-    /// There is deliberately no `Send`: spending needs the money path, which is parked (#1702). Because no
-    /// [`TrayAction`] can move funds, "the tray cannot spend" is STRUCTURAL rather than one
-    /// `enabled: false` away from being wrong — the same discipline [`AboutDid`](Self::AboutDid) follows
-    /// for minting (dig_ecosystem#1841).
+    /// There is deliberately no send ROW. That is a statement about menus, not about the app: a menu
+    /// cannot hold a form, and an amount is not something a person picks from a list — the same reason
+    /// [`SendXch`](Self::SendXch) is emitted by the Wallet PANE and never by a tray row.
+    ///
+    /// The stronger claim this comment used to make — that no [`TrayAction`] can move funds, so "the tray
+    /// cannot spend" is STRUCTURAL — **expired** when [`SendXch`](Self::SendXch) landed
+    /// (dig_ecosystem#2819). Do not rely on it as an invariant; a `TrayAction` CAN now carry a spend, and
+    /// what keeps it off this menu is the row inventory, not the type. The window's body was corrected
+    /// alongside this comment, because it was telling users the same expired thing (dig_ecosystem#2988).
     AboutWallet,
     /// Send XCH from this wallet — the transfer a person filled in on the Wallet tab, ready to build
     /// (dig_ecosystem#2819).
@@ -1333,7 +1338,8 @@ pub fn details_text(view: &TrayView) -> String {
 /// it is not gated on an account, because using another app is not a custody action.
 ///
 /// The **Wallet** submenu (dig_ecosystem#1841) carries the receive address, the balance reading, and the
-/// explainer — and nothing that moves money, since the money path is parked (#1702). Its parent label is
+/// explainer — and nothing that moves money: sending lives in the window's Wallet tab, where a refusal
+/// can be stated against the control it is about, not in a tray row. Its parent label is
 /// deliberately the bare word: unlike the cache figure below, a balance is the user's own money, and a
 /// tray spine is read by anyone standing behind them.
 ///
@@ -1727,11 +1733,10 @@ pub const CREATE_PROFILE_LABEL: &str = "Set up funding for a profile…";
 ///
 /// # Why there is no `Send`
 ///
-/// The money path is PARKED (#1702). A `Send…` row would therefore be permanently greyed, and a greyed row
-/// that cannot say when it will work is the exact defect #1800 removed from this menu. So spending is not
-/// offered *at all* — no [`TrayAction`] can spend, which makes "the tray cannot move funds" a structural
-/// fact rather than one `enabled: false` away from being wrong. [`AboutWallet`](TrayAction::AboutWallet)
-/// explains the situation in a window that has room for it.
+/// A menu cannot hold a form, and an amount is not something a person picks from a list — so spending is
+/// not offered *at all* from this menu. [`SendXch`](Self::SendXch) is emitted by the Wallet pane and
+/// never by a tray row. [`AboutWallet`](TrayAction::AboutWallet) explains the situation in a window
+/// that has room for it.
 ///
 /// The same reasoning already governs DIDs ([`AboutDid`](TrayAction::AboutDid)): the tray does not offer
 /// verbs the app cannot perform.

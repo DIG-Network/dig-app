@@ -423,12 +423,25 @@ fn refine_unsynced(
     }
 }
 
-/// The Wallet window's whole text: where money arrives, what is held, and what the wallet still cannot
-/// do.
+/// The Wallet window's whole text: where money arrives, what is held, and where sending lives.
+///
+/// # Why this window names the Wallet tab rather than denying sending
+///
+/// This is the TRAY's read-only wallet notice, and it long said *"sending is not available yet — DIG
+/// will not offer a button that moves money until the path behind it is finished"*. That was true
+/// while the money path was parked, and dig-app#167/#174 shipped a real Send verb in the window's
+/// Wallet tab — so a released build told a person in one window that a control they can press in
+/// another does not exist (dig_ecosystem#2988). An app that denies a capability it ships is lying
+/// about money in the direction that costs it every other claim it makes.
+///
+/// What is true of THIS window is unchanged: it is a notification body assembled by `explain_wallet`,
+/// with no control and no row that emits an action. So it says that, and points at the surface
+/// that can, instead of speaking for the whole app.
 pub fn window_body(overview: &WalletOverview) -> String {
     format!(
-        "{}{}\n\n{}\n\nSending is not available yet — DIG will not offer a button that moves money until \
-         the path behind it is finished. Receiving works now: anything sent to the address above \
+        "{}{}\n\n{}\n\nThis window shows what you hold; it does not send. Sending is in the DIG \
+         window's Wallet tab, which states its own reason underneath when it cannot go ahead. \
+         Receiving works now: anything sent to the address above \
          arrives in this account, and your recovery phrase restores it.\n\n\
          Reading DIG content never needs an account or a wallet.",
         address_line(&overview.address),
@@ -1987,12 +2000,63 @@ mod tests {
         assert!(!body.contains("could not be derived"), "{body}");
     }
 
-    /// The window never advertises a verb the app cannot perform — sending is parked (#1702), so it is
-    /// named as absent rather than implied.
+    /// The Wallet tab's source, read at compile time so the guard below asks what the app SHIPS
+    /// rather than what this test module remembers about it.
+    const WALLET_PANE_SOURCE: &str = include_str!("../confirm/gui/window/pane/wallet.rs");
+
+    /// **This window never denies a Send the app ships (dig_ecosystem#2988).**
+    ///
+    /// # Why the pane's source is read instead of asserted about
+    ///
+    /// The nearest wrong fix to the shipped defect is deleting the false sentence and asserting the
+    /// deletion — which stays green if Send is later withdrawn and the window then says nothing
+    /// about a verb that no longer exists, and equally green if a future edit reintroduces a denial
+    /// in different words. So the test is a COUPLING: it establishes from the pane's own source that
+    /// a `Send` verb ships, and only then requires this window to be free of denial. Withdraw Send
+    /// and the control fails first, naming the real reason rather than the copy.
+    ///
+    /// The anchor is `id: Verb::Send` — the field assignment that BUILDS the button — rather than the
+    /// bare name, which also occurs in that file's prose and its tests. Anchoring on the bare name
+    /// would let the shipped row be deleted while a doc mention kept this control green, which is the
+    /// vacuity a coupling test exists to avoid.
     #[test]
-    fn the_window_says_sending_is_not_available() {
+    fn the_window_never_denies_a_send_the_app_ships() {
+        assert!(
+            WALLET_PANE_SOURCE.contains("enum Verb")
+                && WALLET_PANE_SOURCE.contains("id: Verb::Send"),
+            "the Wallet tab no longer ships a Send verb — this window's copy must be revisited \
+             before this guard is relaxed"
+        );
+
         let body = window_body(&WalletOverview::read(known(), &ChainSource::Absent));
-        assert!(body.contains("Sending is not available yet"), "{body}");
+        for denial in [
+            "Sending is not available",
+            "not offer a button that moves money",
+            "sending is not available",
+        ] {
+            assert!(
+                !body.contains(denial),
+                "the app ships Send, so this window may not say {denial:?}: {body}"
+            );
+        }
+    }
+
+    /// Saying only "this window does not send" would leave a person with a capability they cannot
+    /// find, so the window names where Send is — the never-trap rule applied to copy.
+    #[test]
+    fn the_window_says_where_sending_lives() {
+        let body = window_body(&WalletOverview::read(known(), &ChainSource::Absent));
+        assert!(
+            body.contains("Sending is in the DIG window's Wallet tab"),
+            "{body}"
+        );
+        assert!(body.contains("it does not send"), "{body}");
+        // A wrapped literal that lost its trailing `\` renders the source's own indentation as a
+        // run of spaces mid-sentence; this copy is wrapped, so it is checked for that here.
+        assert!(
+            !body.contains("  "),
+            "a space run reached the window: {body}"
+        );
     }
 
     /// `address()` reads through only when there IS one.

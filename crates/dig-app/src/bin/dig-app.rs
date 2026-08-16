@@ -3265,12 +3265,13 @@ mod tray {
         notify(confirmer, notice.title, notice.heading, &notice.body);
     }
 
-    /// Show the wallet: where money arrives, what is held, and what the wallet still cannot do
+    /// Show the wallet: where money arrives, what is held, and where sending lives
     /// (dig_ecosystem#1850).
     ///
     /// The window is assembled by [`wallet_window_body`] from a `WalletOverview`, whose whole purpose is
-    /// that an unreadable balance can never be rendered as a zero. Sending is absent because the money
-    /// path is parked (#1702) — no tray action can spend, so that is structural rather than a greyed row.
+    /// that an unreadable balance can never be rendered as a zero. Sending is absent from THIS window
+    /// because this notification body carries no control that emits a [`TrayAction`], and the body
+    /// says so while naming the window's Wallet tab, which does send (dig_ecosystem#2988).
     fn explain_wallet(view: &TrayView, confirmer: &dyn NativeConfirmer) {
         notify(
             confirmer,
