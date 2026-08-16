@@ -78,39 +78,59 @@ pub(super) fn draw(
     // input to it: how many rows the chips need is what decides where the content pane starts.
     let narrow = body.width() < NARROW_AT;
     let plan = narrow.then(|| strip_layout(ui, body, &model.tabs));
-    let (nav, content) = split(body, plan.as_ref().map(|plan| plan.height));
+    let (nav, content, status) = split(body, plan.as_ref().map(|plan| plan.height));
     let clicked = match plan {
         Some(plan) => strip(ui, nav, t, model, selected, live, &plan),
-        None => sidebar(ui, nav, t, model, selected, live),
+        None => sidebar(ui, nav, t, model, selected, live, facts),
     };
+    // In narrow mode there is no sidebar to sit under, so the readings run along the BOTTOM of the
+    // window instead — still out of the reading path, still on every tab, and still never above the
+    // content (dig_ecosystem#3007).
+    if let Some(status) = status {
+        super::header::strip(ui, status, t, facts);
+    }
     let tab = model.tab(selected).or_else(|| model.tabs.first());
     let in_content = tab.and_then(|tab| pane(ui, content, t, tab, facts, live));
     clicked.or(in_content)
 }
 
-/// Where the navigation goes and where the content goes.
+/// Where the navigation goes, where the content goes, and where the status readings go.
 ///
 /// `strip` is the height the wrapped tab strip came to, or `None` when there is room for a sidebar.
-fn split(body: Rect, strip: Option<f32>) -> (Rect, Rect) {
-    match strip {
-        Some(height) => (
-            Rect::from_min_size(body.left_top(), Vec2::new(body.width(), height)),
-            Rect::from_min_max(
-                egui::Pos2::new(body.left(), body.top() + height),
-                body.right_bottom(),
-            ),
-        ),
-        None => (
+///
+/// The third rectangle is `Some` only in narrow mode: with a sidebar the readings live inside the
+/// navigation column and need no band of their own, and without one they take a band along the
+/// bottom of the window (dig_ecosystem#3007). Either way the content pane is what is LEFT, so a
+/// readout can never be painted across a pane that still believes it owns the full rectangle.
+fn split(body: Rect, strip: Option<f32>) -> (Rect, Rect, Option<Rect>) {
+    let Some(height) = strip else {
+        return (
             Rect::from_min_size(body.left_top(), Vec2::new(SIDEBAR_WIDTH, body.height())),
             Rect::from_min_max(
                 egui::Pos2::new(body.left() + SIDEBAR_WIDTH, body.top()),
                 body.right_bottom(),
             ),
+            None,
+        );
+    };
+    // Clamped, so a window too short to hold both the tab strip and the status band gives the band
+    // whatever is left rather than a negative content pane. The tabs win that contest: a tab is a
+    // route to a feature and a reading is a glance.
+    let status_top = (body.bottom() - super::header::HEADER_HEIGHT).max(body.top() + height);
+    (
+        Rect::from_min_size(body.left_top(), Vec2::new(body.width(), height)),
+        Rect::from_min_max(
+            egui::Pos2::new(body.left(), body.top() + height),
+            egui::Pos2::new(body.right(), status_top),
         ),
-    }
+        Some(Rect::from_min_max(
+            egui::Pos2::new(body.left(), status_top),
+            body.right_bottom(),
+        )),
+    )
 }
 
-/// The vertical sidebar.
+/// The vertical sidebar: the tabs at the top, the status readings at the foot.
 fn sidebar(
     ui: &mut Ui,
     at: Rect,
@@ -118,6 +138,7 @@ fn sidebar(
     model: &WindowModel,
     selected: TabId,
     live: bool,
+    facts: &PaneFacts,
 ) -> Option<Click> {
     ui.painter().rect_filled(at, 0, rgba(t.surface));
     ui.painter().vline(
@@ -138,6 +159,16 @@ fn sidebar(
         }
         y += TAB_HEIGHT + 2.0;
     }
+
+    // The readings take everything below the last tab and sit at the BOTTOM of it
+    // (dig_ecosystem#3007). Handed the whole remainder rather than a reserved band, so the column
+    // knows its true room and can say honestly whether a reading fits.
+    super::header::column(
+        ui,
+        Rect::from_min_max(egui::Pos2::new(at.left(), y + space::S3), at.right_bottom()),
+        t,
+        facts,
+    );
     clicked
 }
 
@@ -332,7 +363,27 @@ fn pane(
                 let column = Rect::from_min_size(top_left, Vec2::new(inner_width, f32::INFINITY));
                 let (used, pressed) = pane::draw_tab(ui, column, t, tab, facts, live);
                 clicked = pressed.map(Click::Act);
-                ui.allocate_space(Vec2::new(at.width(), used + space::S5 * 2.0));
+                // Allocate up to where the content ACTUALLY ends, not a fresh block of its whole
+                // height (dig_ecosystem#3009).
+                //
+                // Some blocks draw through widgets that allocate — `paint::button` measures itself
+                // through egui's layout — so by the time the pane is laid out the scroll area's
+                // cursor has already advanced past part of the content. Allocating `used` on top of
+                // that counted the same pixels twice, and the surplus was pure blank: the Home tab
+                // at 480 px could be dragged 1,863 px past its last row, a screenful of nothing
+                // with no cue that the content had ended.
+                //
+                // Recomputed from THIS frame's measurement every frame, which is what makes it
+                // correct across a pane that changes height mid-scroll — a loading state resolving,
+                // the transaction sheet opening. The extent follows the content in the same frame
+                // the content changes, and egui clamps a now-too-large offset itself, so a pane
+                // that shrinks under a person pulls the view back to its new end rather than
+                // stranding them below it.
+                let ends_at = column.top() + used + space::S5;
+                ui.allocate_space(Vec2::new(
+                    at.width(),
+                    (ends_at - ui.cursor().top()).max(0.0),
+                ));
             });
     });
     clicked
@@ -386,6 +437,14 @@ mod tests {
         size: Vec2,
         /// What the last frame painted, for the assertions that read text rather than controls.
         painted: egui::FullOutput,
+        /// Where the content pane actually was last frame.
+        ///
+        /// Taken from the production [`split`], inside the production frame, so a test can never
+        /// assert reachability against a rectangle the window does not use. Before the status
+        /// readings took a band along the bottom in narrow mode (dig_ecosystem#3007), "the content
+        /// pane" and "the window" were the same rectangle and every test said the latter; a probe
+        /// point 20 px off the bottom edge silently stopped landing on the scroll area.
+        content: Rect,
     }
 
     impl Body {
@@ -400,6 +459,7 @@ mod tests {
                 selected,
                 size: Vec2::new(width, super::super::shell::SHELL_MIN),
                 painted: egui::FullOutput::default(),
+                content: Rect::NOTHING,
             };
             body.settled()
         }
@@ -420,6 +480,7 @@ mod tests {
             };
             let tokens = crate::confirm::gui::theme::Theme::Light.tokens();
             let clicked = Cell::new(None);
+            let content = Cell::new(Rect::NOTHING);
             let (model, facts, selected) = (&self.model, &self.facts, self.selected);
             self.painted = self.ctx.run(input, |ctx| {
                 egui::Area::new(egui::Id::new("dig-app-test-body"))
@@ -427,9 +488,13 @@ mod tests {
                     .order(egui::Order::Background)
                     .show(ctx, |ui| {
                         ui.set_clip_rect(screen);
+                        let plan = (screen.width() < NARROW_AT)
+                            .then(|| strip_layout(ui, screen, &model.tabs));
+                        content.set(split(screen, plan.map(|plan| plan.height)).1);
                         clicked.set(draw(ui, screen, &tokens, model, facts, selected, true));
                     });
             });
+            self.content = content.get();
             clicked.get()
         }
 
@@ -491,6 +556,64 @@ mod tests {
                 }
             }
             last
+        }
+
+        /// Scroll the pane back to the very top.
+        fn scroll_to_the_top(&mut self, probe: egui::Pos2) {
+            self.scroll(probe, 10_000.0);
+            for _ in 0..STILL_FRAMES {
+                self.frame(Vec::new());
+            }
+        }
+
+        /// Scroll the pane as far down as it will go.
+        fn scroll_to_the_end(&mut self, probe: egui::Pos2) {
+            for _ in 0..40 {
+                self.scroll(probe, -SCROLL_STEP * 4.0);
+            }
+            for _ in 0..STILL_FRAMES {
+                self.frame(Vec::new());
+            }
+        }
+
+        /// The lowest edge of anything the pane actually DREW inside the content region.
+        ///
+        /// Ink, not controls: a pane's last element is frequently a card, a sentence or a meter
+        /// rather than a clickable row, so measuring the last ROW would report a pane as
+        /// overscrolled while the person is looking at its final paragraph. Restricted to the
+        /// content region so the sidebar's own ink — tabs and status readings, which do not scroll
+        /// — cannot answer for the pane.
+        fn lowest_ink(&mut self) -> Option<f32> {
+            fn walk(shape: &egui::Shape, within: Rect, lowest: &mut Option<f32>) {
+                if let egui::Shape::Vec(shapes) = shape {
+                    shapes.iter().for_each(|s| walk(s, within, lowest));
+                    return;
+                }
+                let egui::Shape::Text(_) = shape else {
+                    return;
+                };
+                let at = shape.visual_bounding_rect();
+                // Strictly inside, not merely touching: the status band starts exactly where the
+                // content pane ends, so a test that accepted an intersection would measure the
+                // BAND's ink as the pane's and report every pane as perfectly full. Same for the
+                // sidebar on the left edge.
+                let inside = at.is_finite()
+                    && at.top() < within.bottom() - 0.5
+                    && at.bottom() > within.top() + 0.5
+                    && at.left() > within.left() - 0.5;
+                if !inside {
+                    return;
+                }
+                let bottom = at.bottom().min(within.bottom());
+                *lowest = Some(lowest.map_or(bottom, |seen: f32| seen.max(bottom)));
+            }
+            self.frame(Vec::new());
+            let within = self.content;
+            let mut lowest = None;
+            for clipped in &self.painted.shapes {
+                walk(&clipped.shape, within, &mut lowest);
+            }
+            lowest
         }
 
         /// Where a control with `element` was laid out on the last frame, if it was.
@@ -854,8 +977,11 @@ mod tests {
                 }
             }
 
-            let viewport = Rect::from_min_size(egui::Pos2::ZERO, body.size);
-            let probe = egui::Pos2::new(body.size.x / 2.0, body.size.y - 20.0);
+            // The CONTENT pane, not the window: a row hidden behind the status band along the
+            // bottom is not reachable, and the wheel has to be aimed somewhere the scroll area
+            // actually is (dig_ecosystem#3007).
+            let viewport = body.content;
+            let probe = viewport.center();
             for (action, enabled, element, label) in wanted {
                 let rect = body
                     .scroll_into_view(element, probe, viewport)
@@ -877,6 +1003,144 @@ mod tests {
             }
         }
     }
+
+    /// **The status readings are never above the content, at either width**
+    /// (dig_ecosystem#3007).
+    ///
+    /// The move's whole point, asserted as geometry at BOTH layouts because they place the readings
+    /// differently and only one of them is "under the sidebar": wide, they are in the navigation
+    /// column beside the content; narrow, they are in a band beneath it. What must hold in both is
+    /// that no reading is drawn between the top of the window and the page.
+    #[test]
+    fn the_status_readings_are_never_drawn_above_the_content() {
+        let view = TrayView {
+            running: true,
+            node_connected: true,
+            ..TrayView::default()
+        };
+        let model = crate::window_model::build(&view);
+        for width in [super::super::shell::SHELL_MIN, 960.0] {
+            let mut body = Body::holding(model.tabs.clone(), width);
+            body.facts = PaneFacts::of_tray(&view);
+            body.frame(Vec::new());
+
+            let node = body
+                .lowest_text_top(super::pane::facts::NODE_CONNECTED)
+                .unwrap_or_else(|| panic!("the node reading is missing entirely at {width} px"));
+            let content = body.content;
+            assert!(
+                node >= content.top() || width >= NARROW_AT,
+                "at {width} px a status reading is drawn at y={node}, above the content pane which \
+                 starts at {}",
+                content.top()
+            );
+            if width < NARROW_AT {
+                assert!(
+                    node >= content.bottom() - 0.5,
+                    "at {width} px the readings are at y={node}, not in the band below the content \
+                     pane which ends at {}",
+                    content.bottom()
+                );
+            } else {
+                assert!(
+                    node > content.top() + content.height() / 2.0,
+                    "at {width} px the readings are at y={node}, not at the FOOT of the sidebar"
+                );
+            }
+        }
+    }
+
+    /// **A pane cannot be scrolled past its own content** (dig_ecosystem#3009).
+    ///
+    /// Scrolled as far as the wheel will take it, the LAST thing the pane draws must still be on
+    /// screen: the person is at the end of the content, so the content is what they are looking at.
+    /// Before this, the pane could be dragged on into blank space — a screenful of nothing, with no
+    /// cue that you had gone past the end and nothing to scroll back TO except by reversing.
+    ///
+    /// Asserted on the last ROW rather than on a scroll offset, because the offset is the mechanism
+    /// and this is a claim about what a person sees. The tolerance is the pane's own bottom padding
+    /// and no more; a pane clamped to the wrong thing — the viewport, or a remembered maximum —
+    /// leaves the last row hundreds of pixels up, which no padding allowance can absorb.
+    #[test]
+    fn a_pane_cannot_be_scrolled_past_its_last_row() {
+        let view = TrayView {
+            running: true,
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            ..TrayView::default()
+        };
+        let model = crate::window_model::build(&view);
+        // Every tab, not only the tall one: overscroll is a property of the scroll surface, and the
+        // surface is shared. Both kinds have to appear or the test is only half exercised, which is
+        // what the two counters below are for.
+        let (mut scrolling_panes, mut short_panes) = (0, 0);
+        // The third size is deliberately TALLER than any pane's content, because a window that is
+        // never big enough leaves the short-pane half of this property untested — which is exactly
+        // what the counters caught on the first run of this test.
+        for size in [
+            Vec2::splat(super::super::shell::SHELL_MIN),
+            Vec2::new(960.0, 640.0),
+            Vec2::new(1_200.0, 2_000.0),
+        ] {
+            let width = size.x;
+            let mut body = Body::holding(model.tabs.clone(), width);
+            body.size = size;
+            body.facts = PaneFacts::of_tray(&view);
+
+            for tab in &model.tabs {
+                body.showing(tab.id);
+                let probe = body.content.center();
+                body.scroll_to_the_top(probe);
+                let at_rest = body
+                    .lowest_ink()
+                    .unwrap_or_else(|| panic!("{:?} at {width} px drew nothing at all", tab.id));
+                body.scroll_to_the_end(probe);
+                let at_the_end = body.lowest_ink().unwrap_or_else(|| {
+                    panic!(
+                        "{:?} at {width} px scrolled to a screen with no content on it at all: \
+                         the person is past the end of the pane, looking at blank space",
+                        tab.id
+                    )
+                });
+
+                // A pane SHORTER than its viewport does not move under the wheel at all, and that
+                // is the correct behaviour rather than a case to bound: "scroll it until it reaches
+                // the bottom" is the opposite fix. Told apart by whether the wheel MOVED anything,
+                // not by comparing heights — the trailing card's own padding sits below the last
+                // word, so a height comparison misreads a scrolling pane as a short one.
+                if at_the_end == at_rest {
+                    short_panes += 1;
+                    continue;
+                }
+
+                let blank = body.content.bottom() - at_the_end;
+                assert!(
+                    blank <= TRAILING_BLANK,
+                    "{:?} at {width} px scrolled {blank} px past the end of its content — the                      person is looking at empty space",
+                    tab.id
+                );
+                scrolling_panes += 1;
+            }
+        }
+        assert!(
+            scrolling_panes > 0 && short_panes > 0,
+            "the fixture exercised {scrolling_panes} scrolling and {short_panes} short panes, so \
+             one of the two halves of this property was never tested"
+        );
+    }
+
+    /// How much blank a correctly clamped pane may still show under its last WORD.
+    ///
+    /// Not zero, and the reason is measurable: the last word sits inside a card, so the card's own
+    /// bottom padding and the pane's trailing `space::S5` are legitimately below it. Measured
+    /// across every tab at every size this test drives, the largest is 67.5 px (Account at 480 px);
+    /// 80 leaves room for a card gaining a step of padding without loosening the bound to the point
+    /// where it stops meaning anything.
+    ///
+    /// The bound is pinned from BOTH sides. The defect this test exists for produces a screen with
+    /// no content on it whatsoever — the `unwrap_or_else` above fails first, and does so on the
+    /// unfixed code — so this bound catches the milder version: a clamp that is merely a little too
+    /// generous.
+    const TRAILING_BLANK: f32 = 80.0;
 
     /// **The Account tab at `SHELL_MIN` genuinely does not fit, so the test above is not vacuous.**
     ///
