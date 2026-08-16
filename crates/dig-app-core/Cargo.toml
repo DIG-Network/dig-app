@@ -31,7 +31,7 @@ profile-test-support = ["dep:dig-did"]
 # systems where a caller cannot tell which it will get is exactly what #2038 set out to remove, so a
 # build either has the one GUI or has no prompt surface.
 default = ["gui"]
-gui = ["dep:egui", "dep:eframe", "dep:winit", "dep:png"]
+gui = ["dep:egui", "dep:eframe", "dep:winit", "dep:png", "dep:rfd"]
 
 [dependencies]
 thiserror.workspace = true
@@ -44,6 +44,9 @@ eframe = { workspace = true, optional = true }
 # The `with_any_thread` extension traits. Prompts are drawn on a dedicated thread (never the
 # main one, which the tray owns), and only winit's per-platform traits can permit that.
 winit = { workspace = true, optional = true }
+# The native file chooser behind the profile editor's picture fields (dig_ecosystem#3028). Part of
+# the `gui` feature: a headless build draws no form and needs no dialog.
+rfd = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 # `EnumIter` on `window_model::TabId` — see the workspace manifest for why a derive rather than a

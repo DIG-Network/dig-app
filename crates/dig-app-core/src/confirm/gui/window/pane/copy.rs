@@ -493,6 +493,25 @@ pub(crate) mod profile_edit {
                                      you publish can be seen by people who kept a copy even after \
                                      you remove it.";
 
+    /// The control that opens the system's file chooser for an image field.
+    ///
+    /// Says CHOOSE rather than "upload": nothing is sent anywhere by picking a file — the picture
+    /// goes into the profile, and only pressing Save publishes anything.
+    pub(crate) const CHOOSE: &str = "Choose an image";
+
+    /// Said beside the control while the system's chooser is open.
+    ///
+    /// A dialog can end up behind the window, and a person who cannot see it is looking at a DIG
+    /// window that has apparently stopped responding. This sentence is the difference between that
+    /// and a state.
+    pub(crate) const CHOOSING: &str = "DIG is waiting for you to choose a file.";
+
+    /// Said beside the control, naming the other way in.
+    ///
+    /// Dragging is discoverable only by trying it, so it is written down; the button exists for
+    /// everyone who cannot drag at all.
+    pub(crate) const DRAG: &str = "…or drag an image file onto this row.";
+
     /// Said under a Save control that cannot be pressed because nothing has been changed.
     ///
     /// A disabled control with no explanation is the dead end dig_ecosystem#1800 removed; this names
