@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.11.0] - 2026-08-16
+
+### Features
+- **profile-edit:** Choose or drag an image into the profile picture and header fields (#184)
+
+### Bug Fixes
+- **profile:** Rebuild a missing seed body, and say which of three states it is (#185)
+
 ## [12.9.0] - 2026-08-16
 
 ### Features
