@@ -27,6 +27,7 @@
 //! form mandatory when the ticket says it must not be.
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use dig_account::mint::ProfileSeed;
 use dig_social_profile::SlotId;
@@ -81,7 +82,7 @@ impl SeedDraft {
 
     /// Whether this form may start a mint: nothing wrong with it. **An empty form may.**
     pub fn is_mintable(&self) -> bool {
-        !self.draft.oversize()
+        is_mintable(&self.draft)
     }
 
     /// The mutable form the pane draws over.
@@ -94,23 +95,36 @@ impl SeedDraft {
     /// The `None` is the whole point of the type: a request is what the mint path accepts, and a
     /// form that cannot produce one cannot spend.
     pub fn request(&self) -> Option<ProfileSeedRequest> {
-        match self.is_mintable() {
-            true => Some(ProfileSeedRequest::of(self.values())),
-            false => None,
-        }
+        ProfileSeedRequest::of_draft(&self.draft)
     }
 
-    /// The non-empty values, keyed by field. Empty fields are absent: a slot set to nothing is a
-    /// slot published as present-and-blank, which is not what leaving a box alone means.
+    /// The non-empty values, keyed by field.
     fn values(&self) -> BTreeMap<ProfileField, String> {
-        ProfileField::ALL
-            .into_iter()
-            .filter_map(|field| match self.draft.value(field) {
-                "" => None,
-                value => Some((field, value.to_string())),
-            })
-            .collect()
+        values_of(&self.draft)
     }
+}
+
+/// Whether `draft` may start a mint: nothing wrong with any field. **An empty draft may.**
+///
+/// The wizard's pane asks this every frame to decide whether its control is pressable, so it is a
+/// borrow rather than a method on an owned form — a copy of a draft carrying a picture is over a
+/// megabyte, and doing that sixty times a second to answer a yes-or-no question is not free.
+pub fn is_mintable(draft: &ProfileDraft) -> bool {
+    !draft.oversize()
+}
+
+/// The non-empty values of `draft`, keyed by field.
+///
+/// Empty fields are absent: a slot set to nothing is a slot published as present-and-blank, which
+/// is not what leaving a box alone means.
+fn values_of(draft: &ProfileDraft) -> BTreeMap<ProfileField, String> {
+    ProfileField::ALL
+        .into_iter()
+        .filter_map(|field| match draft.value(field) {
+            "" => None,
+            value => Some((field, value.to_string())),
+        })
+        .collect()
 }
 
 /// What a person asked their new profile to CONTAIN — the only part of a profile a caller supplies.
@@ -128,6 +142,14 @@ pub struct ProfileSeedRequest {
 }
 
 impl ProfileSeedRequest {
+    /// What `draft` would seed, or `None` when something in it is wrong.
+    pub fn of_draft(draft: &ProfileDraft) -> Option<Self> {
+        match is_mintable(draft) {
+            true => Some(Self::of(values_of(draft))),
+            false => None,
+        }
+    }
+
     /// A request holding nothing — a profile with an identity and no content, which is allowed.
     pub fn new() -> Self {
         Self::default()
@@ -178,6 +200,47 @@ impl ProfileSeedRequest {
             .fold(ProfileSeed::new(), |seed, (field, value)| {
                 seed.with_utf8(SlotId(field.slot().id()), value.clone())
             })
+    }
+}
+
+/// What the wizard collected, held for the ceremony that is about to read it.
+///
+/// # Why a process-wide holder and not an argument
+///
+/// The window is rebuilt from a snapshot every repaint, so the form lives in the frame's own store
+/// and nothing it holds survives the press. The ceremony, meanwhile, is started by the binary from
+/// a tray verb that carries no payload. This is the one value that has to cross that gap, and it is
+/// the same shape [`crate::profile_edit::EditService`] uses for the same reason.
+///
+/// It is READ, never taken. A ceremony that had to ask twice — a retry, a second phase — must
+/// rebuild the same commitment, and a holder that emptied itself on the first read would launch the
+/// store at a root whose body nobody has.
+///
+/// **It does not survive a restart, and nothing in this build asks it to:** an interrupted creation
+/// cannot be picked back up here (`creation_progress::KEEP_DIG_RUNNING` says so to the person). A
+/// build that resumes a ceremony across a restart must persist this beside the mint journal first,
+/// or the resumed launch would commit to a root rebuilt from an empty form.
+static COLLECTED: OnceLock<Mutex<ProfileSeedRequest>> = OnceLock::new();
+
+/// The holder, created empty on first use.
+fn collected() -> &'static Mutex<ProfileSeedRequest> {
+    COLLECTED.get_or_init(|| Mutex::new(ProfileSeedRequest::new()))
+}
+
+impl ProfileSeedRequest {
+    /// Hand what the wizard collected to the ceremony that will mint it.
+    pub fn collect(self) {
+        if let Ok(mut held) = collected().lock() {
+            *held = self;
+        }
+    }
+
+    /// What the wizard collected, or an empty request when it collected nothing.
+    pub fn collected() -> Self {
+        collected()
+            .lock()
+            .map(|held| held.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -351,6 +414,30 @@ mod tests {
     fn the_display_name_is_read_off_the_collected_field() {
         assert_eq!(filled().request().unwrap().display_name(), Some("ada"));
         assert_eq!(ProfileSeedRequest::new().display_name(), None);
+    }
+
+    /// What the wizard collected reaches the ceremony, and stays there to be read again.
+    ///
+    /// The second read is the load-bearing half: a ceremony that asks twice — a retry, its second
+    /// phase — must rebuild the SAME commitment, and a holder that emptied itself on the first read
+    /// would launch the store at a root whose body nobody holds.
+    #[test]
+    fn what_the_wizard_collected_reaches_the_ceremony_and_survives_being_read() {
+        assert!(
+            ProfileSeedRequest::collected().is_empty(),
+            "nothing has been collected yet"
+        );
+
+        filled().request().unwrap().collect();
+
+        let first = ProfileSeedRequest::collected();
+        let again = ProfileSeedRequest::collected();
+        assert_eq!(first.display_name(), Some("ada"));
+        assert_eq!(first, again);
+        assert_eq!(
+            again.to_seed().root().unwrap(),
+            filled().request().unwrap().to_seed().root().unwrap()
+        );
     }
 
     /// Different content commits to a different root — stated here as well as in the crate, because

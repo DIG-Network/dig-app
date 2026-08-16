@@ -527,6 +527,31 @@ pub(crate) mod profiles {
     /// The panel holding what a profile is and why one cannot be created yet.
     pub(crate) const CREATE_PANEL: &str = "Creating a profile";
 
+    /// Said above the wizard's form, so a person knows the boxes are theirs to leave alone.
+    ///
+    /// Every field is optional and this says so first, because a form under a heading about
+    /// spending money reads as a set of requirements unless it is told otherwise.
+    pub(crate) const SEED_INVITATION: &str =
+        "Fill in anything you would like your new profile to hold. All of it is optional: you can \
+         leave every box empty and fill them in later.";
+
+    /// Why filling the form in now is worth doing, stated as the fact it is.
+    ///
+    /// The saving is real and is the point of collecting anything at all: a profile created with
+    /// its content is committed by the store's first root, where one filled in afterwards costs a
+    /// second chain write.
+    pub(crate) const SEED_SAVES_A_WRITE: &str =
+        "Whatever you put here is written when your profile is created, so it costs nothing extra. \
+         Filling it in later is a second blockchain transaction.";
+
+    /// Said when the form holds something that would refuse at the mint.
+    ///
+    /// A creation cannot be undone and cannot be re-done cheaply, so the control is not pressable
+    /// while a value is wrong, and this says which kind of thing to look for.
+    pub(crate) const SEED_HAS_A_PROBLEM: &str =
+        "One of the boxes above cannot be published as it is. Fix it, or empty it, and the control \
+         below will be available again.";
+
     /// Said while nobody has yet measured whether this node can create a profile.
     ///
     /// Delegated to [`crate::profiles::copy::CHECKING_CREATION`] rather than written again here, for
@@ -1069,6 +1094,9 @@ mod tests {
     /// rather than hand-listed (dig_ecosystem#2358), so a new tab's lead arrives here on its own.
     fn every_sentence() -> Vec<String> {
         let mut all: Vec<&'static str> = vec![
+            profiles::SEED_INVITATION,
+            profiles::SEED_SAVES_A_WRITE,
+            profiles::SEED_HAS_A_PROBLEM,
             home::CACHE_UNKNOWN,
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
