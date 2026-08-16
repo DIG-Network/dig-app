@@ -1375,6 +1375,14 @@ holding nothing is a STATE and MUST NOT be drawn as a fault. A read that FAILED 
 profile and MUST NOT offer an editable form — an edit computed against a profile the app could not see would
 commit a body missing everything it already held. A failed read MUST offer a retry.
 
+**The profile read MUST be RATE-bounded, not merely de-duplicated (MUST).** The pane asks for a refresh on
+every frame and has no cadence of its own, so the service MUST hold reads to at most one per `READ_INTERVAL`
+(**15 s**, under one Chia block), timed from the START of a read. Preventing only CONCURRENT reads is
+insufficient: an in-flight guard clears the instant a read returns, so reads run back to back at frame rate,
+and each is a singleton lineage walk plus a `coinById`. That MUST NOT happen — it exhausts dig-node's wallet
+rate limiter, after which the app permanently denies itself the read it needs. It follows that a read
+REFUSED for rate limiting MUST NOT be retried immediately; only a person's explicit retry MAY read sooner.
+
 **Only a failed read MAY offer a retry (MUST).** A store with nothing published and a body that contradicts
 the chain are settled answers: asking again cannot produce content nobody wrote, and cannot make a
 contradicted body agree with the chain. Each MUST be given its own sentence naming its own remedy, and

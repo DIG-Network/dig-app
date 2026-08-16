@@ -18,6 +18,7 @@
 //! What this owns is the doing.
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::commit::{start_commit, EditSeams, Watch};
 use super::draft::SlotChange;
@@ -25,6 +26,18 @@ use super::field::ProfileField;
 use super::offer::ProfileEditing;
 use super::ProfileReading;
 use crate::transaction::Feed;
+
+/// The shortest interval between two chain reads of the profile.
+///
+/// A profile's root moves when a block carries an edit, and a Chia block is roughly 18.75 seconds —
+/// so re-reading faster than this asks the same node the same question about the same unchanged
+/// coin. Chosen just under one block so nothing published is shown late by more than a block, and
+/// deliberately not *shorter*: the read is a singleton lineage walk plus a `coinById`, and each of
+/// those spends a token from the node's wallet rate limiter (dig_ecosystem#3044).
+pub const READ_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Reads the wall clock. Injected so a test can pin the RATE without sleeping through it.
+type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 /// The editor's seams, its current reading, and the thread that refreshes it.
 pub struct EditService {
@@ -35,6 +48,16 @@ pub struct EditService {
     /// Whether a read is already running, so a pane asking every frame starts one worker and not
     /// a hundred and twenty.
     reading_now: Mutex<bool>,
+    /// When the most recent read was STARTED, so [`refresh`](EditService::refresh) can hold the
+    /// rate rather than merely the concurrency. `None` until the first read.
+    ///
+    /// Timed from the start and not the finish, because that is what makes the bound exact: at most
+    /// one read begins per `interval` ([`READ_INTERVAL`] in the app), whatever a single read costs.
+    last_read: Mutex<Option<Instant>>,
+    /// The shortest gap between two reads. [`READ_INTERVAL`] outside tests.
+    interval: Duration,
+    /// Where "now" comes from.
+    clock: Clock,
     /// Where a chain write publishes its progress.
     feed: Feed,
 }
@@ -65,8 +88,22 @@ impl EditService {
             // looked has not failed.
             reading: Mutex::new(ProfileReading::Pending),
             reading_now: Mutex::new(false),
+            last_read: Mutex::new(None),
+            interval: READ_INTERVAL,
+            clock: Arc::new(Instant::now),
             feed,
         }
+    }
+
+    /// A service whose reads are paced by `interval` and timed by `clock`, for tests that assert a
+    /// RATE and cannot afford to spend the interval waiting for it.
+    #[cfg(test)]
+    fn paced(seams: EditSeams, interval: Duration, clock: Clock) -> Arc<Self> {
+        Arc::new(Self {
+            interval,
+            clock,
+            ..Self::new(seams, Feed::detached())
+        })
     }
 
     /// Install the app's service. The first caller wins; later ones are ignored.
@@ -140,9 +177,24 @@ impl EditService {
 
     /// Read the profile from chain, off the calling thread.
     ///
-    /// Safe to call every frame: a read already in flight is not started twice, which is what stops
-    /// a pane that repaints twice a second from opening a chain read twice a second.
+    /// Safe to call every frame, and it is called every frame: the pane has no cadence of its own.
+    ///
+    /// # Why the in-flight guard was not enough
+    ///
+    /// It de-duplicates CONCURRENT reads only, and it clears the instant a read returns — so the
+    /// next frame started another, and the reads ran back to back for as long as the pane was open.
+    /// Each one is a singleton lineage walk plus a `coinById`, which measured as ~8 chain reads per
+    /// second sustained against the node, exhausting its wallet rate limiter. The app then denied
+    /// itself the very read it wanted, permanently and stably: closing the app was the only cure
+    /// (dig_ecosystem#3044).
+    ///
+    /// So the rate is bounded here, by [`READ_INTERVAL`], which also means a REFUSED
+    /// read is never retried immediately — a tight retry against a rate limit re-creates the same
+    /// equilibrium at any baseline cadence.
     pub fn refresh(self: &Arc<Self>) {
+        if !self.due() {
+            return;
+        }
         if !self.begin_reading() {
             return;
         }
@@ -168,9 +220,17 @@ impl EditService {
     }
 
     /// Forget the current answer and read again — the retry a failed read offers.
+    ///
+    /// This is the ONE path that skips the interval, because a person pressed a button and a retry
+    /// that visibly does nothing for fifteen seconds reads as a broken control. It is bounded by
+    /// how fast a hand can press, and by the in-flight guard, so it cannot become the automatic
+    /// loop [`refresh`](Self::refresh) exists to prevent.
     pub fn read_again(self: &Arc<Self>) {
         if let Ok(mut held) = self.reading.lock() {
             *held = ProfileReading::Pending;
+        }
+        if let Ok(mut last) = self.last_read.lock() {
+            *last = None;
         }
         self.refresh();
     }
@@ -200,11 +260,27 @@ impl EditService {
         );
     }
 
-    /// Claim the right to run a read. `false` when one is already running.
+    /// Whether enough time has passed since the last read STARTED to start another.
+    ///
+    /// A poisoned lock answers `false` — the conservative direction here is to read LESS, since the
+    /// failure this paces is reading too much.
+    fn due(&self) -> bool {
+        let Ok(last) = self.last_read.lock() else {
+            return false;
+        };
+        last.map_or(true, |started| {
+            (self.clock)().duration_since(started) >= self.interval
+        })
+    }
+
+    /// Claim the right to run a read, and record when it began. `false` when one is already running.
     fn begin_reading(&self) -> bool {
         match self.reading_now.lock() {
             Ok(mut running) if !*running => {
                 *running = true;
+                if let Ok(mut last) = self.last_read.lock() {
+                    *last = Some((self.clock)());
+                }
                 true
             }
             _ => false,
@@ -298,6 +374,94 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the read never answered");
+    }
+
+    /// A clock a test moves by hand, so a cadence measured in seconds can be asserted in
+    /// milliseconds.
+    #[derive(Clone)]
+    struct TestClock(Arc<Mutex<Instant>>);
+
+    impl TestClock {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Instant::now())))
+        }
+
+        fn advance(&self, by: Duration) {
+            let mut now = self.0.lock().expect("the clock");
+            *now += by;
+        }
+
+        fn handle(&self) -> Clock {
+            let shared = Arc::clone(&self.0);
+            Arc::new(move || *shared.lock().expect("the clock"))
+        }
+    }
+
+    /// Wait for any in-flight read to finish, so the next frame sees the state a real frame would.
+    fn idle(service: &Arc<EditService>) {
+        for _ in 0..500 {
+            if !*service.reading_now.lock().expect("the guard") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("a read never finished");
+    }
+
+    /// An open pane repainting every frame reads the chain at the POLL INTERVAL, not at frame rate.
+    ///
+    /// # Why the assertion is a rate, and why the fixture lets each read FINISH
+    ///
+    /// The in-flight guard already stopped two reads overlapping, so every test that merely shows a
+    /// read succeeds — or that a second read is not started *while the first runs* — passed against
+    /// the version that starved the node. What it did not bound is the rate: the guard clears the
+    /// moment a read returns, so the next frame opened another, and the reads ran back to back for
+    /// as long as the pane was open (~8 chain reads/second measured, dig_ecosystem#3044).
+    ///
+    /// So the fixture must let each read COMPLETE between frames — a fixture whose reads block, or
+    /// which never idles, hides the defect behind the guard and cannot fail. `idle` is that, and it
+    /// is what makes this test load-bearing.
+    ///
+    /// Bounded from BOTH sides. The ceiling is the defect. The floor is the opposite failure — a
+    /// pane that stops refreshing entirely would satisfy any ceiling and would never show an edit
+    /// somebody published from another machine.
+    #[test]
+    fn a_pane_repainting_every_frame_reads_the_chain_at_the_poll_interval() {
+        const INTERVAL: Duration = Duration::from_secs(15);
+        const FRAME: Duration = Duration::from_millis(500);
+        const RUN_SECS: u64 = 60;
+
+        let seam = Reading::of(Ok(a_profile()));
+        let clock = TestClock::new();
+        let service = EditService::paced(
+            EditSeams::Wired {
+                seam: seam.clone(),
+                bodies: Arc::new(InMemoryBodies::default()),
+            },
+            INTERVAL,
+            clock.handle(),
+        );
+
+        let frames = Duration::from_secs(RUN_SECS).as_millis() / FRAME.as_millis();
+        for _ in 0..frames {
+            service.refresh();
+            idle(&service);
+            clock.advance(FRAME);
+        }
+
+        let reads = *seam.reads.lock().expect("reads");
+        let ceiling = (RUN_SECS / INTERVAL.as_secs() + 1) as usize;
+        assert!(
+            reads <= ceiling,
+            "{reads} chain reads in {RUN_SECS}s of an idle open pane; at one per {INTERVAL:?} at \
+             most {ceiling} are justified. A read per frame starves the node's rate limiter and the \
+             app then denies itself the read it needs."
+        );
+        assert!(
+            reads >= (RUN_SECS / INTERVAL.as_secs()) as usize,
+            "{reads} reads in {RUN_SECS}s: the pane stopped refreshing, so an edit published \
+             elsewhere would never appear"
+        );
     }
 
     /// Pressing Save does not perform a CHAIN READ on the thread that pressed it.
