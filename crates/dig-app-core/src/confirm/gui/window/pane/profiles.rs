@@ -388,7 +388,6 @@ fn create_panel(
     creation: ProfileCreation,
     verbs: &ProfileVerbs,
 ) -> Option<TrayAction> {
-    let live = flow.live();
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
         // a blocked cause here would tell a person with a stopped node that nothing is missing from
