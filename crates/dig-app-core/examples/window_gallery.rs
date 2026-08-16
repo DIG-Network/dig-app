@@ -656,7 +656,9 @@ fn main() {
     // (dig_ecosystem#3038). Off by default, because a gallery host has no chain transport and the
     // capture must not imply one; ON is the state a live capable node reaches, and it is the only
     // state in which the creation wizard's form is drawn at all.
-    let can_create = all.iter().any(|argument| argument == "--can-create-profile");
+    let can_create = all
+        .iter()
+        .any(|argument| argument == "--can-create-profile");
     // `--profiles X` takes a value, so it is read from the FULL argument list by position after the
     // flag rather than from the positionals — which the filter above has already had it removed
     // from, along with its value.

@@ -435,14 +435,24 @@ fn wizard(flow: &mut Flow, t: &Tokens, create: &[Action<TrayAction>]) -> Option<
     flow.gap(space::S3);
     profile_form::draw_fields(flow, t, &mut form, WIZARD_SCOPE);
     flow.gap(space::S3);
-    flow.place(|ui, at| (text::caption(ui, at, t, copy::profiles::SEED_SAVES_A_WRITE), ()));
+    flow.place(|ui, at| {
+        (
+            text::caption(ui, at, t, copy::profiles::SEED_SAVES_A_WRITE),
+            (),
+        )
+    });
 
     // An empty form is allowed to mint; a form with something WRONG in it is not, because at mint
     // time a refused value is money already committed.
     let ready = seed::is_mintable(&form.draft);
     if !ready {
         flow.gap(space::S2);
-        flow.place(|ui, at| (text::caption(ui, at, t, copy::profiles::SEED_HAS_A_PROBLEM), ()));
+        flow.place(|ui, at| {
+            (
+                text::caption(ui, at, t, copy::profiles::SEED_HAS_A_PROBLEM),
+                (),
+            )
+        });
     }
 
     flow.gap(space::S3);

@@ -41,9 +41,7 @@ use super::state::{self, PaneState};
 use super::text;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
-use crate::profile_edit::{
-    EditService, ProfileDraft, ProfileEditing, ProfileReading,
-};
+use crate::profile_edit::{EditService, ProfileDraft, ProfileEditing, ProfileReading};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 

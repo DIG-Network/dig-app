@@ -254,8 +254,7 @@ mod tests {
 
     /// A real bech32m mainnet address, because the payment field runs the canonical decode and a
     /// made-up string of the right shape is exactly what that decode exists to reject.
-    const VALID_ADDRESS: &str =
-        "xch14vlj35vktk9uyhuau3fv2dj4gw6c9kfxex44gvmzqa4rmvluqe7qrapt26";
+    const VALID_ADDRESS: &str = "xch14vlj35vktk9uyhuau3fv2dj4gw6c9kfxex44gvmzqa4rmvluqe7qrapt26";
 
     fn filled() -> SeedDraft {
         let mut seed = SeedDraft::new();
@@ -380,7 +379,10 @@ mod tests {
     #[test]
     fn an_oversize_picture_is_refused_before_any_spend_and_the_limit_itself_is_allowed() {
         let prefix = "data:image/png;base64,";
-        let over = format!("{prefix}{}", "A".repeat(MAX_SLOT_PAYLOAD + 1 - prefix.len()));
+        let over = format!(
+            "{prefix}{}",
+            "A".repeat(MAX_SLOT_PAYLOAD + 1 - prefix.len())
+        );
         let at_limit = format!("{prefix}{}", "A".repeat(MAX_SLOT_PAYLOAD - prefix.len()));
 
         let mut too_big = SeedDraft::new();
