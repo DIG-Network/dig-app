@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.12.2] - 2026-08-16
+
+### Features
+- **wizard:** Collect profile data into the mint seed (#186)
+
+### Bug Fixes
+- **chain-probe:** Print the whole lineage result, not just its error (#188)- **profile-edit:** Pace the profile chain read at one per 15s (#189)
+
 ## [12.11.0] - 2026-08-16
 
 ### Features
