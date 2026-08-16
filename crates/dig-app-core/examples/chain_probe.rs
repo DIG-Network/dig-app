@@ -40,7 +40,7 @@ fn main() {
     );
     println!(
         "lineage             {:?}",
-        source.resolve_singleton_lineage(coin_id).err()
+        source.resolve_singleton_lineage(coin_id)
     );
     println!("freshness           {:?}", source.last_freshness());
 }
