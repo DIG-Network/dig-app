@@ -98,6 +98,18 @@ impl CommitOutcome {
 pub enum ProfileEditError {
     /// The profile could not be read, so there is nothing to edit from.
     Unreadable(String),
+    /// The store exists and NOTHING has ever been published under it.
+    ///
+    /// Its own variant because it is not a fault and has no retry (dig_ecosystem#3036): asking
+    /// again cannot produce content nobody wrote. Reported only after a rebuild from this app's own
+    /// mint seed has been tried and did not verify against the root the chain anchors.
+    Unpublished,
+    /// A body exists and does NOT commit to the root the chain anchors.
+    ///
+    /// Kept apart from [`Unreadable`](Self::Unreadable) because it is a security refusal rather
+    /// than weather: the remedy is never "try again", and wording it as one invites a person to
+    /// keep pressing a control that is correctly refusing them.
+    Inconsistent,
     /// The account is locked, so nothing can be signed.
     Locked,
     /// The mempool DECLINED the bundle: a known "no", and the store's root is unchanged.
@@ -128,6 +140,8 @@ impl ProfileEditError {
     pub fn sentence(&self) -> String {
         match self {
             Self::Unreadable(why) => format!("DIG could not read your profile: {why}"),
+            Self::Unpublished => super::copy::UNPUBLISHED.to_string(),
+            Self::Inconsistent => super::copy::INCONSISTENT.to_string(),
             Self::Locked => {
                 "Your account is locked, so DIG cannot sign the change. Unlock it and try again."
                     .to_string()
@@ -185,7 +199,14 @@ impl ProfileEditError {
     /// yes. An unreachable chain may have taken the bundle, and a failed persist happened AFTER a
     /// successful push.
     pub fn profile_is_unchanged(&self) -> bool {
-        matches!(self, Self::Rejected(_) | Self::Refused(_) | Self::Locked)
+        matches!(
+            self,
+            Self::Rejected(_)
+                | Self::Refused(_)
+                | Self::Locked
+                | Self::Unpublished
+                | Self::Inconsistent
+        )
     }
 }
 

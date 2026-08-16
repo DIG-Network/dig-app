@@ -98,8 +98,32 @@ fn content(
             None
         }
         ProfileReading::Unreadable(why) => unreadable(flow, t, why),
+        // Neither of these is weather and neither has a retry: asking again cannot produce content
+        // nobody wrote, and cannot make a contradicted body agree with the chain. Drawing them
+        // through `unreadable` would put a *try reading it again* control under both
+        // (dig_ecosystem#3036).
+        ProfileReading::Unpublished => settled_state(
+            flow,
+            t,
+            PaneState::Empty(crate::profile_edit::copy::UNPUBLISHED.to_string()),
+        ),
+        ProfileReading::Inconsistent => settled_state(
+            flow,
+            t,
+            PaneState::Unreachable(crate::profile_edit::copy::INCONSISTENT.to_string()),
+        ),
         ProfileReading::Known(committed) => form(flow, t, committed, verbs),
     }
+}
+
+/// A state that is settled: it is said, and nothing is offered for it.
+///
+/// The absence of a control is the point. A read that FAILED gets a retry because asking again can
+/// change the answer; a profile that has published nothing, and one whose content contradicts the
+/// chain, cannot be changed by asking — so a control here would be one a person presses forever.
+fn settled_state(flow: &mut Flow, t: &Tokens, state: PaneState) -> Option<TrayAction> {
+    flow.place(|ui, at| (state::banner(ui, at, t, &state), ()));
+    None
 }
 
 /// A profile that could not be read: what happened, and the one control that helps.
