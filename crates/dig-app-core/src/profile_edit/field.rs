@@ -148,9 +148,12 @@ impl ProfileField {
             }
             Self::Pronouns => "How you would like to be referred to. Optional, and public.",
             Self::Location => "Wherever you would like to say you are. Public, and up to you.",
+            // Says SPACES, not lines, because the shared form control is single-line: an
+            // instruction to press Return in a box that cannot take a Return is an instruction
+            // nobody can follow. A multi-line control is dig_ecosystem#3033.
             Self::Links => {
-                "One web address per line. Anyone can read them, and nobody checks that they are \
-                 yours."
+                "Web addresses, separated by spaces. Anyone can read them, and nobody checks that \
+                 they are yours."
             }
             Self::XchAddress => {
                 "An address anyone can send money to. Check it character by character — money sent \

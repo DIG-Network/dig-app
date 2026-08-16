@@ -150,6 +150,35 @@ impl ProfileEditError {
         }
     }
 
+    /// What to tell a person when this failure happened during a READ.
+    ///
+    /// # Why the same failure needs two sentences
+    ///
+    /// [`sentence`](Self::sentence) is written for a commit, and every word of it assumes one: an
+    /// unreachable chain becomes *"DIG does not know whether your change went through"*, which is
+    /// exactly right after a push and a fabrication after a read, where nothing was ever sent. A
+    /// person told that by a card that is merely failing to LOAD has been informed of a transaction
+    /// they did not make — and the advice attached to it, wait before trying again, is advice about
+    /// a spend.
+    ///
+    /// The arms that can only arise from a commit keep their commit wording, because reaching them
+    /// from a read is a bug rather than a state, and inventing a read-flavoured sentence for them
+    /// would hide it.
+    pub fn while_reading(&self) -> String {
+        match self {
+            Self::ChainUnreachable(why) => format!(
+                "DIG could not reach the blockchain to read your profile: {why}. Nothing has \
+                 changed — try again in a moment."
+            ),
+            Self::Locked => {
+                "Your account is locked, so DIG cannot read your profile. Unlock it to see and \
+                 change what it says."
+                    .to_string()
+            }
+            other => other.sentence(),
+        }
+    }
+
     /// Whether the person's profile is definitely unchanged, so offering the form again is safe.
     ///
     /// Deliberately conservative: only the two outcomes that provably never reached a mempool say
@@ -607,6 +636,32 @@ mod tests {
             .expect_err("an unstorable body is a failure");
         assert!(!error.profile_is_unchanged());
         assert!(error.sentence().contains("sent to the blockchain"));
+    }
+
+    /// **A read that failed never tells a person a change was sent.**
+    ///
+    /// The card that fails to load and the card that has just pushed a spend share this error type,
+    /// and the commit wording — *"DIG does not know whether your change went through"* — is a
+    /// transaction a reader did not make, attached to advice about spending twice.
+    #[test]
+    fn a_failed_read_is_not_described_as_a_change_that_may_be_in_flight() {
+        for error in [
+            ProfileEditError::ChainUnreachable("timed out".into()),
+            ProfileEditError::Locked,
+            ProfileEditError::Unreadable("the body does not match the root".into()),
+        ] {
+            let said = error.while_reading().to_lowercase();
+            assert!(
+                !said.contains("your change") && !said.contains("was sent"),
+                "a read failure claimed a change: {said}"
+            );
+            assert!(said.len() > 30, "too terse to act on: {said}");
+        }
+        // And the control: the COMMIT wording for the same error still says it, because after a
+        // push that sentence is the true and load-bearing one.
+        assert!(ProfileEditError::ChainUnreachable("timed out".into())
+            .sentence()
+            .contains("whether your change went through"));
     }
 
     /// An edit the mempool declined leaves the profile alone, and the form may be offered again.

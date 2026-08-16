@@ -110,7 +110,9 @@ impl EditService {
         std::thread::spawn(move || {
             let answer = match seam.read() {
                 Ok(snapshot) => ProfileReading::Known(snapshot.draft()),
-                Err(error) => ProfileReading::Unreadable(error.sentence()),
+                // `while_reading`, not `sentence`: the commit wording tells a person their change may
+                // be in flight, and on a read there was no change.
+                Err(error) => ProfileReading::Unreadable(error.while_reading()),
             };
             service.finish_reading(answer);
         });
