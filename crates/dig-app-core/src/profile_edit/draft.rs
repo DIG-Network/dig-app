@@ -246,8 +246,9 @@ fn is_accepted_data_url(value: &str) -> bool {
 ///
 /// Names the one thing a person is most likely to have done — typed a filename — because the field
 /// is labelled "Profile picture" and a filename is the obvious answer to that label.
-const NOT_AN_IMAGE: &str =
-    "That is not an image. This field holds the picture itself, not a file name or a link to one,      so DIG cannot publish what is there. Choosing a file is not wired up in this version yet.";
+const NOT_AN_IMAGE: &str = "That is not an image. This field holds the picture itself, not a \
+     file name or a link to one, so DIG cannot publish what is there. \
+     Choosing a file is not wired up in this version yet.";
 
 /// The sentence for a payment address that is not one.
 ///
@@ -255,7 +256,10 @@ const NOT_AN_IMAGE: &str =
 /// a checksum failure identifies the address as wrong without identifying where, and pointing at a
 /// position the maths cannot actually locate would send someone hunting in the wrong place.
 const NOT_AN_XCH_ADDRESS: &str =
-    "That is not a Chia address. A payment address starts with xch1 and carries a checksum that      this one fails, so a character is wrong or missing somewhere in it. Paste it again from your      wallet rather than typing it.";
+    "That is not a Chia address. A payment address starts with xch1 and \
+     carries a checksum that this one fails, so a character is wrong or \
+     missing somewhere in it. Paste it again from your wallet rather than \
+     typing it.";
 
 /// The sentence for a value no single slot can hold.
 ///
@@ -608,5 +612,22 @@ mod tests {
                 "{field:?} refused an empty value"
             );
         }
+    }
+
+    /// Regression test: error message constants must not contain multiple consecutive spaces
+    /// (which would result from unwrapped line continuations in the source).
+    #[test]
+    fn error_messages_have_proper_spacing() {
+        // NOT_AN_IMAGE should not contain two consecutive spaces
+        assert!(
+            !NOT_AN_IMAGE.contains("  "),
+            "NOT_AN_IMAGE contains multiple consecutive spaces"
+        );
+
+        // NOT_AN_XCH_ADDRESS should not contain two consecutive spaces
+        assert!(
+            !NOT_AN_XCH_ADDRESS.contains("  "),
+            "NOT_AN_XCH_ADDRESS contains multiple consecutive spaces"
+        );
     }
 }
