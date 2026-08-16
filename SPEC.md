@@ -992,14 +992,38 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   anywhere in the window, chosen by an exhaustive match over the account's state. A second set — however
   well tested against itself — is two surfaces free to tell a reader different things about one state, and
   it MUST be provable by test that only one exists, not merely that each is internally consistent.
-- **The window carries a persistent status strip on EVERY tab (MUST).** Whether the background agent is
-  running and whether a node is reachable MUST be legible from every tab, because both explain what the
-  rest of the window is showing — an unreachable node is frequently the reason a balance reads "not known",
-  and a person MUST NOT have to change tabs to learn it. The strip states each in a glance, MUST NOT sense
-  a click (a reading that responds to one is a control), and MUST take its readings from the same
-  projection the panes read, so the strip and a pane can never describe one machine differently.
-- **The strip states the chain replica and a SEPARATE peer count per network (MUST).** dig-node belongs to
-  two networks — the DIG content network and the Chia network — and the strip MUST report a count for each,
+- **The window carries persistent status readings on EVERY tab, OUT of the reading path (MUST).** Whether
+  the background agent is running and whether a node is reachable MUST be legible from every tab, because
+  both explain what the rest of the window is showing — an unreachable node is frequently the reason a
+  balance reads "not known", and a person MUST NOT have to change tabs to learn it. The readings state each
+  in a glance, MUST NOT sense a click (a reading that responds to one is a control), and MUST take their
+  readings from the same projection the panes read, so they and a pane can never describe one machine
+  differently. They MUST NOT be drawn ABOVE the content: where the window has a sidebar they sit at the
+  FOOT of it, bottom-justified, and where it does not they take a band along the BOTTOM of the window.
+- **When there is not room for every reading, the readings are DROPPED in a stated order, never truncated
+  or shrunk (MUST).** The order is most-explanatory first, and whether the agent is running and whether it
+  has a node MUST be the last two surrendered. The same order MUST govern both layouts, so the two cannot
+  come to disagree about which reading matters least. A reading MUST NOT be drawn clipped, at a reduced
+  size, or behind a scrollbar: an ambient readout a person has to interact with has lost the property that
+  justified showing it everywhere.
+- **A verb that unblocks the whole window MAY be promoted into the chrome, and MUST be quoted from the
+  model (MUST).** The way back into a sealed account is reachable from every tab, not only from the tab
+  that owns it. Where the chrome offers such a verb it MUST take the model's own enabled row — its action
+  and its exact words — so the chrome cannot offer a verb the panes do not, or word it differently; it MUST
+  disappear when the model stops offering it; it MUST NOT be drawn disabled, because the chrome has no room
+  to say why; and it MUST NOT become a gate — nothing is scrimmed, every tab stays reachable, and reading
+  content still requires no account. It MUST carry an accessible NAME on the same terms as the window
+  controls, and the drag strip MUST be derived so that it cannot overlap it.
+- **The header MUST draw the brand's own mark, not an approximation of it (MUST).** The mark is a checked-in
+  asset, shared byte-for-byte with the window icon and the tray so the three cannot show different marks. A
+  decode failure MUST cost the header its picture and nothing else.
+- **A content pane MUST NOT scroll past its own content (MUST).** The scroll extent is the height the pane
+  MEASURED this frame, so a person who scrolls to the end is looking at the end of the content rather than
+  at blank space, and a pane whose height changes between frames — a loading state resolving, a sheet
+  opening — MUST have its extent follow in the same frame. A pane shorter than its viewport MUST NOT
+  scroll at all.
+- **The readings state the chain replica and a SEPARATE peer count per network (MUST).** dig-node belongs to
+  two networks — the DIG content network and the Chia network — and they MUST report a count for each,
   each labelled with the network it is about. It MUST NOT report one combined figure and MUST NOT add the
   two together: a person shown a single count cannot tell which network is healthy, and the two answers
   routinely differ.

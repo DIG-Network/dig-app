@@ -13,7 +13,14 @@ use egui::{
 };
 
 use super::render::{radius, regular, rgba, semibold, size, Weight};
-use super::theme::Tokens;
+use super::theme::{Rgba, Tokens};
+
+/// How strongly Close's hover wash tints the bar with `--danger`.
+///
+/// A TINT, not the accent itself: a solid red field behind a cross announces the destruction louder
+/// than the act deserves on a window that can simply be reopened, and it would drop the glyph's
+/// contrast below AA. This is the same weight `--dig-wash` carries for the other three.
+const CLOSE_HOVER_ALPHA: u8 = 28;
 
 /// Blend two colours by `t` in `0.0..=1.0`.
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -149,9 +156,73 @@ pub fn qr(ui: &Ui, top_left: Pos2, available: f32, art: &crate::confirm::QrArt) 
     field
 }
 
-/// The DIG mark: hub's accent gradient in a small rounded square.
+/// The DIG Mark, as the brand actually draws it (dig_ecosystem#3007).
+///
+/// # Why the artwork and not a shape that resembles it
+///
+/// This used to be a rounded square filled with the accent gradient — a stand-in that read as *a
+/// purple thing* rather than as DIG. The brand has a mark, it is already in this crate ([`MARK`],
+/// the same file the window icon and the tray take), and `professional-ui`'s reuse-before-invent
+/// rule exists for exactly this case: a surface approximating art the brand already owns is how one
+/// product comes to show two different logos.
+///
+/// The gradient remains as the FALLBACK, for the same reason the tray decode is fallible: a corrupt
+/// asset should cost the header its picture and nothing else. A blank square where a logo belongs
+/// reads as a failed load; the gradient reads as the brand, quietly.
 pub fn brand_mark(ui: &Ui, rect: Rect, t: &Tokens) {
-    gradient_fill(ui, rect, 6.0, rgba(t.dig_purple), rgba(t.dig_magenta));
+    let Some(mark) = mark_texture(ui.ctx()) else {
+        gradient_fill(ui, rect, 6.0, rgba(t.dig_purple), rgba(t.dig_magenta));
+        return;
+    };
+    ui.painter().image(
+        mark.id(),
+        rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// The DIG Mark's own artwork, embedded so no surface reads it from disk.
+///
+/// One copy for the whole crate: the header, the window icon and the tray all take this, so they
+/// cannot drift into showing different marks (dig_ecosystem#2340 is what happens when a surface has
+/// no mark at all; two marks would be worse).
+pub const MARK: &[u8] = include_bytes!("../../../assets/mark-64.png");
+
+/// Decode [`MARK`] into `(rgba, width, height)`, or `None` if it will not decode.
+///
+/// **Fallible on purpose.** Every caller here is a picture, and a picture is never worth a panic in
+/// a process that also carries a person's consent surface.
+pub fn decode_mark() -> Option<(Vec<u8>, u32, u32)> {
+    let mut reader = png::Decoder::new(MARK).read_info().ok()?;
+    let info = reader.info();
+    // Only the one shape the checked-in asset has. A PNG in another colour type or bit depth would
+    // need resampling, and silently mis-decoding a brand mark is worse than showing no mark.
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    let (width, height) = (info.width, info.height);
+    let mut rgba = vec![0; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut rgba).ok()?;
+    rgba.truncate(frame.buffer_size());
+    Some((rgba, width, height))
+}
+
+/// The mark uploaded to the GPU once, and handed back on every later frame.
+///
+/// Cached in the context's own store rather than re-uploaded per frame: the mark is drawn on every
+/// frame of every window, and a texture upload per frame is a cost paid sixty times a second for an
+/// image that never changes.
+fn mark_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let key = egui::Id::new("dig-brand-mark-texture");
+    if let Some(cached) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
+        return Some(cached);
+    }
+    let (rgba, width, height) = decode_mark()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+    let handle = ctx.load_texture("dig-brand-mark", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
+    Some(handle)
 }
 
 /// A button in hub's language, returning its click [`Response`].
@@ -415,12 +486,26 @@ pub enum WindowIcon {
     Close,
 }
 
-/// How much of the control's box the glyph occupies.
+/// The side of the square every window glyph is drawn inside (dig_ecosystem#3007).
 ///
-/// A glyph drawn edge to edge in its hit area reads as a filled button rather than a mark; this
-/// leaves a margin on every side while keeping the HIT area the full slot, which is what keeps the
-/// target comfortably clickable (`professional-ui`) even though the mark is small.
-const ICON_INSET: f32 = 9.0;
+/// A SQUARE, and the same square for all four, rather than the slot inset by a margin. The slot is
+/// 40 x 30, so insetting it produced a 22 x 12 *landscape* box: the minimise bar came out nearly
+/// twice the width of the maximise square it sits beside, and the close cross was a squashed X. One
+/// optical box is what makes the row read as a set.
+///
+/// 10 px is the mark size Windows 11 and macOS both settle near, and it leaves the hit area the full
+/// slot — the target stays comfortably clickable (`professional-ui`) even though the mark is small.
+const GLYPH_BOX: f32 = 10.0;
+
+/// The glyph's own box inside a control slot: [`GLYPH_BOX`] square, centred, on whole pixels.
+///
+/// Snapped because a 1 px stroke on a half pixel is drawn as two grey rows rather than one dark one.
+/// That is the entire difference between a crisp mark and a smudged one at this size, and it is the
+/// half of "cleaner" no amount of colour tuning can supply.
+fn glyph_box(slot: Rect) -> Rect {
+    let centre = Pos2::new(slot.center().x.round(), slot.center().y.round());
+    Rect::from_center_size(centre, Vec2::splat(GLYPH_BOX))
+}
 
 /// The id a window control senses under, derived from its NAME.
 ///
@@ -431,6 +516,63 @@ const ICON_INSET: f32 = 9.0;
 pub fn window_control_id(name: &str) -> egui::Id {
     egui::Id::new(("dig-app-window-control", name))
 }
+
+/// A window-chrome control drawn as a WORD, in a rectangle the caller placed (dig_ecosystem#3007).
+///
+/// The text twin of [`window_control`], and deliberately the same contract: it senses under
+/// [`window_control_id`], carries the same name to assistive technology and to the test harness, and
+/// takes the same hover wash. So the chrome has one control vocabulary rather than two, and a test
+/// reaches `Unlock…` exactly the way it reaches `Close`.
+///
+/// It draws a word because it is not a window verb. Minimise, maximise and close are universal
+/// glyphs a person already knows; an invented lock glyph would be a guess, and the one control here
+/// that ACTS ON THE PERSON'S ACCOUNT is the last one that should be a rebus.
+pub fn chrome_word_control(ui: &mut Ui, rect: Rect, name: &str, t: &Tokens) -> Response {
+    let response = ui
+        .interact(rect, window_control_id(name), Sense::click())
+        .on_hover_text(name);
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
+
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(radius::SM),
+            rgba(t.dig_wash.over(t.surface)),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let ink = match hovered {
+        true => t.dig_purple,
+        false => t.muted,
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), semibold(size::XS), rgba(ink));
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        Color32::PLACEHOLDER,
+    );
+    response
+}
+
+/// How wide a slot [`chrome_word_control`] needs for `name`.
+///
+/// Measured from the text the control will actually draw, in the font it will actually draw it in,
+/// for the reason [`super::window::shell::ChromeSlots`] states: a control whose label outgrows its
+/// slot still draws and still senses — on top of its neighbour.
+pub fn chrome_word_width(ui: &Ui, name: &str, t: &Tokens) -> f32 {
+    ui.painter()
+        .layout_no_wrap(name.to_owned(), semibold(size::XS), rgba(t.muted))
+        .size()
+        .x
+        + CHROME_WORD_PAD
+}
+
+/// The breathing room on each side of a chrome word control's text, doubled into its width.
+const CHROME_WORD_PAD: f32 = 20.0;
 
 /// A window-chrome control drawn as a stroked glyph, with an accessible NAME.
 ///
@@ -459,18 +601,32 @@ pub fn window_control(
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
 
     if response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(radius::SM),
-            rgba(t.dig_wash.over(t.surface)),
-        );
+        // Close hovers DANGEROUS, the other three hover neutral. Closing is the one irreversible
+        // thing this row does, and every desktop platform says so in red — a person who lands on it
+        // by accident on the way to Maximize gets a warning before the click, not after.
+        let wash = match icon {
+            WindowIcon::Close => Rgba {
+                a: CLOSE_HOVER_ALPHA,
+                ..t.danger
+            }
+            .over(t.surface),
+            _ => t.dig_wash.over(t.surface),
+        };
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(radius::SM), rgba(wash));
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    // `--muted` for the same reason a text control's label takes it: this is the control's content,
-    // and it carries the 4.5:1 bar rather than the 3:1 one a mere border would (#2038).
-    let stroke = Stroke::new(1.4_f32, rgba(t.muted));
-    let box_ = rect.shrink(ICON_INSET);
+    // `--muted` at rest for the same reason a text control's label takes it: this is the control's
+    // content, and it carries the 4.5:1 bar rather than the 3:1 one a mere border would (#2038). On
+    // hover it goes to `--text`, so the mark under the pointer is the darkest one in the row.
+    let ink = match (response.hovered(), icon) {
+        (true, WindowIcon::Close) => t.danger_text,
+        (true, _) => t.text,
+        (false, _) => t.muted,
+    };
+    let stroke = Stroke::new(1.0_f32, rgba(ink));
+    let box_ = glyph_box(rect);
     let painter = ui.painter();
     match icon {
         WindowIcon::Minimize => {
@@ -648,11 +804,103 @@ mod tests {
         );
     }
 
-    /// **The accent gradient survives on the DIG mark, and only there.**
+    /// **Every window glyph is drawn in the SAME square, on whole pixels** (dig_ecosystem#3007).
     ///
-    /// Without this, the no-mesh assertion above is satisfied by deleting [`gradient_fill`] outright.
+    /// What "cleaner" came to concretely. The glyphs used to be the slot inset by a margin, and the
+    /// slot is 40 x 30 — so the minimise bar was 22 px wide against a 12 px maximise square, and
+    /// the row read as three unrelated marks rather than a set. The box is now square and shared,
+    /// so the four marks are the same size whatever the slot around them becomes.
+    ///
+    /// The snapping half is asserted too, because it is the half a screenshot shows and a colour
+    /// test cannot: a 1 px stroke centred on a half pixel is drawn as two grey rows instead of one
+    /// dark one, which is exactly what a smudged titlebar glyph is.
     #[test]
-    fn the_brand_mark_keeps_the_accent_gradient() {
+    fn every_window_glyph_shares_one_square_pixel_aligned_box() {
+        // Two slots, differing in BOTH parity and size, so a box that merely inherited its slot
+        // would come out different in each and cannot pass by coincidence.
+        for slot in [
+            Rect::from_min_size(Pos2::new(100.0, 7.0), Vec2::new(40.0, 30.0)),
+            Rect::from_min_size(Pos2::new(100.5, 7.5), Vec2::new(41.0, 29.0)),
+        ] {
+            let box_ = glyph_box(slot);
+            assert_eq!(
+                box_.width(),
+                box_.height(),
+                "the glyph box is not square in {slot:?}"
+            );
+            assert_eq!(box_.width(), GLYPH_BOX);
+            assert!(
+                box_.center().x.fract() == 0.0 && box_.center().y.fract() == 0.0,
+                "the glyph box at {box_:?} is centred off the pixel grid, so its strokes blur"
+            );
+            assert!(
+                slot.contains_rect(box_),
+                "the glyph box {box_:?} escaped its slot {slot:?}"
+            );
+        }
+    }
+
+    /// **Close warns before it is pressed, and the other controls do not** (dig_ecosystem#3007).
+    ///
+    /// Closing is the one irreversible thing the row does. Asserted as a DIFFERENCE between the
+    /// hovered close and the hovered minimise rather than as "close paints something": a wash both
+    /// controls share is not a warning, it is a hover state, and a test looking at close alone
+    /// cannot tell those apart.
+    #[test]
+    fn only_close_warns_when_it_is_hovered() {
+        let hovered = |icon| {
+            let ctx = egui::Context::default();
+            let t = super::super::theme::Theme::Light.tokens();
+            let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(40.0, 30.0));
+            let mut output = egui::FullOutput::default();
+            for _ in 0..4 {
+                output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(200.0))),
+                        events: vec![egui::Event::PointerMoved(rect.center())],
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::Area::new(egui::Id::new("glyph-test")).show(ctx, |ui| {
+                            window_control(ui, rect, icon, "Probe", &t);
+                        });
+                    },
+                );
+            }
+            fn fills(shape: &egui::Shape, out: &mut Vec<Color32>) {
+                match shape {
+                    Shape::Rect(rect) => out.push(rect.fill),
+                    Shape::Vec(shapes) => shapes.iter().for_each(|s| fills(s, out)),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            for clipped in &output.shapes {
+                fills(&clipped.shape, &mut found);
+            }
+            found
+        };
+
+        let close = hovered(WindowIcon::Close);
+        let minimize = hovered(WindowIcon::Minimize);
+        assert!(
+            !close.is_empty() && !minimize.is_empty(),
+            "neither control painted a hover wash, so this compares nothing"
+        );
+        assert_ne!(
+            close, minimize,
+            "close and minimize hover identically, so the warning on the irreversible one is absent"
+        );
+    }
+
+    /// **The header draws the brand's OWN mark, not a shape that resembles it**
+    /// (dig_ecosystem#3007).
+    ///
+    /// Asserted as an image, because that is the difference the change is about: a gradient square
+    /// and the real artwork are both "purple ink in a 20 px box", and any test that measured colour
+    /// or extent would pass on the placeholder this replaced.
+    #[test]
+    fn the_brand_mark_draws_the_real_artwork() {
         let shapes = painted(|ui, t| {
             brand_mark(
                 ui,
@@ -660,10 +908,56 @@ mod tests {
                 t,
             );
         });
+        // A TEXTURED mesh specifically. `gradient_fill` also emits a `Shape::Mesh` — on the DEFAULT
+        // texture — so "any mesh" is a property the placeholder had too, and a test asserting it
+        // would have passed unchanged on the square this replaces.
         assert!(
-            shapes.iter().any(|s| matches!(s, Shape::Mesh(_))),
-            "the DIG mark lost its gradient, which is the one place a brand flourish belongs"
+            shapes.iter().any(|s| match s {
+                Shape::Mesh(mesh) => mesh.texture_id != egui::TextureId::default(),
+                _ => false,
+            }),
+            "the mark painted no textured mesh, so it is drawing a stand-in rather than the artwork"
         );
+    }
+
+    /// **The embedded mark is the real 64 px artwork, and it is not blank.**
+    ///
+    /// The control for the test above: an image shape proves the header asked for a texture, and
+    /// this proves the texture it asked for carries a picture. A fully transparent PNG would satisfy
+    /// the drawing test exactly while showing the person nothing at all.
+    #[test]
+    fn the_embedded_mark_decodes_to_visible_artwork() {
+        let (rgba, width, height) = decode_mark().expect("the checked-in DIG Mark did not decode");
+        assert_eq!(
+            (width, height),
+            (64, 64),
+            "the mark is not the 64 px source"
+        );
+        assert_eq!(rgba.len(), 64 * 64 * 4);
+        let opaque = rgba.chunks_exact(4).filter(|px| px[3] > 0).count();
+        assert!(
+            opaque > 64 * 64 / 10,
+            "only {opaque} of {} pixels carry any ink, so the mark is effectively blank",
+            64 * 64
+        );
+    }
+
+    /// **The gradient the mark falls back to still paints something.**
+    ///
+    /// [`brand_mark`]'s fallback cannot be reached from a test — the asset decodes — so the fallback
+    /// is exercised directly rather than left as a branch nobody has ever seen run.
+    #[test]
+    fn the_gradient_fallback_still_paints() {
+        let shapes = painted(|ui, t| {
+            gradient_fill(
+                ui,
+                Rect::from_min_size(Pos2::ZERO, Vec2::splat(20.0)),
+                6.0,
+                rgba(t.dig_purple),
+                rgba(t.dig_magenta),
+            );
+        });
+        assert!(shapes.iter().any(|s| matches!(s, Shape::Mesh(_))));
     }
 
     /// The outline closes and stays inside its rect — a corner that bulged past the edge would show

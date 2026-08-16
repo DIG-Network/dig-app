@@ -1,4 +1,16 @@
-//! The status strip the whole window carries, under the chrome and above every tab.
+//! The status readings the whole window carries — under the SIDEBAR when there is one, and along
+//! the bottom of the window when there is not.
+//!
+//! # Why they left the top of the window (dig_ecosystem#3007)
+//!
+//! They used to run horizontally under the chrome, directly above the page. That put seven ambient
+//! readings between a person and the heading of whatever they had just clicked, and pushed the
+//! content pane down by 36 px on every tab to do it. An ambient readout is something you GLANCE at;
+//! it earns its place by being always visible, not by being first.
+//!
+//! Under the sidebar it is still always visible, still on every tab, and no longer in the reading
+//! path. The axis change is the substance of the move: a column measures its readings against a
+//! 208 px width and a bounded height, where a strip measured them against the window.
 //!
 //! # Why two facts follow the reader everywhere (dig_ecosystem#2358)
 //!
@@ -52,10 +64,13 @@ pub(super) const HEADER_HEIGHT: f32 = 36.0;
 /// CONTROL — every item is a glance-level reading, and the same facts are reachable in full on the
 /// Home tab. The order is therefore the design: whether DIG is running, and whether it has a node,
 /// come first because they explain every other reading on the screen.
-pub(super) fn draw(ui: &mut Ui, at: Rect, t: &Tokens, facts: &PaneFacts) -> f32 {
+pub(super) fn strip(ui: &mut Ui, at: Rect, t: &Tokens, facts: &PaneFacts) -> f32 {
     let bar = Rect::from_min_size(at.left_top(), Vec2::new(at.width(), HEADER_HEIGHT));
     ui.painter().rect_filled(bar, 0, rgba(t.surface));
-    paint::rule(ui, bar, bar.bottom(), t);
+    // The rule sits ABOVE the strip now, because the strip sits along the BOTTOM of a narrow window
+    // rather than under the chrome: a hairline is a separator, and it belongs on the side facing the
+    // content it is separating from.
+    paint::rule(ui, bar, bar.top(), t);
 
     let mut x = bar.left() + space::S4;
     for item in readings(facts) {
@@ -258,6 +273,148 @@ fn reading(
     drawn.right()
 }
 
+/// Draw the readings as a bottom-justified column inside `at` — the sidebar's foot
+/// (dig_ecosystem#3007).
+///
+/// Same readings, same priority order, same honesty rule as [`strip`]; only the axis differs.
+///
+/// # What it does when the column is short
+///
+/// **It drops from the least-explanatory end, exactly as the strip drops from the right, and it
+/// never truncates or shrinks a reading.** The readings are laid out in priority order and the
+/// column keeps the longest PREFIX that fits, so which reading goes when room runs out is a stated
+/// order rather than whatever happened to be last. The two facts that explain every other surface —
+/// whether DIG is running, and whether it has a node — lead that order and are therefore the last
+/// two to go.
+///
+/// The alternative was to scroll the column. It was rejected: a scrollable ambient readout is one a
+/// person has to interact with to trust, and a reading you have to go looking for has lost the only
+/// property that justified putting it on every tab.
+///
+/// Measured against the shipping five-tab sidebar: at the window's opening height every reading
+/// fits, and at [`super::super::shell::SHELL_MIN`] — the shortest the window can be dragged to —
+/// the two raw heights are surrendered and the six diagnostic readings remain. Both are pinned, so
+/// the budget is a stated outcome rather than whatever the arithmetic happens to produce.
+pub(super) fn column(ui: &mut Ui, at: Rect, t: &Tokens, facts: &PaneFacts) {
+    let width = at.width() - space::S3 * 2.0;
+    if width <= 0.0 {
+        return;
+    }
+    let rows: Vec<Row> = readings(facts)
+        .into_iter()
+        .map(|item| Row::measure(ui, t, item, width))
+        .collect();
+
+    let kept = fitting_prefix(&rows, at.height() - space::S3 * 2.0);
+    if kept == 0 {
+        return;
+    }
+    let used = stacked_height(&rows[..kept]);
+
+    let mut y = at.bottom() - space::S3 - used;
+    paint::rule(ui, at, y - space::S3, t);
+    for row in &rows[..kept] {
+        row.draw(ui, egui::Pos2::new(at.left() + space::S3, y), t, width);
+        y += row.height + ROW_GAP;
+    }
+}
+
+/// The gap between two readings in the column.
+///
+/// One step of the 4 px rhythm doubled: the readings are separate facts, and at one step they read
+/// as a single wrapped sentence.
+const ROW_GAP: f32 = space::S2;
+
+/// One reading, measured for the column it is about to be drawn in.
+struct Row {
+    item: Reading,
+    /// How tall the row came out — one line, or two when the badge will not sit beside its label.
+    height: f32,
+    /// Whether the badge goes UNDER the label rather than beside it.
+    stacked: bool,
+    /// The label's own height, which is where a stacked badge starts from.
+    label_height: f32,
+}
+
+impl Row {
+    /// Measure `item` against a column `width` px wide.
+    ///
+    /// A reading whose label and badge will not fit side by side STACKS rather than overflowing or
+    /// being clipped. `Looking for a node` beside `Node` is 3 px inside a 208 px sidebar today,
+    /// which is not a margin anyone should rely on: a re-worded state, a translation, or a wider
+    /// font would push it out, and a clipped badge is a reading a person has to guess at.
+    fn measure(ui: &Ui, t: &Tokens, item: Reading, width: f32) -> Self {
+        let label_height = text_size(ui, t, &item.label, regular(size::XS)).y;
+        let badge = badge_size(ui, t, &item.word);
+        let side_by_side = text_size(ui, t, &item.label, regular(size::XS)).x + space::S2 + badge.x;
+        let stacked = side_by_side > width;
+        let height = match stacked {
+            true => label_height + space::S1 + badge.y,
+            false => badge.y.max(label_height),
+        };
+        Self {
+            item,
+            height,
+            stacked,
+            label_height,
+        }
+    }
+
+    /// Draw the row with its top-left at `at`.
+    fn draw(&self, ui: &mut Ui, at: egui::Pos2, t: &Tokens, width: f32) {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(self.item.label.clone(), regular(size::XS), rgba(t.muted));
+        ui.painter().galley(
+            egui::Pos2::new(at.x, at.y + (self.height - galley.size().y) / 2.0),
+            galley.clone(),
+            egui::Color32::PLACEHOLDER,
+        );
+
+        let badge_at = match self.stacked {
+            true => egui::Pos2::new(at.x, at.y + self.label_height + space::S1),
+            false => {
+                // Right-aligned against the column, so a run of readings shares one right edge and
+                // the eye can scan the VALUES without re-finding them after every label.
+                let badge = badge_size(ui, t, &self.item.word);
+                egui::Pos2::new(at.x + width - badge.x, at.y + (self.height - badge.y) / 2.0)
+            }
+        };
+        // Drawn at its top-left, where the column's arithmetic is: `data::badge` takes a top-left
+        // and measures its own extent from the word, so the column never guesses a width.
+        data::badge(ui, badge_at, t, &self.item.word, self.item.tone);
+    }
+}
+
+/// How many of `rows`, from the front, fit in `room` px of column.
+fn fitting_prefix(rows: &[Row], room: f32) -> usize {
+    let mut kept = 0;
+    while kept < rows.len() && stacked_height(&rows[..=kept]) <= room {
+        kept += 1;
+    }
+    kept
+}
+
+/// How tall `rows` are together, gaps included.
+fn stacked_height(rows: &[Row]) -> f32 {
+    let gaps = rows.len().saturating_sub(1) as f32 * ROW_GAP;
+    rows.iter().map(|row| row.height).sum::<f32>() + gaps
+}
+
+/// How big a badge carrying `word` will be — measured through the same arithmetic
+/// [`data::badge`] uses, so the column and the badge cannot disagree about its extent.
+fn badge_size(ui: &Ui, t: &Tokens, word: &str) -> Vec2 {
+    let text = text_size(ui, t, word, semibold(size::XS));
+    Vec2::new(text.x + space::S3, text.y + space::S1 * 2.0)
+}
+
+/// How big `s` is in `font`.
+fn text_size(ui: &Ui, t: &Tokens, s: &str, font: egui::FontId) -> Vec2 {
+    ui.painter()
+        .layout_no_wrap(s.to_owned(), font, rgba(t.muted))
+        .size()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,7 +452,7 @@ mod tests {
                     egui::Area::new(egui::Id::new("header-test"))
                         .fixed_pos(screen.left_top())
                         .show(ctx, |ui| {
-                            draw(ui, screen, &t, &facts);
+                            strip(ui, screen, &t, &facts);
                         });
                 },
             );
@@ -833,6 +990,238 @@ mod tests {
             "every reading fit at every width, so this test never exercised the drop it exists to \
              pin — the fixture is too narrow to be a worst case"
         );
+    }
+
+    /// Every string the COLUMN painted for `view` in a sidebar-sized rectangle, with its rectangle.
+    fn in_a_column(view: &TrayView, at: Rect) -> Vec<(String, Rect)> {
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let facts = PaneFacts::of_tray(view);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1_000.0, 1_000.0));
+
+        let mut output = egui::FullOutput::default();
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("column-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| column(ui, at, &t, &facts));
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// A node in the middle of everything: syncing, both networks up, both heights known — so every
+    /// reading the column can draw is present rather than a subset that happens to fit.
+    fn a_fully_reporting_node() -> TrayView {
+        use crate::network::{ChainSync, PeerCount};
+        with_peer_peak(
+            on_the_networks(
+                ChainSync::Syncing {
+                    peak_height: 9_140_640,
+                },
+                PeerCount::Known(6),
+                PeerCount::Known(4),
+            ),
+            9_140_656,
+        )
+    }
+
+    /// The room under a five-tab sidebar in a window `height` px tall — the real remaining space,
+    /// computed the way [`super::panes::sidebar`] computes it.
+    fn under_the_tabs(height: f32) -> Rect {
+        let tabs = 5.0 * (36.0 + 2.0) + space::S3;
+        Rect::from_min_max(
+            egui::Pos2::new(0.0, tabs + space::S3),
+            egui::Pos2::new(208.0, height - super::super::CHROME_HEIGHT),
+        )
+    }
+
+    /// **The readings sit at the FOOT of the sidebar, not under the tabs** (dig_ecosystem#3007).
+    ///
+    /// "Justify bottom" is the whole instruction, and it is a claim about geometry that a column
+    /// drawn top-down satisfies in every other respect: same readings, same order, same words. So
+    /// it is asserted as distance from the bottom, against a column with room to spare — in a
+    /// tight column the two layouts coincide and the test would pass on either.
+    #[test]
+    fn the_readings_sit_at_the_bottom_of_the_sidebar() {
+        let at = under_the_tabs(900.0);
+        let laid = in_a_column(&a_fully_reporting_node(), at);
+
+        let lowest = laid
+            .iter()
+            .map(|(_, spot)| spot.bottom())
+            .fold(f32::MIN, f32::max);
+        let highest = laid
+            .iter()
+            .map(|(_, spot)| spot.top())
+            .fold(f32::MAX, f32::min);
+        assert!(
+            at.bottom() - lowest <= space::S4,
+            "the lowest reading ends {} px above the foot of the sidebar, so the column is not \
+             bottom-justified: {laid:?}",
+            at.bottom() - lowest
+        );
+        // The control: the column has genuine slack above it, so "at the bottom" is a choice this
+        // layout made rather than the only place the readings would fit.
+        assert!(
+            highest - at.top() > 200.0,
+            "the fixture column is too tight for bottom-justification to be observable"
+        );
+    }
+
+    /// **Every reading fits at the height the window OPENS at.**
+    ///
+    /// The upper half of the vertical budget. Driven with every reading present, which is the worst
+    /// case: a fixture missing the two heights would fit in half the room and prove nothing.
+    #[test]
+    fn every_reading_fits_under_the_sidebar_at_the_opening_height() {
+        let at = under_the_tabs(super::super::shell::SHELL_HEIGHT);
+        let laid = in_a_column(&a_fully_reporting_node(), at);
+
+        for label in [
+            copy::header::AGENT_LABEL,
+            copy::header::NODE_LABEL,
+            copy::header::CHAIN_LABEL,
+            copy::header::BEHIND_LABEL,
+            crate::network::DIG_PEERS_LABEL,
+            crate::network::CHIA_PEERS_LABEL,
+            copy::header::CHAIN_HEIGHT_LABEL,
+            copy::header::CHIA_PEER_HEIGHT_LABEL,
+        ] {
+            assert!(
+                laid.iter().any(|(said, _)| said == label),
+                "{label} was surrendered at the shortest window a sidebar can appear in: {laid:?}"
+            );
+        }
+        for (said, spot) in &laid {
+            assert!(
+                spot.top() >= at.top() - 0.5 && spot.bottom() <= at.bottom() + 0.5,
+                "{said:?} at {spot:?} is drawn outside the column {at:?}"
+            );
+        }
+    }
+
+    /// **At the shortest window, the two RAW HEIGHTS are what go — the six diagnostic readings
+    /// stay** (dig_ecosystem#3007).
+    ///
+    /// The lower half of the vertical budget, and the decision itself rather than a consequence of
+    /// where the readings happen to sit. Dragged to [`super::super::shell::SHELL_MIN`] the column
+    /// has room for six of the eight, and the order surrenders the two seven-digit heights: they
+    /// are what a person watches when things are WORKING, while everything above them is what they
+    /// need when things are not. It is the same order the horizontal strip drops in, so the two
+    /// layouts cannot come to disagree about which reading matters least.
+    #[test]
+    fn the_shortest_window_surrenders_the_raw_heights_and_keeps_the_diagnostics() {
+        let at = under_the_tabs(super::super::shell::SHELL_MIN);
+        let laid = in_a_column(&a_fully_reporting_node(), at);
+        let said = |label: &str| laid.iter().any(|(said, _)| said == label);
+
+        for kept in [
+            copy::header::AGENT_LABEL,
+            copy::header::NODE_LABEL,
+            copy::header::CHAIN_LABEL,
+            copy::header::BEHIND_LABEL,
+            crate::network::DIG_PEERS_LABEL,
+            crate::network::CHIA_PEERS_LABEL,
+        ] {
+            assert!(
+                said(kept),
+                "{kept} was surrendered before the raw heights were: {laid:?}"
+            );
+        }
+        for gone in [
+            copy::header::CHAIN_HEIGHT_LABEL,
+            copy::header::CHIA_PEER_HEIGHT_LABEL,
+        ] {
+            assert!(
+                !said(gone),
+                "{gone} is drawn in a column with no room for it: {laid:?}"
+            );
+        }
+    }
+
+    /// **Nothing in the column is drawn outside the 208 px sidebar, at any reading's longest word.**
+    ///
+    /// A column is measured against a FIXED width, so overflow here is not a question of how far
+    /// the person dragged the window — it either fits or it is clipped for everyone. Driven with
+    /// the longest word every reading can carry (`Looking for a node`, `Cannot be observed`), which
+    /// is the case that fits by 3 px when it fits at all.
+    #[test]
+    fn no_reading_is_drawn_outside_the_column() {
+        use crate::network::{ChainSync, NoProgress, PeerCount};
+        let mut view = on_the_networks(
+            ChainSync::NoProgress(NoProgress::NoPeers),
+            PeerCount::Unobservable,
+            PeerCount::Unobservable,
+        );
+        view.node_connected = false;
+        let at = under_the_tabs(900.0);
+        let laid = in_a_column(&view, at);
+
+        assert!(!laid.is_empty(), "the column drew nothing at all");
+        for (said, spot) in &laid {
+            assert!(
+                spot.left() >= at.left() - 0.5 && spot.right() <= at.right() + 0.5,
+                "{said:?} at {spot:?} runs outside the {at:?} column"
+            );
+        }
+    }
+
+    /// **A column with room for two readings draws the two that explain the rest — not the last
+    /// two, and not a truncated seven.**
+    ///
+    /// The stated answer to the vertical budget, exercised on a column deliberately shorter than
+    /// anything the window can be dragged to. Unreachable today, and asserted anyway: the rule is
+    /// what makes the layout predictable if a sixth tab or a taller chrome ever eats the room, and
+    /// a drop order nobody has ever run is a drop order that drops the wrong thing.
+    #[test]
+    fn a_column_too_short_for_everything_keeps_the_readings_that_explain_the_rest() {
+        // Room for two rows once the column's own padding is taken off, and no more.
+        let tall_enough_for_two = 100.0;
+        let at = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(208.0, tall_enough_for_two));
+        let laid = in_a_column(&a_fully_reporting_node(), at);
+
+        for kept in [copy::header::AGENT_LABEL, copy::header::NODE_LABEL] {
+            assert!(
+                laid.iter().any(|(said, _)| said == kept),
+                "{kept} is one of the two readings that explain the window and it was dropped \
+                 first: {laid:?}"
+            );
+        }
+        assert!(
+            !laid
+                .iter()
+                .any(|(said, _)| said == copy::header::CHIA_PEER_HEIGHT_LABEL),
+            "everything fitted, so this fixture never exercised the drop it exists to pin: {laid:?}"
+        );
+        for (said, spot) in &laid {
+            assert!(
+                spot.bottom() <= at.bottom() + 0.5,
+                "{said:?} was drawn below the column it was told to fit in: {spot:?}"
+            );
+        }
     }
 
     /// **Every severity a reading can carry maps to a tone**, so a new one cannot silently inherit

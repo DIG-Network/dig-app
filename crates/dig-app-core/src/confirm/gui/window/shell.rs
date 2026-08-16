@@ -81,13 +81,13 @@ use super::{
     install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, Job, Outcome, Overstay,
     PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE,
 };
-use crate::tray_menu::TrayAction;
+use crate::tray_menu::{MenuRow, TrayAction};
 use crate::window_model::{self, TabId, WindowModel};
 
 /// The shell's opening size. Wide enough for the content column this window is designed around.
 const SHELL_WIDTH: f32 = 960.0;
 /// The shell's opening height.
-const SHELL_HEIGHT: f32 = 640.0;
+pub(super) const SHELL_HEIGHT: f32 = 640.0;
 /// The smallest the shell may be dragged to, on both axes.
 ///
 /// Square rather than the prompt's wide-and-short minimum: the shell is a browsable window, and a
@@ -445,25 +445,14 @@ pub(super) fn watched_while_painting<T>(
 /// Without this eframe supplies its own placeholder — a letter "e" — which is what the window
 /// actually showed in the corner and in the taskbar (dig_ecosystem#2340). The 64px source is the
 /// same file the tray uses, so the two surfaces cannot drift into showing different marks.
-const WINDOW_MARK: &[u8] = include_bytes!("../../../../assets/mark-64.png");
-
-/// Decode [`WINDOW_MARK`] into the RGBA an icon wants, or `None` if it will not decode.
+/// Decode the mark into the RGBA an icon wants, or `None` if it will not decode.
 ///
-/// **Fallible on purpose, exactly as the tray's decode is.** A corrupt asset should cost the window
-/// its picture and nothing else — never the user's whole consent surface — so every failure here
-/// returns `None` and the window opens with the toolkit default instead of not opening.
+/// The bytes and the decode both live in [`paint`] now (dig_ecosystem#3007), because the header
+/// draws the same mark and two `include_bytes!` of one file is how one product comes to ship two
+/// logos. The fallibility is unchanged and deliberate: a corrupt asset costs the window its picture
+/// and nothing else — never the user's whole consent surface.
 fn window_icon() -> Option<egui::IconData> {
-    let mut reader = png::Decoder::new(WINDOW_MARK).read_info().ok()?;
-    let info = reader.info();
-    // Only the one shape the checked-in asset has. A PNG in another colour type or bit depth would
-    // need resampling, and silently mis-decoding a brand mark is worse than showing no mark.
-    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
-        return None;
-    }
-    let (width, height) = (info.width, info.height);
-    let mut rgba = vec![0; reader.output_buffer_size()];
-    let frame = reader.next_frame(&mut rgba).ok()?;
-    rgba.truncate(frame.buffer_size());
+    let (rgba, width, height) = paint::decode_mark()?;
     Some(egui::IconData {
         rgba,
         width,
@@ -1011,18 +1000,14 @@ impl ShellApp {
             .show(ctx, |ui| {
                 ui.set_clip_rect(screen);
                 ui.painter().rect_filled(screen, 0, rgba(t.bg));
-                self.chrome(ui, screen, t, prompt_is_up);
-                // The strip is drawn BEFORE the body and its height is subtracted from it, rather
-                // than painted over the top: a band laid across a pane that still believes it owns
-                // the full rectangle hides the pane's first card at every width.
-                let under_chrome = Rect::from_min_max(
+                self.chrome(ui, screen, t, prompt_is_up, &model);
+                // Everything under the chrome is the body now. The status readings used to take a
+                // band off the top of it; they moved into the navigation column
+                // (dig_ecosystem#3007), so the panes own the full height again and the layout of
+                // the readings is decided where the navigation is decided.
+                let body = Rect::from_min_max(
                     egui::Pos2::new(screen.left(), screen.top() + CHROME_HEIGHT),
                     screen.right_bottom(),
-                );
-                let strip = super::header::draw(ui, under_chrome, t, &facts);
-                let body = Rect::from_min_max(
-                    egui::Pos2::new(under_chrome.left(), under_chrome.top() + strip),
-                    under_chrome.right_bottom(),
                 );
                 clicked = panes::draw(ui, body, t, &model, &facts, self.selected, !prompt_is_up);
             });
@@ -1093,7 +1078,14 @@ impl ShellApp {
     ///
     /// So the three controls are drawn, and Maximize RESTORES: a control that can only go one way is
     /// the same trap in a smaller shape.
-    fn chrome(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens, prompt_is_up: bool) {
+    fn chrome(
+        &mut self,
+        ui: &mut egui::Ui,
+        full: Rect,
+        t: &Tokens,
+        prompt_is_up: bool,
+        model: &WindowModel,
+    ) {
         let bar = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), CHROME_HEIGHT));
         paint::brand_mark(
             ui,
@@ -1120,7 +1112,21 @@ impl ShellApp {
         }
 
         let maximized = window_is_maximized(ui.ctx());
-        let slots = ChromeSlots::lay_out(bar);
+        let unlock = unlock_offer(model).map(|name| (name, paint::chrome_word_width(ui, name, t)));
+        let slots = ChromeSlots::lay_out(bar, unlock.map(|(_, width)| width));
+
+        // The way back IN, from wherever the person hit the wall (dig_ecosystem#3007). A sealed
+        // account blocks work on Wallet and Content as surely as it does on Account, and until now
+        // the remedy lived on one tab. Present only while it can do something, so the chrome never
+        // carries a control that answers a question nobody asked.
+        //
+        // It is a control, not a gate: nothing is scrimmed, no pane is covered, and reading content
+        // stays reachable while it sits there unpressed (`professional-ui` HARD RULE 1).
+        if let (Some((name, _)), Some(slot)) = (unlock, slots.unlock) {
+            if paint::chrome_word_control(ui, slot, name, t).clicked() {
+                (self.act)(TrayAction::Unlock);
+            }
+        }
 
         // Glyphs, each carrying the same word it used to say — see [`paint::window_control`] for why
         // the name survives the switch to icons (dig_ecosystem#2997).
@@ -1356,6 +1362,8 @@ struct ChromeSlots {
     maximize: Rect,
     /// Close, rightmost, where every platform puts it.
     close: Rect,
+    /// The unlock offer, when the model is making one — left of the three window controls.
+    unlock: Option<Rect>,
     /// Everything to the left of the controls: drag here to move the window.
     drag: Rect,
 }
@@ -1372,29 +1380,38 @@ impl ChromeSlots {
     /// TALLER but NARROWER than the `Minimize` text control it replaces (about 72 by 27). See
     /// [`CONTROL_WIDTH`] for why that trade was taken and why it still clears the accessibility
     /// floor.
-    fn lay_out(bar: Rect) -> Self {
+    /// `unlock` is the width the offer's word measured to, or `None` when there is no offer. The
+    /// WIDTH rather than the word, because that is the only thing the geometry depends on and it
+    /// keeps this a pure function a headless test can hold to (dig_ecosystem#3007).
+    fn lay_out(bar: Rect, unlock: Option<f32>) -> Self {
         let mut right = bar.right() - space::S3;
-        let mut slot = || {
+        let mut slot = |width: f32| {
             let rect = Rect::from_min_size(
-                egui::Pos2::new(right - CONTROL_WIDTH, bar.top() + CONTROL_TOP),
-                Vec2::new(CONTROL_WIDTH, CONTROL_HEIGHT),
+                egui::Pos2::new(right - width, bar.top() + CONTROL_TOP),
+                Vec2::new(width, CONTROL_HEIGHT),
             );
             right = rect.left() - space::S1;
             rect
         };
-        let close = slot();
-        let maximize = slot();
-        let minimize = slot();
+        let close = slot(CONTROL_WIDTH);
+        let maximize = slot(CONTROL_WIDTH);
+        let minimize = slot(CONTROL_WIDTH);
+        // Left of the window controls, and separated from them by a full step: the three glyphs are
+        // verbs about the WINDOW and this is a verb about the account, so the gap is what stops a
+        // person reading it as a fourth window control.
+        let unlock = unlock.map(|width| slot(width + space::S2 * 2.0));
+        let leftmost = unlock.unwrap_or(minimize);
         Self {
             minimize,
             maximize,
             close,
+            unlock,
             // `max` rather than a bare subtraction: on a window narrow enough that the controls fill
             // the bar the strip collapses to nothing, which is a window that cannot be dragged by
             // its header. That is recoverable; a strip laid OVER the controls is not.
             drag: Rect::from_min_max(
                 bar.left_top(),
-                egui::Pos2::new((minimize.left() - space::S2).max(bar.left()), bar.bottom()),
+                egui::Pos2::new((leftmost.left() - space::S2).max(bar.left()), bar.bottom()),
             ),
         }
     }
@@ -1408,6 +1425,37 @@ impl ChromeSlots {
             ("close", self.close),
         ]
     }
+}
+
+/// The word the header's unlock control should say, or `None` when it should not be there
+/// (dig_ecosystem#3007).
+///
+/// # Why the word is quoted from the model rather than written here
+///
+/// The row that opens an account differs by state — `Unlock…` for a sealed account, something else
+/// entirely for one that has never had a password — and writing either literally in the chrome is
+/// how dig_ecosystem#2059 happened: a surface naming a remedy the model does not offer. Quoting the
+/// model's own enabled `Unlock` row means the header cannot offer a verb the panes do not, cannot
+/// word it differently from the pane that also offers it, and disappears the moment the account is
+/// open without this function knowing anything about accounts.
+///
+/// A DISABLED row is declined. The chrome has no room to say why a control cannot be used, and a
+/// greyed word in a titlebar is a dead end with no explanation beside it — which is the trap
+/// `professional-ui` forbids. The pane keeps the disabled row, with its reason.
+fn unlock_offer(model: &WindowModel) -> Option<&str> {
+    model
+        .tabs
+        .iter()
+        .flat_map(|tab| &tab.sections)
+        .flat_map(|section| &section.rows)
+        .find_map(|row| match row {
+            MenuRow::Action {
+                action: TrayAction::Unlock,
+                label,
+                enabled: true,
+            } => Some(label.as_str()),
+            _ => None,
+        })
 }
 
 /// The maximise control's glyph AND its name, which must always describe the same action.
@@ -3653,7 +3701,8 @@ mod tests {
         );
         assert_eq!(
             bar, BAR_HEIGHT,
-            "the bar no longer opens at a bar's height, so holding it to its opening height proves              nothing about what it is"
+            "the bar no longer opens at a bar's height, so holding it to its opening height proves \
+             nothing about what it is"
         );
 
         let dialog = height_after_a_few_frames(Shelf::queue_live_prompt);
@@ -4353,6 +4402,130 @@ mod tests {
         );
     }
 
+    /// A view whose account is sealed, so the model offers `Unlock…` everywhere it offers anything.
+    fn locked_view() -> crate::tray_menu::TrayView {
+        crate::tray_menu::TrayView {
+            account: Some(crate::tray_menu::AccountState::Locked),
+            ..busy_view()
+        }
+    }
+
+    /// **A sealed account can be opened from the HEADER, on whatever tab the person is standing on**
+    /// (dig_ecosystem#3007).
+    ///
+    /// The remedy used to live one tab away from where a person hits the wall: a sealed account
+    /// stops work on Wallet and Content just as surely as on Account, and only Account offered the
+    /// way back in.
+    ///
+    /// Driven as a real click on the control the chrome actually drew, resolved by the same
+    /// accessible NAME a screen reader announces — so this also pins the #2997 name contract onto
+    /// the new control. The pane's selection is left on the FIRST tab, which is not Account, so the
+    /// dispatch cannot be coming from the pane.
+    #[test]
+    fn the_header_opens_a_sealed_account_from_any_tab() {
+        let mut shelf = Shelf::showing(locked_view());
+        assert_ne!(
+            shelf.app.selected,
+            TabId::Account,
+            "the fixture is standing ON the Account tab, so reaching Unlock proves nothing"
+        );
+
+        let at = shelf.control_at(&unlock_name());
+        shelf.click(at);
+        assert_eq!(
+            shelf.dispatched(),
+            vec![TrayAction::Unlock],
+            "the header's unlock control did not run the unlock"
+        );
+    }
+
+    /// The word the model gives the unlock row, which the chrome quotes verbatim.
+    ///
+    /// Read from the model rather than written here for the same reason [`unlock_offer`] quotes it:
+    /// a test carrying its own copy of a label is a second source of truth for the copy, and would
+    /// keep passing while the header and the panes drifted apart.
+    fn unlock_name() -> String {
+        let model = window_model::build(&locked_view());
+        unlock_offer(&model)
+            .expect("a sealed account offers no way back in")
+            .to_owned()
+    }
+
+    /// **The header offers nothing when there is nothing to offer.**
+    ///
+    /// The control for the test above, and the thing that keeps the chrome honest: a permanent
+    /// `Unlock…` in the titlebar of an open account is a control that either does nothing or
+    /// re-locks by surprise. The account state is the ONLY difference between the two fixtures.
+    #[test]
+    fn the_header_carries_no_unlock_when_the_account_is_open() {
+        // Sequenced rather than held side by side: a `Shelf` takes the consent-surface exclusion
+        // for its whole life and the mutex is not reentrant.
+        let offered = |view| Shelf::showing(view).control_rect(&unlock_name()).is_some();
+        assert!(
+            !offered(busy_view()),
+            "an open account was still offered an unlock control in the chrome"
+        );
+        // The control: the same harness DOES draw it for a sealed account, so this is not passing
+        // because the harness cannot see chrome controls at all.
+        assert!(offered(locked_view()));
+    }
+
+    /// **The unlock control never becomes a gate.**
+    ///
+    /// `professional-ui` HARD RULE 1, asserted rather than asserted-about: with a sealed account and
+    /// no prompt up, every tab is still reachable and the pane still draws — nothing is scrimmed,
+    /// nothing is covered, and reading DIG content does not require an account.
+    #[test]
+    fn a_sealed_account_does_not_trap_the_window() {
+        let mut shelf = Shelf::showing(locked_view());
+        let model = window_model::build(&locked_view());
+        let words = shelf.words();
+        for tab in &model.tabs {
+            assert!(
+                shelf
+                    .ctx
+                    .read_response(egui::Id::new(window_model::tab_element_id(tab.id)))
+                    .is_some(),
+                "{:?} is unreachable while the account is sealed: {words:?}",
+                tab.id
+            );
+        }
+        assert!(
+            shelf.control_rect("Close").is_some(),
+            "the window's own controls stopped working behind the unlock offer"
+        );
+    }
+
+    /// **The drag strip clears the unlock control too.**
+    ///
+    /// The strip is derived from the LEFTMOST control, and the unlock offer is now sometimes that
+    /// control. A strip laid over it is a control that cannot be pressed — the same defect as a
+    /// strip over Close, on the one control that opens a person's account.
+    #[test]
+    fn the_drag_strip_clears_the_unlock_control() {
+        let bar = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_WIDTH, CHROME_HEIGHT));
+        let slots = ChromeSlots::lay_out(bar, Some(64.0));
+        let unlock = slots
+            .unlock
+            .expect("an offer was made, so a slot was measured");
+
+        assert!(bar.contains_rect(unlock), "the unlock slot left the bar");
+        assert!(
+            !slots.drag.intersects(unlock),
+            "the drag strip {:?} covers the unlock control {unlock:?}",
+            slots.drag
+        );
+        for (name, rect) in slots.controls() {
+            assert!(
+                !rect.intersects(unlock),
+                "the unlock control overlaps the {name} control"
+            );
+        }
+        // And the strip is still draggable: a header whose whole width became controls is a window
+        // that cannot be moved.
+        assert!(slots.drag.width() > 0.0);
+    }
+
     /// **Each slot is disjoint from the others and the drag strip clears them all.**
     ///
     /// Derived from the leftmost control rather than declared, so it cannot come to overlap one. On
@@ -4361,7 +4534,7 @@ mod tests {
     #[test]
     fn every_chrome_slot_is_disjoint_and_the_drag_strip_clears_them_all() {
         let bar = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(SHELL_MIN, CHROME_HEIGHT));
-        let slots = ChromeSlots::lay_out(bar);
+        let slots = ChromeSlots::lay_out(bar, None);
 
         let controls = slots.controls();
         for (i, (name, rect)) in controls.iter().enumerate() {
