@@ -378,6 +378,28 @@ dead and never as waiting (`account::profile_mint::MintLiveness`). The asymmetry
 wrongly called dead leads the user to mint again, after which the original confirms and they have paid
 twice and own an orphan DID.
 
+**The creation surface MUST collect the profile's content BEFORE the ceremony starts, and the mint
+MUST seed the store with it.** The store singleton is launched at the seed's root
+(`dig_account::mint::ProfileSeed`), so content collected before the mint is committed by the store's
+FIRST generation; collecting it afterwards costs a second chain write for the same result. The rules:
+
+- Every field MUST be optional. An empty seed is a valid whole profile, and an implementation MUST
+  NOT require any value in order to mint.
+- An empty seed MUST still be the schema-stamped profile (`Profile::with_schema_v2`), never a
+  literally empty tree — an empty tree's root is all zeros, which `dig-social-profile` refuses as an
+  anchor because a bare five-byte body verifies against it.
+- A collected value MUST reach the slot the schema gives it, through ONE field-to-slot mapping shared
+  with the editor (`profile_edit::field::ProfileField::slot`). In particular an image the person
+  chooses is a data URL and MUST be written to the INLINE slots `0x0020`/`0x0021`, never to the
+  `dig://` reference slots `0x0003`/`0x0004`.
+- Every value MUST be validated with the editor's own rules BEFORE the ceremony begins — the
+  canonical bech32m decode for a payment address, the accepted data-URL shape for an image, and the
+  per-slot and whole-body size ceilings. At mint time a refused value is money already committed.
+- The seed is a pure function of its slots and MUST remain so, since a resumed mint rebuilds the same
+  commitment from it without having journalled a root. An implementation that resumes a ceremony
+  ACROSS A RESTART MUST persist the collected seed beside the mint journal; one that does not resume
+  across a restart MUST say so to the person rather than rebuild from an empty form.
+
 **No API may return a DID it has not seen confirmed.** A create entry point MUST return what was
 reserved — the profile index and the DID coin id this host computed — and MUST NOT return, print or
 otherwise report a `did:chia:` string before an on-chain confirmation

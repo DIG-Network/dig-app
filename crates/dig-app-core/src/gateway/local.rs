@@ -31,17 +31,13 @@ pub struct ProfileSummary {
     pub active: bool,
 }
 
-/// What a person asked their new profile to CONTAIN — the only part of a profile a caller supplies.
+/// What a person asked their new profile to CONTAIN, re-exported from where the wizard builds it.
 ///
-/// A profile's identity is derived on chain; everything a user can choose about it is content, and
-/// this is that content. It is deliberately not a `&str` name: the seed's commitment root is a pure
-/// function of its slots, so naming them here is what lets a resumed mint rebuild the same
-/// commitment without having journalled it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProfileSeedRequest {
-    /// The display name for the new profile, when the person gave one. Minting does not require it.
-    pub display_name: Option<String>,
-}
+/// It used to be declared here holding a display name and nothing else, which is why every other
+/// field a person might want had to wait for an edit — and a second chain write — after the mint
+/// confirmed. It now names the editor's own fields ([`crate::profile_edit::seed`]), so the CLI, the
+/// wizard and the editor agree about where a value is stored.
+pub use crate::profile_edit::seed::ProfileSeedRequest;
 
 /// A profile mint that has been STARTED. **It is not a profile, and it has no DID.**
 ///
@@ -166,9 +162,10 @@ fn handle_profiles(
             ))
         }
         ProfilesAction::Create { name } => {
-            let started = identity.begin_profile_creation(ProfileSeedRequest {
-                display_name: Some(name.clone()),
-            })?;
+            let started = identity.begin_profile_creation(
+                ProfileSeedRequest::new()
+                    .with(crate::profile_edit::ProfileField::DisplayName, name.clone()),
+            )?;
             // Deliberately returns immediately, and deliberately says no DID. Blocking here would
             // hold a CLI for the five to ten minutes a mint takes, and printing a DID would print
             // one nothing has confirmed.
@@ -589,8 +586,8 @@ mod tests {
             "what it CAN report is the coin id this host computed"
         );
         assert_eq!(
-            identity.requested.borrow().as_ref().unwrap().display_name,
-            Some("carol".to_owned()),
+            identity.requested.borrow().as_ref().unwrap().display_name(),
+            Some("carol"),
             "the name the person typed is seed content, and must actually reach the mint"
         );
     }

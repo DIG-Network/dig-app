@@ -31,10 +31,12 @@ use super::data::{self, Tone, Value};
 use super::facts::PaneFacts;
 use super::flow::Flow;
 use super::identity;
+use super::profile_form::{self, Form, Scope};
 use super::state::{self, PaneState};
 use super::text;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
+use crate::profile_edit::{seed, ProfileDraft, ProfileSeedRequest};
 use crate::profiles::{ProfileCreation, ProfileRow, ProfilesReading};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
@@ -386,7 +388,6 @@ fn create_panel(
     creation: ProfileCreation,
     verbs: &ProfileVerbs,
 ) -> Option<TrayAction> {
-    let live = flow.live();
     let sentence = match creation {
         // Nobody has asked the node yet, so the panel names the READ rather than an outcome. Drawing
         // a blocked cause here would tell a person with a stopped node that nothing is missing from
@@ -405,14 +406,99 @@ fn create_panel(
             card::panel(ui, at, t, Some(copy::profiles::CREATE_PANEL), |inner| {
                 inner.place(|ui, at| (text::body(ui, at, t, &sentence), ()));
                 if !verbs.create.is_empty() {
-                    inner.gap(space::S3);
-                    pressed = inner.place(|ui, at| action::buttons(ui, at, t, live, &verbs.create));
+                    pressed = wizard(inner, t, &verbs.create);
                 }
             }),
             (),
         )
     });
     pressed
+}
+
+/// The creation wizard: what the new profile will HOLD, collected before anything is spent.
+///
+/// # Why the form is here rather than after the mint
+///
+/// The store singleton is launched at the seed's root, so whatever this collects is committed by
+/// the store's very first generation (dig_ecosystem#3038). Filling the same boxes in after the mint
+/// confirms is a second chain write for the same result, which the person pays for.
+///
+/// Drawn only when the model built a create row, so the form never appears on a machine that could
+/// not honour it — the offer is withheld by the MODEL, exactly as the control is.
+fn wizard(flow: &mut Flow, t: &Tokens, create: &[Action<TrayAction>]) -> Option<TrayAction> {
+    let live = flow.live();
+    let mut form = flow.place(|ui, _| (0.0, load_wizard(ui)));
+    form.collect_a_finished_choice();
+
+    flow.gap(space::S3);
+    flow.place(|ui, at| (text::body(ui, at, t, copy::profiles::SEED_INVITATION), ()));
+    flow.gap(space::S3);
+    profile_form::draw_fields(flow, t, &mut form, WIZARD_SCOPE);
+    flow.gap(space::S3);
+    flow.place(|ui, at| {
+        (
+            text::caption(ui, at, t, copy::profiles::SEED_SAVES_A_WRITE),
+            (),
+        )
+    });
+
+    // An empty form is allowed to mint; a form with something WRONG in it is not, because at mint
+    // time a refused value is money already committed.
+    let ready = seed::is_mintable(&form.draft);
+    if !ready {
+        flow.gap(space::S2);
+        flow.place(|ui, at| {
+            (
+                text::caption(ui, at, t, copy::profiles::SEED_HAS_A_PROBLEM),
+                (),
+            )
+        });
+    }
+
+    flow.gap(space::S3);
+    let offered: Vec<Action<TrayAction>> = create
+        .iter()
+        .map(|verb| Action {
+            // The label is the model's, verbatim. What this panel decides is only whether the
+            // control is pressable right now.
+            enabled: verb.enabled && ready,
+            ..verb.clone()
+        })
+        .collect();
+    let pressed = flow.place(|ui, at| action::buttons(ui, at, t, live, &offered));
+
+    // Handed over BEFORE the verb is reported, because reporting it is what starts the ceremony:
+    // a mint that read the holder first would seed the store from the previous form.
+    if pressed.is_some() {
+        if let Some(request) = ProfileSeedRequest::of_draft(&form.draft) {
+            request.collect();
+        }
+    }
+    flow.place(|ui, _| (0.0, store_wizard(&form, ui)));
+    pressed
+}
+
+/// The element-id namespace the wizard's inputs live in — distinct from the editor's, which may be
+/// drawn on the same tab.
+const WIZARD_SCOPE: Scope = Scope("dig-window-profile-create");
+
+/// The id the wizard's form is kept under, for the life of the window.
+fn wizard_id() -> egui::Id {
+    egui::Id::new("dig-profile-create-session")
+}
+
+/// The wizard's form as it stands, or an empty one the first time it is drawn.
+///
+/// Unlike the editor's, this form is never rebuilt from underneath: there is no profile to re-read,
+/// so anything typed is the only copy of it and dropping it would lose a person's work mid-form.
+fn load_wizard(ui: &egui::Ui) -> Form {
+    ui.data(|d| d.get_temp::<Form>(wizard_id()))
+        .unwrap_or_else(|| Form::over(ProfileDraft::empty()))
+}
+
+/// Keep the wizard's form for the next frame.
+fn store_wizard(form: &Form, ui: &egui::Ui) {
+    ui.data_mut(|d| d.insert_temp(wizard_id(), form.clone()));
 }
 
 #[cfg(test)]
@@ -856,6 +942,80 @@ mod tests {
                 "a node that CAN mint is told {blocked:?} is missing: {painted}"
             );
         }
+    }
+
+    /// **The wizard collects the new profile's content, and only where a mint could honour it.**
+    ///
+    /// The point of the form is that the store singleton launches at the seed's root, so anything
+    /// collected here is committed by the store's first generation instead of costing a second
+    /// chain write. A form drawn on a node that cannot mint would invite somebody to type a
+    /// biography into a machine that has nowhere to put it, so the withheld arm is the control —
+    /// without it, an unconditional form passes this test.
+    #[test]
+    fn the_wizard_collects_the_profiles_content_where_a_mint_is_possible_and_nowhere_else() {
+        let capable = TrayView {
+            profile_creation: ProfileCreation::Possible,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let painted = card_says(&capable, 960.0);
+
+        for field in crate::profile_edit::ProfileField::ALL {
+            assert!(
+                painted.contains(field.label()),
+                "the wizard collects nothing for {field:?}, so it can only be filled in after the                  mint -- a second chain write: {painted}"
+            );
+        }
+        assert!(
+            painted.contains(copy::profiles::SEED_INVITATION),
+            "the form never says every box is optional, so it reads as a set of requirements:              {painted}"
+        );
+        assert!(
+            painted.contains(copy::profiles::SEED_SAVES_A_WRITE),
+            "nothing says why filling this in now is worth doing: {painted}"
+        );
+
+        // The control: a node nobody has spoken to. It answers `blocked() == None` exactly as
+        // `Possible` does, so a form gated on anything but the ARM is drawn here too.
+        let unmeasured = TrayView {
+            profile_creation: ProfileCreation::Unknown,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let quiet = card_says(&unmeasured, 960.0);
+        assert!(
+            !quiet.contains(copy::profiles::SEED_INVITATION),
+            "a node nobody has measured invited somebody to fill in a profile it may not be able              to mint: {quiet}"
+        );
+    }
+
+    /// **A value that could not be published stops the creation before the money moves.**
+    ///
+    /// At mint time a refused value is money already committed and a profile born holding a
+    /// filename, so the gate is the wizard's, not the ceremony's. Pinned from both sides against
+    /// the same field: an empty form -- the person who wants only a DID -- must remain mintable,
+    /// which is the half a `is_committable`-style gate silently breaks.
+    #[test]
+    fn a_wrong_value_blocks_the_creation_while_an_empty_form_does_not() {
+        use crate::profile_edit::{seed, ProfileDraft, ProfileField};
+
+        let empty = ProfileDraft::empty();
+        assert!(
+            seed::is_mintable(&empty),
+            "a person who wants only a DID cannot create one"
+        );
+
+        let mut mistyped = ProfileDraft::empty();
+        mistyped.set(ProfileField::XchAddress, "xch1notarealaddress");
+        assert!(
+            !seed::is_mintable(&mistyped),
+            "a mistyped payment address would have been minted into the profile"
+        );
+
+        let mut pictured = ProfileDraft::empty();
+        pictured.set(ProfileField::Avatar, "me.png");
+        assert!(
+            !seed::is_mintable(&pictured),
+            "a filename would have been published where every client looks for a picture"
+        );
     }
 
     /// **A card that cannot honour the offer draws no control — for a MEASURED blocker and for an

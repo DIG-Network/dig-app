@@ -4303,10 +4303,11 @@ mod tray {
             let door =
                 ProfileMint::for_session(residency.profiles(), &residency, &chain, &publisher);
 
+            let (seed, label) = profile_seed();
             let outcome = create_profile(
                 &door,
-                &profile_seed(),
-                None,
+                &seed,
+                label,
                 Watch::default(),
                 &mut || std::thread::sleep(CREATION_POLL_INTERVAL),
                 &mut |step| {
@@ -4327,14 +4328,22 @@ mod tray {
     #[cfg(feature = "tray")]
     const CREATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// The seed the first profile is created from.
+    /// What the creation wizard collected, and the label the profile is filed under.
     ///
-    /// Deliberately empty: nothing on this path has asked the person for a display name or a bio,
-    /// and inventing one would put words in their profile they never typed. The profile's fields are
-    /// editable afterwards; a fabricated identity is not undoable in the same way.
+    /// Nothing is invented here. An empty answer is the honest one for a person who filled nothing
+    /// in, and it is a whole profile — the seed is still schema-stamped, so the store launches at a
+    /// real root rather than at an all-zero one.
+    ///
+    /// The seed goes into the store LAUNCH, so whatever the wizard collected is committed by the
+    /// store's first generation and costs no second chain write (dig_ecosystem#3038).
     #[cfg(feature = "tray")]
-    fn profile_seed() -> dig_app_core::account::profile_creation::Seed {
-        dig_app_core::account::profile_creation::Seed::new()
+    fn profile_seed() -> (
+        dig_app_core::account::profile_creation::Seed,
+        Option<String>,
+    ) {
+        let collected = dig_app_core::profile_edit::ProfileSeedRequest::collected();
+        let label = collected.display_name().map(str::to_owned);
+        (collected.to_seed(), label)
     }
 
     /// Said when an approved creation could not START — nothing was pushed and nothing was spent.

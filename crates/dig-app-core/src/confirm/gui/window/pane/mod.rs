@@ -90,6 +90,7 @@ pub(crate) mod home;
 pub(crate) mod identity;
 pub(crate) mod image_pick;
 pub(crate) mod profile_edit;
+pub(crate) mod profile_form;
 pub(crate) mod profiles;
 pub(crate) mod select;
 pub(crate) mod selectable;

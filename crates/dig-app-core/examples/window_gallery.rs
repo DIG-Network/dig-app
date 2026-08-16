@@ -297,7 +297,12 @@ https://example.org/notes"
     Some(offer)
 }
 
-fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> TrayView {
+fn view_for(
+    account: AccountState,
+    second_factor: bool,
+    profiles: Profiles,
+    can_create: bool,
+) -> TrayView {
     let sealed = !matches!(account, AccountState::Unlocked { .. });
     TrayView {
         // Set by `--profile-edit`, which installs the matching service; left unmeasured otherwise,
@@ -331,7 +336,10 @@ fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> T
         // in this gallery would show a *still checking* card that no build any user runs can
         // produce: a picture that contradicts the product, which is the one thing a gallery must
         // never do.
-        profile_creation: ProfileCreation::of(MintAvailability::NoChainTransport),
+        profile_creation: match can_create {
+            true => ProfileCreation::Possible,
+            false => ProfileCreation::of(MintAvailability::NoChainTransport),
+        },
         // A fixture takes no reading (dig_ecosystem#2398).
         mint_chain: None,
         window_host: WindowHost::Available,
@@ -644,6 +652,13 @@ fn main() {
     // it is the case the design brief singles out, and the one an invented disabled button would
     // have hidden.
     let second_factor = all.iter().any(|argument| argument == "--second-factor");
+    // Whether the node this fixture stands for can complete a whole-profile mint
+    // (dig_ecosystem#3038). Off by default, because a gallery host has no chain transport and the
+    // capture must not imply one; ON is the state a live capable node reaches, and it is the only
+    // state in which the creation wizard's form is drawn at all.
+    let can_create = all
+        .iter()
+        .any(|argument| argument == "--can-create-profile");
     // `--profiles X` takes a value, so it is read from the FULL argument list by position after the
     // flag rather than from the positionals — which the filter above has already had it removed
     // from, along with its value.
@@ -696,7 +711,7 @@ fn main() {
     };
 
     let view = Arc::new(move || {
-        let mut fixture = view_for(account.clone(), second_factor, profiles);
+        let mut fixture = view_for(account.clone(), second_factor, profiles, can_create);
         // Applied over the fixture rather than threaded through `view_for`, so every other axis of
         // the gallery keeps the signature it had.
         fixture.profile_editing = editing;
@@ -831,6 +846,7 @@ mod tests {
             AccountState::Unlocked { recoverable: true },
             false,
             Profiles::None,
+            false,
         );
         let live = with_live(base.clone(), &readings());
 
@@ -882,6 +898,7 @@ mod tests {
             AccountState::Unlocked { recoverable: true },
             false,
             Profiles::None,
+            false,
         );
         assert!(
             fixture.node.contains("1 store(s) hosted"),
