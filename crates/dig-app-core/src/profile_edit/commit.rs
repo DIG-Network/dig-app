@@ -194,6 +194,17 @@ impl ProfileEditError {
 /// Small on purpose: everything it takes and returns is a plain owned value, so no chia type crosses
 /// into the editor and a test can implement the whole thing in a dozen lines.
 pub trait ProfileEditSeam: Send + Sync {
+    /// The store this profile's content lives in, lowercase 64-hex.
+    ///
+    /// # Why this is its own method and not read off a snapshot
+    ///
+    /// The store is decided when the seam is built — it is the anchor's launcher id — so answering
+    /// costs nothing and touches no chain. Taking it from [`read`](Self::read) instead would make
+    /// every caller that merely needs to NAME the store perform a node round trip, and the caller
+    /// that needs it is [`EditService::save`](super::service::EditService::save), which runs on the
+    /// thread that paints. That is the freeze dig-app 12.6.0 was cut to fix.
+    fn store_id(&self) -> String;
+
     /// Read the active profile as the chain currently publishes it.
     fn read(&self) -> Result<ProfileSnapshot, ProfileEditError>;
 
@@ -420,6 +431,9 @@ pub(crate) mod tests_support {
     pub(crate) struct NeverSeam;
 
     impl ProfileEditSeam for NeverSeam {
+        fn store_id(&self) -> String {
+            "00".repeat(32)
+        }
         fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
             Err(ProfileEditError::Locked)
         }
@@ -506,6 +520,10 @@ mod tests {
     }
 
     impl ProfileEditSeam for Committing {
+        fn store_id(&self) -> String {
+            STORE.into()
+        }
+
         fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
             Ok(ProfileSnapshot {
                 store_id: STORE.into(),
@@ -541,6 +559,9 @@ mod tests {
     struct Refusing(ProfileEditError);
 
     impl ProfileEditSeam for Refusing {
+        fn store_id(&self) -> String {
+            STORE.into()
+        }
         fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
             Err(self.0.clone())
         }

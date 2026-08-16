@@ -154,11 +154,6 @@ where
         }
     }
 
-    /// The store this profile's content lives in, lowercase 64-hex — the id the body store is keyed
-    /// by, and the one a caller passes to `commit_and_persist`.
-    pub fn store_id(&self) -> String {
-        hex::encode(self.anchor.store_launcher_id())
-    }
 }
 
 impl<C, P> ProfileEditSeam for AccountEditSeam<C, P>
@@ -166,6 +161,11 @@ where
     C: ChainSource + Send + Sync,
     P: SpendPublisher + Send + Sync,
 {
+    /// The store's launcher id, decided when the seam was built. No chain read, by design.
+    fn store_id(&self) -> String {
+        hex::encode(self.anchor.store_launcher_id())
+    }
+
     fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
         let snapshot = dig_account::edit::read_profile(&self.anchor, &*self.chain, &self.content)
             .map_err(edit_error)?;

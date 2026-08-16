@@ -201,6 +201,12 @@ fn install_edit_fixture(named: &str) -> Option<dig_app_core::profile_edit::Profi
     struct Fixture(Result<ProfileSnapshot, ProfileEditError>);
 
     impl ProfileEditSeam for Fixture {
+        fn store_id(&self) -> String {
+            self.0
+                .as_ref()
+                .map(|snapshot| snapshot.store_id.clone())
+                .unwrap_or_else(|_| "11".repeat(32))
+        }
         fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
             self.0.clone()
         }

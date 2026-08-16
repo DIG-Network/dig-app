@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use super::commit::{start_commit, EditSeams, Watch};
 use super::draft::SlotChange;
 use super::field::ProfileField;
+use super::offer::ProfileEditing;
 use super::ProfileReading;
 use crate::transaction::Feed;
 
@@ -76,6 +77,19 @@ impl EditService {
     /// Whether this build can edit a profile at all.
     pub fn is_possible(&self) -> bool {
         self.seams.is_possible()
+    }
+
+    /// The offer, read off THIS service's own seams plus the two facts they cannot know.
+    ///
+    /// # Why the shell asks the service instead of building a second `EditSeams`
+    ///
+    /// [`ProfileEditing::of_seams`] must be given the seams the app will actually save through, and
+    /// the app has exactly one set — the ones installed here. A shell that constructed its own value
+    /// to read the offer from would be a second expression of the same capability, which is how a
+    /// control comes to be offered by a surface that has nothing behind it (dig_ecosystem#2377's
+    /// shape). There is one, and the surface reads it.
+    pub fn editing(&self, has_profile: bool, unlocked: bool) -> ProfileEditing {
+        ProfileEditing::of_seams(&self.seams, has_profile, unlocked)
     }
 
     /// The current reading. Never blocks on a chain read.
@@ -139,25 +153,16 @@ impl EditService {
             // against what was read, and against a failed read it would be computed against nothing.
             return;
         };
-        let Some(store_id) = self.store_id() else {
-            return;
-        };
         start_commit(
             Arc::clone(seam),
             Arc::clone(bodies),
-            store_id,
+            // Asked of the seam directly, never taken from a fresh `read()`: naming the store costs
+            // nothing, and reading it would put a node round trip on the thread that pressed Save.
+            seam.store_id(),
             changes,
             self.feed.clone(),
             Watch::default(),
         );
-    }
-
-    /// The store the current reading belongs to.
-    fn store_id(&self) -> Option<String> {
-        match &self.seams {
-            EditSeams::Wired { seam, .. } => seam.read().ok().map(|snapshot| snapshot.store_id),
-            EditSeams::NoChainTransport => None,
-        }
     }
 
     /// Claim the right to run a read. `false` when one is already running.
@@ -206,6 +211,9 @@ mod tests {
     }
 
     impl ProfileEditSeam for Reading {
+        fn store_id(&self) -> String {
+            a_profile().store_id
+        }
         fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
             *self.reads.lock().expect("reads") += 1;
             self.answer.clone()
@@ -250,6 +258,39 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("the read never answered");
+    }
+
+    /// Pressing Save does not perform a CHAIN READ on the thread that pressed it.
+    ///
+    /// # What this catches, and why the count is the assertion
+    ///
+    /// `save` needs the store id, and the obvious way to get one is to ask the seam to read the
+    /// profile — which is a node round trip and a chain walk, run on the painting thread. dig-app
+    /// 12.6.0 exists because a chain call ran there during a mint and the window stopped repainting
+    /// for the length of the ceremony; from outside, that is a crash.
+    ///
+    /// A test asserting only that the commit happened cannot see this: the version that blocks
+    /// commits too, just after freezing the window. So the observable is the READ COUNT across the
+    /// call. The seam counts, one read has already happened to produce the reading `save` requires,
+    /// and any read `save` itself performs is a second one.
+    #[test]
+    fn pressing_save_does_not_read_the_chain_on_the_calling_thread() {
+        let seam = Reading::of(Ok(a_profile()));
+        let service = service_over(seam.clone());
+        service.refresh();
+        assert!(matches!(settled(&service), ProfileReading::Known(_)));
+        let after_the_read = *seam.reads.lock().expect("reads");
+
+        service.save(vec![(
+            ProfileField::DisplayName,
+            SlotChange::Set("Grace".into()),
+        )]);
+
+        assert_eq!(
+            *seam.reads.lock().expect("reads"),
+            after_the_read,
+            "Save performed a chain read on the thread that pressed it"
+        );
     }
 
     #[test]
