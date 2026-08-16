@@ -935,6 +935,80 @@ mod tests {
         }
     }
 
+    /// **The wizard collects the new profile's content, and only where a mint could honour it.**
+    ///
+    /// The point of the form is that the store singleton launches at the seed's root, so anything
+    /// collected here is committed by the store's first generation instead of costing a second
+    /// chain write. A form drawn on a node that cannot mint would invite somebody to type a
+    /// biography into a machine that has nowhere to put it, so the withheld arm is the control —
+    /// without it, an unconditional form passes this test.
+    #[test]
+    fn the_wizard_collects_the_profiles_content_where_a_mint_is_possible_and_nowhere_else() {
+        let capable = TrayView {
+            profile_creation: ProfileCreation::Possible,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let painted = card_says(&capable, 960.0);
+
+        for field in crate::profile_edit::ProfileField::ALL {
+            assert!(
+                painted.contains(field.label()),
+                "the wizard collects nothing for {field:?}, so it can only be filled in after the                  mint -- a second chain write: {painted}"
+            );
+        }
+        assert!(
+            painted.contains(copy::profiles::SEED_INVITATION),
+            "the form never says every box is optional, so it reads as a set of requirements:              {painted}"
+        );
+        assert!(
+            painted.contains(copy::profiles::SEED_SAVES_A_WRITE),
+            "nothing says why filling this in now is worth doing: {painted}"
+        );
+
+        // The control: a node nobody has spoken to. It answers `blocked() == None` exactly as
+        // `Possible` does, so a form gated on anything but the ARM is drawn here too.
+        let unmeasured = TrayView {
+            profile_creation: ProfileCreation::Unknown,
+            ..view_with(ProfilesReading::Known(Vec::new()))
+        };
+        let quiet = card_says(&unmeasured, 960.0);
+        assert!(
+            !quiet.contains(copy::profiles::SEED_INVITATION),
+            "a node nobody has measured invited somebody to fill in a profile it may not be able              to mint: {quiet}"
+        );
+    }
+
+    /// **A value that could not be published stops the creation before the money moves.**
+    ///
+    /// At mint time a refused value is money already committed and a profile born holding a
+    /// filename, so the gate is the wizard's, not the ceremony's. Pinned from both sides against
+    /// the same field: an empty form -- the person who wants only a DID -- must remain mintable,
+    /// which is the half a `is_committable`-style gate silently breaks.
+    #[test]
+    fn a_wrong_value_blocks_the_creation_while_an_empty_form_does_not() {
+        use crate::profile_edit::{seed, ProfileDraft, ProfileField};
+
+        let empty = ProfileDraft::empty();
+        assert!(
+            seed::is_mintable(&empty),
+            "a person who wants only a DID cannot create one"
+        );
+
+        let mut mistyped = ProfileDraft::empty();
+        mistyped.set(ProfileField::XchAddress, "xch1notarealaddress");
+        assert!(
+            !seed::is_mintable(&mistyped),
+            "a mistyped payment address would have been minted into the profile"
+        );
+
+        let mut pictured = ProfileDraft::empty();
+        pictured.set(ProfileField::Avatar, "me.png");
+        assert!(
+            !seed::is_mintable(&pictured),
+            "a filename would have been published where every client looks for a picture"
+        );
+    }
+
     /// **A card that cannot honour the offer draws no control — for a MEASURED blocker and for an
     /// unmeasured node alike** (dig_ecosystem#2939, #2690).
     ///
