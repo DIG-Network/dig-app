@@ -26,7 +26,7 @@
 //! removal.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::profile_edit::{chosen, ProfileDraft, ProfileField};
@@ -104,7 +104,7 @@ impl InFlight {
                 .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
                 .set_title("Choose an image")
                 .pick_file();
-            *slot.lock().expect("the chooser slot") = Some(picked.map(|p| read(&p)));
+            *slot.lock().expect("the chooser slot") = Some(picked.map(|p| chosen(&p)));
             // The window may have been idle the whole time the dialog was up, and an answer nobody
             // repaints for is an answer nobody sees until the next mouse move.
             repaint.request_repaint();
@@ -118,16 +118,12 @@ impl InFlight {
     }
 }
 
-/// Read a chosen path. Separated only so [`InFlight::open`]'s thread body stays one line of intent.
-fn read(path: &PathBuf) -> Result<String, String> {
-    chosen(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{DynamicImage, ImageFormat, RgbImage};
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     /// A real PNG on disk, of the kind a chooser would return.
     fn a_png(dir: &tempfile::TempDir, name: &str) -> PathBuf {
@@ -203,7 +199,7 @@ mod tests {
         );
 
         assert!(
-            problems.get(&ProfileField::Banner).is_some(),
+            problems.contains_key(&ProfileField::Banner),
             "the header field says nothing about the file it refused"
         );
         assert_eq!(
