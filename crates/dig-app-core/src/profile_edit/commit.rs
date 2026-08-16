@@ -373,6 +373,44 @@ pub fn start_commit(
 }
 
 #[cfg(test)]
+pub(crate) mod tests_support {
+    //! Seams for tests that need a `Wired` shape and never call through it — the capability
+    //! readings, which are about whether seams EXIST rather than what they answer.
+
+    use super::*;
+
+    /// A seam that would refuse everything, if anything asked it.
+    pub(crate) struct NeverSeam;
+
+    impl ProfileEditSeam for NeverSeam {
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+        fn commit(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+    }
+
+    /// A body store that would refuse everything, if anything asked it.
+    pub(crate) struct NeverBodies;
+
+    impl BodyStore for NeverBodies {
+        fn put(&self, _: &str, _: &str, _: &[u8]) -> Result<(), BodyStoreError> {
+            Err(BodyStoreError::NoToken)
+        }
+        fn get(&self, _: &str, _: &str) -> Result<BodyRead, BodyStoreError> {
+            Err(BodyStoreError::NoToken)
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;

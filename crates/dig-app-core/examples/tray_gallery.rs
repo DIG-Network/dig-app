@@ -43,6 +43,9 @@ fn main() {
         // is missing because of the account state, not because the fixture starved it.
         let view = TrayView {
             running: true,
+            // Measured as impossible, which is what every gallery host is: the tray's editor verb
+            // is therefore absent, and the gallery photographs the menu a real machine shows.
+            profile_editing: Default::default(),
             // The tray offers no send — a native menu cannot hold a form — so the gallery
             // photographs the state a machine that has sent nothing is in.
             send: dig_app_core::wallet::sending::SendProgress::Idle,

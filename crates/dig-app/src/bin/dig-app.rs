@@ -1448,6 +1448,14 @@ mod tray {
             ),
         };
         TrayView {
+            // Measured off the seams this build has. It has none today: the dig-account editor
+            // adapter is not wired here yet, so the card names that as the missing piece rather
+            // than offering a control that could not publish anything (dig_ecosystem#2993).
+            profile_editing: dig_app_core::profile_edit::ProfileEditing::of_seams(
+                &dig_app_core::profile_edit::EditSeams::NoChainTransport,
+                false,
+                false,
+            ),
             running,
             node,
             node_connected,
@@ -2731,6 +2739,13 @@ mod tray {
                 set_profile_visibility(env, session.as_ref(), confirmer, ix, hidden)
             }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
+            // Nothing to do HERE, and that is the design rather than an omission. The editor's form
+            // lives in the window, so the change set exists only there; the pane hands it straight
+            // to `profile_edit::EditService`, which does the work on a worker thread and reports
+            // into the transaction feed the status sheet draws. This arm exists because the tray
+            // and the window compose the same verbs (`window_model`), and a row the shell could not
+            // name would not compile.
+            TrayAction::PublishProfileEdits => {}
             // The same window the daily cadence raises, reached on demand. Routed to the SAME
             // function rather than to a second flow: two ways in that read the balance differently
             // is how one of them comes to quote a figure the other does not (dig_ecosystem#2957).

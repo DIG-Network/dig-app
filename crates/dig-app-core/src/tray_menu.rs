@@ -157,6 +157,12 @@ pub enum AddressFault {
 /// Everything the tray is rendered from — one snapshot, read once per repaint.
 #[derive(Debug, Clone, Default)]
 pub struct TrayView {
+    /// Whether a profile can be EDITED here, and when it cannot, which piece is missing.
+    ///
+    /// A reading rather than a boolean, for `profile_creation`'s reason: an unmeasured capability
+    /// and a measured blocker are different facts, and drawing the first as the second names a
+    /// cause nobody observed (dig_ecosystem#2993).
+    pub profile_editing: crate::profile_edit::ProfileEditing,
     /// Whether the agent loop is running.
     pub running: bool,
     /// Whether the agent is talking to a node right now.
@@ -388,7 +394,7 @@ impl TrayView {
     pub fn renders_same_as(&self, other: &Self) -> bool {
         // No `..` — see above. Each binding is compared exactly once, in declaration order.
         let Self {
-            running,
+            profile_editing,
             node_connected,
             node,
             account,
@@ -412,9 +418,14 @@ impl TrayView {
             network,
             enrolment,
             send,
+            running,
         } = self;
 
-        running == &other.running
+        // The editor's card flips between its form and the sentence naming what is missing on this
+        // reading alone, so a view that ignored it would leave a person looking at "your account is
+        // locked" after they unlocked it.
+        profile_editing == &other.profile_editing
+            && running == &other.running
             && node_connected == &other.node_connected
             && node == &other.node
             && account == &other.account
@@ -872,7 +883,18 @@ pub enum TrayAction {
     ///
     /// Like the other explainers it is about the CONCEPT, so it is offered in every state.
     AboutProfiles,
-    /// Take the person to the funding check for a profile, on demand.
+    /// Publish the changes a person has made to their profile (dig_ecosystem#2993).
+    ///
+    /// # Why the verb says *publish* and not *save*
+    ///
+    /// Saving a document is free, private and reversible. This spends real XCH, writes to a public
+    /// chain, and cannot be taken back — anybody who read the old profile may have kept it. A label
+    /// promising the first while doing the second is the surprise `professional-ui` forbids.
+    ///
+    /// Offered ONLY where [`ProfileEditing::is_possible`](crate::profile_edit::ProfileEditing) — a
+    /// build with the seams, an account that is unlocked, and a profile that exists. Never derived
+    /// from `blocked().is_none()`, which reads an unmeasured build as a capable one.
+    PublishProfileEdits,
     ///
     /// # The verb is deliberately NARROWER than "create a profile"
     ///
@@ -1657,6 +1679,35 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
 /// Nothing is emitted at all until the list has been READ. A verb built from
 /// [`ProfilesReading::Pending`](crate::profiles::ProfilesReading::Pending) would be a control acting
 /// on a profile nobody has confirmed exists.
+/// **Profile editing** — the one verb that publishes what a person typed (dig_ecosystem#2993).
+///
+/// # What this builder decides
+///
+/// Whether the verb EXISTS, from one reading. It does not decide whether the control can be pressed
+/// at this instant: that depends on whether anything has been typed, which is form state the window
+/// owns and no menu can see. The pane draws the row it is given and disables it while the form has
+/// nothing to publish — narrowing the model's answer, never widening it.
+///
+/// # Why the row is absent rather than greyed when editing is impossible
+///
+/// The card explains the missing piece in a sentence with room for it, which a menu row does not
+/// have. A permanently-greyed *Publish my profile changes* row that cannot say when it will work is
+/// the dead end dig_ecosystem#1800 removed.
+pub(crate) fn profile_edit_actions(view: &TrayView) -> Vec<MenuRow> {
+    match view.profile_editing.is_possible() {
+        true => vec![MenuRow::action(
+            TrayAction::PublishProfileEdits,
+            PUBLISH_PROFILE_LABEL,
+            true,
+        )],
+        false => Vec::new(),
+    }
+}
+
+/// The publish control's label. Names what pressing it DOES — see [`TrayAction::PublishProfileEdits`]
+/// for why it is not called *save*.
+pub const PUBLISH_PROFILE_LABEL: &str = "Publish my profile changes…";
+
 pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
     let mut rows: Vec<MenuRow> = view
         .profiles
@@ -2572,6 +2623,9 @@ mod tests {
         let receive_address =
             matches!(account, AccountState::Unlocked { .. }).then(|| FIXTURE_ADDRESS.to_string());
         TrayView {
+            // These suites are about the account states, and editing is measured elsewhere; the
+            // default has measured nothing, which is what every one of these fixtures has done.
+            profile_editing: Default::default(),
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),

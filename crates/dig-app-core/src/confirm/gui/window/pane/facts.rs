@@ -97,6 +97,10 @@ pub(crate) struct PaneFacts {
     /// It decides no verb, because there is no verb to decide — nothing in this shell can mint a
     /// profile (see [`crate::tray_menu::TrayAction::AboutProfiles`]).
     pub(crate) profile_creation: crate::profiles::ProfileCreation,
+    /// Whether a profile can be EDITED here, and when it cannot, which piece is missing
+    /// (dig_ecosystem#2993). The editor card's four-state banner is drawn from this and from the
+    /// profile reading the edit service holds.
+    pub(crate) profile_editing: crate::profile_edit::ProfileEditing,
     /// Where this node stands on the DIG and Chia networks — the header strip's three right-hand
     /// readings (dig_ecosystem#2569).
     ///
@@ -137,6 +141,7 @@ impl PaneFacts {
             update: view.update,
             profiles: view.profiles.clone(),
             profile_creation: view.profile_creation,
+            profile_editing: view.profile_editing,
             network: view.network.clone(),
             send: view.send.clone(),
         }
