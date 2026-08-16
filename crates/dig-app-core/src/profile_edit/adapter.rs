@@ -35,7 +35,7 @@
 //! (Appendix B) — so the crate that owns the format does the decoding, in `slots_of` and
 //! nowhere else. No type from it crosses any public API here.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chia_protocol::Bytes32;
 use dig_account::edit::{EditError, ProfileContentSource, ProfileEdit};
@@ -49,6 +49,7 @@ use super::bodies::{BodyRead, BodyStore, BodyStoreError};
 use super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
 use super::draft::SlotChange;
 use super::field::ProfileField;
+use super::recovery;
 use crate::account::residency::AccountResidency;
 
 /// The signing domain an edit is committed under, re-exported so the shell can name mainnet without
@@ -63,12 +64,51 @@ pub use dig_account::mint::MintNetwork;
 pub struct NodeProfileContent {
     /// Where the bytes are kept.
     bodies: Arc<dyn BodyStore>,
+    /// Set when a read found the store holding nothing and no rebuild could answer for it.
+    ///
+    /// # Why an observation is kept here at all
+    ///
+    /// dig-account reports every content failure as `EditError::ContentUnavailable(String)`, so by
+    /// the time the seam sees it, *nothing is published* and *the node is not answering* are the
+    /// same type carrying different prose. They are opposite states with opposite remedies
+    /// (dig_ecosystem#3036), and telling them apart by matching on that prose would make a wording
+    /// change silently re-merge them. This is the one place that knows which it was, so it records
+    /// it, and [`AccountEditSeam::read`] asks.
+    unpublished: Mutex<bool>,
 }
 
 impl NodeProfileContent {
     /// A content source over `bodies`.
     pub fn new(bodies: Arc<dyn BodyStore>) -> Self {
-        Self { bodies }
+        Self {
+            bodies,
+            unpublished: Mutex::new(false),
+        }
+    }
+
+    /// Forget what the last read observed. Called before each one, so an answer never carries over.
+    fn forget_absence(&self) {
+        if let Ok(mut seen) = self.unpublished.lock() {
+            *seen = false;
+        }
+    }
+
+    /// Whether the last read found nothing published, rather than failing to ask.
+    fn saw_nothing_published(&self) -> bool {
+        self.unpublished.lock().map(|seen| *seen).unwrap_or(false)
+    }
+
+    /// Rebuild the seed body for `root` and hand it to the node, when this app can produce one.
+    ///
+    /// Returns the bytes only when they VERIFY against the root the chain anchors — the check lives
+    /// in [`recovery::seed_body_for`] and is not repeated or relaxed here. A failed `put` is not
+    /// fatal to the read: the bytes are correct and verified whether or not the node kept them, and
+    /// refusing to show a person their own profile because a store write failed would be a second
+    /// failure invented from the first.
+    fn rebuilt(&self, store_id: &str, root_hex: &str, root: [u8; 32]) -> Option<Vec<u8>> {
+        let bytes = recovery::seed_body_for(root)?;
+        let _ = self.bodies.put(store_id, root_hex, &bytes);
+        Some(bytes)
     }
 }
 
@@ -87,9 +127,21 @@ impl ProfileContentSource for NodeProfileContent {
             // The line this module's header is about. The node consulted its store and holds nothing
             // — which is NOT "this profile publishes no slots", and returning `vec![]` here would
             // hand dig-account an empty body to verify a real root against.
-            BodyRead::Nothing => Err(BodyStoreError::Refused(format!(
-                "your node does not hold the profile content for {root_hex}"
-            ))),
+            //
+            // It is also the state a pre-0.16.0 mint leaves behind, and this is the layer that can
+            // do something about it: the chain-anchored `root` is already in hand, so a seed rebuild
+            // can be VERIFIED against it here rather than asserted anywhere.
+            BodyRead::Nothing => match self.rebuilt(&store_id, &root_hex, root) {
+                Some(bytes) => slots_of(&bytes, root),
+                None => {
+                    if let Ok(mut seen) = self.unpublished.lock() {
+                        *seen = true;
+                    }
+                    Err(BodyStoreError::Refused(format!(
+                        "your node does not hold the profile content for {root_hex}"
+                    )))
+                }
+            },
         }
     }
 }
@@ -174,8 +226,18 @@ where
     }
 
     fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        // Cleared first: the observation below is about THIS read, and a stale one would report a
+        // node that has since stopped answering as a profile that publishes nothing.
+        self.content.forget_absence();
         let snapshot = dig_account::edit::read_profile(&self.anchor, &*self.chain, &self.content)
-            .map_err(edit_error)?;
+            .map_err(|error| match error {
+            // The crate flattens every content failure into one string, and this is the only
+            // layer that still knows which of them it was.
+            EditError::ContentUnavailable(_) if self.content.saw_nothing_published() => {
+                ProfileEditError::Unpublished
+            }
+            other => edit_error(other),
+        })?;
         Ok(ProfileSnapshot {
             store_id: self.store_id(),
             root: hex::encode(snapshot.root()),
@@ -308,11 +370,7 @@ fn edit_error(error: EditError) -> ProfileEditError {
         EditError::NoStore => ProfileEditError::Unreadable(
             "this profile has no store on chain yet, so there is nothing to edit".to_string(),
         ),
-        EditError::StaleOrTamperedContent => ProfileEditError::Unreadable(
-            "your profile's content does not match what the blockchain says it should be, so DIG \
-             will not show or change it"
-                .to_string(),
-        ),
+        EditError::StaleOrTamperedContent => ProfileEditError::Inconsistent,
         EditError::ContentUnavailable(why) => ProfileEditError::Unreadable(why),
         EditError::Format(why) => ProfileEditError::Unreadable(why),
     }
@@ -401,6 +459,105 @@ mod tests {
             .fetch_profile_slots(STORE, root)
             .expect("the held root reads")
             .is_empty());
+    }
+
+    /// The recovery, at the seam: a store holding nothing for a root this app MINTED is answered
+    /// from a rebuild, and the node is given the bytes so the next reader does not need one.
+    ///
+    /// # Why the store is asserted afterwards
+    ///
+    /// The nearest wrong implementation rebuilds the body, answers the read from it, and never puts
+    /// it — which looks identical from the caller's side and leaves every peer, every other machine
+    /// and every restart exactly as unreadable as before. So the observable is the STORE's contents
+    /// after the read, not the read's return value alone.
+    #[test]
+    fn a_root_this_app_minted_is_answered_from_a_rebuild_and_the_bytes_are_kept() {
+        let root = dig_account::mint::ProfileSeed::new()
+            .root()
+            .expect("the seed builds");
+        let bodies = Arc::new(InMemoryBodies::default());
+        let content = NodeProfileContent::new(bodies.clone());
+
+        let slots = content
+            .fetch_profile_slots(STORE, root)
+            .expect("the minted root is answerable from its own seed");
+        assert!(
+            slots.iter().any(|(id, _)| *id == 0x0000),
+            "the rebuild published no schema stamp, so it is not the seed the mint used"
+        );
+        assert!(
+            !content.saw_nothing_published(),
+            "a recovered read was recorded as a profile that publishes nothing"
+        );
+
+        assert!(
+            matches!(
+                bodies.get(&hex::encode(STORE), &hex::encode(root)),
+                Ok(BodyRead::Held(_))
+            ),
+            "the rebuild was never given to the node, so nothing else can ever read it"
+        );
+    }
+
+    /// A root this app cannot have minted is NOT rebuilt, and is recorded as *nothing published*
+    /// rather than reported as a store failure.
+    ///
+    /// # The fixture, and the control beside it
+    ///
+    /// The store answers fully for a root it DOES hold, so the refusal below is about the absent
+    /// root and not about a store that fails everything. And the absent root is a real profile's —
+    /// a body this app could produce, for a seed it did not mint — so an implementation that
+    /// published its single candidate regardless would be caught here rather than passing on the
+    /// strength of malformed bytes.
+    #[test]
+    fn a_root_this_app_cannot_mint_is_recorded_as_nothing_published_and_never_rebuilt() {
+        let bodies = Arc::new(InMemoryBodies::default());
+        let (bytes, held) = a_body();
+        bodies
+            .put(&hex::encode(STORE), &hex::encode(held), &bytes)
+            .expect("stores");
+        let content = NodeProfileContent::new(bodies.clone());
+        let absent = [0x77; 32];
+
+        assert!(matches!(
+            content.fetch_profile_slots(STORE, absent),
+            Err(BodyStoreError::Refused(_))
+        ));
+        assert!(
+            content.saw_nothing_published(),
+            "the absence was not recorded, so the app cannot tell it from an unreachable node"
+        );
+        assert!(
+            matches!(
+                bodies.get(&hex::encode(STORE), &hex::encode(absent)),
+                Ok(BodyRead::Nothing)
+            ),
+            "a body was published under a root the chain does not anchor it at"
+        );
+        // The control: the same store still answers for the root it holds.
+        assert!(!content
+            .fetch_profile_slots(STORE, held)
+            .expect("the held root reads")
+            .is_empty());
+    }
+
+    /// The observation does not survive into the NEXT read.
+    ///
+    /// Without the reset, a profile that failed to publish once is reported as publishing nothing
+    /// forever — including on a later read that failed because the node stopped answering, which is
+    /// the retryable state and would silently lose its retry.
+    #[test]
+    fn an_absence_seen_once_does_not_answer_for_a_later_read() {
+        let content = NodeProfileContent::new(Arc::new(InMemoryBodies::default()));
+        let _ = content.fetch_profile_slots(STORE, [0x77; 32]);
+        assert!(content.saw_nothing_published());
+
+        content.forget_absence();
+
+        assert!(
+            !content.saw_nothing_published(),
+            "a stale absence would report an unreachable node as an unpublished profile"
+        );
     }
 
     /// A change list becomes the crate's batch with removals still removals — the half a

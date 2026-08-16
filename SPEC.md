@@ -1345,12 +1345,28 @@ are different edits. A field emptied that held a value MUST commit a removal; a 
 nothing MUST commit nothing, because a spend that removes an absent slot pays for no change; a field typed
 back to its committed value MUST commit nothing.
 
-**Reading MUST be verified, and its four states MUST be distinct (MUST).** The profile MUST be read through
+**Reading MUST be verified, and its states MUST be distinct (MUST).** The profile MUST be read through
 a seam that verifies the body against the root the CHAIN anchors, and the surface MUST distinguish: a read in
-flight, a profile that answered and holds nothing, a read that failed, and a profile with values. A profile
+flight, a profile that answered and holds nothing, a store under which NOTHING has ever been published, a
+body that CONTRADICTS the anchored root, a read that failed, and a profile with values. A profile
 holding nothing is a STATE and MUST NOT be drawn as a fault. A read that FAILED MUST NOT be drawn as an empty
 profile and MUST NOT offer an editable form — an edit computed against a profile the app could not see would
 commit a body missing everything it already held. A failed read MUST offer a retry.
+
+**Only a failed read MAY offer a retry (MUST).** A store with nothing published and a body that contradicts
+the chain are settled answers: asking again cannot produce content nobody wrote, and cannot make a
+contradicted body agree with the chain. Each MUST be given its own sentence naming its own remedy, and
+neither MUST be worded as a fault of the node or the network. Neither MUST offer an editable form.
+
+**A missing body MUST be rebuilt from the mint seed when it VERIFIES, and MUST NOT be published otherwise
+(MUST).** A profile minted before dig-account 0.16.0 anchors a root whose body was computed and discarded, so
+nothing holds its preimage. Because the seed is deterministic (`ProfileSeed::root()` is defined over the same
+constructor as `ProfileSeed::body_bytes()`), the implementation MUST, on finding the store holds nothing,
+rebuild the body from the seed this app mints from and compare it against the root the CHAIN anchors. On a
+match it MUST store the bytes via `control.profile.putBody` and serve the read from them; this path writes no
+chain state and spends nothing. On a mismatch it MUST publish nothing and MUST report the store as holding
+nothing published — a body that does not verify belongs to a different seed, and publishing it would serve
+content the chain contradicts.
 
 **The bytes a commit returns MUST be persisted (MUST).** A commit yields a status AND the canonical body
 bytes the new root commits to. The implementation MUST store those bytes — via `control.profile.putBody` on

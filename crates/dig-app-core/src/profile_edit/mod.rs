@@ -38,9 +38,39 @@ pub mod draft;
 pub mod field;
 pub mod offer;
 pub mod picture;
+pub mod recovery;
 pub mod service;
 
 use std::collections::BTreeMap;
+
+/// The sentences for the two profile states that are NOT faults, kept where both the model and the
+/// pane can reach one definition.
+///
+/// # Why these live in the model and not the pane's copy table
+///
+/// Both are returned by [`ProfileEditError::sentence`], which is what a commit failure is reported
+/// through, AND drawn by the editor card. Two tables would let the same state be described two ways
+/// depending on which surface a person happened to be looking at — which is how *your node refused
+/// you* came to be shown for a profile that had simply never published anything (dig_ecosystem#3036).
+pub mod copy {
+    /// Said over a store that exists on chain with nothing published under it.
+    ///
+    /// Names all three facts a person needs: the profile is real, nothing is broken, and what is
+    /// missing is content. It does not offer a retry, because there is nothing to ask again.
+    pub const UNPUBLISHED: &str = "This profile has no published information yet. Nothing has gone \
+                                   wrong — the profile is on the blockchain and its details have \
+                                   never been written. Publishing them writes to the blockchain and \
+                                   costs a small amount of XCH.";
+
+    /// Said over a profile whose stored content does not match what the chain anchors.
+    ///
+    /// A refusal, worded as one. There is no retry and no repair a person can perform from here,
+    /// and implying either would send them round a loop that cannot end.
+    pub const INCONSISTENT: &str = "This profile's saved details do not match what the blockchain \
+                                    says they should be, so DIG will not show them. Nothing here \
+                                    can be trusted until that is resolved, and DIG will not change \
+                                    a profile it cannot read.";
+}
 
 pub use adapter::{AccountEditSeam, MintNetwork, NodeProfileContent};
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
@@ -53,7 +83,7 @@ pub use service::EditService;
 
 /// What the app can honestly say about the profile it is editing.
 ///
-/// Four states, because a pane drawing this has four different things to say and no way to
+/// Five states, because a pane drawing this has five different things to say and no way to
 /// distinguish them from an `Option<BTreeMap<_, _>>`. The middle two are the ones that get
 /// collapsed by accident: **a profile with no fields set** is a working profile a person has not
 /// filled in, and **a profile nobody could read** is a fault with a retry. Drawn the same way, the
@@ -73,12 +103,48 @@ pub enum ProfileReading {
     /// does not match the root on chain" are different situations with different remedies, and the
     /// second is a security refusal that must never be worded as a network hiccup.
     Unreadable(String),
+    /// The store is real and nothing has ever been published under it.
+    ///
+    /// Not a fault and not an empty profile: there is no draft, because a draft is computed against
+    /// what was read and there is nothing to read. A person here is told what is true and offered
+    /// the way to publish something — never a retry (dig_ecosystem#3036).
+    Unpublished,
+    /// A body exists and contradicts the root the chain anchors.
+    ///
+    /// The refusal, which must never be drawn as weather: no draft, and no retry.
+    Inconsistent,
 }
 
 impl ProfileReading {
     /// A reading over a profile that answered with these values.
     pub fn known(values: BTreeMap<ProfileField, String>, body_len: usize) -> Self {
         Self::Known(ProfileDraft::over(values, body_len))
+    }
+
+    /// The reading a failed read produces, keeping the three states apart.
+    ///
+    /// # The defect this method IS
+    ///
+    /// Every failure used to become `Unreadable(error.while_reading())`, so *your profile has never
+    /// published anything* and *your node is not answering* reached a person as one sentence about
+    /// the node — and the remedy they were given, restart things, could not help, because nothing
+    /// was broken (dig_ecosystem#3036). The mapping is here, once, so no surface can re-merge them.
+    pub fn of_read_failure(error: &ProfileEditError) -> Self {
+        match error {
+            ProfileEditError::Unpublished => Self::Unpublished,
+            ProfileEditError::Inconsistent => Self::Inconsistent,
+            other => Self::Unreadable(other.while_reading()),
+        }
+    }
+
+    /// What to say about this reading, when it is one of the states that carries a sentence.
+    pub fn sentence(&self) -> Option<&str> {
+        match self {
+            Self::Unreadable(why) => Some(why),
+            Self::Unpublished => Some(copy::UNPUBLISHED),
+            Self::Inconsistent => Some(copy::INCONSISTENT),
+            _ => None,
+        }
     }
 
     /// The draft to edit, when there is one.
@@ -103,6 +169,7 @@ impl ProfileReading {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile_edit::commit::ProfileEditError;
 
     #[test]
     fn an_empty_profile_is_not_a_failed_read() {
@@ -124,6 +191,71 @@ mod tests {
         assert!(!failed.is_empty());
         assert!(failed.is_retryable());
         assert!(failed.draft().is_none());
+    }
+
+    /// The defect #3036 is about: three states that had one sentence between them.
+    ///
+    /// # Why all three are asserted together
+    ///
+    /// Each state in isolation passes against the broken version too — every one of them WAS an
+    /// `Unreadable`, so any single-state assertion about "it says something" held before the fix.
+    /// What the fix changes is that they are DISTINGUISHABLE, so the property is pairwise: three
+    /// failures, three different sentences, and only the middle one retryable.
+    #[test]
+    fn the_three_read_states_say_three_different_things_and_only_one_retries() {
+        let unpublished = ProfileReading::of_read_failure(&ProfileEditError::Unpublished);
+        let unreachable = ProfileReading::of_read_failure(&ProfileEditError::ChainUnreachable(
+            "no node answered".into(),
+        ));
+        let inconsistent = ProfileReading::of_read_failure(&ProfileEditError::Inconsistent);
+
+        let said: Vec<&str> = [&unpublished, &unreachable, &inconsistent]
+            .iter()
+            .map(|reading| reading.sentence().expect("each state says something"))
+            .collect();
+        assert_eq!(
+            said.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "two of the three states are worded the same, so a person cannot tell them apart: \
+             {said:?}"
+        );
+
+        assert!(
+            unreachable.is_retryable(),
+            "the only genuine failure lost its retry"
+        );
+        assert!(
+            !unpublished.is_retryable(),
+            "a profile that has published nothing was offered a retry, which cannot help"
+        );
+        assert!(
+            !inconsistent.is_retryable(),
+            "a body contradicting the chain was offered a retry, which cannot help"
+        );
+    }
+
+    /// None of the three offers a draft. An unpublished profile especially: it reads as the empty
+    /// state, and an editable form over it would commit a body against a root nothing verified.
+    #[test]
+    fn no_failed_state_hands_out_a_draft_to_edit_over() {
+        for state in [
+            ProfileReading::Unpublished,
+            ProfileReading::Inconsistent,
+            ProfileReading::Unreadable("no node".into()),
+        ] {
+            assert!(state.draft().is_none(), "{state:?} offered a draft");
+            assert!(!state.is_empty(), "{state:?} was drawn as an empty profile");
+        }
+    }
+
+    /// The unpublished sentence does not blame the node, which is the exact wording defect: a
+    /// person told their node refused them restarts things that were never broken.
+    #[test]
+    fn the_unpublished_sentence_does_not_blame_the_node() {
+        let said = ProfileEditError::Unpublished.sentence();
+        assert!(!said.contains("node"), "{said}");
+        assert!(!said.contains("could not read"), "{said}");
+        assert!(said.contains("no published information"), "{said}");
     }
 
     #[test]
