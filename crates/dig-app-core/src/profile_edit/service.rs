@@ -64,9 +64,7 @@ impl EditService {
     /// The app's service — a build with no chain transport until something installs one.
     pub fn app() -> Arc<EditService> {
         APP_SERVICE
-            .get_or_init(|| {
-                Arc::new(EditService::new(EditSeams::NoChainTransport, Feed::app()))
-            })
+            .get_or_init(|| Arc::new(EditService::new(EditSeams::NoChainTransport, Feed::app())))
             .clone()
     }
 
@@ -187,9 +185,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::super::bodies::doubles::InMemoryBodies;
-    use super::super::commit::{
-        CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot,
-    };
+    use super::super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
     use super::*;
 
     /// A seam over a profile that reads, with a counter so a test can see how often.

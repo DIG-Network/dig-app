@@ -173,7 +173,12 @@ fn form(
     let pressed = flow.place(|ui, at| action::buttons(ui, at, t, live, &offered));
     if !ready && !session.draft.is_dirty() {
         flow.gap(space::S2);
-        flow.place(|ui, at| (text::caption(ui, at, t, copy::profile_edit::NOTHING_CHANGED), ()));
+        flow.place(|ui, at| {
+            (
+                text::caption(ui, at, t, copy::profile_edit::NOTHING_CHANGED),
+                (),
+            )
+        });
     }
 
     if pressed.is_some() {
@@ -195,12 +200,16 @@ fn draw_field(flow: &mut Flow, t: &Tokens, session: &mut Session, edited: Profil
         id: element(edited),
     };
 
+    // Typed into a local and compared afterwards rather than edited in place: the draft owns both
+    // what was committed and what was typed, and handing a `&mut String` into it would make every
+    // repaint a write even when nothing was pressed.
     let mut typed = session.draft.value(edited).to_string();
-    let height = flow.place(|ui, at| {
-        let used = field::text_field(ui, at, t, live, &described, &mut typed);
-        (used, ())
+    flow.place(|ui, at| {
+        (
+            field::text_field(ui, at, t, live, &described, &mut typed),
+            (),
+        )
     });
-    let _ = height;
 
     if typed != session.draft.value(edited) {
         session.draft.set(edited, typed);
@@ -303,7 +312,7 @@ mod tests {
     #[test]
     fn a_reread_underneath_a_dirty_form_does_not_throw_away_what_was_typed() {
         let ctx = egui::Context::default();
-        ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let mut session = Session::load(ui, &a_profile());
                 session.draft.set(ProfileField::Bio, "Builds engines.");
@@ -320,12 +329,9 @@ mod tests {
     #[test]
     fn a_clean_form_takes_the_newest_committed_values() {
         let ctx = egui::Context::default();
-        ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                Session {
-                    draft: a_profile(),
-                }
-                .store(ui);
+                Session { draft: a_profile() }.store(ui);
 
                 let mut moved_on = BTreeMap::new();
                 moved_on.insert(ProfileField::DisplayName, "Ada Lovelace".to_string());

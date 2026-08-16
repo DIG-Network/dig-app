@@ -92,9 +92,11 @@ impl BodyStoreError {
             Self::Unreachable(detail) => {
                 format!("DIG could not reach your node: {detail}")
             }
-            Self::Unsupported(_) => "Your node is too old to store profile content. Update it, and \
+            Self::Unsupported(_) => {
+                "Your node is too old to store profile content. Update it, and \
                                      DIG will store your profile then."
-                .to_string(),
+                    .to_string()
+            }
             Self::Refused(detail) => format!("Your node refused to store the profile: {detail}"),
             Self::TooLarge { len } => format!(
                 "This profile comes to {len} bytes and a profile may hold {MAX_BODY_BYTES}. Remove \

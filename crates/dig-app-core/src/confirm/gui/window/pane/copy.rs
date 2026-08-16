@@ -497,8 +497,7 @@ pub(crate) mod profile_edit {
     ///
     /// A disabled control with no explanation is the dead end dig_ecosystem#1800 removed; this names
     /// exactly what would make it pressable.
-    pub(crate) const NOTHING_CHANGED: &str =
-        "Change something above and this becomes available.";
+    pub(crate) const NOTHING_CHANGED: &str = "Change something above and this becomes available.";
 }
 
 pub(crate) mod profiles {

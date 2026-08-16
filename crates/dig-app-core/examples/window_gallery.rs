@@ -185,9 +185,118 @@ const HELD: Balances = Balances {
 /// captures is the account and nothing else. A sealed account has no key to derive an address from,
 /// so it gets no address, no profile id and no balance — a gallery that showed them anyway would
 /// photograph figures the application cannot produce in that state.
+/// Install the edit service the `--profile-edit` fixture names, and report the offer that goes with
+/// it. `None` when the name is not one of them.
+///
+/// The fixtures answer; they never reach a chain, and none of them can commit — `commit` refuses on
+/// every one, so a gallery run cannot spend anything even if something pressed the control.
+fn install_edit_fixture(named: &str) -> Option<dig_app_core::profile_edit::ProfileEditing> {
+    use dig_app_core::profile_edit::{
+        BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService,
+        ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField, ProfileSnapshot,
+        SlotChange,
+    };
+
+    /// A seam that answers one fixed read and refuses to commit.
+    struct Fixture(Result<ProfileSnapshot, ProfileEditError>);
+
+    impl ProfileEditSeam for Fixture {
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            self.0.clone()
+        }
+        fn commit(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            Ok(None)
+        }
+    }
+
+    /// A store that holds nothing and is never asked, since nothing here commits.
+    struct NoBodies;
+
+    impl BodyStore for NoBodies {
+        fn put(&self, _: &str, _: &str, _: &[u8]) -> Result<(), BodyStoreError> {
+            Err(BodyStoreError::NoToken)
+        }
+        fn get(&self, _: &str, _: &str) -> Result<BodyRead, BodyStoreError> {
+            Ok(BodyRead::Nothing)
+        }
+    }
+
+    let filled = || {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert(ProfileField::DisplayName, "Ada Lovelace".to_string());
+        values.insert(
+            ProfileField::Bio,
+            "Writes engines that write themselves.".to_string(),
+        );
+        values.insert(ProfileField::Pronouns, "she/her".to_string());
+        values.insert(ProfileField::Location, "London".to_string());
+        values.insert(
+            ProfileField::Links,
+            "https://example.org
+https://example.org/notes"
+                .to_string(),
+        );
+        values.insert(
+            ProfileField::XchAddress,
+            "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string(),
+        );
+        ProfileSnapshot {
+            store_id: "11".repeat(32),
+            root: "22".repeat(32),
+            values,
+            body_len: 240,
+        }
+    };
+
+    let (answer, offer) = match named {
+        "filled" => (Ok(filled()), ProfileEditing::Possible),
+        "empty" => (
+            Ok(ProfileSnapshot {
+                values: std::collections::BTreeMap::new(),
+                body_len: 5,
+                ..filled()
+            }),
+            ProfileEditing::Possible,
+        ),
+        "unreadable" => (
+            Err(ProfileEditError::ChainUnreachable(
+                "your node did not answer".to_string(),
+            )),
+            ProfileEditing::Possible,
+        ),
+        // The blocked case needs no service at all: the card never gets as far as a read.
+        "locked" => {
+            return Some(ProfileEditing::of_seams(
+                &EditSeams::Wired {
+                    seam: std::sync::Arc::new(Fixture(Ok(filled()))),
+                    bodies: std::sync::Arc::new(NoBodies),
+                },
+                true,
+                false,
+            ))
+        }
+        _ => return None,
+    };
+
+    EditService::install(EditService::detached(EditSeams::Wired {
+        seam: std::sync::Arc::new(Fixture(answer)),
+        bodies: std::sync::Arc::new(NoBodies),
+    }));
+    Some(offer)
+}
+
 fn view_for(account: AccountState, second_factor: bool, profiles: Profiles) -> TrayView {
     let sealed = !matches!(account, AccountState::Unlocked { .. });
     TrayView {
+        // Set by `--profile-edit`, which installs the matching service; left unmeasured otherwise,
+        // which is what a gallery host with no chain transport genuinely is.
+        profile_editing: Default::default(),
         running: true,
         node_connected: true,
         node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
@@ -486,7 +595,7 @@ fn main() {
     // positional list; leaving only the flag itself out while keeping the value shifts the output
     // path along by one and writes the fixture name as an extra file in the working directory.
     let args: Vec<&String> = {
-        let value_flags: &[&str] = &["--profiles", "--transaction"];
+        let value_flags: &[&str] = &["--profiles", "--transaction", "--profile-edit"];
         let mut skip_next = false;
         all.iter()
             .filter(|argument| {
@@ -554,6 +663,21 @@ fn main() {
         }
     }
 
+    // The profile editor's fixture (dig_ecosystem#2993). The pane reads the profile through
+    // `EditService::app()`, so photographing its states means installing a service that answers the
+    // way the state under test does — a filled profile, an empty one, or a read that failed.
+    let editing = match all.iter().position(|argument| argument == "--profile-edit") {
+        None => dig_app_core::profile_edit::ProfileEditing::default(),
+        Some(at) => match all
+            .get(at + 1)
+            .map(String::as_str)
+            .map(install_edit_fixture)
+        {
+            Some(Some(offer)) => offer,
+            _ => refuse("--profile-edit needs one of: filled empty unreadable locked"),
+        },
+    };
+
     // A live capture takes its readings ONCE, before the window opens, so every frame of the
     // capture shows the same instant — and so a node that is not there stops the run here, with no
     // file written, rather than being papered over by the fixture the closure would otherwise build.
@@ -566,7 +690,10 @@ fn main() {
     };
 
     let view = Arc::new(move || {
-        let fixture = view_for(account.clone(), second_factor, profiles);
+        let mut fixture = view_for(account.clone(), second_factor, profiles);
+        // Applied over the fixture rather than threaded through `view_for`, so every other axis of
+        // the gallery keeps the signature it had.
+        fixture.profile_editing = editing;
         match &live {
             None => fixture,
             Some(readings) => with_live(fixture, readings),

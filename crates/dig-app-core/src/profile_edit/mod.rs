@@ -41,7 +41,7 @@ pub mod service;
 use std::collections::BTreeMap;
 
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
-pub use commit::{CommitOutcome, EditSeams, ProfileEditSeam, ProfileEditError, ProfileSnapshot};
+pub use commit::{CommitOutcome, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};
 pub use field::{FieldKind, ProfileField};
 pub use offer::{EditBlocked, ProfileEditing};
@@ -105,7 +105,10 @@ mod tests {
         let empty = ProfileReading::known(BTreeMap::new(), 5);
         assert!(empty.is_empty());
         assert!(!empty.is_retryable());
-        assert!(empty.draft().is_some(), "an empty profile is still editable");
+        assert!(
+            empty.draft().is_some(),
+            "an empty profile is still editable"
+        );
     }
 
     /// The inverse, which is the half that actually loses data: a read that FAILED must never be

@@ -132,9 +132,9 @@ impl ProfileEditError {
                 "Your account is locked, so DIG cannot sign the change. Unlock it and try again."
                     .to_string()
             }
-            Self::Rejected(why) => format!(
-                "The blockchain declined the change, so your profile is unchanged: {why}"
-            ),
+            Self::Rejected(why) => {
+                format!("The blockchain declined the change, so your profile is unchanged: {why}")
+            }
             Self::ChainUnreachable(why) => format!(
                 "DIG could not reach the blockchain, so it does not know whether your change went \
                  through: {why}. Wait a minute and look at your profile again before trying it a \
@@ -169,8 +169,10 @@ pub trait ProfileEditSeam: Send + Sync {
     fn read(&self) -> Result<ProfileSnapshot, ProfileEditError>;
 
     /// Build, sign and push the edit, and hand back the status AND the bytes it produced.
-    fn commit(&self, changes: &[(ProfileField, SlotChange)])
-        -> Result<CommitOutcome, ProfileEditError>;
+    fn commit(
+        &self,
+        changes: &[(ProfileField, SlotChange)],
+    ) -> Result<CommitOutcome, ProfileEditError>;
 
     /// Whether the chain now anchors `root`, and the height of the coin that carries it.
     ///
@@ -359,15 +361,21 @@ pub fn start_commit(
                 feed.publish(opening.at(outcome.stage(None)));
                 watch_for_confirmation(&*seam, &outcome, &opening, &feed, watch);
             }
-            Err(error) => feed.publish(opening.at(Stage::Failed {
-                why: error.sentence(),
-                next: match error.profile_is_unchanged() {
-                    true => "Your profile is unchanged. You can change it and try again.".into(),
-                    false => "Open your profile again in a minute to see what it says before you \
+            Err(error) => feed.publish(
+                opening.at(Stage::Failed {
+                    why: error.sentence(),
+                    next: match error.profile_is_unchanged() {
+                        true => {
+                            "Your profile is unchanged. You can change it and try again.".into()
+                        }
+                        false => {
+                            "Open your profile again in a minute to see what it says before you \
                               try a second time."
-                        .into(),
-                },
-            })),
+                                .into()
+                        }
+                    },
+                }),
+            ),
         }
     });
 }
@@ -495,9 +503,7 @@ mod tests {
             match self.chain {
                 Chain::Confirms(height) => Ok(Some(height)),
                 Chain::NotYet => Ok(None),
-                Chain::Unreachable => {
-                    Err(ProfileEditError::ChainUnreachable("no node".into()))
-                }
+                Chain::Unreachable => Err(ProfileEditError::ChainUnreachable("no node".into())),
             }
         }
     }
@@ -640,7 +646,9 @@ mod tests {
     #[test]
     fn a_pushed_edit_is_drawn_as_pushed_and_carries_its_root_as_a_handle() {
         let outcome = CommitOutcome {
-            status: EditStatus::Pushed { new_root: [0x22; 32] },
+            status: EditStatus::Pushed {
+                new_root: [0x22; 32],
+            },
             root: NEW_ROOT.into(),
             body: b"body".to_vec(),
         };
@@ -713,7 +721,9 @@ mod tests {
         );
         // The transaction is visible IMMEDIATELY, before the worker has done anything: a person who
         // pressed Save sees that something is happening on the very next frame.
-        let opening = feed.read().expect("a transaction is published synchronously");
+        let opening = feed
+            .read()
+            .expect("a transaction is published synchronously");
         assert_eq!(opening.what, WHAT);
 
         let settled = wait_for_settled(&feed);

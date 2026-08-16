@@ -31,10 +31,9 @@
 //! CI.
 
 use crate::tray_menu::{
-    profile_edit_actions,
     apps_actions, auto_update_actions, auto_update_label, cache_actions, cache_label,
-    management_actions, profile_actions, security_actions, view_account_actions, wallet_actions,
-    MenuRow, TrayAction, TrayView,
+    management_actions, profile_actions, profile_edit_actions, security_actions,
+    view_account_actions, wallet_actions, MenuRow, TrayAction, TrayView,
 };
 
 /// One tab of the app window — five destinations, in the order a person meets them.
