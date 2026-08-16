@@ -356,7 +356,12 @@ fn encode(image: &DynamicImage) -> Result<DataUrl, IntakeError> {
     let mime = if has_transparency(image) {
         let rgba = image.to_rgba8();
         PngEncoder::new(&mut buffer)
-            .write_image(rgba.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+            .write_image(
+                rgba.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
             .map_err(|_| IntakeError::EncodeFailed)?;
         "image/png"
     } else {

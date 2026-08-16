@@ -125,7 +125,10 @@ fn the_counter_sees_the_bomb_when_the_bound_is_raised() {
 
     let (accepted, allocated) = watch(|| intake(&bomb, lifted));
 
-    assert!(accepted.is_ok(), "the lifted bound accepts it: {accepted:?}");
+    assert!(
+        accepted.is_ok(),
+        "the lifted bound accepts it: {accepted:?}"
+    );
     assert!(
         allocated > ALLOWED_BYTES,
         "decoding the same {DECODED_BYTES} byte bitmap allocated only {allocated} bytes — the \
@@ -143,7 +146,9 @@ static COUNTER: Mutex<()> = Mutex::new(());
 
 /// Run `body` with the allocation counter armed, returning its answer and the bytes it asked for.
 fn watch<T>(body: impl FnOnce() -> T) -> (T, usize) {
-    let _armed = COUNTER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _armed = COUNTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     ALLOCATED.store(0, Ordering::Relaxed);
     WATCHING.store(true, Ordering::Relaxed);
     let answer = body();

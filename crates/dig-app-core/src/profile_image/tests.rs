@@ -9,9 +9,11 @@
 //! * **the bomb** is a header declaring an enormous image with no pixel data behind it. If the
 //!   refusal happened after decoding, that fixture would fail as truncated rather than as too large
 //!   — so the assertion is on the error *carrying the declared dimensions*, which only a header-time
-//!   refusal can know. The allocation itself is bounded in
-//!   `tests/profile_image_bomb_allocates_nothing.rs`, which is a separate binary because it needs
-//!   its own global allocator.
+//!   refusal can know. It is deliberately NOT the fixture for the allocation claim — a header-only
+//!   file allocates nothing even when the bound is removed, so it cannot tell a bounded decode from
+//!   an unbounded one. That claim is bounded by a real bomb in
+//!   `tests/profile_image_bomb_allocates_nothing.rs`, a separate binary because it needs its own
+//!   global allocator.
 
 use super::*;
 
@@ -54,7 +56,9 @@ fn encode_png(image: &DynamicImage) -> Vec<u8> {
 /// through the reported `width`/`height`, so an implementation that resized and then encoded the
 /// original cannot pass.
 fn stored_dimensions(url: &DataUrl) -> (u32, u32) {
-    let bytes = STANDARD.decode(&url.base64).expect("stored payload is base64");
+    let bytes = STANDARD
+        .decode(&url.base64)
+        .expect("stored payload is base64");
     let image = image::load_from_memory(&bytes).expect("stored payload decodes");
     (image.width(), image.height())
 }
@@ -215,7 +219,10 @@ fn a_decompression_bomb_is_refused_with_the_dimensions_it_declared() {
         "the refusal must name what the header declared, which only a header-time refusal knows"
     );
     let message = refusal.to_string();
-    assert!(message.contains("60000") && message.contains("8192"), "{message}");
+    assert!(
+        message.contains("60000") && message.contains("8192"),
+        "{message}"
+    );
 }
 
 #[test]
