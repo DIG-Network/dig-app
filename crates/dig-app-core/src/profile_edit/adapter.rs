@@ -99,8 +99,9 @@ impl ProfileContentSource for NodeProfileContent {
 /// The root is not decoration: [`VerifiedBody::open`] refuses bytes that do not rebuild to it, so a
 /// body that has been altered in transit is rejected HERE, before dig-account is ever handed it.
 fn slots_of(bytes: &[u8], root: [u8; 32]) -> Result<Vec<(u16, Vec<u8>)>, BodyStoreError> {
-    let body = VerifiedBody::open(bytes, AnchoredRoot::from_chain_read(root))
-        .map_err(|e| BodyStoreError::Refused(format!("the stored profile content is unusable: {e}")))?;
+    let body = VerifiedBody::open(bytes, AnchoredRoot::from_chain_read(root)).map_err(|e| {
+        BodyStoreError::Refused(format!("the stored profile content is unusable: {e}"))
+    })?;
     Ok(body
         .profile()
         .iter()
@@ -137,7 +138,10 @@ where
     P: SpendPublisher + Send + Sync,
 {
     /// Assemble the seam for the profile at `ix`, anchored at `anchor`.
-    #[allow(clippy::too_many_arguments, reason = "each argument is a distinct authority")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is a distinct authority"
+    )]
     pub fn new(
         residency: Arc<AccountResidency>,
         ix: ProfileIx,
@@ -157,7 +161,6 @@ where
             network,
         }
     }
-
 }
 
 impl<C, P> ProfileEditSeam for AccountEditSeam<C, P>
@@ -179,9 +182,7 @@ where
             values: snapshot
                 .fields()
                 .iter()
-                .filter_map(|(slot, value)| {
-                    Some((ProfileField::of_slot(slot)?, value.to_string()))
-                })
+                .filter_map(|(slot, value)| Some((ProfileField::of_slot(slot)?, value.to_string())))
                 .collect(),
             body_len: snapshot.body_bytes().len(),
         })
@@ -330,10 +331,16 @@ mod tests {
     /// A body publishing a display name and one slot the editor does not name, with its real root.
     fn a_body() -> (Vec<u8>, [u8; 32]) {
         let mut profile = Profile::new();
-        profile.set(SlotId(ProfileSlot::DisplayName.id()), Value::Utf8("Ada".into()));
+        profile.set(
+            SlotId(ProfileSlot::DisplayName.id()),
+            Value::Utf8("Ada".into()),
+        );
         // A slot the form has no field for. It must survive a round trip, because the new root is
         // computed over the WHOLE body and a decode that dropped it would silently delete it.
-        profile.set(SlotId(ProfileSlot::Avatar.id()), Value::Utf8("dig://av".into()));
+        profile.set(
+            SlotId(ProfileSlot::Avatar.id()),
+            Value::Utf8("dig://av".into()),
+        );
         let body = VerifiedBody::from_profile(&profile).expect("a body");
         (body.as_bytes().to_vec(), body.root())
     }

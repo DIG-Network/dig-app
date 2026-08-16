@@ -259,7 +259,9 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     // Both body methods are token-gated. Without a token the store can only refuse, and a seam whose
     // persistence half can only refuse must not offer a Save that spends first and fails second.
     let Some(token) = dig_app_core::control::load_control_token() else {
-        tracing::warn!("profile editing not wired: this app could not read your node's control token");
+        tracing::warn!(
+            "profile editing not wired: this app could not read your node's control token"
+        );
         return;
     };
 
