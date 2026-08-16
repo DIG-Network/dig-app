@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use chia_protocol::CoinSpend;
 use dig_account::{
-    AccountError, CustodyPolicy, LocalMoneySigner, ProfileIx, ProfileMinter,
+    AccountError, CustodyPolicy, LocalMoneySigner, ProfileEditor, ProfileIx, ProfileMinter,
     Result as AccountResult, SpendSummary, TransferPlan, TransferRequest, UnlockedAccount,
 };
 use dig_chainsource_interface::ChainSource;
@@ -318,6 +318,17 @@ impl AccountResidency {
     /// for a cached handle.
     pub fn profile_minter(&self) -> Option<ProfileMinter> {
         self.guard().as_ref().map(UnlockedAccount::profile_minter)
+    }
+
+    /// Build the LIVE profile editor through the CURRENT account — or `None` once locked.
+    ///
+    /// Derived per call for [`profile_minter`](Self::profile_minter)'s reason, and it is the same
+    /// reason: committing an edit recreates the store singleton on chain and spends real XCH, so an
+    /// editor derived once and kept would go on spending after a lock-now or an idle timeout.
+    /// dig-account scopes `ProfileEditor` to the unlock's residency itself, and deriving it here per
+    /// call is what keeps that property whole rather than trading it for a cached handle.
+    pub fn profile_editor(&self) -> Option<ProfileEditor> {
+        self.guard().as_ref().map(UnlockedAccount::profile_editor)
     }
 
     /// The account's receiving address, in `xch1…` form — where a user sends XCH or $DIG.

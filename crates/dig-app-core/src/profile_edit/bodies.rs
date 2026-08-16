@@ -78,6 +78,18 @@ pub enum BodyStoreError {
     Undecodable(String),
 }
 
+/// The remedy sentence IS the display form.
+///
+/// dig-account's [`ProfileContentSource`](dig_account::edit::ProfileContentSource) surfaces a
+/// source's error through `Display`, and that string reaches a person via
+/// `EditError::ContentUnavailable`. A derived `Debug`-ish rendering there would show them
+/// `Unreachable("connection refused")`; this shows them what to do about it.
+impl std::fmt::Display for BodyStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.sentence())
+    }
+}
+
 impl BodyStoreError {
     /// What to tell a person, in words that name the remedy.
     pub fn sentence(&self) -> String {

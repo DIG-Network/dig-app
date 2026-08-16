@@ -31,6 +31,7 @@
 //! which is what lets the rest of the editor be written and reviewed against an API that is
 //! published rather than one that is in a gate.
 
+pub mod adapter;
 pub mod bodies;
 pub mod commit;
 pub mod draft;
@@ -40,6 +41,7 @@ pub mod service;
 
 use std::collections::BTreeMap;
 
+pub use adapter::{AccountEditSeam, NodeProfileContent};
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
 pub use commit::{CommitOutcome, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};

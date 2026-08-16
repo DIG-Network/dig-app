@@ -119,6 +119,9 @@ chia-bls.workspace = true
 chia-protocol.workspace = true
 # The canonical chain-read trait the DID mint is generic over (`account::chain_mint`).
 dig-chainsource-interface.workspace = true
+# Decodes a persisted profile body into the slot pairs dig-account's content seam takes. Used in
+# exactly one private function; see the workspace manifest for why the dep is the right call.
+dig-social-profile.workspace = true
 chia-puzzle-types.workspace = true
 chia-sdk-driver.workspace = true
 chia-sdk-signer.workspace = true

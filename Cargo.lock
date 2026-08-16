@@ -2015,6 +2015,7 @@ dependencies = [
  "dig-keystore",
  "dig-node-control-interface",
  "dig-session",
+ "dig-social-profile",
  "dig-wallet-backend",
  "dispatch2",
  "eframe",
