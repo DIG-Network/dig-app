@@ -150,7 +150,7 @@ impl ProfileField {
             Self::Location => "Wherever you would like to say you are. Public, and up to you.",
             // Says SPACES, not lines, because the shared form control is single-line: an
             // instruction to press Return in a box that cannot take a Return is an instruction
-            // nobody can follow. A multi-line control is dig_ecosystem#3033.
+            // nobody can follow. A multi-line control is dig_ecosystem#3026.
             Self::Links => {
                 "Web addresses, separated by spaces. Anyone can read them, and nobody checks that \
                  they are yours."
