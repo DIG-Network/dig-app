@@ -3270,8 +3270,8 @@ mod tray {
     ///
     /// The window is assembled by [`wallet_window_body`] from a `WalletOverview`, whose whole purpose is
     /// that an unreadable balance can never be rendered as a zero. Sending is absent from THIS window
-    /// because no tray action can spend — structural, rather than a greyed row — and the body says so
-    /// while naming the window's Wallet tab, which does send (dig_ecosystem#2988).
+    /// because this notification body carries no control that emits a [`TrayAction`], and the body
+    /// says so while naming the window's Wallet tab, which does send (dig_ecosystem#2988).
     fn explain_wallet(view: &TrayView, confirmer: &dyn NativeConfirmer) {
         notify(
             confirmer,

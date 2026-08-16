@@ -1733,11 +1733,10 @@ pub const CREATE_PROFILE_LABEL: &str = "Set up funding for a profile…";
 ///
 /// # Why there is no `Send`
 ///
-/// The money path is PARKED (#1702). A `Send…` row would therefore be permanently greyed, and a greyed row
-/// that cannot say when it will work is the exact defect #1800 removed from this menu. So spending is not
-/// offered *at all* — no [`TrayAction`] can spend, which makes "the tray cannot move funds" a structural
-/// fact rather than one `enabled: false` away from being wrong. [`AboutWallet`](TrayAction::AboutWallet)
-/// explains the situation in a window that has room for it.
+/// A menu cannot hold a form, and an amount is not something a person picks from a list — so spending is
+/// not offered *at all* from this menu. [`SendXch`](Self::SendXch) is emitted by the Wallet pane and
+/// never by a tray row. [`AboutWallet`](TrayAction::AboutWallet) explains the situation in a window
+/// that has room for it.
 ///
 /// The same reasoning already governs DIDs ([`AboutDid`](TrayAction::AboutDid)): the tray does not offer
 /// verbs the app cannot perform.

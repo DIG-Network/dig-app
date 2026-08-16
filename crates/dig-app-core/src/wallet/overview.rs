@@ -434,8 +434,9 @@ fn refine_unsynced(
 /// another does not exist (dig_ecosystem#2988). An app that denies a capability it ships is lying
 /// about money in the direction that costs it every other claim it makes.
 ///
-/// What is true of THIS window is unchanged: it cannot spend, because no tray action can. So it says
-/// that, and points at the surface that can, instead of speaking for the whole app.
+/// What is true of THIS window is unchanged: it is a notification body assembled by `explain_wallet`,
+/// with no control and no row that emits an action. So it says that, and points at the surface
+/// that can, instead of speaking for the whole app.
 pub fn window_body(overview: &WalletOverview) -> String {
     format!(
         "{}{}\n\n{}\n\nThis window shows what you hold; it does not send. Sending is in the DIG \
