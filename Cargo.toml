@@ -52,7 +52,7 @@ dig-ipc-protocol = "0.3"
 # ride in. dig-app-core consumes it as the CLIENT half so the app can never drift from the surface
 # dig-node dispatches. Transport-agnostic by design — `crate::control` supplies the loopback HTTP
 # transport the node actually answers on.
-dig-node-control-interface = "0.15"
+dig-node-control-interface = "0.16"
 # The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
 # WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the
@@ -91,7 +91,7 @@ dig-session = "0.6"
 # so the crate's own `PolicyAuthorizer` is now mechanically the only thing that can permit a spend.
 # Consumed as the published crates.io release (release-first, §4.1), never a git source (§3.6
 # all-crates rule).
-dig-account = "0.13"
+dig-account = "0.16"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account

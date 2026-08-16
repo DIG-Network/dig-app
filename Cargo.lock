@@ -1936,9 +1936,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.13.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bbb42b77f2a31abf6850626f0c7408d58aadffc613095639b75b21472079840"
+checksum = "c0396489e5aa69dd9f0cf22f247614a823d4a80be4d84bdb879ea1ca9f17803b"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2243,9 +2243,9 @@ dependencies = [
 
 [[package]]
 name = "dig-node-control-interface"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86e047496591c00027d843bf9bd27c858fcd27035e0020eed9a8b2b0d64c87cc"
+checksum = "f9717baa676e3a55c097fdc7dba6793824fdf4b1801fe115bc7820e3f19b3241"
 dependencies = [
  "async-trait",
  "semver",
@@ -2312,9 +2312,9 @@ dependencies = [
 
 [[package]]
 name = "dig-social-profile"
-version = "0.4.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8998398cfeeef2ff81f3035f4358a9f8559efe36bc3787da8d7f5e4bd23b1cf3"
+checksum = "80244160b8e00e8c3362773e3b0f5732de527aef4d361470f10d17fd50a09588"
 dependencies = [
  "chia-protocol",
  "chia-sdk-utils",
@@ -2322,6 +2322,7 @@ dependencies = [
  "dig-identity 0.7.0",
  "dig-smt",
  "dig-store",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
 ]
 

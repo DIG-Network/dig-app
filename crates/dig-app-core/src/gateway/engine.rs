@@ -421,6 +421,10 @@ mod tests {
                 }),
                 serde_json::to_value(params::SubscribeParams {
                     store_id: "sid".into(),
+                    // The subscription this command builds follows ordinary store content, which is
+                    // the meaning every untagged subscription already carried before the contract
+                    // named it (dig-node-control-interface 0.16).
+                    kind: params::SubscriptionKind::Capsule,
                 })
                 .unwrap(),
                 <params::SubscribeParams as ControlCall>::METHOD.name(),
