@@ -3,25 +3,33 @@
 //! # Why this is a separate test binary
 //!
 //! It installs a `#[global_allocator]`, and a crate may have exactly one. That is also the only
-//! instrument that can actually settle the question: every other assertion available — the error
-//! variant, the dimensions in the message, the wall-clock time — is equally satisfied by an
-//! implementation that allocates fourteen gigabytes and *then* refuses. Only counting the bytes the
-//! allocator was asked for distinguishes the bound-on-decode this module claims from a
-//! bound-on-output that would leave the machine on its knees first.
+//! instrument that can settle the question: every other assertion available — the error variant, the
+//! dimensions in the message, the wall-clock time — is equally satisfied by an implementation that
+//! allocates the whole bitmap and *then* refuses. Only counting the bytes the allocator was asked
+//! for distinguishes the bound-on-decode this module claims from a bound-on-output that would leave
+//! the machine on its knees first.
 //!
-//! The declared bitmap is 60,000 x 60,000 RGBA — **14.4 GB**. The ceiling asserted here is 64 MiB,
-//! chosen from the fixture rather than from taste: it is over two hundred times the largest thing
-//! this test legitimately allocates, and over two hundred times *below* the declared bitmap, so it
-//! cannot be passed by accident from either direction.
+//! # Why the fixture is a real bomb and not a bare header
+//!
+//! A PNG header declaring enormous dimensions with no pixel data behind it is the obvious fixture,
+//! and it is a **false green** here: this decoder streams rows, so a header-only file never asks the
+//! allocator for the declared bitmap even with every bound removed — the counter reads near zero
+//! whether the code is right or wrong, and the test proves nothing. (Measured: with both halves of
+//! the bound disabled, a 60,000 x 60,000 header-only fixture still allocated under the ceiling.)
+//!
+//! So the fixture is an actual decompression bomb — a uniform 6,000 x 6,000 image, which is a few
+//! kilobytes compressed and **36 MB** decoded. That is a real allocation, and
+//! [`the_counter_sees_the_bomb_when_the_bound_is_raised`] proves the counter sees it: the same bytes,
+//! with the bound lifted, blow straight through the ceiling the refusal path stays under.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use dig_app_core::profile_image::{intake, DecodeBounds, IntakeError};
 
-/// Bytes requested from the allocator while [`WATCHING`] is set. Not a live-usage figure: a
-/// cumulative total, which is the stricter measure — a decoder that allocated and freed the bomb
-/// would still be caught.
+/// Bytes requested from the allocator while [`WATCHING`] is set. Cumulative rather than live usage,
+/// which is the stricter measure: a decoder that allocated the bomb and freed it is still caught.
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
@@ -35,6 +43,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
             ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
         }
         System.alloc(layout)
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if WATCHING.load(Ordering::Relaxed) {
+            ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        System.alloc_zeroed(layout)
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -52,84 +67,100 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-/// The declared bitmap, in bytes, if the bomb were ever decoded: 60,000 x 60,000 x RGBA.
-const DECLARED_BITMAP_BYTES: usize = 60_000 * 60_000 * 4;
+/// The bomb's side, in pixels.
+///
+/// Taken from the protocol's own numbers rather than picked for drama: the received path admits
+/// 512 x 512, so this is nearly 140x its pixel bound — a size no conforming writer of ours could
+/// have produced — while staying small enough that the control below can afford to decode it.
+const BOMB_SIDE: u32 = 6_000;
 
-/// What intake is allowed to ask the allocator for while refusing the bomb.
-const ALLOWED_BYTES: usize = 64 * 1024 * 1024;
+/// What decoding the bomb costs at one byte per pixel, before any RGBA expansion: 36 MB.
+const DECODED_BYTES: usize = BOMB_SIDE as usize * BOMB_SIDE as usize;
+
+/// What intake may ask the allocator for while refusing the bomb.
+///
+/// Taken from the fixture, not from taste: nine times below what decoding costs, and three orders of
+/// magnitude above the compressed input, so neither a correct nor a broken implementation lands near
+/// it by accident.
+const ALLOWED_BYTES: usize = 4 * 1024 * 1024;
 
 #[test]
 fn a_bomb_is_refused_without_allocating_its_declared_bitmap() {
-    let bomb = bomb_header(60_000, 60_000);
-    assert!(bomb.len() < 200, "a bomb is a small file, this one is {}", bomb.len());
+    let bomb = uniform_png(BOMB_SIDE, BOMB_SIDE);
+    assert!(
+        bomb.len() < ALLOWED_BYTES / 8,
+        "a bomb is a small file; this fixture is {} bytes and is not one",
+        bomb.len()
+    );
 
-    ALLOCATED.store(0, Ordering::Relaxed);
-    WATCHING.store(true, Ordering::Relaxed);
-    let refusal = intake(&bomb, DecodeBounds::LOCAL_PICK);
-    WATCHING.store(false, Ordering::Relaxed);
-    let allocated = ALLOCATED.load(Ordering::Relaxed);
+    // The received path, because that is where a bomb actually arrives: a body some other peer wrote.
+    let (refusal, allocated) = watch(|| intake(&bomb, DecodeBounds::RECEIVED));
 
+    assert!(
+        allocated < ALLOWED_BYTES,
+        "refusing a bomb that decodes to {DECODED_BYTES} bytes allocated {allocated} bytes, over \
+         the {ALLOWED_BYTES} this bound permits — the refusal is happening after the decode, not \
+         before it"
+    );
     assert!(
         matches!(refusal, Err(IntakeError::TooLarge { .. })),
         "expected a size refusal, got {refusal:?}"
     );
+}
+
+/// The control that makes the ceiling above mean something.
+///
+/// Same bytes, bound lifted above the bomb's dimensions: the decode now happens and the counter
+/// records it. Without this, "allocated under 8 MiB" is equally satisfied by a counter that is
+/// simply not watching, or by a decoder that never allocates for any input.
+#[test]
+fn the_counter_sees_the_bomb_when_the_bound_is_raised() {
+    let bomb = uniform_png(BOMB_SIDE, BOMB_SIDE);
+    let lifted = DecodeBounds {
+        max_width: BOMB_SIDE,
+        max_height: BOMB_SIDE,
+        max_pixels: u64::from(BOMB_SIDE) * u64::from(BOMB_SIDE),
+        ..DecodeBounds::LOCAL_PICK
+    };
+
+    let (accepted, allocated) = watch(|| intake(&bomb, lifted));
+
+    assert!(accepted.is_ok(), "the lifted bound accepts it: {accepted:?}");
     assert!(
-        allocated < ALLOWED_BYTES,
-        "refusing a {DECLARED_BITMAP_BYTES} byte declared bitmap allocated {allocated} bytes, \
-         over the {ALLOWED_BYTES} this bound permits — the refusal is happening after decode"
+        allocated > ALLOWED_BYTES,
+        "decoding the same {DECODED_BYTES} byte bitmap allocated only {allocated} bytes — the \
+         counter cannot see this decode, so the refusal test above proves nothing"
     );
 }
 
-/// The control. Without it the assertion above is satisfiable by an intake that allocates nothing
-/// because it does nothing — the instrument has to be shown capable of seeing an allocation at all.
-#[test]
-fn the_allocation_counter_can_see_a_real_decode() {
-    let real = encoded_png(800, 800);
+/// The counter is one global, so only one test may be armed at a time.
+///
+/// Without this the tests race in a way that reads as a *pass*: the short test finishes first,
+/// clears `WATCHING`, and the long one then measures a decode nobody was counting. That is exactly
+/// how the control below earned its place — it failed on a near-zero reading while the decode it was
+/// measuring was demonstrably running.
+static COUNTER: Mutex<()> = Mutex::new(());
 
+/// Run `body` with the allocation counter armed, returning its answer and the bytes it asked for.
+fn watch<T>(body: impl FnOnce() -> T) -> (T, usize) {
+    let _armed = COUNTER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     ALLOCATED.store(0, Ordering::Relaxed);
     WATCHING.store(true, Ordering::Relaxed);
-    let accepted = intake(&real, DecodeBounds::LOCAL_PICK);
+    let answer = body();
     WATCHING.store(false, Ordering::Relaxed);
-    let allocated = ALLOCATED.load(Ordering::Relaxed);
-
-    assert!(accepted.is_ok(), "the control image is accepted");
-    assert!(
-        allocated > 800 * 800,
-        "decoding an 800x800 image allocated only {allocated} bytes — the counter is not watching"
-    );
+    (answer, ALLOCATED.load(Ordering::Relaxed))
 }
 
-/// See `profile_image::tests::bomb_header`; duplicated here because a `#[cfg(test)]` helper is not
-/// reachable from an integration test binary, and vendoring twenty lines beats widening the crate's
-/// public surface with a fixture builder.
-fn bomb_header(width: u32, height: u32) -> Vec<u8> {
-    let mut bytes = encoded_png(1, 1);
-    bytes[16..20].copy_from_slice(&width.to_be_bytes());
-    bytes[20..24].copy_from_slice(&height.to_be_bytes());
-    let crc = crc32(&bytes[12..29]);
-    bytes[29..33].copy_from_slice(&crc.to_be_bytes());
-    bytes
-}
-
-fn encoded_png(width: u32, height: u32) -> Vec<u8> {
-    let image = image::RgbImage::from_fn(width, height, |x, y| {
-        image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 233) as u8])
-    });
+/// A uniform single-colour PNG — the classic decompression bomb, since a constant image deflates to
+/// almost nothing while declaring, and on decode genuinely allocating, its full size.
+fn uniform_png(width: u32, height: u32) -> Vec<u8> {
+    let image = image::GrayImage::from_pixel(width, height, image::Luma([0u8]));
     let mut bytes = Vec::new();
-    image::DynamicImage::ImageRgb8(image)
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+    image::DynamicImage::ImageLuma8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .expect("fixture encodes");
     bytes
-}
-
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
 }
