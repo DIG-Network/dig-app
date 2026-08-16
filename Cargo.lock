@@ -2019,6 +2019,7 @@ dependencies = [
  "dispatch2",
  "eframe",
  "egui",
+ "flate2",
  "futures-util",
  "hex",
  "hex-literal",

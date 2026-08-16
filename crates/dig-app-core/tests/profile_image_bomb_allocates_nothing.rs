@@ -169,3 +169,132 @@ fn uniform_png(width: u32, height: u32) -> Vec<u8> {
         .expect("fixture encodes");
     bytes
 }
+
+/// **The metadata vector: a colour profile that outweighs the image it describes.**
+///
+/// The bomb above is a big *picture*. This one is a 1x1 picture carrying a big *colour profile*, and
+/// it is the case every other bound in the module misses: `max_input_bytes` bounds the COMPRESSED
+/// file, and the width/height/pixel checks read an IHDR that honestly says 1x1. Nothing in the
+/// module's own arithmetic can see it.
+///
+/// It reaches the allocator because reading a PNG "header" is not header-only — `into_dimensions()`
+/// builds the full decoder, which walks every ancillary chunk ahead of IDAT, and `iCCP` carries a
+/// zlib-compressed profile that png decompresses on the way past with a budget taken from the limits
+/// it was handed.
+///
+/// **Refusal is not the assertion here, and that is the point.** With the bound in place png skips
+/// the chunk it cannot afford and returns the honest 1x1 image — a success, not an error. So an
+/// error-shaped test would fail on correct code, and a "did it decode?" test passes on broken code.
+/// Only the allocator distinguishes them.
+#[test]
+fn a_compressed_colour_profile_cannot_outgrow_the_decode_it_precedes() {
+    const DECLARED: usize = 64 * 1024 * 1024;
+
+    let bomb = iccp_bomb(DECLARED);
+    assert!(
+        bomb.len() < DecodeBounds::RECEIVED.max_input_bytes,
+        "the fixture must be legal by size or it is refused for the wrong reason: {} bytes",
+        bomb.len()
+    );
+
+    let (outcome, allocated) = watch(|| intake(&bomb, DecodeBounds::RECEIVED));
+
+    // Measured against what the attacker DECLARED, not against a fixed ceiling. The bound does not
+    // promise "allocates nothing" — png still spends its allowance discovering the chunk is
+    // unaffordable, and the decode that follows needs real buffers. What it promises is that the
+    // spend tracks OUR limits rather than the attacker's number. Measured: about 4.7 MB against
+    // 64 MiB declared, and it stays flat as DECLARED grows, which is the property that matters.
+    let ceiling = DECLARED / 8;
+    assert!(
+        allocated < ceiling,
+        "a {DECLARED}-byte colour profile on a 1x1 image drew {allocated} bytes through the \
+         allocator; the bound should hold that far under {ceiling}"
+    );
+    // The image itself is honest and tiny, so it is served rather than refused. Asserted so a future
+    // change that starts REFUSING these is noticed as a behaviour change rather than passing quietly.
+    assert!(
+        outcome.is_ok(),
+        "the 1x1 image behind the profile was refused: {outcome:?}"
+    );
+}
+
+/// The counter sees this bomb too when the bound is lifted — the control for the test above.
+///
+/// Without it, `a_compressed_colour_profile_cannot_outgrow_the_decode_it_precedes` is satisfied by a
+/// decoder that never allocates for any reason, which is exactly the false green that the
+/// header-only fixture turned out to be.
+#[test]
+fn the_counter_sees_the_colour_profile_when_it_is_decompressed() {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    const DECLARED: usize = 64 * 1024 * 1024;
+    let bomb = iccp_bomb(DECLARED);
+
+    // Decompress the same payload directly: this is what png does on the unbounded path, and it is
+    // the allocation the bound prevents.
+    let start = bomb
+        .windows(4)
+        .position(|w| w == b"iCCP")
+        .expect("the fixture carries an iCCP chunk");
+    let length = u32::from_be_bytes(bomb[start - 4..start].try_into().unwrap()) as usize;
+    let payload = &bomb[start + 4..start + 4 + length];
+    let compressed = &payload[3..]; // past "p\0" and the compression-method byte
+
+    let (decompressed, allocated) = watch(|| {
+        let mut out = Vec::new();
+        ZlibDecoder::new(compressed)
+            .read_to_end(&mut out)
+            .expect("the profile decompresses");
+        out.len()
+    });
+
+    assert_eq!(decompressed, DECLARED);
+    assert!(
+        allocated > ALLOWED_BYTES,
+        "the counter did not see a {DECLARED}-byte decompression: {allocated} bytes"
+    );
+}
+
+/// A 1x1 PNG carrying an `iCCP` chunk whose colour profile decompresses to `declared` bytes.
+fn iccp_bomb(declared: usize) -> Vec<u8> {
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(&vec![0u8; declared])
+        .expect("zeros compress");
+    let compressed = encoder.finish().expect("the stream closes");
+
+    // iCCP payload: null-terminated profile name, the compression-method byte (0 = zlib), then the
+    // compressed profile.
+    let mut payload = b"p\0\0".to_vec();
+    payload.extend_from_slice(&compressed);
+
+    let mut chunk = (payload.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"iCCP");
+    chunk.extend_from_slice(&payload);
+    chunk.extend_from_slice(&crc32(&chunk[4..]).to_be_bytes());
+
+    // Spliced right after IHDR (8-byte signature + 25-byte IHDR chunk) so it is read before any
+    // pixel data — where a real encoder would put it.
+    let base = uniform_png(1, 1);
+    let mut bytes = base[..33].to_vec();
+    bytes.extend_from_slice(&chunk);
+    bytes.extend_from_slice(&base[33..]);
+    bytes
+}
+
+/// The CRC-32 PNG chunks are checked against (IEEE polynomial, reflected).
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}

@@ -115,6 +115,23 @@ impl DecodeBounds {
     }
 }
 
+/// The limits for the HEADER read — allocation bounded, dimensions deliberately not.
+///
+/// Leaving `max_image_width`/`max_image_height` unset is what lets an oversized image be refused
+/// with its real numbers (`IntakeError::TooLarge { width, height, .. }`) rather than a bare "limit
+/// exceeded"; the dimension check runs on the returned values a moment later.
+///
+/// `max_alloc` is set because reading a PNG header is NOT allocation-free: `iCCP` carries a
+/// zlib-compressed colour profile that png decompresses while walking to IDAT, with its budget taken
+/// from here. The cap is the same one the decode uses, so a header read can never allocate more than
+/// the decode it precedes — an image whose METADATA outweighs its own pixel buffer is not a case
+/// worth serving.
+fn header_limits(bounds: DecodeBounds) -> Limits {
+    let mut limits = Limits::no_limits();
+    limits.max_alloc = Some(bounds.max_pixels.saturating_mul(4).saturating_add(1 << 20));
+    limits
+}
+
 /// A `data:` URL carrying the normalised image, ready to be stored or rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataUrl {
@@ -282,11 +299,25 @@ fn decode_within(
     format: ImageFormat,
     bounds: DecodeBounds,
 ) -> Result<DynamicImage, IntakeError> {
-    // Deliberately UNLIMITED for the header read alone. Parsing a header allocates nothing
-    // proportional to the declared size, and a decoder that refused here would report only "limit
-    // exceeded" — costing the actual dimensions, which are the one thing that makes the refusal
-    // message actionable. The strict limits are still applied to the decode below.
-    let (width, height) = reader_for(bytes, format, Limits::no_limits())
+    // The dimension bounds are deliberately left OFF for the header read, so a refusal can report
+    // the image's real numbers instead of a bare "limit exceeded" — that is what makes the message
+    // actionable. But `max_alloc` IS set, and that distinction is load-bearing.
+    //
+    // # Why an allocation bound is needed to read a header
+    //
+    // "Parsing a header allocates nothing proportional to the declared size" is FALSE for PNG, and
+    // an earlier version of this comment asserted it. `into_dimensions()` constructs the full
+    // `PngDecoder`, whose `read_info()` walks every ancillary chunk ahead of IDAT — and `iCCP`
+    // carries a **zlib-compressed** colour profile that png decompresses eagerly, taking its budget
+    // from these very limits.
+    //
+    // Every other bound in this module misses it: `max_input_bytes` bounds the COMPRESSED input,
+    // and the width/height/pixel checks below plus `decoder_limits()` all run AFTER this call. The
+    // IHDR can honestly say 1x1. A 4 MiB file declaring a 4 GiB profile — about 1029x amplification,
+    // comfortably under `RECEIVED.max_input_bytes` — reaches an allocation of 4 GiB here, which is
+    // an abort on a normal host and a multi-second zero-fill on a large one. On the peer-facing
+    // path that is one unauthenticated profile body from any peer.
+    let (width, height) = reader_for(bytes, format, header_limits(bounds))
         .into_dimensions()
         .map_err(|err| classify(err, bounds))?;
 
