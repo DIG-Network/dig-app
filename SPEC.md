@@ -1372,6 +1372,20 @@ and MUST subtract what a replaced slot costs today rather than only adding what 
 offer exactly as a blocked one does, and MUST NOT name a cause nobody observed. A blocked build MUST name
 which piece is missing — no chain transport, no profile, or a locked account — with the remedy for it.
 
+- **There MUST be exactly ONE set of seams, and the offer MUST be read off the set the app SAVES through
+  (MUST).** A surface MUST NOT construct a second seam value to answer the offer question. Two expressions of
+  one capability disagree eventually, and the way they disagree is a Save control drawn by a surface with
+  nothing behind it.
+- **A seam set MUST be installed whole or not at all (MUST).** Chain reads, the push, and the body store are
+  one capability: a build that can spend but cannot persist MUST report no chain transport rather than
+  offering a control that commits a root whose content it cannot keep.
+- **Whether the account is unlocked MUST be decided by the same predicate the seam signs under (MUST).** A
+  surface that asks a second way can offer Save to an account that has since relocked.
+
+**Naming the store MUST NOT require a chain read (MUST).** The store a profile lives in is fixed when the
+seam is built. Obtaining it MUST NOT perform a node round trip, because the caller that needs it is the
+commit path and that path is entered from the thread that paints.
+
 **The commit MUST obey §3.1c-v.** It MUST run off the painting thread, it MUST be reported through the same
 transaction surface every other chain write uses, and a pushed edit's root — a PREDICTION — MUST NOT be
 rendered as confirmed. Only a height the chain reported may be drawn as a confirmation. A watch that gives up
