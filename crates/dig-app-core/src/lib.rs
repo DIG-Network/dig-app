@@ -84,6 +84,10 @@ pub mod notify;
 pub mod paired_apps;
 pub mod pairing;
 pub mod pairing_code;
+/// Profile-image intake (dig_ecosystem#3010): bounded decode, fit-within-500x500 resize, and the
+/// base64 data URL that is stored. Outside the `gui` feature on purpose — it is pure bytes-to-bytes,
+/// so the decompression-bomb bound is testable headlessly.
+pub mod profile_image;
 pub mod profiles;
 pub mod sealer;
 pub mod secret_file;

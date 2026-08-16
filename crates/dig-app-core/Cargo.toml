@@ -105,6 +105,8 @@ qrcodegen.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
+# Profile-image intake (#3010): bounded decode, fit-within-500x500 resize, PNG/JPEG re-encode.
+image.workspace = true
 # Profiles (U5) — the canonical `did:chia:` profile FORMAT (consumed, never reinvented) + hex
 # encoding for the human-readable registry.
 dig-identity.workspace = true

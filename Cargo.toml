@@ -166,6 +166,13 @@ sha2 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
+# The bitmap decoder/encoder behind profile-image intake (dig_ecosystem#3010). `default-features =
+# false` is load-bearing, not tidiness: the default feature set enables a dozen decoders (TIFF, WebP,
+# GIF, DDS, TGA, farbfeld, ...) and every decoder is parser attack surface reachable from a body an
+# untrusted peer sent us. Profile images are PNG or JPEG, so those are the only two compiled in — a
+# format we cannot decode cannot be exploited through us. Chosen over hand-rolling because the resize
+# filters and the aspect arithmetic are exactly where a hand-rolled version goes subtly wrong.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # The OS credential store abstraction — used as the custody PRIMARY on Windows (Credential Manager)
 # and macOS (Keychain) ONLY, because those backends gate access per-application. Linux is
 # deliberately EXCLUDED: the kernel keyutils session keyring is readable by any same-UID process in

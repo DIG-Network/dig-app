@@ -2024,6 +2024,7 @@ dependencies = [
  "hex-literal",
  "hkdf",
  "hmac",
+ "image",
  "keyring",
  "libc",
  "objc2 0.6.4",
@@ -3811,6 +3812,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
