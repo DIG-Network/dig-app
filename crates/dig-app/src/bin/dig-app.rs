@@ -210,6 +210,91 @@ fn main() {
     }
 }
 
+/// Install the profile editor's seams, so an edit made in this app reaches the blockchain.
+///
+/// # Why this is attempted on each repaint rather than once at start-up
+///
+/// Neither half exists when the app opens. The endpoint must be the one the ENGINE actually
+/// connected to — `agent.endpoint()` is the user's CONFIGURED value and is empty on the ordinary
+/// machine that lets the §5.3 ladder resolve one — and the account starts LOCKED, by design, so
+/// there is no residency to derive an editor from. Both become true later, at moments this function
+/// cannot be called from: an unlock from the tray menu, a first-run setup, an engine that connects.
+///
+/// So the shell tries every frame and `EditService::is_installed` makes that cost nothing. This is
+/// the shape `ProfileCreation` already uses for the same three inputs.
+///
+/// # What each half is, and why both are required
+///
+/// A profile edit is a chain read, a locally-signed store recreation, a push, and the PERSISTENCE of
+/// the body the new root commits to. The chain half is the node's control plane
+/// ([`ControlChainSource`] reads, [`ControlSpendPublisher`] pushes an already-signed bundle — §908:
+/// nothing here hands the node a key). The persistence half is [`ControlBodyStore`] over
+/// `control.profile.putBody`/`getBody`, and it is not optional: the root goes on chain whether or
+/// not the bytes were kept, and a root whose preimage nobody holds is a profile no one can ever read
+/// again, on any machine, with every layer reporting success.
+///
+/// # Why a missing piece installs NOTHING rather than something partial
+///
+/// Each early return leaves the app on `EditSeams::NoChainTransport`, where the card names the
+/// missing piece and offers no Save control. That is the only safe direction: a half-wired seam would
+/// draw a control that spends real XCH and then cannot keep what the spend commits to.
+///
+/// Two of the three preconditions are ordinary states rather than faults — an account nobody has
+/// unlocked yet, and an account with no profile — and the card says so in those words
+/// (`EditBlocked::Locked`, `EditBlocked::NoProfile`) because the shell reads its offer off these
+/// same seams.
+#[cfg(feature = "tray")]
+fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
+    use dig_app_core::profile_edit::{AccountEditSeam, EditSeams, EditService};
+
+    // Each early return leaves the install slot FREE, so a later frame tries again. That is the
+    // point: every one of these is a condition that becomes true while the app runs.
+    let Some(session) = session else {
+        return;
+    };
+    // The profile to edit is the ACTIVE one, and its anchor is the chain evidence that it exists —
+    // a DID singleton and the store launched from it. An account with no confirmed profile has
+    // nothing to anchor an edit to, which is a state and not a fault.
+    let Some((ix, anchor)) = session.residency.profiles().with_registry(|registry| {
+        registry
+            .active()
+            .map(|active| (active.ix(), active.entry().anchor().clone()))
+    }) else {
+        return;
+    };
+    // Both body methods are token-gated. Without a token the store can only refuse, and a seam whose
+    // persistence half can only refuse must not offer a Save that spends first and fails second.
+    let Some(token) = dig_app_core::control::load_control_token() else {
+        return;
+    };
+
+    let bodies: std::sync::Arc<dyn dig_app_core::profile_edit::BodyStore> = std::sync::Arc::new(
+        dig_app_core::profile_edit::bodies::ControlBodyStore::new(endpoint, Some(token)),
+    );
+    let seam = AccountEditSeam::new(
+        std::sync::Arc::new(session.residency.clone()),
+        ix,
+        anchor,
+        std::sync::Arc::new(dig_app_core::chain::ControlChainSource::new(endpoint)),
+        std::sync::Arc::new(dig_app_core::chain::ControlSpendPublisher::new(endpoint)),
+        std::sync::Arc::clone(&bodies),
+        // Mainnet, and this is where a real edit spends real XCH. There is no other production value.
+        dig_app_core::profile_edit::MintNetwork::mainnet(),
+    );
+
+    EditService::install(std::sync::Arc::new(EditService::new(
+        EditSeams::Wired {
+            seam: std::sync::Arc::new(seam),
+            bodies,
+        },
+        // The app's own feed, so the write draws in the SAME transaction sheet every other chain
+        // write does — one surface that already distinguishes a push from a confirmation, rather
+        // than a second progress display beside it.
+        dig_app_core::transaction::Feed::app(),
+    )));
+    tracing::info!(%ix, "profile editing wired: edits made here will be published on chain");
+}
+
 /// Another dig-app already owns this user's brand directory, so this process must stand down.
 struct SecondInstance;
 
@@ -1447,7 +1532,36 @@ mod tray {
                 false,
             ),
         };
+        // Attempted here because this is the one place that holds all three inputs at once: the
+        // endpoint the engine CONNECTED to, the session, and its profile registry. Costs a single
+        // atomic load once the slot is taken.
+        if !dig_app_core::profile_edit::EditService::is_installed() {
+            if let Ok(status) = status.read() {
+                if let Some(endpoint) = status.engine.endpoint() {
+                    super::install_edit_seams(endpoint, session);
+                }
+            }
+        }
+
         TrayView {
+            // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
+            // installed — rather than a second `EditSeams` value built here (dig_ecosystem#3027).
+            // Two values would eventually disagree, and the way they disagree is a Save control
+            // offered by a surface with nothing behind it.
+            //
+            // The two facts the seams cannot know are supplied live, because both change under a
+            // seam that does not: a profile is confirmed, an account locks on the idle timer.
+            profile_editing: dig_app_core::profile_edit::EditService::app().editing(
+                session.is_some_and(|s| {
+                    s.residency
+                        .profiles()
+                        .with_registry(|registry| registry.active().is_some())
+                }),
+                // The SAME predicate the seam itself uses to decide whether it may sign: an
+                // editor exists exactly while the account is unlocked. Asking a second way is how a
+                // card comes to offer Save to a locked account.
+                session.is_some_and(|s| s.residency.profile_editor().is_some()),
+            ),
             running,
             node,
             node_connected,
@@ -2731,6 +2845,13 @@ mod tray {
                 set_profile_visibility(env, session.as_ref(), confirmer, ix, hidden)
             }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
+            // Nothing to do HERE, and that is the design rather than an omission. The editor's form
+            // lives in the window, so the change set exists only there; the pane hands it straight
+            // to `profile_edit::EditService`, which does the work on a worker thread and reports
+            // into the transaction feed the status sheet draws. This arm exists because the tray
+            // and the window compose the same verbs (`window_model`), and a row the shell could not
+            // name would not compile.
+            TrayAction::PublishProfileEdits => {}
             // The same window the daily cadence raises, reached on demand. Routed to the SAME
             // function rather than to a second flow: two ways in that read the balance differently
             // is how one of them comes to quote a figure the other does not (dig_ecosystem#2957).

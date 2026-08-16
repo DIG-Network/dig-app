@@ -1329,6 +1329,71 @@ happens, and MUST be described in terms of what the chain has actually proved.
 - **A cost MUST be stated wherever money moves, and an unmeasured cost MUST be silent (MUST).** A fee or an
   amount that was never measured MUST NOT render as zero, which is a claim that the transaction is free.
 
+### 3.1c-vi Editing a profile (normative, dig_ecosystem#2993)
+
+dig-app MUST let a person change everything their dig-profile publishes about them, and MUST do so without
+ever leaving the profile committed to content nobody holds.
+
+**The editable set.** The editor MUST offer exactly the named standard slots — display name, bio, avatar
+image, banner image, pronouns, location, links and XCH address — and MUST NOT offer the schema-version slot,
+the key slots, or any custom or encrypted slot. The two image fields MUST be the INLINE data-URL slots
+(`0x0020`, `0x0021`), never the `dig://` reference slots (`0x0003`, `0x0004`): the bytes ride in the profile
+body, and writing them where readers dereference a URI publishes an image no client can show.
+
+**Three acts, and they MUST NOT collapse into two.** Setting a slot, REMOVING a slot, and leaving it alone
+are different edits. A field emptied that held a value MUST commit a removal; a field emptied that held
+nothing MUST commit nothing, because a spend that removes an absent slot pays for no change; a field typed
+back to its committed value MUST commit nothing.
+
+**Reading MUST be verified, and its four states MUST be distinct (MUST).** The profile MUST be read through
+a seam that verifies the body against the root the CHAIN anchors, and the surface MUST distinguish: a read in
+flight, a profile that answered and holds nothing, a read that failed, and a profile with values. A profile
+holding nothing is a STATE and MUST NOT be drawn as a fault. A read that FAILED MUST NOT be drawn as an empty
+profile and MUST NOT offer an editable form — an edit computed against a profile the app could not see would
+commit a body missing everything it already held. A failed read MUST offer a retry.
+
+**The bytes a commit returns MUST be persisted (MUST).** A commit yields a status AND the canonical body
+bytes the new root commits to. The implementation MUST store those bytes — via `control.profile.putBody` on
+the local node — and MUST read them back at the root they were stored under before reporting the edit as
+done. A store that accepts a body and does not hold it MUST fail the commit. This is the one failure with no
+error of its own: the root reaches the chain, nothing holds its preimage, the profile becomes unreadable
+permanently, and every layer reports success.
+
+**A failed persist MUST be reported as an edit that HAPPENED (MUST).** It occurs after a successful push, so
+the surface MUST say both true things — the change was sent, and the content is not stored — and MUST NOT
+offer the form again as though nothing had happened.
+
+**Size MUST be refused before the form is filled in (MUST).** A body has two ceilings — 1,400,000 bytes for
+any one slot and 4 MiB for the whole body — and both MUST be checked against the projected body as a person
+edits, not only when the body is assembled. The check MUST account for the slots the editor does not show,
+and MUST subtract what a replaced slot costs today rather than only adding what its replacement costs.
+
+**Whether editing is OFFERED MUST be read off the seams (MUST).** An unmeasured build MUST withhold the
+offer exactly as a blocked one does, and MUST NOT name a cause nobody observed. A blocked build MUST name
+which piece is missing — no chain transport, no profile, or a locked account — with the remedy for it.
+
+- **There MUST be exactly ONE set of seams, and the offer MUST be read off the set the app SAVES through
+  (MUST).** A surface MUST NOT construct a second seam value to answer the offer question. Two expressions of
+  one capability disagree eventually, and the way they disagree is a Save control drawn by a surface with
+  nothing behind it.
+- **A seam set MUST be installed whole or not at all (MUST).** Chain reads, the push, and the body store are
+  one capability: a build that can spend but cannot persist MUST report no chain transport rather than
+  offering a control that commits a root whose content it cannot keep.
+- **Whether the account is unlocked MUST be decided by the same predicate the seam signs under (MUST).** A
+  surface that asks a second way can offer Save to an account that has since relocked.
+
+**Naming the store MUST NOT require a chain read (MUST).** The store a profile lives in is fixed when the
+seam is built. Obtaining it MUST NOT perform a node round trip, because the caller that needs it is the
+commit path and that path is entered from the thread that paints.
+
+**The commit MUST obey §3.1c-v.** It MUST run off the painting thread, it MUST be reported through the same
+transaction surface every other chain write uses, and a pushed edit's root — a PREDICTION — MUST NOT be
+rendered as confirmed. Only a height the chain reported may be drawn as a confirmation. A watch that gives up
+MUST say the change may still confirm and MUST tell the person not to publish again while it might.
+
+**§908 is unchanged.** The node never signs. The edit is built and signed in dig-app under the unlocked
+account; the node reads chain, stores the body, and pushes an already-signed bundle.
+
 ### 3.1c-iv The settings the window WRITES (normative)
 
 Beside the auto-update group — which dig-app may only ask the beacon to change (§3.1c-iii) — the Settings

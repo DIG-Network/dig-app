@@ -455,6 +455,51 @@ pub(crate) mod protection {
 /// honour, and a person who believed it would think they had removed an identity that is still there
 /// for anyone to resolve. [`no_profile_copy_implies_a_profile_can_be_deleted`](super::tests) is that
 /// rule as an assertion.
+/// The profile editor's words (dig_ecosystem#2993).
+///
+/// Every sentence here is written for somebody who does not know that a profile is published
+/// content on a public chain, and who is about to spend money finding out.
+pub(crate) mod profile_edit {
+    /// The card holding the form.
+    pub(crate) const CARD: &str = "What your profile says about you";
+
+    /// Said while nobody has yet measured whether this build can change a profile.
+    ///
+    /// Names the check rather than an answer: a build that CAN edit and one that cannot look
+    /// identical during this moment, and claiming either would be a claim no reading supports.
+    pub(crate) const MEASURING: &str = "DIG is checking whether it can change your profile here.";
+
+    /// Said while the profile itself is being read from the chain.
+    pub(crate) const READING: &str = "DIG is reading your profile from the blockchain.";
+
+    /// The control that asks again after a read failed.
+    pub(crate) const RETRY: &str = "Try reading it again";
+
+    /// Said over a profile that answered and holds nothing.
+    ///
+    /// It is a STATE, not a fault: the profile exists, it is on chain, and nobody has filled it in.
+    /// The sentence says all three things, because an empty form under a heading otherwise reads as
+    /// something having gone wrong.
+    pub(crate) const EMPTY: &str = "Your profile is empty. Nothing has gone wrong — you have a \
+                                    profile on the blockchain and nothing in it yet. Fill in \
+                                    whatever you would like other people to see.";
+
+    /// What saving costs, said ABOVE the control rather than after it is pressed.
+    pub(crate) const COST: &str = "Publishing writes these changes to the blockchain, which costs \
+                                   a small amount of XCH from your wallet.";
+
+    /// Who can read the result. Said once, under the form, as well as per field.
+    pub(crate) const PUBLIC: &str = "Everything here is public. Anyone can read it, and anything \
+                                     you publish can be seen by people who kept a copy even after \
+                                     you remove it.";
+
+    /// Said under a Save control that cannot be pressed because nothing has been changed.
+    ///
+    /// A disabled control with no explanation is the dead end dig_ecosystem#1800 removed; this names
+    /// exactly what would make it pressable.
+    pub(crate) const NOTHING_CHANGED: &str = "Change something above and this becomes available.";
+}
+
 pub(crate) mod profiles {
     use crate::profiles::CreationBlocked;
 
@@ -1049,6 +1094,12 @@ mod tests {
             account::DESTRUCTIVE_CAVEAT,
             account::DIG_ID_UNKNOWN,
             apps::INSTALL_NOTE,
+            profile_edit::MEASURING,
+            profile_edit::READING,
+            profile_edit::EMPTY,
+            profile_edit::COST,
+            profile_edit::PUBLIC,
+            profile_edit::NOTHING_CHANGED,
             profiles::PENDING,
             profiles::CHECKING_CREATION,
             profiles::EMPTY,

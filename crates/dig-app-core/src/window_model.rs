@@ -32,8 +32,8 @@
 
 use crate::tray_menu::{
     apps_actions, auto_update_actions, auto_update_label, cache_actions, cache_label,
-    management_actions, profile_actions, security_actions, view_account_actions, wallet_actions,
-    MenuRow, TrayAction, TrayView,
+    management_actions, profile_actions, profile_edit_actions, security_actions,
+    view_account_actions, wallet_actions, MenuRow, TrayAction, TrayView,
 };
 
 /// One tab of the app window — five destinations, in the order a person meets them.
@@ -306,6 +306,14 @@ pub const APPS_HEADING: &str = "Other DIG apps";
 /// the coupling the merged Account pane exists to avoid.
 pub const PROFILES_HEADING: &str = "Profiles on this account";
 
+/// The heading over the Account tab's profile-editor row, shared for the same reason as
+/// [`PROTECTION_HEADING`] (dig_ecosystem#2993).
+///
+/// The editor draws its one verb at the foot of a FORM rather than in a run of buttons, so the pane
+/// has to find the section; finding it by position would couple the pane's layout to the order this
+/// module happens to list sections in.
+pub const PROFILE_EDIT_HEADING: &str = "What your profile says about you";
+
 /// The note for a tab whose whole content is a statement about the account.
 ///
 /// `view.account` is `None` until the first boot report arrives — NOT "there is no account". The
@@ -397,6 +405,13 @@ pub fn build(view: &TrayView) -> WindowModel {
                 Section {
                     heading: Some(PROFILES_HEADING.to_string()),
                     rows: profile_actions(view),
+                },
+                // Directly under the list, because it is about the profile the list says is in
+                // use: a person who has just read which identity they are presenting is in exactly
+                // the right place to change what it says (dig_ecosystem#2993).
+                Section {
+                    heading: Some(PROFILE_EDIT_HEADING.to_string()),
+                    rows: profile_edit_actions(view),
                 },
                 Section {
                     heading: Some(PROTECTION_HEADING.to_string()),
@@ -703,6 +718,8 @@ mod tests {
         );
         // A real menu row now (dig_ecosystem#2939), offered only where creation is possible.
         all.push(TrayAction::CreateProfile);
+        // Offered only where editing is measured possible, on the Account tab beneath the list.
+        all.push(TrayAction::PublishProfileEdits);
         all
     }
 
@@ -711,7 +728,8 @@ mod tests {
     #[allow(dead_code)]
     fn assert_exhaustive(action: TrayAction) {
         match action {
-            TrayAction::ShowStatus
+            TrayAction::PublishProfileEdits
+            | TrayAction::ShowStatus
             | TrayAction::Open
             | TrayAction::SetUpAccount
             | TrayAction::RestoreFromPhrase

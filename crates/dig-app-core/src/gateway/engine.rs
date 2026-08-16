@@ -88,7 +88,13 @@ pub fn engine_call(command: &Command) -> Option<EngineCall> {
             EngineCall::new("control.listSubscriptions", json!({}))
         }
         Command::Subscriptions(SubscriptionsAction::Add { store_id }) => {
-            EngineCall::new("control.subscribe", json!({ "store_id": store_id }))
+            // `kind` is sent EXPLICITLY, though the contract defaults it: this call and the typed
+            // `SubscribeParams` are asserted byte-identical, and a field the contract serializes is
+            // one this builder must serialize too (dig-node-control-interface 0.16).
+            EngineCall::new(
+                "control.subscribe",
+                json!({ "store_id": store_id, "kind": "capsule" }),
+            )
         }
         Command::Subscriptions(SubscriptionsAction::Remove { store_id }) => {
             EngineCall::new("control.unsubscribe", json!({ "store_id": store_id }))
@@ -150,7 +156,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(sub.method, "control.subscribe");
-        assert_eq!(sub.params, json!({ "store_id": "abc" }));
+        assert_eq!(sub.params, json!({ "store_id": "abc", "kind": "capsule" }));
 
         let ban = engine_call(&Command::Peers(PeersAction::Ban {
             peer: "p1".into(),
@@ -421,6 +427,10 @@ mod tests {
                 }),
                 serde_json::to_value(params::SubscribeParams {
                     store_id: "sid".into(),
+                    // The subscription this command builds follows ordinary store content, which is
+                    // the meaning every untagged subscription already carried before the contract
+                    // named it (dig-node-control-interface 0.16).
+                    kind: params::SubscriptionKind::Capsule,
                 })
                 .unwrap(),
                 <params::SubscribeParams as ControlCall>::METHOD.name(),

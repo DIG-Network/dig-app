@@ -1,0 +1,922 @@
+//! Committing an edit: what the app asks of dig-account, and what it must do with the answer.
+//!
+//! # The one step with no error to warn you
+//!
+//! `commit_edit` hands back TWO things, and only one of them is on chain. The status says whether
+//! the spend was pushed or confirmed; the BYTES are the body that new root commits to, and nothing
+//! but this app is holding them at that moment. Drop them and the profile is unreadable — forever,
+//! on every machine, with every layer reporting success, because from each layer's own point of view
+//! the edit worked.
+//!
+//! So [`commit_and_persist`] is the only way this app commits an edit, and persisting is not a step
+//! after the commit — it is PART of it. Its failures are reported with the bytes still in hand.
+//!
+//! # Pushed is not confirmed, and the two roots are not the same value
+//!
+//! `CommittedEdit::root()` is the root the edit commits to: a PREDICTION until the chain says
+//! otherwise. `EditStatus::Confirmed { root }` is the chain-proved one. [`CommitOutcome`] keeps them
+//! apart in its shape rather than in a comment, so a surface cannot render the first as the second.
+//!
+//! # Why a trait sits between this app and the crate
+//!
+//! [`ProfileEditSeam`] names exactly what the editor needs: read a profile, commit an edit. Two
+//! things fall out. The whole editor — including the silent-loss failure above — is drivable in a
+//! test against doubles, with no chain, no node and no money. And the concrete adapter is one file
+//! that names the crate, so the rest of the editor holds no chia types at all.
+
+use std::sync::Arc;
+use std::thread;
+
+use dig_account::edit::EditStatus;
+
+use super::bodies::{BodyRead, BodyStore, BodyStoreError};
+use super::draft::{ProfileDraft, SlotChange};
+use super::field::ProfileField;
+use crate::transaction::{Feed, Stage, Transaction};
+
+/// A profile as it was read, in this app's vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSnapshot {
+    /// The store the profile lives in, lowercase 64-hex.
+    pub store_id: String,
+    /// The root the chain anchors, lowercase 64-hex.
+    pub root: String,
+    /// The editable fields it publishes.
+    pub values: std::collections::BTreeMap<ProfileField, String>,
+    /// How many bytes the verified body came to — the base every size projection adjusts.
+    pub body_len: usize,
+}
+
+impl ProfileSnapshot {
+    /// The draft a person edits over this profile.
+    pub fn draft(&self) -> ProfileDraft {
+        ProfileDraft::over(self.values.clone(), self.body_len)
+    }
+}
+
+/// What a commit produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitOutcome {
+    /// Where the spend got to. The ONLY thing that may decide whether a surface says "confirmed".
+    pub status: EditStatus,
+    /// The root the edit commits to, lowercase 64-hex — a prediction until `status` proves it.
+    pub root: String,
+    /// The body those bytes are, which MUST be persisted. See this module's header.
+    pub body: Vec<u8>,
+}
+
+impl CommitOutcome {
+    /// The stage a surface may draw this as, given whatever the chain has reported.
+    ///
+    /// # The height is the evidence, and it is the ONLY evidence
+    ///
+    /// A height can only come from a chain read, so `Some(height)` is proof and `None` is its
+    /// absence — that is the whole rule, and it is why this does not consult
+    /// [`status`](Self::status).
+    ///
+    /// It once did, and that was wrong in both directions. A commit reports `Pushed` and never
+    /// changes its mind, so a status-gated mapping could never promote a confirmation the watch went
+    /// on to prove: the write sat at *waiting for the blockchain* forever, however long the chain
+    /// had held it. And in the other direction, `EditStatus::Confirmed` is reachable with no height
+    /// at all — the case where the edit's root was ALREADY the store's root, so nothing was spent
+    /// and no block was involved — where naming a block would be inventing one.
+    pub fn stage(&self, confirmed_at: Option<u32>) -> Stage {
+        match confirmed_at {
+            Some(height) => Stage::Confirmed {
+                height,
+                made: format!("Your profile now publishes {}.", self.root),
+            },
+            None => Stage::Pushed {
+                id: self.root.clone(),
+            },
+        }
+    }
+}
+
+/// Why an edit did not commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileEditError {
+    /// The profile could not be read, so there is nothing to edit from.
+    Unreadable(String),
+    /// The account is locked, so nothing can be signed.
+    Locked,
+    /// The mempool DECLINED the bundle: a known "no", and the store's root is unchanged.
+    Rejected(String),
+    /// The chain could not be asked, so the outcome is UNKNOWN and the edit may still confirm.
+    ///
+    /// Kept apart from [`Rejected`](Self::Rejected) because the remedies invert: a rejected edit is
+    /// rebuilt, an unanswered one is waited on.
+    ChainUnreachable(String),
+    /// The crate refused to build the edit at all — an empty batch, a protected slot, a body that
+    /// cannot be encoded.
+    Refused(String),
+    /// The spend committed and the BYTES could not be kept.
+    ///
+    /// Its own variant, and the most important one here: the root may be on chain while nothing
+    /// holds its preimage. A surface reaching this must say the edit went through AND that the
+    /// content is not stored yet — never one without the other.
+    NotPersisted {
+        /// What went wrong with the store.
+        why: BodyStoreError,
+        /// The root that is now, or will shortly be, on chain.
+        root: String,
+    },
+}
+
+impl ProfileEditError {
+    /// What to tell a person, naming what is true and what to do.
+    pub fn sentence(&self) -> String {
+        match self {
+            Self::Unreadable(why) => format!("DIG could not read your profile: {why}"),
+            Self::Locked => {
+                "Your account is locked, so DIG cannot sign the change. Unlock it and try again."
+                    .to_string()
+            }
+            Self::Rejected(why) => {
+                format!("The blockchain declined the change, so your profile is unchanged: {why}")
+            }
+            Self::ChainUnreachable(why) => format!(
+                "DIG could not reach the blockchain, so it does not know whether your change went \
+                 through: {why}. Wait a minute and look at your profile again before trying it a \
+                 second time."
+            ),
+            Self::Refused(why) => format!("DIG could not make that change: {why}"),
+            Self::NotPersisted { why, root } => format!(
+                "Your change was sent to the blockchain, but DIG could not store the profile \
+                 content it points at ({root}). Until it is stored, other people will not be able \
+                 to read your profile. {}",
+                why.sentence()
+            ),
+        }
+    }
+
+    /// What to tell a person when this failure happened during a READ.
+    ///
+    /// # Why the same failure needs two sentences
+    ///
+    /// [`sentence`](Self::sentence) is written for a commit, and every word of it assumes one: an
+    /// unreachable chain becomes *"DIG does not know whether your change went through"*, which is
+    /// exactly right after a push and a fabrication after a read, where nothing was ever sent. A
+    /// person told that by a card that is merely failing to LOAD has been informed of a transaction
+    /// they did not make — and the advice attached to it, wait before trying again, is advice about
+    /// a spend.
+    ///
+    /// The arms that can only arise from a commit keep their commit wording, because reaching them
+    /// from a read is a bug rather than a state, and inventing a read-flavoured sentence for them
+    /// would hide it.
+    pub fn while_reading(&self) -> String {
+        match self {
+            Self::ChainUnreachable(why) => format!(
+                "DIG could not reach the blockchain to read your profile: {why}. Nothing has \
+                 changed — try again in a moment."
+            ),
+            Self::Locked => {
+                "Your account is locked, so DIG cannot read your profile. Unlock it to see and \
+                 change what it says."
+                    .to_string()
+            }
+            other => other.sentence(),
+        }
+    }
+
+    /// Whether the person's profile is definitely unchanged, so offering the form again is safe.
+    ///
+    /// Deliberately conservative: only the two outcomes that provably never reached a mempool say
+    /// yes. An unreachable chain may have taken the bundle, and a failed persist happened AFTER a
+    /// successful push.
+    pub fn profile_is_unchanged(&self) -> bool {
+        matches!(self, Self::Rejected(_) | Self::Refused(_) | Self::Locked)
+    }
+}
+
+/// What the editor needs of dig-account.
+///
+/// Small on purpose: everything it takes and returns is a plain owned value, so no chia type crosses
+/// into the editor and a test can implement the whole thing in a dozen lines.
+pub trait ProfileEditSeam: Send + Sync {
+    /// The store this profile's content lives in, lowercase 64-hex.
+    ///
+    /// # Why this is its own method and not read off a snapshot
+    ///
+    /// The store is decided when the seam is built — it is the anchor's launcher id — so answering
+    /// costs nothing and touches no chain. Taking it from [`read`](Self::read) instead would make
+    /// every caller that merely needs to NAME the store perform a node round trip, and the caller
+    /// that needs it is [`EditService::save`](super::service::EditService::save), which runs on the
+    /// thread that paints. That is the freeze dig-app 12.6.0 was cut to fix.
+    fn store_id(&self) -> String;
+
+    /// Read the active profile as the chain currently publishes it.
+    fn read(&self) -> Result<ProfileSnapshot, ProfileEditError>;
+
+    /// Build, sign and push the edit, and hand back the status AND the bytes it produced.
+    fn commit(
+        &self,
+        changes: &[(ProfileField, SlotChange)],
+    ) -> Result<CommitOutcome, ProfileEditError>;
+
+    /// Whether the chain now anchors `root`, and the height of the coin that carries it.
+    ///
+    /// Three answers, all of which a caller must keep apart. `Ok(Some(height))` is chain-proved and
+    /// is the ONLY thing that may become [`Stage::Confirmed`]. `Ok(None)` is a real answer — the
+    /// chain was asked and does not anchor that root yet. `Err` is nobody having been able to ask,
+    /// which is not the same as "not yet" and must never be drawn as one.
+    fn confirmation(&self, root: &str) -> Result<Option<u32>, ProfileEditError>;
+}
+
+/// The editing seams a build actually has.
+///
+/// Modelled as a value for [`MintSeams`](crate::account::chain_mint::MintSeams)'s reason: whether
+/// the editor may be OFFERED is read off the seams that exist, never asserted beside them, so a
+/// build with no chain transport cannot show a Save control that has nothing to save through.
+pub enum EditSeams {
+    /// A real seam and somewhere to keep the bytes.
+    Wired {
+        /// Reads and commits.
+        seam: Arc<dyn ProfileEditSeam>,
+        /// Keeps what the commit produces.
+        bodies: Arc<dyn BodyStore>,
+    },
+    /// This build cannot read chain or push a bundle, so no profile can be edited on this machine.
+    NoChainTransport,
+}
+
+impl EditSeams {
+    /// Whether editing can be attempted at all.
+    pub fn is_possible(&self) -> bool {
+        matches!(self, Self::Wired { .. })
+    }
+}
+
+/// Commit `changes`, and KEEP the bytes the commit produced.
+///
+/// The two halves are one act. A caller cannot obtain a [`CommitOutcome`] from this function without
+/// its body having been stored and read back, which is what stops the bytes being dropped by a
+/// caller who simply did not know they mattered.
+///
+/// # The read-back, and why a successful `put` is not enough
+///
+/// A store that accepts everything and keeps nothing returns `Ok(())`, and the profile is then
+/// exactly as lost as if nothing had been called at all. So the body is read back at the root it was
+/// stored under, and a store that does not have it is a failure — [`BodyRead::Nothing`] here is not
+/// an ordinary absence, it is this app's own bytes missing from the place it just put them.
+pub fn commit_and_persist(
+    seam: &dyn ProfileEditSeam,
+    bodies: &dyn BodyStore,
+    store_id: &str,
+    changes: &[(ProfileField, SlotChange)],
+) -> Result<CommitOutcome, ProfileEditError> {
+    let outcome = seam.commit(changes)?;
+
+    let kept = |why: BodyStoreError| ProfileEditError::NotPersisted {
+        why,
+        root: outcome.root.clone(),
+    };
+
+    bodies
+        .put(store_id, &outcome.root, &outcome.body)
+        .map_err(kept)?;
+
+    match bodies.get(store_id, &outcome.root).map_err(kept)? {
+        BodyRead::Held(held) if held == outcome.body => Ok(outcome),
+        BodyRead::Held(held) => Err(kept(BodyStoreError::Refused(format!(
+            "your node stored {} bytes where DIG sent {}",
+            held.len(),
+            outcome.body.len()
+        )))),
+        BodyRead::Nothing => Err(kept(BodyStoreError::Refused(
+            "your node accepted the profile content and then did not have it".to_string(),
+        ))),
+    }
+}
+
+/// The line a person reads while their edit is being written.
+const WHAT: &str = "Saving your profile";
+
+/// How patiently a pushed edit is watched.
+///
+/// A value rather than three constants so a test can drive the whole watch — including the two
+/// giving-up paths — in milliseconds instead of a quarter of an hour. A watch nobody can exercise
+/// cheaply is a watch nobody exercises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Watch {
+    /// How long to keep looking before giving up.
+    pub within: std::time::Duration,
+    /// How long to wait between looks.
+    pub every: std::time::Duration,
+    /// How many consecutive UNANSWERED looks end the watch.
+    ///
+    /// An unreachable chain is not a "no", so a handful are ridden out. Enough in a row means the
+    /// app cannot see the chain at all, and polling a node that is not there tells nobody anything.
+    pub unreachable_looks_allowed: usize,
+}
+
+impl Default for Watch {
+    /// Generous enough that an ordinary mainnet confirmation always resolves on screen, and bounded
+    /// because a worker that watches forever is a thread this app never gets back.
+    fn default() -> Self {
+        Self {
+            within: std::time::Duration::from_secs(15 * 60),
+            every: std::time::Duration::from_secs(10),
+            unreachable_looks_allowed: 12,
+        }
+    }
+}
+
+/// Watch a pushed edit until the chain proves it, publishing the result into `feed`.
+///
+/// Every exit is honest about what is known. Confirmed carries the height the chain reported.
+/// Running out of patience does NOT become a failure of the edit — it becomes a statement that the
+/// app stopped watching and that the change may still land, with the one instruction that matters:
+/// do not send it again.
+fn watch_for_confirmation(
+    seam: &dyn ProfileEditSeam,
+    outcome: &CommitOutcome,
+    opening: &Transaction,
+    feed: &Feed,
+    watch: Watch,
+) {
+    let until = std::time::Instant::now() + watch.within;
+    let mut unanswered = 0usize;
+
+    while std::time::Instant::now() < until {
+        match seam.confirmation(&outcome.root) {
+            Ok(Some(height)) => {
+                feed.publish(opening.at(outcome.stage(Some(height))));
+                return;
+            }
+            Ok(None) => unanswered = 0,
+            Err(_) => {
+                unanswered += 1;
+                if unanswered >= watch.unreachable_looks_allowed {
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(watch.every);
+    }
+
+    feed.publish(opening.at(Stage::Failed {
+        why: format!(
+            "Your change was sent to the blockchain and DIG stopped waiting for it. It may still \
+             confirm — the change is at {}.",
+            outcome.root
+        ),
+        next: "Do NOT save it again yet: a second attempt while the first is still waiting spends \
+               twice. Open your profile in a few minutes to see what it says."
+            .to_string(),
+    }));
+}
+
+/// Run a commit OFF the painting thread, reporting into `feed`.
+///
+/// # Why this is not called inline
+///
+/// dig-app 12.6.0 exists because a chain write ran on the thread that paints: the window stopped
+/// repainting for the length of a mainnet ceremony, which from outside is indistinguishable from a
+/// crash. An edit is a shorter ceremony than a mint and it is the same defect — a person who
+/// force-quits a frozen window during a push has a root heading for the chain and an app that never
+/// stored its body.
+///
+/// Returns immediately. Everything a surface needs to draw is published to the feed.
+pub fn start_commit(
+    seam: Arc<dyn ProfileEditSeam>,
+    bodies: Arc<dyn BodyStore>,
+    store_id: String,
+    changes: Vec<(ProfileField, SlotChange)>,
+    feed: Feed,
+    watch: Watch,
+) {
+    let opening = Transaction::starting(WHAT, None);
+    feed.publish(opening.clone());
+    thread::spawn(move || {
+        // Signing happens inside the seam, on THIS thread and in this process (§908). The stage is
+        // published before the call rather than after, because the call is the slow part and a
+        // person watching deserves to know which slow part it is.
+        feed.publish(opening.at(Stage::Signing));
+        match commit_and_persist(&*seam, &*bodies, &store_id, &changes) {
+            Ok(outcome) => {
+                // Published BEFORE the watch begins, because the push is a fact the moment it
+                // happens and the watch takes minutes. The stage is `Pushed` — never `Confirmed` —
+                // until the chain says otherwise.
+                feed.publish(opening.at(outcome.stage(None)));
+                watch_for_confirmation(&*seam, &outcome, &opening, &feed, watch);
+            }
+            Err(error) => feed.publish(
+                opening.at(Stage::Failed {
+                    why: error.sentence(),
+                    next: match error.profile_is_unchanged() {
+                        true => {
+                            "Your profile is unchanged. You can change it and try again.".into()
+                        }
+                        false => {
+                            "Open your profile again in a minute to see what it says before you \
+                              try a second time."
+                                .into()
+                        }
+                    },
+                }),
+            ),
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    //! Seams for tests that need a `Wired` shape and never call through it — the capability
+    //! readings, which are about whether seams EXIST rather than what they answer.
+
+    use super::*;
+
+    /// A seam that would refuse everything, if anything asked it.
+    pub(crate) struct NeverSeam;
+
+    impl ProfileEditSeam for NeverSeam {
+        fn store_id(&self) -> String {
+            "00".repeat(32)
+        }
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+        fn commit(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            Err(ProfileEditError::Locked)
+        }
+    }
+
+    /// A body store that would refuse everything, if anything asked it.
+    pub(crate) struct NeverBodies;
+
+    impl BodyStore for NeverBodies {
+        fn put(&self, _: &str, _: &str, _: &[u8]) -> Result<(), BodyStoreError> {
+            Err(BodyStoreError::NoToken)
+        }
+        fn get(&self, _: &str, _: &str) -> Result<BodyRead, BodyStoreError> {
+            Err(BodyStoreError::NoToken)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    use super::super::bodies::doubles::{ForgetfulBodies, InMemoryBodies, RefusingBodies};
+    use super::*;
+
+    const STORE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const NEW_ROOT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// What a seam's chain answers when asked whether a root has landed.
+    #[derive(Clone)]
+    enum Chain {
+        /// The chain anchors it, at this height.
+        Confirms(u32),
+        /// The chain answered, and does not anchor it yet.
+        NotYet,
+        /// Nobody could ask.
+        Unreachable,
+    }
+
+    /// A seam that commits whatever it is given and hands back a body.
+    struct Committing {
+        /// What the commit reports.
+        status: EditStatus,
+        /// The bytes it produces.
+        body: Vec<u8>,
+        /// What it was asked to change, for the tests that care.
+        asked: Mutex<Vec<(ProfileField, SlotChange)>>,
+        /// What its chain says when the watch looks.
+        chain: Chain,
+        /// How many times the watch has looked.
+        looks: Mutex<usize>,
+    }
+
+    impl Committing {
+        fn pushed() -> Self {
+            Self {
+                status: EditStatus::Pushed {
+                    new_root: [0x22; 32],
+                },
+                body: b"DIGP\x01the new body".to_vec(),
+                asked: Mutex::new(Vec::new()),
+                chain: Chain::Confirms(9_154_460),
+                looks: Mutex::new(0),
+            }
+        }
+
+        /// The same seam, over a chain that answers differently.
+        fn over(chain: Chain) -> Self {
+            Self {
+                chain,
+                ..Self::pushed()
+            }
+        }
+    }
+
+    impl ProfileEditSeam for Committing {
+        fn store_id(&self) -> String {
+            STORE.into()
+        }
+
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Ok(ProfileSnapshot {
+                store_id: STORE.into(),
+                root: "00".repeat(32),
+                values: BTreeMap::new(),
+                body_len: 5,
+            })
+        }
+
+        fn commit(
+            &self,
+            changes: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            *self.asked.lock().expect("asked") = changes.to_vec();
+            Ok(CommitOutcome {
+                status: self.status.clone(),
+                root: NEW_ROOT.into(),
+                body: self.body.clone(),
+            })
+        }
+
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            *self.looks.lock().expect("looks") += 1;
+            match self.chain {
+                Chain::Confirms(height) => Ok(Some(height)),
+                Chain::NotYet => Ok(None),
+                Chain::Unreachable => Err(ProfileEditError::ChainUnreachable("no node".into())),
+            }
+        }
+    }
+
+    /// A seam that refuses.
+    struct Refusing(ProfileEditError);
+
+    impl ProfileEditSeam for Refusing {
+        fn store_id(&self) -> String {
+            STORE.into()
+        }
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Err(self.0.clone())
+        }
+        fn commit(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(self.0.clone())
+        }
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            Err(self.0.clone())
+        }
+    }
+
+    /// A watch short enough to run inside a test, with the same SHAPE as the shipped one.
+    fn a_brisk_watch() -> Watch {
+        Watch {
+            within: std::time::Duration::from_millis(300),
+            every: std::time::Duration::from_millis(5),
+            unreachable_looks_allowed: 3,
+        }
+    }
+
+    fn a_change() -> Vec<(ProfileField, SlotChange)> {
+        vec![(ProfileField::Bio, SlotChange::Set("Builds engines.".into()))]
+    }
+
+    #[test]
+    fn a_committed_edit_keeps_its_bytes_at_its_root() {
+        let seam = Committing::pushed();
+        let bodies = InMemoryBodies::default();
+        let outcome =
+            commit_and_persist(&seam, &bodies, STORE, &a_change()).expect("the edit commits");
+
+        assert_eq!(
+            bodies.get(STORE, &outcome.root),
+            Ok(BodyRead::Held(b"DIGP\x01the new body".to_vec())),
+            "the bytes the commit produced are not in the store at the root it produced"
+        );
+    }
+
+    /// **The silent, permanent failure, made loud.**
+    ///
+    /// The store here accepts every put and holds nothing — exactly what a node with a broken or
+    /// full content store does, and exactly what dropping the bytes looks like from the outside. The
+    /// spend succeeded, so every layer's own answer is "fine"; only the read-back can tell. Without
+    /// it this test passes while the profile is unreadable forever.
+    #[test]
+    fn a_store_that_accepts_and_forgets_fails_the_commit_rather_than_reporting_success() {
+        let error = commit_and_persist(&Committing::pushed(), &ForgetfulBodies, STORE, &a_change())
+            .expect_err("a commit whose body was not kept must not report success");
+
+        match &error {
+            ProfileEditError::NotPersisted { root, .. } => assert_eq!(root, NEW_ROOT),
+            other => panic!("the wrong failure: {other:?}"),
+        }
+        // And the sentence must say BOTH true things, because either alone is a lie: the change was
+        // sent, and the content is not stored.
+        let said = error.sentence();
+        assert!(said.contains("sent to the blockchain"), "said: {said}");
+        assert!(said.contains("not be able to read"), "said: {said}");
+        assert!(
+            !error.profile_is_unchanged(),
+            "a failed persist happened AFTER a successful push; offering the form again invites a \
+             second spend"
+        );
+    }
+
+    /// A store that returns DIFFERENT bytes is as bad as one that returns none: whatever it serves
+    /// will not rebuild to the root on chain.
+    #[test]
+    fn a_store_that_keeps_the_wrong_bytes_fails_the_commit() {
+        struct Substituting;
+        impl BodyStore for Substituting {
+            fn put(&self, _: &str, _: &str, _: &[u8]) -> Result<(), BodyStoreError> {
+                Ok(())
+            }
+            fn get(&self, _: &str, _: &str) -> Result<BodyRead, BodyStoreError> {
+                Ok(BodyRead::Held(b"something else".to_vec()))
+            }
+        }
+        let error = commit_and_persist(&Committing::pushed(), &Substituting, STORE, &a_change())
+            .expect_err("bytes that are not the ones committed must not be accepted");
+        assert!(matches!(error, ProfileEditError::NotPersisted { .. }));
+    }
+
+    /// A store that cannot be reached fails the commit as a persist failure — not as an edit that
+    /// did not happen, because it did.
+    #[test]
+    fn an_unreachable_store_is_reported_as_the_edit_having_gone_through() {
+        let bodies = RefusingBodies(BodyStoreError::Unreachable("no node".into()));
+        let error = commit_and_persist(&Committing::pushed(), &bodies, STORE, &a_change())
+            .expect_err("an unstorable body is a failure");
+        assert!(!error.profile_is_unchanged());
+        assert!(error.sentence().contains("sent to the blockchain"));
+    }
+
+    /// **A read that failed never tells a person a change was sent.**
+    ///
+    /// The card that fails to load and the card that has just pushed a spend share this error type,
+    /// and the commit wording — *"DIG does not know whether your change went through"* — is a
+    /// transaction a reader did not make, attached to advice about spending twice.
+    #[test]
+    fn a_failed_read_is_not_described_as_a_change_that_may_be_in_flight() {
+        for error in [
+            ProfileEditError::ChainUnreachable("timed out".into()),
+            ProfileEditError::Locked,
+            ProfileEditError::Unreadable("the body does not match the root".into()),
+        ] {
+            let said = error.while_reading().to_lowercase();
+            assert!(
+                !said.contains("your change") && !said.contains("was sent"),
+                "a read failure claimed a change: {said}"
+            );
+            assert!(said.len() > 30, "too terse to act on: {said}");
+        }
+        // And the control: the COMMIT wording for the same error still says it, because after a
+        // push that sentence is the true and load-bearing one.
+        assert!(ProfileEditError::ChainUnreachable("timed out".into())
+            .sentence()
+            .contains("whether your change went through"));
+    }
+
+    /// An edit the mempool declined leaves the profile alone, and the form may be offered again.
+    #[test]
+    fn a_rejected_edit_leaves_the_profile_unchanged() {
+        let seam = Refusing(ProfileEditError::Rejected("bad signature".into()));
+        let error = commit_and_persist(&seam, &InMemoryBodies::default(), STORE, &a_change())
+            .expect_err("a rejection is a failure");
+        assert!(error.profile_is_unchanged());
+    }
+
+    /// An unanswered chain is NOT an unchanged profile: the bundle may be in a mempool right now,
+    /// and telling a person to try again is telling them to spend twice.
+    #[test]
+    fn an_unreachable_chain_does_not_promise_the_profile_is_unchanged() {
+        let seam = Refusing(ProfileEditError::ChainUnreachable("timed out".into()));
+        let error = commit_and_persist(&seam, &InMemoryBodies::default(), STORE, &a_change())
+            .expect_err("an unanswered chain is a failure");
+        assert!(!error.profile_is_unchanged());
+        assert!(error.sentence().contains("before trying it a second time"));
+    }
+
+    /// Nothing is put anywhere when the commit itself failed — a body stored under a root no chain
+    /// carries is a node serving content nobody can verify.
+    #[test]
+    fn a_failed_commit_stores_nothing() {
+        let bodies = InMemoryBodies::default();
+        let seam = Refusing(ProfileEditError::Rejected("declined".into()));
+        let _ = commit_and_persist(&seam, &bodies, STORE, &a_change());
+        assert_eq!(bodies.get(STORE, NEW_ROOT), Ok(BodyRead::Nothing));
+    }
+
+    // -- what a surface may say about it -------------------------------------------------------
+
+    /// **A pushed edit is never drawn as confirmed.** The root it carries is a prediction, and it
+    /// travels as the LOOKUP HANDLE of a push, which is the only honest place for it.
+    #[test]
+    fn a_pushed_edit_is_drawn_as_pushed_and_carries_its_root_as_a_handle() {
+        let outcome = CommitOutcome {
+            status: EditStatus::Pushed {
+                new_root: [0x22; 32],
+            },
+            root: NEW_ROOT.into(),
+            body: b"body".to_vec(),
+        };
+        let stage = outcome.stage(None);
+        assert!(!stage.is_confirmed());
+        assert_eq!(
+            stage,
+            Stage::Pushed {
+                id: NEW_ROOT.to_string()
+            }
+        );
+    }
+
+    /// A height the CHAIN reported is the one thing that may say confirmed — and it is the only
+    /// thing, so the crate's own `Confirmed` status without a height does NOT claim a block.
+    #[test]
+    fn only_a_chain_reported_height_is_drawn_as_confirmed() {
+        for status in [
+            EditStatus::Confirmed { root: [0x22; 32] },
+            EditStatus::Pushed {
+                new_root: [0x22; 32],
+            },
+        ] {
+            let outcome = CommitOutcome {
+                status,
+                root: NEW_ROOT.into(),
+                body: b"body".to_vec(),
+            };
+            assert!(outcome.stage(Some(9_154_460)).is_confirmed());
+            assert!(
+                !outcome.stage(None).is_confirmed(),
+                "a write with no height in hand named a block"
+            );
+        }
+    }
+
+    /// The changes reach the seam exactly as the draft expressed them — in particular a removal
+    /// stays a removal, which is the half a `HashMap<field, String>` would have flattened away.
+    #[test]
+    fn the_seam_is_asked_for_the_changes_the_draft_expressed() {
+        let seam = Committing::pushed();
+        let changes = vec![
+            (ProfileField::Bio, SlotChange::Remove),
+            (
+                ProfileField::DisplayName,
+                SlotChange::Set("Ada".to_string()),
+            ),
+        ];
+        commit_and_persist(&seam, &InMemoryBodies::default(), STORE, &changes).expect("commits");
+        assert_eq!(*seam.asked.lock().expect("asked"), changes);
+    }
+
+    // -- off the painting thread ---------------------------------------------------------------
+
+    /// The worker publishes its progress and settles, and the caller is not held while it does.
+    ///
+    /// The chain here confirms on the first look, so the write reaches a chain-proved end — which is
+    /// the only way this test can distinguish a worker that watches from one that pushes and walks
+    /// away, because both publish the same `Pushed` stage on the way.
+    #[test]
+    fn a_commit_runs_off_the_calling_thread_and_reports_into_the_feed() {
+        let feed = Feed::detached();
+        start_commit(
+            Arc::new(Committing::pushed()),
+            Arc::new(InMemoryBodies::default()),
+            STORE.to_string(),
+            a_change(),
+            feed.clone(),
+            a_brisk_watch(),
+        );
+        // The transaction is visible IMMEDIATELY, before the worker has done anything: a person who
+        // pressed Save sees that something is happening on the very next frame.
+        let opening = feed
+            .read()
+            .expect("a transaction is published synchronously");
+        assert_eq!(opening.what, WHAT);
+
+        let settled = wait_for_settled(&feed);
+        assert_eq!(
+            settled.stage,
+            Stage::Confirmed {
+                height: 9_154_460,
+                made: format!("Your profile now publishes {NEW_ROOT}."),
+            }
+        );
+    }
+
+    /// A commit that fails to PERSIST settles as a failure with a next step, not as a success.
+    #[test]
+    fn a_worker_whose_bytes_were_lost_settles_as_failed() {
+        let feed = Feed::detached();
+        start_commit(
+            Arc::new(Committing::pushed()),
+            Arc::new(ForgetfulBodies),
+            STORE.to_string(),
+            a_change(),
+            feed.clone(),
+            a_brisk_watch(),
+        );
+        match wait_for_settled(&feed).stage {
+            Stage::Failed { why, next } => {
+                assert!(why.contains("not be able to read"), "why: {why}");
+                assert!(!next.is_empty());
+            }
+            other => panic!("a lost body settled as {other:?}"),
+        }
+    }
+
+    // -- the watch -----------------------------------------------------------------------------
+
+    /// A push is drawn as a push while the chain has not answered — and stays that way. The stage
+    /// must not drift towards "confirmed" merely because time passed.
+    #[test]
+    fn an_unconfirmed_edit_is_never_promoted_to_confirmed_by_waiting() {
+        let feed = Feed::detached();
+        let seam = Committing::over(Chain::NotYet);
+        let outcome = CommitOutcome {
+            status: EditStatus::Pushed {
+                new_root: [0x22; 32],
+            },
+            root: NEW_ROOT.into(),
+            body: b"body".to_vec(),
+        };
+        watch_for_confirmation(
+            &seam,
+            &outcome,
+            &Transaction::starting(WHAT, None),
+            &feed,
+            a_brisk_watch(),
+        );
+
+        assert!(
+            *seam.looks.lock().expect("looks") > 1,
+            "the watch looked once and gave up, so it is not a watch"
+        );
+        let ended = feed.read().expect("the watch says something");
+        assert!(!ended.stage.is_confirmed());
+        // Giving up says the change may still land, and says NOT to send it again — the second
+        // sentence is the one that stops a person paying twice.
+        match ended.stage {
+            Stage::Failed { why, next } => {
+                assert!(why.contains("may still confirm"), "why: {why}");
+                assert!(next.contains("Do NOT save it again"), "next: {next}");
+            }
+            other => panic!("a watch that ran out settled as {other:?}"),
+        }
+    }
+
+    /// An unreachable chain ends the watch after a bounded number of looks rather than at the first
+    /// one: a single failed read is a hiccup, and treating it as an answer would abandon a person's
+    /// transaction the moment their node blinked.
+    #[test]
+    fn an_unreachable_chain_is_ridden_out_and_then_stops_the_watch() {
+        let feed = Feed::detached();
+        let seam = Committing::over(Chain::Unreachable);
+        let outcome = CommitOutcome {
+            status: EditStatus::Pushed {
+                new_root: [0x22; 32],
+            },
+            root: NEW_ROOT.into(),
+            body: b"body".to_vec(),
+        };
+        let watch = Watch {
+            // Long enough that only the unreachable count can end this watch, so the test cannot
+            // pass by timing out instead.
+            within: std::time::Duration::from_secs(30),
+            every: std::time::Duration::from_millis(1),
+            unreachable_looks_allowed: 4,
+        };
+        watch_for_confirmation(
+            &seam,
+            &outcome,
+            &Transaction::starting(WHAT, None),
+            &feed,
+            watch,
+        );
+
+        assert_eq!(*seam.looks.lock().expect("looks"), 4);
+        assert!(!feed.read().expect("a verdict").stage.is_confirmed());
+    }
+
+    /// Poll the feed until the write settles. Bounded, so a worker that never finishes fails the
+    /// test instead of hanging the suite behind the 600-second watchdog.
+    fn wait_for_settled(feed: &Feed) -> Transaction {
+        for _ in 0..500 {
+            if let Some(current) = feed.read() {
+                if current.is_settled() {
+                    return current;
+                }
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the commit never settled");
+    }
+}

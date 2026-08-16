@@ -79,6 +79,10 @@ pub(crate) fn draw(
     // to be told which profile it belongs to (dig_ecosystem#2403).
     pressed = pressed.or(super::profiles::card(flow, t, tab, facts));
     flow.gap(space::S4);
+    // Directly under the list, because it is about the profile the list says is in use
+    // (dig_ecosystem#2993).
+    pressed = pressed.or(super::profile_edit::card(flow, t, tab, facts));
+    flow.gap(space::S4);
     pressed = pressed.or(second_factor_card(flow, t, facts, &protection));
     flow.gap(space::S4);
     pressed = pressed.or(paired_apps_card(flow, t, &protection));
@@ -1031,6 +1035,23 @@ mod tests {
             crate::profiles::CreationBlocked::EVERY
                 .into_iter()
                 .map(|blocked| copy::profiles::cannot_create(blocked).to_string()),
+        );
+        // Every sentence the profile editor's card can draw, keyed on the EDITING reading rather
+        // than on the account's state — so none of them is a second per-state sentence set. All
+        // are admitted because the fixture holds that reading fixed and any one could be the one
+        // drawn. Derived from `EditBlocked`'s own list for `CreationBlocked`'s reason: a
+        // hand-listed version drifts the moment a fourth blocker arrives.
+        allowed.push(copy::profile_edit::MEASURING.to_string());
+        allowed.push(copy::profile_edit::READING.to_string());
+        allowed.push(copy::profile_edit::EMPTY.to_string());
+        allowed.push(copy::profile_edit::COST.to_string());
+        allowed.push(copy::profile_edit::PUBLIC.to_string());
+        allowed.push(copy::profile_edit::NOTHING_CHANGED.to_string());
+        allowed.push(copy::profile_edit::RETRY.to_string());
+        allowed.extend(
+            crate::profile_edit::EditBlocked::EVERY
+                .into_iter()
+                .map(|blocked| blocked.sentence().to_string()),
         );
         allowed.push(copy::protection::second_factor_needs(&lead));
         allowed.push(copy::protection::pairing_needs(&lead));
