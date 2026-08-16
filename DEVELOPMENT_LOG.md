@@ -978,3 +978,25 @@ answers about SPENT coins. `control.wallet.coins` cannot: it is address-scoped a
 `include_spent: true` is unserviceable on the control plane and `ControlChainSource` refuses the
 widening as `Unsupported`. Anything hunting a spent coin goes through `coinById` or it does not
 happen.
+
+## A diagnostic that projects a `Result` reports SUCCESS as an absence, and the P0 lands on the code
+
+`chain_probe` printed one of its rows as `source.resolve_singleton_lineage(coin_id).err()`. `.err()`
+maps every `Ok` to `None`, so an authenticated singleton lineage and a genuine "no lineage exists"
+rendered as the same word. A day of profile reading was blamed on
+`dig-chainsource-interface`'s walk admitting neither a real mainnet DID nor a real mainnet
+DataLayer store; re-run with the row printing the whole `Result`, both resolve
+`Ok(Some(SingletonLineage { .. }))` on the first try, tips and all.
+
+Two things made it durable rather than obvious. The probe's other rows print `{:?}` of the whole
+`Result`, so a reader sees a debug rendering and reads it as complete. And the answer it produced —
+`None` — is a value the walk genuinely can return, with a documented meaning, so it survived every
+attempt to rule that meaning out: each of the four documented causes was excluded by measurement,
+and the conclusion drawn was that the walk had a fifth, undiscovered cause. The instrument was
+never a suspect because it agreed with the type.
+
+The rule: a diagnostic prints the outcome it read, never a projection of it. `.err()`, `.ok()`,
+`.is_ok()` and `.map(|_| ())` all turn a three-valued answer into a two-valued one, and the value
+they discard is the one the diagnostic exists to show. When the projected form is what a caller
+does anyway, that is a reason to print MORE, not less — the point of a probe is to distinguish
+outcomes production code deliberately collapses.
