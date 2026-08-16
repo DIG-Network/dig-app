@@ -200,11 +200,6 @@ fn main() {
             let tray_session: Option<TraySession> = show_the_did_wizard_if_needed(&env);
             #[cfg(not(feature = "tray"))]
             let tray_session = None::<()>;
-            // Installed once, here, because the editor's seams need BOTH halves and this is the first
-            // point that holds them: the node endpoint (from the agent) and the unlocked residency
-            // plus its profile registry (from the session).
-            #[cfg(feature = "tray")]
-            install_edit_seams(agent.endpoint(), tray_session.as_ref());
             run_tray_or_headless(agent, tray_session, env)
         }
         FormFactor::Headless => {
@@ -216,6 +211,17 @@ fn main() {
 }
 
 /// Install the profile editor's seams, so an edit made in this app reaches the blockchain.
+///
+/// # Why this is attempted on each repaint rather than once at start-up
+///
+/// Neither half exists when the app opens. The endpoint must be the one the ENGINE actually
+/// connected to — `agent.endpoint()` is the user's CONFIGURED value and is empty on the ordinary
+/// machine that lets the §5.3 ladder resolve one — and the account starts LOCKED, by design, so
+/// there is no residency to derive an editor from. Both become true later, at moments this function
+/// cannot be called from: an unlock from the tray menu, a first-run setup, an engine that connects.
+///
+/// So the shell tries every frame and `EditService::is_installed` makes that cost nothing. This is
+/// the shape `ProfileCreation` already uses for the same three inputs.
 ///
 /// # What each half is, and why both are required
 ///
@@ -241,8 +247,9 @@ fn main() {
 fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     use dig_app_core::profile_edit::{AccountEditSeam, EditSeams, EditService};
 
+    // Each early return leaves the install slot FREE, so a later frame tries again. That is the
+    // point: every one of these is a condition that becomes true while the app runs.
     let Some(session) = session else {
-        tracing::info!("profile editing not wired: no unlocked account this session");
         return;
     };
     // The profile to edit is the ACTIVE one, and its anchor is the chain evidence that it exists —
@@ -253,15 +260,11 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
             .active()
             .map(|active| (active.ix(), active.entry().anchor().clone()))
     }) else {
-        tracing::info!("profile editing not wired: this account has no confirmed profile yet");
         return;
     };
     // Both body methods are token-gated. Without a token the store can only refuse, and a seam whose
     // persistence half can only refuse must not offer a Save that spends first and fails second.
     let Some(token) = dig_app_core::control::load_control_token() else {
-        tracing::warn!(
-            "profile editing not wired: this app could not read your node's control token"
-        );
         return;
     };
 
@@ -1529,6 +1532,17 @@ mod tray {
                 false,
             ),
         };
+        // Attempted here because this is the one place that holds all three inputs at once: the
+        // endpoint the engine CONNECTED to, the session, and its profile registry. Costs a single
+        // atomic load once the slot is taken.
+        if !dig_app_core::profile_edit::EditService::is_installed() {
+            if let Ok(status) = status.read() {
+                if let Some(endpoint) = status.engine.endpoint() {
+                    super::install_edit_seams(endpoint, session);
+                }
+            }
+        }
+
         TrayView {
             // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
             // installed — rather than a second `EditSeams` value built here (dig_ecosystem#3027).

@@ -39,8 +39,22 @@ pub struct EditService {
     feed: Feed,
 }
 
-/// The app's one service.
+/// The app's one service, once something has installed it.
 static APP_SERVICE: OnceLock<Arc<EditService>> = OnceLock::new();
+
+/// The service every reader gets until then.
+///
+/// # Why this is a SECOND static and not `APP_SERVICE.get_or_init(...)`
+///
+/// The seams cannot exist when the app opens: they need the endpoint the engine actually connected
+/// to, and an unlocked account. So the shell READS the service (to draw the card's honest blocked
+/// state) long before it can INSTALL one. With a single `get_or_init`, that first read would occupy
+/// the slot with an unwired service, permanently — the app would draw *this version of DIG cannot
+/// reach the blockchain* for the rest of the session, on a machine where editing works, and
+/// `install` would silently do nothing.
+///
+/// Keeping the fallback apart means looking costs nothing: reading never closes the door.
+static NO_SEAMS: OnceLock<Arc<EditService>> = OnceLock::new();
 
 impl EditService {
     /// A service over `seams`, publishing chain writes into `feed`.
@@ -62,11 +76,31 @@ impl EditService {
         let _ = APP_SERVICE.set(service);
     }
 
+    /// Whether a service has been installed yet.
+    ///
+    /// # Why the shell needs to ask
+    ///
+    /// The seams cannot be built at start-up: they need the node endpoint the engine actually
+    /// CONNECTED to, and the account being unlocked — neither of which is true when the app opens.
+    /// So the shell tries on each repaint, and this is what makes that cheap: without it every frame
+    /// would assemble a seam only for [`install`](Self::install) to discard it.
+    ///
+    /// Answers whether the slot is TAKEN, not whether the seams work — a host that installed a
+    /// deliberately unwired service has made its decision, and a shell must not keep retrying over
+    /// it every frame.
+    pub fn is_installed() -> bool {
+        APP_SERVICE.get().is_some()
+    }
+
     /// The app's service — a build with no chain transport until something installs one.
+    ///
+    /// Reading this does NOT install anything. The unwired fallback lives in its own static, so a
+    /// read cannot take the install slot — which is what makes a late install possible at all.
     pub fn app() -> Arc<EditService> {
         APP_SERVICE
-            .get_or_init(|| Arc::new(EditService::new(EditSeams::NoChainTransport, Feed::app())))
-            .clone()
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(no_seams()))
     }
 
     /// A service connected to nothing, for tests and galleries.
@@ -187,6 +221,11 @@ impl EditService {
     }
 }
 
+/// The unwired service, created once and shared.
+fn no_seams() -> &'static Arc<EditService> {
+    NO_SEAMS.get_or_init(|| Arc::new(EditService::new(EditSeams::NoChainTransport, Feed::app())))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -290,6 +329,37 @@ mod tests {
             *seam.reads.lock().expect("reads"),
             after_the_read,
             "Save performed a chain read on the thread that pressed it"
+        );
+    }
+
+    /// Reading the app service before anything is installed does NOT take the install slot.
+    ///
+    /// # The trap, which this file walked into once
+    ///
+    /// The seams need the endpoint the engine connected to and an unlocked account, so the shell
+    /// reads the service to draw its honest blocked state many frames before it can install one. A
+    /// single `get_or_init` behind `app()` makes that first read permanent: `install` becomes a
+    /// silent no-op and the app reports *this version of DIG cannot reach the blockchain* for the
+    /// rest of the session, on a machine where editing works perfectly.
+    ///
+    /// The read comes FIRST here, because that ordering is the whole property — asserting only that
+    /// `is_installed` follows `install` would pass against the broken version too.
+    #[test]
+    fn reading_the_app_service_early_does_not_close_the_door_on_installing_one() {
+        assert!(
+            !EditService::is_installed(),
+            "this test must run before anything installs a service"
+        );
+        // What the shell does on every frame before an account is unlocked.
+        let early = EditService::app();
+        assert!(!early.is_possible());
+
+        EditService::install(service_over(Reading::of(Ok(a_profile()))));
+
+        assert!(EditService::is_installed());
+        assert!(
+            EditService::app().is_possible(),
+            "an early read took the install slot, so the real seams could never be installed"
         );
     }
 
