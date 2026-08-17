@@ -216,26 +216,31 @@ pub fn drain(pending: &dyn PendingBodies, bodies: &dyn BodyStore) -> DrainReport
         return DrainReport::default();
     };
 
-    entries.iter().fold(DrainReport::default(), |report, entry| {
-        match handed_over(entry, bodies) {
-            true => {
-                let _ = pending.forget(&entry.store_id, &entry.root);
-                DrainReport {
-                    stored: report.stored + 1,
-                    ..report
+    entries
+        .iter()
+        .fold(DrainReport::default(), |report, entry| {
+            match handed_over(entry, bodies) {
+                true => {
+                    let _ = pending.forget(&entry.store_id, &entry.root);
+                    DrainReport {
+                        stored: report.stored + 1,
+                        ..report
+                    }
                 }
+                false => DrainReport {
+                    waiting: report.waiting + 1,
+                    ..report
+                },
             }
-            false => DrainReport {
-                waiting: report.waiting + 1,
-                ..report
-            },
-        }
-    })
+        })
 }
 
 /// Whether the node now holds `entry`'s bytes at `entry`'s root, proved by reading them back.
 fn handed_over(entry: &PendingBody, bodies: &dyn BodyStore) -> bool {
-    if bodies.put(&entry.store_id, &entry.root, &entry.body).is_err() {
+    if bodies
+        .put(&entry.store_id, &entry.root, &entry.body)
+        .is_err()
+    {
         return false;
     }
     matches!(
@@ -244,44 +249,47 @@ fn handed_over(entry: &PendingBody, bodies: &dyn BodyStore) -> bool {
     )
 }
 
+/// A pending set held in memory, for builds and galleries that have no sealed storage.
+///
+/// It is honest about what it is: bodies in it do NOT survive a restart, so it belongs only where
+/// nothing is ever committed for real.
+#[derive(Debug, Default)]
+pub struct MemoryPending {
+    /// What it holds.
+    entries: std::sync::Mutex<Vec<PendingBody>>,
+}
+
+impl PendingBodies for MemoryPending {
+    fn remember(&self, entry: &PendingBody) -> Result<(), PendingError> {
+        let mut entries = self.entries.lock().expect("pending");
+        if !entries
+            .iter()
+            .any(|held| held.store_id == entry.store_id && held.root == entry.root)
+        {
+            entries.push(entry.clone());
+        }
+        Ok(())
+    }
+
+    fn forget(&self, store_id: &str, root: &str) -> Result<(), PendingError> {
+        self.entries
+            .lock()
+            .expect("pending")
+            .retain(|held| !(held.store_id == store_id && held.root == root));
+        Ok(())
+    }
+
+    fn all(&self) -> Result<Vec<PendingBody>, PendingError> {
+        Ok(self.entries.lock().expect("pending").clone())
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod doubles {
     //! Pending sets a test can drive.
 
-    use std::sync::Mutex;
-
+    pub(crate) use super::MemoryPending as InMemoryPending;
     use super::{PendingBodies, PendingBody, PendingError};
-
-    /// A pending set held in memory, which a test may hand to a SECOND reader to model a restart.
-    #[derive(Debug, Default)]
-    pub(crate) struct InMemoryPending {
-        entries: Mutex<Vec<PendingBody>>,
-    }
-
-    impl PendingBodies for InMemoryPending {
-        fn remember(&self, entry: &PendingBody) -> Result<(), PendingError> {
-            let mut entries = self.entries.lock().expect("pending");
-            if !entries
-                .iter()
-                .any(|held| held.store_id == entry.store_id && held.root == entry.root)
-            {
-                entries.push(entry.clone());
-            }
-            Ok(())
-        }
-
-        fn forget(&self, store_id: &str, root: &str) -> Result<(), PendingError> {
-            self.entries
-                .lock()
-                .expect("pending")
-                .retain(|held| !(held.store_id == store_id && held.root == root));
-            Ok(())
-        }
-
-        fn all(&self) -> Result<Vec<PendingBody>, PendingError> {
-            Ok(self.entries.lock().expect("pending").clone())
-        }
-    }
 
     /// A pending set that cannot keep anything — a locked account, or a full disk.
     #[derive(Debug, Default)]
@@ -359,7 +367,9 @@ mod tests {
     #[test]
     fn a_body_pending_at_shutdown_is_still_pending_at_the_next_launch() {
         let dir = tempfile::tempdir().expect("a directory");
-        let path = dir.path().join(SealedPendingBodies::<DidKeyedSealer>::FILE_NAME);
+        let path = dir
+            .path()
+            .join(SealedPendingBodies::<DidKeyedSealer>::FILE_NAME);
         let sealer = Arc::new(DidKeyedSealer::default());
         let did = "did:chia:abc";
 
@@ -405,9 +415,7 @@ mod tests {
 
         let on_disk = std::fs::read(&path).expect("the file exists");
         assert!(
-            !on_disk
-                .windows(4)
-                .any(|window| window == b"DIGP"),
+            !on_disk.windows(4).any(|window| window == b"DIGP"),
             "the profile body is on disk in the clear"
         );
 
@@ -512,7 +520,9 @@ mod tests {
             .expect("second");
         assert_eq!(store.all().expect("reads").len(), 2);
 
-        store.forget(&an_entry().store_id, &an_entry().root).expect("forgets");
+        store
+            .forget(&an_entry().store_id, &an_entry().root)
+            .expect("forgets");
         assert_eq!(
             store.all().expect("reads"),
             vec![PendingBody {

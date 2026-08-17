@@ -45,7 +45,8 @@ pub fn predicted_body(
     current_root: [u8; 32],
     changes: &[(ProfileField, SlotChange)],
 ) -> Option<(String, Vec<u8>)> {
-    let opened = VerifiedBody::open(current_body, AnchoredRoot::from_chain_read(current_root)).ok()?;
+    let opened =
+        VerifiedBody::open(current_body, AnchoredRoot::from_chain_read(current_root)).ok()?;
     let mut next = opened.into_profile();
     next.apply_all(slot_edits(changes));
     let body = VerifiedBody::from_profile(&next).ok()?;
@@ -78,8 +79,14 @@ mod tests {
     /// A profile publishing a name, a bio, and a slot this editor has no field for.
     fn a_profile() -> Profile {
         let mut profile = Profile::new();
-        profile.set(SlotId(ProfileField::DisplayName.slot().id()), Value::Utf8("Ada".into()));
-        profile.set(SlotId(ProfileField::Bio.slot().id()), Value::Utf8("Builds engines.".into()));
+        profile.set(
+            SlotId(ProfileField::DisplayName.slot().id()),
+            Value::Utf8("Ada".into()),
+        );
+        profile.set(
+            SlotId(ProfileField::Bio.slot().id()),
+            Value::Utf8("Builds engines.".into()),
+        );
         profile.set(SlotId(0x0003), Value::Utf8("dig://avatar".into()));
         profile
     }
@@ -111,8 +118,7 @@ mod tests {
             (ProfileField::Bio, SlotChange::Remove),
         ];
 
-        let (predicted_root, predicted) =
-            predicted_body(&bytes, root, &changes).expect("predicts");
+        let (predicted_root, predicted) = predicted_body(&bytes, root, &changes).expect("predicts");
         let opened = VerifiedBody::open(
             &predicted,
             AnchoredRoot::from_chain_read(root_bytes(&predicted_root)),
@@ -143,7 +149,10 @@ mod tests {
         let (_, predicted) = predicted_body(
             &bytes,
             root,
-            &[(ProfileField::DisplayName, SlotChange::Set("Ada Lovelace".into()))],
+            &[(
+                ProfileField::DisplayName,
+                SlotChange::Set("Ada Lovelace".into()),
+            )],
         )
         .expect("predicts");
 
@@ -183,7 +192,10 @@ mod tests {
         let (predicted_root, predicted) = predicted_body(
             &bytes,
             root,
-            &[(ProfileField::Bio, SlotChange::Set("Builds better engines.".into()))],
+            &[(
+                ProfileField::Bio,
+                SlotChange::Set("Builds better engines.".into()),
+            )],
         )
         .expect("predicts");
 
@@ -196,6 +208,10 @@ mod tests {
             "the predicted bytes do not commit to the predicted root, so the pending file would \
              hold a body no node can ever accept"
         );
-        assert_ne!(predicted_root, hex::encode(root), "the edit changed nothing");
+        assert_ne!(
+            predicted_root,
+            hex::encode(root),
+            "the edit changed nothing"
+        );
     }
 }

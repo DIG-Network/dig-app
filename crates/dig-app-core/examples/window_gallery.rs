@@ -256,7 +256,7 @@ https://example.org/notes"
             store_id: "11".repeat(32),
             root: "22".repeat(32),
             values,
-            body_len: 240,
+            body: vec![b'x'; 240],
         }
     };
 
@@ -265,7 +265,7 @@ https://example.org/notes"
         "empty" => (
             Ok(ProfileSnapshot {
                 values: std::collections::BTreeMap::new(),
-                body_len: 5,
+                body: vec![b'x'; 5],
                 ..filled()
             }),
             ProfileEditing::Possible,
@@ -282,6 +282,9 @@ https://example.org/notes"
                 &EditSeams::Wired {
                     seam: std::sync::Arc::new(Fixture(Ok(filled()))),
                     bodies: std::sync::Arc::new(NoBodies),
+                    pending: std::sync::Arc::new(
+                        dig_app_core::profile_edit::MemoryPending::default(),
+                    ),
                 },
                 true,
                 false,
@@ -293,6 +296,7 @@ https://example.org/notes"
     EditService::install(EditService::detached(EditSeams::Wired {
         seam: std::sync::Arc::new(Fixture(answer)),
         bodies: std::sync::Arc::new(NoBodies),
+        pending: std::sync::Arc::new(dig_app_core::profile_edit::MemoryPending::default()),
     }));
     Some(offer)
 }

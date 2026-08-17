@@ -276,9 +276,27 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
         return;
     };
 
+    // Where a body waits when the node cannot take it yet. Resolved before the seam is built,
+    // because a Save that can spend but cannot write the bytes down is the loss dig_ecosystem#3066
+    // is about: the root goes on chain forever and only this process holds its preimage.
+    let Some(pending) = pending_bodies(&session.residency) else {
+        return;
+    };
+
     let bodies: std::sync::Arc<dyn dig_app_core::profile_edit::BodyStore> = std::sync::Arc::new(
         dig_app_core::profile_edit::bodies::ControlBodyStore::new(endpoint, Some(token)),
     );
+
+    // Anything left over from a previous run goes to the node NOW, before this session's own edits
+    // queue behind it — a body pending at last shutdown is the case the file exists for.
+    let report = dig_app_core::profile_edit::drain(&*pending, &*bodies);
+    if report.stored > 0 || report.waiting > 0 {
+        tracing::info!(
+            stored = report.stored,
+            waiting = report.waiting,
+            "handed profile content saved on this computer to the node"
+        );
+    }
     let seam = AccountEditSeam::new(
         std::sync::Arc::new(session.residency.clone()),
         ix,
@@ -294,6 +312,7 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
         EditSeams::Wired {
             seam: std::sync::Arc::new(seam),
             bodies,
+            pending,
         },
         // The app's own feed, so the write draws in the SAME transaction sheet every other chain
         // write does — one surface that already distinguishes a push from a confirmation, rather
@@ -301,6 +320,33 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
         dig_app_core::transaction::Feed::app(),
     )));
     tracing::info!(%ix, "profile editing wired: edits made here will be published on chain");
+}
+
+/// The sealed file this profile's un-stored bodies wait in, or `None` when there is nowhere to put
+/// one.
+///
+/// `None` withholds the whole editor rather than degrading it, which is deliberate: an editor that
+/// can push a spend but cannot write the body down is the configuration that loses a person's
+/// profile permanently, and a locked or unresolvable account is a state that becomes true later —
+/// the caller retries on a later frame.
+#[cfg(feature = "tray")]
+fn pending_bodies(
+    residency: &dig_app_core::account::residency::AccountResidency,
+) -> Option<std::sync::Arc<dyn dig_app_core::profile_edit::PendingBodies>> {
+    use dig_app_core::profile_edit::SealedPendingBodies;
+
+    let did = dig_app_core::account::boot::active_profile_id(residency)?;
+    let dir = dig_app_core::storage::profile_dir(
+        &brand_dir(&AppEnvironment::from_host())?,
+        &dig_app_core::storage::did_hash(&did),
+    );
+    Some(std::sync::Arc::new(SealedPendingBodies::new(
+        dir.join(
+            SealedPendingBodies::<dig_app_core::account::residency::ResidencySealer>::FILE_NAME,
+        ),
+        did,
+        std::sync::Arc::new(residency.production_sealer()),
+    )))
 }
 
 /// Another dig-app already owns this user's brand directory, so this process must stand down.

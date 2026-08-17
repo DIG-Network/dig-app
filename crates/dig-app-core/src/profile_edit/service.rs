@@ -314,8 +314,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::super::bodies::doubles::InMemoryBodies;
-    use super::super::pending::doubles::InMemoryPending;
     use super::super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
+    use super::super::pending::doubles::InMemoryPending;
     use super::*;
 
     /// A seam over a profile that reads, with a counter so a test can see how often.
