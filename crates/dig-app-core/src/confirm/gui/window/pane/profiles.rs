@@ -20,9 +20,15 @@
 //!
 //! # The one thing the copy may never imply
 //!
-//! That a profile can be deleted. Hiding is a preference about this computer's lists; the DID
-//! singleton and the store are permanent on chain. See [`copy::profiles`] for that rule and the
-//! assertion that holds it.
+//! That deleting takes back what a profile already published. Deleting is real now
+//! (dig_ecosystem#3037) — it melts both singletons, so the DID stops resolving and the store's
+//! lineage ends — but peers hold profile bodies keyed on `(store_id, root)`, and nothing on chain
+//! reaches a copy somebody already has.
+//!
+//! The rule this replaces was *the copy may never imply a profile can be deleted*, which was correct
+//! while hiding was all there was and became false the moment a melt shipped. What survives it is
+//! the half that is still true: **hiding is not deleting**, and the hide copy must keep saying so
+//! now that a control one row away really does end the profile.
 
 use super::action::{self, Action};
 use super::card;
@@ -306,9 +312,9 @@ impl ProfileVerbs {
         };
         for action in section_actions(tab) {
             match action.id {
-                TrayAction::SetActiveProfile { .. } | TrayAction::SetProfileVisibility { .. } => {
-                    verbs.per_profile.push(action)
-                }
+                TrayAction::SetActiveProfile { .. }
+                | TrayAction::SetProfileVisibility { .. }
+                | TrayAction::DeleteProfile { .. } => verbs.per_profile.push(action),
                 TrayAction::CreateProfile => verbs.create.push(action),
                 _ => verbs.about.push(action),
             }
@@ -329,9 +335,9 @@ impl ProfileVerbs {
 /// Which profile an action acts on, or `None` when it acts on none.
 fn acts_on(action: TrayAction) -> Option<u32> {
     match action {
-        TrayAction::SetActiveProfile { ix } | TrayAction::SetProfileVisibility { ix, .. } => {
-            Some(ix)
-        }
+        TrayAction::SetActiveProfile { ix }
+        | TrayAction::SetProfileVisibility { ix, .. }
+        | TrayAction::DeleteProfile { ix } => Some(ix),
         _ => None,
     }
 }
@@ -1199,40 +1205,129 @@ mod tests {
         );
     }
 
-    /// **No profile copy implies a profile can be deleted.**
+    /// **Hiding is never worded as deleting, now that a control one row away really deletes**
+    ///   (dig_ecosystem#3037).
     ///
-    /// The card's whole risk. Hiding is a preference about one computer's lists; the DID singleton
-    /// and the store are permanent on chain, so a person who believed they had deleted an identity
-    /// would be wrong about something anyone can still resolve.
+    /// This replaces `no_profile_copy_implies_a_profile_can_be_deleted`, which swept the card for
+    /// the word *delete* and was correct only while hiding was all there was. Melting both
+    /// singletons ships now, so that sweep would forbid the truthful label on a real control — but
+    /// the half it protected is MORE load-bearing than before: with both controls on one card, a
+    /// hide row worded as removal is a person ending an identity they meant to tidy away.
     ///
-    /// Swept over every sentence this module can paint, including the row LABELS the model builds —
-    /// which is where the word would most naturally appear, because a label is short and "remove" is
-    /// shorter than "hide from this list".
+    /// The fixture draws the card in the state where BOTH controls are present, because that is the
+    /// only state in which the two can be confused. It holds a VISIBLE non-active profile and a
+    /// HIDDEN one, so both arms of the visibility label — *hide* and *show* — are on screen; the
+    /// unhide arm is the same copy class and is worded by the same `match`.
+    ///
+    /// The sweep reads the labels the MODEL built and the card PAINTED, never a literal repeated
+    /// here: a test that lowercases a sentence it authored itself asserts nothing about production,
+    /// and stays green through any rewording of the row it claims to protect.
     #[test]
-    fn no_profile_copy_implies_a_profile_can_be_deleted() {
-        let reading = reading_of(
-            &[
-                (ProfileIx::ROOT, Some("home")),
-                (ProfileIx(1), Some("work")),
-            ],
-            &[],
-        );
-        let view = view_with(reading);
-        let painted = card_says(&view, 960.0).to_lowercase();
+    fn hiding_is_never_worded_as_deleting_even_beside_a_real_delete_control() {
+        let view = TrayView {
+            profile_deletion: crate::profiles::ProfileDeletion::of_seams(true, true),
+            ..view_with(reading_of(
+                &[
+                    (ProfileIx::ROOT, Some("home")),
+                    (ProfileIx(1), Some("work")),
+                    (ProfileIx(2), Some("spare")),
+                ],
+                &[ProfileIx(2)],
+            ))
+        };
+        let painted = card_says(&view, 960.0);
 
-        for forbidden in ["delete", "remove", "erase", "destroy", "permanently hide"] {
+        let tab = crate::window_model::build(&view)
+            .tab(TabId::Account)
+            .cloned()
+            .expect("the Account tab is emitted in every account state");
+        let visibility_labels: Vec<String> = ProfileVerbs::of(&tab)
+            .per_profile
+            .iter()
+            .filter(|action| matches!(action.id, TrayAction::SetProfileVisibility { .. }))
+            .map(|action| action.label.clone())
+            .collect();
+        assert_eq!(
+            visibility_labels.len(),
+            2,
+            "the fixture drew {} visibility control(s), so the sweep below covers neither the hide \
+             arm nor the show arm as intended: {painted}",
+            visibility_labels.len()
+        );
+
+        // The rows' own words plus the note under the list. Scoped to the visibility copy rather
+        // than swept over the whole card: the card now legitimately carries a truthful *Delete*
+        // label, so a blanket sweep — what the old test did — would forbid correct copy.
+        for hide_copy in visibility_labels
+            .iter()
+            .map(String::as_str)
+            .chain([copy::profiles::HIDE_NOTE])
+        {
             assert!(
-                !painted.contains(forbidden),
-                "the profiles card says “{forbidden}”, which claims an act the chain would not \
-                 honour: {painted}"
+                painted.contains(hide_copy),
+                "“{hide_copy}” never reached the screen, so sweeping its words proves nothing about \
+                 what a person reads: {painted}"
+            );
+            let lowered = hide_copy.to_lowercase();
+            for forbidden in ["delete", "remove", "erase", "destroy"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "the hide copy “{hide_copy}” is worded as removal, one row from a control that \
+                     really ends the profile"
+                );
+            }
+        }
+        // The control: the delete row IS on this card, so the assertions above are about wording
+        // rather than about a card where the confusion cannot arise.
+        assert!(
+            painted.contains("Delete “work” permanently"),
+            "the delete control is absent, so nothing here distinguishes hiding from deleting: \
+             {painted}"
+        );
+    }
+
+    /// **The delete control is drawn for EVERY profile where deletion is measured possible, and for
+    /// none where it is not** (dig_ecosystem#3037).
+    ///
+    /// Both directions, because each catches a different defect. The positive leg catches the
+    /// account that holds ONE profile: withholding delete there — the shape *hide* takes, since
+    /// dig-account refuses to hide the active profile — would leave that person permanently unable
+    /// to delete anything, which is the trap `professional-ui` forbids. So the fixture is a lone
+    /// ACTIVE profile, the exact case a per-profile filter would drop.
+    ///
+    /// The negative leg walks `Unknown` as well as every blocker, because `Unknown` answers
+    /// `blocked() == None` exactly as `Possible` does — any gate written against `blocked()` rather
+    /// than against the ARM offers an irreversible spend on a build nobody has measured.
+    #[test]
+    fn the_delete_control_appears_only_where_deletion_is_measured_possible() {
+        let alone = reading_of(&[(ProfileIx::ROOT, Some("home"))], &[]);
+
+        let capable = TrayView {
+            profile_deletion: crate::profiles::ProfileDeletion::of_seams(true, true),
+            ..view_with(alone.clone())
+        };
+        assert!(
+            card_says(&capable, 960.0).contains("Delete “home” permanently"),
+            "an account with one profile — which cannot switch away and cannot hide it — was left \
+             with no way to delete it at all"
+        );
+
+        let mut withheld = vec![crate::profiles::ProfileDeletion::Unknown];
+        withheld.extend(
+            crate::profiles::DeletionBlocked::EVERY.map(crate::profiles::ProfileDeletion::Blocked),
+        );
+        for deletion in withheld {
+            let view = TrayView {
+                profile_deletion: deletion,
+                ..view_with(alone.clone())
+            };
+            let painted = card_says(&view, 960.0);
+            assert!(
+                !painted.contains("Delete “home” permanently"),
+                "{deletion:?} drew a control leading to an irreversible spend it cannot honour: \
+                 {painted}"
             );
         }
-        // The control: it DOES say what hiding actually is, so the sweep above is passing on copy
-        // that explains rather than on a card that says nothing.
-        assert!(
-            painted.contains("stays on the blockchain"),
-            "the card never says a hidden profile is still on chain: {painted}"
-        );
     }
 
     /// **A DID copy control is addressed by the profile's index, so two rows never share one id.**

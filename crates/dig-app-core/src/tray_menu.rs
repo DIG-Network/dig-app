@@ -330,6 +330,13 @@ pub struct TrayView {
     /// That single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
     /// surface comes to advertise a create control whose implementation refuses.
     pub profile_creation: crate::profiles::ProfileCreation,
+    /// Whether a profile can be DELETED on this build, and which missing piece stops it
+    /// (dig_ecosystem#3037).
+    ///
+    /// Its own reading rather than `profile_editing` reused: the facts coincide today and the
+    /// sentences do not, and a person trying to delete a profile cannot be shown a blocker phrased
+    /// about changing one. See [`ProfileDeletion`](crate::profiles::ProfileDeletion).
+    pub profile_deletion: crate::profiles::ProfileDeletion,
     /// What the connected node last said about its ability to service a profile mint, or `None`
     /// when nobody has asked it yet (dig_ecosystem#2398).
     ///
@@ -414,6 +421,7 @@ impl TrayView {
             installed_apps,
             profiles,
             profile_creation,
+            profile_deletion,
             mint_chain,
             network,
             enrolment,
@@ -492,6 +500,9 @@ impl TrayView {
             // field the pane draws from cannot escape this comparison, which destructures with no
             // `..` precisely so that it cannot.
             && profile_creation == &other.profile_creation
+            // The delete control appears and disappears on this reading alone, and it is the one
+            // control in the app a person must never find missing without a sentence saying why.
+            && profile_deletion == &other.profile_deletion
             && mint_chain == &other.mint_chain
             // The header strip RENDERS all three of these, on every tab. Without this arm the first
             // real peer count would never replace nothing at all until some unrelated field moved —
@@ -867,6 +878,27 @@ pub enum TrayAction {
         ix: u32,
         /// `true` to hide it from this host's lists, `false` to show it again.
         hidden: bool,
+    },
+    /// DELETE a profile permanently, by melting both of its singletons (dig_ecosystem#3037).
+    ///
+    /// # This is the one verb in the app that cannot be undone at any layer
+    ///
+    /// [`SetProfileVisibility`](Self::SetProfileVisibility) directly above it is a preference about
+    /// one computer's lists. This ends the profile on chain: both singletons are spent with
+    /// `MELT_SINGLETON`, so neither lineage has a successor and the launcher ids can never be
+    /// re-derived. Every `did:chia:` reference to that identity stops resolving, for everybody.
+    ///
+    /// So the row carries no state to move to and no toggle — pressing it opens a confirmation that
+    /// NAMES the DID and the store it will end, and the ceremony begins only after that. The label
+    /// says *permanently* for the same reason `PublishProfileEdits` says *publish*: a verb that
+    /// sounds reversible in front of an act that is not is the surprise `professional-ui` forbids.
+    ///
+    /// Offered ONLY where [`ProfileDeletion::is_possible`](crate::profiles::ProfileDeletion) — the
+    /// seams, an unlocked account, and a profile the registry actually holds. Never derived from
+    /// `blocked().is_none()`, which reads an unmeasured build as a capable one.
+    DeleteProfile {
+        /// The profile's HD index, as `ProfileIx`'s inner `u32`.
+        ix: u32,
     },
     /// EXPLAIN what a dig-profile is and what creating one costs (dig_ecosystem#2403).
     ///
@@ -1736,6 +1768,29 @@ pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
             ],
         })
         .collect();
+    // Delete is offered for EVERY profile, the active one included. Withholding it there would trap
+    // the account that holds exactly one profile — nothing to switch to, so nothing could ever be
+    // deleted — which is the dead end `professional-ui`'s never-trap rule forbids. What happens to
+    // the active pointer afterwards is the shell's, and it is defined: it moves to the lowest
+    // remaining profile, or the account is left with none, which the card already renders honestly.
+    //
+    // Keyed on the ARM, never on `blocked().is_none()`: an unmeasured build answers `None` there
+    // too, and this row leads to a spend that cannot be undone.
+    if view.profile_deletion.is_possible() {
+        rows.extend(
+            view.profiles
+                .rows()
+                .unwrap_or_default()
+                .iter()
+                .map(|profile| {
+                    MenuRow::action(
+                        TrayAction::DeleteProfile { ix: profile.ix.0 },
+                        format!("Delete {} permanently…", profile.display_name()),
+                        true,
+                    )
+                }),
+        );
+    }
     // Keyed on the ARM. `blocked().is_none()` answers `None` for `Unknown` too, and offering this
     // against a node nobody has spoken to is the fail-open direction on a path that leads to a
     // money window (dig_ecosystem#2690).
@@ -2626,6 +2681,9 @@ mod tests {
             // These suites are about the account states, and editing is measured elsewhere; the
             // default has measured nothing, which is what every one of these fixtures has done.
             profile_editing: Default::default(),
+            // Deletion is measured elsewhere too, and an unmeasured reading offers nothing — which
+            // is exactly what every fixture in this suite has done.
+            profile_deletion: Default::default(),
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),

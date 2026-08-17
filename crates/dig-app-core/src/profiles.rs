@@ -698,6 +698,150 @@ pub mod copy {
          keeps its address and its funds, and you can show it here again at any time.";
 }
 
+/// What is in the way of deleting a profile (dig_ecosystem#3037).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionBlocked {
+    /// This build cannot read chain or push a bundle, so no profile can be deleted here.
+    NoChainTransport,
+    /// The account is locked, so the melt cannot be signed.
+    Locked,
+}
+
+impl DeletionBlocked {
+    /// Every blocker, so a sweep over them cannot fall behind the enum.
+    pub const EVERY: [Self; 2] = [Self::NoChainTransport, Self::Locked];
+
+    /// The sentence a surface shows, which always names the remedy.
+    pub fn sentence(self) -> &'static str {
+        match self {
+            Self::NoChainTransport => {
+                "This version of DIG cannot reach the blockchain to delete a profile. Start your \
+                 DIG node, or install a newer DIG and a newer node, and this becomes available."
+            }
+            Self::Locked => {
+                "Your account is locked, so DIG cannot sign a deletion. Unlock it to delete a \
+                 profile."
+            }
+        }
+    }
+}
+
+/// Whether a profile can be deleted here.
+///
+/// # Why this is its own reading and not `ProfileEditing` reused
+///
+/// The two measure the same facts today and will not always: an edit is a recreation the store can
+/// refuse on its own terms, while a deletion is a melt with no successor, and the day either grows a
+/// condition of its own, a shared reading would carry it silently into the other. More immediately,
+/// a capability whose blocked sentences talk about *changing* a profile cannot be shown to somebody
+/// trying to delete one — the remedy is the same, the sentence is not.
+///
+/// [`Unknown`](Self::Unknown) withholds the offer exactly as a blocker does; what differs is only
+/// what the surface SAYS while it waits (`ProfileCreation`'s lesson, dig_ecosystem#2690).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileDeletion {
+    /// **Nobody has measured this yet.** Not a failure and not a capability.
+    #[default]
+    Unknown,
+    /// A seam and an unlocked account: a deletion can really be attempted.
+    ///
+    /// Reachable only through [`of_seams`](Self::of_seams), so this arm cannot be asserted beside
+    /// the capability — it can only be read off it.
+    Possible,
+    /// Deletion cannot be attempted, and this is the piece that is missing.
+    Blocked(DeletionBlocked),
+}
+
+impl ProfileDeletion {
+    /// Read the offer off the seams that exist, plus the lock, which they cannot know.
+    ///
+    /// The lock is reported FIRST for the reason `ProfileEditing::of_seams` records: the shell
+    /// derives the seams from an unlocked account, so a locked one leaves them uninstalled and
+    /// reading the transport off that state fabricates a claim about the BUILD (dig_ecosystem#3057).
+    pub fn of_seams(seams_exist: bool, unlocked: bool) -> Self {
+        match (unlocked, seams_exist) {
+            (false, _) => Self::Blocked(DeletionBlocked::Locked),
+            (true, false) => Self::Blocked(DeletionBlocked::NoChainTransport),
+            (true, true) => Self::Possible,
+        }
+    }
+
+    /// Whether the delete control may be offered. Keyed on the ARM: an `Unknown` reading must
+    /// withhold the offer exactly as a blocker does.
+    pub fn is_possible(self) -> bool {
+        matches!(self, Self::Possible)
+    }
+
+    /// What is in the way, when something measured is.
+    pub fn blocked(self) -> Option<DeletionBlocked> {
+        match self {
+            Self::Blocked(why) => Some(why),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+
+    /// **An unmeasured build offers no delete control and names no cause.**
+    ///
+    /// The safe direction and the honest one are different properties, and this pins both: the
+    /// default withholds the offer as firmly as a blocker does, and it does NOT invent a reason
+    /// nobody observed.
+    #[test]
+    fn an_unmeasured_capability_offers_nothing_and_blames_nothing() {
+        let unknown = ProfileDeletion::default();
+        assert_eq!(unknown, ProfileDeletion::Unknown);
+        assert!(!unknown.is_possible());
+        assert!(
+            unknown.blocked().is_none(),
+            "an unmeasured reading named a cause nobody observed"
+        );
+    }
+
+    /// **Each missing piece is read off the state that causes it, lock first.**
+    ///
+    /// The locked leg uses the seam state a locked machine is REALLY in — uninstalled — because
+    /// that is the fixture that catches the defect: reading the transport there tells a person whose
+    /// only problem is a lock to install a newer build. The unlocked control is what stops "locked
+    /// always wins" passing: with the account open, an absent transport is a real measurement and
+    /// must still be named.
+    #[test]
+    fn a_locked_account_is_told_to_unlock_and_an_open_one_still_hears_about_its_transport() {
+        assert_eq!(
+            ProfileDeletion::of_seams(false, false).blocked(),
+            Some(DeletionBlocked::Locked),
+            "a locked account was told its build cannot reach the blockchain"
+        );
+        assert_eq!(
+            ProfileDeletion::of_seams(false, true).blocked(),
+            Some(DeletionBlocked::NoChainTransport),
+            "an unlocked build with no transport lost the sentence naming its real cause"
+        );
+        assert!(ProfileDeletion::of_seams(true, true).is_possible());
+    }
+
+    /// **Every blocker names a door**, and the locked one sends nobody to install anything.
+    #[test]
+    fn every_blocker_names_a_remedy_and_the_locked_one_names_the_unlock() {
+        for blocked in DeletionBlocked::EVERY {
+            assert!(
+                crate::window_model::label_names_a_remedy(blocked.sentence()),
+                "{blocked:?} names no remedy: {}",
+                blocked.sentence()
+            );
+        }
+        let locked = DeletionBlocked::Locked.sentence().to_lowercase();
+        assert!(locked.contains("unlock"), "the locked sentence: {locked}");
+        assert!(
+            !locked.contains("install"),
+            "a locked account is told to install a newer build: {locked}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

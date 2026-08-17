@@ -63,6 +63,9 @@ fn state_for(residency: &AccountResidency) -> AccountState {
 
 fn view_for(state: AccountState) -> TrayView {
     TrayView {
+        // Deletion is measured elsewhere; an unmeasured reading offers nothing, which is what
+        // every fixture in this suite has done.
+        profile_deletion: Default::default(),
         // This suite is about the lock states; editing is measured elsewhere, and the default has
         // measured nothing.
         profile_editing: Default::default(),
