@@ -283,6 +283,14 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
         return;
     };
 
+    // What this app wrote down before each mint it ran, so a read of a profile whose FIRST body was
+    // never stored can rebuild the wizard's own content instead of only the empty seed
+    // (dig_ecosystem#3073). Installed here because this is the first moment the account is open
+    // enough to seal with; a restart after an interrupted creation reaches this on a later frame.
+    if let Some(seeds) = mint_seed_bodies(&session.residency) {
+        dig_app_core::profile_edit::recovery::install_recorded_seeds(seeds);
+    }
+
     let bodies: std::sync::Arc<dyn dig_app_core::profile_edit::BodyStore> = std::sync::Arc::new(
         dig_app_core::profile_edit::bodies::ControlBodyStore::new(endpoint, Some(token)),
     );
@@ -345,6 +353,28 @@ fn pending_bodies(
             SealedPendingBodies::<dig_app_core::account::residency::ResidencySealer>::FILE_NAME,
         ),
         did,
+        std::sync::Arc::new(residency.production_sealer()),
+    )))
+}
+
+/// The sealed file the bodies of this account's minted seeds live in.
+///
+/// # Why this is brand-level and `pending_bodies` is per-profile
+///
+/// A pending EDIT belongs to a profile that exists, so it is filed under that profile's DID. A mint
+/// seed is written down BEFORE the ceremony that creates the profile, when there is no DID and no
+/// store id to file it under — that absence is the whole of dig_ecosystem#3073. So it is keyed by the
+/// account's brand directory and sealed under [`MINT_SEED_LABEL`], which cannot collide with a
+/// profile: every DID this app seals under begins `did:chia:`.
+#[cfg(feature = "tray")]
+fn mint_seed_bodies(
+    residency: &dig_app_core::account::residency::AccountResidency,
+) -> Option<std::sync::Arc<dyn dig_app_core::profile_edit::mint_seed::MintSeedBodies>> {
+    use dig_app_core::profile_edit::mint_seed::SealedMintSeeds;
+
+    let dir = brand_dir(&AppEnvironment::from_host())?;
+    Some(std::sync::Arc::new(SealedMintSeeds::new(
+        dir.join(SealedMintSeeds::<dig_app_core::account::residency::ResidencySealer>::FILE_NAME),
         std::sync::Arc::new(residency.production_sealer()),
     )))
 }
@@ -1596,6 +1626,16 @@ mod tray {
                 }
             }
         }
+
+        // Profile content the node would not take yet is offered again from here, because a repaint
+        // is the only thing this app has that happens repeatedly. The alternative — one drain per
+        // process, which is what this replaces — left a saved profile unreadable to other people
+        // until the person restarted DIG, for a reason they were never told (dig_ecosystem#3078).
+        //
+        // Safe to call every frame and deliberately unconditional: the service holds the cadence, the
+        // in-flight guard, and its own worker thread, so a frame that has nothing to do pays an
+        // atomic clock read.
+        dig_app_core::profile_edit::EditService::app().retry_pending_bodies();
 
         TrayView {
             // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
@@ -4435,6 +4475,25 @@ mod tray {
         // moment this function returns — which it now does long before the ceremony ends.
         let endpoint = endpoint.to_owned();
         let residency = live.residency.clone();
+
+        // The seed is built and WRITTEN DOWN before anything is pushed, and this order is the whole
+        // of dig_ecosystem#3073.
+        //
+        // The wizard's answers live in a process-wide holder that dies with the process, and
+        // dig-account commits `seed.root()` into the store LAUNCH — so the new profile's very first
+        // root goes on chain carrying content only this process can still produce. Close the app
+        // between that launch landing and the body reaching a node, and the preimage of an anchored
+        // root is gone for good: recovery can rebuild the EMPTY seed, which by construction does not
+        // hash to a root carrying a person's name.
+        //
+        // So a creation that cannot write its seed down does not spend. That is the same call
+        // `install_edit_seams` makes about the editor, for the same reason and with a better outcome
+        // here, because nothing has been submitted yet and the person may honestly be told so.
+        let (seed, label) = profile_seed();
+        if let Err(why) = remember_this_mint_seed(&residency, &seed) {
+            return say_the_creation_could_not_start(confirmer, &why);
+        }
+
         let feed = Feed::app();
         let base = creation_progress::starting(cost);
         feed.publish(base.clone());
@@ -4456,7 +4515,6 @@ mod tray {
             let door =
                 ProfileMint::for_session(residency.profiles(), &residency, &chain, &publisher);
 
-            let (seed, label) = profile_seed();
             let outcome = create_profile(
                 &door,
                 &seed,
@@ -4497,6 +4555,39 @@ mod tray {
         let collected = dig_app_core::profile_edit::ProfileSeedRequest::collected();
         let label = collected.display_name().map(str::to_owned);
         (collected.to_seed(), label)
+    }
+
+    /// Write the body `seed` commits to onto this computer, and make it a rebuild candidate.
+    ///
+    /// Returns the sentence to tell a person when it could not be done, in which case the creation
+    /// MUST NOT proceed: the alternative is a store whose first root is anchored on chain and whose
+    /// content nothing can ever produce again (dig_ecosystem#3073).
+    ///
+    /// Recovery is pointed at the store here as well as in
+    /// [`install_edit_seams`](super::install_edit_seams), so a profile created in THIS session can be
+    /// rebuilt without waiting for the editor's seams to install.
+    #[cfg(feature = "tray")]
+    fn remember_this_mint_seed(
+        residency: &dig_app_core::account::residency::AccountResidency,
+        seed: &dig_app_core::account::profile_creation::Seed,
+    ) -> Result<(), String> {
+        let Some(seeds) = super::mint_seed_bodies(residency) else {
+            return Err(
+                "DIG could not find a place on this computer to keep your new profile's details."
+                    .to_string(),
+            );
+        };
+        // A seed whose body cannot even be computed cannot be minted from either — dig-account
+        // computes the same value to commit it — so this is a refusal before any money moves rather
+        // than a durability failure.
+        let body = seed
+            .body_bytes()
+            .map_err(|e| format!("DIG could not prepare your profile's details: {e}."))?;
+        seeds.remember(&body).map_err(|e| {
+            format!("DIG could not save your new profile's details on this computer: {e}.")
+        })?;
+        dig_app_core::profile_edit::recovery::install_recorded_seeds(seeds);
+        Ok(())
     }
 
     /// Said when an approved creation could not START — nothing was pushed and nothing was spent.

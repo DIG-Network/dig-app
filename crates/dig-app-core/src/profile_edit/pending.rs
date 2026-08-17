@@ -77,6 +77,31 @@ pub enum PendingError {
     Unreadable(String),
 }
 
+/// A clause a caller can drop into a sentence of its own, in a person's language.
+///
+/// Deliberately NOT [`PendingError::sentence`]: that is a whole standalone sentence, ending in its
+/// own advice, and nesting it inside another caller's sentence reads as two sentences collided.
+/// Callers that own the framing — the profile-creation path says what it was trying to save — need
+/// only the cause, so this renders the cause alone, with no leading capital and no full stop.
+impl std::fmt::Display for PendingError {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sealed(why) => {
+                write!(out, "your account is locked, or the details could not be secured for storage ({why})")
+            }
+            Self::Io(why) => write!(out, "the disk could not be read from or written to ({why})"),
+            Self::Unreadable(why) => {
+                write!(
+                    out,
+                    "the saved file was not in a form DIG could understand ({why})"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PendingError {}
+
 impl PendingError {
     /// What to tell a person, naming what is at risk.
     pub fn sentence(&self) -> String {
@@ -532,5 +557,105 @@ mod tests {
             }],
             "forgetting one root took the other with it"
         );
+    }
+
+    /// The three causes, each with the marker only that variant could have produced and the variant
+    /// name a Debug rendering would leak.
+    fn every_cause() -> [(PendingError, &'static str, &'static str); 3] {
+        [
+            (
+                PendingError::Sealed("the-sealing-marker".into()),
+                "the-sealing-marker",
+                "Sealed",
+            ),
+            (
+                PendingError::Io("the-disk-marker".into()),
+                "the-disk-marker",
+                "Io",
+            ),
+            (
+                PendingError::Unreadable("the-parsing-marker".into()),
+                "the-parsing-marker",
+                "Unreadable",
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_cause_displays_as_a_plain_language_clause_naming_what_went_wrong() {
+        for (cause, _, variant) in every_cause() {
+            let shown = cause.to_string();
+
+            // The nearest wrong implementation is `{e:?}`, which a person would read as source code.
+            assert!(
+                !shown.contains(variant) && !shown.contains('"'),
+                "{cause:?} rendered as a Debug dump rather than a sentence: {shown}"
+            );
+            // The other nearest wrong implementation is delegating to `sentence()`, which is a whole
+            // standalone sentence and nests absurdly inside the clause its callers wrap it in.
+            assert!(
+                !shown.starts_with("DIG") && !shown.contains("Do not close DIG"),
+                "{cause:?} rendered a whole sentence where a clause belongs: {shown}"
+            );
+            assert!(
+                !shown.ends_with('.'),
+                "{cause:?} ended itself, so a caller's own full stop doubles up: {shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_keeps_the_underlying_cause_a_support_request_needs() {
+        for (cause, marker, _) in every_cause() {
+            assert!(
+                cause.to_string().contains(marker),
+                "{cause:?} dropped the detail that says WHICH failure happened: {cause}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_three_causes_do_not_read_alike() {
+        // Told apart by their wording alone: the markers are stripped, so an implementation that
+        // renders one fixed phrase plus the detail cannot pass this.
+        let phrasings: Vec<String> = every_cause()
+            .into_iter()
+            .map(|(cause, marker, _)| cause.to_string().replace(marker, ""))
+            .collect();
+
+        assert_ne!(phrasings[0], phrasings[1], "sealing and disk read alike");
+        assert_ne!(phrasings[1], phrasings[2], "disk and parsing read alike");
+        assert_ne!(phrasings[0], phrasings[2], "sealing and parsing read alike");
+    }
+
+    #[test]
+    fn display_composes_into_the_sentence_the_creation_path_wraps_it_in() {
+        // The exact shape used when a mint seed cannot be written down (dig_ecosystem#3073). It is
+        // the reason `Display` exists, so it is asserted here rather than left to the binary.
+        let told = format!(
+            "DIG could not save your new profile's details on this computer: {}.",
+            PendingError::Io("the disk is full".into())
+        );
+
+        assert_eq!(
+            told,
+            "DIG could not save your new profile's details on this computer: the disk could not be \
+             read from or written to (the disk is full).",
+        );
+    }
+
+    #[test]
+    fn a_cause_is_a_std_error_with_nothing_hidden_beneath_it() {
+        fn only_takes_std_errors<E: std::error::Error>(
+            error: &E,
+        ) -> Option<&dyn std::error::Error> {
+            error.source()
+        }
+
+        // The detail is already a rendered string by the time it reaches the variant, so there is no
+        // inner error to chain to. Pinned so a later refactor that keeps a real source must say so.
+        for (cause, _, _) in every_cause() {
+            assert!(only_takes_std_errors(&cause).is_none(), "{cause:?}");
+        }
     }
 }
