@@ -2058,6 +2058,7 @@ dependencies = [
  "dig-ipc-protocol",
  "dig-keystore",
  "dig-node-control-interface",
+ "dig-offers",
  "dig-session",
  "dig-social-profile",
  "dig-wallet-backend",
