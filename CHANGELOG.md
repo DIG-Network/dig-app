@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.18.0] - 2026-08-17
+
+### Bug Fixes
+- **profile:** Durable profile creation and honest publish retry (#194)
+
 ## [12.17.0] - 2026-08-17
 
 ### Bug Fixes
