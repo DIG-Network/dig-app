@@ -2995,7 +2995,7 @@ mod tray {
             // The stale view is why a second send cannot be prevented by the drawn form: the button
             // a person sees was published before the send began. `SendHolder::send` refuses on its
             // own compare-and-set instead.
-            TrayAction::SendXch(request) => {
+            TrayAction::Send(request) => {
                 send_holder().send(status, session.as_ref().map(|s| &s.residency), &request)
             }
             // The offer itself is staged by the pane as a `ReviewedOffer` — the value that owns both

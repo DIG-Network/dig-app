@@ -471,11 +471,12 @@ impl SendDraft<'_> {
             return Err(SendBlocked::NoDestination);
         }
 
-        let amount =
-            parse_asset_amount(self.asset, self.amount).map_err(|problem| SendBlocked::BadAmount {
+        let amount = parse_asset_amount(self.asset, self.amount).map_err(|problem| {
+            SendBlocked::BadAmount {
                 asset: self.asset,
                 problem,
-            })?;
+            }
+        })?;
         // Through dig-account's own address decoders, never a hand-rolled bech32 check: they are the
         // ONE place a typed string is judged payable, and they refuse a non-`xch` prefix because
         // paying the puzzle hash inside one burns the funds. A $DIG payment is addressed by the very
@@ -584,6 +585,28 @@ pub enum SendIntent {
     /// A $DIG (CAT) payment. The fee rides alongside it in XCH.
     Dig(CatTransferRequest),
 }
+
+/// Written out rather than derived because `CatTransferRequest` is not `PartialEq`.
+///
+/// It compares every field that decides what would be PAID — asset, recipient, amount and fee — so
+/// two intents comparing equal really would build the same payment. A shallower comparison would let
+/// `TrayAction`'s equality (which decides whether the shell has already handled an action) treat two
+/// different payments as one.
+impl PartialEq for SendIntent {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Xch(mine), Self::Xch(theirs)) => mine == theirs,
+            (Self::Dig(mine), Self::Dig(theirs)) => {
+                mine.recipient() == theirs.recipient()
+                    && mine.amount_base_units() == theirs.amount_base_units()
+                    && mine.fee_mojos() == theirs.fee_mojos()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SendIntent {}
 
 impl SendIntent {
     /// Which asset moves.
@@ -832,7 +855,7 @@ impl SendHolder {
     /// Release a transfer whose fate is unknown, on the person's own say-so (dig_ecosystem#2894).
     ///
     /// Reached only for a claim [`ReleaseDraft::assess`] has already accepted, which is where the
-    /// typed acknowledgement is compared — the same split `SendXch` uses, and for the same reason:
+    /// typed acknowledgement is compared — the same split `Send` uses, and for the same reason:
     /// the rule belongs where a test can put a wrong answer in front of it.
     ///
     /// It still re-reads the state here rather than trusting the caller, because the transfer may
@@ -922,7 +945,7 @@ impl SendHolder {
     ///
     /// Everything below is a decision — is there an account, is there a node, what did the failure
     /// mean — and the tray binary can execute none of it under test (dig_ecosystem#2377). So the
-    /// binary's `TrayAction::SendXch` arm calls this and nothing else. The custody ceremony is the
+    /// binary's `TrayAction::Send` arm calls this and nothing else. The custody ceremony is the
     /// PRODUCTION one: the person approves the payment in the app's own prompt, and the account's key
     /// never leaves this process (§908).
     ///
@@ -1130,9 +1153,7 @@ impl SendHolder {
             })?;
         let session = SendSession::new(residency, money, custody, &chain, &publisher);
         match intent {
-            SendIntent::Xch(request) => {
-                runtime.block_on(session.send(request)).map(Accepted::Xch)
-            }
+            SendIntent::Xch(request) => runtime.block_on(session.send(request)).map(Accepted::Xch),
             SendIntent::Dig(request) => runtime
                 .block_on(session.send_dig(request))
                 .map(Accepted::Dig),

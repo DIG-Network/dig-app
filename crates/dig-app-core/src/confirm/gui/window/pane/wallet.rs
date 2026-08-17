@@ -19,7 +19,7 @@
 //!
 //! Whether a send can be started, and what a finished one MEANT, is
 //! [`crate::wallet::sending`]'s answer. This module draws that answer and returns the intent
-//! ([`TrayAction::SendXch`]); it re-derives no rule, because a rule living in a pane is a rule no
+//! ([`TrayAction::Send`]); it re-derives no rule, because a rule living in a pane is a rule no
 //! test can put a wrong input in front of.
 //!
 //! # The rule this pane cannot break
@@ -44,8 +44,6 @@
 //! node, and a node says things like *rpc error 500 after 30s*. Those numerals arrive inside a
 //! sentence beginning `Not known —`, never beside an asset label.
 
-use dig_account::TransferRequest;
-
 use super::action;
 use super::card;
 use super::copy;
@@ -54,6 +52,7 @@ use super::facts::{AccountKind, PaneFacts};
 use super::field;
 use super::flow::Flow;
 use super::identity;
+use super::select::{self, Choice};
 use super::text;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
@@ -65,7 +64,7 @@ use crate::wallet::overview::{
 };
 use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
 use crate::wallet::sending::{
-    ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendProgress, VerdictSource,
+    ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendIntent, SendProgress, VerdictSource,
 };
 use crate::wallet::state::Asset;
 use crate::window_model::Tab;
@@ -370,6 +369,11 @@ fn verbs_row(flow: &mut Flow, t: &Tokens, facts: &PaneFacts, open: Disclosed) ->
 /// answer rather than a reason to withhold the form, and [`state_of`] is what tells them apart.
 fn send_refusal(facts: &PaneFacts) -> Option<String> {
     let blocked = SendDraft {
+        // XCH here is not a claim about what the person will choose — the form is not open yet. The
+        // two refusals this function acts on (a sealed account, a send already running) are decided
+        // BEFORE the asset is looked at, so either asset yields the same answer and the choice is
+        // arbitrary by construction.
+        asset: Asset::Xch,
         destination: "",
         amount: "",
         account_open: matches!(facts.account, Some(AccountKind::Unlocked)),
@@ -706,6 +710,13 @@ fn outcome(flow: &mut Flow, t: &Tokens, send: &SendProgress) -> Option<TrayActio
             Tone::Neutral,
             copy::wallet::SEND_SIGNING_BODY.to_string(),
         ),
+        SendProgress::Broadcast { .. } => (
+            copy::wallet::SEND_BROADCAST_BADGE,
+            // Neutral, not Good: a payment nobody can confirm is not a success, and a green badge
+            // over an unfollowable payment reads as one.
+            Tone::Neutral,
+            copy::wallet::send_broadcast_body(),
+        ),
         SendProgress::Pending {
             blocks_since_push, ..
         } => (
@@ -889,6 +900,12 @@ fn outcome_facts(send: &SendProgress) -> Vec<Readout> {
             copy::wallet::SEND_COIN_LABEL,
             Value::Identifier(payment_coin_id.clone()),
         )],
+        // Labelled as a BUNDLE, never as a payment coin: it names the submission and not the money,
+        // and the surface must not hand a person a weaker identifier under a stronger label.
+        SendProgress::Broadcast { bundle_id } => vec![Readout::new(
+            copy::wallet::SEND_BUNDLE_LABEL,
+            Value::Identifier(bundle_id.clone()),
+        )],
         // A payment that died AFTER being pushed has a real coin, and that is exactly when a person
         // most needs something to look up. Withholding it here left them with a verdict and no way
         // to check it. The source goes with it: this is the verdict a hostile read source would
@@ -952,8 +969,10 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
     let element = egui::Id::new("dig-window-wallet-send");
     let live = flow.live();
     let (mut destination, mut amount) = typed(flow, element);
+    let mut asset = chosen_asset(flow, element);
 
     let verdict = SendDraft {
+        asset,
         destination: &destination,
         amount: &amount,
         account_open: matches!(facts.account, Some(AccountKind::Unlocked)),
@@ -962,6 +981,10 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
     }
     .assess();
 
+    if let Some(picked) = asset_chooser(flow, t, live, element, asset) {
+        asset = picked;
+    }
+    flow.gap(space::S3);
     flow.place(|ui, at| {
         (
             field::text_field(
@@ -1001,12 +1024,13 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
             (),
         )
     });
-    remember(flow, element, &destination, &amount);
+    remember(flow, element, asset, &destination, &amount);
 
     flow.gap(space::S2);
-    // The fee is drawn through the one formatter that knows XCH has twelve decimal places. A figure
-    // divided here would be the money lie this pane's module doc forbids, in the one place a person
-    // is deciding what a payment costs.
+    // The fee is drawn through the one formatter that knows XCH has twelve decimal places, and it
+    // stays XCH for BOTH assets because the fee genuinely is: Chia charges fees in native mojos and
+    // a CAT cannot pay its own. Formatting it as $DIG when $DIG is selected would show a number a
+    // thousand times off, in the one place a person is deciding what a payment costs.
     let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
     flow.place(|ui, at| (text::caption(ui, at, t, &copy::wallet::send_fee(&fee)), ()));
     flow.gap(space::S3);
@@ -1049,7 +1073,7 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
     }
 
     match pressed {
-        true => verdict.ok().map(TrayAction::SendXch),
+        true => verdict.ok().map(TrayAction::Send),
         false => None,
     }
 }
@@ -1067,7 +1091,7 @@ enum Field {
 /// A refusal has ONE home. Attaching every reason to every control would put "unlock your account"
 /// under the amount box, and `professional-ui` is explicit that an error belongs to the control that
 /// caused it.
-fn field_error(verdict: &Result<TransferRequest, SendBlocked>, field: Field) -> Option<String> {
+fn field_error(verdict: &Result<SendIntent, SendBlocked>, field: Field) -> Option<String> {
     let Err(blocked) = verdict else {
         return None;
     };
@@ -1075,7 +1099,11 @@ fn field_error(verdict: &Result<TransferRequest, SendBlocked>, field: Field) -> 
         (blocked, field),
         (SendBlocked::BadDestination(_), Field::Destination)
             | (
-                SendBlocked::BadAmount(_) | SendBlocked::NotEnough { .. },
+                // `NoXchForFee` belongs to the amount box only in the sense that it is about money;
+                // it is really about the WALLET holding no XCH, and no edit to either field lifts
+                // it. So it is left to the state sentence under the control, where a condition the
+                // person must go and fix elsewhere belongs.
+                SendBlocked::BadAmount { .. } | SendBlocked::NotEnough { .. },
                 Field::Amount
             )
     );
@@ -1092,7 +1120,11 @@ fn state_of(blocked: &SendBlocked) -> bool {
         SendBlocked::AccountSealed
             | SendBlocked::AlreadySending
             | SendBlocked::NoDestination
-            | SendBlocked::BadAmount(crate::amount::AmountProblem::Empty)
+            | SendBlocked::NoXchForFee { .. }
+            | SendBlocked::BadAmount {
+                problem: crate::amount::AmountProblem::Empty,
+                ..
+            }
     )
 }
 
@@ -1114,14 +1146,76 @@ fn typed(flow: &mut Flow, element: egui::Id) -> (String, String) {
     })
 }
 
-/// Keep what was typed, so the next frame draws it back.
-fn remember(flow: &mut Flow, element: egui::Id, destination: &str, amount: &str) {
+/// Keep what was typed and chosen, so the next frame draws it back.
+fn remember(flow: &mut Flow, element: egui::Id, asset: Asset, destination: &str, amount: &str) {
     flow.place(|ui, _| {
         ui.ctx().data_mut(|d| {
             d.insert_temp(element.with("to-text"), destination.to_owned());
             d.insert_temp(element.with("amount-text"), amount.to_owned());
+            d.insert_temp(element.with("asset"), asset);
         });
         (0.0, ())
+    })
+}
+
+/// Which asset the form is set to send.
+///
+/// Defaults to [`Asset::Xch`] on a form nobody has touched — the asset the fee is denominated in and
+/// the one a wallet is expected to open on. A default is safe here BECAUSE the choice is drawn: the
+/// chooser states which asset is in force on every frame, so an unread default cannot be mistaken for
+/// a decision the person made.
+fn chosen_asset(flow: &mut Flow, element: egui::Id) -> Asset {
+    flow.place(|ui, _| {
+        (
+            0.0,
+            ui.ctx()
+                .data(|d| d.get_temp(element.with("asset")).unwrap_or(Asset::Xch)),
+        )
+    })
+}
+
+/// The asset chooser, reporting the asset newly picked — `None` when nothing changed this frame.
+///
+/// Drawn with the SAME [`select`](super::select::select) control as the update channel and the cache
+/// size, rather than a bespoke pair of toggle buttons: `professional-ui` says reuse before inventing,
+/// and a person who has met one chooser in this window has met all of them.
+///
+/// It leads the form, above the destination, because it changes what every field beneath it MEANS —
+/// which holding the amount is weighed against, and which decimal places it is read to. A chooser
+/// placed under the amount would let someone fill the form and then discover they had been typing
+/// into the other asset.
+fn asset_chooser(
+    flow: &mut Flow,
+    t: &Tokens,
+    live: bool,
+    element: egui::Id,
+    asset: Asset,
+) -> Option<Asset> {
+    let options = [
+        Choice {
+            label: copy::wallet::SEND_ASSET_XCH.to_string(),
+            id: Asset::Xch,
+        },
+        Choice {
+            label: copy::wallet::SEND_ASSET_DIG.to_string(),
+            id: Asset::Dig,
+        },
+    ];
+    let selected = options.iter().position(|choice| choice.id == asset);
+    flow.place(|ui, at| {
+        select::select(
+            ui,
+            at,
+            t,
+            live,
+            &select::Select {
+                label: copy::wallet::SEND_ASSET_LABEL,
+                options: &options,
+                selected,
+                unknown: copy::wallet::SEND_ASSET_XCH,
+                id: element.with("asset-select"),
+            },
+        )
     })
 }
 
@@ -2337,8 +2431,8 @@ mod tests {
         };
         let request = draft.assess().expect("a funded, well-formed draft");
         assert_eq!(
-            TrayAction::SendXch(request),
-            TrayAction::SendXch(
+            TrayAction::Send(request),
+            TrayAction::Send(
                 dig_account::TransferRequest::to_address(ADDRESS, 500_000_000_000)
                     .expect("a mainnet address")
                     .with_fee(DEFAULT_SEND_FEE_MOJOS)
