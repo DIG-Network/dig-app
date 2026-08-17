@@ -478,6 +478,8 @@ mod tests {
     struct Reading {
         answer: Result<ProfileSnapshot, ProfileEditError>,
         reads: Mutex<usize>,
+        /// How often a commit was ATTEMPTED. The observable for a control that must not be silent.
+        commits: Mutex<usize>,
     }
 
     impl Reading {
@@ -485,6 +487,7 @@ mod tests {
             Arc::new(Self {
                 answer,
                 reads: Mutex::new(0),
+                commits: Mutex::new(0),
             })
         }
     }
@@ -501,6 +504,7 @@ mod tests {
             &self,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
+            *self.commits.lock().expect("commits") += 1;
             Err(ProfileEditError::Locked)
         }
         fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
@@ -642,6 +646,68 @@ mod tests {
     /// commits too, just after freezing the window. So the observable is the READ COUNT across the
     /// call. The seam counts, one read has already happened to produce the reading `save` requires,
     /// and any read `save` itself performs is a second one.
+    /// **dig_ecosystem#3041.** Publishing from the re-entry form is a real ATTEMPT, not a silent
+    /// no-op.
+    ///
+    /// # The defect this is the observable for
+    ///
+    /// The card tells a person whose content is unrecoverable to type the details in and publish
+    /// them. `save` returned early on every reading that was not `Known`, so the press reached no
+    /// seam, produced no error, and closed the modal exactly as a real save does — a promise in
+    /// copy that the code did not keep, and the dead-control shape of #3069 arriving through a door
+    /// nobody had checked.
+    ///
+    /// # Why the control is `Unreadable` and not `NoChainTransport`
+    ///
+    /// The nearest wrong fix is deleting the reading guard altogether, and against an unwired
+    /// service that version looks identical — nothing commits either way, because there is no seam.
+    /// `Unreadable` is the state that MUST still refuse over a fully wired seam: its bytes may be
+    /// perfectly intact behind a node that is merely not answering, so committing there publishes a
+    /// body missing everything the profile still holds. One state gained the attempt; the other
+    /// must not have.
+    #[test]
+    fn publishing_a_fresh_body_reaches_the_seam_while_an_unread_profile_still_refuses() {
+        let changes = vec![(ProfileField::DisplayName, SlotChange::Set("Ada".into()))];
+
+        let lost = Reading::of(Err(ProfileEditError::BodyLost {
+            root: "33".repeat(32),
+        }));
+        let service = service_over(lost.clone());
+        service.refresh();
+        assert!(matches!(settled(&service), ProfileReading::BodyLost { .. }));
+
+        service.save(changes.clone());
+        assert!(
+            waited_for(|| *lost.commits.lock().expect("commits") > 0),
+            "pressing publish on the re-entry form reached no seam: it wrote nothing, said              nothing, and closed as though it had saved"
+        );
+
+        // The control: a profile that merely FAILED to read still refuses, because its bytes may be
+        // intact behind a node that is not answering.
+        let unread = Reading::of(Err(ProfileEditError::ChainUnreachable("no node".into())));
+        let refusing = service_over(unread.clone());
+        refusing.refresh();
+        assert!(matches!(settled(&refusing), ProfileReading::Unreadable(_)));
+
+        refusing.save(changes);
+        assert!(
+            !waited_for(|| *unread.commits.lock().expect("commits") > 0),
+            "a commit was built over a profile this app could not read, so it would publish a body              missing everything the profile still holds"
+        );
+    }
+
+    /// Poll `done` for up to a second. The commit runs on its own thread, so an immediate assertion
+    /// would be a race that passes on a fast machine and fails on a loaded one.
+    fn waited_for(done: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
     #[test]
     fn pressing_save_does_not_read_the_chain_on_the_calling_thread() {
         let seam = Reading::of(Ok(a_profile()));

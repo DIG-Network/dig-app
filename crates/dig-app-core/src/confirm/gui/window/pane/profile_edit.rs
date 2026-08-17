@@ -560,6 +560,55 @@ mod tests {
         );
     }
 
+    /// **dig_ecosystem#3041.** The re-entry form does NOT reinstate the reassurance its own banner
+    /// just contradicted.
+    ///
+    /// # The fixture, and why the control is the same draft
+    ///
+    /// A `BodyLost` draft is ALWAYS empty, and the empty-profile banner is drawn off
+    /// `ProfileDraft::is_empty()` — so the form said *"Your profile is empty. Nothing has gone
+    /// wrong"* one line below *"This profile's details are gone."* The model was never wrong:
+    /// `ProfileReading::is_empty()` is correctly false for the state. The surface consulted the
+    /// draft instead, which is how an invariant defended in one layer is bypassed in the next.
+    ///
+    /// The control is the SAME empty draft with `re_entry: false`, which is the only thing that
+    /// distinguishes this from an implementation that deleted the empty-state banner outright — a
+    /// person with a genuinely unfilled profile still needs it, and the fixture would look identical
+    /// either way without the second leg.
+    ///
+    /// It is drawn through the REAL form, because this defect is invisible to every assertion made
+    /// about the model and visible in one look at the composed pane.
+    #[test]
+    fn a_re_entry_form_does_not_tell_a_person_nothing_has_gone_wrong() {
+        let nothing_typed = ProfileDraft::over(std::collections::BTreeMap::new(), 0);
+
+        let re_entry = form_says_with(&nothing_typed, true);
+        assert!(
+            !re_entry.contains("Nothing has gone wrong"),
+            "the re-entry form reassured a person whose content was destroyed, directly beneath              the banner saying it was: {re_entry}"
+        );
+        assert!(
+            !re_entry.contains("Your profile is empty"),
+            "the re-entry form drew the blank fields as an unfilled profile: {re_entry}"
+        );
+
+        // The control: an ordinarily empty profile still gets the banner, so the fix suppressed a
+        // sentence in one state rather than deleting it from the form.
+        let unfilled = form_says_with(&nothing_typed, false);
+        assert!(
+            unfilled.contains("Your profile is empty") && unfilled.contains("Nothing has gone wrong"),
+            "a person who simply has not filled their profile in lost the sentence that says so:              {unfilled}"
+        );
+
+        // And the form is genuinely a form in both, so neither leg passes by drawing nothing.
+        for said in [&re_entry, &unfilled] {
+            assert!(
+                said.contains(copy::profile_edit::ALL_OPTIONAL),
+                "no form was painted at all, so the assertions above are about a blank card: {said}"
+            );
+        }
+    }
+
     /// Every string the real form painted over `committed`.
     ///
     /// Drawn through the REAL [`form`] and a REAL [`Flow`], because the property under test is what
@@ -567,6 +616,11 @@ mod tests {
     /// process-wide [`EditService`], and the sentence lives in the form regardless of how the read
     /// that produced `committed` arrived.
     fn form_says(committed: &ProfileDraft) -> String {
+        form_says_with(committed, false)
+    }
+
+    /// The same, over a form drawn as a RE-ENTRY over content that is gone.
+    fn form_says_with(committed: &ProfileDraft, re_entry: bool) -> String {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
         let t = crate::confirm::gui::theme::Theme::Light.tokens();
@@ -589,7 +643,7 @@ mod tests {
                                 egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = Flow::new(ui, column, true);
-                            super::form(&mut flow, &t, committed, &[], CARD_FORM);
+                            super::form(&mut flow, &t, committed, &[], CARD_FORM, re_entry);
                         });
                 },
             );
@@ -634,6 +688,20 @@ mod tests {
         );
         assert_eq!(label, crate::tray_menu::PUBLISH_PROFILE_LABEL);
         assert!(ready, "a dirty, valid form was not pressable");
+
+        // **dig_ecosystem#3041.** Added to THIS test rather than asserted beside it, because the
+        // omission was the defect: the sweep below listed every non-`Known` reading and `BodyLost`
+        // was simply not among them, so a suite of 1932 tests could not see that its form had no
+        // Save row at all. A separate test would have left this list free to go stale again.
+        let (lost_label, lost_ready) = offer_over(&ProfileReading::body_lost(&"aa".repeat(32)))
+            .expect(
+                "a profile whose content is unrecoverable offered no Save, so the form inviting a                  person to publish fresh details is a control that cannot be pressed",
+            );
+        assert_eq!(lost_label, crate::tray_menu::PUBLISH_PROFILE_LABEL);
+        assert!(
+            lost_ready,
+            "the re-entry form was typed into and still not pressable"
+        );
 
         for unread in [
             ProfileReading::Pending,
