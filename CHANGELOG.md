@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.13.0] - 2026-08-17
+
+### Bug Fixes
+- **profile:** Honest locked message, live publish control, discoverable profiles (#190)
+
 ## [12.12.2] - 2026-08-16
 
 ### Features
