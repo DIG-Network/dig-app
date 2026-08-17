@@ -145,7 +145,7 @@ mod windows_toast {
     use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
+        COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
@@ -278,7 +278,16 @@ mod windows_toast {
         ToastNotificationManager::CreateToastNotifierWithId(aumid)?.Show(&toast)
     }
 
-    /// Create the Start Menu shortcut carrying [`AUMID`], unless it is already there.
+    /// Create the Start Menu shortcut carrying [`AUMID`], or repair one that is already there.
+    ///
+    /// # Why an existing shortcut is not left alone
+    ///
+    /// Windows attributes an unpackaged Win32 toast to this shortcut, so the shortcut's icon IS the
+    /// toast's icon. Every machine that ran an earlier build already has a shortcut written without
+    /// one, and skipping on existence would mean the icon fix reached only brand-new installs —
+    /// leaving the generic file icon in place for exactly the users who reported it (#3076). So the
+    /// shortcut is rewritten whenever it does not already point at the icon this build expects, and
+    /// left untouched once it does.
     ///
     /// # Safety
     /// Calls COM on the current thread, which the caller has put in an apartment.
@@ -286,7 +295,7 @@ mod windows_toast {
         let Some(path) = shortcut_path() else {
             return Ok(());
         };
-        if path.exists() {
+        if path.exists() && shortcut_icon_is_current(&path) {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
@@ -302,6 +311,11 @@ mod windows_toast {
             link.SetWorkingDirectory(&HSTRING::from(parent.as_os_str()))?;
         }
 
+        // The icon lives in the executable's own resources, so index 0 — the binary's lowest icon
+        // group — is the DIG Mark that `dig-app/build.rs` embeds. Setting it explicitly rather than
+        // relying on the shell inheriting it keeps the toast's appearance a property of this code.
+        link.SetIconLocation(&HSTRING::from(executable.as_os_str()), ICON_INDEX)?;
+
         let properties: IPropertyStore = link.cast()?;
         let mut value = PROPVARIANT::from(AUMID);
         properties.SetValue(&PKEY_APP_USER_MODEL_ID, &value)?;
@@ -315,6 +329,51 @@ mod windows_toast {
         let _ = aumid;
         Ok(())
     }
+
+    /// Does the shortcut at `path` already draw this build's icon?
+    ///
+    /// Answers `false` on any doubt — an unreadable shortcut, a missing icon, one pointing at a
+    /// different executable — because rewriting a shortcut is cheap and idempotent, while wrongly
+    /// concluding it is current leaves the generic icon on screen forever.
+    ///
+    /// # Safety
+    /// Calls COM on the current thread, which the caller has put in an apartment.
+    unsafe fn shortcut_icon_is_current(path: &std::path::Path) -> bool {
+        let Ok(executable) = std::env::current_exe() else {
+            return false;
+        };
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        else {
+            return false;
+        };
+        let Ok(file) = link.cast::<IPersistFile>() else {
+            return false;
+        };
+        if file
+            .Load(PCWSTR(HSTRING::from(path.as_os_str()).as_ptr()), STGM_READ)
+            .is_err()
+        {
+            return false;
+        }
+
+        // MAX_PATH is the buffer the shell writes an icon location into; anything longer is
+        // truncated by the API itself, not by this call.
+        let mut icon = [0u16; 260];
+        let mut index = 0i32;
+        if link
+            .GetIconLocation(&mut icon, std::ptr::addr_of_mut!(index))
+            .is_err()
+        {
+            return false;
+        }
+        let end = icon.iter().position(|c| *c == 0).unwrap_or(icon.len());
+        let icon = std::path::PathBuf::from(String::from_utf16_lossy(&icon[..end]));
+
+        index == ICON_INDEX && icon == executable
+    }
+
+    /// The icon index within the executable's resources: its lowest icon group, the DIG Mark.
+    const ICON_INDEX: i32 = 0;
 
     /// Where the per-user Start Menu shortcut goes, or `None` when `%APPDATA%` is not set.
     ///
