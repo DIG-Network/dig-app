@@ -64,17 +64,23 @@ pub use dig_account::mint::MintNetwork;
 pub struct NodeProfileContent {
     /// Where the bytes are kept.
     bodies: Arc<dyn BodyStore>,
-    /// Set when a read found the store holding nothing and no rebuild could answer for it.
+    /// The root a read found the store holding nothing at, when no rebuild could answer for it.
     ///
     /// # Why an observation is kept here at all
     ///
     /// dig-account reports every content failure as `EditError::ContentUnavailable(String)`, so by
-    /// the time the seam sees it, *nothing is published* and *the node is not answering* are the
-    /// same type carrying different prose. They are opposite states with opposite remedies
+    /// the time the seam sees it, *the content is gone* and *the node is not answering* are the same
+    /// type carrying different prose. They are opposite states with opposite remedies
     /// (dig_ecosystem#3036), and telling them apart by matching on that prose would make a wording
     /// change silently re-merge them. This is the one place that knows which it was, so it records
     /// it, and [`AccountEditSeam::read`] asks.
-    unpublished: Mutex<bool>,
+    ///
+    /// # Why it holds the ROOT rather than a flag (dig_ecosystem#3041)
+    ///
+    /// The state it records is *the chain anchors this root and nothing holds its preimage*, and a
+    /// person cannot check that claim — or be told it honestly — without the number. A bool made the
+    /// sentence generic, and the generic sentence that got chosen was the reassuring one.
+    absent_at: Mutex<Option<String>>,
 }
 
 impl NodeProfileContent {
@@ -82,20 +88,20 @@ impl NodeProfileContent {
     pub fn new(bodies: Arc<dyn BodyStore>) -> Self {
         Self {
             bodies,
-            unpublished: Mutex::new(false),
+            absent_at: Mutex::new(None),
         }
     }
 
     /// Forget what the last read observed. Called before each one, so an answer never carries over.
     fn forget_absence(&self) {
-        if let Ok(mut seen) = self.unpublished.lock() {
-            *seen = false;
+        if let Ok(mut seen) = self.absent_at.lock() {
+            *seen = None;
         }
     }
 
-    /// Whether the last read found nothing published, rather than failing to ask.
-    fn saw_nothing_published(&self) -> bool {
-        self.unpublished.lock().map(|seen| *seen).unwrap_or(false)
+    /// The root the last read found the store holding nothing at, rather than failing to ask.
+    fn saw_body_missing_at(&self) -> Option<String> {
+        self.absent_at.lock().ok().and_then(|seen| seen.clone())
     }
 
     /// Rebuild the seed body for `root` and hand it to the node, when this app can produce one.
@@ -133,9 +139,13 @@ impl ProfileContentSource for NodeProfileContent {
             // can be VERIFIED against it here rather than asserted anywhere.
             BodyRead::Nothing => match self.rebuilt(&store_id, &root_hex, root) {
                 Some(bytes) => slots_of(&bytes, root),
+                // Nothing this app can mint from hashes to the anchored root, so the root was
+                // produced by a real edit and its bytes are gone — the #3041 state. It is recorded
+                // WITH the root, because that is the difference between telling a person their
+                // content was destroyed and telling them it was never written.
                 None => {
-                    if let Ok(mut seen) = self.unpublished.lock() {
-                        *seen = true;
+                    if let Ok(mut seen) = self.absent_at.lock() {
+                        *seen = Some(root_hex.clone());
                     }
                     Err(BodyStoreError::Refused(format!(
                         "your node does not hold the profile content for {root_hex}"
@@ -233,8 +243,17 @@ where
             .map_err(|error| match error {
             // The crate flattens every content failure into one string, and this is the only
             // layer that still knows which of them it was.
-            EditError::ContentUnavailable(_) if self.content.saw_nothing_published() => {
-                ProfileEditError::Unpublished
+            EditError::ContentUnavailable(_)
+                if self.content.saw_body_missing_at().is_some() =>
+            {
+                // `expect` cannot fire: the guard above just observed it, and nothing clears the
+                // observation between the guard and here.
+                ProfileEditError::BodyLost {
+                    root: self
+                        .content
+                        .saw_body_missing_at()
+                        .unwrap_or_else(|| "an unknown root".to_string()),
+                }
             }
             other => edit_error(other),
         })?;

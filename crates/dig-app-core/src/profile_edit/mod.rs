@@ -66,6 +66,28 @@ pub mod copy {
                                    never been written. Publishing them writes to the blockchain and \
                                    costs a small amount of XCH.";
 
+    /// Said over a profile whose content is anchored on chain and exists nowhere
+    /// (dig_ecosystem#3041).
+    ///
+    /// # Every clause is load-bearing
+    ///
+    /// It states the loss without hedging, because the preceding version of this sentence told those
+    /// people *"nothing has gone wrong"* and they went looking for a setting that would bring their
+    /// profile back. It does not offer a retry, because a hash has no preimage to find. It names the
+    /// root, so the claim is checkable rather than taken on trust. And it ends on the door — typing
+    /// the details in again — because a statement of permanent loss with no next action is the dead
+    /// end `professional-ui`'s first rule exists to forbid.
+    pub fn body_lost(root: &str) -> String {
+        format!(
+            "This profile's details are gone. The blockchain still records that they existed \
+             (as {root}), but the details themselves are not on your node and could not be found \
+             anywhere else, and they cannot be recovered — not by waiting, retrying, or \
+             reinstalling. Your profile itself is safe and still yours. To use it again, type the \
+             details in below and publish them; that writes to the blockchain and costs a small \
+             amount of XCH."
+        )
+    }
+
     /// Said over a profile whose stored content does not match what the chain anchors.
     ///
     /// A refusal, worded as one. There is no retry and no repair a person can perform from here,
@@ -118,6 +140,26 @@ pub enum ProfileReading {
     /// what was read and there is nothing to read. A person here is told what is true and offered
     /// the way to publish something — never a retry (dig_ecosystem#3036).
     Unpublished,
+    /// The chain anchors a root whose content is gone for good (dig_ecosystem#3041).
+    ///
+    /// # The one state here that offers a draft it did not read
+    ///
+    /// Every other failure withholds the form, and for a good reason: a person typing over a profile
+    /// the app merely FAILED to read commits a body missing everything it still held. That reason
+    /// does not apply here, because there is nothing left to lose — the bytes are unrecoverable, so
+    /// an empty form destroys nothing and is the only way back to a working profile.
+    ///
+    /// So the draft is empty and [`is_empty`](Self::is_empty) is deliberately FALSE. The two facts
+    /// together are what force a surface to draw this as *your details are gone, type them again*
+    /// rather than as *you have not filled this in yet* — which would let a person press Save on
+    /// three blank fields believing they were preserving what was there.
+    BodyLost {
+        /// The unrecoverable root, carried so the sentence can name it.
+        root: String,
+        /// An empty draft to type into. Empty because nothing survived, never because the profile
+        /// was empty.
+        draft: ProfileDraft,
+    },
     /// A body exists and contradicts the root the chain anchors.
     ///
     /// The refusal, which must never be drawn as weather: no draft, and no retry.
@@ -141,8 +183,17 @@ impl ProfileReading {
     pub fn of_read_failure(error: &ProfileEditError) -> Self {
         match error {
             ProfileEditError::Unpublished => Self::Unpublished,
+            ProfileEditError::BodyLost { root } => Self::body_lost(root),
             ProfileEditError::Inconsistent => Self::Inconsistent,
             other => Self::Unreadable(other.while_reading()),
+        }
+    }
+
+    /// The reading over a profile whose content is unrecoverable, with the empty form to retype into.
+    pub fn body_lost(root: &str) -> Self {
+        Self::BodyLost {
+            root: root.to_string(),
+            draft: ProfileDraft::over(BTreeMap::new(), 0),
         }
     }
 
@@ -151,20 +202,52 @@ impl ProfileReading {
         match self {
             Self::Unreadable(why) => Some(why),
             Self::Unpublished => Some(copy::UNPUBLISHED),
+            Self::BodyLost { .. } => None,
             Self::Inconsistent => Some(copy::INCONSISTENT),
             _ => None,
         }
     }
 
+    /// What to say about this reading, as an owned sentence, for the one state whose wording is
+    /// computed rather than constant.
+    ///
+    /// [`sentence`](Self::sentence) borrows, and `BodyLost`'s sentence names the root, so it has no
+    /// `&str` to lend. Rather than let that state quietly return `None` everywhere and reach a person
+    /// as a blank card, every caller that can hold a `String` uses this and gets all five.
+    pub fn says(&self) -> Option<String> {
+        match self {
+            Self::BodyLost { root, .. } => Some(copy::body_lost(root)),
+            other => other.sentence().map(str::to_string),
+        }
+    }
+
     /// The draft to edit, when there is one.
+    ///
+    /// `BodyLost` is included deliberately: its draft is EMPTY, and handing it over is what lets a
+    /// person whose content is unrecoverable type it in again (dig_ecosystem#3041). Every other
+    /// non-`Known` state still withholds it.
     pub fn draft(&self) -> Option<&ProfileDraft> {
         match self {
-            Self::Known(draft) => Some(draft),
+            Self::Known(draft) | Self::BodyLost { draft, .. } => Some(draft),
             _ => None,
         }
     }
 
+    /// Whether the form this reading offers is a RE-ENTRY over content that is gone, rather than the
+    /// profile's own values.
+    ///
+    /// The surface needs this separately from [`draft`](Self::draft), because the two cases produce
+    /// an identical empty form and only one of them may be drawn as *your profile*.
+    pub fn is_re_entry(&self) -> bool {
+        matches!(self, Self::BodyLost { .. })
+    }
+
     /// Whether the profile answered and holds nothing — the empty state, which is not a fault.
+    ///
+    /// Keyed on `Known` alone. `BodyLost` also carries an empty draft and must NOT report true: it is
+    /// not a profile with nothing in it, it is a profile whose contents were destroyed, and drawing
+    /// the second as the first is how a person comes to press Save on blank fields believing they
+    /// are keeping what was there.
     pub fn is_empty(&self) -> bool {
         matches!(self, Self::Known(draft) if draft.is_empty())
     }

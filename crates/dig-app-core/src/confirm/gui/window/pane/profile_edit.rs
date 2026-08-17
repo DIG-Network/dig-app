@@ -187,6 +187,16 @@ fn content(
             t,
             PaneState::Unreachable(crate::profile_edit::copy::INCONSISTENT.to_string()),
         ),
+        // The one unreadable state that still gets the form (dig_ecosystem#3041). The banner goes
+        // FIRST and says the content is gone, so the blank fields below it are read as a re-entry
+        // rather than as this person's profile — the distinction that stops someone publishing three
+        // empty fields believing they are preserving what was there.
+        ProfileReading::BodyLost { root, draft } => {
+            let lost = PaneState::Unreachable(crate::profile_edit::copy::body_lost(root));
+            flow.place(|ui, at| (state::banner(ui, at, t, &lost), ()));
+            flow.gap(space::S3);
+            form(flow, t, draft, verbs, form_id)
+        }
         ProfileReading::Known(committed) => form(flow, t, committed, verbs, form_id),
     }
 }

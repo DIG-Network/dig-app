@@ -111,6 +111,27 @@ pub enum ProfileEditError {
     /// again cannot produce content nobody wrote. Reported only after a rebuild from this app's own
     /// mint seed has been tried and did not verify against the root the chain anchors.
     Unpublished,
+    /// The chain anchors a root, and the bytes it commits to exist NOWHERE.
+    ///
+    /// # Why this is not [`Unpublished`](Self::Unpublished), and why the difference is the whole bug
+    ///
+    /// Both states reach a person through a node that answered `body_b64: null`, so for a while they
+    /// were reported as one — and the one they were reported as was the reassuring one. A person
+    /// whose content was permanently lost read *"nothing has gone wrong"* over a profile that had
+    /// been destroyed (dig_ecosystem#3041). They are told apart by the ROOT: a store still sitting at
+    /// the root its mint anchored has genuinely never published anything, and any other root was
+    /// produced by a real edit whose bytes are now gone.
+    ///
+    /// # The remedy, which is the reason the state exists at all
+    ///
+    /// Nothing recovers the bytes — no node, no peer, no reinstall can produce a preimage of a hash.
+    /// What a person CAN do is publish a fresh body: retype the content, and let the chain confirm
+    /// the new root that commits to it. So this is an ordinary state with a door, not a dead end.
+    BodyLost {
+        /// The root the chain anchors and nothing holds the preimage of. Shown verbatim, so a
+        /// person can check the claim themselves rather than take the app's word for it.
+        root: String,
+    },
     /// A body exists and does NOT commit to the root the chain anchors.
     ///
     /// Kept apart from [`Unreadable`](Self::Unreadable) because it is a security refusal rather
@@ -154,6 +175,7 @@ impl ProfileEditError {
         match self {
             Self::Unreadable(why) => format!("DIG could not read your profile: {why}"),
             Self::Unpublished => super::copy::UNPUBLISHED.to_string(),
+            Self::BodyLost { root } => super::copy::body_lost(root),
             Self::Inconsistent => super::copy::INCONSISTENT.to_string(),
             Self::Locked => {
                 "Your account is locked, so DIG cannot sign the change. Unlock it and try again."
@@ -235,6 +257,7 @@ impl ProfileEditError {
                 | Self::Refused(_)
                 | Self::Locked
                 | Self::Unpublished
+                | Self::BodyLost { .. }
                 | Self::Inconsistent
         )
     }
