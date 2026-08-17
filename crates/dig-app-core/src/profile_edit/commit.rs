@@ -1001,7 +1001,12 @@ mod tests {
         // nothing in between. A sentence describing a background retry would be a promise no code
         // in this crate keeps (dig_ecosystem#3078 adds the timer that would make one true).
         assert!(said.contains("next time DIG starts"), "said: {said}");
-        for invented in ["keep trying", "keeps trying", "on a timer", "in the background"] {
+        for invented in [
+            "keep trying",
+            "keeps trying",
+            "on a timer",
+            "in the background",
+        ] {
             assert!(
                 !said.contains(invented),
                 "promised a retry no code performs ({invented}): {said}"
