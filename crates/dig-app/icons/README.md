@@ -29,11 +29,27 @@ Copied **byte-identical** from the ecosystem's canonical Tauri icon set in `dig-
 | --- | --- | --- |
 | `mark-32.png` | `dig-installer .../icons/32x32.png` | `713b15773e7ef3bd134962a2651fd354447007fa761db4484ace66095de0426f` |
 | `mark-64.png` | `dig-installer .../icons/64x64.png` | `534b747565a796d964f261c0f8f235e90ff02a2126c67286203be60cd67d494b` |
+| `mark.ico` | `dig-installer .../icons/icon.ico` | `c7c07193175dea780ce24c5ec6fbd95609cdff35c40d9e9c1337b4287d92406f` |
 
 The copy is deliberate: the artwork must live in this crate so the binary is self-contained, rather than
 reaching across into another submodule at build or run time.
 
-## Why these two sizes
+## `mark.ico` — the Windows icon resource
+
+The two PNGs are painted by this crate; `mark.ico` is handed to the **linker** instead, by
+[`build.rs`](../build.rs) through the encoder in [`build/res.rs`](../build/res.rs), so the executable
+itself carries an icon.
+
+It has to, because Windows attributes an unpackaged Win32 toast to the app's Start Menu shortcut, and
+that shortcut draws whatever icon the executable it points at carries. Without this resource, the
+notification, the taskbar, Explorer and Alt-Tab all fall back to the generic file icon (#3076).
+
+Six images — 16, 24, 32, 48, 64 and **256** — because the shell picks a size by context and 256 is
+what a modern toast and the Start Menu sample. The 256px image is byte-identical to the icon set's
+own `128x128@2x.png` master (`b00279e7b72bafac51fa9b8c61a3fe9152243db6295a3c88b9bb97ab8456cd27`), so
+it is a real render at that size rather than an upscale of the 64px asset.
+
+## Why these two PNG sizes
 
 Each is the *nearest source* to a real tray paint size, because downscaling the 128px master collapses
 the glyph's fine anti-aliasing into mush at tray dimensions.

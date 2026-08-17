@@ -145,7 +145,7 @@ mod windows_toast {
     use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
+        COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, PROPERTYKEY};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
@@ -200,9 +200,25 @@ mod windows_toast {
     /// caught up within the same process.
     ///
     /// So the identity is written when the app STARTS, minutes before any payment could arrive,
-    /// rather than at the moment of the first toast. [`deliver`] still writes it as a fallback for a
-    /// host where start-up could not, which is why this is belt-and-braces rather than the only path.
+    /// rather than at the moment of the first toast.
+    ///
+    /// # Why this is the ONLY path that writes the Start Menu
+    ///
+    /// Writing it from [`deliver`] as well used to look like free belt-and-braces, and it was the
+    /// opposite: `deliver` is reachable from `native_notifier().show(…)`, so every `cargo test` run
+    /// on a Windows developer machine rewrote the user's real `DIG.lnk` to point at the ephemeral
+    /// `target/debug/deps/*.exe` the harness happened to be running — a path the next rebuild
+    /// deletes, leaving the generic icon this very change exists to fix. The measurement above also
+    /// says that same-process write cannot help the toast being delivered, so the fallback bought
+    /// nothing and cost the user's Start Menu.
+    ///
+    /// The shortcut write therefore lives on exactly one call path — this function, called once by
+    /// the app shell at start-up — and [`start_menu_write_is_refused`] makes even that path
+    /// default-deny for any executable built into `target/`.
     pub fn prepare() {
+        if start_menu_write_is_refused() {
+            return;
+        }
         let aumid = HSTRING::from(AUMID);
         let _ = std::thread::Builder::new()
             .name("dig-toast-identity".to_string())
@@ -215,6 +231,84 @@ mod windows_toast {
                     CoUninitialize();
                 }
             });
+    }
+
+    /// Decide whether THIS process may write the user's Start Menu, and complain loudly when the
+    /// caller is a test harness.
+    ///
+    /// The user's `%APPDATA%\…\Start Menu\Programs\DIG.lnk` is a real, durable artifact of THEIR
+    /// machine: it carries the AUMID every DIG toast is filed under, and its target is whatever
+    /// executable wrote it last. So the question the guard has to answer is whether the running
+    /// executable is one the shortcut may still point at tomorrow.
+    ///
+    /// A test harness is additionally a defect rather than a config: nothing in a test suite has any
+    /// business here, so it trips a `debug_assert` and fails the suite instead of passing quietly.
+    /// A `cargo run` gets the silent refusal, because refusing a developer's app launch by panicking
+    /// would be a worse bug than the one being prevented.
+    fn start_menu_write_is_refused() -> bool {
+        let exe = std::env::current_exe().ok();
+        if !write_is_refused(launched_by_cargo(), exe.as_deref()) {
+            return false;
+        }
+        debug_assert!(
+            !exe.as_deref().is_some_and(is_test_harness_path),
+            "a test reached the Start Menu identity writer; it must not touch the user's machine"
+        );
+        tracing::debug!(
+            "skipping the Start Menu identity: this process runs from a build directory, so its \
+             executable is not one the shortcut may point at"
+        );
+        true
+    }
+
+    /// The refusal itself, as a decision over facts rather than over the ambient process — so both
+    /// directions of it can be tested, including the one that matters most.
+    ///
+    /// **The refusal is about WHERE the executable lives, not about who started it.** An executable
+    /// under `target/` is by construction one the next rebuild or `cargo clean` deletes, so pointing
+    /// the shortcut at it trades a working Start Menu entry for a dangling one — which is the very
+    /// generic-icon state this module exists to repair. That is true of `target\debug\dig-app.exe`
+    /// double-clicked from Explorer, which carries none of cargo's environment; keying the refusal on
+    /// the environment alone would let exactly that case through. The cargo environment is kept as a
+    /// second, independent signal because it catches the converse — a `cargo run` whose binary has
+    /// been copied somewhere that looks shipped.
+    ///
+    /// **An unknown executable is ALLOWED, deliberately.** The costs are asymmetric: a wrong refusal
+    /// means the installed app never registers its AUMID and notifications break for every user,
+    /// which is strictly worse than the icon defect a wrong permit could reintroduce on a developer's
+    /// own machine. The guard therefore fails open when it cannot see the path.
+    fn write_is_refused(launched_by_cargo: bool, exe: Option<&std::path::Path>) -> bool {
+        launched_by_cargo || exe.is_some_and(runs_from_a_cargo_build_directory)
+    }
+
+    /// Was this process started by cargo (`cargo run`, `cargo test`, `cargo bench`)?
+    ///
+    /// Cargo exports the manifest environment to the programs it runs; neither variable is set for a
+    /// binary started from Explorer, a service, or the installer.
+    fn launched_by_cargo() -> bool {
+        std::env::var_os("CARGO").is_some() || std::env::var_os("CARGO_MANIFEST_DIR").is_some()
+    }
+
+    /// Does `exe` sit inside a cargo `target/` build directory?
+    ///
+    /// Cargo emits binaries at a bounded depth below `target/`: `target/<profile>/` for an
+    /// application, one deeper for a test or bench harness, and one deeper again for each when a
+    /// `--target <triple>` is in play. Four ancestors is therefore the whole layout, and the bound is
+    /// what keeps the guard from over-reaching: an installed path that merely happens to contain a
+    /// directory named `target` further up — the false positive that would silently disable the
+    /// shipped app's repair — is out of range.
+    fn runs_from_a_cargo_build_directory(exe: &std::path::Path) -> bool {
+        const CARGO_BUILD_DIR_MAX_DEPTH: usize = 4;
+        exe.ancestors()
+            .skip(1)
+            .take(CARGO_BUILD_DIR_MAX_DEPTH)
+            .any(|dir| dir.file_name() == Some(std::ffi::OsStr::new("target")))
+    }
+
+    /// A cargo test/bench binary is emitted into `target/<profile>/deps/`; an application binary is
+    /// emitted a directory above it. The parent directory name is therefore the discriminator.
+    fn is_test_harness_path(exe: &std::path::Path) -> bool {
+        exe.parent().and_then(|parent| parent.file_name()) == Some(std::ffi::OsStr::new("deps"))
     }
 
     impl NativeNotifier for WinToast {
@@ -260,25 +354,31 @@ mod windows_toast {
         }
     }
 
-    /// Register the app's identity if needed, then raise the toast.
+    /// Raise the toast, against the identity [`prepare`] registered at start-up.
+    ///
+    /// Deliberately writes NOTHING to the file system: this function is reachable from
+    /// `native_notifier().show(…)`, which a test may legitimately call, and the user's Start Menu is
+    /// not a test's to touch. See [`prepare`] for why that separation is the fix and not a caveat.
     ///
     /// # Safety
     /// Calls COM/WinRT on the current thread, which the caller has put in an apartment.
     unsafe fn deliver(aumid: &HSTRING, notification: &Notification) -> windows::core::Result<()> {
-        // Best-effort: a machine where the Start Menu is not writable (a locked-down profile) may
-        // still have the identity registered by the installer, so a failure here is not a reason to
-        // skip the toast.
-        if let Err(e) = ensure_start_menu_identity(aumid) {
-            tracing::debug!(error = %e, "the Start Menu identity could not be written");
-        }
-
         let document = windows::Data::Xml::Dom::XmlDocument::new()?;
         document.LoadXml(&HSTRING::from(toast_xml(notification)))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         ToastNotificationManager::CreateToastNotifierWithId(aumid)?.Show(&toast)
     }
 
-    /// Create the Start Menu shortcut carrying [`AUMID`], unless it is already there.
+    /// Create the Start Menu shortcut carrying [`AUMID`], or repair one that is already there.
+    ///
+    /// # Why an existing shortcut is not left alone
+    ///
+    /// Windows attributes an unpackaged Win32 toast to this shortcut, so the shortcut's icon IS the
+    /// toast's icon. Every machine that ran an earlier build already has a shortcut written without
+    /// one, and skipping on existence would mean the icon fix reached only brand-new installs —
+    /// leaving the generic file icon in place for exactly the users who reported it (#3076). So the
+    /// shortcut is rewritten whenever it does not already point at the icon this build expects, and
+    /// left untouched once it does.
     ///
     /// # Safety
     /// Calls COM on the current thread, which the caller has put in an apartment.
@@ -286,7 +386,7 @@ mod windows_toast {
         let Some(path) = shortcut_path() else {
             return Ok(());
         };
-        if path.exists() {
+        if path.exists() && shortcut_icon_is_current(&path) {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
@@ -302,6 +402,11 @@ mod windows_toast {
             link.SetWorkingDirectory(&HSTRING::from(parent.as_os_str()))?;
         }
 
+        // The icon lives in the executable's own resources, so index 0 — the binary's lowest icon
+        // group — is the DIG Mark that `dig-app/build.rs` embeds. Setting it explicitly rather than
+        // relying on the shell inheriting it keeps the toast's appearance a property of this code.
+        link.SetIconLocation(&HSTRING::from(executable.as_os_str()), ICON_INDEX)?;
+
         let properties: IPropertyStore = link.cast()?;
         let mut value = PROPVARIANT::from(AUMID);
         properties.SetValue(&PKEY_APP_USER_MODEL_ID, &value)?;
@@ -315,6 +420,51 @@ mod windows_toast {
         let _ = aumid;
         Ok(())
     }
+
+    /// Does the shortcut at `path` already draw this build's icon?
+    ///
+    /// Answers `false` on any doubt — an unreadable shortcut, a missing icon, one pointing at a
+    /// different executable — because rewriting a shortcut is cheap and idempotent, while wrongly
+    /// concluding it is current leaves the generic icon on screen forever.
+    ///
+    /// # Safety
+    /// Calls COM on the current thread, which the caller has put in an apartment.
+    unsafe fn shortcut_icon_is_current(path: &std::path::Path) -> bool {
+        let Ok(executable) = std::env::current_exe() else {
+            return false;
+        };
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        else {
+            return false;
+        };
+        let Ok(file) = link.cast::<IPersistFile>() else {
+            return false;
+        };
+        if file
+            .Load(PCWSTR(HSTRING::from(path.as_os_str()).as_ptr()), STGM_READ)
+            .is_err()
+        {
+            return false;
+        }
+
+        // MAX_PATH is the buffer the shell writes an icon location into; anything longer is
+        // truncated by the API itself, not by this call.
+        let mut icon = [0u16; 260];
+        let mut index = 0i32;
+        if link
+            .GetIconLocation(&mut icon, std::ptr::addr_of_mut!(index))
+            .is_err()
+        {
+            return false;
+        }
+        let end = icon.iter().position(|c| *c == 0).unwrap_or(icon.len());
+        let icon = std::path::PathBuf::from(String::from_utf16_lossy(&icon[..end]));
+
+        index == ICON_INDEX && icon == executable
+    }
+
+    /// The icon index within the executable's resources: its lowest icon group, the DIG Mark.
+    const ICON_INDEX: i32 = 0;
 
     /// Where the per-user Start Menu shortcut goes, or `None` when `%APPDATA%` is not set.
     ///
@@ -404,6 +554,104 @@ mod windows_toast {
         #[test]
         fn the_app_identity_is_stable() {
             assert_eq!(AUMID, "DIGNetwork.DIG");
+        }
+
+        /// **This very test binary is refused the user's Start Menu, on both of the guard's signals.**
+        ///
+        /// The guard is only worth anything if it fires in the situation it exists for, and that
+        /// situation is the process running this assertion. Asserting on a synthesised path alone
+        /// would prove the classifier and nothing about the harness, which is exactly how the
+        /// original defect survived: `deliver` looked harmless until you noticed which executable
+        /// was calling it. Each signal is pinned separately as well as through the decision, so that
+        /// one of them going silent shows up here rather than being masked by the other.
+        #[test]
+        fn a_cargo_test_binary_is_refused_the_start_menu() {
+            let exe = std::env::current_exe().expect("a test binary knows its own path");
+            assert!(
+                launched_by_cargo(),
+                "cargo no longer exports its environment to test binaries; the refusal that keeps \
+                 `cargo test` out of the user's Start Menu has gone silent"
+            );
+            assert!(
+                runs_from_a_cargo_build_directory(&exe),
+                "this harness was not recognised as running from a build directory: {exe:?}"
+            );
+            assert!(write_is_refused(launched_by_cargo(), Some(&exe)));
+        }
+
+        /// **A binary run STRAIGHT out of `target/` is refused, with no cargo environment at all.**
+        ///
+        /// This is the variant the environment check cannot see. Double-clicking
+        /// `target\debug\dig-app.exe` in Explorer exports no `CARGO*`, so a guard keyed only on the
+        /// environment permits it — and it then writes a shortcut pointing into `target/` that the
+        /// next rebuild deletes, which is precisely the dangling-shortcut damage this change exists
+        /// to stop. `launched_by_cargo` is passed as `false` deliberately: with `true` the assertion
+        /// would pass on the environment alone and prove nothing about the path.
+        #[test]
+        fn an_executable_run_directly_out_of_target_is_refused() {
+            for exe in [
+                r"C:\repo\target\debug\dig-app.exe",
+                r"C:\repo\target\release\dig-app.exe",
+                r"C:\repo\target\debug\deps\dig_app_core-e5b8b4388e0565db.exe",
+                r"C:\repo\target\x86_64-pc-windows-msvc\release\dig-app.exe",
+            ] {
+                assert!(
+                    write_is_refused(false, Some(std::path::Path::new(exe))),
+                    "a build-directory executable was allowed to rewrite the user's shortcut: {exe}"
+                );
+            }
+        }
+
+        /// **The SHIPPED app is still allowed to write the shortcut — the direction that breaks the
+        /// product if it ever inverts.**
+        ///
+        /// A refusal that false-positives on an installed binary is strictly worse than the icon
+        /// defect: the app never registers its AUMID and every DIG notification stops arriving, for
+        /// every user, silently. Nothing else in this suite fails if the guard becomes over-broad —
+        /// an always-refuse implementation satisfies every other assertion here — so this test is
+        /// the only thing standing between that and a release. The last path is the near miss the
+        /// depth bound exists for: `target` appears, but far above the executable.
+        #[test]
+        fn a_shipped_executable_may_still_write_the_shortcut() {
+            for exe in [
+                r"C:\Program Files\DIG\bin\dig-app.exe",
+                r"C:\Users\someone\AppData\Local\DIG\dig-app.exe",
+                r"C:\build\target\one\two\three\four\dig-app.exe",
+            ] {
+                assert!(
+                    !write_is_refused(false, Some(std::path::Path::new(exe))),
+                    "the installed app was refused its own AUMID registration: {exe}"
+                );
+            }
+        }
+
+        /// **An executable the process cannot identify is allowed, not refused.**
+        ///
+        /// `current_exe()` can fail, and the guard fails open there on purpose (see
+        /// [`write_is_refused`]): breaking notifications for everyone is a worse outcome than a
+        /// developer's shortcut going stale.
+        #[test]
+        fn an_unknown_executable_is_allowed() {
+            assert!(!write_is_refused(false, None));
+        }
+
+        /// **The harness classifier that arms the `debug_assert` separates a harness from a shipped
+        /// binary.**
+        ///
+        /// This one drives the loud-failure path only. It is kept distinct from the write decision
+        /// because a test reaching the writer is a defect to shout about, while a `cargo run` is
+        /// merely something to decline.
+        #[test]
+        fn only_the_deps_directory_reads_as_a_test_harness() {
+            assert!(is_test_harness_path(std::path::Path::new(
+                r"C:\repo\target\debug\deps\dig_app_core-e5b8b4388e0565db.exe"
+            )));
+            assert!(!is_test_harness_path(std::path::Path::new(
+                r"C:\Program Files\DIG\bin\dig-app.exe"
+            )));
+            assert!(!is_test_harness_path(std::path::Path::new(
+                r"C:\repo\target\debug\dig-app.exe"
+            )));
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Embeds `dig-app.manifest` into the Windows binaries this crate builds.
+//! Embeds `dig-app.manifest` and the DIG Mark icon into the Windows binaries this crate builds.
 //!
 //! # Why a build script rather than a crate
 //!
@@ -15,23 +15,35 @@
 //! silent skip is how a process quietly goes back to deciding its DPI awareness by event-loop
 //! construction order — the exact defect the manifest exists to remove (dig-app#87).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[path = "build/res.rs"]
+mod res;
 
 fn main() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("dig-app.manifest");
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = crate_dir.join("dig-app.manifest");
+    let icon = crate_dir.join("icons").join("mark.ico");
     println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build/res.rs");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
 
     match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-        Ok("msvc") => embed(&manifest),
+        Ok("msvc") => {
+            embed(&manifest);
+            embed_icon(&icon);
+        }
         other => println!(
-            "cargo:warning=dig-app.manifest was NOT embedded on this Windows toolchain ({}), so \
-             this binary's DPI awareness is decided by whichever event loop is constructed first \
-             (dig-app#87). Build with the MSVC toolchain for a release.",
+            "cargo:warning=dig-app.manifest and the DIG Mark icon were NOT embedded on this \
+             Windows toolchain ({}), so this binary's DPI awareness is decided by whichever event \
+             loop is constructed first (dig-app#87) and its notifications, taskbar and Explorer \
+             entries fall back to a generic icon (#3076). Build with the MSVC toolchain for a \
+             release.",
             other.unwrap_or("unknown")
         ),
     }
@@ -48,4 +60,39 @@ fn embed(manifest: &Path) {
         "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
         manifest.display()
     );
+}
+
+/// Compile the DIG Mark into a `.res` object and hand it to the linker as an ordinary input.
+///
+/// The icon has to live in the binary rather than only beside it: Windows attributes an unpackaged
+/// Win32 toast to a Start Menu shortcut, and that shortcut draws whatever the executable it points
+/// at carries. With no icon resource, every surface that samples one — the toast, the taskbar,
+/// Explorer, Alt-Tab — falls back to the generic file icon (#3076).
+///
+/// A failure here WARNS rather than panicking, for the same reason the manifest branch does: an
+/// unbuildable icon must not stop a developer building, but it must never be silent either.
+fn embed_icon(icon: &Path) {
+    let Some(out_dir) = std::env::var_os("OUT_DIR") else {
+        println!("cargo:warning=OUT_DIR is unset, so the DIG Mark icon was not embedded (#3076).");
+        return;
+    };
+
+    let written = std::fs::read(icon)
+        .map_err(|e| format!("{} could not be read: {e}", icon.display()))
+        .and_then(|bytes| res::ico_to_res(&bytes))
+        .and_then(|res| {
+            let path = PathBuf::from(out_dir).join("dig-app-icon.res");
+            match std::fs::write(&path, res) {
+                Ok(()) => Ok(path),
+                Err(e) => Err(format!("{} could not be written: {e}", path.display())),
+            }
+        });
+
+    match written {
+        Ok(path) => println!("cargo:rustc-link-arg-bins={}", path.display()),
+        Err(reason) => println!(
+            "cargo:warning=the DIG Mark icon was NOT embedded ({reason}), so this binary's \
+             notifications, taskbar and Explorer entries will show a generic icon (#3076)."
+        ),
+    }
 }
