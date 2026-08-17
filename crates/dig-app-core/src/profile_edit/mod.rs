@@ -350,6 +350,92 @@ mod tests {
         assert!(said.contains("no published information"), "{said}");
     }
 
+    /// **dig_ecosystem#3041.** A profile whose content is unrecoverable is told the truth AND
+    /// handed the form to type it in again.
+    ///
+    /// # Why every one of these is asserted together
+    ///
+    /// Each clause alone passes against a different wrong version, and the wrong versions are the
+    /// ones this state was actually shipped as:
+    ///
+    /// * *offers a draft* alone passes for the version that reports `Known(empty)` — which is the
+    ///   destructive one, because it draws as *you have not filled this in yet* and invites Save
+    ///   over three blank fields. `is_empty()` being FALSE is what separates them.
+    /// * *is not empty and not retryable* alone passes for the version shipped before this fix,
+    ///   which reported `Unpublished` — no draft, no way out, and a false sentence.
+    /// * *says the content is gone* alone passes for a version that says so and still withholds the
+    ///   form, which is the dead end the ticket is about.
+    ///
+    /// So the property is the conjunction: honest sentence, no retry, not drawn as an empty
+    /// profile, and a form all the same.
+    #[test]
+    fn an_unrecoverable_body_is_named_as_gone_and_still_offers_a_form_to_retype_into() {
+        const ROOT: &str = "371a39b04742cd4d4b45bdf61a99f3838b700587fad093330dddb4766feba454";
+        let lost = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
+            root: ROOT.to_string(),
+        });
+
+        let draft = lost.draft().expect(
+            "a person whose content is unrecoverable was given no way to publish a fresh body",
+        );
+        assert!(draft.is_empty(), "the re-entry form was pre-filled from somewhere");
+        assert!(
+            lost.is_re_entry(),
+            "the form is indistinguishable from an ordinary edit of this person's own values"
+        );
+        assert!(
+            !lost.is_empty(),
+            "a destroyed profile was drawn as one that had simply never been filled in"
+        );
+        assert!(
+            !lost.is_retryable(),
+            "a retry was offered for bytes no amount of asking can produce"
+        );
+
+        let said = lost.says().expect("the state says nothing at all");
+        assert!(said.contains(ROOT), "the sentence does not name the root: {said}");
+        assert!(
+            !said.contains("Nothing has gone wrong"),
+            "the reassurance from the UNPUBLISHED sentence survived onto a destroyed profile:              {said}"
+        );
+        assert!(
+            crate::window_model::label_names_a_remedy(&said),
+            "a permanent loss was stated with no next action: {said}"
+        );
+    }
+
+    /// The two states a node answering `body_b64: null` can mean are worded DIFFERENTLY.
+    ///
+    /// # Why the control is the unpublished sentence and not a length check
+    ///
+    /// Both reach a person through the same node answer, and the defect was that one sentence
+    /// served both — so the only thing that proves the fix is that the two strings differ, and
+    /// specifically that the destroyed one does not inherit the reassuring one. A test over
+    /// `BodyLost` alone cannot see a re-merge, because a re-merge keeps `BodyLost` saying something.
+    #[test]
+    fn a_destroyed_profile_and_an_unwritten_one_do_not_share_a_sentence() {
+        let destroyed = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
+            root: "aa".repeat(32),
+        })
+        .says()
+        .expect("says something");
+        let unwritten = ProfileReading::Unpublished.says().expect("says something");
+
+        assert_ne!(destroyed, unwritten);
+        assert!(
+            unwritten.contains("never been written"),
+            "the control lost the claim that makes it the WRONG thing to say here: {unwritten}"
+        );
+        assert!(
+            !destroyed.contains("never been written"),
+            "a person whose details were destroyed was told they had never written any: {destroyed}"
+        );
+        // And the unwritten state still withholds the form, so widening the draft did not widen it
+        // to the state that has nothing to recover.
+        assert!(ProfileReading::Unpublished.draft().is_none());
+        assert!(!ProfileReading::Unpublished.is_re_entry());
+    }
+
     #[test]
     fn a_read_in_flight_is_neither() {
         assert!(!ProfileReading::Pending.is_empty());

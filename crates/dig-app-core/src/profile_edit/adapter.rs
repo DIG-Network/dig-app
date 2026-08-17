@@ -505,8 +505,8 @@ mod tests {
             "the rebuild published no schema stamp, so it is not the seed the mint used"
         );
         assert!(
-            !content.saw_nothing_published(),
-            "a recovered read was recorded as a profile that publishes nothing"
+            content.saw_body_missing_at().is_none(),
+            "a recovered read was recorded as a profile whose content is gone"
         );
 
         assert!(
@@ -518,8 +518,8 @@ mod tests {
         );
     }
 
-    /// A root this app cannot have minted is NOT rebuilt, and is recorded as *nothing published*
-    /// rather than reported as a store failure.
+    /// A root this app cannot have minted is NOT rebuilt, and is recorded — WITH the root — as
+    /// content that is gone, rather than reported as a store failure.
     ///
     /// # The fixture, and the control beside it
     ///
@@ -529,7 +529,7 @@ mod tests {
     /// published its single candidate regardless would be caught here rather than passing on the
     /// strength of malformed bytes.
     #[test]
-    fn a_root_this_app_cannot_mint_is_recorded_as_nothing_published_and_never_rebuilt() {
+    fn a_root_this_app_cannot_mint_is_recorded_as_lost_content_and_never_rebuilt() {
         let bodies = Arc::new(InMemoryBodies::default());
         let (bytes, held) = a_body();
         bodies
@@ -542,9 +542,10 @@ mod tests {
             content.fetch_profile_slots(STORE, absent),
             Err(BodyStoreError::Refused(_))
         ));
-        assert!(
-            content.saw_nothing_published(),
-            "the absence was not recorded, so the app cannot tell it from an unreachable node"
+        assert_eq!(
+            content.saw_body_missing_at(),
+            Some(hex::encode(absent)),
+            "the absence was not recorded against its root, so the app can neither tell it from an              unreachable node nor name what was lost"
         );
         assert!(
             matches!(
@@ -569,13 +570,13 @@ mod tests {
     fn an_absence_seen_once_does_not_answer_for_a_later_read() {
         let content = NodeProfileContent::new(Arc::new(InMemoryBodies::default()));
         let _ = content.fetch_profile_slots(STORE, [0x77; 32]);
-        assert!(content.saw_nothing_published());
+        assert!(content.saw_body_missing_at().is_some());
 
         content.forget_absence();
 
         assert!(
-            !content.saw_nothing_published(),
-            "a stale absence would report an unreachable node as an unpublished profile"
+            content.saw_body_missing_at().is_none(),
+            "a stale absence would report an unreachable node as a profile whose content is gone"
         );
     }
 
