@@ -30,6 +30,14 @@ $shots = @(
     @{ file = 'wallet-light-pending.png';  args = @('wallet', 'light', '960', '1180', 'live', 'pending',  '0.8') }
     @{ file = 'wallet-light-timedout.png'; args = @('wallet', 'light', '960', '1180', 'live', 'timedout', '0.8') }
     @{ file = 'wallet-light-locked.png';   args = @('wallet', 'light', '960', '1180', 'live', 'locked') }
+    # The offer card, in the two states worth a picture: an offer read and ready to take, and the
+    # same card on a locked account, where the take control is refused WITH its reason rather than
+    # greyed in silence. Drawn at 0.8 because the wallet pane plus a filled offer card is taller
+    # than this display grants a window.
+    @{ file = 'wallet-light-offer.png'; args = @('wallet', 'light', '960', '1180', 'live', 'healthy', '0.8', 'offer') }
+    @{ file = 'wallet-dark-offer.png';  args = @('wallet', 'dark',  '960', '1180', 'live', 'healthy', '0.8', 'offer') }
+    @{ file = 'wallet-light-offer-480.png'; args = @('wallet', 'light', '480', '900', 'live', 'healthy', '0.7', 'offer') }
+    @{ file = 'wallet-light-offer-locked.png'; args = @('wallet', 'light', '960', '1180', 'live', 'locked', '0.8', 'offer') }
     @{ file = 'cache-light-960.png';  args = @('cache',  'light', '960', '1180', 'live', 'healthy') }
     @{ file = 'cache-dark-960.png';   args = @('cache',  'dark',  '960', '1180', 'live', 'healthy') }
     @{ file = 'cache-light-480.png';   args = @('cache',  'light', '480', '900',  'live', 'healthy') }

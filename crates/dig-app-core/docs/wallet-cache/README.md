@@ -46,6 +46,11 @@ will be ignored.
 | `wallet-light-timedout.png` | 960 | 0.8 | 2432 × 2488 | A node that connected and did not answer in time: *"Not known — your node did not answer in time. Nothing is wrong with your account, and the figure appears on its own once a read finishes…"* Deliberately not *"no node is running"*, which is the sentence a live user was wrongly shown (#2325). Again no numeral under `Balance`. |
 | `wallet-light-locked.png` | 960 | 1.0 | 2432 × 2488 | A sealed account. `Receive` carries no code and no address, only the sentence saying the address is withheld rather than guessed while the keys are sealed. `Balance` reads *"Not known — your account is locked…"*. The tab's one verb is disabled AND relabelled `Copy my receive address (unlock first)`, so the reason travels with the control. The pane is short enough to fit at 1.0. |
 
+| `wallet-light-offer.png` | 960 | 0.8 | 2432 × 2488 | The `Offers` card with a REAL offer read. The field holds the `offer1…` string; under it **You receive — XCH 0.0000000004** and **You pay — XCH 0.000000001**, two figures that differ, so a swapped mapping could not produce this picture. `Take this offer` is the card's one primary control. Nothing shows a net figure: a swap changes ownership, and naming only the difference would hide half of what is being agreed to (NC-14). |
+| `wallet-dark-offer.png` | 960 | 0.8 | 2432 × 2488 | The same card in dark. Same offer, same two figures, the primary control carrying its glow against the dark surface. |
+| `wallet-light-offer-480.png` | 480 | 0.7 | 1232 × 2338 | `SHELL_MIN`. The offer string truncates inside the field rather than reflowing the card, the two sides keep their headings, and the take control stays full-size and reachable without a horizontal scroll. |
+| `wallet-light-offer-locked.png` | 960 | 0.8 | 2432 × 2488 | The same offer on a SEALED account. The terms are still fully readable — reading an offer needs no key — while `Take this offer` is disabled with its reason directly beneath it: *"Unlock your account to take an offer — taking one spends your coins, and that needs your key."* A greyed control whose condition is unstated is the defect `professional-ui` names; this is what it looks like fixed. |
+
 ## Cache
 
 | File | Logical width | Zoom | Physical | What is in the image |
