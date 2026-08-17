@@ -60,7 +60,8 @@
 use dig_account::mint::PushOutcome;
 use dig_account::{AuthProvider, TransferResult};
 use dig_account::{
-    CustodyPolicy, PendingTransfer, SpendOpClass, TransferError, TransferRequest, TransferStatus,
+    CatTransferError, CatTransferRequest, CustodyPolicy, PendingTransfer, SpendOpClass,
+    TransferError, TransferRequest, TransferStatus,
 };
 use dig_chainsource_interface::ChainSource;
 
@@ -109,6 +110,15 @@ pub enum SendError {
     #[error("could not build the transfer: {0}")]
     Build(#[from] TransferError),
 
+    /// The unsigned **$DIG** transfer could not be built.
+    ///
+    /// Kept separate from [`Build`](Self::Build) rather than flattened to a string, because
+    /// [`CatTransferError`] draws distinctions no XCH error has and the surface repeats them: a $DIG
+    /// shortfall and a missing XCH fee coin send a person to two different places, and an unprovable
+    /// lineage is neither.
+    #[error("could not build the $DIG transfer: {0}")]
+    BuildDig(#[from] CatTransferError),
+
     /// The custody gate refused, the user declined, or signing failed. No bundle exists.
     #[error("the transfer was not signed: {0}")]
     Sign(#[from] MoneyPathError),
@@ -149,6 +159,26 @@ pub enum SendError {
     PushUnanswered {
         /// Poll this rather than rebuilding.
         pending: Box<PendingTransfer>,
+        /// What went wrong asking.
+        detail: String,
+    },
+
+    /// The same unknown fate as [`PushUnanswered`](Self::PushUnanswered), for a **$DIG** payment —
+    /// which carries nothing to poll.
+    ///
+    /// # Why the missing poll target earns its own variant
+    ///
+    /// `PushUnanswered`'s entire remedy is *watch this coin id rather than rebuilding*, and its
+    /// payload is what makes that remedy performable. A $DIG transfer has no such id (see
+    /// [`BroadcastDig`]), so reusing that variant would state a remedy the caller cannot carry out,
+    /// and would leave the surface offering a **Check this payment** control over nothing. The
+    /// prohibition survives intact and is the whole content of this variant: the bundle may be in a
+    /// mempool, so it must NOT be rebuilt — it simply cannot be watched from here either.
+    #[error(
+        "the node did not answer the $DIG broadcast, so this payment's fate is unknown and it \
+         cannot be watched from this app: {detail}"
+    )]
+    PushUnwatchable {
         /// What went wrong asking.
         detail: String,
     },
@@ -252,6 +282,105 @@ where
             // It provably never left, so there is nothing to watch and the form may come back.
             Err(failure) => Err(SendError::PushNotSent(failure)),
         }
+    }
+
+    /// Build, gate, sign and push a **$DIG** payment — the same four steps in the same order.
+    ///
+    /// Returns a [`BroadcastDig`] ONLY when a mempool accepted the bundle. As with the XCH path that
+    /// is an acceptance and not a payment; unlike the XCH path there is currently nothing that can
+    /// turn it into a confirmation. See [`BroadcastDig`] for exactly what is and is not known.
+    ///
+    /// # Why there is no peak anchor here
+    ///
+    /// The XCH path reads the peak between signing and pushing so a later confirmation cannot be
+    /// back-dated. That read exists to serve
+    /// [`transfer_status`](dig_account::transfer_status), and `dig-account` 0.16 has no CAT
+    /// counterpart to serve — no `PendingCatTransfer`, no status poll. Reading a height that nothing
+    /// will ever check would be ceremony: it would make this function look like the XCH one while
+    /// establishing nothing, which is worse than the honest absence, because the next reader would
+    /// assume a back-dating check exists somewhere.
+    ///
+    /// The op class is [`SpendOpClass::SmallSend`] for the same reason the XCH path uses it — the
+    /// destination and amount were typed by the person in this process. The gate never auto-approves
+    /// it regardless: `dig-account` forces every spend that moves a non-native asset to the confirm
+    /// tier, however generous the auto-send policy.
+    pub async fn send_dig(self, request: &CatTransferRequest) -> Result<BroadcastDig, SendError> {
+        let plan = self
+            .residency
+            .build_dig_transfer(self.chain, &self.custody, request)
+            .ok_or(SendError::Locked)??;
+
+        // Sign FIRST. The human is in this call, and it may take minutes.
+        let bundle = self
+            .money
+            .authorize_and_sign(plan.coin_spends().to_vec(), SpendOpClass::SmallSend)
+            .await?;
+        let bundle_id = hex::encode(bundle.name());
+
+        match self.publisher.push_detailed(&bundle) {
+            Ok(PushOutcome::Accepted | PushOutcome::AlreadyInMempool) => Ok(BroadcastDig {
+                bundle_id,
+                recipient: plan.recipient(),
+                amount_base_units: plan.amount_base_units(),
+            }),
+            Ok(PushOutcome::Rejected { reason }) => Err(SendError::Rejected { reason }),
+            // A $DIG bundle that may be in a mempool cannot be polled, so — unlike the XCH path —
+            // there is no `PendingTransfer` to hand back and no watching to offer. The distinction
+            // still matters and is still reported: the caller must not rebuild.
+            Err(failure) if failure.may_have_reached_a_mempool() => {
+                Err(SendError::PushUnwatchable {
+                    detail: failure.to_string(),
+                })
+            }
+            Err(failure) => Err(SendError::PushNotSent(failure)),
+        }
+    }
+}
+
+/// A $DIG payment a mempool accepted, and the precise limit of what that establishes.
+///
+/// # This is NOT a confirmation, and it cannot become one here
+///
+/// `dig-account` 0.16 ships a $DIG transfer BUILDER and no $DIG transfer WATCHER: there is no
+/// `PendingCatTransfer`, no `cat_transfer_status`, and no `ConfirmedCatTransfer` to hold a buried
+/// chain record. The XCH path's whole settlement apparatus therefore has no counterpart, so this type
+/// deliberately exposes no status, no height, and no coin id — there is no honest value to put in any
+/// of them, and a field named `confirmed_height` filled from a submission is the money lie this
+/// ecosystem does not defer.
+///
+/// # Why the reference is a BUNDLE id rather than a payment coin id
+///
+/// The XCH path references a transfer by its payment coin, because a coin id commits to the
+/// recipient and the amount and is therefore evidence about the MONEY. That id cannot be computed
+/// here: a CAT payment coin's puzzle hash is the curried CAT puzzle and identifying which created
+/// coin is the payment means running the spend, which is spend introspection this layer must not
+/// hand-roll. The bundle id names the SUBMISSION instead — a weaker claim, and the true one. It is
+/// still worth carrying: it is what a person quotes in a bug report and what a node's own logs key on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "an accepted push is not a payment"]
+pub struct BroadcastDig {
+    /// The bundle a mempool accepted, lowercase hex.
+    bundle_id: String,
+    /// The recipient's p2 puzzle hash, as the plan built it.
+    recipient: chia_protocol::Bytes32,
+    /// The amount paid, in $DIG base units.
+    amount_base_units: u64,
+}
+
+impl BroadcastDig {
+    /// The accepted bundle's id, lowercase hex.
+    pub fn bundle_id(&self) -> &str {
+        &self.bundle_id
+    }
+
+    /// The recipient's p2 puzzle hash.
+    pub fn recipient(&self) -> chia_protocol::Bytes32 {
+        self.recipient
+    }
+
+    /// The amount paid, in $DIG base units.
+    pub fn amount_base_units(&self) -> u64 {
+        self.amount_base_units
     }
 }
 

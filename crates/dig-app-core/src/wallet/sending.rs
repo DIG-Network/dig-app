@@ -18,7 +18,9 @@
 //! [`SendProgress::Unknown`], never a failure — see that variant for why the difference is worth a
 //! whole state.
 
-use dig_account::{PendingTransfer, TransferRequest, TransferStatus};
+use dig_account::{
+    CatTransferRequest, PayableDestination, PendingTransfer, TransferRequest, TransferStatus,
+};
 
 use crate::amount::{parse_asset_amount, AmountProblem};
 use crate::wallet::overview::BalanceReading;
@@ -63,6 +65,30 @@ pub enum SendProgress {
         /// What went wrong asking, in the node's own words.
         detail: String,
     },
+    /// A **$DIG** bundle a mempool accepted, which this app cannot follow any further
+    /// (dig_ecosystem#2396).
+    ///
+    /// # Why $DIG stops here while XCH goes on to [`Confirmed`](Self::Confirmed)
+    ///
+    /// `dig-account` 0.16 builds a $DIG transfer and cannot watch one — see
+    /// [`BroadcastDig`](crate::wallet::send::BroadcastDig). So this state is the END of what is
+    /// KNOWN, not a stage on the way to something better, and it says so in those words rather than
+    /// leaving a spinner turning towards a verdict that will never arrive.
+    ///
+    /// # Why it is NOT [`in_flight`](Self::in_flight), even though a payment is genuinely in flight
+    ///
+    /// `in_flight` closes the send form, and the only way back out of a closed form is
+    /// [`ReleaseDraft`], which requires naming the payment COIN id being released. A $DIG send has no
+    /// such id, so an in-flight $DIG state would close the form for the life of the process with no
+    /// escape and nothing to check — `professional-ui`'s trap, arrived at from the safe direction.
+    ///
+    /// The form therefore reopens, and the surface states plainly that the previous payment was
+    /// accepted and is not being tracked, so a person deciding whether to send again is deciding with
+    /// what this app actually knows rather than with its silence.
+    Broadcast {
+        /// The accepted bundle's id — the submission's name, never the money's.
+        bundle_id: String,
+    },
     /// The payment coin is buried on chain. This is the only state that means the money arrived.
     Confirmed {
         /// The payment coin id.
@@ -93,7 +119,12 @@ pub enum SendProgress {
         /// Whose word this verdict rests on (dig_ecosystem#2891).
         source: VerdictSource,
     },
-    /// The attempt fell over part-way and this app does not know how far it got.
+    /// The attempt reached an END this app cannot describe: it fell over part-way, or it pushed a
+    /// payment whose fate is unknown and which nothing here can watch.
+    ///
+    /// Both routes state the same two facts, which is why they share a state: money MAY have moved,
+    /// and this app cannot tell. Both therefore reopen the form behind a warning to look before
+    /// sending again, rather than closing it over something uncheckable.
     ///
     /// # Why a panic cannot be reported as a failure (dig_ecosystem#2895)
     ///
@@ -208,9 +239,18 @@ impl SendProgress {
                 payment_coin_id: pending.payment_coin_id().to_string(),
                 detail: detail.clone(),
             },
+            // A $DIG bundle that may be in a mempool and cannot be watched. NOT `Failed` — that
+            // copy's first words are "Nothing was sent and no money has moved", which would be a
+            // claim about the person's money made out of this app's inability to look. `Abandoned`
+            // is the state that says exactly that inability, needs no coin id, and reopens the form
+            // behind a warning to check before sending again.
+            SendError::PushUnwatchable { detail } => Self::Abandoned {
+                detail: detail.clone(),
+            },
             SendError::Locked
             | SendError::WalletBehindActiveProfile(_)
             | SendError::Build(_)
+            | SendError::BuildDig(_)
             | SendError::Sign(_)
             | SendError::PeakUnreadable(_)
             // Provably never broadcast — see `PublishFailure::may_have_reached_a_mempool`. It is a
@@ -277,16 +317,43 @@ pub enum SendBlocked {
     /// The destination is not a mainnet payment address. Carries dig-account's own words, which name
     /// the offending prefix rather than calling the address merely invalid.
     BadDestination(String),
-    /// The amount field does not hold a number of XCH.
-    BadAmount(AmountProblem),
-    /// The amount plus the fee is more than the wallet is known to hold.
+    /// The amount field does not hold a number of the asset being sent.
+    ///
+    /// Carries the asset because the sentence differs: XCH and $DIG do not have the same number of
+    /// decimal places, and telling someone "$DIG goes to twelve decimal places" would be false.
+    BadAmount {
+        /// What the amount was being read as.
+        asset: Asset,
+        /// What is wrong with it.
+        problem: AmountProblem,
+    },
+    /// The amount is more than the wallet is known to hold of that asset — plus the fee, when the
+    /// asset pays its own fee.
     ///
     /// Only ever reached from a MEASURED balance: a balance nobody has read blocks nothing, because
     /// refusing a send over a figure the app does not have would be inventing the figure.
     NotEnough {
-        /// What the send would cost, in mojos, fee included.
+        /// Which holding falls short.
+        asset: Asset,
+        /// What the send would cost, in that asset's base units. For XCH this includes the fee; for
+        /// $DIG it cannot, because the fee is not paid in $DIG.
         needed: u64,
-        /// What the wallet holds, in mojos, as last read.
+        /// What the wallet holds of it, as last read.
+        spendable: u64,
+    },
+    /// The wallet holds the $DIG but not the XCH the fee is paid in.
+    ///
+    /// # Why this is not [`NotEnough`](Self::NotEnough)
+    ///
+    /// Chia charges fees in native mojos and a CAT cannot pay its own, so a $DIG-rich, XCH-empty
+    /// wallet is an ordinary state with a remedy that has nothing to do with $DIG. Folding it into a
+    /// shortfall would send someone to acquire more of the one token they already hold enough of —
+    /// `dig-account` draws exactly this distinction in `CatTransferError::NoXchForFee` and the
+    /// surface must not collapse what the builder took care to separate.
+    NoXchForFee {
+        /// The fee, in mojos.
+        needed: u64,
+        /// The wallet's whole XCH holding, in mojos, as last read.
         spendable: u64,
     },
 }
@@ -307,32 +374,57 @@ impl SendBlocked {
                 "Enter the address you are paying and the amount to send.".to_string()
             }
             Self::BadDestination(reason) => format!("That is not a payment address: {reason}"),
-            Self::BadAmount(problem) => amount_sentence(*problem),
-            Self::NotEnough { needed, spendable } => format!(
-                "That is more than this wallet holds. The payment and its fee come to {} XCH, and \
-                 the last reading was {} XCH.",
-                crate::amount::format_asset_amount(Asset::Xch, *needed),
-                crate::amount::format_asset_amount(Asset::Xch, *spendable)
+            Self::BadAmount { asset, problem } => amount_sentence(*asset, *problem),
+            Self::NotEnough {
+                asset,
+                needed,
+                spendable,
+            } => {
+                let ticker = ticker(*asset);
+                format!(
+                    "That is more than this wallet holds. This payment comes to {} {ticker}, and \
+                     the last reading was {} {ticker}.",
+                    crate::amount::format_asset_amount(*asset, *needed),
+                    crate::amount::format_asset_amount(*asset, *spendable)
+                )
+            }
+            Self::NoXchForFee { needed, spendable } => format!(
+                "A network fee is paid in XCH, not in $DIG, and this wallet holds {} XCH against a \
+                 fee of {} XCH. Add a little XCH and this send becomes available.",
+                crate::amount::format_asset_amount(Asset::Xch, *spendable),
+                crate::amount::format_asset_amount(Asset::Xch, *needed)
             ),
         }
     }
 }
 
-/// What to say about an amount that is not a number of XCH.
+/// How an asset is named to a person. The one place the two tickers are written, so a sentence about
+/// a $DIG shortfall can never quote an XCH ticker.
+fn ticker(asset: Asset) -> &'static str {
+    match asset {
+        Asset::Xch => "XCH",
+        Asset::Dig => "$DIG",
+    }
+}
+
+/// What to say about an amount that is not a number of `asset`.
 ///
 /// Each problem gets its own sentence: someone who typed a thirteenth decimal place has a different
-/// next move from someone who typed a word.
-fn amount_sentence(problem: AmountProblem) -> String {
+/// next move from someone who typed a word. The DECIMAL count is read from the asset rather than
+/// written into the sentence, because XCH and $DIG do not share one and a hardcoded twelve would be
+/// a false statement about $DIG in the exact place a person is correcting an amount.
+fn amount_sentence(asset: Asset, problem: AmountProblem) -> String {
+    let ticker = ticker(asset);
     match problem {
-        AmountProblem::Empty => "Enter the amount of XCH to send.".to_string(),
+        AmountProblem::Empty => format!("Enter the amount of {ticker} to send."),
         AmountProblem::NotANumber => {
-            "Enter the amount as a plain number of XCH, like 0.25.".to_string()
+            format!("Enter the amount as a plain number of {ticker}, like 0.25.")
         }
         AmountProblem::TooManyDecimals { allowed } => format!(
-            "XCH goes to {allowed} decimal places, and this has more. Chia cannot move a smaller \
-             amount than that."
+            "{ticker} goes to {allowed} decimal places, and this has more. Chia cannot move a \
+             smaller amount than that."
         ),
-        AmountProblem::TooLarge => "That is more XCH than can exist.".to_string(),
+        AmountProblem::TooLarge => format!("That is more {ticker} than can exist."),
     }
 }
 
@@ -341,9 +433,12 @@ fn amount_sentence(problem: AmountProblem) -> String {
 /// Borrowed rather than owned because it is assembled fresh from the pane's own fields on every frame.
 #[derive(Debug, Clone, Copy)]
 pub struct SendDraft<'a> {
+    /// Which asset is being sent. Chosen on the form; it decides how the amount is read, which
+    /// holding it is weighed against, and which builder the intent goes to.
+    pub asset: Asset,
     /// The destination, exactly as typed.
     pub destination: &'a str,
-    /// The amount in whole XCH, exactly as typed.
+    /// The amount in whole units of [`asset`](Self::asset), exactly as typed.
     pub amount: &'a str,
     /// Whether the account is open. A sealed account can build nothing.
     pub account_open: bool,
@@ -365,7 +460,7 @@ impl SendDraft<'_> {
     /// # Errors
     ///
     /// [`SendBlocked`], carrying the sentence the pane draws beneath the refused control.
-    pub fn assess(&self) -> Result<TransferRequest, SendBlocked> {
+    pub fn assess(&self) -> Result<SendIntent, SendBlocked> {
         if !self.account_open {
             return Err(SendBlocked::AccountSealed);
         }
@@ -376,28 +471,135 @@ impl SendDraft<'_> {
             return Err(SendBlocked::NoDestination);
         }
 
-        let amount = parse_asset_amount(Asset::Xch, self.amount).map_err(SendBlocked::BadAmount)?;
-        // Through `TransferRequest::to_address`, never a hand-rolled bech32 check: that constructor is
-        // the ONE place a typed string is judged payable, and it refuses a non-`xch` prefix because
-        // paying the puzzle hash inside one burns the funds.
-        let request = TransferRequest::to_address(self.destination.trim(), amount)
-            .map_err(|e| SendBlocked::BadDestination(e.to_string()))?
-            .with_fee(DEFAULT_SEND_FEE_MOJOS);
+        let amount =
+            parse_asset_amount(self.asset, self.amount).map_err(|problem| SendBlocked::BadAmount {
+                asset: self.asset,
+                problem,
+            })?;
+        // Through dig-account's own address decoders, never a hand-rolled bech32 check: they are the
+        // ONE place a typed string is judged payable, and they refuse a non-`xch` prefix because
+        // paying the puzzle hash inside one burns the funds. A $DIG payment is addressed by the very
+        // same `xch1…` destination — the builder is what wraps it in the CAT puzzle — so both arms
+        // apply the identical rule to the identical string.
+        let destination = self.destination.trim();
+        let intent = match self.asset {
+            Asset::Xch => SendIntent::Xch(
+                TransferRequest::to_address(destination, amount)
+                    .map_err(|e| SendBlocked::BadDestination(e.to_string()))?
+                    .with_fee(DEFAULT_SEND_FEE_MOJOS),
+            ),
+            Asset::Dig => SendIntent::Dig(
+                CatTransferRequest::new(
+                    PayableDestination::from_address(destination)
+                        .map_err(|e| SendBlocked::BadDestination(e.to_string()))?,
+                    amount,
+                )
+                .with_fee_mojos(DEFAULT_SEND_FEE_MOJOS),
+            ),
+        };
 
-        // The affordability check runs LAST and only against a real reading. `checked_add` because an
-        // amount near `u64::MAX` plus a fee is otherwise a wrap into an affordable-looking number.
-        let needed = amount
-            .checked_add(DEFAULT_SEND_FEE_MOJOS)
-            .ok_or(SendBlocked::BadAmount(AmountProblem::TooLarge))?;
-        if let BalanceReading::Known { balances, .. } = self.balance {
-            if needed > balances.xch_mojos {
-                return Err(SendBlocked::NotEnough {
-                    needed,
-                    spendable: balances.xch_mojos,
-                });
+        self.affordable(amount)?;
+        Ok(intent)
+    }
+
+    /// Refuse an amount the wallet is known not to hold — including, for $DIG, the XCH the fee needs.
+    ///
+    /// Runs LAST and only against a MEASURED reading: an unread balance blocks nothing, because
+    /// refusing over a figure the app does not have would be inventing it.
+    ///
+    /// # The two assets do not have the same sum, and that is the whole reason this is not one line
+    ///
+    /// An XCH send spends the amount AND the fee from one holding, so the check is against their
+    /// checked sum — `checked_add` because an amount near `u64::MAX` plus a fee otherwise wraps into
+    /// an affordable-looking number. A $DIG send spends $DIG for the amount and XCH for the fee, from
+    /// two separate holdings, so adding them would compare base units to mojos: arithmetic between
+    /// two different units, producing a confident figure that means nothing.
+    fn affordable(&self, amount: u64) -> Result<(), SendBlocked> {
+        let BalanceReading::Known { balances, .. } = self.balance else {
+            return Ok(());
+        };
+        match self.asset {
+            Asset::Xch => {
+                let needed =
+                    amount
+                        .checked_add(DEFAULT_SEND_FEE_MOJOS)
+                        .ok_or(SendBlocked::BadAmount {
+                            asset: Asset::Xch,
+                            problem: AmountProblem::TooLarge,
+                        })?;
+                if needed > balances.xch_mojos {
+                    return Err(SendBlocked::NotEnough {
+                        asset: Asset::Xch,
+                        needed,
+                        spendable: balances.xch_mojos,
+                    });
+                }
+            }
+            Asset::Dig => {
+                if amount > balances.dig_units {
+                    return Err(SendBlocked::NotEnough {
+                        asset: Asset::Dig,
+                        needed: amount,
+                        spendable: balances.dig_units,
+                    });
+                }
+                if DEFAULT_SEND_FEE_MOJOS > balances.xch_mojos {
+                    return Err(SendBlocked::NoXchForFee {
+                        needed: DEFAULT_SEND_FEE_MOJOS,
+                        spendable: balances.xch_mojos,
+                    });
+                }
             }
         }
-        Ok(request)
+        Ok(())
+    }
+}
+
+/// A push a mempool accepted, and how much of it can be followed afterwards.
+///
+/// The two arms are NOT two shades of success. An XCH push yields something watchable to
+/// confirmation; a $DIG push yields a submission and nothing more. Keeping them distinct here is what
+/// stops the caller from writing one "accepted" path that quietly claims the stronger of the two for
+/// both.
+enum Accepted {
+    /// An XCH transfer that can be polled to a verdict.
+    Xch(crate::wallet::send::InFlightSend),
+    /// A $DIG payment that cannot.
+    Dig(crate::wallet::send::BroadcastDig),
+}
+
+/// A validated send, ready to be performed — one variant per asset the wallet can move.
+///
+/// # Why the two are one type rather than two parallel code paths
+///
+/// Everything from the moment a person presses **Send** — the single-send lock, the custody ceremony,
+/// the panic guard, the activity row, the progress state — is identical for both assets and must stay
+/// identical. Two entry points would be two places for that machinery to drift, and the half that
+/// drifts is the half nobody exercised. So the asset is decided ONCE, here, and the difference travels
+/// as data through one pipeline that branches only where the builders genuinely differ.
+#[derive(Debug, Clone, Copy)]
+pub enum SendIntent {
+    /// A native XCH payment, fee included in the same holding.
+    Xch(TransferRequest),
+    /// A $DIG (CAT) payment. The fee rides alongside it in XCH.
+    Dig(CatTransferRequest),
+}
+
+impl SendIntent {
+    /// Which asset moves.
+    pub fn asset(&self) -> Asset {
+        match self {
+            Self::Xch(_) => Asset::Xch,
+            Self::Dig(_) => Asset::Dig,
+        }
+    }
+
+    /// The amount that will be paid, in the asset's base units.
+    pub fn amount(&self) -> u64 {
+        match self {
+            Self::Xch(request) => request.amount_mojos(),
+            Self::Dig(request) => request.amount_base_units(),
+        }
     }
 }
 
@@ -595,6 +797,23 @@ impl SendHolder {
         watched.judged = true;
     }
 
+    /// Record a **$DIG** push a mempool accepted, which nothing here can follow any further.
+    ///
+    /// The counterpart of [`accepted`](Self::accepted), and everything it does NOT do is the point:
+    /// no transfer is retained, no poll is scheduled, and `judged` stays false — because there is
+    /// nothing to poll and no later verdict this app could reach. Leaving a `next_poll` set would
+    /// schedule a read that can only ever be inconclusive, and a surface that keeps re-reading
+    /// nothing looks exactly like one that is making progress.
+    pub fn broadcast_untracked(&self, bundle_id: impl Into<String>) {
+        let mut watched = self.lock();
+        watched.progress = SendProgress::Broadcast {
+            bundle_id: bundle_id.into(),
+        };
+        watched.pending = None;
+        watched.next_poll = None;
+        watched.judged = false;
+    }
+
     /// Record that an attempt stopped without ever recording its own outcome.
     ///
     /// Reached only from the send guard's unwind. It frees the send slot — the alternative is a
@@ -731,19 +950,33 @@ impl SendHolder {
         &self,
         status: &crate::agent::SharedStatus,
         residency: Option<&crate::account::residency::AccountResidency>,
-        request: &TransferRequest,
+        intent: &SendIntent,
     ) {
         if !self.begin() {
             return;
         }
         let mut guard = AbandonedSend::watching(self);
-        let outcome = self.perform(status, residency, request);
+        let outcome = self.perform(status, residency, intent);
         guard.completed();
         match outcome {
-            Ok(in_flight) => {
+            Ok(Accepted::Xch(in_flight)) => {
                 let pending = in_flight.finish();
-                Self::list_as_sent(&pending);
+                Self::list_as_sent(
+                    pending.recipient(),
+                    Asset::Xch,
+                    pending.amount_mojos(),
+                    hex::encode(pending.payment_coin_id()),
+                );
                 self.accepted(pending);
+            }
+            Ok(Accepted::Dig(broadcast)) => {
+                Self::list_as_sent(
+                    broadcast.recipient(),
+                    Asset::Dig,
+                    broadcast.amount_base_units(),
+                    broadcast.bundle_id().to_string(),
+                );
+                self.broadcast_untracked(broadcast.bundle_id());
             }
             Err(error) => self.finished(&error),
         }
@@ -759,29 +992,47 @@ impl SendHolder {
     /// the money moved is [`InFlightSend::status`](crate::wallet::send::InFlightSend::status)'s
     /// answer, from a chain read, and the two must not be joined into one confident row.
     ///
-    /// # The reference is the payment COIN id
+    /// # The ASSET is supplied, never assumed (dig_ecosystem#2396)
     ///
-    /// [`PendingTransfer::payment_coin_id`] is the value whose confirmation IS this transfer's
-    /// evidence, so it is the one a person can take to an explorer and the one the status poll
-    /// watches. A bundle name would identify the submission instead of the money.
+    /// This function once wrote `Asset::Xch` as a literal, which was correct for exactly as long as
+    /// XCH was the only thing the wallet could send. The moment $DIG sends landed it would have
+    /// labelled every $DIG payment as XCH — a row whose ticker and decimal places both belong to
+    /// another asset, which is a surface lying about money in the wallet's own history. The caller
+    /// knows which builder produced the payment, so the caller states it.
+    ///
+    /// # What `reference` is allowed to be
+    ///
+    /// For XCH it is the payment COIN id: the value whose confirmation IS that transfer's evidence,
+    /// so it is what a person takes to an explorer and what the status poll watches. For $DIG it is
+    /// the accepted BUNDLE's id, because no payment coin id is computable here — see
+    /// [`BroadcastDig`](crate::wallet::send::BroadcastDig). The row's claim is a submission either
+    /// way, so both are honest references to it; only the XCH one additionally names the money.
     ///
     /// A recipient whose puzzle hash will not encode is listed with no address rather than not
     /// listed: the payment happened, and dropping the row would be a wallet quietly forgetting a
     /// send. This cannot occur in practice — bech32m over a fixed 32-byte payload and a fixed HRP
     /// has no failing input — which is exactly why the arm must not be a panic on a money path.
-    fn list_as_sent(pending: &PendingTransfer) {
-        let recipient = chia_sdk_utils::Address::new(pending.recipient(), "xch".to_string())
+    fn list_as_sent(
+        recipient: chia_protocol::Bytes32,
+        asset: Asset,
+        amount: u64,
+        reference: String,
+    ) {
+        // The `xch1…` form for BOTH assets, deliberately: a $DIG payment is addressed to the
+        // recipient's ordinary p2 puzzle hash, and it is that address — not the curried CAT puzzle
+        // hash the coin ends up at — that the person typed and would recognise here.
+        let address = chia_sdk_utils::Address::new(recipient, "xch".to_string())
             .encode()
             .ok();
         crate::wallet::activity::remember_spend(crate::wallet::state::SpendRecord {
-            recipient: recipient.unwrap_or_default(),
-            asset: Asset::Xch,
-            amount: pending.amount_mojos(),
+            recipient: address.unwrap_or_default(),
+            asset,
+            amount,
             broadcast_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|since| since.as_secs())
                 .unwrap_or_default(),
-            transaction_id: hex::encode(pending.payment_coin_id()),
+            transaction_id: reference,
         });
     }
 
@@ -836,8 +1087,8 @@ impl SendHolder {
         &self,
         status: &crate::agent::SharedStatus,
         residency: Option<&crate::account::residency::AccountResidency>,
-        request: &TransferRequest,
-    ) -> Result<crate::wallet::send::InFlightSend, SendError> {
+        intent: &SendIntent,
+    ) -> Result<Accepted, SendError> {
         use crate::chain::{ControlChainSource, ControlSpendPublisher};
         use crate::wallet::send::SendSession;
         use dig_account::{CustodyPolicy, HotWallet};
@@ -877,8 +1128,15 @@ impl SendHolder {
                     "this app could not start the worker the confirmation needs: {e}"
                 )))
             })?;
-        runtime
-            .block_on(SendSession::new(residency, money, custody, &chain, &publisher).send(request))
+        let session = SendSession::new(residency, money, custody, &chain, &publisher);
+        match intent {
+            SendIntent::Xch(request) => {
+                runtime.block_on(session.send(request)).map(Accepted::Xch)
+            }
+            SendIntent::Dig(request) => runtime
+                .block_on(session.send_dig(request))
+                .map(Accepted::Dig),
+        }
     }
 
     /// Poll the watched transfer against the connected node, if there is one.
