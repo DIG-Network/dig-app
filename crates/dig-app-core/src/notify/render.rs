@@ -200,9 +200,25 @@ mod windows_toast {
     /// caught up within the same process.
     ///
     /// So the identity is written when the app STARTS, minutes before any payment could arrive,
-    /// rather than at the moment of the first toast. [`deliver`] still writes it as a fallback for a
-    /// host where start-up could not, which is why this is belt-and-braces rather than the only path.
+    /// rather than at the moment of the first toast.
+    ///
+    /// # Why this is the ONLY path that writes the Start Menu
+    ///
+    /// Writing it from [`deliver`] as well used to look like free belt-and-braces, and it was the
+    /// opposite: `deliver` is reachable from `native_notifier().show(…)`, so every `cargo test` run
+    /// on a Windows developer machine rewrote the user's real `DIG.lnk` to point at the ephemeral
+    /// `target/debug/deps/*.exe` the harness happened to be running — a path the next rebuild
+    /// deletes, leaving the generic icon this very change exists to fix. The measurement above also
+    /// says that same-process write cannot help the toast being delivered, so the fallback bought
+    /// nothing and cost the user's Start Menu.
+    ///
+    /// The shortcut write therefore lives on exactly one call path — this function, called once by
+    /// the app shell at start-up — and [`refuse_when_launched_by_cargo`] makes even that path
+    /// default-deny under a test harness.
     pub fn prepare() {
+        if refuse_when_launched_by_cargo() {
+            return;
+        }
         let aumid = HSTRING::from(AUMID);
         let _ = std::thread::Builder::new()
             .name("dig-toast-identity".to_string())
@@ -215,6 +231,54 @@ mod windows_toast {
                     CoUninitialize();
                 }
             });
+    }
+
+    /// Decide whether this process is allowed to write the user's Start Menu, refusing by default
+    /// for anything cargo launched, and complaining loudly when the caller is a test harness.
+    ///
+    /// The user's `%APPDATA%\…\Start Menu\Programs\DIG.lnk` is a real, durable artifact of THEIR
+    /// machine: it carries the AUMID every DIG toast is filed under, and its target is whatever
+    /// executable wrote it last. A cargo-launched process is, by construction, running an executable
+    /// under `target/` that the next `cargo clean` or rebuild removes — so letting one write the
+    /// shortcut trades a working Start Menu entry for a dangling one. That applies to `cargo run` as
+    /// much as to `cargo test`; neither is the installed app, and neither should speak for it.
+    ///
+    /// A test harness is additionally a defect rather than a config: nothing in a test suite has any
+    /// business here, so it trips a `debug_assert` and fails the suite instead of passing quietly.
+    /// `cargo run` gets the silent refusal, because refusing a developer's app launch by panicking
+    /// would be a worse bug than the one being prevented.
+    fn refuse_when_launched_by_cargo() -> bool {
+        if !launched_by_cargo() {
+            return false;
+        }
+        debug_assert!(
+            !running_as_test_harness(),
+            "a test reached the Start Menu identity writer; it must not touch the user's machine"
+        );
+        tracing::debug!(
+            "skipping the Start Menu identity: this process was launched by cargo, so its \
+             executable is not one the shortcut may point at"
+        );
+        true
+    }
+
+    /// Was this process started by cargo (`cargo run`, `cargo test`, `cargo bench`)?
+    ///
+    /// Cargo exports the manifest environment to the programs it runs; neither variable is set for a
+    /// binary started from Explorer, a service, or the installer.
+    fn launched_by_cargo() -> bool {
+        std::env::var_os("CARGO").is_some() || std::env::var_os("CARGO_MANIFEST_DIR").is_some()
+    }
+
+    /// Is the running executable a cargo TEST binary rather than a built application?
+    fn running_as_test_harness() -> bool {
+        std::env::current_exe().is_ok_and(|exe| is_test_harness_path(&exe))
+    }
+
+    /// A cargo test/bench binary is emitted into `target/<profile>/deps/`; an application binary is
+    /// emitted a directory above it. The parent directory name is therefore the discriminator.
+    fn is_test_harness_path(exe: &std::path::Path) -> bool {
+        exe.parent().and_then(|parent| parent.file_name()) == Some(std::ffi::OsStr::new("deps"))
     }
 
     impl NativeNotifier for WinToast {
@@ -260,18 +324,15 @@ mod windows_toast {
         }
     }
 
-    /// Register the app's identity if needed, then raise the toast.
+    /// Raise the toast, against the identity [`prepare`] registered at start-up.
+    ///
+    /// Deliberately writes NOTHING to the file system: this function is reachable from
+    /// `native_notifier().show(…)`, which a test may legitimately call, and the user's Start Menu is
+    /// not a test's to touch. See [`prepare`] for why that separation is the fix and not a caveat.
     ///
     /// # Safety
     /// Calls COM/WinRT on the current thread, which the caller has put in an apartment.
     unsafe fn deliver(aumid: &HSTRING, notification: &Notification) -> windows::core::Result<()> {
-        // Best-effort: a machine where the Start Menu is not writable (a locked-down profile) may
-        // still have the identity registered by the installer, so a failure here is not a reason to
-        // skip the toast.
-        if let Err(e) = ensure_start_menu_identity(aumid) {
-            tracing::debug!(error = %e, "the Start Menu identity could not be written");
-        }
-
         let document = windows::Data::Xml::Dom::XmlDocument::new()?;
         document.LoadXml(&HSTRING::from(toast_xml(notification)))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
@@ -463,6 +524,46 @@ mod windows_toast {
         #[test]
         fn the_app_identity_is_stable() {
             assert_eq!(AUMID, "DIGNetwork.DIG");
+        }
+
+        /// **This very test binary is recognised as one that may not write the user's Start Menu.**
+        ///
+        /// The guard is only worth anything if it fires in the situation it exists for, and that
+        /// situation is the process running this assertion. Asserting on a synthesised path alone
+        /// would prove the classifier and nothing about the harness, which is exactly how the
+        /// original defect survived: `deliver` looked harmless until you noticed which executable
+        /// was calling it. Both live facts are pinned, because either one alone would let the
+        /// shortcut be rewritten to `target/debug/deps/*.exe`.
+        #[test]
+        fn a_cargo_test_binary_is_refused_the_start_menu() {
+            assert!(
+                launched_by_cargo(),
+                "cargo no longer exports its environment to test binaries; the refusal that keeps \
+                 `cargo test` out of the user's Start Menu has gone silent"
+            );
+            assert!(
+                running_as_test_harness(),
+                "this harness was not recognised as one: {:?}",
+                std::env::current_exe()
+            );
+        }
+
+        /// **The classifier separates a harness binary from a shipped one.**
+        ///
+        /// The installed path is the control: a classifier that answered `true` for everything would
+        /// satisfy the live assertions above while silently converting the shipped app's own
+        /// start-up repair into a no-op — the failure direction that would leave #3076 unfixed.
+        #[test]
+        fn only_the_deps_directory_reads_as_a_test_harness() {
+            assert!(is_test_harness_path(std::path::Path::new(
+                r"C:\repo\target\debug\deps\dig_app_core-e5b8b4388e0565db.exe"
+            )));
+            assert!(!is_test_harness_path(std::path::Path::new(
+                r"C:\Program Files\DIG\bin\dig-app.exe"
+            )));
+            assert!(!is_test_harness_path(std::path::Path::new(
+                r"C:\repo\target\debug\dig-app.exe"
+            )));
         }
     }
 }

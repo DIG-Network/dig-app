@@ -2814,6 +2814,13 @@ made. Registration happens at start-up (`notify::prepare_host()`), not at the fi
 resolves the id through an index over the Start Menu that the creating process does not see, so a
 toast raised in the same run as the shortcut is created does not appear.
 
+The shortcut is REPAIRED, not merely created: a shortcut whose icon does not already name the running
+executable is rewritten, so a machine carrying an earlier build's iconless shortcut gets the DIG Mark
+rather than the generic file icon (#3076). `prepare_host()` is the ONLY path that writes it —
+delivering a toast MUST NOT — and a process launched by cargo MUST decline to write it at all, because
+its executable lives under `target/` and the next rebuild deletes it. A cargo TEST binary reaching the
+writer is a defect and fails the suite rather than modifying the developer's machine.
+
 ### 3.7a Confirmed-arrival notifications (`arrivals`, #2548)
 
 **dig-node decides what an arrival is; dig-app decides what to say and when to stop saying it.** The
