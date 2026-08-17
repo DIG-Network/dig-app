@@ -804,6 +804,14 @@ mod tests {
     ///
     /// The control is the same status with nothing in flight: a `draw` that requested a repaint
     /// unconditionally would burn a laptop's battery all day and would pass a one-sided test.
+    ///
+    /// # What this does NOT prove
+    ///
+    /// It asserts the PROPERTY, not one line of code. egui also schedules repaints of its own for
+    /// the card's hover animations, and measurement confirms this test still passes with
+    /// [`ChainStatus::modal`]'s explicit `request_repaint` removed. That call therefore stays as the
+    /// guarantee — the incidental animations are an implementation detail of a widget that could
+    /// stop animating tomorrow, and the modal's liveness must not rest on them.
     #[test]
     fn every_frame_that_draws_the_modal_asks_for_another() {
         let feed = Feed::detached();
