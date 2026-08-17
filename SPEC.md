@@ -2490,7 +2490,7 @@ drops in as the production implementation without touching the wallet logic.
 [dig_ecosystem#910]: https://github.com/DIG-Network/dig_ecosystem/issues/910
 [dig_ecosystem#2295]: https://github.com/DIG-Network/dig_ecosystem/issues/2295
 
-#### 3.3a Sending XCH (normative)
+#### 3.3a Sending money (normative)
 
 A send travels in exactly this order, and `dig_app_core::wallet::send` is the only implementation of
 it: **build** the unsigned spends (`dig_account::WalletOps::build_transfer`, reached through
@@ -2542,7 +2542,35 @@ the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
 - Every send reaches the human. The production custody policy is `Hot { auto_send_limit: 0 }` with the
   default deny-everything `AutoSendPolicy`; raising the allowance above zero is what would let a
   payment leave with no confirmation.
-- CAT / `$DIG` sending is not part of this flow.
+
+##### Sending `$DIG` (a CAT)
+
+A `$DIG` send travels the SAME order — build, sign, push — through
+`dig_account::WalletOps::build_dig_transfer` (reached through `AccountResidency::build_dig_transfer`)
+and `SendSession::send_dig`. It differs in exactly three respects, and each difference is normative.
+
+- The builder MUST be `dig-account`'s. Constructing a CAT spend in dig-app is FORBIDDEN, as is
+  addressing a payment to a curried CAT puzzle hash: a `$DIG` payment is addressed to the recipient's
+  ordinary `xch` destination and the builder is what wraps it.
+- The fee MUST be denominated and displayed in XCH. Chia charges fees in native mojos and a CAT cannot
+  pay its own, so a wallet holding `$DIG` and no XCH cannot send at a non-zero fee. That state MUST be
+  reported as a missing FEE coin and MUST NOT be reported as a `$DIG` shortfall — the two send a person
+  to opposite remedies.
+- There is **no anchoring peak read and no confirmation**. `dig-account` 0.16 ships a `$DIG` transfer
+  builder and no watcher: there is no `PendingCatTransfer`, no `cat_transfer_status`, and no buried
+  chain record a `ConfirmedCatTransfer` could be constructed from. Therefore:
+  - dig-app MUST NOT report a `$DIG` payment as confirmed, settled or arrived, by any route. The
+    accepted push yields `SendProgress::Broadcast`, which states the acceptance and the limitation and
+    claims nothing further.
+  - The reference carried MUST be the accepted BUNDLE id and MUST be labelled as such. A `$DIG` payment
+    coin id is not computable without spend introspection, and a bundle id under a "payment coin" label
+    would present a submission's name as evidence about money.
+  - `Broadcast` MUST NOT be in flight. The only escape from an in-flight state requires acknowledging a
+    payment coin id, which a `$DIG` send does not have, so an in-flight `Broadcast` would close the send
+    form for the life of the process with no escape.
+  - An UNANSWERED `$DIG` push (`SendError::PushUnwatchable`) MUST NOT be reported as a failure. It MUST
+    reach `Abandoned`, which reopens the form behind a warning to check before sending again, and it
+    MUST NOT be reported as `Unknown`, which offers a coin id to watch that does not exist.
 
 #### 3.3a2 Taking a Chia offer (normative)
 
@@ -2584,8 +2612,20 @@ NOT decode, summarize, assemble or combine offer bytes itself.
 
 The Wallet tab offers the send, and `dig_app_core::wallet::sending` is the only place that decides
 anything about it. The pane draws that module's answers and returns an intent
-(`TrayAction::SendXch`, or `TrayAction::ReleaseUnknownSend` for the escape below); the shell forwards
+(`TrayAction::Send`, or `TrayAction::ReleaseUnknownSend` for the escape below); the shell forwards
 the intent and performs the send.
+
+- The ASSET is chosen on the form and MUST be carried as part of the validated intent
+  (`sending::SendIntent`), never beside it. There MUST be no representation in which the amount and the
+  builder disagree about which asset is moving.
+- An amount MUST be read to the DECIMAL PLACES of the asset in force — twelve for XCH, three for `$DIG`
+  — and every sentence about it MUST name that asset's ticker. A refusal quoting the wrong ticker sends
+  a person to acquire the wrong token.
+- An affordability check MUST weigh a payment against the holding it actually spends: `$DIG` against
+  the `$DIG` balance and its fee against the XCH balance, as two separate comparisons. Summing them is
+  FORBIDDEN — they are different units and the total means nothing.
+- An activity row MUST be labelled with the asset that was sent (`sending::sent_record`). A fixed asset
+  label is FORBIDDEN.
 
 - A typed amount MUST be converted to base units by `amount::parse_asset_amount`, the exact inverse of
   `amount::format_asset_amount`. The conversion MUST be integer arithmetic on the digits: a binary
@@ -2601,8 +2641,9 @@ the intent and performs the send.
 - **Send** MUST be refused, with the condition stated on screen, when the account is sealed, when a
   send is in flight, when either field is unusable, or when the amount plus the fee exceeds a MEASURED
   balance. A balance nobody has read MUST NOT refuse a send — that would invent the figure.
-- The eight states of `SendProgress` — `Idle`, `Signing`, `Pending`, `Unknown`, `Confirmed`, `Failed`,
-  `Abandoned` and `Released` — MUST each be rendered as themselves where they are reached. `Awaiting` MUST NOT be shown as success,
+- The nine states of `SendProgress` — `Idle`, `Signing`, `Pending`, `Broadcast`, `Unknown`,
+  `Confirmed`, `Failed`, `Abandoned` and `Released` — MUST each be rendered as themselves where they
+  are reached. `Awaiting` MUST NOT be shown as success,
   and an unanswered push MUST be shown as an UNKNOWN outcome to keep watching — never as a failure,
   since rebuilding it can pay the recipient twice. (`Signing` is not currently reachable on screen: the
   action worker holds the session for the whole ceremony and the tray publishes no view while it does,
