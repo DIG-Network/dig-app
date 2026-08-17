@@ -400,6 +400,70 @@ mod tests {
         );
     }
 
+    /// **And the form actually PAINTS it** (dig_ecosystem#3057).
+    ///
+    /// The test above is about a string constant: it holds whether or not anything draws that
+    /// string, so deleting the `flow.place` that paints it leaves it green. What a person reads is
+    /// a property of the rendered form, so this one renders the real form and reads the text it
+    /// produced — the shape the profiles card's own `card_says` uses, for the same reason.
+    #[test]
+    fn the_rendered_form_paints_the_optional_sentence() {
+        let painted = form_says(&a_profile());
+        assert!(
+            painted.contains(copy::profile_edit::ALL_OPTIONAL),
+            "the form drew no sentence saying the boxes are optional; it said: {painted}"
+        );
+    }
+
+    /// Every string the real form painted over `committed`.
+    ///
+    /// Drawn through the REAL [`form`] and a REAL [`Flow`], because the property under test is what
+    /// a person SEES. The card's outer states are not exercised here: reaching them means the
+    /// process-wide [`EditService`], and the sentence lives in the form regardless of how the read
+    /// that produced `committed` arrived.
+    fn form_says(committed: &ProfileDraft) -> String {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(420.0, 8_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("profile-edit-form-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = Flow::new(ui, column, true);
+                            super::form(&mut flow, &t, committed, &[]);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said.join(" | ")
+    }
+
     /// Nothing to save is not something to press. The label still says what the control does — the
     /// model wrote it — and this pane only decides that it cannot be pressed right now.
     #[test]
