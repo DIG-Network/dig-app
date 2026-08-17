@@ -490,13 +490,22 @@ fn grouped(tab: &Tab, drew_copy_control: bool) -> (Vec<Group>, Vec<Group>) {
                 super::actions_in(section.rows.iter().cloned(), &mut seen),
                 drew_copy_control,
             );
-            // The protection and profile sections are already drawn — protection as the state card
-            // and the two cards under it, profiles as the list card — so a group for either here
-            // would put every one of its verbs on the pane twice.
+            // Every section this pane draws with a card of its own is skipped here — protection as
+            // the state card and the two cards under it, profiles as the list card, and the profile
+            // editor as the form — because a group for any of them would put its verbs on the pane
+            // a second time.
+            //
+            // The second copy is not merely redundant, it DISABLES the first: both are addressed by
+            // `row_element_id(label, occurrence)`, both get occurrence 0, and to egui two widgets
+            // with one id are one widget. That is what left `Publish my profile changes…`
+            // unpressable however much was typed into the form above it (dig_ecosystem#3057) — and
+            // the editor's copy is the one that must survive, because it is the only one that knows
+            // whether the draft has anything in it to publish.
             if matches!(
                 section.heading.as_deref(),
                 Some(crate::window_model::PROTECTION_HEADING)
                     | Some(crate::window_model::PROFILES_HEADING)
+                    | Some(crate::window_model::PROFILE_EDIT_HEADING)
             ) {
                 return None;
             }
@@ -720,6 +729,15 @@ mod tests {
                     &tab,
                     &PaneFacts::of_tray(&view_for(account.clone())),
                 ))
+                // The editor's card is the fifth renderer, and `grouped` now skips its section for
+                // the same reason it skips the other two — so its verbs are summed in here, or a row
+                // falling down that gap would read as the pane simply having fewer verbs than the
+                // model.
+                .chain(
+                    super::super::profile_edit::save_verbs(&tab)
+                        .iter()
+                        .map(|a| a.id),
+                )
                 .collect();
             let mut expected = tab.actions();
             assert!(
@@ -732,6 +750,76 @@ mod tests {
                 rendered, expected,
                 "the {account:?} pane's buttons are not the model's actions"
             );
+        }
+    }
+
+    /// **No two controls on the Account pane share an element id** (dig_ecosystem#3057).
+    ///
+    /// # Why this is about a dead button and not about tidiness
+    ///
+    /// egui identifies a widget by its id, so two controls sharing one are ONE control to it: the
+    /// second claims the interaction and the first stops responding to clicks entirely. That is what
+    /// happened to `Publish my profile changes…`. The editor's card drew it — gated on whether the
+    /// draft holds anything to publish — and [`grouped`] drew it a second time in a card of its own,
+    /// because the skip list named the protection and profiles sections and not the editor's. Both
+    /// copies were addressed as occurrence 0 of the same label, so the one people typed above never
+    /// became pressable no matter what they typed.
+    ///
+    /// # Why the fixture must set `ProfileEditing::Possible`
+    ///
+    /// The model builds the editor's row ONLY when editing is possible, so every other fixture in
+    /// this module has an empty profile-edit section — and a duplicate of nothing is not a
+    /// duplicate. A pane-wide id sweep on the default view passes with the defect fully present.
+    ///
+    /// The sweep is over every renderer on the pane rather than over the editor alone: the property
+    /// is that the pane draws each control once, and a check scoped to the two cards that collided
+    /// this time would not see the next pair.
+    #[test]
+    fn no_two_controls_on_the_account_pane_share_an_element_id() {
+        use crate::profile_edit::ProfileEditing;
+
+        let view = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            profile_id: Some("a".repeat(64)),
+            profile_editing: ProfileEditing::Possible,
+            ..TrayView::default()
+        };
+        let tab = crate::window_model::build(&view)
+            .tab(TabId::Account)
+            .cloned()
+            .expect("the Account tab is emitted in every account state");
+        let facts = PaneFacts::of_tray(&view);
+
+        let editor = super::super::profile_edit::save_verbs(&tab);
+        assert!(
+            editor
+                .iter()
+                .any(|action| action.id == TrayAction::PublishProfileEdits),
+            "the editor's card draws no publish control in this fixture, so this proves nothing"
+        );
+
+        let protection = Protection::of(&tab);
+        let (safe, destroying) = grouped(&tab, drew_copy_control(&facts));
+        let drawn: Vec<Action<TrayAction>> = safe
+            .iter()
+            .chain(destroying.iter())
+            .flat_map(|group| group.actions.iter().cloned())
+            .chain(protection.lead.iter().cloned())
+            .chain(protection.second_factor.iter().cloned())
+            .chain(protection.paired_apps.iter().cloned())
+            .chain(editor.iter().cloned())
+            .collect();
+
+        let mut seen: HashMap<egui::Id, String> = HashMap::new();
+        for action in &drawn {
+            if let Some(first) = seen.insert(action.element, action.label.clone()) {
+                panic!(
+                    "“{}” and “{}” are drawn with the same element id, so egui treats them as one \
+                     control and the first one a person reaches stops responding",
+                    first, action.label
+                );
+            }
         }
     }
 
@@ -1004,6 +1092,7 @@ mod tests {
         copy::profiles::SWITCH_CAUTION,
         copy::profiles::HIDE_NOTE,
         copy::profiles::ACTIVE_CANNOT_HIDE,
+        copy::profiles::ONE_PROFILE,
     ];
 
     /// Every string the pane is accounted for painting in `account`'s state.
@@ -1047,6 +1136,7 @@ mod tests {
         allowed.push(copy::profile_edit::COST.to_string());
         allowed.push(copy::profile_edit::PUBLIC.to_string());
         allowed.push(copy::profile_edit::NOTHING_CHANGED.to_string());
+        allowed.push(copy::profile_edit::ALL_OPTIONAL.to_string());
         allowed.push(copy::profile_edit::RETRY.to_string());
         allowed.extend(
             crate::profile_edit::EditBlocked::EVERY

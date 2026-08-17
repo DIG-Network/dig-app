@@ -168,6 +168,10 @@ fn form(
         flow.gap(space::S3);
     }
 
+    // Above the fields, not below them: a person reads the requirement into the form the moment
+    // they see it, so the sentence that says there is none has to arrive first.
+    flow.place(|ui, at| (text::body(ui, at, t, copy::profile_edit::ALL_OPTIONAL), ()));
+    flow.gap(space::S3);
     profile_form::draw_fields(flow, t, &mut session, SCOPE);
 
     flow.gap(space::S4);
@@ -223,7 +227,7 @@ fn retry_element() -> egui::Id {
 
 /// The Save verbs the model built for this card, found by the section's shared heading rather than
 /// by position — the coupling the merged Account pane exists to avoid.
-fn save_verbs(tab: &Tab) -> Vec<Action<TrayAction>> {
+pub(super) fn save_verbs(tab: &Tab) -> Vec<Action<TrayAction>> {
     let mut seen = std::collections::HashMap::new();
     tab.sections
         .iter()
@@ -326,6 +330,138 @@ mod tests {
                 assert_eq!(after.draft.value(ProfileField::DisplayName), "Ada Lovelace");
             });
         });
+    }
+
+    /// **No single field is required, in either direction** (dig_ecosystem#3057).
+    ///
+    /// The user's report was that every box felt mandatory. The draft model has no required-field
+    /// rule, so what this pins is that none can be introduced — by a validator, by a gate written
+    /// against a display name, or by an `is_committable` that grew a condition.
+    ///
+    /// # Why it is asserted per FIELD and in both directions
+    ///
+    /// One fixture that sets one field would pass on an implementation requiring exactly that
+    /// field. So each field is exercised as the ONLY thing filled in, over an empty profile — the
+    /// person who wants to publish one detail and nothing else — and then each is exercised as the
+    /// only thing REMOVED from a full profile, which is the other half of optional: a box you may
+    /// empty again. An implementation that required a field passes neither leg for that field.
+    #[test]
+    fn every_field_may_be_the_only_one_filled_in_and_the_only_one_emptied() {
+        for field in ProfileField::ALL {
+            let mut alone = ProfileDraft::empty();
+            alone.set(field, an_acceptable_value_for(field));
+            assert!(
+                alone.is_committable(),
+                "{field:?} cannot be published on its own, so some other box is required"
+            );
+
+            let mut full = a_filled_profile();
+            full.clear(field);
+            assert!(
+                full.is_committable(),
+                "{field:?} cannot be emptied, so it is required once it has been filled in"
+            );
+        }
+    }
+
+    /// A value each field genuinely accepts — the address and image slots are validated, so a single
+    /// placeholder string would fail those two for a reason that has nothing to do with this test.
+    fn an_acceptable_value_for(field: ProfileField) -> String {
+        match field {
+            ProfileField::XchAddress => {
+                "xch17s7wd45k6vpmpwcqu26x43x5kac6u3n6pprjl9ssal6qp3dlvmjqf4snk5".to_string()
+            }
+            field if field.is_image() => "data:image/png;base64,iVBORw0KGgo=".to_string(),
+            _ => "something".to_string(),
+        }
+    }
+
+    /// A profile holding an acceptable value in EVERY field, so any one of them can be emptied.
+    fn a_filled_profile() -> ProfileDraft {
+        let values: BTreeMap<ProfileField, String> = ProfileField::ALL
+            .into_iter()
+            .map(|field| (field, an_acceptable_value_for(field)))
+            .collect();
+        let len = values.values().map(|v| v.len() + 11).sum::<usize>() + 5;
+        ProfileDraft::over(values, len)
+    }
+
+    /// **The form says the boxes are optional before a person reads a requirement into them.**
+    ///
+    /// The sentence is the only thing standing between a truthful model and a person inventing a
+    /// display name because the box looked mandatory.
+    #[test]
+    fn the_editor_says_every_box_is_optional() {
+        let said = copy::profile_edit::ALL_OPTIONAL.to_lowercase();
+        assert!(said.contains("optional"), "{said}");
+        assert!(
+            said.contains("empty"),
+            "the sentence never says a box may be left or made empty: {said}"
+        );
+    }
+
+    /// **And the form actually PAINTS it** (dig_ecosystem#3057).
+    ///
+    /// The test above is about a string constant: it holds whether or not anything draws that
+    /// string, so deleting the `flow.place` that paints it leaves it green. What a person reads is
+    /// a property of the rendered form, so this one renders the real form and reads the text it
+    /// produced — the shape the profiles card's own `card_says` uses, for the same reason.
+    #[test]
+    fn the_rendered_form_paints_the_optional_sentence() {
+        let painted = form_says(&a_profile());
+        assert!(
+            painted.contains(copy::profile_edit::ALL_OPTIONAL),
+            "the form drew no sentence saying the boxes are optional; it said: {painted}"
+        );
+    }
+
+    /// Every string the real form painted over `committed`.
+    ///
+    /// Drawn through the REAL [`form`] and a REAL [`Flow`], because the property under test is what
+    /// a person SEES. The card's outer states are not exercised here: reaching them means the
+    /// process-wide [`EditService`], and the sentence lives in the form regardless of how the read
+    /// that produced `committed` arrived.
+    fn form_says(committed: &ProfileDraft) -> String {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(420.0, 8_000.0));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("profile-edit-form-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = Flow::new(ui, column, true);
+                            super::form(&mut flow, &t, committed, &[]);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said.join(" | ")
     }
 
     /// Nothing to save is not something to press. The label still says what the control does — the

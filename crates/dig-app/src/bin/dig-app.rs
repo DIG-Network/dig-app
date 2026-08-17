@@ -243,6 +243,14 @@ fn main() {
 /// unlocked yet, and an account with no profile — and the card says so in those words
 /// (`EditBlocked::Locked`, `EditBlocked::NoProfile`) because the shell reads its offer off these
 /// same seams.
+///
+/// # The lock is why `ProfileEditing::of_seams` reports it before the transport
+///
+/// A LOCKED account reaches the second early return: there is no active profile to anchor an edit
+/// to, so nothing installs and the app sits on `EditSeams::NoChainTransport` — on a machine whose
+/// build and node are both perfectly capable. Reading that as a statement about the BUILD is how a
+/// locked account came to be told to install a newer DIG (dig_ecosystem#3057), so the offer names
+/// the lock first and only measures the transport once the account is open.
 #[cfg(feature = "tray")]
 fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     use dig_app_core::profile_edit::{AccountEditSeam, EditSeams, EditService};

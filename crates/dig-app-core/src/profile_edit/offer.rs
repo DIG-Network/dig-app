@@ -71,11 +71,23 @@ impl ProfileEditing {
     ///
     /// `has_profile` and `unlocked` are the caller's, because a seam is about this BUILD while both
     /// of those are about this MOMENT: an account locks and unlocks under a seam that never changes.
+    /// # Why the lock is reported FIRST, ahead of a missing transport
+    ///
+    /// While the account is locked, the other two facts are not measurements — they are consequences
+    /// of the lock. The shell derives both from the ACTIVE profile, and a locked account has no
+    /// active profile to derive them from, so the seams stay uninstalled and `has_profile` reads
+    /// false on a machine that holds a profile and a working node alike.
+    ///
+    /// Reporting the transport there is a fabrication about the BUILD: it told a person whose only
+    /// problem was a locked account to *install a newer DIG and a newer node*
+    /// (dig_ecosystem#3057). Naming the unlock first is honest at every step — it is true right now,
+    /// it is the one act that helps, and a genuinely missing transport is still named the moment the
+    /// unlock has made that a thing anybody has measured.
     pub fn of_seams(seams: &EditSeams, has_profile: bool, unlocked: bool) -> Self {
-        match (seams.is_possible(), has_profile, unlocked) {
-            (false, _, _) => Self::Blocked(EditBlocked::NoChainTransport),
-            (true, false, _) => Self::Blocked(EditBlocked::NoProfile),
-            (true, true, false) => Self::Blocked(EditBlocked::Locked),
+        match (unlocked, seams.is_possible(), has_profile) {
+            (false, _, _) => Self::Blocked(EditBlocked::Locked),
+            (true, false, _) => Self::Blocked(EditBlocked::NoChainTransport),
+            (true, _, false) => Self::Blocked(EditBlocked::NoProfile),
             (true, true, true) => Self::Possible,
         }
     }
@@ -138,13 +150,45 @@ mod tests {
         assert!(ProfileEditing::of_seams(&wired(), true, true).is_possible());
     }
 
-    /// A transport-less build is told about its transport even while it is also locked: naming the
-    /// unlock would send a person to do something that changes nothing.
+    /// **A locked account is told to unlock, never that its build cannot reach the chain**
+    /// (dig_ecosystem#3057).
+    ///
+    /// The fixture is the state a real locked machine is actually in, and that is the whole point:
+    /// the shell installs the edit seams from the ACTIVE profile, and a locked account has none — so
+    /// `EditSeams::NoChainTransport` with `has_profile: false` is what a perfectly healthy machine
+    /// reports while its account is locked, NOT a measurement of the build. Reading the transport off
+    /// it told those people to *install a newer DIG and a newer node*.
+    ///
+    /// # Why the unlocked control is load-bearing
+    ///
+    /// "Locked always wins" and "the transport blocker was deleted" are indistinguishable from the
+    /// locked leg alone. The control is the SAME seams, unlocked: there the missing transport is a
+    /// real measurement and must still be named, because that person genuinely does need a newer
+    /// build and telling them to unlock an already-open account helps nobody.
     #[test]
-    fn the_deepest_blocker_is_the_one_reported() {
+    fn a_locked_account_is_told_to_unlock_and_an_unlocked_one_still_hears_about_its_transport() {
         assert_eq!(
             ProfileEditing::of_seams(&EditSeams::NoChainTransport, false, false).blocked(),
-            Some(EditBlocked::NoChainTransport)
+            Some(EditBlocked::Locked),
+            "a locked account was told its build cannot reach the blockchain"
+        );
+
+        assert_eq!(
+            ProfileEditing::of_seams(&EditSeams::NoChainTransport, false, true).blocked(),
+            Some(EditBlocked::NoChainTransport),
+            "an unlocked build with no transport lost the sentence that names its real cause"
+        );
+    }
+
+    /// The sentence a locked account reads names the unlock, and does not send anybody to install
+    /// anything — the words the defect actually put on screen.
+    #[test]
+    fn the_locked_sentence_names_the_unlock_and_no_installation() {
+        let said = EditBlocked::Locked.sentence().to_lowercase();
+        assert!(said.contains("unlock"), "the locked sentence: {said}");
+        assert!(
+            !said.contains("install") && !said.contains("newer"),
+            "the locked sentence tells a person to install a newer build: {said}"
         );
     }
 
