@@ -1597,6 +1597,16 @@ mod tray {
             }
         }
 
+        // Profile content the node would not take yet is offered again from here, because a repaint
+        // is the only thing this app has that happens repeatedly. The alternative — one drain per
+        // process, which is what this replaces — left a saved profile unreadable to other people
+        // until the person restarted DIG, for a reason they were never told (dig_ecosystem#3078).
+        //
+        // Safe to call every frame and deliberately unconditional: the service holds the cadence, the
+        // in-flight guard, and its own worker thread, so a frame that has nothing to do pays an
+        // atomic clock read.
+        dig_app_core::profile_edit::EditService::app().retry_pending_bodies();
+
         TrayView {
             // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
             // installed — rather than a second `EditSeams` value built here (dig_ecosystem#3027).

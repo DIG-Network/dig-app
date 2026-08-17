@@ -36,6 +36,22 @@ use crate::transaction::Feed;
 /// those spends a token from the node's wallet rate limiter (dig_ecosystem#3044).
 pub const READ_INTERVAL: Duration = Duration::from_secs(15);
 
+/// The shortest gap between two attempts to hand waiting profile content to the node.
+///
+/// Bounded by the thing that usually refuses it: `putBody` declines a body whose root the chain has
+/// not confirmed yet, and that resolves in a block or two. Retrying faster asks the same node about
+/// the same unconfirmed root; retrying much slower turns a several-minute wait into one a person
+/// resolves by restarting the app, which is the state dig_ecosystem#3078 exists to remove.
+pub const DRAIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The longest that gap may grow to.
+///
+/// Not every refusal resolves with time. A body that does not rebuild to its root never becomes
+/// acceptable, and an entry like that would otherwise ask forever at the fastest cadence — so the
+/// gap doubles on every attempt that moves nothing, and stops widening here. Eight minutes still
+/// recovers on its own within one sitting once the obstacle clears.
+pub const DRAIN_CEILING: Duration = Duration::from_secs(480);
+
 /// Reads the wall clock. Injected so a test can pin the RATE without sleeping through it.
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
@@ -56,6 +72,17 @@ pub struct EditService {
     last_read: Mutex<Option<Instant>>,
     /// The shortest gap between two reads. [`READ_INTERVAL`] outside tests.
     interval: Duration,
+    /// When the most recent drain was STARTED. `None` until the first one.
+    last_drain: Mutex<Option<Instant>>,
+    /// Whether a drain is already running, so a pane asking every frame starts one worker and not
+    /// a hundred and twenty.
+    draining_now: Mutex<bool>,
+    /// How many drains in a row have moved nothing, which is what widens the gap between them.
+    ///
+    /// A COUNT rather than the duration itself, so the first retry after a single refusal still
+    /// happens at the plain [`DRAIN_INTERVAL`]: that refusal is nearly always a root the chain has
+    /// not confirmed yet, and it is the one case where waiting longer is exactly wrong.
+    fruitless_drains: Mutex<u32>,
     /// Where "now" comes from.
     clock: Clock,
     /// Where a chain write publishes its progress.
@@ -90,6 +117,11 @@ impl EditService {
             reading_now: Mutex::new(false),
             last_read: Mutex::new(None),
             interval: READ_INTERVAL,
+            // `None`, so the first frame after a launch drains immediately: a body pending at the
+            // last shutdown should not wait out a cadence built for retries.
+            last_drain: Mutex::new(None),
+            draining_now: Mutex::new(false),
+            fruitless_drains: Mutex::new(0),
             clock: Arc::new(Instant::now),
             feed,
         }
@@ -266,6 +298,116 @@ impl EditService {
         );
     }
 
+    /// Offer every body still waiting on this computer to the node again, off the calling thread.
+    ///
+    /// # Why a start-up drain was not enough
+    ///
+    /// A body waits on disk because the node would not take it, and the commonest reason is a root
+    /// the chain has not confirmed yet — which resolves by itself within a block or two. Until this
+    /// existed the only drain ran once per process, so that body stayed unreadable to everyone else
+    /// until the person happened to restart dig-app, for a reason they had no way to know
+    /// (dig_ecosystem#3078). Nothing was ever at risk — the bytes are on disk and sealed — but the
+    /// profile stayed private for as long as the app stayed open, which is the opposite of what a
+    /// person who pressed Save was told.
+    ///
+    /// # It is safe to call from a repaint
+    ///
+    /// Every frame may call it. The cadence gate answers first and costs an atomic clock read, the
+    /// in-flight guard stops two overlapping, and the work itself happens on its own thread — the
+    /// node round trips must never land on the thread that paints the window (dig_ecosystem#2995).
+    ///
+    /// An entry is cleared only by [`drain`](super::pending::drain)'s verified read-back, which this
+    /// does not relax: retrying more often changes how soon a body is offered, never what counts as
+    /// the node having it.
+    pub fn retry_pending_bodies(self: &Arc<Self>) {
+        let EditSeams::Wired {
+            bodies, pending, ..
+        } = &self.seams
+        else {
+            return;
+        };
+        if !self.drain_due() || !self.begin_draining() {
+            return;
+        }
+
+        let bodies = Arc::clone(bodies);
+        let pending = Arc::clone(pending);
+        let service = Arc::clone(self);
+        std::thread::spawn(move || {
+            let report = super::pending::drain(&*pending, &*bodies);
+            service.finish_draining(report);
+        });
+    }
+
+    /// Whether enough time has passed since the last drain STARTED to start another.
+    ///
+    /// Timed from the START, like [`due`](Self::due), because that is what makes the bound exact: at
+    /// most one drain begins per gap, whatever a single drain costs. A poisoned lock answers `false`
+    /// — the conservative direction is to ask the node less.
+    fn drain_due(&self) -> bool {
+        let Ok(last) = self.last_drain.lock() else {
+            return false;
+        };
+        let gap = self.drain_gap();
+        last.map_or(true, |started| {
+            (self.clock)().duration_since(started) >= gap
+        })
+    }
+
+    /// How long to wait before the next drain.
+    ///
+    /// [`DRAIN_INTERVAL`] until two attempts in a row have moved nothing, then doubling per
+    /// fruitless attempt up to [`DRAIN_CEILING`]. A poisoned lock answers the ceiling: the safe
+    /// direction is to ask the node less often, and the bytes are on disk either way.
+    fn drain_gap(&self) -> Duration {
+        let Ok(fruitless) = self.fruitless_drains.lock() else {
+            return DRAIN_CEILING;
+        };
+        DRAIN_INTERVAL
+            .saturating_mul(2u32.saturating_pow(fruitless.saturating_sub(1).min(16)))
+            .min(DRAIN_CEILING)
+    }
+
+    /// Claim the right to run a drain, and record when it began. `false` when one is already running.
+    fn begin_draining(&self) -> bool {
+        match self.draining_now.lock() {
+            Ok(mut running) if !*running => {
+                *running = true;
+                if let Ok(mut last) = self.last_drain.lock() {
+                    *last = Some((self.clock)());
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Release the claim, and set the gap the next attempt will wait.
+    ///
+    /// Progress resets the cadence; an attempt that moved nothing doubles it. Which of those a
+    /// report describes is read from the report itself rather than from the refusal text, because the
+    /// two refusals that matter are told apart by their OUTCOME over time — an unconfirmed root
+    /// starts succeeding, a body that does not rebuild to its root never will — and backing off is
+    /// the one response that is correct for both.
+    fn finish_draining(&self, report: super::pending::DrainReport) {
+        if report.stored > 0 {
+            tracing::info!(
+                stored = report.stored,
+                waiting = report.waiting,
+                "the node has taken profile content that was waiting on this computer"
+            );
+        }
+        if let Ok(mut fruitless) = self.fruitless_drains.lock() {
+            *fruitless = match report.stored > 0 || report.waiting == 0 {
+                true => 0,
+                false => fruitless.saturating_add(1),
+            };
+        }
+        if let Ok(mut running) = self.draining_now.lock() {
+            *running = false;
+        }
+    }
+
     /// Whether enough time has passed since the last read STARTED to start another.
     ///
     /// A poisoned lock answers `false` — the conservative direction here is to read LESS, since the
@@ -313,9 +455,10 @@ fn no_seams() -> &'static Arc<EditService> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::super::bodies::doubles::InMemoryBodies;
+    use super::super::bodies::doubles::{InMemoryBodies, NodeThatWarmsUp};
     use super::super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
     use super::super::pending::doubles::InMemoryPending;
+    use super::super::pending::{PendingBodies, PendingBody};
     use super::*;
 
     /// A seam over a profile that reads, with a counter so a test can see how often.
@@ -682,6 +825,181 @@ mod tests {
         assert!(
             service.feed.read().is_none(),
             "a commit was started over a profile nobody could read"
+        );
+    }
+
+    /// A body the node has not taken yet, as one would sit on disk after a refused `putBody`.
+    fn a_waiting_body() -> PendingBody {
+        PendingBody {
+            store_id: a_profile().store_id,
+            root: a_profile().root,
+            body: a_profile().body,
+        }
+    }
+
+    /// A service whose pending set and node a test holds, paced by a clock it moves by hand.
+    fn service_draining(
+        pending: Arc<InMemoryPending>,
+        node: Arc<NodeThatWarmsUp>,
+        clock: &TestClock,
+    ) -> Arc<EditService> {
+        EditService::paced(
+            EditSeams::Wired {
+                seam: Reading::of(Ok(a_profile())),
+                bodies: node,
+                pending,
+            },
+            READ_INTERVAL,
+            clock.handle(),
+        )
+    }
+
+    /// Wait for any in-flight drain to finish, so the next frame sees what a real frame would.
+    fn drained(service: &Arc<EditService>) {
+        for _ in 0..500 {
+            if !*service.draining_now.lock().expect("the guard") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        panic!("a drain never finished");
+    }
+
+    /// **A body refused once is offered again WITHOUT a restart** (dig_ecosystem#3078).
+    ///
+    /// # Why the fixture is a node that changes its mind
+    ///
+    /// The refusal this exists for is temporary: `putBody` declines a root the chain has not
+    /// confirmed, and a block or two later the same bytes are accepted. So the only fixture that can
+    /// see the defect is one that refuses and then accepts — against a permanently-refusing node
+    /// every implementation leaves the entry pending and passes, and against a permanently-accepting
+    /// one the start-up drain alone passes. The nearest wrong implementation is the code this
+    /// replaces: it drains once per process, so it is the flip-then-retry that it fails.
+    ///
+    /// The clock is fake, so a thirty-second cadence is asserted in microseconds.
+    #[test]
+    fn a_body_the_node_refused_is_taken_later_in_the_same_session() {
+        let clock = TestClock::new();
+        let pending = Arc::new(InMemoryPending::default());
+        pending.remember(&a_waiting_body()).expect("remembers");
+        let node = Arc::new(NodeThatWarmsUp::default());
+        let service = service_draining(Arc::clone(&pending), Arc::clone(&node), &clock);
+
+        // The first attempt, as the start-up drain would make it: the chain is behind, so the node
+        // refuses and the body correctly stays on disk.
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(
+            pending.all().expect("reads").len(),
+            1,
+            "a refused body was dropped from disk, which is the loss #3066 closed"
+        );
+
+        // A block carries the new root. Nothing in the app is told; nothing in the app asks again
+        // until the cadence comes round.
+        node.catch_up();
+        clock.advance(DRAIN_INTERVAL);
+        service.retry_pending_bodies();
+        drained(&service);
+
+        assert!(
+            pending.all().expect("reads").is_empty(),
+            "the profile is still private to everyone else until the person restarts dig-app"
+        );
+    }
+
+    /// The same call from every frame is one offer per cadence, not one per frame.
+    ///
+    /// Bounded from BOTH sides: the ceiling is a retry storm against a rate-limited node, and the
+    /// floor is a cadence so cautious it never retries at all — which is the defect being fixed.
+    #[test]
+    fn frames_between_cadences_do_not_re_offer_the_body() {
+        let clock = TestClock::new();
+        let pending = Arc::new(InMemoryPending::default());
+        pending.remember(&a_waiting_body()).expect("remembers");
+        let node = Arc::new(NodeThatWarmsUp::default());
+        let service = service_draining(Arc::clone(&pending), Arc::clone(&node), &clock);
+
+        // Two hundred repaints inside one cadence — about a minute and a half of an open pane.
+        for _ in 0..200 {
+            service.retry_pending_bodies();
+            drained(&service);
+        }
+        assert_eq!(
+            node.offers(),
+            1,
+            "an open pane hammered the node once per frame"
+        );
+
+        clock.advance(DRAIN_INTERVAL);
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(node.offers(), 2, "the cadence never came round");
+    }
+
+    /// An entry that can never be accepted backs off — but not on its FIRST refusal.
+    ///
+    /// # Both directions are defects, and they pull opposite ways
+    ///
+    /// Backing off too eagerly is the one that hurts the common case: a single refusal almost always
+    /// means the chain has not caught up, so doubling the wait then delays exactly the body that was
+    /// about to succeed. Never backing off is the other — an entry whose body does not rebuild to its
+    /// root can never be accepted, and asking every thirty seconds forever is a node this app is
+    /// pointlessly loading. So the schedule is pinned at both ends here.
+    #[test]
+    fn refusals_widen_the_gap_but_the_first_retry_is_still_prompt() {
+        let clock = TestClock::new();
+        let pending = Arc::new(InMemoryPending::default());
+        pending.remember(&a_waiting_body()).expect("remembers");
+        let node = Arc::new(NodeThatWarmsUp::default());
+        let service = service_draining(Arc::clone(&pending), Arc::clone(&node), &clock);
+
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(
+            service.drain_gap(),
+            DRAIN_INTERVAL,
+            "one refusal delayed the retry that was most likely to succeed"
+        );
+
+        // The second refusal is the one that starts widening the gap.
+        clock.advance(DRAIN_INTERVAL);
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(node.offers(), 2, "the first cadence never came round");
+        assert_eq!(service.drain_gap(), DRAIN_INTERVAL * 2);
+
+        // One interval is no longer enough, and the widened gap does come round.
+        clock.advance(DRAIN_INTERVAL);
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(node.offers(), 2, "the gap widened but was not respected");
+        clock.advance(DRAIN_INTERVAL);
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(node.offers(), 3, "the widened gap never came round");
+
+        // And it stops widening: many refusals later the wait is the ceiling, not an eternity.
+        for _ in 0..20 {
+            clock.advance(DRAIN_CEILING);
+            service.retry_pending_bodies();
+            drained(&service);
+        }
+        assert_eq!(
+            service.drain_gap(),
+            DRAIN_CEILING,
+            "the back-off grew past its ceiling and stopped retrying in any useful time"
+        );
+
+        // A node that finally accepts resets the cadence, so the next waiting body is prompt again.
+        node.catch_up();
+        clock.advance(DRAIN_CEILING);
+        service.retry_pending_bodies();
+        drained(&service);
+        assert_eq!(
+            service.drain_gap(),
+            DRAIN_INTERVAL,
+            "progress did not reset the back-off, so a healthy node is still asked once an hour"
         );
     }
 }

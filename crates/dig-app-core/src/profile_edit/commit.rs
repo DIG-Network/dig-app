@@ -179,11 +179,16 @@ impl ProfileEditError {
                 why.sentence(),
                 match kept_locally {
                     true =>
-                        "DIG has kept a copy of it on this computer, so nothing is lost. It offers \
-                         that copy to your node again the next time DIG starts.",
+                        "DIG has kept a copy of it on this computer, so nothing is lost. It keeps \
+                         offering that copy to your node while DIG is open, and again the next time \
+                         DIG starts.",
+                    // No copy was kept, so there is nothing on this computer to offer again — and a
+                    // sentence inviting the person to wait would have them waiting on a retry with
+                    // no bytes behind it (dig_ecosystem#3080). Making the change again is the only
+                    // remedy this app has, so it is the only one it names.
                     false =>
-                        "DIG could NOT keep a copy on this computer: leave DIG open until your \
-                         profile shows as published.",
+                        "DIG could NOT keep a copy on this computer, so it has nothing left to \
+                         offer your node: the change will need to be made again.",
                 }
             ),
         }
@@ -997,21 +1002,13 @@ mod tests {
         let said = error.sentence();
         assert!(said.contains("sent to the blockchain"), "said: {said}");
         assert!(said.contains("kept a copy"), "said: {said}");
-        // The retry it promises must be the one `drain` actually performs — a start-up drain, and
-        // nothing in between. A sentence describing a background retry would be a promise no code
-        // in this crate keeps (dig_ecosystem#3078 adds the timer that would make one true).
+        // Both retries it promises must be ones code actually performs. Since dig_ecosystem#3078
+        // that is two: `EditService::retry_pending_bodies` on a cadence while the app is open, and
+        // the start-up drain in `install_edit_seams`. Before #3078 the in-session half was a promise
+        // nothing kept, and this assertion is the thing that has to move when it becomes true —
+        // hence naming the mechanism rather than banning a phrase.
+        assert!(said.contains("while DIG is open"), "said: {said}");
         assert!(said.contains("next time DIG starts"), "said: {said}");
-        for invented in [
-            "keep trying",
-            "keeps trying",
-            "on a timer",
-            "in the background",
-        ] {
-            assert!(
-                !said.contains(invented),
-                "promised a retry no code performs ({invented}): {said}"
-            );
-        }
     }
 
     /// **The pre-spend write happens even if the COMMIT never returns.**
@@ -1159,7 +1156,22 @@ mod tests {
         }
         let said = error.sentence();
         assert!(said.contains("could NOT keep a copy"), "said: {said}");
-        assert!(said.contains("leave DIG open"), "said: {said}");
+        // The remedy names making the change AGAIN, because with no copy kept there is nothing on
+        // this computer for any retry to offer (dig_ecosystem#3080). The banned phrases are the
+        // waiting-and-it-will-publish family: each of them is true only of the OTHER arm, and each
+        // has a person leaving the app open in front of a retry with no bytes behind it.
+        assert!(said.contains("made again"), "said: {said}");
+        for retry_with_nothing_to_retry in [
+            "leave DIG open",
+            "while DIG is open",
+            "next time DIG starts",
+            "keeps offering",
+        ] {
+            assert!(
+                !said.contains(retry_with_nothing_to_retry),
+                "promised a retry with no copy to retry ({retry_with_nothing_to_retry}): {said}"
+            );
+        }
     }
 
     // -- what a surface may say about it -------------------------------------------------------

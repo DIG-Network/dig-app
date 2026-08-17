@@ -282,6 +282,52 @@ pub(crate) mod doubles {
         }
     }
 
+    /// A node that refuses a body until told to accept it, counting every attempt.
+    ///
+    /// The shape of the case an in-session retry exists for: the commonest refusal is a root the
+    /// chain has not confirmed YET, which becomes acceptable on its own a block or two later
+    /// (dig_ecosystem#3078). A double that can only ever refuse, or only ever accept, cannot express
+    /// that change of mind — and a test written against either one passes for an app that offers a
+    /// body exactly once.
+    #[derive(Debug, Default)]
+    pub(crate) struct NodeThatWarmsUp {
+        /// What it holds once it starts accepting.
+        held: InMemoryBodies,
+        /// Whether the chain has caught up yet.
+        accepting: Mutex<bool>,
+        /// How many times a body has been offered, so a test can assert a RATE and not merely a
+        /// success.
+        offers: Mutex<usize>,
+    }
+
+    impl NodeThatWarmsUp {
+        /// Start accepting, as a block carrying the new root does.
+        pub(crate) fn catch_up(&self) {
+            *self.accepting.lock().expect("accepting") = true;
+        }
+
+        /// How many times a body has been offered.
+        pub(crate) fn offers(&self) -> usize {
+            *self.offers.lock().expect("offers")
+        }
+    }
+
+    impl BodyStore for NodeThatWarmsUp {
+        fn put(&self, store_id: &str, root: &str, body: &[u8]) -> Result<(), BodyStoreError> {
+            *self.offers.lock().expect("offers") += 1;
+            if !*self.accepting.lock().expect("accepting") {
+                return Err(BodyStoreError::Refused(format!(
+                    "root {root} is not this store's confirmed on-chain root"
+                )));
+            }
+            self.held.put(store_id, root, body)
+        }
+
+        fn get(&self, store_id: &str, root: &str) -> Result<BodyRead, BodyStoreError> {
+            self.held.get(store_id, root)
+        }
+    }
+
     /// A store that refuses every call.
     #[derive(Debug)]
     pub(crate) struct RefusingBodies(pub(crate) BodyStoreError);
