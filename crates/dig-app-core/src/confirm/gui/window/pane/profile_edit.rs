@@ -112,9 +112,15 @@ pub(crate) fn modal_save_offer(
     if !offer.is_possible() {
         return None;
     }
-    let ProfileReading::Known(_) = reading else {
+    // The two readings [`EditService::save`] will actually act on. Withholding Save over
+    // `BodyLost` is what made its form a dead control: the card invited a person to publish and the
+    // one row that could do it was not drawn (dig_ecosystem#3041).
+    if !matches!(
+        reading,
+        ProfileReading::Known(_) | ProfileReading::BodyLost { .. }
+    ) {
         return None;
-    };
+    }
     let label = save_verbs(tab).first().map(|verb| verb.label.clone())?;
     let session = ui.data(|d| d.get_temp::<Session>(egui::Id::new(MODAL_FORM.session)))?;
     Some((label, session.draft.is_committable()))
@@ -195,9 +201,9 @@ fn content(
             let lost = PaneState::Unreachable(crate::profile_edit::copy::body_lost(root));
             flow.place(|ui, at| (state::banner(ui, at, t, &lost), ()));
             flow.gap(space::S3);
-            form(flow, t, draft, verbs, form_id)
+            form(flow, t, draft, verbs, form_id, reading.is_re_entry())
         }
-        ProfileReading::Known(committed) => form(flow, t, committed, verbs, form_id),
+        ProfileReading::Known(committed) => form(flow, t, committed, verbs, form_id, false),
     }
 }
 
@@ -245,13 +251,20 @@ fn form(
     committed: &ProfileDraft,
     verbs: &[Action<TrayAction>],
     form_id: FormId,
+    re_entry: bool,
 ) -> Option<TrayAction> {
     // Loaded inside a zero-height block, because a `Flow` hands out a `Ui` only for the width of
     // one block and the session lives in that `Ui`'s own store.
     let mut session = flow.place(|ui, _| (0.0, session::load(ui, committed, form_id)));
     session.collect_a_finished_choice();
 
-    if committed.is_empty() {
+    // Suppressed for a re-entry, and the suppression is the whole point. A `BodyLost` draft is
+    // ALWAYS empty, so this drew "Your profile is empty. Nothing has gone wrong" immediately beneath
+    // a banner saying the content was destroyed — reinstating, one line lower, the exact reassurance
+    // dig_ecosystem#3041 removed. `ProfileReading::is_empty` is correctly false for that state; this
+    // consulted the DRAFT's emptiness instead, so the invariant was held at the model and bypassed
+    // at the surface. The loss banner is already overhead and says the true version.
+    if committed.is_empty() && !re_entry {
         let empty = PaneState::Empty(copy::profile_edit::EMPTY.to_string());
         flow.place(|ui, at| (state::banner(ui, at, t, &empty), ()));
         flow.gap(space::S3);

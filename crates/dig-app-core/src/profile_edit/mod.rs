@@ -88,6 +88,21 @@ pub mod copy {
         )
     }
 
+    /// Said when a person PRESSED publish on the re-entry form and this build could not do it.
+    ///
+    /// # Why this is a second sentence and not [`body_lost`] again
+    ///
+    /// [`body_lost`] is written for a card that is being READ: it invites the person to type the
+    /// details in and publish them. Shown back to them a moment after they did exactly that, it
+    /// tells them to do the thing they just did — a loop with no exit, and the reason
+    /// [`ProfileEditError`](super::ProfileEditError) already keeps commit wording and read wording
+    /// apart.
+    ///
+    /// The first thing it says is that nothing was sent and nothing was spent, because that is the
+    /// question a person has after pressing a control that costs XCH.
+    pub const FRESH_BODY_REFUSED: &str =
+        "DIG could not publish these details, and nothing was sent to the blockchain — no XCH was          spent. Writing a fresh set of details over content that cannot be read is not something          this version of DIG can do yet. Update DIG, and publishing them here will work.";
+
     /// Said over a profile whose stored content does not match what the chain anchors.
     ///
     /// A refusal, worded as one. There is no retry and no repair a person can perform from here,

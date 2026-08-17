@@ -241,6 +241,10 @@ impl ProfileEditError {
                  change what it says."
                     .to_string()
             }
+            // The READ wording, which invites the person to type the details in again. Its commit
+            // counterpart in `sentence` is the refusal, because answering a press of publish with
+            // "publish them" is a loop with no exit.
+            Self::BodyLost { root } => super::copy::body_lost(root),
             other => other.sentence(),
         }
     }

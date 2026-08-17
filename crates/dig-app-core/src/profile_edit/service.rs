@@ -280,11 +280,24 @@ impl EditService {
         else {
             return;
         };
-        let ProfileReading::Known(_) = self.reading() else {
-            // Nothing may be committed over a profile this app has not read: the edit is computed
-            // against what was read, and against a failed read it would be computed against nothing.
+        // Two readings may be published from, and the second is the exception that proves the rule.
+        //
+        // Nothing may be committed over a profile this app FAILED to read: the edit is computed
+        // against what was read, so against a failed read it would be computed against nothing and
+        // would publish a body missing everything the profile still held.
+        //
+        // `BodyLost` is not that. Its content is unrecoverable, so there is nothing left for a fresh
+        // body to lose, and refusing here is what made the remedy a silent no-op: the form invited a
+        // person to publish, the press did nothing, and the modal closed exactly as it does on a
+        // real save (dig_ecosystem#3041, the shape of #3069). The attempt now runs, and whatever the
+        // seam answers — today a refusal, because dig-account computes an edit as a delta over a
+        // body it must read first — is REPORTED rather than swallowed.
+        if !matches!(
+            self.reading(),
+            ProfileReading::Known(_) | ProfileReading::BodyLost { .. }
+        ) {
             return;
-        };
+        }
         start_commit(
             Arc::clone(seam),
             Arc::clone(bodies),
