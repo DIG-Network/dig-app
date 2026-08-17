@@ -374,9 +374,7 @@ fn mint_seed_bodies(
 
     let dir = brand_dir(&AppEnvironment::from_host())?;
     Some(std::sync::Arc::new(SealedMintSeeds::new(
-        dir.join(
-            SealedMintSeeds::<dig_app_core::account::residency::ResidencySealer>::FILE_NAME,
-        ),
+        dir.join(SealedMintSeeds::<dig_app_core::account::residency::ResidencySealer>::FILE_NAME),
         std::sync::Arc::new(residency.production_sealer()),
     )))
 }

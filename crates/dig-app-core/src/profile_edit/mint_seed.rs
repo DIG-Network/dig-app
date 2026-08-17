@@ -18,9 +18,10 @@
 //!
 //! # Why keeping a candidate forever is safe
 //!
-//! A candidate is never published on its own say-so. [`recovery::seed_body_for`] hands back bytes
-//! only when they VERIFY against the root the chain anchors, so a stale, abandoned or simply wrong
-//! candidate is inert: it fails the comparison and is skipped. Nothing here decides what is true —
+//! A candidate is never published on its own say-so.
+//! [`seed_body_for`](super::recovery::seed_body_for) hands back bytes only when they VERIFY against
+//! the root the chain anchors, so a stale, abandoned or simply wrong candidate is inert: it fails
+//! the comparison and is skipped. Nothing here decides what is true —
 //! it only widens the set of preimages the app is able to offer to that one check.
 //!
 //! # NC-2 / NC-3
@@ -186,7 +187,9 @@ mod tests {
 
         fn open(&self, label: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
             match self.vault.lock().expect("vault").get(ciphertext) {
-                Some((sealed_for, plain)) if sealed_for == label => Ok(Zeroizing::new(plain.clone())),
+                Some((sealed_for, plain)) if sealed_for == label => {
+                    Ok(Zeroizing::new(plain.clone()))
+                }
                 _ => Err(SealError::Open),
             }
         }
@@ -208,7 +211,9 @@ mod tests {
 
         {
             let before_the_crash = SealedMintSeeds::new(path.clone(), sealer.clone());
-            before_the_crash.remember(&a_seed_body()).expect("remembers");
+            before_the_crash
+                .remember(&a_seed_body())
+                .expect("remembers");
         } // and the process ends here, with the launch spend already on its way.
 
         let after_the_restart = SealedMintSeeds::new(path, sealer);
@@ -264,7 +269,9 @@ mod tests {
         );
         store.remember(&a_seed_body()).expect("first");
         store.remember(&a_seed_body()).expect("the same one again");
-        store.remember(b"DIGP\x01display-name=grace").expect("second");
+        store
+            .remember(b"DIGP\x01display-name=grace")
+            .expect("second");
 
         assert_eq!(
             store.all().expect("reads"),
