@@ -722,7 +722,7 @@ impl ShellApp {
         // the wrong signal on the window that authorises spending.
         if !prompt_is_up {
             self.chain_status
-                .draw(ctx, ctx.screen_rect(), &t, &self.transactions);
+                .draw(ctx, ctx.screen_rect(), &t, self.theme, &self.transactions);
         }
         self.show_prompt(ctx, ctx.screen_rect());
         self.dismiss_a_bar_clicked_away_from(ctx);
@@ -778,6 +778,12 @@ impl ShellApp {
             return;
         }
         if escape && self.prompt.is_none() {
+            // The transaction modal answers Escape first. On a surface that is watching a spend,
+            // Escape means "put this away" — closing the app mid-ceremony is the one action an
+            // unfinished creation cannot survive, and it must not be one keystroke away.
+            if self.chain_status.take_escape(&self.transactions) {
+                return;
+            }
             self.closing = true;
         }
     }
@@ -1203,7 +1209,7 @@ impl ShellApp {
             .show(ctx, |ui| {
                 ui.set_clip_rect(full);
                 ui.painter()
-                    .rect_filled(full, 0, rgba(scrim(t, self.theme)));
+                    .rect_filled(full, 0, rgba(scrim_over(t, self.theme)));
                 ui.interact(full, scrim_blocker(), egui::Sense::click_and_drag());
             });
     }
@@ -1241,7 +1247,7 @@ impl ShellApp {
 /// full width, so a margin of scrim always shows: a modal drawn edge to edge is indistinguishable
 /// from the window having simply become the prompt, which loses the one cue that says the app is
 /// still there, waiting behind this.
-fn modal_rect(full: Rect, chrome: Chrome, height: f32) -> Rect {
+pub(super) fn modal_rect(full: Rect, chrome: Chrome, height: f32) -> Rect {
     let (natural_width, ..) = super::opening_size(chrome);
     let size = Vec2::new(
         natural_width.min(full.width() * MODAL_SHARE),
@@ -1270,7 +1276,7 @@ fn modal_rect(full: Rect, chrome: Chrome, height: f32) -> Rect {
 ///
 /// The ceiling is the tighter of the prompt's own [`super::MAX_HEIGHT`] and [`MODAL_SHARE`] of the
 /// host window, so the modal cannot grow past the frame it lives in; past that the body scrolls.
-fn modal_height(full: Rect, at: Rect, content_bottom: f32) -> f32 {
+pub(super) fn modal_height(full: Rect, at: Rect, content_bottom: f32) -> f32 {
     let needed = (content_bottom - at.top()) + space::S6 + super::ACTION_ROW;
     let ceiling = super::MAX_HEIGHT
         .min(full.height() * MODAL_SHARE)
@@ -1282,7 +1288,7 @@ fn modal_height(full: Rect, at: Rect, content_bottom: f32) -> f32 {
 ///
 /// Derived rather than added to [`Tokens`] on purpose — a token with no counterpart in hub's
 /// `globals.css` breaks the by-eye diffability the token table exists for.
-fn scrim(t: &Tokens, theme: Theme) -> Rgba {
+pub(super) fn scrim_over(t: &Tokens, theme: Theme) -> Rgba {
     let a = match theme {
         Theme::Light => SCRIM_ALPHA_LIGHT,
         Theme::Dark => SCRIM_ALPHA_DARK,
@@ -4161,7 +4167,7 @@ mod tests {
     #[test]
     fn the_scrim_dims_both_themes_without_blacking_them_out() {
         for theme in [Theme::Light, Theme::Dark] {
-            let a = scrim(&theme.tokens(), theme).a;
+            let a = scrim_over(&theme.tokens(), theme).a;
             assert!(
                 (96..=200).contains(&a),
                 "the {theme:?} scrim at alpha {a} either fails to read as inert or hides the \
@@ -4169,8 +4175,8 @@ mod tests {
             );
         }
         assert!(
-            scrim(&Theme::Dark.tokens(), Theme::Dark).a
-                > scrim(&Theme::Light.tokens(), Theme::Light).a,
+            scrim_over(&Theme::Dark.tokens(), Theme::Dark).a
+                > scrim_over(&Theme::Light.tokens(), Theme::Light).a,
             "dark surfaces need the heavier scrim"
         );
     }

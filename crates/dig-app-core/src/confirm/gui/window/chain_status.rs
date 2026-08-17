@@ -1,17 +1,32 @@
-//! The window's live view of the chain write happening right now (dig_ecosystem#2995).
+//! The window's live view of the chain write happening right now (dig_ecosystem#2995, #3075).
 //!
-//! # Why this is not a modal
+//! # One modal, raised by the FEED and by nothing else
 //!
-//! The defect this answers is a window that stopped repainting for the length of a mainnet
-//! ceremony, and a modal that owns the app for two confirmations is that freeze with nicer pixels.
-//! `professional-ui`'s first hard rule forbids trapping the person, and a chain write takes minutes:
-//! long enough that "wait here" is not an acceptable thing to ask.
+//! Every chain broadcast the app makes puts a [`Transaction`] on [`Feed`], and this module watches
+//! that feed. When something unsettled is on it, the modal is up — wherever the broadcast came from.
+//! No transaction site constructs it, passes it, or knows it exists, which is what makes it
+//! impossible for a transaction site added later to forget it (dig_ecosystem#3075).
 //!
-//! So the status is a **sheet**, not a modal. It floats over the app at the bottom right, above the
-//! panes and below any consent prompt, it takes no scrim, it blocks nothing, and it can be put away
-//! at any moment. Putting it away does not touch the transaction — a worker is doing that, and it
-//! keeps going — and while a write is in flight a pill stays in the same corner to bring the sheet
-//! back. There is no state in which a person can lose sight of a spend they started.
+//! # Why a modal is safe here, when the module used to argue it was not
+//!
+//! The defect behind #2995 was a window that stopped repainting for the length of a mainnet
+//! ceremony, and this file previously concluded from that "a modal that owns the app for two
+//! confirmations is that freeze with nicer pixels". That conclusion mistook a repaint failure for a
+//! property of modals. The freeze is engineered around instead:
+//!
+//! * [`ctx.request_repaint`](egui::Context::request_repaint) is called on every frame the modal is
+//!   drawn, and the progress bar moves on wall-clock time, so the animation is proof of life rather
+//!   than decoration — a modal that has stopped painting is visibly a modal that has stopped.
+//! * No work happens here. The bundle is being pushed and watched by a worker thread that has never
+//!   heard of this surface, exactly as it was behind the sheet.
+//!
+//! # The escape rule is NOT waived
+//!
+//! `professional-ui`'s first hard rule stands: the modal takes Escape or **Hide** at any moment, and
+//! putting it away does not touch the transaction — the worker runs on and the corner pill keeps the
+//! live stage word. "Stays up until confirmed" means it never goes away BY ITSELF; the person can
+//! always put it away. The **Done** affordance appears only once the transaction is settled, so the
+//! surface can never claim a finish it does not have.
 //!
 //! # What it may say
 //!
@@ -22,11 +37,13 @@
 use egui::{Rect, Vec2};
 
 use super::pane::{action, card, data, flow::Flow, text};
-use crate::confirm::gui::render::{space, Weight};
-use crate::confirm::gui::theme::Tokens;
+use super::shell::{modal_height, modal_rect, scrim_over};
+use super::Chrome;
+use crate::confirm::gui::render::{rgba, space, Weight};
+use crate::confirm::gui::theme::{Theme, Tokens};
 use crate::transaction::{Feed, Stage, Transaction};
 
-/// How wide the sheet is drawn, at most.
+/// How wide the corner pill is drawn, at most.
 ///
 /// Wide enough for a full 64-character coin id to wrap onto two lines rather than five, narrow
 /// enough that it never reads as a second pane.
@@ -59,34 +76,52 @@ const DISMISS: &str = "Done";
 const KEEPS_GOING: &str = "DIG keeps working on this whether or not this is showing. Closing the \
                            window is safe; quitting DIG is not.";
 
-/// The window's transaction sheet, and whether it is showing.
+/// The window's transaction modal: which ceremony step it is watching, and whether it is showing.
 #[derive(Debug, Default)]
 pub(crate) struct ChainStatus {
-    /// Whether the person put the sheet away for the current write.
+    /// Whether the person put the modal away for the current write.
     hidden: bool,
-    /// The height the sheet came to last frame, so it can be drawn bottom-anchored.
+    /// The height the modal came to last frame, so it can be centred at its real size.
     ///
-    /// Measured rather than declared, for the same reason the in-window modal measures itself: the
+    /// Measured rather than declared, for the same reason the consent modal measures itself: the
     /// content is prose of an unknown length, and a fixed height is either a clipped id or a slab of
     /// empty card.
     height: f32,
+    /// The `what` of the phase being watched, and how many phases have been seen before it.
+    ///
+    /// A ceremony is several bundles — creating a profile mints an identity, launches a store and
+    /// commits its data — and each arrives on the feed as the same transaction under a new name. So
+    /// the ordinal is COUNTED here from the names the feed publishes, and it is the only thing the
+    /// modal claims about position. See [`step_line`] for why no total is ever stated.
+    phase: Option<String>,
+    /// How many phases of the current ceremony have been seen, the current one included.
+    step: usize,
 }
 
 impl ChainStatus {
     /// Draw whatever `feed` is reporting, and act on anything pressed.
     ///
     /// Draws nothing at all when there is no chain write, which is almost always.
-    pub(crate) fn draw(&mut self, ctx: &egui::Context, full: Rect, t: &Tokens, feed: &Feed) {
+    pub(crate) fn draw(
+        &mut self,
+        ctx: &egui::Context,
+        full: Rect,
+        t: &Tokens,
+        theme: Theme,
+        feed: &Feed,
+    ) {
         let Some(current) = feed.read() else {
-            // Nothing in flight, so the next write starts visible. A sheet that stayed hidden
-            // because a PREVIOUS one was dismissed would silently swallow the next spend.
-            self.hidden = false;
+            // Nothing in flight, so the next write starts visible and starts counting again. A
+            // modal that stayed hidden because a PREVIOUS one was dismissed would silently swallow
+            // the next spend.
+            self.forget_the_ceremony();
             return;
         };
+        self.count_the_phase(&current);
 
         let pressed = match self.hidden {
             true => self.pill(ctx, full, t, &current),
-            false => self.sheet(ctx, full, t, &current),
+            false => self.modal(ctx, full, t, theme, &current),
         };
 
         match pressed {
@@ -96,42 +131,90 @@ impl ChainStatus {
                 // Only ever clears a SETTLED write — the feed refuses anything else, so a
                 // mis-wired button here cannot make an in-flight spend disappear.
                 feed.clear_if_settled();
-                self.hidden = false;
+                self.forget_the_ceremony();
             }
             None => {}
         }
     }
 
-    /// The sheet itself, bottom-right, above the panes.
-    fn sheet(
+    /// Put the modal away, and say whether there was one to put away.
+    ///
+    /// This is how Escape reaches the modal: the shell asks first, and only closes the window when
+    /// the answer is `false`. Escape on a surface that is watching a spend must mean *put this
+    /// away*, never *quit the app in the middle of a ceremony*.
+    ///
+    /// Hiding, never clearing — the transaction is untouched and the pill keeps reporting it, which
+    /// is the same promise the **Hide** button makes.
+    pub(crate) fn take_escape(&mut self, feed: &Feed) -> bool {
+        let showing = !self.hidden && feed.read().is_some();
+        if showing {
+            self.hidden = true;
+        }
+        showing
+    }
+
+    /// Note which phase of a ceremony `current` is, counting a newly-named phase as the next step.
+    fn count_the_phase(&mut self, current: &Transaction) {
+        if self.phase.as_deref() != Some(current.what.as_str()) {
+            self.phase = Some(current.what.clone());
+            self.step += 1;
+        }
+    }
+
+    /// Start the next ceremony from nothing: showing, at step zero, watching no phase.
+    fn forget_the_ceremony(&mut self) {
+        self.hidden = false;
+        self.phase = None;
+        self.step = 0;
+    }
+
+    /// The modal itself: a scrim over the window, and the status centred on it.
+    fn modal(
         &mut self,
         ctx: &egui::Context,
         full: Rect,
         t: &Tokens,
+        theme: Theme,
         current: &Transaction,
     ) -> Option<Press> {
-        let width = SHEET_WIDTH.min(full.width() - MARGIN * 2.0);
-        let at = Rect::from_min_size(
-            egui::Pos2::new(
-                full.right() - MARGIN - width,
-                (full.bottom() - MARGIN - self.height).max(full.top() + MARGIN),
-            ),
-            Vec2::new(width, self.height.max(1.0)),
-        );
+        // The whole answer to #2995's freeze. egui is lazy, and a surface that only repaints on
+        // input would sit motionless through the minutes this modal exists to cover — which is
+        // exactly what a crashed app looks like. The shell requests its own repaints too; this
+        // one is stated here as well so the modal's liveness does not depend on a caller.
+        ctx.request_repaint();
+        self.scrim(ctx, full, t, theme);
 
+        let at = modal_rect(full, Chrome::Dialog, self.height);
+        let seconds = ctx.input(|i| i.time);
         let mut pressed = None;
         let mut bottom = at.top();
+        // Above the scrim's layer, and above the panes, so the modal is the one thing under the
+        // pointer that still answers to it.
         egui::Area::new(egui::Id::new("dig-app-chain-status"))
-            .order(egui::Order::Middle)
+            .order(egui::Order::Tooltip)
             .fixed_pos(at.left_top())
             .show(ctx, |ui| {
-                let column = Rect::from_min_size(at.left_top(), Vec2::new(width, full.height()));
+                ui.set_clip_rect(at);
+                let column =
+                    Rect::from_min_size(at.left_top(), Vec2::new(at.width(), full.height()));
                 let mut flow = Flow::new(ui, column, true);
-                pressed = body(&mut flow, t, current);
+                pressed = body(&mut flow, t, current, self.step, seconds);
                 bottom = flow.cursor();
             });
-        self.height = bottom - at.top();
+        self.height = modal_height(full, at, bottom);
         pressed
+    }
+
+    /// The dimmed window behind the modal, drawn in the shell's own scrim colour.
+    fn scrim(&self, ctx: &egui::Context, full: Rect, t: &Tokens, theme: Theme) {
+        egui::Area::new(egui::Id::new("dig-app-chain-status-scrim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(full.left_top())
+            .show(ctx, |ui| {
+                ui.set_clip_rect(full);
+                ui.painter()
+                    .rect_filled(full, 0, rgba(scrim_over(t, theme)));
+            });
     }
 
     /// The pill that brings a hidden sheet back.
@@ -194,12 +277,19 @@ fn act(label: String, weight: Weight, id: Press, element: &str) -> action::Actio
     }
 }
 
-/// The sheet's content: what is happening, what it costs, and what may be pressed.
-fn body(flow: &mut Flow, t: &Tokens, current: &Transaction) -> Option<Press> {
+/// The modal's content: what is happening, how far along, what it costs, and what may be pressed.
+fn body(
+    flow: &mut Flow,
+    t: &Tokens,
+    current: &Transaction,
+    step: usize,
+    seconds: f64,
+) -> Option<Press> {
     let settled = current.is_settled();
     let stage = current.stage.clone();
     let money = current.money.clone();
     let title = current.what.clone();
+    let position = step_line(step, current.more_to_come);
 
     flow.place(|ui, at| {
         let (height, pressed) = card::interactive_card(ui, at, t, true, Some(&title), |inner| {
@@ -209,6 +299,20 @@ fn body(flow: &mut Flow, t: &Tokens, current: &Transaction) -> Option<Press> {
                     (),
                 )
             });
+
+            // The bar carries no progress figure and is not meant to: nothing can say how far
+            // through a mempool wait a bundle is, and a bar that crept to 90% and stopped would be
+            // inventing one. It reports that the app is alive, and the words report the rest.
+            if !stage.is_settled() {
+                inner.gap(space::S4);
+                inner.place(|ui, at| (indeterminate(ui, at, t, seconds), ()));
+            }
+
+            if let Some(position) = &position {
+                inner.gap(space::S3);
+                inner.place(|ui, at| (text::caption(ui, at, t, position), ()));
+            }
+
             inner.gap(space::S3);
             inner.place(|ui, at| (text::body(ui, at, t, &stage.detail()), ()));
 
@@ -257,6 +361,72 @@ fn controls(settled: bool) -> Vec<action::Action<Press>> {
     }
 }
 
+/// How tall the indeterminate bar is drawn, matching the meter's bar so the two read as one family.
+const BAR_HEIGHT: f32 = 8.0;
+
+/// How much of the track the travelling segment occupies.
+const BAR_SHARE: f32 = 0.35;
+
+/// How long the segment takes to cross the track once, in seconds.
+///
+/// Slow enough to read as waiting rather than as loading, fast enough that a glance a second apart
+/// sees it in two different places — which is the only thing it is claiming.
+const BAR_PERIOD: f64 = 1.4;
+
+/// The travelling segment's left edge, in points from the track's left edge.
+///
+/// A pure function of the track and the clock, so the animation is ASSERTABLE: that it stays inside
+/// its track, and that it actually moves. A bar that had stopped would be the #2995 freeze wearing
+/// this modal's face, and a test that could not tell the difference would be no guard at all.
+fn bar_offset(track_width: f32, seconds: f64) -> f32 {
+    let travel = (track_width - track_width * BAR_SHARE).max(0.0);
+    let swept = (seconds.rem_euclid(BAR_PERIOD * 2.0)) / BAR_PERIOD;
+    // Out and back rather than wrapping, so the segment never jumps discontinuously across the
+    // track — a jump reads as a repaint glitch, which is the opposite of the reassurance intended.
+    let fraction = match swept <= 1.0 {
+        true => swept,
+        false => 2.0 - swept,
+    };
+    travel * fraction as f32
+}
+
+/// The indeterminate bar: a track, and a segment travelling along it. Returns the height used.
+fn indeterminate(ui: &mut egui::Ui, at: Rect, t: &Tokens, seconds: f64) -> f32 {
+    let track = Rect::from_min_size(at.left_top(), Vec2::new(at.width(), BAR_HEIGHT));
+    let corner = egui::CornerRadius::same((BAR_HEIGHT / 2.0) as u8);
+    ui.painter()
+        .rect_filled(track, corner, rgba(t.surface_2.over(t.surface)));
+    let segment = Rect::from_min_size(
+        egui::Pos2::new(
+            track.left() + bar_offset(track.width(), seconds),
+            track.top(),
+        ),
+        Vec2::new(track.width() * BAR_SHARE, BAR_HEIGHT),
+    );
+    ui.painter()
+        .rect_filled(segment, corner, rgba(t.dig_purple));
+    BAR_HEIGHT
+}
+
+/// Which step of a ceremony this is, or nothing when the write is a ceremony of one.
+///
+/// # Why it never says "of three"
+///
+/// The feed carries what a write IS and whether more follow it; no publisher declares how many
+/// bundles a ceremony will take, and a creation's ladder can end early on a failure. So a total
+/// would be a number this surface invented, drawn beside a real one — the same class of claim as
+/// rendering an unmeasured cost as zero. What CAN be said honestly is which step is in flight and
+/// whether more follow, and that is what is said.
+fn step_line(step: usize, more_to_come: bool) -> Option<String> {
+    match (step, more_to_come) {
+        (0 | 1, false) => None,
+        (step, true) => Some(format!(
+            "Step {step} of this transaction. More steps follow once this one confirms."
+        )),
+        (step, false) => Some(format!("Step {step} of this transaction — the last one.")),
+    }
+}
+
 /// The badge's colour, which must never say more than the stage does.
 ///
 /// A push is NEUTRAL, not positive: green on a broadcast is the same lie as the word "Sent" on its
@@ -275,6 +445,26 @@ fn tone(stage: &Stage) -> data::Tone {
 mod tests {
     use super::*;
     use crate::transaction::Money;
+
+    /// A window big enough that nothing is clamped by its edges.
+    fn window() -> Rect {
+        Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 600.0))
+    }
+
+    /// Run one real paint of `status` against `feed`, and say whether the MODAL was drawn.
+    ///
+    /// Read from the scrim's own layer rather than from a field on the struct: the question the
+    /// modal has to answer is "did a person see this", and `hidden == false` is a claim about
+    /// intent, which a placement or ordering mistake would satisfy just as happily.
+    fn painted_modal(status: &mut ChainStatus, feed: &Feed) -> bool {
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            status.draw(ctx, window(), &Tokens::LIGHT, Theme::Light, feed);
+        });
+        ctx.memory(|m| m.area_rect(egui::Id::new("dig-app-chain-status-scrim")))
+            .is_some()
+    }
 
     /// Every stage a write can be in, as fixtures.
     fn every_stage() -> Vec<Stage> {
@@ -378,15 +568,244 @@ mod tests {
         // Hidden again, and now with NOTHING in flight: the next write must not inherit the last
         // one's dismissal, or a spend would start silently.
         status.hidden = true;
-        let ctx = egui::Context::default();
-        let full = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 600.0));
         let empty = Feed::detached();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            status.draw(ctx, full, &Tokens::LIGHT, &empty);
-        });
+        assert!(
+            !painted_modal(&mut status, &empty),
+            "a modal was drawn with nothing in flight"
+        );
         assert!(
             !status.hidden,
-            "the sheet stayed hidden with no write in flight, so the next spend would be silent"
+            "the surface stayed hidden with no write in flight, so the next spend would be silent"
+        );
+    }
+
+    /// **A broadcast published by production code this change never touched raises the modal.**
+    ///
+    /// The load-bearing property of dig_ecosystem#3075: the modal is raised by the FEED, so no
+    /// transaction site opts in and none can forget to. The fixture is deliberately a real
+    /// publisher — [`crate::account::creation_progress`], which this change does not modify and
+    /// which the profile creation worker calls verbatim — rather than a hand-built [`Transaction`].
+    /// A hand-built one would prove the modal can draw a struct, which is a different and much
+    /// weaker claim than "what the app actually broadcasts raises it".
+    ///
+    /// The control is the same status against an EMPTY feed. Without it, a `draw` that painted a
+    /// scrim unconditionally would pass.
+    #[test]
+    fn a_broadcast_from_an_unmodified_site_raises_the_modal() {
+        use crate::account::creation_progress;
+
+        let feed = Feed::detached();
+        let mut status = ChainStatus::default();
+        assert!(
+            !painted_modal(&mut status, &feed),
+            "the modal was up before anything was broadcast"
+        );
+
+        feed.publish(creation_progress::starting(20_002));
+        assert!(
+            painted_modal(&mut status, &feed),
+            "a transaction on the feed did not raise the modal, so a broadcast can happen unseen"
+        );
+    }
+
+    /// **Escape puts the modal away and the transaction carries on.**
+    ///
+    /// Both halves matter and they pull in opposite directions: a modal that cannot be escaped traps
+    /// the person, and an escape that cancelled the ceremony would lose their money. So the feed is
+    /// re-read afterwards — asserting only `hidden` would pass for an implementation that cleared
+    /// the write on the way out.
+    #[test]
+    fn escape_puts_the_modal_away_without_touching_the_transaction() {
+        let feed = Feed::detached();
+        let base = Transaction::starting("Sending XCH", None);
+        feed.publish(base.at(Stage::Pushed {
+            id: "0xabc".to_string(),
+        }));
+
+        let mut status = ChainStatus::default();
+        assert!(painted_modal(&mut status, &feed), "the modal never came up");
+        assert!(
+            status.take_escape(&feed),
+            "Escape was refused while the modal was up"
+        );
+
+        assert!(
+            !painted_modal(&mut status, &feed),
+            "Escape left the modal up, so there is no way out of it"
+        );
+        assert_eq!(
+            feed.read().map(|t| t.stage),
+            Some(Stage::Pushed {
+                id: "0xabc".to_string()
+            }),
+            "Escape abandoned the transaction"
+        );
+        assert!(
+            !status.take_escape(&feed),
+            "Escape was swallowed with the modal already away, so it could never close the window"
+        );
+    }
+
+    /// **A three-bundle ceremony is counted as three steps, from the feed alone.**
+    ///
+    /// The user's stated case: creating a profile is three chain writes and each needs its own wait.
+    /// The fixture publishes three DIFFERENTLY-NAMED phases with a confirmation between them,
+    /// because that is the shape the real ceremony has — a mid-ceremony `Confirmed` that is not the
+    /// end. A counter keyed on anything but the phase name would miscount it.
+    #[test]
+    fn each_phase_of_a_ceremony_is_counted_as_its_own_step() {
+        let feed = Feed::detached();
+        let base = Transaction::starting("Creating your profile", None);
+        let mut status = ChainStatus::default();
+
+        let phases = [
+            "Creating your profile",
+            "Creating your profile — launching your store",
+            "Creating your profile — saving your details",
+        ];
+        for (index, phase) in phases.iter().enumerate() {
+            feed.publish(base.mid_ceremony(
+                *phase,
+                Stage::Pushed {
+                    id: format!("0x{index}"),
+                },
+            ));
+            assert!(
+                painted_modal(&mut status, &feed),
+                "{phase} did not raise the modal"
+            );
+            assert_eq!(
+                status.step,
+                index + 1,
+                "{phase} was counted as step {}",
+                status.step
+            );
+
+            // The chain proves this bundle, and the ceremony is still not over.
+            feed.publish(base.mid_ceremony(
+                *phase,
+                Stage::Confirmed {
+                    height: 9_154_450 + index as u32,
+                    made: "on chain".to_string(),
+                },
+            ));
+            let _ = painted_modal(&mut status, &feed);
+            assert_eq!(
+                status.step,
+                index + 1,
+                "a confirmation was counted as a new step"
+            );
+        }
+
+        // The ceremony ends, and the next one starts counting from one rather than from four.
+        feed.publish(base.at(Stage::Confirmed {
+            height: 9_154_460,
+            made: "done".to_string(),
+        }));
+        let _ = painted_modal(&mut status, &feed);
+        feed.clear_if_settled();
+        let _ = painted_modal(&mut status, &feed);
+        feed.publish(Transaction::starting("Sending XCH", None));
+        let _ = painted_modal(&mut status, &feed);
+        assert_eq!(
+            status.step, 1,
+            "a new ceremony inherited the last one's step count"
+        );
+    }
+
+    /// **The step line says which step it is, and never how many there are.**
+    ///
+    /// No publisher declares a ceremony's length, so a total would be invented — the same class of
+    /// claim as drawing an unmeasured cost as zero. The digit assertion is on the STRING because
+    /// that is what a person reads; a total held only in a field would be harmless.
+    #[test]
+    fn the_step_line_never_invents_a_total() {
+        assert_eq!(
+            step_line(1, false),
+            None,
+            "a single spend was given step language"
+        );
+        let mid = step_line(2, true).expect("a mid-ceremony step said nothing about its position");
+        assert!(
+            mid.contains("Step 2"),
+            "{mid} does not say which step it is"
+        );
+        assert!(
+            mid.contains("More steps follow"),
+            "{mid} hides that more spends are coming"
+        );
+        assert!(
+            !mid.contains(" of 2") && !mid.contains(" of 3"),
+            "{mid} invented a total"
+        );
+        let last = step_line(3, false).expect("the last step of a ceremony said nothing");
+        assert!(
+            last.contains("Step 3"),
+            "{last} does not say which step it is"
+        );
+        assert!(
+            !last.contains("More steps follow"),
+            "{last} promises a step that is not coming"
+        );
+    }
+
+    /// **The bar stays inside its track, and it moves.**
+    ///
+    /// Movement is the whole point (dig_ecosystem#2995): a modal that stopped painting looks exactly
+    /// like a frozen app, and the animation is the proof of life. Sampled across four full periods
+    /// rather than at two instants, because a bar that only moved for the first half second would
+    /// satisfy a two-sample test and still stop while a person watched.
+    #[test]
+    fn the_bar_travels_inside_its_track_and_never_stalls() {
+        let width = 320.0;
+        let travel = width - width * BAR_SHARE;
+        let mut seen: Vec<f32> = Vec::new();
+        let mut at = 0.0;
+        while at < BAR_PERIOD * 4.0 {
+            let offset = bar_offset(width, at);
+            assert!(
+                (0.0..=travel + f32::EPSILON).contains(&offset),
+                "at {at}s the bar sat at {offset}, outside a {travel}-wide travel"
+            );
+            seen.push(offset);
+            at += BAR_PERIOD / 8.0;
+        }
+        // Every consecutive pair differs, so the bar is never motionless for a sampled interval.
+        assert!(
+            seen.windows(2).all(|pair| (pair[0] - pair[1]).abs() > 1.0),
+            "the bar stopped moving somewhere in {seen:?}"
+        );
+        // A track with no room to travel in is arithmetic, not a panic or a NaN.
+        assert_eq!(
+            bar_offset(0.0, 3.5),
+            0.0,
+            "a zero-width track produced a position"
+        );
+    }
+
+    /// **An unconfirmed write is never offered a way to finish.**
+    ///
+    /// The modal's version of the honesty rule: `Pushed` is the state the person waits in, and a
+    /// **Done** button there would let them close a surface that had proved nothing. The fixture is
+    /// a mid-ceremony CONFIRMATION rather than a push, because that is the case a settledness check
+    /// reading the stage instead of the transaction would get wrong.
+    #[test]
+    fn an_unconfirmed_write_is_never_offered_a_finish() {
+        let unsettled = Transaction::starting("Creating your profile", None).mid_ceremony(
+            "Creating your profile",
+            Stage::Confirmed {
+                height: 9_154_450,
+                made: "half".to_string(),
+            },
+        );
+        assert!(
+            !unsettled.is_settled(),
+            "a mid-ceremony confirmation read as the end"
+        );
+        assert_eq!(
+            controls(unsettled.is_settled())[0].id,
+            Press::Hide,
+            "a ceremony still holding the person's money offered to be finished"
         );
     }
 }
