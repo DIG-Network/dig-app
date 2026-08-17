@@ -263,3 +263,33 @@ mod tests {
         );
     }
 }
+
+/// The offer the Wallet pane is currently showing, ready for the shell to take.
+///
+/// # Why a staged value rather than an action payload
+///
+/// [`TrayAction`](crate::tray_menu::TrayAction) is `Copy`, and a `ReviewedOffer` is not — but the
+/// stronger reason is the one that would apply anyway: what must reach the shell is the offer whose
+/// terms a person actually read, and a [`ReviewedOffer`] is the only value that carries the bytes and
+/// their summary together. Passing an `offer1…` string instead would put a second, unparsed copy in
+/// flight for the two to disagree about.
+///
+/// One slot, because the pane shows one offer and the take path admits one take at a time.
+fn slot() -> &'static std::sync::Mutex<Option<ReviewedOffer>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<ReviewedOffer>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(Default::default)
+}
+
+/// Remember `reviewed` as the offer on screen, replacing whatever was there.
+pub fn stage(reviewed: Option<ReviewedOffer>) {
+    if let Ok(mut slot) = slot().lock() {
+        *slot = reviewed;
+    }
+}
+
+/// The offer on screen, if one is staged.
+#[must_use]
+pub fn staged() -> Option<ReviewedOffer> {
+    slot().lock().ok().and_then(|slot| slot.clone())
+}

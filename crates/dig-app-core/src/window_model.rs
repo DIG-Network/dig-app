@@ -770,6 +770,9 @@ mod tests {
             // Wallet pane draws, and a native menu cannot hold one. It is listed here because this
             // match is the compile-time prompt to make exactly that decision about a new variant.
             | TrayAction::SendXch(_)
+            // Never a menu ROW, for the same reason as `SendXch`: taking an offer needs a field to
+            // paste an `offer1…` string into, and a native menu cannot hold one.
+            | TrayAction::TakeOffer
             // Never a menu ROW either, and for a stronger reason than `SendXch`: nobody clicks it
             // at all. The state loop raises it on a schedule (dig_ecosystem#2950), which is the
             // whole of what the user asked for — an *automatic* popout — so a row offering it would

@@ -2998,6 +2998,19 @@ mod tray {
             TrayAction::SendXch(request) => {
                 send_holder().send(status, session.as_ref().map(|s| &s.residency), &request)
             }
+            // The offer itself is staged by the pane as a `ReviewedOffer` — the value that owns both
+            // the offer bytes and the summary they produced — so the shell cannot take an offer
+            // other than the one that was on screen. A missing stage means the card moved on between
+            // the click and this call, which is nothing to take rather than something to guess at.
+            TrayAction::TakeOffer => {
+                if let Some(reviewed) = dig_app_core::wallet::offer::staged() {
+                    dig_app_core::wallet::taking::holder().take(
+                        status,
+                        session.as_ref().map(|s| &s.residency),
+                        &reviewed,
+                    );
+                }
+            }
             // The acknowledgement was already judged by `ReleaseDraft::assess` in the pane, so what
             // arrives here is an accepted claim (dig_ecosystem#2894). The holder still re-reads the
             // send state, because it may have resolved while the person was looking the coin up.

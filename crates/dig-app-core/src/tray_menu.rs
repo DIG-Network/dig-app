@@ -1003,6 +1003,18 @@ pub enum TrayAction {
     /// This action is offered by the Wallet PANE and never by a tray row: a menu cannot hold a form,
     /// and an amount is not something a person picks from a list.
     SendXch(dig_account::TransferRequest),
+    /// Take the Chia offer the person pasted or scanned and is looking at (dig_ecosystem#3077).
+    ///
+    /// It carries NOTHING, and that is a design choice rather than a limitation of this `Copy` enum.
+    /// The offer itself lives in [`crate::wallet::offer::staged`], as a
+    /// [`ReviewedOffer`](crate::wallet::offer::ReviewedOffer) — a value that owns both the offer
+    /// bytes and the summary those very bytes produced, whose only constructor is the parser. So the
+    /// shell cannot take an offer other than the one the pane read and displayed: there is no raw
+    /// string in flight for the two to disagree about.
+    ///
+    /// Offered by the Wallet PANE only, like [`SendXch`](Self::SendXch): it needs a field to paste
+    /// an `offer1…` string into, and a native menu cannot hold one.
+    TakeOffer,
     /// Release a send whose fate this app never learned, on the person's own say-so
     /// (dig_ecosystem#2894).
     ///
