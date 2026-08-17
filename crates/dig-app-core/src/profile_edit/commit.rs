@@ -32,6 +32,8 @@ use dig_account::edit::EditStatus;
 use super::bodies::{BodyRead, BodyStore, BodyStoreError};
 use super::draft::{ProfileDraft, SlotChange};
 use super::field::ProfileField;
+use super::pending::{PendingBodies, PendingBody};
+use super::predict;
 use crate::transaction::{Feed, Stage, Transaction};
 
 /// A profile as it was read, in this app's vocabulary.
@@ -43,14 +45,19 @@ pub struct ProfileSnapshot {
     pub root: String,
     /// The editable fields it publishes.
     pub values: std::collections::BTreeMap<ProfileField, String>,
-    /// How many bytes the verified body came to — the base every size projection adjusts.
-    pub body_len: usize,
+    /// The verified body itself — the base an edit is computed over, and the base every size
+    /// projection adjusts.
+    ///
+    /// Carried in full rather than as a length because the next body cannot be computed without it,
+    /// and computing the next body BEFORE the spend is what lets it be written down before the
+    /// spend (dig_ecosystem#3066).
+    pub body: Vec<u8>,
 }
 
 impl ProfileSnapshot {
     /// The draft a person edits over this profile.
     pub fn draft(&self) -> ProfileDraft {
-        ProfileDraft::over(self.values.clone(), self.body_len)
+        ProfileDraft::over(self.values.clone(), self.body.len())
     }
 }
 
@@ -132,6 +139,12 @@ pub enum ProfileEditError {
         why: BodyStoreError,
         /// The root that is now, or will shortly be, on chain.
         root: String,
+        /// Whether this computer holds a copy of the bytes, to be handed to the node later.
+        ///
+        /// The difference between an inconvenience and a permanent loss, so it is a field rather
+        /// than an assumption: a sentence that promised a retry this app cannot make would be the
+        /// most damaging thing the editor could say.
+        kept_locally: bool,
     },
 }
 
@@ -155,11 +168,23 @@ impl ProfileEditError {
                  second time."
             ),
             Self::Refused(why) => format!("DIG could not make that change: {why}"),
-            Self::NotPersisted { why, root } => format!(
+            Self::NotPersisted {
+                why,
+                root,
+                kept_locally,
+            } => format!(
                 "Your change was sent to the blockchain, but DIG could not store the profile \
-                 content it points at ({root}). Until it is stored, other people will not be able \
-                 to read your profile. {}",
-                why.sentence()
+                 content it points at ({root}) on your node, so other people cannot read your \
+                 profile yet. {} {}",
+                why.sentence(),
+                match kept_locally {
+                    true =>
+                        "DIG has kept a copy of it on this computer, so nothing is lost. It offers \
+                         that copy to your node again the next time DIG starts.",
+                    false =>
+                        "DIG could NOT keep a copy on this computer: leave DIG open until your \
+                         profile shows as published.",
+                }
             ),
         }
     }
@@ -256,6 +281,8 @@ pub enum EditSeams {
         seam: Arc<dyn ProfileEditSeam>,
         /// Keeps what the commit produces.
         bodies: Arc<dyn BodyStore>,
+        /// Keeps it on THIS computer until the node will take it (dig_ecosystem#3066).
+        pending: Arc<dyn PendingBodies>,
     },
     /// This build cannot read chain or push a bundle, so no profile can be edited on this machine.
     NoChainTransport,
@@ -283,14 +310,42 @@ impl EditSeams {
 pub fn commit_and_persist(
     seam: &dyn ProfileEditSeam,
     bodies: &dyn BodyStore,
+    pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
 ) -> Result<CommitOutcome, ProfileEditError> {
-    let outcome = seam.commit(changes)?;
+    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes);
+
+    let outcome = match seam.commit(changes) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // Only an outcome that PROVES nothing reached a mempool may drop the copy. An
+            // unanswered chain may have taken the bundle, and deleting the preimage of a root that
+            // is quietly confirming is the exact loss this function exists to prevent.
+            if let (Some(root), true) = (&foreseen, error.profile_is_unchanged()) {
+                let _ = pending.forget(store_id, root);
+            }
+            return Err(error);
+        }
+    };
+
+    // The prediction is never trusted over the commit's own answer: a root the commit did not
+    // produce is a body no node will ever accept, so it is dropped here, in the call that made it.
+    if let Some(root) = foreseen.filter(|root| root != &outcome.root) {
+        let _ = pending.forget(store_id, &root);
+    }
+    let kept_locally = pending
+        .remember(&PendingBody {
+            store_id: store_id.to_string(),
+            root: outcome.root.clone(),
+            body: outcome.body.clone(),
+        })
+        .is_ok();
 
     let kept = |why: BodyStoreError| ProfileEditError::NotPersisted {
         why,
         root: outcome.root.clone(),
+        kept_locally,
     };
 
     bodies
@@ -298,7 +353,11 @@ pub fn commit_and_persist(
         .map_err(kept)?;
 
     match bodies.get(store_id, &outcome.root).map_err(kept)? {
-        BodyRead::Held(held) if held == outcome.body => Ok(outcome),
+        BodyRead::Held(held) if held == outcome.body => {
+            // The node has them, proved by reading them back, so this machine no longer needs to.
+            let _ = pending.forget(store_id, &outcome.root);
+            Ok(outcome)
+        }
         BodyRead::Held(held) => Err(kept(BodyStoreError::Refused(format!(
             "your node stored {} bytes where DIG sent {}",
             held.len(),
@@ -308,6 +367,37 @@ pub fn commit_and_persist(
             "your node accepted the profile content and then did not have it".to_string(),
         ))),
     }
+}
+
+/// Work out what the edit will publish and write it down, BEFORE anything is signed or pushed.
+///
+/// Returns the root it wrote down, or `None` when no honest prediction was available — an
+/// unreadable current profile, an unencodable next one, or a store that could not keep it. `None`
+/// is not reported to anyone: it means this attempt has only the post-commit copy to fall back on,
+/// which is what shipped before, and refusing to save someone's profile because a cache write
+/// failed would be a second failure invented from the first.
+fn write_down_before_the_spend(
+    seam: &dyn ProfileEditSeam,
+    pending: &dyn PendingBodies,
+    store_id: &str,
+    changes: &[(ProfileField, SlotChange)],
+) -> Option<String> {
+    let snapshot = seam.read().ok()?;
+    let current_root = root_bytes(&snapshot.root)?;
+    let (root, body) = predict::predicted_body(&snapshot.body, current_root, changes)?;
+    pending
+        .remember(&PendingBody {
+            store_id: store_id.to_string(),
+            root: root.clone(),
+            body,
+        })
+        .ok()?;
+    Some(root)
+}
+
+/// A 64-hex root as the bytes the format checks against.
+fn root_bytes(root: &str) -> Option<[u8; 32]> {
+    hex::decode(root).ok()?.try_into().ok()
 }
 
 /// The line a person reads while their edit is being written.
@@ -402,6 +492,7 @@ fn watch_for_confirmation(
 pub fn start_commit(
     seam: Arc<dyn ProfileEditSeam>,
     bodies: Arc<dyn BodyStore>,
+    pending: Arc<dyn PendingBodies>,
     store_id: String,
     changes: Vec<(ProfileField, SlotChange)>,
     feed: Feed,
@@ -414,7 +505,7 @@ pub fn start_commit(
         // published before the call rather than after, because the call is the slow part and a
         // person watching deserves to know which slow part it is.
         feed.publish(opening.at(Stage::Signing));
-        match commit_and_persist(&*seam, &*bodies, &store_id, &changes) {
+        match commit_and_persist(&*seam, &*bodies, &*pending, &store_id, &changes) {
             Ok(outcome) => {
                 // Published BEFORE the watch begins, because the push is a fact the moment it
                 // happens and the watch takes minutes. The stage is `Pushed` — never `Confirmed` —
@@ -487,8 +578,85 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    use dig_social_profile::body::VerifiedBody;
+    use dig_social_profile::profile::Profile;
+    use dig_social_profile::slot::SlotId;
+    use dig_social_profile::value::Value;
+
     use super::super::bodies::doubles::{ForgetfulBodies, InMemoryBodies, RefusingBodies};
+    use super::super::pending::doubles::{InMemoryPending, RefusingPending};
+    use super::super::pending::{PendingBodies as _, PendingBody};
     use super::*;
+
+    /// The profile the seams below are editing, as real DPB bytes and the root they commit to.
+    ///
+    /// Real rather than a placeholder because the pre-spend write is computed FROM these bytes: a
+    /// fixture the format cannot open predicts nothing, and every test of the pre-spend write over
+    /// it would pass while proving the write never happens.
+    fn current_body() -> (Vec<u8>, [u8; 32]) {
+        let mut profile = Profile::new();
+        profile.set(
+            SlotId(ProfileField::DisplayName.slot().id()),
+            Value::Utf8("Ada".into()),
+        );
+        let body = VerifiedBody::from_profile(&profile).expect("a body");
+        (body.as_bytes().to_vec(), body.root())
+    }
+
+    /// A seam that commits the edit the way the real crate does: the body it returns is the one
+    /// the changes actually produce over [`current_body`], at the root that body commits to.
+    ///
+    /// [`Committing`] deliberately does NOT — it answers a fixed, unrelated root — so the two
+    /// together cover both sides of the prediction check.
+    struct Honest;
+
+    impl Honest {
+        /// What committing `changes` publishes.
+        fn published(changes: &[(ProfileField, SlotChange)]) -> (String, Vec<u8>) {
+            let (bytes, root) = current_body();
+            super::super::predict::predicted_body(&bytes, root, changes)
+                .expect("the fixture edit encodes")
+        }
+    }
+
+    impl ProfileEditSeam for Honest {
+        fn store_id(&self) -> String {
+            STORE.into()
+        }
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Ok(ProfileSnapshot {
+                store_id: STORE.into(),
+                root: hex::encode(current_body().1),
+                values: BTreeMap::new(),
+                body: current_body().0,
+            })
+        }
+        fn commit(
+            &self,
+            changes: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            let (root, body) = Self::published(changes);
+            Ok(CommitOutcome {
+                status: EditStatus::Pushed {
+                    new_root: [0x22; 32],
+                },
+                root,
+                body,
+            })
+        }
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            Ok(None)
+        }
+    }
+
+    /// A node that refuses every `putBody` the way the live one does while the chain is still
+    /// catching up — the exact refusal measured on 12.13.0.
+    fn a_node_awaiting_confirmation() -> RefusingBodies {
+        RefusingBodies(BodyStoreError::Refused(
+            "root 371a… is not this store's confirmed on-chain root 7165… — the chain is the              authority"
+                .into(),
+        ))
+    }
 
     const STORE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const NEW_ROOT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
@@ -548,9 +716,9 @@ mod tests {
         fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
             Ok(ProfileSnapshot {
                 store_id: STORE.into(),
-                root: "00".repeat(32),
+                root: hex::encode(current_body().1),
                 values: BTreeMap::new(),
-                body_len: 5,
+                body: current_body().0,
             })
         }
 
@@ -614,8 +782,14 @@ mod tests {
     fn a_committed_edit_keeps_its_bytes_at_its_root() {
         let seam = Committing::pushed();
         let bodies = InMemoryBodies::default();
-        let outcome =
-            commit_and_persist(&seam, &bodies, STORE, &a_change()).expect("the edit commits");
+        let outcome = commit_and_persist(
+            &seam,
+            &bodies,
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        )
+        .expect("the edit commits");
 
         assert_eq!(
             bodies.get(STORE, &outcome.root),
@@ -632,8 +806,14 @@ mod tests {
     /// it this test passes while the profile is unreadable forever.
     #[test]
     fn a_store_that_accepts_and_forgets_fails_the_commit_rather_than_reporting_success() {
-        let error = commit_and_persist(&Committing::pushed(), &ForgetfulBodies, STORE, &a_change())
-            .expect_err("a commit whose body was not kept must not report success");
+        let error = commit_and_persist(
+            &Committing::pushed(),
+            &ForgetfulBodies,
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        )
+        .expect_err("a commit whose body was not kept must not report success");
 
         match &error {
             ProfileEditError::NotPersisted { root, .. } => assert_eq!(root, NEW_ROOT),
@@ -643,7 +823,10 @@ mod tests {
         // sent, and the content is not stored.
         let said = error.sentence();
         assert!(said.contains("sent to the blockchain"), "said: {said}");
-        assert!(said.contains("not be able to read"), "said: {said}");
+        assert!(
+            said.contains("cannot read your profile yet"),
+            "said: {said}"
+        );
         assert!(
             !error.profile_is_unchanged(),
             "a failed persist happened AFTER a successful push; offering the form again invites a \
@@ -664,8 +847,14 @@ mod tests {
                 Ok(BodyRead::Held(b"something else".to_vec()))
             }
         }
-        let error = commit_and_persist(&Committing::pushed(), &Substituting, STORE, &a_change())
-            .expect_err("bytes that are not the ones committed must not be accepted");
+        let error = commit_and_persist(
+            &Committing::pushed(),
+            &Substituting,
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        )
+        .expect_err("bytes that are not the ones committed must not be accepted");
         assert!(matches!(error, ProfileEditError::NotPersisted { .. }));
     }
 
@@ -674,8 +863,14 @@ mod tests {
     #[test]
     fn an_unreachable_store_is_reported_as_the_edit_having_gone_through() {
         let bodies = RefusingBodies(BodyStoreError::Unreachable("no node".into()));
-        let error = commit_and_persist(&Committing::pushed(), &bodies, STORE, &a_change())
-            .expect_err("an unstorable body is a failure");
+        let error = commit_and_persist(
+            &Committing::pushed(),
+            &bodies,
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        )
+        .expect_err("an unstorable body is a failure");
         assert!(!error.profile_is_unchanged());
         assert!(error.sentence().contains("sent to the blockchain"));
     }
@@ -710,8 +905,14 @@ mod tests {
     #[test]
     fn a_rejected_edit_leaves_the_profile_unchanged() {
         let seam = Refusing(ProfileEditError::Rejected("bad signature".into()));
-        let error = commit_and_persist(&seam, &InMemoryBodies::default(), STORE, &a_change())
-            .expect_err("a rejection is a failure");
+        let error = commit_and_persist(
+            &seam,
+            &InMemoryBodies::default(),
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        )
+        .expect_err("a rejection is a failure");
         assert!(error.profile_is_unchanged());
     }
 
@@ -720,8 +921,14 @@ mod tests {
     #[test]
     fn an_unreachable_chain_does_not_promise_the_profile_is_unchanged() {
         let seam = Refusing(ProfileEditError::ChainUnreachable("timed out".into()));
-        let error = commit_and_persist(&seam, &InMemoryBodies::default(), STORE, &a_change())
-            .expect_err("an unanswered chain is a failure");
+        let error = commit_and_persist(
+            &seam,
+            &InMemoryBodies::default(),
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        )
+        .expect_err("an unanswered chain is a failure");
         assert!(!error.profile_is_unchanged());
         assert!(error.sentence().contains("before trying it a second time"));
     }
@@ -732,8 +939,227 @@ mod tests {
     fn a_failed_commit_stores_nothing() {
         let bodies = InMemoryBodies::default();
         let seam = Refusing(ProfileEditError::Rejected("declined".into()));
-        let _ = commit_and_persist(&seam, &bodies, STORE, &a_change());
+        let _ = commit_and_persist(
+            &seam,
+            &bodies,
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+        );
         assert_eq!(bodies.get(STORE, NEW_ROOT), Ok(BodyRead::Nothing));
+    }
+
+    // -- the copy that survives a restart (dig_ecosystem#3066) ----------------------------------
+
+    /// **A body the node will not take yet is kept on this computer.**
+    ///
+    /// # The fixture, and what this test does NOT prove
+    ///
+    /// The node here answers the way the live one did when this was measured: the chain has not
+    /// confirmed the new root yet, so `putBody` is refused. A store that ACCEPTED the body would
+    /// clear the entry, so the refusal is what makes the assertion below load-bearing at all.
+    ///
+    /// It does not prove the write happened BEFORE the push — the post-commit write satisfies it
+    /// identically, which was confirmed by reverting the pre-spend call and watching this stay
+    /// green. The ordering is pinned by
+    /// [`a_commit_whose_outcome_is_unknown_keeps_the_copy`], which is the only test here that a
+    /// commit-answer-only implementation cannot pass.
+    #[test]
+    fn a_body_the_node_will_not_take_yet_is_kept_on_this_computer() {
+        let pending = InMemoryPending::default();
+        let changes = a_change();
+        let (expected_root, expected_body) = Honest::published(&changes);
+
+        let error = commit_and_persist(
+            &Honest,
+            &a_node_awaiting_confirmation(),
+            &pending,
+            STORE,
+            &changes,
+        )
+        .expect_err("a node that will not take the body is not a success");
+
+        assert_eq!(
+            pending.all().expect("reads"),
+            vec![PendingBody {
+                store_id: STORE.to_string(),
+                root: expected_root,
+                body: expected_body,
+            }],
+            "the bytes the chain now commits to are held nowhere but this process"
+        );
+        // And the person is told the truth about BOTH halves: the change went out, and the content
+        // is safe here meanwhile.
+        match &error {
+            ProfileEditError::NotPersisted { kept_locally, .. } => assert!(*kept_locally),
+            other => panic!("the wrong failure: {other:?}"),
+        }
+        let said = error.sentence();
+        assert!(said.contains("sent to the blockchain"), "said: {said}");
+        assert!(said.contains("kept a copy"), "said: {said}");
+        // The retry it promises must be the one `drain` actually performs — a start-up drain, and
+        // nothing in between. A sentence describing a background retry would be a promise no code
+        // in this crate keeps (dig_ecosystem#3078 adds the timer that would make one true).
+        assert!(said.contains("next time DIG starts"), "said: {said}");
+        for invented in [
+            "keep trying",
+            "keeps trying",
+            "on a timer",
+            "in the background",
+        ] {
+            assert!(
+                !said.contains(invented),
+                "promised a retry no code performs ({invented}): {said}"
+            );
+        }
+    }
+
+    /// **The pre-spend write happens even if the COMMIT never returns.**
+    ///
+    /// # Why this drives the seam rather than asserting on the happy path
+    ///
+    /// The nearest wrong implementation writes the body from the commit's own answer — which is
+    /// correct in every test where the commit returns, and absent in exactly the case the ticket
+    /// exists for: a process that dies between the push and the return. The seam here reports an
+    /// UNANSWERED chain, which is the closest a test can get to that death and is the one commit
+    /// outcome that must NOT clear the copy.
+    #[test]
+    fn a_commit_whose_outcome_is_unknown_keeps_the_copy() {
+        struct PushedThenSilent;
+        impl ProfileEditSeam for PushedThenSilent {
+            fn store_id(&self) -> String {
+                STORE.into()
+            }
+            fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+                Honest.read()
+            }
+            fn commit(
+                &self,
+                _: &[(ProfileField, SlotChange)],
+            ) -> Result<CommitOutcome, ProfileEditError> {
+                Err(ProfileEditError::ChainUnreachable("no answer".into()))
+            }
+            fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+                Err(ProfileEditError::ChainUnreachable("no answer".into()))
+            }
+        }
+
+        let pending = InMemoryPending::default();
+        let changes = a_change();
+        let _ = commit_and_persist(
+            &PushedThenSilent,
+            &InMemoryBodies::default(),
+            &pending,
+            STORE,
+            &changes,
+        );
+
+        assert_eq!(
+            pending.all().expect("reads"),
+            vec![PendingBody {
+                store_id: STORE.to_string(),
+                root: Honest::published(&changes).0,
+                body: Honest::published(&changes).1,
+            }],
+            "an edit that may be in a mempool right now had its only copy deleted"
+        );
+    }
+
+    /// An edit the mempool DECLINED leaves nothing behind: the root is not on chain and never will
+    /// be, so a copy of its body would be a file no drain can ever clear.
+    #[test]
+    fn a_declined_edit_leaves_no_copy_behind() {
+        struct Declining;
+        impl ProfileEditSeam for Declining {
+            fn store_id(&self) -> String {
+                STORE.into()
+            }
+            fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+                Honest.read()
+            }
+            fn commit(
+                &self,
+                _: &[(ProfileField, SlotChange)],
+            ) -> Result<CommitOutcome, ProfileEditError> {
+                Err(ProfileEditError::Rejected("declined".into()))
+            }
+            fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+                Ok(None)
+            }
+        }
+
+        let pending = InMemoryPending::default();
+        let _ = commit_and_persist(
+            &Declining,
+            &InMemoryBodies::default(),
+            &pending,
+            STORE,
+            &a_change(),
+        );
+        assert!(
+            pending.all().expect("reads").is_empty(),
+            "a body was left waiting for a root the chain refused"
+        );
+    }
+
+    /// A prediction the commit CONTRADICTS is dropped in the same call that made it — otherwise the
+    /// file accumulates bodies for roots that do not exist and no drain can ever clear them.
+    ///
+    /// [`Committing`] answers a fixed root unrelated to the edit, which is exactly that divergence.
+    #[test]
+    fn a_prediction_the_commit_contradicts_is_dropped() {
+        let pending = InMemoryPending::default();
+        commit_and_persist(
+            &Committing::pushed(),
+            &InMemoryBodies::default(),
+            &pending,
+            STORE,
+            &a_change(),
+        )
+        .expect("commits");
+
+        assert!(
+            pending.all().expect("reads").is_empty(),
+            "the node took the real body, so nothing should still be waiting"
+        );
+    }
+
+    /// Once the node HAS the bytes — proved by reading them back — this computer stops holding them.
+    #[test]
+    fn a_body_the_node_verifiably_holds_is_no_longer_kept_here() {
+        let pending = InMemoryPending::default();
+        let node = InMemoryBodies::default();
+        let outcome = commit_and_persist(&Honest, &node, &pending, STORE, &a_change())
+            .expect("the edit commits");
+
+        assert!(pending.all().expect("reads").is_empty());
+        assert_eq!(
+            node.get(STORE, &outcome.root),
+            Ok(BodyRead::Held(outcome.body.clone())),
+            "the entry was cleared without the node actually holding the bytes"
+        );
+    }
+
+    /// A pending store that cannot keep anything says so, rather than promising a retry that will
+    /// never happen. The difference decides whether a person may safely close the app.
+    #[test]
+    fn a_copy_that_could_not_be_kept_is_never_reported_as_kept() {
+        let error = commit_and_persist(
+            &Honest,
+            &a_node_awaiting_confirmation(),
+            &RefusingPending,
+            STORE,
+            &a_change(),
+        )
+        .expect_err("a node that will not take the body is not a success");
+
+        match &error {
+            ProfileEditError::NotPersisted { kept_locally, .. } => assert!(!*kept_locally),
+            other => panic!("the wrong failure: {other:?}"),
+        }
+        let said = error.sentence();
+        assert!(said.contains("could NOT keep a copy"), "said: {said}");
+        assert!(said.contains("leave DIG open"), "said: {said}");
     }
 
     // -- what a surface may say about it -------------------------------------------------------
@@ -794,7 +1220,14 @@ mod tests {
                 SlotChange::Set("Ada".to_string()),
             ),
         ];
-        commit_and_persist(&seam, &InMemoryBodies::default(), STORE, &changes).expect("commits");
+        commit_and_persist(
+            &seam,
+            &InMemoryBodies::default(),
+            &InMemoryPending::default(),
+            STORE,
+            &changes,
+        )
+        .expect("commits");
         assert_eq!(*seam.asked.lock().expect("asked"), changes);
     }
 
@@ -811,6 +1244,7 @@ mod tests {
         start_commit(
             Arc::new(Committing::pushed()),
             Arc::new(InMemoryBodies::default()),
+            Arc::new(InMemoryPending::default()),
             STORE.to_string(),
             a_change(),
             feed.clone(),
@@ -840,6 +1274,7 @@ mod tests {
         start_commit(
             Arc::new(Committing::pushed()),
             Arc::new(ForgetfulBodies),
+            Arc::new(InMemoryPending::default()),
             STORE.to_string(),
             a_change(),
             feed.clone(),
@@ -847,7 +1282,7 @@ mod tests {
         );
         match wait_for_settled(&feed).stage {
             Stage::Failed { why, next } => {
-                assert!(why.contains("not be able to read"), "why: {why}");
+                assert!(why.contains("cannot read your profile yet"), "why: {why}");
                 assert!(!next.is_empty());
             }
             other => panic!("a lost body settled as {other:?}"),

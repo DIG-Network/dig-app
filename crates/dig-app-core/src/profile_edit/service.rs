@@ -240,7 +240,12 @@ impl EditService {
     /// Silently does nothing without seams. The control that reaches here is withheld by the model
     /// in that state, so this is the belt to that braces rather than a path a person can take.
     pub fn save(&self, changes: Vec<(ProfileField, SlotChange)>) {
-        let EditSeams::Wired { seam, bodies } = &self.seams else {
+        let EditSeams::Wired {
+            seam,
+            bodies,
+            pending,
+        } = &self.seams
+        else {
             return;
         };
         let ProfileReading::Known(_) = self.reading() else {
@@ -251,6 +256,7 @@ impl EditService {
         start_commit(
             Arc::clone(seam),
             Arc::clone(bodies),
+            Arc::clone(pending),
             // Asked of the seam directly, never taken from a fresh `read()`: naming the store costs
             // nothing, and reading it would put a node round trip on the thread that pressed Save.
             seam.store_id(),
@@ -309,6 +315,7 @@ mod tests {
 
     use super::super::bodies::doubles::InMemoryBodies;
     use super::super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
+    use super::super::pending::doubles::InMemoryPending;
     use super::*;
 
     /// A seam over a profile that reads, with a counter so a test can see how often.
@@ -352,7 +359,7 @@ mod tests {
             store_id: "11".repeat(32),
             root: "22".repeat(32),
             values,
-            body_len: 22,
+            body: vec![b'x'; 22],
         }
     }
 
@@ -360,6 +367,7 @@ mod tests {
         EditService::detached(EditSeams::Wired {
             seam,
             bodies: Arc::new(InMemoryBodies::default()),
+            pending: Arc::new(InMemoryPending::default()),
         })
     }
 
@@ -437,6 +445,7 @@ mod tests {
             EditSeams::Wired {
                 seam: seam.clone(),
                 bodies: Arc::new(InMemoryBodies::default()),
+                pending: Arc::new(InMemoryPending::default()),
             },
             INTERVAL,
             clock.handle(),

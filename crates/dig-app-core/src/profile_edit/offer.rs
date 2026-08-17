@@ -115,6 +115,7 @@ mod tests {
         EditSeams::Wired {
             seam: std::sync::Arc::new(super::super::commit::tests_support::NeverSeam),
             bodies: std::sync::Arc::new(super::super::commit::tests_support::NeverBodies),
+            pending: std::sync::Arc::new(super::super::pending::doubles::InMemoryPending::default()),
         }
     }
 

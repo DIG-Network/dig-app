@@ -246,7 +246,7 @@ where
                 .iter()
                 .filter_map(|(slot, value)| Some((ProfileField::of_slot(slot)?, value.to_string())))
                 .collect(),
-            body_len: snapshot.body_bytes().len(),
+            body: snapshot.body_bytes().to_vec(),
         })
     }
 
