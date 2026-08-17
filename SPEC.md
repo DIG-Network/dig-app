@@ -2817,9 +2817,13 @@ toast raised in the same run as the shortcut is created does not appear.
 The shortcut is REPAIRED, not merely created: a shortcut whose icon does not already name the running
 executable is rewritten, so a machine carrying an earlier build's iconless shortcut gets the DIG Mark
 rather than the generic file icon (#3076). `prepare_host()` is the ONLY path that writes it —
-delivering a toast MUST NOT — and a process launched by cargo MUST decline to write it at all, because
-its executable lives under `target/` and the next rebuild deletes it. A cargo TEST binary reaching the
-writer is a defect and fails the suite rather than modifying the developer's machine.
+delivering a toast MUST NOT — and a process whose own executable lives inside a cargo `target/` build
+directory MUST decline to write it at all, because the next rebuild deletes that executable and leaves
+the shortcut dangling. The test is the executable's PATH, not the presence of cargo's environment: a
+binary run straight out of `target\debug\` exports no `CARGO*` and MUST still be refused. An executable
+that cannot be identified MUST be ALLOWED, because a false refusal leaves the installed app without its
+AppUserModelID and silently stops every notification. A cargo TEST binary reaching the writer is a defect
+and fails the suite rather than modifying the developer's machine.
 
 ### 3.7a Confirmed-arrival notifications (`arrivals`, #2548)
 
