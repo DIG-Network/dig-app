@@ -93,16 +93,28 @@ pub(crate) fn modal_body(flow: &mut Flow, t: &Tokens, offer: ProfileEditing) {
 /// `None` when there is nothing to save through: the editor is blocked, or the profile has not been
 /// read yet, so a control would act on a form that is not on screen.
 ///
+/// # Why the reading is asked about here and not left to the service
+///
+/// [`EditService::save`] already refuses over a profile this app has not read, so the money was
+/// never at risk. What was at risk is the truth: the row is drawn outside the body, so a read that
+/// failed under a form somebody had already typed into left Save enabled over a banner — and
+/// pressing it published nothing while closing the modal exactly as a real save does. A refusal
+/// nobody can see is indistinguishable from success (dig_ecosystem#3069).
+///
 /// The LABEL is the model's, verbatim — the modal decides only whether it is pressable this frame,
 /// which is a fact about what has been typed and lives nowhere but in the form's own session.
 pub(crate) fn modal_save_offer(
     ui: &Ui,
     tab: &Tab,
     offer: ProfileEditing,
+    reading: &ProfileReading,
 ) -> Option<(String, bool)> {
     if !offer.is_possible() {
         return None;
     }
+    let ProfileReading::Known(_) = reading else {
+        return None;
+    };
     let label = save_verbs(tab).first().map(|verb| verb.label.clone())?;
     let session = ui.data(|d| d.get_temp::<Session>(egui::Id::new(MODAL_FORM.session)))?;
     Some((label, session.draft.is_committable()))
@@ -119,6 +131,15 @@ pub(crate) fn modal_save(ui: &Ui) {
         return;
     };
     EditService::app().save(session.draft.changes());
+}
+
+/// Drop whatever is half-typed in the modal's form.
+///
+/// Called when the modal closes, which is what makes the module header's *the typing is dropped*
+/// true. A draft that outlived its modal is also what the pinned Save reads to decide there is
+/// something to publish, so leaving one behind offers a control over a form nobody has opened.
+pub(crate) fn forget_modal_typing(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<Session>(egui::Id::new(MODAL_FORM.session)));
 }
 
 /// The card's body: the blocker that explains itself, or the form.
@@ -365,6 +386,28 @@ mod session {
     }
 }
 
+/// What a test needs to see the modal's half-typed state, without giving production a second way
+/// to reach it.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::{Form, ProfileDraft, Session, MODAL_FORM};
+
+    /// Store typing in the modal's session, as a drawn form does.
+    pub(crate) fn remember_modal_typing(ui: &egui::Ui) {
+        let mut typed = Form::over(ProfileDraft::empty());
+        typed
+            .draft
+            .set(crate::profile_edit::ProfileField::Bio, "Builds engines.");
+        super::session::store(&typed, ui, MODAL_FORM);
+    }
+
+    /// Whether any typing is still held for the modal's form.
+    pub(crate) fn modal_typing_is_held(ctx: &egui::Context) -> bool {
+        ctx.data(|d| d.get_temp::<Session>(egui::Id::new(MODAL_FORM.session)))
+            .is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +584,94 @@ mod tests {
             walk(&clipped.shape, &mut said);
         }
         said.join(" | ")
+    }
+
+    /// **The pinned Save is offered only over a profile this app has actually READ**
+    /// (dig_ecosystem#3069).
+    ///
+    /// # The sequence this closes
+    ///
+    /// The modal opens over a `Known` reading, a person types, and the session is stored. Fifteen
+    /// seconds later the poll answers `Unreadable` — a node hiccup, or the wallet rate limiter — so
+    /// the body draws the banner instead of the form. The pinned row is drawn outside everything the
+    /// body decides, so it went on finding that stale session and drawing Save enabled over a body
+    /// that was not a form. Pressing it published NOTHING, because [`EditService::save`] correctly
+    /// refuses over an unread profile, and the modal closed exactly as it does on a real save.
+    ///
+    /// # Why both legs are asserted, and why the same session is used for all five
+    ///
+    /// The refusal leg alone passes against an implementation that never offers Save at all, which
+    /// is a control a person can no longer reach. So the `Known` leg is the control, and the four
+    /// other states are run over the SAME stored session — the only difference between the fixtures
+    /// is the reading, which is the property under test.
+    #[test]
+    fn the_modal_offers_save_only_over_a_profile_that_has_been_read() {
+        let (label, ready) = offer_over(&ProfileReading::Known(a_profile())).expect(
+            "a read profile with typing in it offered no Save, so nothing can be published",
+        );
+        assert_eq!(label, crate::tray_menu::PUBLISH_PROFILE_LABEL);
+        assert!(ready, "a dirty, valid form was not pressable");
+
+        for unread in [
+            ProfileReading::Pending,
+            ProfileReading::Unreadable("no node".to_string()),
+            ProfileReading::Unpublished,
+            ProfileReading::Inconsistent,
+        ] {
+            assert!(
+                offer_over(&unread).is_none(),
+                "Save was offered over {unread:?}: pressing it publishes nothing and closes the \
+                 modal as if it had saved"
+            );
+        }
+    }
+
+    /// The pinned row's offer over `reading`, with a dirty modal session already stored — the state
+    /// a person is in after typing into the form and the read failing underneath them.
+    fn offer_over(reading: &ProfileReading) -> Option<(String, bool)> {
+        let ctx = egui::Context::default();
+        let mut answer = None;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut typed = Form::over(a_profile());
+                typed.draft.set(ProfileField::Bio, "Builds engines.");
+                session::store(&typed, ui, MODAL_FORM);
+                answer = modal_save_offer(ui, &a_tab_offering_save(), editable(), reading);
+            });
+        });
+        answer
+    }
+
+    /// The tab the model builds when editing is possible: one Save verb, under the editor's heading.
+    fn a_tab_offering_save() -> Tab {
+        use crate::window_model::{PaneNote, Section, TabId, PROFILE_EDIT_HEADING};
+        Tab {
+            id: TabId::Account,
+            label: "Account".to_string(),
+            note: PaneNote::Ready,
+            sections: vec![Section {
+                heading: Some(PROFILE_EDIT_HEADING.to_string()),
+                rows: vec![crate::tray_menu::MenuRow::Action {
+                    action: TrayAction::PublishProfileEdits,
+                    label: crate::tray_menu::PUBLISH_PROFILE_LABEL.to_string(),
+                    enabled: true,
+                }],
+            }],
+        }
+    }
+
+    /// The offer over seams that exist, an unlocked account and a profile — read off the capability
+    /// rather than asserted, so this fixture cannot claim one the model would not build.
+    fn editable() -> ProfileEditing {
+        use crate::profile_edit::commit::{tests_support::NeverSeam, EditSeams};
+        let seams = EditSeams::Wired {
+            seam: std::sync::Arc::new(NeverSeam),
+            bodies: std::sync::Arc::new(crate::profile_edit::commit::tests_support::NeverBodies),
+            pending: std::sync::Arc::new(
+                crate::profile_edit::pending::doubles::InMemoryPending::default(),
+            ),
+        };
+        ProfileEditing::of_seams(&seams, true, true)
     }
 
     /// Nothing to save is not something to press. The label still says what the control does — the

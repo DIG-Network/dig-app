@@ -811,7 +811,7 @@ impl ShellApp {
             // Then the profile modal, which is the other surface Escape must mean *put this away*
             // on. Asked second because a chain write already pushed outranks a form: with both up,
             // the transaction is the thing a person is anxious about.
-            if self.profile_modal.take_escape() {
+            if self.profile_modal.take_escape(ctx) {
                 return;
             }
             self.closing = true;
@@ -1087,7 +1087,7 @@ impl ShellApp {
             // The Account tab has stopped being emitted — the account was locked or removed under
             // the modal. There is nothing left to edit, so it closes rather than floating over a
             // window that no longer has the thing it was about.
-            self.profile_modal.close();
+            self.profile_modal.close(ctx);
             return;
         };
         let facts = super::pane::facts::PaneFacts::of_tray(view);

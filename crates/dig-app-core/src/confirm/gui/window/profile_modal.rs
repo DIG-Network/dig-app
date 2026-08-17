@@ -36,7 +36,7 @@ use super::Chrome;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{rgba, space, Weight};
 use crate::confirm::gui::theme::{Theme, Tokens};
-use crate::profile_edit::ProfileEditing;
+use crate::profile_edit::{EditService, ProfileEditing};
 use crate::window_model::Tab;
 
 /// Which profile the person asked to edit.
@@ -87,8 +87,13 @@ impl ProfileModal {
     }
 
     /// Close it. The typing is dropped; nothing else is.
-    pub(crate) fn close(&mut self) {
+    ///
+    /// The draft lives in the frame's own store rather than in this struct, so dropping it takes the
+    /// context: a session left behind would be re-adopted by the next opening of the modal, and read
+    /// by the pinned Save as something to publish.
+    pub(crate) fn close(&mut self, ctx: &egui::Context) {
         self.open = None;
+        profile_edit::forget_modal_typing(ctx);
     }
 
     /// Whether it is up, which is what the shell asks before letting Escape close the window.
@@ -100,9 +105,9 @@ impl ProfileModal {
     ///
     /// The shell asks first and only closes the window when the answer is `false` — Escape on a
     /// form means *put this away*, never *quit the app*.
-    pub(crate) fn take_escape(&mut self) -> bool {
+    pub(crate) fn take_escape(&mut self, ctx: &egui::Context) -> bool {
         let showing = self.is_open();
-        self.close();
+        self.close(ctx);
         showing
     }
 
@@ -186,7 +191,7 @@ impl ProfileModal {
         self.height = modal_height(full, at, at.top() + used);
         self.take_scroll(ctx, at, content);
         if closed {
-            self.close();
+            self.close(ctx);
         }
     }
 
@@ -246,7 +251,11 @@ fn action_row(
     // Offered only where the form behind it can actually be saved. A profile this build cannot
     // reach gets no Save at all, rather than one that is permanently unpressable.
     if editing.active {
-        if let Some((label, ready)) = profile_edit::modal_save_offer(ui, tab, offer) {
+        // The row is drawn outside everything the body decides, so it has to ask the body's own
+        // question for itself: a Save offered over a reading that is not `Known` acts on a form that
+        // is not on screen, and publishes nothing.
+        let reading = EditService::app().reading();
+        if let Some((label, ready)) = profile_edit::modal_save_offer(ui, tab, offer, &reading) {
             controls.push(action::Action {
                 label,
                 weight: Weight::Primary,
@@ -350,18 +359,53 @@ mod tests {
     /// an ordinary window would stop working entirely.
     #[test]
     fn escape_closes_an_open_modal_and_is_declined_by_a_closed_one() {
+        let ctx = egui::Context::default();
         let mut modal = ProfileModal::default();
         assert!(
-            !modal.take_escape(),
+            !modal.take_escape(&ctx),
             "a closed modal swallowed Escape, so the window can no longer be closed with it"
         );
 
         modal.open(a_profile(true));
         assert!(modal.is_open());
-        assert!(modal.take_escape(), "Escape did not reach an open modal");
+        assert!(
+            modal.take_escape(&ctx),
+            "Escape did not reach an open modal"
+        );
         assert!(
             !modal.is_open(),
             "Escape was taken and the modal stayed up, which is a surface with no way out"
+        );
+    }
+
+    /// **Closing the modal drops the typing, which is what the module header promises**
+    /// (dig_ecosystem#3069).
+    ///
+    /// A draft left behind is not merely untidy: the pinned row reads the stored session to decide
+    /// whether there is anything to save, so a stale one is a Save control offered over a form
+    /// nobody has typed into this time — and, before the reading gate above it, over a body that is
+    /// not a form at all.
+    #[test]
+    fn closing_the_modal_leaves_no_typing_behind() {
+        let ctx = egui::Context::default();
+        let mut modal = ProfileModal::default();
+        modal.open(a_profile(true));
+
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                profile_edit::tests_support::remember_modal_typing(ui);
+            });
+        });
+        assert!(
+            profile_edit::tests_support::modal_typing_is_held(&ctx),
+            "the fixture stored nothing, so the assertion below cannot fail"
+        );
+
+        modal.close(&ctx);
+
+        assert!(
+            !profile_edit::tests_support::modal_typing_is_held(&ctx),
+            "the modal closed and its draft survived, so the next opening starts dirty"
         );
     }
 
