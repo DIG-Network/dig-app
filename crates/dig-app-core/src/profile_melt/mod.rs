@@ -196,6 +196,34 @@ impl MeltSeams {
     }
 }
 
+/// The seams the running app will actually delete through, once something has installed them.
+///
+/// A `Mutex` rather than a `OnceLock` because a melt seam is bound to ONE profile: the shell rebuilds
+/// it as the active profile changes, where the editor's is installed once and read for the life of
+/// the process. Reading before anything installs answers [`MeltSeams::NoChainTransport`], which
+/// withholds the control rather than closing the door on a later install — the two-static shape
+/// `EditService` needed, expressed as one replaceable value.
+static APP_SEAMS: std::sync::Mutex<Option<MeltSeams>> = std::sync::Mutex::new(None);
+
+/// Install the seams a real deletion runs through. Replaces whatever was installed before.
+pub fn install_seams(seams: MeltSeams) {
+    if let Ok(mut held) = APP_SEAMS.lock() {
+        *held = Some(seams);
+    }
+}
+
+/// The app's melt seams, or [`MeltSeams::NoChainTransport`] while nothing has installed any.
+///
+/// A poisoned lock answers the same way, which is the fail-closed direction: the control disappears
+/// rather than leading to an irreversible spend this app can no longer reason about.
+pub fn app_seams() -> MeltSeams {
+    APP_SEAMS
+        .lock()
+        .ok()
+        .and_then(|held| held.clone())
+        .unwrap_or(MeltSeams::NoChainTransport)
+}
+
 /// How long the ceremony waits for each half, and how often it looks.
 #[derive(Debug, Clone, Copy)]
 pub struct Watch {

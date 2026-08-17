@@ -1559,6 +1559,13 @@ mod tray {
             //
             // The two facts the seams cannot know are supplied live, because both change under a
             // seam that does not: a profile is confirmed, an account locks on the idle timer.
+            // Read off the seams a deletion would ACTUALLY run through, plus the lock, which they
+            // cannot know. One value, never a second independent check — that is how a surface comes
+            // to offer an irreversible control whose implementation refuses (dig_ecosystem#3037).
+            profile_deletion: dig_app_core::profiles::ProfileDeletion::of_seams(
+                dig_app_core::profile_melt::app_seams().is_possible(),
+                session.is_some(),
+            ),
             profile_editing: dig_app_core::profile_edit::EditService::app().editing(
                 session.is_some_and(|s| {
                     s.residency
@@ -2852,6 +2859,12 @@ mod tray {
             TrayAction::SetProfileVisibility { ix, hidden } => {
                 set_profile_visibility(env, session.as_ref(), confirmer, ix, hidden)
             }
+            // The one irreversible verb in the app. It takes consent in a dialog that NAMES what is
+            // destroyed before a byte is spent, and everything after that runs off this thread and
+            // reports into the same transaction sheet every other chain write uses.
+            TrayAction::DeleteProfile { ix } => {
+                delete_profile(env, session.as_ref(), confirmer, ix)
+            }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
             // Nothing to do HERE, and that is the design rather than an omission. The editor's form
             // lives in the window, so the change set exists only there; the pane hands it straight
@@ -3873,6 +3886,92 @@ mod tray {
     /// window's standing caution points at.
     ///
     /// Every branch that cannot proceed SAYS so. A silent no-op is the dead end #1800 removed.
+    /// Delete a profile permanently, once the person has agreed to what that destroys.
+    ///
+    /// # The registry is re-read rather than trusted from the click
+    ///
+    /// The row was drawn from a view up to a tick old, and this spends coins that cannot be
+    /// un-spent. So the DID and the store named in the confirmation come from the registry as it is
+    /// NOW — a list that moved in between decides the outcome rather than the picture.
+    ///
+    /// # Refusal is the default answer
+    ///
+    /// Enter declines. A mis-press here cannot be undone at any layer, which is the one case where
+    /// the safe direction is worth costing an extra keystroke (`SPEC.md` §3.2).
+    fn delete_profile(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+        ix: u32,
+    ) {
+        use dig_app_core::account::ProfileIx;
+        use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
+        use dig_app_core::profile_melt::{self, copy, MeltTarget, Watch};
+        use dig_app_core::profiles::ProfilesReading;
+
+        let Some(profiles) = profiles_to_act_on(env, session) else {
+            notify(
+                confirmer,
+                copy::CONFIRM_TITLE,
+                "DIG could not find this computer's profile list.",
+                "Nothing was deleted. The log folder has the detail.",
+            );
+            return;
+        };
+        let reading = ProfilesReading::of_session(&profiles);
+        let Some(profile) = reading.row(ProfileIx(ix)) else {
+            notify(
+                confirmer,
+                copy::CONFIRM_TITLE,
+                "That profile is no longer on this account's list.",
+                "Nothing was deleted. Close and reopen this window to see the current list.",
+            );
+            return;
+        };
+
+        let target = MeltTarget {
+            ix,
+            name: profile.display_name(),
+            did: profile.did.clone(),
+            store_id: profile.store_id.clone(),
+        };
+        match confirmer.confirm_claim(&ClaimPrompt {
+            title: copy::CONFIRM_TITLE,
+            heading: copy::CONFIRM_TITLE,
+            body: &copy::confirm_body(&target),
+            affirm: copy::CONFIRM_VERB,
+            decline: Some(copy::CANCEL_VERB),
+            refusal_is_default: true,
+            scannable: None,
+            identifier: None,
+        }) {
+            ConfirmDecision::Approve => {}
+            // Declined, closed or timed out: the dialog named what would be destroyed and the person
+            // did not agree. Nothing is spent and nothing more is said.
+            ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
+            ConfirmDecision::Unavailable => {
+                notify(
+                    confirmer,
+                    copy::CONFIRM_TITLE,
+                    "DIG could not ask you to confirm the deletion.",
+                    "Nothing was deleted. Deleting a profile ends it on the blockchain forever, so                      DIG will not do it without asking.",
+                );
+                return;
+            }
+        }
+
+        // Returns immediately; the ceremony runs on its own thread and publishes every stage into
+        // the transaction sheet, which is the ONE surface that already tells a push from a
+        // confirmation. Holding this thread for the length of a mainnet ceremony is the freeze
+        // dig-app 12.6.0 was cut to fix.
+        profile_melt::start_melt(
+            profile_melt::app_seams(),
+            target,
+            dig_app_core::transaction::Feed::app(),
+            Watch::default(),
+        );
+    }
+
     fn switch_profile(
         env: &AppEnvironment,
         session: Option<&TraySession>,

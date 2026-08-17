@@ -308,6 +308,7 @@ fn view_for(
         // Set by `--profile-edit`, which installs the matching service; left unmeasured otherwise,
         // which is what a gallery host with no chain transport genuinely is.
         profile_editing: Default::default(),
+        profile_deletion: Default::default(),
         running: true,
         node_connected: true,
         node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
