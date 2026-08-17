@@ -23,12 +23,14 @@ use egui::{Rect, Ui};
 use super::action::{self, Action};
 use super::copy;
 use super::field::{self, Field};
+use super::fieldset::{self, Fieldset};
 use super::flow::Flow;
 use super::image_pick::{self, InFlight, PickProblems};
+use super::image_well::{self, Well};
 use super::text;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
-use crate::profile_edit::{ProfileDraft, ProfileField};
+use crate::profile_edit::{FieldGroup, FieldKind, ProfileDraft, ProfileField};
 
 /// The element-id namespace one drawing of the form lives in.
 ///
@@ -91,25 +93,87 @@ impl Form {
     }
 }
 
-/// Draw every field of the profile, in the order a person thinks about themselves.
+/// Draw every field of the profile, in two collapsible fieldsets.
+///
+/// The fold state is the WINDOW's, not the form's: it is a way of looking at a form rather than a
+/// fact about the profile, so it lives in the frame's own store beside every other such preference
+/// and is keyed on the scope, so the wizard's groups and the editor's fold independently.
 pub(crate) fn draw_fields(flow: &mut Flow, t: &Tokens, form: &mut Form, scope: Scope) {
-    for (index, edited) in ProfileField::ALL.into_iter().enumerate() {
+    for (index, group) in FieldGroup::ALL.into_iter().enumerate() {
         if index > 0 {
-            flow.gap(space::S3);
+            flow.gap(space::S4);
         }
-        draw_field(flow, t, form, edited, scope);
+        draw_group(flow, t, form, group, scope);
     }
 }
 
-/// One field: its label, its input, and whatever is wrong with it.
+/// One fieldset: its header, and — when it is showing — the fields inside it.
+fn draw_group(flow: &mut Flow, t: &Tokens, form: &mut Form, group: FieldGroup, scope: Scope) {
+    let fields = ProfileField::of_group(group);
+    // Every field's verdict is asked for BEFORE the fieldset draws, because whether the fieldset
+    // may stay folded depends on it. A group folded over a problem is the dead end
+    // `fieldset`'s module header describes.
+    let needs_attention = fields
+        .iter()
+        .any(|edited| form.shown_problem(*edited).is_some());
+
+    let id = fieldset_element(scope, group);
+    let open = flow.place(|ui, _| (0.0, is_open(ui, id, group)));
+    let set = Fieldset {
+        title: group.title(),
+        summary: group.summary(),
+        open,
+        needs_attention,
+        id,
+    };
+
+    let toggled = fieldset::fieldset(flow, t, &set, |inner| {
+        for (index, edited) in fields.iter().enumerate() {
+            if index > 0 {
+                inner.gap(space::S3);
+            }
+            draw_field(inner, t, form, *edited, scope);
+        }
+    });
+    if toggled {
+        flow.place(|ui, _| (0.0, set_open(ui, id, !open)));
+    }
+}
+
+/// One field, drawn as whatever KIND of thing it holds (criterion 6).
+///
+/// The match is exhaustive on [`FieldKind`] rather than defaulting, so a kind added later cannot
+/// quietly fall back to a line of text — which is how an image field came to be a text box in the
+/// first place.
 fn draw_field(flow: &mut Flow, t: &Tokens, form: &mut Form, edited: ProfileField, scope: Scope) {
-    let problem = form.shown_problem(edited);
+    match edited.kind() {
+        FieldKind::Image => image_field(flow, t, form, edited, scope),
+        FieldKind::Paragraph => typed_field(flow, t, form, edited, scope, PARAGRAPH_ROWS),
+        FieldKind::Line | FieldKind::Address => typed_field(flow, t, form, edited, scope, 1),
+    }
+}
+
+/// How many lines a paragraph field opens at.
+///
+/// Three, because the two fields that use it hold a few lines by nature: a short biography, and the
+/// handful of links a person actually has. The box scrolls past that rather than clipping.
+const PARAGRAPH_ROWS: usize = 3;
+
+/// A field a person types into: its label, its box, and whatever is wrong with it.
+fn typed_field(
+    flow: &mut Flow,
+    t: &Tokens,
+    form: &mut Form,
+    edited: ProfileField,
+    scope: Scope,
+    rows: usize,
+) {
     let live = flow.live();
     let described = Field {
         label: edited.label(),
         placeholder: edited.placeholder(),
         help: edited.help(),
-        error: problem,
+        error: form.shown_problem(edited),
         id: element(scope, edited),
     };
 
@@ -118,10 +182,11 @@ fn draw_field(flow: &mut Flow, t: &Tokens, form: &mut Form, edited: ProfileField
     // repaint a write even when nothing was pressed.
     let mut typed = form.draft.value(edited).to_string();
     flow.place(|ui, at| {
-        (
-            field::text_field(ui, at, t, live, &described, &mut typed),
-            (),
-        )
+        let height = match rows {
+            0 | 1 => field::text_field(ui, at, t, live, &described, &mut typed),
+            many => field::paragraph_field(ui, at, t, live, &described, &mut typed, many),
+        };
+        (height, ())
     });
 
     if typed != form.draft.value(edited) {
@@ -130,11 +195,38 @@ fn draw_field(flow: &mut Flow, t: &Tokens, form: &mut Form, edited: ProfileField
         // is about something that is no longer there.
         form.picked.remove(&edited);
     }
+}
 
-    if edited.is_image() {
-        flow.gap(space::S2);
-        image_controls(flow, t, form, edited, scope);
-    }
+/// An image field: the picture itself, and the two controls that change it.
+///
+/// **There is no text box here, by design.** The value is a data URL tens of thousands of characters
+/// long, and drawing it is criterion 9's whole subject. Removing the box takes away the only way to
+/// CLEAR a picture, which is why *Remove picture* is not optional — see [`super::image_well`].
+fn image_field(flow: &mut Flow, t: &Tokens, form: &mut Form, edited: ProfileField, scope: Scope) {
+    let choosing = form.is_choosing_for(edited);
+    let state = Well::of(form.draft.value(edited), choosing);
+    let problem = form.shown_problem(edited);
+
+    flow.place(|ui, at| (text::caption(ui, at, t, edited.label()), ()));
+    flow.gap(space::S1);
+
+    let name = format!("{}-{:04x}", scope.0, edited.slot().id());
+    flow.place(|ui, at| (image_well::tile(ui, at, t, &state, &name), ()));
+    flow.gap(space::S2);
+
+    image_controls(flow, t, form, edited, scope, state.holds_something());
+
+    flow.gap(space::S1);
+    // One sentence under the field, never two — the same rule `field` follows: a refusal REPLACES
+    // the help, because a person choosing between two sentences about one control reads the wrong
+    // one. An undisplayable value's own sentence is a refusal like any other.
+    let said = problem
+        .or_else(|| match &state {
+            Well::Unshowable(why) => Some(why.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| edited.help().to_string());
+    flow.place(|ui, at| (text::caption(ui, at, t, &said), ()));
 }
 
 /// The two ways a picture gets into an image field: the system's chooser, and a dropped file.
@@ -149,18 +241,30 @@ fn image_controls(
     form: &mut Form,
     edited: ProfileField,
     scope: Scope,
+    holds_a_picture: bool,
 ) {
     let live = flow.live();
     let choosing = form.is_choosing_for(edited);
-    let controls = [Action {
+    let mut controls = vec![Action {
         label: copy::profile_edit::CHOOSE.to_string(),
         weight: Weight::Ghost,
         // One chooser at a time: two open dialogs writing into one form is a race a person cannot
         // see, and the answer that lands second would silently win.
         enabled: live && form.in_flight.is_none(),
-        id: Chose(edited),
+        id: Press::Choose(edited),
         element: choose_element(scope, edited),
     }];
+    // Offered only where there is something to remove. A permanently disabled *Remove picture* on
+    // an empty field is a control that never explains itself; its absence is unambiguous.
+    if holds_a_picture {
+        controls.push(Action {
+            label: copy::profile_edit::REMOVE_PICTURE.to_string(),
+            weight: Weight::Ghost,
+            enabled: live,
+            id: Press::Remove(edited),
+            element: remove_element(scope, edited),
+        });
+    }
 
     let (pressed, dropped, ctx) = flow.place(|ui, at| {
         let (height, pressed) = action::buttons(ui, at, t, live, &controls);
@@ -178,8 +282,16 @@ fn image_controls(
     if let Some(path) = dropped {
         image_pick::dropped(&mut form.draft, &mut form.picked, edited, &path);
     }
-    if pressed == Some(Chose(edited)) && form.in_flight.is_none() {
-        form.in_flight = Some(InFlight::open(edited, ctx));
+    match pressed {
+        Some(Press::Choose(field)) if form.in_flight.is_none() => {
+            form.in_flight = Some(InFlight::open(field, ctx));
+        }
+        Some(Press::Remove(field)) => {
+            form.draft.clear(field);
+            // The complaint was about a file chosen for a picture that is now gone.
+            form.picked.remove(&field);
+        }
+        _ => {}
     }
 }
 
@@ -204,18 +316,48 @@ fn dropped_onto(ui: &Ui, row: Rect) -> Option<std::path::PathBuf> {
     })
 }
 
-/// A press of one field's chooser button.
+/// Something pressed on one image field's row.
 ///
-/// Deliberately its own type rather than a [`crate::tray_menu::TrayAction`]: it reaches no worker,
-/// spends nothing, and belongs on no menu.
+/// Deliberately its own type rather than a [`crate::tray_menu::TrayAction`]: neither reaches a
+/// worker, neither spends anything, and neither belongs on a menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Chose(ProfileField);
+enum Press {
+    /// Open the system's file chooser for this field.
+    Choose(ProfileField),
+    /// Empty the field. Publishes nothing by itself — Save is still what writes.
+    Remove(ProfileField),
+}
 
 /// One image field's chooser-button element id, keyed on the field for the same reason the inputs
 /// are: two buttons sharing an id are one button to egui, so pressing either would open the chooser
 /// for whichever field drew first.
 fn choose_element(scope: Scope, edited: ProfileField) -> egui::Id {
     egui::Id::new((scope.0, "choose", edited.slot().id()))
+}
+
+/// One image field's remove-button element id — its own namespace, so the two controls on one row
+/// are two controls.
+fn remove_element(scope: Scope, edited: ProfileField) -> egui::Id {
+    egui::Id::new((scope.0, "remove", edited.slot().id()))
+}
+
+/// One fieldset's header-control element id.
+///
+/// Derived from the SCOPE like every other id here: the creation wizard and the edit modal can both
+/// be alive on the Account tab, and a shared id would make folding one group fold the other's.
+fn fieldset_element(scope: Scope, group: FieldGroup) -> egui::Id {
+    egui::Id::new((scope.0, "fieldset", group.title()))
+}
+
+/// Whether the fieldset at `id` is open, defaulting to the group's own answer the first time.
+fn is_open(ui: &egui::Ui, id: egui::Id, group: FieldGroup) -> bool {
+    ui.data(|d| d.get_temp::<bool>(id))
+        .unwrap_or_else(|| group.starts_open())
+}
+
+/// Remember that the fieldset at `id` is open, or is not.
+fn set_open(ui: &egui::Ui, id: egui::Id, open: bool) {
+    ui.data_mut(|d| d.insert_temp(id, open));
 }
 
 /// One field's input element id, keyed on the field so focus and the caret survive the pane being

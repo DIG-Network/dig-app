@@ -675,6 +675,18 @@ fn main() {
         },
     };
 
+    // Open the per-profile edit modal over the capture (dig_ecosystem#3069, criterion 4). Takes the
+    // profile INDEX, which is what the modal itself is keyed on -- `active` is derived from the
+    // fixture rather than asked for, so a capture cannot claim a profile is in use when the list
+    // behind it says otherwise.
+    let edit_modal = match all.iter().position(|argument| argument == "--edit-profile") {
+        None => None,
+        Some(at) => match all.get(at + 1).and_then(|ix| ix.parse::<u32>().ok()) {
+            Some(ix) => Some(ix),
+            None => refuse("--edit-profile needs a profile index, like 0 or 1"),
+        },
+    };
+
     // A chain write to photograph (dig_ecosystem#2995). Published to the app's own feed, which is
     // where the shell reads it from, so the picture is the real surface rather than a mock of it.
     if let Some(at) = all.iter().position(|argument| argument == "--transaction") {
@@ -725,12 +737,25 @@ fn main() {
             Some(readings) => with_live(fixture, readings),
         }
     });
+    // Read off the SAME fixture the card behind the modal is drawn from.
+    let edit_modal = edit_modal.map(|ix| {
+        let rows = profiles.reading();
+        let row = rows
+            .rows()
+            .and_then(|rows| rows.iter().find(|row| row.ix.0 == ix).cloned());
+        match row {
+            Some(row) => (ix, row.display_name(), row.active),
+            None => refuse("--edit-profile names a profile this fixture does not hold"),
+        }
+    });
+
     match photograph_shell(
         theme,
         tab,
         egui::Vec2::new(width, height),
         view,
         std::path::Path::new(path),
+        edit_modal,
     ) {
         Ok((pixels_wide, pixels_high)) => println!("{path} — {pixels_wide} x {pixels_high} px"),
         Err(problem) => {

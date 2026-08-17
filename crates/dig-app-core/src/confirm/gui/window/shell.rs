@@ -209,6 +209,7 @@ pub fn photograph(
     size: Vec2,
     view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
     path: &std::path::Path,
+    editing: Option<(u32, String, bool)>,
 ) -> Result<(usize, usize), String> {
     // The shell reads its theme from a store and its toggle writes back to one. A scratch store
     // keeps both away from the person's own preference — a gallery has no business changing settings
@@ -223,7 +224,14 @@ pub fn photograph(
     // and never sends: the receiver must simply stay open, because a disconnected queue is a
     // different state from an empty one.
     let (_keep_open, queue) = std::sync::mpsc::channel();
-    let app = ShellApp::new(theme, store, view, Arc::new(|_| {}), Some(tab));
+    let mut app = ShellApp::new(theme, store, view, Arc::new(|_| {}), Some(tab));
+    // The edit modal is opened by an ARGUMENT rather than by clicking its control, for the reason
+    // the tab is: synthetic input takes the foreground off the window and photographs whatever was
+    // behind it (dig_ecosystem#2326). Nothing else about the modal differs from the shipped one.
+    if let Some((ix, name, active)) = editing {
+        app.profile_modal
+            .open(super::profile_modal::Editing { ix, name, active });
+    }
 
     let recorded = Arc::new(Mutex::new(None));
     let size_slot = Arc::clone(&recorded);
@@ -656,6 +664,12 @@ struct ShellApp {
     transactions: crate::transaction::Feed,
     /// The sheet that draws [`ShellApp::transactions`], and whether it has been put away.
     chain_status: super::chain_status::ChainStatus,
+    /// The per-profile edit modal, and which profile it is open on (dig_ecosystem#3069).
+    ///
+    /// Held by the SHELL rather than by the profiles pane because it is a modal: it covers the
+    /// whole window, it owns Escape while it is up, and a pane cannot draw over the chrome that
+    /// contains it.
+    profile_modal: super::profile_modal::ProfileModal,
     /// Which tab is showing.
     ///
     /// Held here rather than derived per frame because the model is REBUILT every frame from a view
@@ -679,6 +693,7 @@ impl ShellApp {
             closing: false,
             transactions: crate::transaction::Feed::app(),
             chain_status: super::chain_status::ChainStatus::default(),
+            profile_modal: super::profile_modal::ProfileModal::default(),
             view,
             act,
             // A caller that names no tab gets the shipping behaviour; only a gallery names one.
@@ -715,7 +730,16 @@ impl ShellApp {
 
         let t = self.theme.tokens();
         let prompt_is_up = self.prompt.is_some();
-        self.paint_shell(ctx, &t, prompt_is_up);
+        // One snapshot, drawn by the panes AND by the modal over them. Read twice, the two could
+        // describe different instants — and the modal would then be editing a profile the card
+        // behind it no longer lists.
+        let view = (self.view)();
+        self.paint_shell(ctx, &t, prompt_is_up, &view);
+        // Over the panes, under the consent prompt and under the transaction modal. A chain write
+        // that has already been pushed outranks a form somebody is still filling in.
+        if !prompt_is_up {
+            self.draw_profile_modal(ctx, &t, &view);
+        }
         // After the shell, so it floats over the panes; before the prompt, so a consent surface is
         // still the only thing reachable while one is up. Suppressed entirely under a prompt for the
         // same reason the chrome's controls are: a live-looking control over a scrimmed window is
@@ -782,6 +806,12 @@ impl ShellApp {
             // Escape means "put this away" — closing the app mid-ceremony is the one action an
             // unfinished creation cannot survive, and it must not be one keystroke away.
             if self.chain_status.take_escape(&self.transactions) {
+                return;
+            }
+            // Then the profile modal, which is the other surface Escape must mean *put this away*
+            // on. Asked second because a chain write already pushed outranks a form: with both up,
+            // the transaction is the thing a person is anxious about.
+            if self.profile_modal.take_escape(ctx) {
                 return;
             }
             self.closing = true;
@@ -987,14 +1017,19 @@ impl ShellApp {
     }
 
     /// Paint the shell itself: chrome, panes, and — while a prompt is up — the scrim and the pill.
-    fn paint_shell(&mut self, ctx: &egui::Context, t: &Tokens, prompt_is_up: bool) {
+    fn paint_shell(
+        &mut self,
+        ctx: &egui::Context,
+        t: &Tokens,
+        prompt_is_up: bool,
+        view: &crate::tray_menu::TrayView,
+    ) {
         let screen = ctx.screen_rect();
-        let view = (self.view)();
-        let model = window_model::build(&view);
+        let model = window_model::build(view);
         // The same snapshot, projected twice: the model decides which verbs exist, and the facts are
         // the readings a pane displays beside them. One call, so the two cannot describe different
         // instants.
-        let facts = super::pane::facts::PaneFacts::of_tray(&view);
+        let facts = super::pane::facts::PaneFacts::of_tray(view);
         self.keep_selection_valid(&model);
         // An `Area` rather than a `CentralPanel` so the shell and the prompt it hosts never contend
         // for the one central-panel id on hosts where egui embeds an immediate viewport instead of
@@ -1026,6 +1061,44 @@ impl ShellApp {
         } else {
             self.resize_edges(ctx, screen);
         }
+    }
+
+    /// Take up an Edit the profiles card recorded, and draw the modal it opens.
+    ///
+    /// # Why the pane asks rather than opening it itself
+    ///
+    /// A modal covers the whole window, including the chrome, and it owns Escape while it is up —
+    /// neither of which a pane inside the shell can do. So the card records the request and the
+    /// shell honours it, exactly as the Settings pane records a theme for the shell to apply.
+    fn draw_profile_modal(
+        &mut self,
+        ctx: &egui::Context,
+        t: &Tokens,
+        view: &crate::tray_menu::TrayView,
+    ) {
+        if let Some(asked) = super::pane::profiles::EditRequest::take(ctx) {
+            self.profile_modal.open(asked);
+        }
+        if !self.profile_modal.is_open() {
+            return;
+        }
+        let model = window_model::build(view);
+        let Some(tab) = model.tab(TabId::Account) else {
+            // The Account tab has stopped being emitted — the account was locked or removed under
+            // the modal. There is nothing left to edit, so it closes rather than floating over a
+            // window that no longer has the thing it was about.
+            self.profile_modal.close(ctx);
+            return;
+        };
+        let facts = super::pane::facts::PaneFacts::of_tray(view);
+        self.profile_modal.draw(
+            ctx,
+            ctx.screen_rect(),
+            t,
+            self.theme,
+            tab,
+            facts.profile_editing,
+        );
     }
 
     /// Keep the selection on a tab that still exists.

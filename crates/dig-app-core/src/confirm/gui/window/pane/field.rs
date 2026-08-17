@@ -54,15 +54,59 @@ pub(crate) fn text_field(
     field: &Field<'_>,
     value: &mut String,
 ) -> f32 {
+    labelled(ui, at, t, field, paint::BUTTON_HEIGHT, |ui, input| {
+        input_box(ui, input, t, live, field, value, Lines::One);
+    })
+}
+
+/// The same field, over a box a person may press Return inside.
+///
+/// # Why this is a second entry point and not a flag on [`text_field`]
+///
+/// `text_field` has six callers across four panes, and every one of them constructs a [`Field`]
+/// literal. Adding a variant to either would edit all six for the benefit of the one field that
+/// needs it — so the shared scaffolding is extracted and this sits beside it, changing nothing that
+/// already works.
+///
+/// `rows` is the box's height in lines of text. It is a floor and not a cap: the value may be longer
+/// and the box scrolls, exactly as a paragraph control should — a value silently truncated to what
+/// fits would be published truncated.
+pub(crate) fn paragraph_field(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    live: bool,
+    field: &Field<'_>,
+    value: &mut String,
+    rows: usize,
+) -> f32 {
+    let height = paint::BUTTON_HEIGHT + LINE_HEIGHT * rows.saturating_sub(1) as f32;
+    labelled(ui, at, t, field, height, |ui, input| {
+        input_box(ui, input, t, live, field, value, Lines::Many(rows));
+    })
+}
+
+/// The label above, the input in the middle, and the one sentence under it.
+///
+/// Everything a field draws EXCEPT the control itself, so the single-line and multi-line boxes
+/// cannot come to disagree about where their label sits or which sentence they show.
+fn labelled(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    field: &Field<'_>,
+    input_height: f32,
+    draw_input: impl FnOnce(&mut Ui, Rect),
+) -> f32 {
     let mut y = at.top();
     y += text::caption(ui, row(at, y), t, field.label);
     y += LABEL_GAP;
 
     let input = Rect::from_min_size(
         egui::Pos2::new(at.left(), y),
-        Vec2::new(at.width().min(INPUT_CAP), paint::BUTTON_HEIGHT),
+        Vec2::new(at.width().min(INPUT_CAP), input_height),
     );
-    input_box(ui, input, t, live, field, value);
+    draw_input(ui, input);
     y = input.bottom() + LABEL_GAP;
 
     y += match &field.error {
@@ -71,6 +115,21 @@ pub(crate) fn text_field(
     };
     y - at.top()
 }
+
+/// How many lines of text a box takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lines {
+    /// One, and Return does not insert anything.
+    One,
+    /// Several, and Return inserts a newline.
+    Many(usize),
+}
+
+/// How much taller each line past the first makes a box.
+///
+/// egui lays a paragraph out at its own line height, so this is used only to RESERVE the rectangle;
+/// the widget is what decides where the glyphs land inside it.
+const LINE_HEIGHT: f32 = 20.0;
 
 /// The widest an input is drawn.
 ///
@@ -88,7 +147,15 @@ fn row(at: Rect, y: f32) -> Rect {
 }
 
 /// The input itself: the prompt's `TextEdit`, placed in a rectangle the pane chose.
-fn input_box(ui: &mut Ui, at: Rect, t: &Tokens, live: bool, field: &Field<'_>, value: &mut String) {
+fn input_box(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    live: bool,
+    field: &Field<'_>,
+    value: &mut String,
+    lines: Lines,
+) {
     let invalid = field.error.is_some();
     // Drawn under the widget so the edge is the field's, not egui's: the `TextEdit` itself is
     // frameless, and the border is what carries "there is something wrong here" alongside the
@@ -105,7 +172,14 @@ fn input_box(ui: &mut Ui, at: Rect, t: &Tokens, live: bool, field: &Field<'_>, v
         egui::StrokeKind::Inside,
     );
 
-    let edit = egui::TextEdit::singleline(value)
+    let edit = match lines {
+        Lines::One => egui::TextEdit::singleline(value),
+        // `desired_rows` rather than a clipped `singleline`: a multi-line value in a one-line box
+        // shows its first line and hides the rest, so a person editing four links would see one and
+        // conclude the others were lost.
+        Lines::Many(rows) => egui::TextEdit::multiline(value).desired_rows(rows),
+    };
+    let edit = edit
         .id(field.id)
         .frame(false)
         .interactive(live)
@@ -256,6 +330,116 @@ mod tests {
             !typed.iter().any(|line| line.contains("Automatic")),
             "the placeholder is still drawn over a filled field: {typed:?}"
         );
+    }
+
+    /// How many LINES the painter laid `needle`'s text out on.
+    ///
+    /// Not how many characters it was handed. A single-line `TextEdit` holding a value with
+    /// newlines in it produces a galley whose `text()` is the whole string — every line present,
+    /// every character intact — laid out on ONE row. So a test that reads the galley's text sees a
+    /// three-line value in a control that shows one line of it, and passes on both. The row count
+    /// is what a person actually sees, and it is the only reading here that tells them apart.
+    /// (Written the other way first; the revert-proof caught it.)
+    fn laid_out_rows(output: &egui::FullOutput, needle: &str) -> Vec<usize> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, usize)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push((text.galley.text().to_owned(), text.galley.rows.len()))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut seen = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut seen);
+        }
+        seen.into_iter()
+            .filter(|(text, _)| text.contains(needle))
+            .map(|(_, rows)| rows)
+            .collect()
+    }
+
+    /// Draw one field through `draw`, and hand back the frame it produced.
+    fn frame_of(draw: impl Fn(&mut Ui, Rect, &Tokens, &mut String)) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = Theme::Light.tokens();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(480.0, 480.0));
+        let mut text = A_THREE_LINE_VALUE.to_string();
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("lines-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| draw(ui, screen, &t, &mut text));
+                },
+            );
+        }
+        output
+    }
+
+    /// Three links, which is what the schema's newline separator is FOR.
+    const A_THREE_LINE_VALUE: &str =
+        "https://one.example\nhttps://two.example\nhttps://three.example";
+
+    /// **A paragraph field lays a three-line value out on three lines; the shipped single-line box
+    /// lays the same value out on one.**
+    ///
+    /// This is what dig_ecosystem#3070's fix rests on. `dig-social-profile` defines the links slot
+    /// as newline-separated, so the editor now asks for one address per line — and that instruction
+    /// is unfollowable in a control that shows the first line only.
+    ///
+    /// # Why the single-line control is the fixture's control leg
+    ///
+    /// The nearest wrong implementation is not "no box at all": it is the box that ships today,
+    /// which accepts the same string and shows one line of it. Both draw the label, both draw the
+    /// help, both report a height, and — the part that made the first version of this test vacuous
+    /// — both produce a galley whose TEXT holds all three lines. Only the layout differs, so both
+    /// are drawn here and their row counts are required to differ.
+    #[test]
+    fn a_paragraph_field_lays_out_every_line_where_the_single_line_box_lays_out_one() {
+        let links = a_links_field();
+
+        let many = frame_of(|ui, at, t, value| {
+            paragraph_field(ui, at, t, true, &links, value, 3);
+        });
+        assert_eq!(
+            laid_out_rows(&many, "one.example"),
+            vec![3],
+            "the paragraph box did not lay the three links out on three lines, so a person \
+             editing them can see only the first"
+        );
+
+        // The control: the SAME value through the shipped single-line control, which must give the
+        // other answer. Without it, an assertion about "three rows" says nothing about whether
+        // this control is any different from the one it replaces.
+        let one = frame_of(|ui, at, t, value| {
+            text_field(ui, at, t, true, &links, value);
+        });
+        assert_eq!(
+            laid_out_rows(&one, "one.example"),
+            vec![1],
+            "the single-line box already laid the value out on several lines, so the assertion \
+             above distinguishes nothing"
+        );
+    }
+
+    /// The Links field, as the profile form describes it.
+    fn a_links_field() -> Field<'static> {
+        Field {
+            label: "Links",
+            placeholder: "None",
+            help: "Web addresses, one per line.",
+            error: None,
+            id: egui::Id::new("links-test-input"),
+        }
     }
 
     /// **A field reports a height that contains everything it drew.**

@@ -39,6 +39,7 @@ mod header;
 mod pane;
 mod panes;
 mod preview;
+mod profile_modal;
 mod shell;
 
 pub use preview::{open_pane_preview, preview_theme, stored_theme};
