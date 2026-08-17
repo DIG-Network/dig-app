@@ -9,9 +9,9 @@
 //!
 //! **The 1 mojo per singleton is spent, not refunded.** `(51 () -113)` occupies the singleton
 //! puzzle's one permitted odd-amount `CREATE_COIN`, so paying the amount back is unexpressible
-//! rather than unimplemented. No sentence here promises it, and
-//! [`no_copy_promises_the_mojo_back`](tests::no_copy_promises_the_mojo_back) sweeps every one of
-//! them for the words that would.
+//! rather than unimplemented. No sentence here promises it, and `no_copy_promises_the_mojo_back`
+//! below sweeps every one of them for the words that would. (Named rather than linked: it is a
+//! `#[cfg(test)]` item, so an intra-doc link to it breaks `cargo doc`.)
 //!
 //! **What was already published stays published.** Peers hold profile bodies keyed on
 //! `(store_id, root)`, and melting the store ends its lineage without un-serving a byte anybody
