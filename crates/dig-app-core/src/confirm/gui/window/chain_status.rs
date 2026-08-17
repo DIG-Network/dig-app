@@ -451,19 +451,64 @@ mod tests {
         Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(900.0, 600.0))
     }
 
-    /// Run one real paint of `status` against `feed`, and say whether the MODAL was drawn.
+    /// What one real paint of `status` against `feed` produced.
+    struct Painted {
+        /// Whether a scrim covering the window was drawn.
+        scrimmed: bool,
+        /// Where the status card ended up, if it was drawn at all.
+        card: Option<Rect>,
+        /// Whether the frame asked to be painted again immediately.
+        repaints: bool,
+    }
+
+    impl Painted {
+        /// Whether a person saw a MODAL: a scrimmed window with the status centred on it.
+        ///
+        /// Both halves are required because each alone is satisfied by the surface this replaced.
+        /// The pre-#3075 sheet drew the same card, with the same content, in the bottom-right
+        /// corner and with no scrim — so a test that only asked "was the card drawn" would pass
+        /// against the very thing the user asked to be changed.
+        fn is_a_modal(&self) -> bool {
+            let centred = self.card.is_some_and(|card| {
+                (card.center().x - window().center().x).abs() < window().width() * 0.1
+            });
+            self.scrimmed && centred
+        }
+    }
+
+    /// Paint one real frame of `status` against `feed` and read back what it produced.
     ///
-    /// Read from the scrim's own layer rather than from a field on the struct: the question the
-    /// modal has to answer is "did a person see this", and `hidden == false` is a claim about
+    /// Read from egui's own layers rather than from a field on the struct: the question this
+    /// surface has to answer is "did a person see this", and `hidden == false` is a claim about
     /// intent, which a placement or ordering mistake would satisfy just as happily.
-    fn painted_modal(status: &mut ChainStatus, feed: &Feed) -> bool {
+    fn paint(status: &mut ChainStatus, feed: &Feed) -> Painted {
         let ctx = egui::Context::default();
         super::super::install_fonts(&ctx);
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            status.draw(ctx, window(), &Tokens::LIGHT, Theme::Light, feed);
-        });
-        ctx.memory(|m| m.area_rect(egui::Id::new("dig-app-chain-status-scrim")))
-            .is_some()
+        // Twice, and the SECOND frame is the one read. A freshly-built context always asks to be
+        // painted again — it has fonts to load and a layout it has never done — so a first frame
+        // says nothing about whether this surface is keeping itself alive.
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(ctx.run(egui::RawInput::default(), |ctx| {
+                status.draw(ctx, window(), &Tokens::LIGHT, Theme::Light, feed);
+            }));
+        }
+        let output = output.expect("no frame was painted");
+        Painted {
+            scrimmed: ctx
+                .memory(|m| m.area_rect(egui::Id::new("dig-app-chain-status-scrim")))
+                .is_some(),
+            card: ctx.memory(|m| m.area_rect(egui::Id::new("dig-app-chain-status"))),
+            repaints: output
+                .viewport_output
+                .values()
+                .any(|viewport| viewport.repaint_delay.is_zero()),
+        }
+    }
+
+    /// Whether one real paint put the modal up.
+    fn painted_modal(status: &mut ChainStatus, feed: &Feed) -> bool {
+        paint(status, feed).is_a_modal()
     }
 
     /// Every stage a write can be in, as fixtures.
@@ -746,6 +791,38 @@ mod tests {
         assert!(
             !last.contains("More steps follow"),
             "{last} promises a step that is not coming"
+        );
+    }
+
+    /// **A frame that draws the modal asks for the next one.**
+    ///
+    /// The dig_ecosystem#2995 guard, at the layer the freeze actually happened on. egui is lazy: a
+    /// frame that does not request a repaint is the last frame drawn until something moves, and a
+    /// motionless modal over a minutes-long mainnet wait is indistinguishable from the crash this
+    /// module was written for. The bar's own arithmetic being correct proves nothing if no frame
+    /// ever runs to draw it, which is why this is asserted on the frame rather than on the bar.
+    ///
+    /// The control is the same status with nothing in flight: a `draw` that requested a repaint
+    /// unconditionally would burn a laptop's battery all day and would pass a one-sided test.
+    #[test]
+    fn every_frame_that_draws_the_modal_asks_for_another() {
+        let feed = Feed::detached();
+        let mut status = ChainStatus::default();
+        assert!(
+            !paint(&mut status, &feed).repaints,
+            "the window was kept spinning with no chain write in flight"
+        );
+
+        feed.publish(
+            Transaction::starting("Sending XCH", None).at(Stage::Pushed {
+                id: "0xabc".to_string(),
+            }),
+        );
+        let painted = paint(&mut status, &feed);
+        assert!(painted.is_a_modal(), "the modal never came up");
+        assert!(
+            painted.repaints,
+            "the modal drew one frame and asked for no more, so it would sit frozen"
         );
     }
 
