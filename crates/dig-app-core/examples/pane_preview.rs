@@ -21,9 +21,17 @@
 //! This example only ever DRAWS. A click is read and discarded — a verb dispatched from a gallery
 //! would run against the machine it is previewing on.
 
+use std::sync::Arc;
+
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{open_pane_preview, preview_theme};
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
+use dig_app_core::profile_edit::{
+    BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
+    PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
+    ProfileSnapshot, SlotChange,
+};
+use dig_app_core::transaction::Feed;
 use dig_app_core::window_model::TabId;
 
 /// The view every pane is photographed against: the richest state, so nothing reads as empty by
@@ -59,6 +67,82 @@ fn preview_view(beacon: Beacon) -> TrayView {
         mint_chain: None,
         ..TrayView::default()
     }
+}
+
+/// Install an editor whose profile READ fails the way an unrecoverable body fails.
+///
+/// # Why a seam and not a fabricated reading
+///
+/// The card asks the process-wide [`EditService`] for its reading, and the reading is DERIVED from
+/// what the seam answers. Installing a `BodyLost` reading directly would photograph a value this
+/// example made up; installing a seam that fails the way the user's node fails photographs the value
+/// the app computes. The difference matters exactly here, because the defect being captured was the
+/// app computing the right value and drawing the wrong thing.
+///
+/// It reads and commits nothing: there is no chain, no node and no key behind it.
+fn install_a_profile_whose_content_is_gone() {
+    /// The root from the machine this defect was measured on, so the capture shows a real one.
+    const LOST_ROOT: &str = "371a39b04742cd4d4b45bdf61a99f3838b700587fad093330dddb4766feba454";
+
+    struct ContentIsGone;
+
+    impl ProfileEditSeam for ContentIsGone {
+        fn store_id(&self) -> String {
+            "111e8bce53a9b46bedc6a8883b50b6e503ee333384930e93ef3054b25e992be0".to_string()
+        }
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Err(ProfileEditError::BodyLost {
+                root: LOST_ROOT.to_string(),
+            })
+        }
+        fn commit(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            // A preview never spends. Reaching here means somebody pressed publish while
+            // photographing, and the honest answer is the one the shipped build gives today.
+            Err(ProfileEditError::BodyLost {
+                root: LOST_ROOT.to_string(),
+            })
+        }
+        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            Ok(None)
+        }
+    }
+
+    /// Never reached: the read fails first, so nothing is ever stored or read back.
+    struct NoBodies;
+    impl BodyStore for NoBodies {
+        fn put(&self, _: &str, _: &str, _: &[u8]) -> Result<(), BodyStoreError> {
+            Ok(())
+        }
+        fn get(&self, _: &str, _: &str) -> Result<BodyRead, BodyStoreError> {
+            Ok(BodyRead::Nothing)
+        }
+    }
+
+    /// Likewise: a preview writes nothing to this machine.
+    struct NoPending;
+    impl PendingBodies for NoPending {
+        fn remember(&self, _: &PendingBody) -> Result<(), PendingError> {
+            Ok(())
+        }
+        fn forget(&self, _: &str, _: &str) -> Result<(), PendingError> {
+            Ok(())
+        }
+        fn all(&self) -> Result<Vec<PendingBody>, PendingError> {
+            Ok(Vec::new())
+        }
+    }
+
+    EditService::install(Arc::new(EditService::new(
+        EditSeams::Wired {
+            seam: Arc::new(ContentIsGone),
+            bodies: Arc::new(NoBodies),
+            pending: Arc::new(NoPending),
+        },
+        Feed::app(),
+    )));
 }
 
 /// Which beacon state to photograph.
@@ -131,6 +215,13 @@ enum Case {
     Locked,
     /// Nothing answered the §5.3 ladder, so no cache snapshot and no balance.
     NoNode,
+    /// A profile whose content is anchored on chain and exists nowhere (dig_ecosystem#3041).
+    ///
+    /// The state a person is actually stuck in, and the one worth photographing: the card must say
+    /// the details are gone AND draw the form to type them in again, with no sentence anywhere under
+    /// it claiming nothing has gone wrong. Two separate defects on this card rendered correctly at
+    /// the model and wrongly on screen, so it gets a capture of its own.
+    ProfileBodyLost,
 }
 
 impl Case {
@@ -168,6 +259,13 @@ impl Case {
                 cache: None,
                 ..view
             },
+            Self::ProfileBodyLost => {
+                install_a_profile_whose_content_is_gone();
+                TrayView {
+                    profile_editing: ProfileEditing::Possible,
+                    ..view
+                }
+            }
         }
     }
 
@@ -178,6 +276,7 @@ impl Case {
             "timedout" => Some(Self::BalanceTimedOut),
             "locked" => Some(Self::Locked),
             "no-node" => Some(Self::NoNode),
+            "body-lost" => Some(Self::ProfileBodyLost),
             _ => None,
         }
     }
@@ -235,7 +334,7 @@ fn seed_activity() {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: pane_preview <tab> <light|dark> [width] [height] [live|opted-out|absent] \
-                 [healthy|pending|timedout|locked|no-node] [zoom]";
+                 [healthy|pending|timedout|locked|no-node|body-lost] [zoom]";
 
     let Some(tab) = args.first().and_then(|name| tab(name)) else {
         eprintln!("{usage}");
