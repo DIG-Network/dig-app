@@ -213,10 +213,10 @@ mod windows_toast {
     /// nothing and cost the user's Start Menu.
     ///
     /// The shortcut write therefore lives on exactly one call path — this function, called once by
-    /// the app shell at start-up — and [`refuse_when_launched_by_cargo`] makes even that path
-    /// default-deny under a test harness.
+    /// the app shell at start-up — and [`start_menu_write_is_refused`] makes even that path
+    /// default-deny for any executable built into `target/`.
     pub fn prepare() {
-        if refuse_when_launched_by_cargo() {
+        if start_menu_write_is_refused() {
             return;
         }
         let aumid = HSTRING::from(AUMID);
@@ -233,33 +233,52 @@ mod windows_toast {
             });
     }
 
-    /// Decide whether this process is allowed to write the user's Start Menu, refusing by default
-    /// for anything cargo launched, and complaining loudly when the caller is a test harness.
+    /// Decide whether THIS process may write the user's Start Menu, and complain loudly when the
+    /// caller is a test harness.
     ///
     /// The user's `%APPDATA%\…\Start Menu\Programs\DIG.lnk` is a real, durable artifact of THEIR
     /// machine: it carries the AUMID every DIG toast is filed under, and its target is whatever
-    /// executable wrote it last. A cargo-launched process is, by construction, running an executable
-    /// under `target/` that the next `cargo clean` or rebuild removes — so letting one write the
-    /// shortcut trades a working Start Menu entry for a dangling one. That applies to `cargo run` as
-    /// much as to `cargo test`; neither is the installed app, and neither should speak for it.
+    /// executable wrote it last. So the question the guard has to answer is whether the running
+    /// executable is one the shortcut may still point at tomorrow.
     ///
     /// A test harness is additionally a defect rather than a config: nothing in a test suite has any
     /// business here, so it trips a `debug_assert` and fails the suite instead of passing quietly.
-    /// `cargo run` gets the silent refusal, because refusing a developer's app launch by panicking
+    /// A `cargo run` gets the silent refusal, because refusing a developer's app launch by panicking
     /// would be a worse bug than the one being prevented.
-    fn refuse_when_launched_by_cargo() -> bool {
-        if !launched_by_cargo() {
+    fn start_menu_write_is_refused() -> bool {
+        let exe = std::env::current_exe().ok();
+        if !write_is_refused(launched_by_cargo(), exe.as_deref()) {
             return false;
         }
         debug_assert!(
-            !running_as_test_harness(),
+            !exe.as_deref().is_some_and(is_test_harness_path),
             "a test reached the Start Menu identity writer; it must not touch the user's machine"
         );
         tracing::debug!(
-            "skipping the Start Menu identity: this process was launched by cargo, so its \
+            "skipping the Start Menu identity: this process runs from a build directory, so its \
              executable is not one the shortcut may point at"
         );
         true
+    }
+
+    /// The refusal itself, as a decision over facts rather than over the ambient process — so both
+    /// directions of it can be tested, including the one that matters most.
+    ///
+    /// **The refusal is about WHERE the executable lives, not about who started it.** An executable
+    /// under `target/` is by construction one the next rebuild or `cargo clean` deletes, so pointing
+    /// the shortcut at it trades a working Start Menu entry for a dangling one — which is the very
+    /// generic-icon state this module exists to repair. That is true of `target\debug\dig-app.exe`
+    /// double-clicked from Explorer, which carries none of cargo's environment; keying the refusal on
+    /// the environment alone would let exactly that case through. The cargo environment is kept as a
+    /// second, independent signal because it catches the converse — a `cargo run` whose binary has
+    /// been copied somewhere that looks shipped.
+    ///
+    /// **An unknown executable is ALLOWED, deliberately.** The costs are asymmetric: a wrong refusal
+    /// means the installed app never registers its AUMID and notifications break for every user,
+    /// which is strictly worse than the icon defect a wrong permit could reintroduce on a developer's
+    /// own machine. The guard therefore fails open when it cannot see the path.
+    fn write_is_refused(launched_by_cargo: bool, exe: Option<&std::path::Path>) -> bool {
+        launched_by_cargo || exe.is_some_and(runs_from_a_cargo_build_directory)
     }
 
     /// Was this process started by cargo (`cargo run`, `cargo test`, `cargo bench`)?
@@ -270,9 +289,20 @@ mod windows_toast {
         std::env::var_os("CARGO").is_some() || std::env::var_os("CARGO_MANIFEST_DIR").is_some()
     }
 
-    /// Is the running executable a cargo TEST binary rather than a built application?
-    fn running_as_test_harness() -> bool {
-        std::env::current_exe().is_ok_and(|exe| is_test_harness_path(&exe))
+    /// Does `exe` sit inside a cargo `target/` build directory?
+    ///
+    /// Cargo emits binaries at a bounded depth below `target/`: `target/<profile>/` for an
+    /// application, one deeper for a test or bench harness, and one deeper again for each when a
+    /// `--target <triple>` is in play. Four ancestors is therefore the whole layout, and the bound is
+    /// what keeps the guard from over-reaching: an installed path that merely happens to contain a
+    /// directory named `target` further up — the false positive that would silently disable the
+    /// shipped app's repair — is out of range.
+    fn runs_from_a_cargo_build_directory(exe: &std::path::Path) -> bool {
+        const CARGO_BUILD_DIR_MAX_DEPTH: usize = 4;
+        exe.ancestors()
+            .skip(1)
+            .take(CARGO_BUILD_DIR_MAX_DEPTH)
+            .any(|dir| dir.file_name() == Some(std::ffi::OsStr::new("target")))
     }
 
     /// A cargo test/bench binary is emitted into `target/<profile>/deps/`; an application binary is
@@ -526,33 +556,91 @@ mod windows_toast {
             assert_eq!(AUMID, "DIGNetwork.DIG");
         }
 
-        /// **This very test binary is recognised as one that may not write the user's Start Menu.**
+        /// **This very test binary is refused the user's Start Menu, on both of the guard's signals.**
         ///
         /// The guard is only worth anything if it fires in the situation it exists for, and that
         /// situation is the process running this assertion. Asserting on a synthesised path alone
         /// would prove the classifier and nothing about the harness, which is exactly how the
         /// original defect survived: `deliver` looked harmless until you noticed which executable
-        /// was calling it. Both live facts are pinned, because either one alone would let the
-        /// shortcut be rewritten to `target/debug/deps/*.exe`.
+        /// was calling it. Each signal is pinned separately as well as through the decision, so that
+        /// one of them going silent shows up here rather than being masked by the other.
         #[test]
         fn a_cargo_test_binary_is_refused_the_start_menu() {
+            let exe = std::env::current_exe().expect("a test binary knows its own path");
             assert!(
                 launched_by_cargo(),
                 "cargo no longer exports its environment to test binaries; the refusal that keeps \
                  `cargo test` out of the user's Start Menu has gone silent"
             );
             assert!(
-                running_as_test_harness(),
-                "this harness was not recognised as one: {:?}",
-                std::env::current_exe()
+                runs_from_a_cargo_build_directory(&exe),
+                "this harness was not recognised as running from a build directory: {exe:?}"
             );
+            assert!(write_is_refused(launched_by_cargo(), Some(&exe)));
         }
 
-        /// **The classifier separates a harness binary from a shipped one.**
+        /// **A binary run STRAIGHT out of `target/` is refused, with no cargo environment at all.**
         ///
-        /// The installed path is the control: a classifier that answered `true` for everything would
-        /// satisfy the live assertions above while silently converting the shipped app's own
-        /// start-up repair into a no-op — the failure direction that would leave #3076 unfixed.
+        /// This is the variant the environment check cannot see. Double-clicking
+        /// `target\debug\dig-app.exe` in Explorer exports no `CARGO*`, so a guard keyed only on the
+        /// environment permits it — and it then writes a shortcut pointing into `target/` that the
+        /// next rebuild deletes, which is precisely the dangling-shortcut damage this change exists
+        /// to stop. `launched_by_cargo` is passed as `false` deliberately: with `true` the assertion
+        /// would pass on the environment alone and prove nothing about the path.
+        #[test]
+        fn an_executable_run_directly_out_of_target_is_refused() {
+            for exe in [
+                r"C:\repo\target\debug\dig-app.exe",
+                r"C:\repo\target\release\dig-app.exe",
+                r"C:\repo\target\debug\deps\dig_app_core-e5b8b4388e0565db.exe",
+                r"C:\repo\target\x86_64-pc-windows-msvc\release\dig-app.exe",
+            ] {
+                assert!(
+                    write_is_refused(false, Some(std::path::Path::new(exe))),
+                    "a build-directory executable was allowed to rewrite the user's shortcut: {exe}"
+                );
+            }
+        }
+
+        /// **The SHIPPED app is still allowed to write the shortcut — the direction that breaks the
+        /// product if it ever inverts.**
+        ///
+        /// A refusal that false-positives on an installed binary is strictly worse than the icon
+        /// defect: the app never registers its AUMID and every DIG notification stops arriving, for
+        /// every user, silently. Nothing else in this suite fails if the guard becomes over-broad —
+        /// an always-refuse implementation satisfies every other assertion here — so this test is
+        /// the only thing standing between that and a release. The last path is the near miss the
+        /// depth bound exists for: `target` appears, but far above the executable.
+        #[test]
+        fn a_shipped_executable_may_still_write_the_shortcut() {
+            for exe in [
+                r"C:\Program Files\DIG\bin\dig-app.exe",
+                r"C:\Users\someone\AppData\Local\DIG\dig-app.exe",
+                r"C:\build\target\one\two\three\four\dig-app.exe",
+            ] {
+                assert!(
+                    !write_is_refused(false, Some(std::path::Path::new(exe))),
+                    "the installed app was refused its own AUMID registration: {exe}"
+                );
+            }
+        }
+
+        /// **An executable the process cannot identify is allowed, not refused.**
+        ///
+        /// `current_exe()` can fail, and the guard fails open there on purpose (see
+        /// [`write_is_refused`]): breaking notifications for everyone is a worse outcome than a
+        /// developer's shortcut going stale.
+        #[test]
+        fn an_unknown_executable_is_allowed() {
+            assert!(!write_is_refused(false, None));
+        }
+
+        /// **The harness classifier that arms the `debug_assert` separates a harness from a shipped
+        /// binary.**
+        ///
+        /// This one drives the loud-failure path only. It is kept distinct from the write decision
+        /// because a test reaching the writer is a defect to shout about, while a `cargo run` is
+        /// merely something to decline.
         #[test]
         fn only_the_deps_directory_reads_as_a_test_harness() {
             assert!(is_test_harness_path(std::path::Path::new(
