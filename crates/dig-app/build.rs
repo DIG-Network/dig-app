@@ -82,9 +82,10 @@ fn embed_icon(icon: &Path) {
         .and_then(|bytes| res::ico_to_res(&bytes))
         .and_then(|res| {
             let path = PathBuf::from(out_dir).join("dig-app-icon.res");
-            std::fs::write(&path, res)
-                .map(|()| path)
-                .map_err(|e| format!("{} could not be written: {e}", path.display()))
+            match std::fs::write(&path, res) {
+                Ok(()) => Ok(path),
+                Err(e) => Err(format!("{} could not be written: {e}", path.display())),
+            }
         });
 
     match written {

@@ -6,7 +6,10 @@
 
 #![cfg(windows)]
 
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/build/res.rs"));
+#[path = "../build/res.rs"]
+mod res;
+
+use res::{ico_to_res, ICON_GROUP_ID, RT_GROUP_ICON, RT_ICON};
 
 const ICO: &[u8] = include_bytes!("../icons/mark.ico");
 

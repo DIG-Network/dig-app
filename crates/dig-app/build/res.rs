@@ -15,7 +15,7 @@
 //! data padded out to a DWORD boundary. Windows resolves an icon in two hops: `RT_GROUP_ICON`
 //! holds a directory of available sizes, each naming an `RT_ICON` that holds the image itself.
 //!
-//! Included by `build.rs`, and by `tests/icon_resource.rs` so the byte layout is actually checked.
+//! Mounted by `build.rs`, and by `tests/icon_resource.rs` so the byte layout is actually checked.
 
 /// Resource type for one icon image.
 pub const RT_ICON: u16 = 3;
@@ -116,7 +116,8 @@ fn read_ico_directory(ico: &[u8]) -> Result<Vec<IcoImage>, String> {
         .map(|index| {
             let entry = 6 + ICO_ENTRY * index;
             let read_u32 = |at: usize| {
-                u32::from_le_bytes(ico[at..at + 4].try_into().expect("bounds checked above")) as usize
+                u32::from_le_bytes(ico[at..at + 4].try_into().expect("bounds checked above"))
+                    as usize
             };
             let size = read_u32(entry + 8);
             let offset = read_u32(entry + 12);
