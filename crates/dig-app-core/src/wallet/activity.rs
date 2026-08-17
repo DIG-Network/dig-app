@@ -208,7 +208,8 @@ impl ActivityLog {
     /// Record a sweep's worth of arrivals, oldest first, assigning each its learning position.
     ///
     /// Positions start above the largest a spend log could hand out, so an arrival learned after a
-    /// spend sorts after it. See [`SPEND_POSITIONS`].
+    /// spend sorts after it. The offset is the private `SPEND_POSITIONS`, whose own comment states
+    /// what that ordering does and does not promise.
     pub fn record(&mut self, arrivals: &[Arrival]) {
         for arrival in arrivals {
             self.seen.push(SeenArrival {
