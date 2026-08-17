@@ -68,6 +68,35 @@ pub struct SpendRecord {
     pub transaction_id: String,
 }
 
+/// What this wallet knows about ONE of its addresses beyond the address itself — the derivation
+/// index it came from, and whatever the user called it (dig_ecosystem#3077).
+///
+/// # Keyed by the ADDRESS, never by a position
+///
+/// The obvious shape is a label per slot in [`WalletState::addresses`], and it is wrong: that list is
+/// rebuilt from derivation and is free to gain an entry at the front or come back in another order,
+/// at which point every label silently moves to a different address. A label that has drifted onto a
+/// stranger's address is worse than no label at all — it is the name a person checks *instead of*
+/// reading the address, so a wrong one sends money to the wrong place with the user's full attention
+/// on the screen.
+///
+/// # The derivation index is remembered rather than assumed
+///
+/// It is [`Option`] because this wallet has held addresses since before it recorded one, and an
+/// unknown index must read as unknown. Inferring it from the position in `addresses` is the same
+/// mistake as above with a number instead of a name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressNote {
+    /// The `xch1…` address this note is about — the key, and the only field that identifies it.
+    pub address: String,
+    /// The HD derivation index this address came from, when it is known.
+    #[serde(default)]
+    pub derivation_index: Option<u32>,
+    /// What the user called this address, when they named it.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 /// A profile's wallet view — its receive addresses, its last-known spendable coins, and its
 /// outbound spend history. This is the cached, user-facing state; it is authoritative for display +
 /// coin selection between chain reads, and is refreshed from the engine's chain-read seam
@@ -84,6 +113,11 @@ pub struct WalletState {
     /// The wallet's outbound spends, oldest first — the substrate the wave-2 security lanes read.
     #[serde(default)]
     pub history: Vec<SpendRecord>,
+    /// What the user knows each address by, and which index it came from. Sparse: an address with
+    /// nothing recorded about it has no entry, so an empty list is a wallet nobody has annotated
+    /// rather than a wallet with no addresses.
+    #[serde(default)]
+    pub notes: Vec<AddressNote>,
 }
 
 impl WalletState {
@@ -124,6 +158,61 @@ impl WalletState {
             }
         }
         recipients
+    }
+
+    /// What the user called `address`, or `None` when they never named it.
+    pub fn label_of(&self, address: &str) -> Option<&str> {
+        self.note_of(address).and_then(|n| n.label.as_deref())
+    }
+
+    /// The derivation index `address` came from, or `None` when it was never recorded.
+    ///
+    /// `None` is *not known*, never *index zero*: index zero is a real address holding real money,
+    /// and a surface that renders an unknown as `#0` has made a claim nobody measured.
+    pub fn derivation_index_of(&self, address: &str) -> Option<u32> {
+        self.note_of(address).and_then(|n| n.derivation_index)
+    }
+
+    /// Name `address`. An empty or whitespace-only name CLEARS the label rather than storing a blank
+    /// one, so a user who deletes the text they typed gets the address back rather than a row with a
+    /// nameless name.
+    pub fn set_label(&mut self, address: &str, label: &str) {
+        let label = label.trim();
+        let label = (!label.is_empty()).then(|| label.to_owned());
+        self.note_mut(address).label = label;
+        self.prune_empty_notes();
+    }
+
+    /// Record which derivation index `address` came from.
+    pub fn set_derivation_index(&mut self, address: &str, index: u32) {
+        self.note_mut(address).derivation_index = Some(index);
+    }
+
+    /// The note for `address`, if there is one.
+    fn note_of(&self, address: &str) -> Option<&AddressNote> {
+        self.notes.iter().find(|n| n.address == address)
+    }
+
+    /// The note for `address`, creating an empty one if needed.
+    fn note_mut(&mut self, address: &str) -> &mut AddressNote {
+        if let Some(position) = self.notes.iter().position(|n| n.address == address) {
+            return &mut self.notes[position];
+        }
+        self.notes.push(AddressNote {
+            address: address.to_owned(),
+            derivation_index: None,
+            label: None,
+        });
+        self.notes
+            .last_mut()
+            .expect("a note was just pushed and cannot be absent")
+    }
+
+    /// Drop notes that record nothing, so clearing a label does not leave the state growing an entry
+    /// per address a user once typed into and thought better of.
+    fn prune_empty_notes(&mut self) {
+        self.notes
+            .retain(|n| n.label.is_some() || n.derivation_index.is_some());
     }
 
     /// The total amount of `asset` this wallet has sent across all recorded spends, in base units —
@@ -270,7 +359,7 @@ mod tests {
                     amount: 7,
                 },
             ],
-            history: Vec::new(),
+            ..WalletState::default()
         };
         assert_eq!(state.balance(Asset::Dig), 150);
         assert_eq!(state.balance(Asset::Xch), 7);
@@ -336,6 +425,100 @@ mod tests {
         assert_eq!(state.total_sent(Asset::Xch), 7);
     }
 
+    /// **A label follows its ADDRESS, not its position** (dig_ecosystem#3077).
+    ///
+    /// The nearest wrong implementation stores one label per slot in `addresses`, which is
+    /// indistinguishable from this one until the list changes shape. So the fixture changes its
+    /// shape in the way derivation actually does: a new address arrives at the FRONT, moving every
+    /// existing address down one. A positional store would hand "savings" to the newcomer and leave
+    /// the named address anonymous.
+    #[test]
+    fn a_label_follows_its_address_when_the_address_list_is_rebuilt() {
+        let mut state = WalletState {
+            addresses: vec!["xch1first".into(), "xch1savings".into()],
+            ..WalletState::default()
+        };
+        state.set_label("xch1savings", "Savings");
+
+        state.addresses = vec![
+            "xch1newest".into(),
+            "xch1first".into(),
+            "xch1savings".into(),
+        ];
+
+        assert_eq!(state.label_of("xch1savings"), Some("Savings"));
+        assert_eq!(state.label_of("xch1newest"), None);
+        assert_eq!(state.label_of("xch1first"), None);
+    }
+
+    /// A derivation index is remembered per address, and an unrecorded one reads as unknown rather
+    /// than as index zero — which is a real address holding real money.
+    #[test]
+    fn an_unrecorded_derivation_index_is_unknown_and_not_zero() {
+        let mut state = WalletState::default();
+        state.set_derivation_index("xch1zero", 0);
+
+        assert_eq!(state.derivation_index_of("xch1zero"), Some(0));
+        assert_eq!(state.derivation_index_of("xch1unknown"), None);
+    }
+
+    /// A label and an index live on the same address without displacing each other.
+    #[test]
+    fn a_label_and_an_index_coexist_on_one_address() {
+        let mut state = WalletState::default();
+        state.set_derivation_index("xch1a", 7);
+        state.set_label("xch1a", "Payroll");
+        state.set_derivation_index("xch1a", 8);
+
+        assert_eq!(state.label_of("xch1a"), Some("Payroll"));
+        assert_eq!(state.derivation_index_of("xch1a"), Some(8));
+        assert_eq!(state.notes.len(), 1, "one note per address, not one per write");
+    }
+
+    /// Clearing a name gives the address back rather than storing a blank one.
+    #[test]
+    fn a_blank_label_clears_rather_than_storing_an_empty_name() {
+        let mut state = WalletState::default();
+        state.set_label("xch1a", "Savings");
+        state.set_label("xch1a", "   ");
+
+        assert_eq!(state.label_of("xch1a"), None);
+        assert!(
+            state.notes.is_empty(),
+            "a note recording nothing is not kept"
+        );
+    }
+
+    /// Labels survive the seal, like every other piece of wallet state.
+    #[test]
+    fn labels_and_indices_round_trip_through_the_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path(), DID_A);
+        let mut state = WalletState {
+            addresses: vec!["xch1primary".into()],
+            ..WalletState::default()
+        };
+        state.set_label("xch1primary", "Main");
+        state.set_derivation_index("xch1primary", 3);
+
+        store.save_state(DID_A, &state).unwrap();
+        assert_eq!(store.load_state(DID_A).unwrap(), state);
+    }
+
+    /// **A sealed state written before notes existed still opens**, as an unannotated wallet — the
+    /// additive-field contract (§5.1) applied to the seal.
+    #[test]
+    fn a_state_sealed_before_notes_existed_still_opens() {
+        let older = serde_json::json!({
+            "addresses": ["xch1primary"],
+            "coins": [],
+            "history": [],
+        });
+        let state: WalletState = serde_json::from_value(older).expect("an older state deserializes");
+        assert_eq!(state.addresses, vec!["xch1primary".to_string()]);
+        assert!(state.notes.is_empty());
+    }
+
     #[test]
     fn history_round_trips_through_the_seal() {
         let dir = tempfile::tempdir().unwrap();
@@ -360,7 +543,7 @@ mod tests {
                 asset: Asset::Dig,
                 amount: 42,
             }],
-            history: Vec::new(),
+            ..WalletState::default()
         };
         store.save_state(DID_A, &state).unwrap();
         assert_eq!(store.load_state(DID_A).unwrap(), state);
