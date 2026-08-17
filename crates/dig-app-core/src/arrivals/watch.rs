@@ -344,6 +344,15 @@ pub fn sweep(
         tracing::warn!(error = %e, "the arrival record could not be saved; nothing announced");
         return;
     }
+    // Listed BEFORE it is announced, and from the same batch, so the Wallet tab's activity list and
+    // the toast can never disagree about what arrived (dig_ecosystem#3077). It is the announceable
+    // batch rather than everything drained, deliberately: a client adopting a node's existing ledger
+    // deliberately does not replay its history, and a list that replayed what the toast suppressed
+    // would reintroduce that burst in another surface.
+    //
+    // Both sit AFTER the save guard above, so a sweep whose record did not persist says nothing
+    // anywhere.
+    crate::wallet::activity::remember_arrivals(&announceable);
     notify::announce_arrivals(&announceable, notifications_enabled, notifier);
 }
 

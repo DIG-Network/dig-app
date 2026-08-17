@@ -193,6 +193,45 @@ const HELD: dig_app_core::wallet::overview::Balances = dig_app_core::wallet::ove
     xch_mojos: 250_000_000_000,
 };
 
+/// Put a plausible two-way activity list in front of the Wallet tab's Activity card.
+///
+/// The card reads a PROCESS-WIDE log rather than the tray view, because its two writers (the arrival
+/// sweep and the send path) run on their own threads — so seeding it is how this gallery photographs
+/// it populated, in the same spirit as the rich `preview_view` above.
+///
+/// The fixture deliberately mixes the two directions and two assets, because the picture worth
+/// having is the one where an arrival cites a height and a send does not: that asymmetry is the
+/// feature, and a capture of one direction alone cannot show it.
+fn seed_activity() {
+    use dig_app_core::arrivals::Arrival;
+    use dig_app_core::wallet::activity;
+    use dig_app_core::wallet::state::{Asset, SpendRecord};
+
+    activity::remember_arrivals(&[
+        Arrival {
+            seq: 41,
+            coin_id: "9f2c".repeat(16),
+            asset_id: None,
+            amount: 2_500_000_000_000,
+            confirmed_height: 5_400_096,
+        },
+        Arrival {
+            seq: 42,
+            coin_id: "1ab4".repeat(16),
+            asset_id: Some(dig_app_core::notify::dig_asset_id()),
+            amount: 12_500,
+            confirmed_height: 5_400_112,
+        },
+    ]);
+    activity::remember_spend(SpendRecord {
+        recipient: "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq".into(),
+        asset: Asset::Xch,
+        amount: 750_000_000_000,
+        broadcast_at: 1_770_000_000,
+        transaction_id: "c0ffee".repeat(10),
+    });
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: pane_preview <tab> <light|dark> [width] [height] [live|opted-out|absent] \
@@ -223,6 +262,8 @@ fn main() {
     // A pane taller than the display is clamped by the window manager, not by the size asked for,
     // so a whole-pane capture of a long pane needs this rather than a bigger number.
     let zoom: f32 = args.get(6).and_then(|z| z.parse().ok()).unwrap_or(1.0);
+
+    seed_activity();
 
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(theme, tab, size, zoom, case.apply(preview_view(beacon))) {

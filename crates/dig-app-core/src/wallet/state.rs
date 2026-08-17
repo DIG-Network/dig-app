@@ -472,7 +472,11 @@ mod tests {
 
         assert_eq!(state.label_of("xch1a"), Some("Payroll"));
         assert_eq!(state.derivation_index_of("xch1a"), Some(8));
-        assert_eq!(state.notes.len(), 1, "one note per address, not one per write");
+        assert_eq!(
+            state.notes.len(),
+            1,
+            "one note per address, not one per write"
+        );
     }
 
     /// Clearing a name gives the address back rather than storing a blank one.
@@ -514,7 +518,8 @@ mod tests {
             "coins": [],
             "history": [],
         });
-        let state: WalletState = serde_json::from_value(older).expect("an older state deserializes");
+        let state: WalletState =
+            serde_json::from_value(older).expect("an older state deserializes");
         assert_eq!(state.addresses, vec!["xch1primary".to_string()]);
         assert!(state.notes.is_empty());
     }

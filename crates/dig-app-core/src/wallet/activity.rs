@@ -165,7 +165,7 @@ pub fn merge(history: &[SpendRecord], arrivals: &[SeenArrival]) -> Vec<ActivityE
 
     // Newest-learned first. A stable sort, so two entries this app learned of in the same sweep keep
     // the order their own source gave them rather than swapping between repaints.
-    entries.sort_by(|a, b| b.learned_at.cmp(&a.learned_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.learned_at));
     entries
 }
 
@@ -200,6 +200,7 @@ const MAX_REMEMBERED_ARRIVALS: usize = 256;
 #[derive(Debug, Default)]
 pub struct ActivityLog {
     seen: Vec<SeenArrival>,
+    spends: Vec<SpendRecord>,
     next_position: u64,
 }
 
@@ -221,14 +222,31 @@ impl ActivityLog {
         }
     }
 
+    /// Record a spend this app broadcast in this session, oldest last.
+    pub fn record_spend(&mut self, record: SpendRecord) {
+        self.spends.push(record);
+    }
+
     /// The arrivals this app has learned of, oldest first.
     pub fn seen(&self) -> &[SeenArrival] {
         &self.seen
     }
 
-    /// The activity list for `history` joined with everything seen, newest-learned first.
+    /// The activity list for the persisted `history` joined with everything this session saw,
+    /// newest-learned first.
+    ///
+    /// A spend appearing in BOTH — persisted and broadcast in this session — is listed once. The
+    /// transaction id is what identifies it, because that is the value the chain and both logs agree
+    /// on; deduplicating on amount-and-recipient would silently collapse two identical payments a
+    /// person deliberately made twice.
     pub fn entries(&self, history: &[SpendRecord]) -> Vec<ActivityEntry> {
-        merge(history, &self.seen)
+        let mut all = history.to_vec();
+        for spend in &self.spends {
+            if !all.iter().any(|s| s.transaction_id == spend.transaction_id) {
+                all.push(spend.clone());
+            }
+        }
+        merge(&all, &self.seen)
     }
 }
 
@@ -245,6 +263,52 @@ impl ActivityLog {
 /// session is the one case this under-orders, and it is visible for seconds, next to a row that
 /// states its own broadcast time.
 const SPEND_POSITIONS: u64 = 1 << 32;
+
+/// The process-wide activity log.
+///
+/// One instance for the reason the balance poller and the arrival watch are each one: the two
+/// writers (the arrival sweep on its worker, the send path on its own) and the reader (the Wallet
+/// pane, on the repaint thread) are in different places and must see the same list. A per-snapshot
+/// log would show a payment that arrived and then lose it on the next repaint.
+///
+/// It holds only what [`ActivityLog`] holds — public metadata about money that has already moved.
+/// No key, no bundle bytes, nothing that crosses the custody boundary (§908).
+pub fn app_log() -> &'static std::sync::Mutex<ActivityLog> {
+    static LOG: std::sync::OnceLock<std::sync::Mutex<ActivityLog>> = std::sync::OnceLock::new();
+    LOG.get_or_init(Default::default)
+}
+
+/// Record `arrivals` in the process-wide log, ignoring a poisoned lock.
+///
+/// A poisoned lock is ignored rather than propagated because this is a display cache downstream of
+/// dig-node's durable ledger: losing a row costs a list entry until the next sweep, while panicking
+/// on the arrival worker would cost every future one.
+pub fn remember_arrivals(arrivals: &[Arrival]) {
+    match app_log().lock() {
+        Ok(mut log) => log.record(arrivals),
+        Err(_) => tracing::debug!("the activity log is poisoned; this sweep is not listed"),
+    }
+}
+
+/// Record an outbound spend this app just broadcast in the process-wide log.
+///
+/// **What this row claims is exactly "we sent this".** It carries no height and answers `false` to
+/// [`ActivityEntry::is_settled`], because a broadcast is a submission — settlement is
+/// [`InFlightSend::status`](crate::wallet::send::InFlightSend::status)'s answer, from a chain read.
+pub fn remember_spend(record: SpendRecord) {
+    match app_log().lock() {
+        Ok(mut log) => log.record_spend(record),
+        Err(_) => tracing::debug!("the activity log is poisoned; this spend is not listed"),
+    }
+}
+
+/// The activity list as the Wallet pane should draw it, newest-learned first.
+pub fn entries() -> Vec<ActivityEntry> {
+    match app_log().lock() {
+        Ok(log) => log.entries(&[]),
+        Err(_) => Vec::new(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -367,6 +431,47 @@ mod tests {
 
         assert_eq!(entries[0].counterparty, None);
         assert_eq!(entries[1].counterparty.as_deref(), Some("xch1alice"));
+    }
+
+    /// **A spend recorded in this session AND already persisted is listed once.**
+    ///
+    /// The nearest wrong implementation concatenates the two sources, which shows every payment
+    /// twice the moment the persisted log gains a writer. Identity is the transaction id.
+    #[test]
+    fn a_spend_present_in_both_the_session_and_the_history_is_listed_once() {
+        let persisted = spend("xch1alice", 10, 1_600_000_000);
+        let mut log = ActivityLog::default();
+        log.record_spend(persisted.clone());
+
+        let entries = log.entries(std::slice::from_ref(&persisted));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].counterparty.as_deref(), Some("xch1alice"));
+    }
+
+    /// **Two identical payments deliberately made twice stay two rows.** Deduplicating on amount and
+    /// recipient would hide one, which is a wrong claim about how much left the wallet.
+    #[test]
+    fn two_identical_payments_with_different_transaction_ids_are_two_rows() {
+        let first = spend("xch1alice", 10, 1_600_000_000);
+        let second = SpendRecord {
+            transaction_id: "beef".into(),
+            ..first.clone()
+        };
+        let mut log = ActivityLog::default();
+        log.record_spend(second);
+
+        assert_eq!(log.entries(std::slice::from_ref(&first)).len(), 2);
+    }
+
+    /// A spend broadcast in this session appears with no persisted history at all — which is the
+    /// state every wallet is in today, since nothing writes the history yet.
+    #[test]
+    fn a_session_spend_appears_without_any_persisted_history() {
+        let mut log = ActivityLog::default();
+        log.record_spend(spend("xch1alice", 10, 1_600_000_000));
+        let entries = log.entries(&[]);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].is_settled());
     }
 
     /// The empty case is an empty list, not a row saying so — the pane draws its own empty state.
