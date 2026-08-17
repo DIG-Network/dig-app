@@ -1413,8 +1413,8 @@ file, BEFORE anything is signed or pushed. A write performed only after the comm
 `putBody` is refused, does NOT satisfy this: it is absent for exactly the crash it exists to survive.
 
 The pending file MUST live in the per-profile AppData directory and MUST be sealed at rest to the user's key
-(NC-2 / NC-3). It MUST be drained — every entry re-offered to `control.profile.putBody` — on a later attempt
-and at the next launch, and an entry MUST be removed ONLY after `control.profile.getBody` returns those exact
+(NC-2 / NC-3). It MUST be drained — every entry re-offered to `control.profile.putBody` — at the next launch,
+and an entry MUST be removed ONLY after `control.profile.getBody` returns those exact
 bytes at that root; a successful `putBody` alone MUST NOT clear it. An edit whose outcome is UNKNOWN (an
 unanswered chain) MUST keep its entry; only an outcome proving nothing reached a mempool may drop it.
 

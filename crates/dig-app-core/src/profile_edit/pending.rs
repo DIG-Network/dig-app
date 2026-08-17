@@ -207,8 +207,8 @@ pub struct DrainReport {
 /// lost as before, so the entry is dropped only once [`BodyStore::get`] returns the same bytes at
 /// the same root. Anything else leaves it pending, which costs a retry and never costs the body.
 ///
-/// Never returns an error: a drain runs on a timer and at start-up, and a node that is down is the
-/// ordinary case it exists to ride out.
+/// Never returns an error: a drain runs at start-up, and a node that is down is the ordinary case
+/// it exists to ride out — every entry it could not hand over stays pending for the next launch.
 pub fn drain(pending: &dyn PendingBodies, bodies: &dyn BodyStore) -> DrainReport {
     let Ok(entries) = pending.all() else {
         return DrainReport::default();

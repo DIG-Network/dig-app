@@ -179,8 +179,8 @@ impl ProfileEditError {
                 why.sentence(),
                 match kept_locally {
                     true =>
-                        "DIG has kept a copy on this computer and will keep trying, including \
-                         after you restart it.",
+                        "DIG has kept a copy of it on this computer, so nothing is lost. It offers \
+                         that copy to your node again the next time DIG starts.",
                     false =>
                         "DIG could NOT keep a copy on this computer: leave DIG open until your \
                          profile shows as published.",
@@ -996,10 +996,17 @@ mod tests {
         }
         let said = error.sentence();
         assert!(said.contains("sent to the blockchain"), "said: {said}");
-        assert!(
-            said.contains("kept a copy on this computer"),
-            "said: {said}"
-        );
+        assert!(said.contains("kept a copy"), "said: {said}");
+        // The retry it promises must be the one `drain` actually performs — a start-up drain, and
+        // nothing in between. A sentence describing a background retry would be a promise no code
+        // in this crate keeps (dig_ecosystem#3078 adds the timer that would make one true).
+        assert!(said.contains("next time DIG starts"), "said: {said}");
+        for invented in ["keep trying", "keeps trying", "on a timer", "in the background"] {
+            assert!(
+                !said.contains(invented),
+                "promised a retry no code performs ({invented}): {said}"
+            );
+        }
     }
 
     /// **The pre-spend write happens even if the COMMIT never returns.**
