@@ -123,9 +123,9 @@ impl ProfileMeltError {
             Self::AlreadyGone => {
                 "This part of the profile is no longer on the blockchain.".to_string()
             }
-            Self::Rejected(why) => format!(
-                "The blockchain declined the deletion, and the profile is unchanged: {why}"
-            ),
+            Self::Rejected(why) => {
+                format!("The blockchain declined the deletion, and the profile is unchanged: {why}")
+            }
             Self::ChainUnreachable(why) => format!(
                 "DIG could not reach the blockchain, so it does not know whether the deletion went \
                  through: {why}"
@@ -237,10 +237,12 @@ pub fn start_melt(seams: MeltSeams, target: MeltTarget, feed: Feed, watch: Watch
         // Unreachable from the app, whose control is gated on the seams existing. Reported rather
         // than ignored, because a silent no-op on a control a person pressed is the dead end
         // dig_ecosystem#1800 removed.
-        feed.publish(Transaction::starting(copy::what(&target), None).at(Stage::Failed {
-            why: copy::NO_TRANSPORT.to_string(),
-            next: copy::NO_TRANSPORT_NEXT.to_string(),
-        }));
+        feed.publish(
+            Transaction::starting(copy::what(&target), None).at(Stage::Failed {
+                why: copy::NO_TRANSPORT.to_string(),
+                next: copy::NO_TRANSPORT_NEXT.to_string(),
+            }),
+        );
         return;
     };
     thread::spawn(move || run(&*seam, &target, &feed, watch));
@@ -309,7 +311,11 @@ fn melt_one(
 }
 
 /// Watch the chain until it proves `pushed`, or until the watch gives up.
-fn prove(seam: &dyn ProfileMeltSeam, pushed: &PushedMelt, watch: Watch) -> Result<u32, MeltStopped> {
+fn prove(
+    seam: &dyn ProfileMeltSeam,
+    pushed: &PushedMelt,
+    watch: Watch,
+) -> Result<u32, MeltStopped> {
     let until = Instant::now() + watch.until;
     let mut unanswered = 0;
     while Instant::now() < until {
@@ -439,7 +445,11 @@ mod tests {
     /// printed at the end of the loop.
     #[test]
     fn a_profile_is_reported_deleted_only_once_the_chain_proved_both_melts() {
-        let seam = Halves::of(pushed(MeltHalf::Did), pushed(MeltHalf::Store), Chain::Proves(7));
+        let seam = Halves::of(
+            pushed(MeltHalf::Did),
+            pushed(MeltHalf::Store),
+            Chain::Proves(7),
+        );
         let ended = settled(seam.clone());
 
         assert!(

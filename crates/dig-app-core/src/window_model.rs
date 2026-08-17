@@ -716,6 +716,7 @@ mod tests {
             [(0_u32, true), (0, false), (1, true), (1, false)]
                 .map(|(ix, hidden)| TrayAction::SetProfileVisibility { ix, hidden }),
         );
+        all.extend([0_u32, 1].map(|ix| TrayAction::DeleteProfile { ix }));
         // A real menu row now (dig_ecosystem#2939), offered only where creation is possible.
         all.push(TrayAction::CreateProfile);
         // Offered only where editing is measured possible, on the Account tab beneath the list.
@@ -752,6 +753,7 @@ mod tests {
             | TrayAction::AboutDid
             | TrayAction::SetActiveProfile { .. }
             | TrayAction::SetProfileVisibility { .. }
+            | TrayAction::DeleteProfile { .. }
             | TrayAction::AboutProfiles
             | TrayAction::CreateProfile
             | TrayAction::CopyReceiveAddress

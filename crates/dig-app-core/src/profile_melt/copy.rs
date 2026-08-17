@@ -205,7 +205,12 @@ mod tests {
     fn no_copy_promises_the_mojo_back() {
         for said in every_sentence() {
             let lowered = said.to_lowercase();
-            for forbidden in ["refund", "returned to your wallet", "paid back", "get it back"] {
+            for forbidden in [
+                "refund",
+                "returned to your wallet",
+                "paid back",
+                "get it back",
+            ] {
                 assert!(
                     !lowered.contains(forbidden),
                     "the deletion copy says “{forbidden}”, promising an amount the singleton puzzle \
@@ -251,7 +256,10 @@ mod tests {
     fn the_confirmation_names_the_identity_and_the_store_it_will_end() {
         let t = target();
         let body = confirm_body(&t);
-        assert!(body.contains(&t.did), "the DID being ended is not named: {body}");
+        assert!(
+            body.contains(&t.did),
+            "the DID being ended is not named: {body}"
+        );
         assert!(
             body.contains(&t.store_id),
             "the store being ended is not named: {body}"
@@ -297,9 +305,14 @@ mod tests {
     fn every_ending_tells_the_person_what_to_do_next() {
         let t = target();
         let endings = [
-            stopped_after(&[], MeltHalf::Did, &t, &MeltStopped::Refused(
-                super::super::ProfileMeltError::ChainUnreachable("no node".into()),
-            )),
+            stopped_after(
+                &[],
+                MeltHalf::Did,
+                &t,
+                &MeltStopped::Refused(super::super::ProfileMeltError::ChainUnreachable(
+                    "no node".into(),
+                )),
+            ),
             stopped_after(
                 &[MeltHalf::Did],
                 MeltHalf::Store,
