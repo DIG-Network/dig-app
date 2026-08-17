@@ -37,7 +37,9 @@ pub mod commit;
 pub mod draft;
 pub mod field;
 pub mod offer;
+pub mod pending;
 pub mod picture;
+pub mod predict;
 pub mod recovery;
 pub mod seed;
 pub mod service;
@@ -79,6 +81,7 @@ pub use commit::{CommitOutcome, EditSeams, ProfileEditError, ProfileEditSeam, Pr
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};
 pub use field::{FieldKind, ProfileField};
 pub use offer::{EditBlocked, ProfileEditing};
+pub use pending::{drain, DrainReport, PendingBodies, PendingBody, PendingError, SealedPendingBodies};
 pub use picture::chosen;
 pub use seed::{ProfileSeedRequest, SeedDraft};
 pub use service::EditService;

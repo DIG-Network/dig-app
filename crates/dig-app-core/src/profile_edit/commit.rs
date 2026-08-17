@@ -32,6 +32,8 @@ use dig_account::edit::EditStatus;
 use super::bodies::{BodyRead, BodyStore, BodyStoreError};
 use super::draft::{ProfileDraft, SlotChange};
 use super::field::ProfileField;
+use super::pending::{PendingBodies, PendingBody};
+use super::predict;
 use crate::transaction::{Feed, Stage, Transaction};
 
 /// A profile as it was read, in this app's vocabulary.
@@ -43,14 +45,19 @@ pub struct ProfileSnapshot {
     pub root: String,
     /// The editable fields it publishes.
     pub values: std::collections::BTreeMap<ProfileField, String>,
-    /// How many bytes the verified body came to — the base every size projection adjusts.
-    pub body_len: usize,
+    /// The verified body itself — the base an edit is computed over, and the base every size
+    /// projection adjusts.
+    ///
+    /// Carried in full rather than as a length because the next body cannot be computed without it,
+    /// and computing the next body BEFORE the spend is what lets it be written down before the
+    /// spend (dig_ecosystem#3066).
+    pub body: Vec<u8>,
 }
 
 impl ProfileSnapshot {
     /// The draft a person edits over this profile.
     pub fn draft(&self) -> ProfileDraft {
-        ProfileDraft::over(self.values.clone(), self.body_len)
+        ProfileDraft::over(self.values.clone(), self.body.len())
     }
 }
 
@@ -132,6 +139,12 @@ pub enum ProfileEditError {
         why: BodyStoreError,
         /// The root that is now, or will shortly be, on chain.
         root: String,
+        /// Whether this computer holds a copy of the bytes, to be handed to the node later.
+        ///
+        /// The difference between an inconvenience and a permanent loss, so it is a field rather
+        /// than an assumption: a sentence that promised a retry this app cannot make would be the
+        /// most damaging thing the editor could say.
+        kept_locally: bool,
     },
 }
 
@@ -155,11 +168,23 @@ impl ProfileEditError {
                  second time."
             ),
             Self::Refused(why) => format!("DIG could not make that change: {why}"),
-            Self::NotPersisted { why, root } => format!(
+            Self::NotPersisted {
+                why,
+                root,
+                kept_locally,
+            } => format!(
                 "Your change was sent to the blockchain, but DIG could not store the profile \
-                 content it points at ({root}). Until it is stored, other people will not be able \
-                 to read your profile. {}",
-                why.sentence()
+                 content it points at ({root}) on your node, so other people cannot read your \
+                 profile yet. {} {}",
+                why.sentence(),
+                match kept_locally {
+                    true =>
+                        "DIG has kept a copy on this computer and will keep trying, including \
+                         after you restart it.",
+                    false =>
+                        "DIG could NOT keep a copy on this computer: leave DIG open until your \
+                         profile shows as published.",
+                }
             ),
         }
     }
@@ -256,6 +281,8 @@ pub enum EditSeams {
         seam: Arc<dyn ProfileEditSeam>,
         /// Keeps what the commit produces.
         bodies: Arc<dyn BodyStore>,
+        /// Keeps it on THIS computer until the node will take it (dig_ecosystem#3066).
+        pending: Arc<dyn PendingBodies>,
     },
     /// This build cannot read chain or push a bundle, so no profile can be edited on this machine.
     NoChainTransport,
@@ -283,14 +310,42 @@ impl EditSeams {
 pub fn commit_and_persist(
     seam: &dyn ProfileEditSeam,
     bodies: &dyn BodyStore,
+    pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
 ) -> Result<CommitOutcome, ProfileEditError> {
-    let outcome = seam.commit(changes)?;
+    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes);
+
+    let outcome = match seam.commit(changes) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // Only an outcome that PROVES nothing reached a mempool may drop the copy. An
+            // unanswered chain may have taken the bundle, and deleting the preimage of a root that
+            // is quietly confirming is the exact loss this function exists to prevent.
+            if let (Some(root), true) = (&foreseen, error.profile_is_unchanged()) {
+                let _ = pending.forget(store_id, root);
+            }
+            return Err(error);
+        }
+    };
+
+    // The prediction is never trusted over the commit's own answer: a root the commit did not
+    // produce is a body no node will ever accept, so it is dropped here, in the call that made it.
+    if let Some(root) = foreseen.filter(|root| root != &outcome.root) {
+        let _ = pending.forget(store_id, &root);
+    }
+    let kept_locally = pending
+        .remember(&PendingBody {
+            store_id: store_id.to_string(),
+            root: outcome.root.clone(),
+            body: outcome.body.clone(),
+        })
+        .is_ok();
 
     let kept = |why: BodyStoreError| ProfileEditError::NotPersisted {
         why,
         root: outcome.root.clone(),
+        kept_locally,
     };
 
     bodies
@@ -298,7 +353,11 @@ pub fn commit_and_persist(
         .map_err(kept)?;
 
     match bodies.get(store_id, &outcome.root).map_err(kept)? {
-        BodyRead::Held(held) if held == outcome.body => Ok(outcome),
+        BodyRead::Held(held) if held == outcome.body => {
+            // The node has them, proved by reading them back, so this machine no longer needs to.
+            let _ = pending.forget(store_id, &outcome.root);
+            Ok(outcome)
+        }
         BodyRead::Held(held) => Err(kept(BodyStoreError::Refused(format!(
             "your node stored {} bytes where DIG sent {}",
             held.len(),
@@ -308,6 +367,37 @@ pub fn commit_and_persist(
             "your node accepted the profile content and then did not have it".to_string(),
         ))),
     }
+}
+
+/// Work out what the edit will publish and write it down, BEFORE anything is signed or pushed.
+///
+/// Returns the root it wrote down, or `None` when no honest prediction was available — an
+/// unreadable current profile, an unencodable next one, or a store that could not keep it. `None`
+/// is not reported to anyone: it means this attempt has only the post-commit copy to fall back on,
+/// which is what shipped before, and refusing to save someone's profile because a cache write
+/// failed would be a second failure invented from the first.
+fn write_down_before_the_spend(
+    seam: &dyn ProfileEditSeam,
+    pending: &dyn PendingBodies,
+    store_id: &str,
+    changes: &[(ProfileField, SlotChange)],
+) -> Option<String> {
+    let snapshot = seam.read().ok()?;
+    let current_root = root_bytes(&snapshot.root)?;
+    let (root, body) = predict::predicted_body(&snapshot.body, current_root, changes)?;
+    pending
+        .remember(&PendingBody {
+            store_id: store_id.to_string(),
+            root: root.clone(),
+            body,
+        })
+        .ok()?;
+    Some(root)
+}
+
+/// A 64-hex root as the bytes the format checks against.
+fn root_bytes(root: &str) -> Option<[u8; 32]> {
+    hex::decode(root).ok()?.try_into().ok()
 }
 
 /// The line a person reads while their edit is being written.
@@ -402,6 +492,7 @@ fn watch_for_confirmation(
 pub fn start_commit(
     seam: Arc<dyn ProfileEditSeam>,
     bodies: Arc<dyn BodyStore>,
+    pending: Arc<dyn PendingBodies>,
     store_id: String,
     changes: Vec<(ProfileField, SlotChange)>,
     feed: Feed,
@@ -414,7 +505,7 @@ pub fn start_commit(
         // published before the call rather than after, because the call is the slow part and a
         // person watching deserves to know which slow part it is.
         feed.publish(opening.at(Stage::Signing));
-        match commit_and_persist(&*seam, &*bodies, &store_id, &changes) {
+        match commit_and_persist(&*seam, &*bodies, &*pending, &store_id, &changes) {
             Ok(outcome) => {
                 // Published BEFORE the watch begins, because the push is a fact the moment it
                 // happens and the watch takes minutes. The stage is `Pushed` — never `Confirmed` —
