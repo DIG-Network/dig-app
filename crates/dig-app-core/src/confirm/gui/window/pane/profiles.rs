@@ -102,11 +102,19 @@ fn list(
     }
 
     flow.gap(space::S3);
-    // The caution sits under the whole list rather than beside each switch control: it is one
-    // statement about what switching costs, and repeated per row it would be four paragraphs saying
-    // one thing. It is drawn only where a switch is actually offered — a lone profile has nothing
-    // to switch to, and a warning about an act that cannot be performed is noise.
-    if rows.iter().any(|profile| !profile.active) {
+    // What is said under the list depends on whether there is anything to switch BETWEEN, and both
+    // arms exist for the same reason: a sentence about an act a person cannot perform is noise, and
+    // silence where they might perform one reads as an app that cannot.
+    if !rows.iter().any(|profile| !profile.active) {
+        // The lone-profile account is the one state with no per-profile control anywhere on the
+        // card — nothing to switch to, and the profile in use cannot be hidden — so left silent it
+        // reads as an app with no multi-profile support, which is the conclusion a real user
+        // reached (dig_ecosystem#3057).
+        flow.place(|ui, at| (text::caption(ui, at, t, copy::profiles::ONE_PROFILE), ()));
+    } else {
+        // The caution sits under the whole list rather than beside each switch control: it is one
+        // statement about what switching costs, and repeated per row it would be four paragraphs
+        // saying one thing.
         flow.place(|ui, at| (text::caption(ui, at, t, copy::profiles::SWITCH_CAUTION), ()));
         flow.gap(space::S2);
         flow.place(|ui, at| (text::caption(ui, at, t, copy::profiles::HIDE_NOTE), ()));
@@ -1134,6 +1142,61 @@ mod tests {
                 "the word #1820 settled against is back: {lowered}"
             );
         }
+    }
+
+    /// **The way to put a profile in use is on the card — and a lone-profile account is told what
+    /// would produce one** (dig_ecosystem#3057).
+    ///
+    /// A user reported seeing no *set active* and no *add new* control. Both exist, and the fixture
+    /// here is what makes that checkable rather than asserted: two profiles produce a real switch
+    /// control naming the one NOT in use, and a capable node produces the create control.
+    ///
+    /// # Why the one-profile leg is the load-bearing half
+    ///
+    /// With a single profile the card draws no per-profile control at all — correctly, since there
+    /// is nothing to switch to and the profile in use cannot be hidden — so it said nothing about
+    /// multiplicity to exactly the person who would conclude it is unsupported. The control is the
+    /// two-profile capture, which must NOT carry that sentence: an implementation that printed it
+    /// unconditionally would be telling somebody with a switch in front of them that they have
+    /// nothing to switch between.
+    #[test]
+    fn the_switch_control_appears_with_a_second_profile_and_is_explained_without_one() {
+        let two = reading_of(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
+            &[],
+        );
+        let switching = card_says(&view_with(two), 960.0);
+        assert!(
+            switching.contains("Use “work” for this account"),
+            "the card offers no way to put the other profile in use: {switching}"
+        );
+        assert!(
+            !switching.contains(copy::profiles::ONE_PROFILE),
+            "an account with a switch on screen is told it has nothing to switch between: \
+             {switching}"
+        );
+
+        let alone = reading_of(&[(ProfileIx::ROOT, Some("home"))], &[]);
+        let lonely = card_says(&view_with(alone), 960.0);
+        assert!(
+            lonely.contains(copy::profiles::ONE_PROFILE),
+            "a lone-profile account is left with no control and no explanation, which reads as an \
+             app that does not support more than one: {lonely}"
+        );
+
+        // And the create control, which is the other half of what was reported missing. Gated on a
+        // MEASURED mint availability, so the fixture has to say the node can honour it.
+        let capable = TrayView {
+            profile_creation: ProfileCreation::Possible,
+            ..view_with(reading_of(&[(ProfileIx::ROOT, Some("home"))], &[]))
+        };
+        assert!(
+            card_says(&capable, 960.0).contains(crate::tray_menu::CREATE_PROFILE_LABEL),
+            "an account that already holds a profile is offered no way to add another"
+        );
     }
 
     /// **No profile copy implies a profile can be deleted.**

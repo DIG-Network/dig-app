@@ -517,6 +517,16 @@ pub(crate) mod profile_edit {
     /// A disabled control with no explanation is the dead end dig_ecosystem#1800 removed; this names
     /// exactly what would make it pressable.
     pub(crate) const NOTHING_CHANGED: &str = "Change something above and this becomes available.";
+
+    /// Said above the editor's form, for [`super::profiles::SEED_INVITATION`]'s reason.
+    ///
+    /// Every box here is optional — filling none of them is a working profile, and emptying one
+    /// takes it off the chain rather than leaving a blank behind. A form sitting under a heading
+    /// about spending money reads as a set of requirements unless it says otherwise, and a person
+    /// who believes a box is required will fill it in with something untrue.
+    pub(crate) const ALL_OPTIONAL: &str =
+        "Every box below is optional. Fill in what you want other people to see, leave the rest \
+         empty, and empty a box to take that detail off the blockchain.";
 }
 
 pub(crate) mod profiles {
@@ -526,6 +536,20 @@ pub(crate) mod profiles {
     pub(crate) const CARD: &str = "Profiles on this account";
     /// The panel holding what a profile is and why one cannot be created yet.
     pub(crate) const CREATE_PANEL: &str = "Creating a profile";
+
+    /// Said under a list holding exactly ONE profile (dig_ecosystem#3057).
+    ///
+    /// A lone profile is the only state in which this card draws no per-profile control at all:
+    /// there is nothing to switch to, and dig-account refuses to hide the profile in use. So the
+    /// card is silent about multiplicity precisely for the person most likely to conclude the app
+    /// does not support it — which is the conclusion a real user reached. This says the second
+    /// profile is the thing that produces the switch, and points at the control that makes one.
+    ///
+    /// It promises no removal, for [`SWITCH_CAUTION`]'s reason: a profile's DID singleton and store
+    /// are permanent on chain, so this card may never imply one can be taken back.
+    pub(crate) const ONE_PROFILE: &str =
+        "This account holds one profile, so there is nothing to switch between yet. Create another \
+         below and each one gains a control to put it in use.";
 
     /// Said above the wizard's form, so a person knows the boxes are theirs to leave alone.
     ///
@@ -1095,6 +1119,7 @@ mod tests {
     fn every_sentence() -> Vec<String> {
         let mut all: Vec<&'static str> = vec![
             profiles::SEED_INVITATION,
+            profiles::ONE_PROFILE,
             profiles::SEED_SAVES_A_WRITE,
             profiles::SEED_HAS_A_PROBLEM,
             home::CACHE_UNKNOWN,
@@ -1147,6 +1172,7 @@ mod tests {
             profile_edit::COST,
             profile_edit::PUBLIC,
             profile_edit::NOTHING_CHANGED,
+            profile_edit::ALL_OPTIONAL,
             profiles::PENDING,
             profiles::CHECKING_CREATION,
             profiles::EMPTY,

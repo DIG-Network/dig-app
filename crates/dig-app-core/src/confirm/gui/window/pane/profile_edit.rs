@@ -168,6 +168,10 @@ fn form(
         flow.gap(space::S3);
     }
 
+    // Above the fields, not below them: a person reads the requirement into the form the moment
+    // they see it, so the sentence that says there is none has to arrive first.
+    flow.place(|ui, at| (text::body(ui, at, t, copy::profile_edit::ALL_OPTIONAL), ()));
+    flow.gap(space::S3);
     profile_form::draw_fields(flow, t, &mut session, SCOPE);
 
     flow.gap(space::S4);
@@ -223,7 +227,7 @@ fn retry_element() -> egui::Id {
 
 /// The Save verbs the model built for this card, found by the section's shared heading rather than
 /// by position — the coupling the merged Account pane exists to avoid.
-fn save_verbs(tab: &Tab) -> Vec<Action<TrayAction>> {
+pub(super) fn save_verbs(tab: &Tab) -> Vec<Action<TrayAction>> {
     let mut seen = std::collections::HashMap::new();
     tab.sections
         .iter()
@@ -326,6 +330,74 @@ mod tests {
                 assert_eq!(after.draft.value(ProfileField::DisplayName), "Ada Lovelace");
             });
         });
+    }
+
+    /// **No single field is required, in either direction** (dig_ecosystem#3057).
+    ///
+    /// The user's report was that every box felt mandatory. The draft model has no required-field
+    /// rule, so what this pins is that none can be introduced — by a validator, by a gate written
+    /// against a display name, or by an `is_committable` that grew a condition.
+    ///
+    /// # Why it is asserted per FIELD and in both directions
+    ///
+    /// One fixture that sets one field would pass on an implementation requiring exactly that
+    /// field. So each field is exercised as the ONLY thing filled in, over an empty profile — the
+    /// person who wants to publish one detail and nothing else — and then each is exercised as the
+    /// only thing REMOVED from a full profile, which is the other half of optional: a box you may
+    /// empty again. An implementation that required a field passes neither leg for that field.
+    #[test]
+    fn every_field_may_be_the_only_one_filled_in_and_the_only_one_emptied() {
+        for field in ProfileField::ALL {
+            let mut alone = ProfileDraft::empty();
+            alone.set(field, an_acceptable_value_for(field));
+            assert!(
+                alone.is_committable(),
+                "{field:?} cannot be published on its own, so some other box is required"
+            );
+
+            let mut full = a_filled_profile();
+            full.clear(field);
+            assert!(
+                full.is_committable(),
+                "{field:?} cannot be emptied, so it is required once it has been filled in"
+            );
+        }
+    }
+
+    /// A value each field genuinely accepts — the address and image slots are validated, so a single
+    /// placeholder string would fail those two for a reason that has nothing to do with this test.
+    fn an_acceptable_value_for(field: ProfileField) -> String {
+        match field {
+            ProfileField::XchAddress => {
+                "xch17s7wd45k6vpmpwcqu26x43x5kac6u3n6pprjl9ssal6qp3dlvmjqf4snk5".to_string()
+            }
+            field if field.is_image() => "data:image/png;base64,iVBORw0KGgo=".to_string(),
+            _ => "something".to_string(),
+        }
+    }
+
+    /// A profile holding an acceptable value in EVERY field, so any one of them can be emptied.
+    fn a_filled_profile() -> ProfileDraft {
+        let values: BTreeMap<ProfileField, String> = ProfileField::ALL
+            .into_iter()
+            .map(|field| (field, an_acceptable_value_for(field)))
+            .collect();
+        let len = values.values().map(|v| v.len() + 11).sum::<usize>() + 5;
+        ProfileDraft::over(values, len)
+    }
+
+    /// **The form says the boxes are optional before a person reads a requirement into them.**
+    ///
+    /// The sentence is the only thing standing between a truthful model and a person inventing a
+    /// display name because the box looked mandatory.
+    #[test]
+    fn the_editor_says_every_box_is_optional() {
+        let said = copy::profile_edit::ALL_OPTIONAL.to_lowercase();
+        assert!(said.contains("optional"), "{said}");
+        assert!(
+            said.contains("empty"),
+            "the sentence never says a box may be left or made empty: {said}"
+        );
     }
 
     /// Nothing to save is not something to press. The label still says what the control does — the
