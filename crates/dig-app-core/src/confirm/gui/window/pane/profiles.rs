@@ -1215,7 +1215,13 @@ mod tests {
     /// hide row worded as removal is a person ending an identity they meant to tidy away.
     ///
     /// The fixture draws the card in the state where BOTH controls are present, because that is the
-    /// only state in which the two can be confused.
+    /// only state in which the two can be confused. It holds a VISIBLE non-active profile and a
+    /// HIDDEN one, so both arms of the visibility label — *hide* and *show* — are on screen; the
+    /// unhide arm is the same copy class and is worded by the same `match`.
+    ///
+    /// The sweep reads the labels the MODEL built and the card PAINTED, never a literal repeated
+    /// here: a test that lowercases a sentence it authored itself asserts nothing about production,
+    /// and stays green through any rewording of the row it claims to protect.
     #[test]
     fn hiding_is_never_worded_as_deleting_even_beside_a_real_delete_control() {
         let view = TrayView {
@@ -1224,15 +1230,44 @@ mod tests {
                 &[
                     (ProfileIx::ROOT, Some("home")),
                     (ProfileIx(1), Some("work")),
+                    (ProfileIx(2), Some("spare")),
                 ],
-                &[],
+                &[ProfileIx(2)],
             ))
         };
         let painted = card_says(&view, 960.0);
 
-        // The hide row and the note under it, by name. A blanket sweep for the word is what the old
-        // test did and is exactly what a real delete control makes impossible.
-        for hide_copy in ["Hide “work” from this list", copy::profiles::HIDE_NOTE] {
+        let tab = crate::window_model::build(&view)
+            .tab(TabId::Account)
+            .cloned()
+            .expect("the Account tab is emitted in every account state");
+        let visibility_labels: Vec<String> = ProfileVerbs::of(&tab)
+            .per_profile
+            .iter()
+            .filter(|action| matches!(action.id, TrayAction::SetProfileVisibility { .. }))
+            .map(|action| action.label.clone())
+            .collect();
+        assert_eq!(
+            visibility_labels.len(),
+            2,
+            "the fixture drew {} visibility control(s), so the sweep below covers neither the hide \
+             arm nor the show arm as intended: {painted}",
+            visibility_labels.len()
+        );
+
+        // The rows' own words plus the note under the list. Scoped to the visibility copy rather
+        // than swept over the whole card: the card now legitimately carries a truthful *Delete*
+        // label, so a blanket sweep — what the old test did — would forbid correct copy.
+        for hide_copy in visibility_labels
+            .iter()
+            .map(String::as_str)
+            .chain([copy::profiles::HIDE_NOTE])
+        {
+            assert!(
+                painted.contains(hide_copy),
+                "“{hide_copy}” never reached the screen, so sweeping its words proves nothing about \
+                 what a person reads: {painted}"
+            );
             let lowered = hide_copy.to_lowercase();
             for forbidden in ["delete", "remove", "erase", "destroy"] {
                 assert!(
@@ -1242,10 +1277,6 @@ mod tests {
                 );
             }
         }
-        assert!(
-            painted.contains(copy::profiles::HIDE_NOTE),
-            "the card never says a hidden profile is still on chain: {painted}"
-        );
         // The control: the delete row IS on this card, so the assertions above are about wording
         // rather than about a card where the confusion cannot arise.
         assert!(
