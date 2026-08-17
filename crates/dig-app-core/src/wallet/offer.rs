@@ -226,7 +226,7 @@ mod tests {
 
     /// **The two sides are named in the taker's direction, and are distinguishable.**
     ///
-    /// The fixture offers 1,000 mojos and requests 400 — two DIFFERENT amounts, because an offer
+    /// The fixture offers 400 mojos and requests 1,000 — two DIFFERENT amounts, because an offer
     /// whose sides were equal would read identically under an implementation that swapped them, and
     /// swapping them is the nearest wrong version of this mapping.
     #[test]
@@ -235,12 +235,12 @@ mod tests {
 
         assert_eq!(
             reviewed.terms().you_receive,
-            vec![OfferLeg::Xch { mojos: 1_000 }],
+            vec![OfferLeg::Xch { mojos: 400 }],
             "the offered side is what the taker receives"
         );
         assert_eq!(
             reviewed.terms().you_pay,
-            vec![OfferLeg::Xch { mojos: 400 }],
+            vec![OfferLeg::Xch { mojos: 1_000 }],
             "the requested side is what the taker pays"
         );
         assert!(!reviewed.terms().is_empty());

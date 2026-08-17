@@ -26,15 +26,22 @@ use std::marker::PhantomData;
 /// The shape of a fixture offer.
 #[derive(Debug, Clone, Copy)]
 pub enum OfferShape {
-    /// 1,000 mojos offered for 400 mojos requested.
+    /// 400 mojos offered for 1,000 mojos requested.
     ///
-    /// The two amounts DIFFER so that a test reading the two sides can distinguish them; an offer of
-    /// equal amounts reads identically under an implementation that swapped the sides.
+    /// Two properties are deliberate. The amounts DIFFER, so a test reading the two sides can tell
+    /// them apart — an offer of equal amounts reads identically under an implementation that swapped
+    /// them. And the request EXCEEDS the offer, so the take has a real arbitrage cost (600 mojos) the
+    /// taker must fund from its own coins. An offer that asked for less than it gave would cost the
+    /// taker nothing, and every funding assertion written over it would pass on any wallet balance
+    /// whatsoever, including an empty one.
     XchForXch,
 }
 
-/// 1,000 mojos offered for 400 requested — see [`OfferShape::XchForXch`].
+/// 400 mojos offered for 1,000 requested — see [`OfferShape::XchForXch`].
 pub const XCH_FOR_XCH: OfferShape = OfferShape::XchForXch;
+
+/// What taking [`XCH_FOR_XCH`] costs the taker in mojos: the requested-over-offered surplus.
+pub const XCH_FOR_XCH_COST: u64 = 600;
 
 /// The maker's deterministic key — also the payee the requested payment is made to. Distinct from
 /// [`taker`] so a spend built for one is never accidentally satisfiable by the other, and so a test
@@ -80,13 +87,13 @@ pub fn an_offer_of(shape: OfferShape) -> String {
             xch_coins: vec![coin_of(&maker, 1_500, 0xA1)],
             cat_coins: Vec::new(),
             nfts: Vec::new(),
-            offer_xch: 1_000,
+            offer_xch: 400,
             offer_cats: Vec::new(),
             _pd: PhantomData,
         },
         RequestedSide {
             payee_puzzle_hash: maker.puzzle_hash,
-            xch: 400,
+            xch: 1_000,
             cats: Vec::new(),
             nfts: Vec::new(),
         },
@@ -107,8 +114,8 @@ pub fn an_offer_of(shape: OfferShape) -> String {
 /// Build the TAKER's unsigned coin spends for `offer` — the exact bytes a take would hand the custody
 /// gate.
 ///
-/// Funded generously (2,000 mojos against a 400-mojo request) so that a refusal from anything
-/// downstream is never a shortfall in the fixture.
+/// Funded generously (2,000 mojos against a 600-mojo cost) so that a refusal from anything downstream
+/// is never a shortfall in the fixture.
 ///
 /// # Panics
 /// If the take cannot be built, which would mean the fixture offer is not takeable at all.

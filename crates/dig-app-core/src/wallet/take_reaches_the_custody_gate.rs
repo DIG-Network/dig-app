@@ -131,7 +131,7 @@ fn the_ceremony_names_the_paid_leg_of_the_swap_and_not_the_received_one() {
         .collect();
     assert_eq!(
         paid,
-        vec![(payee.as_str(), 400)],
+        vec![(payee.as_str(), 1_000)],
         "the ceremony describes the requested payment to the maker, and nothing else"
     );
     assert!(

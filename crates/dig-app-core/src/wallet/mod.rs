@@ -41,6 +41,7 @@ pub mod state;
 /// The custody-gate measurement for taking an offer — read its header before building on it.
 #[cfg(test)]
 mod take_reaches_the_custody_gate;
+pub mod taking;
 
 use chia_protocol::SpendBundle;
 use chia_traits::Streamable;

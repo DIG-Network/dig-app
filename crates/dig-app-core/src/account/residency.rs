@@ -435,6 +435,27 @@ impl AccountResidency {
         indices
     }
 
+    /// The wallet identity a Chia OFFER take is funded from: the puzzle hash this account spends
+    /// from, and the money public key that authorizes those coins. `None` while locked.
+    ///
+    /// `dig-offers` needs both to build the taker's half of a settlement — the puzzle hash is where
+    /// change and every claimed asset return, and the key map tells the builder which signature each
+    /// spent coin will require. Both come from the SAME
+    /// [`WalletOps`](dig_account::WalletOps) as [`observe_receiving_address`](Self::observe_receiving_address),
+    /// so a take is funded by the very address the wallet tab displays rather than by a second
+    /// derivation that could silently differ.
+    ///
+    /// No secret material crosses this boundary: a public key and a puzzle hash are both derivable
+    /// from the address the account already hands out (§908).
+    pub fn taker_identity(&self) -> Option<(chia_protocol::Bytes32, chia_bls::PublicKey)> {
+        self.guard().as_ref().map(|acct| {
+            (
+                acct.wallet_ops().puzzle_hash(),
+                acct.wallet_ops().public_key(),
+            )
+        })
+    }
+
     /// The 48-byte identity signing public key of the ACTIVE profile, as hex — for the connect-handle
     /// advertisement at assembly time (read while unlocked). `None` if the residency is locked.
     pub fn signing_public_key_hex(&self) -> Option<String> {
