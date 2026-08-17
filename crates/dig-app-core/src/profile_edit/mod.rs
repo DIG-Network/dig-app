@@ -36,6 +36,7 @@ pub mod bodies;
 pub mod commit;
 pub mod draft;
 pub mod field;
+pub mod mint_seed;
 pub mod offer;
 pub mod pending;
 pub mod picture;
