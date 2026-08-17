@@ -2237,6 +2237,9 @@ mod tests {
             SendProgress::Released {
                 payment_coin_id: "5e771ed".to_string(),
             },
+            SendProgress::Broadcast {
+                bundle_id: "b0117dle".to_string(),
+            },
         ]
     }
 
@@ -2253,12 +2256,13 @@ mod tests {
                 SendProgress::Failed { .. } => 5,
                 SendProgress::Abandoned { .. } => 6,
                 SendProgress::Released { .. } => 7,
+                SendProgress::Broadcast { .. } => 8,
             }
         }
         let mut arms: Vec<u8> = every_send_state().iter().map(arm).collect();
         arms.sort_unstable();
         arms.dedup();
-        assert_eq!(arms, (0..8).collect::<Vec<u8>>());
+        assert_eq!(arms, (0..9).collect::<Vec<u8>>());
     }
 
     /// **Each send state is drawn as ITSELF, and an unknown outcome is never drawn as a failure**
@@ -2368,6 +2372,7 @@ mod tests {
     #[test]
     fn a_refused_send_states_the_condition_that_would_lift_it() {
         let sealed = SendDraft {
+            asset: Asset::Xch,
             destination: "",
             amount: "",
             account_open: false,
@@ -2423,6 +2428,7 @@ mod tests {
             },
         };
         let draft = SendDraft {
+            asset: Asset::Xch,
             destination: ADDRESS,
             amount: "0.5",
             account_open: true,
@@ -2432,11 +2438,11 @@ mod tests {
         let request = draft.assess().expect("a funded, well-formed draft");
         assert_eq!(
             TrayAction::Send(request),
-            TrayAction::Send(
+            TrayAction::Send(SendIntent::Xch(
                 dig_account::TransferRequest::to_address(ADDRESS, 500_000_000_000)
                     .expect("a mainnet address")
                     .with_fee(DEFAULT_SEND_FEE_MOJOS)
-            ),
+            )),
             "the action carried something other than the amount and fee the card showed"
         );
     }

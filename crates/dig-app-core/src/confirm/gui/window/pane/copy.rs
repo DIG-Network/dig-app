@@ -970,9 +970,15 @@ pub(crate) mod wallet {
     /// can get a real answer. A surface that simply stopped talking would be read as *finished*,
     /// which is the same false claim made by omission.
     pub(crate) fn send_broadcast_body() -> String {
-        "Your node has taken this $DIG payment and passed it to the network. DIG cannot yet follow          a $DIG payment to confirmation, so it will not tell you when it lands — check the          recipient, or look the bundle below up on a block explorer. The payment is listed in your          activity as sent."
-            .to_string()
+        [
+            "Your node has taken this $DIG payment and passed it to the network.",
+            "DIG cannot yet follow a $DIG payment to confirmation, so it will not tell you when it",
+            "lands — check the recipient, or look the bundle below up on a block explorer.",
+            "The payment is listed in your activity as sent.",
+        ]
+        .join(" ")
     }
+
     /// The label on the accepted bundle's id.
     ///
     /// Deliberately not "Payment coin": it is the SUBMISSION's name, not the money's, and the two
@@ -1415,6 +1421,7 @@ mod tests {
         // `""` would leave the guard reading a sentence the reader never sees.
         said.push(wallet::send_pending_body(3));
         said.push(wallet::send_unknown_body("the node closed the connection"));
+        said.push(wallet::send_broadcast_body());
         said.push(wallet::send_fee("0.00001"));
         said.push(wallet::send_abandoned_body("the confirmation fell over"));
         said.push(content::add_field_error(63));

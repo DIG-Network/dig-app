@@ -429,7 +429,7 @@ mod tests {
     use super::*;
     use crate::account::active_profile::WalletSlot;
     use crate::account::auth::{AuthCeremony, CeremonyError, HarnessAuthProvider};
-    use crate::wallet::sending::VerdictSource;
+    use crate::wallet::sending::{SendIntent, VerdictSource};
     use async_trait::async_trait;
     use chia_protocol::{Bytes32, Coin, SpendBundle};
     use dig_account::mint::MIN_CONFIRMATION_DEPTH;
@@ -1376,7 +1376,7 @@ mod tests {
 
         let holder = SendHolder::default();
         holder.accepted(in_flight.finish());
-        holder.send(&status, None, &request());
+        holder.send(&status, None, &SendIntent::Xch(request()));
 
         assert_eq!(
             holder.progress(),
@@ -1389,7 +1389,7 @@ mod tests {
 
         // The control: with nothing in flight, that same call is accepted and records its failure.
         let idle = SendHolder::default();
-        idle.send(&status, None, &request());
+        idle.send(&status, None, &SendIntent::Xch(request()));
         assert!(
             matches!(idle.progress(), SendProgress::Failed { .. }),
             "an idle holder refused a send, so the guard above proves nothing"

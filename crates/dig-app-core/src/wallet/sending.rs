@@ -1281,6 +1281,7 @@ mod tests {
     /// A draft that would send successfully, so each test varies exactly ONE thing away from it.
     fn ready<'a>(balance: &'a BalanceReading, progress: &'a SendProgress) -> SendDraft<'a> {
         SendDraft {
+            asset: Asset::Xch,
             destination: PAYABLE,
             amount: "0.25",
             account_open: true,
@@ -1297,9 +1298,12 @@ mod tests {
     fn a_complete_draft_becomes_a_transfer_carrying_the_typed_amount_and_the_fixed_fee() {
         let balance = funded();
         let progress = SendProgress::Idle;
-        let request = ready(&balance, &progress)
+        let SendIntent::Xch(request) = ready(&balance, &progress)
             .assess()
-            .expect("a funded, open, well-formed draft is sendable");
+            .expect("a funded, open, well-formed draft is sendable")
+        else {
+            panic!("an XCH draft produced a non-XCH intent");
+        };
         assert_eq!(
             request.amount_mojos(),
             250_000_000_000,
@@ -1436,7 +1440,10 @@ mod tests {
             };
             assert_eq!(
                 draft.assess(),
-                Err(SendBlocked::BadAmount(expected)),
+                Err(SendBlocked::BadAmount {
+                    asset: Asset::Xch,
+                    problem: expected
+                }),
                 "{typed:?} was not refused as {expected:?}"
             );
         }
@@ -1467,6 +1474,7 @@ mod tests {
         assert_eq!(
             ready(&exactly_the_amount, &progress).assess(),
             Err(SendBlocked::NotEnough {
+                asset: Asset::Xch,
                 needed: amount + DEFAULT_SEND_FEE_MOJOS,
                 spendable: amount,
             }),
