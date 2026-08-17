@@ -25,11 +25,13 @@
 use chia_protocol::Coin;
 use chia_sdk_driver::SpendContext;
 use dig_account::mint::PushOutcome;
-use dig_account::{AuthProvider, CustodyPolicy, SpendOpClass};
+use dig_account::{AuthProvider, CustodyPolicy, HotWallet, SpendOpClass};
 use dig_offers::TakerFunds;
 use indexmap::IndexMap;
 use std::marker::PhantomData;
 
+use crate::account::auth::HarnessAuthProvider;
+use crate::account::ceremony::PromptedCeremony;
 use crate::account::money::{MoneyPath, MoneyPathError};
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
@@ -46,6 +48,17 @@ pub enum TakeError {
     /// The account is locked, so nothing could be built or signed. Fail-closed.
     #[error("the account is locked — the offer was not taken")]
     Locked,
+
+    /// No node is connected, so the wallet's coins could not be read and nothing could be pushed.
+    #[error("no DIG node is connected, so nothing could be built or broadcast")]
+    NoNode,
+
+    /// A node is connected and could not answer what this wallet holds.
+    ///
+    /// Deliberately not an empty coin list: a read that failed has made no claim about the wallet,
+    /// and treating it as "you have nothing" would tell a funded person they cannot afford a swap.
+    #[error("this app could not read what your wallet holds: {0}")]
+    FundsUnreadable(String),
 
     /// The offer could not be read, or this profile may not take one at all.
     #[error(transparent)]
@@ -106,6 +119,35 @@ pub struct TakenOffer {
 pub struct SpendableXch {
     /// Unspent native coins belonging to this account's wallet address.
     pub coins: Vec<Coin>,
+}
+
+impl SpendableXch {
+    /// Read the unspent native coins paying `puzzle_hash` from `chain`.
+    ///
+    /// Spent coins are asked for and then dropped rather than excluded at the source, because a
+    /// source that answers `include_spent = false` by silently answering nothing is
+    /// indistinguishable from a wallet with no coins. Filtering here means the emptiness is one this
+    /// app decided from records it actually saw.
+    ///
+    /// A read ERROR is never an empty wallet: it becomes
+    /// [`FundsUnreadable`](TakeError::FundsUnreadable), because an unanswered read has made no claim
+    /// about the money and telling a funded person they cannot afford a swap is the lie this wallet
+    /// refuses everywhere else.
+    pub fn read_from<C>(chain: &C, puzzle_hash: chia_protocol::Bytes32) -> Result<Self, TakeError>
+    where
+        C: dig_chainsource_interface::ChainSource + ?Sized,
+    {
+        let records = chain
+            .coin_records_by_puzzle_hash(puzzle_hash, true)
+            .map_err(|e| TakeError::FundsUnreadable(e.to_string()))?;
+        Ok(Self {
+            coins: records
+                .into_iter()
+                .filter(|record| !record.is_spent())
+                .map(|record| record.coin)
+                .collect(),
+        })
+    }
 }
 
 /// Build, gate, sign, combine and push a take.
@@ -203,6 +245,214 @@ where
             }
             Err(failure) => Err(TakeError::PushNotSent(failure)),
         }
+    }
+}
+
+/// How far the one in-flight take has got, as the Wallet pane should draw it.
+///
+/// The four states are the four `professional-ui` async states, and none of them claims a settled
+/// swap: [`Broadcast`](Self::Broadcast) says a node accepted the bundle, which is a statement about a
+/// node. Whether the swap happened is a chain read the centralized progress modal already performs
+/// for every broadcast, and this enum deliberately has no variant that could be mistaken for it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TakeProgress {
+    /// Nothing is being taken.
+    #[default]
+    Idle,
+    /// A take is building, waiting on the person's confirmation, or being pushed.
+    Working,
+    /// A node accepted the settlement bundle. NOT a settled swap.
+    Broadcast {
+        /// The spend-bundle name, lowercase hex — the handle to look the swap up by.
+        bundle_name: String,
+    },
+    /// The take did not complete, in the words the failure itself used.
+    Failed {
+        /// What stopped it.
+        why: String,
+    },
+}
+
+/// The process-wide take holder: one take at a time, and the gate it runs through.
+///
+/// # Why it holds its own gate rather than sharing the send path's
+///
+/// A [`PolicyAuthorizer`](dig_account::PolicyAuthorizer) owns the rolling-period-cap ledger, and a
+/// host that built one per request would turn a period cap into N per-transaction limits. That is
+/// why the send path holds ONE gate per unlock, and the same reasoning would argue for one gate
+/// across both paths.
+///
+/// It does not apply here, and the reason is specific rather than convenient: a take is authorized as
+/// [`SpendOpClass::Undeclared`], which can never auto-approve, so it never reaches the cap ledger to
+/// charge it or to be judged by it. A take therefore neither consumes an allowance nor benefits from
+/// one, and a separate gate cannot launder a spend past a bound that was never consulted. Sharing the
+/// send path's gate would instead mean reaching into `wallet::sending`'s private state from here.
+///
+/// If a take ever becomes auto-approvable, this reasoning expires and the two paths must share one
+/// gate. That is stated here because the change would be silent otherwise.
+#[derive(Default)]
+pub struct TakeHolder {
+    gate: std::sync::Mutex<Option<UnlockGate>>,
+    progress: std::sync::Mutex<TakeProgress>,
+}
+
+/// The money gate built for one unlock, remembered against the address it rules on.
+struct UnlockGate {
+    address: String,
+    money: std::sync::Arc<MoneyPath<HarnessAuthProvider<PromptedCeremony>>>,
+}
+
+/// The process-wide take holder.
+pub fn holder() -> &'static TakeHolder {
+    static HOLDER: std::sync::OnceLock<TakeHolder> = std::sync::OnceLock::new();
+    HOLDER.get_or_init(TakeHolder::default)
+}
+
+/// What the Wallet pane should draw about the take in flight.
+#[must_use]
+pub fn progress() -> TakeProgress {
+    holder().progress()
+}
+
+impl TakeHolder {
+    /// What the take in flight is doing.
+    #[must_use]
+    pub fn progress(&self) -> TakeProgress {
+        self.lock().clone()
+    }
+
+    /// Put the surface back to rest after a person has read a finished take's outcome.
+    ///
+    /// The one way out of both terminal states, so neither becomes furniture that cannot be
+    /// dismissed (`professional-ui`: never trap the user).
+    pub fn dismiss(&self) {
+        *self.lock() = TakeProgress::Idle;
+    }
+
+    /// Take `reviewed`: read the wallet's coins, build, gate, sign, combine and push.
+    ///
+    /// # Why the shell's arm for this is one call
+    ///
+    /// Everything here is a decision — is there an account, is there a node, what did the failure
+    /// mean — and the tray binary can execute none of it under test. So the binary's
+    /// `TrayAction::TakeOffer` arm calls this and nothing else.
+    ///
+    /// It BLOCKS for as long as the person takes to confirm, so the caller must be a worker thread
+    /// and never the repaint loop.
+    pub fn take(
+        &self,
+        status: &crate::agent::SharedStatus,
+        residency: Option<&AccountResidency>,
+        reviewed: &ReviewedOffer,
+    ) {
+        if !self.begin() {
+            return;
+        }
+        let outcome = self.perform(status, residency, reviewed);
+        *self.lock() = match outcome {
+            Ok(taken) => TakeProgress::Broadcast {
+                bundle_name: taken.bundle_name,
+            },
+            Err(error) => TakeProgress::Failed {
+                why: error.to_string(),
+            },
+        };
+    }
+
+    /// Claim the one take slot, or report that another take already holds it.
+    ///
+    /// Structural, not advisory: a second take of the same offer while the first is settling would
+    /// spend the taker's coins twice against one maker half, and the second can only fail — after a
+    /// person has confirmed it.
+    fn begin(&self) -> bool {
+        let mut progress = self.lock();
+        if *progress == TakeProgress::Working {
+            return false;
+        }
+        *progress = TakeProgress::Working;
+        true
+    }
+
+    /// Read, build, gate, sign and push — every step that can fail, and none that record state.
+    fn perform(
+        &self,
+        status: &crate::agent::SharedStatus,
+        residency: Option<&AccountResidency>,
+        reviewed: &ReviewedOffer,
+    ) -> Result<TakenOffer, TakeError> {
+        let residency = residency.ok_or(TakeError::Locked)?;
+
+        // Cloned out from under the lock, which is then released: the confirm ceremony below can
+        // take minutes, and holding the status guard across it would stall the agent's own tick.
+        let engine = match status.read() {
+            Ok(status) => status.engine.clone(),
+            Err(_) => crate::engine::EngineState::initial(),
+        };
+        let crate::engine::EngineState::Connected { endpoint, .. } = &engine else {
+            return Err(TakeError::NoNode);
+        };
+
+        let (puzzle_hash, _) = residency.taker_identity().ok_or(TakeError::Locked)?;
+        let chain = crate::chain::ControlChainSource::new(endpoint);
+        let funds = SpendableXch::read_from(&chain, puzzle_hash)?;
+
+        let custody = CustodyPolicy::Hot(HotWallet { auto_send_limit: 0 });
+        let held = self.gate_for(residency, custody)?;
+        let money = &held
+            .as_ref()
+            .expect("gate_for leaves a gate in place or returns an error")
+            .money;
+        let publisher = crate::chain::ControlSpendPublisher::new(endpoint);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| TakeError::Build(format!("this app could not start a worker: {e}")))?;
+        runtime.block_on(
+            TakeSession::new(residency, money, custody, &publisher).take(reviewed, &funds, 0),
+        )
+    }
+
+    /// The money gate for this unlock, built once and reused — see the type docs for why it is not
+    /// shared with the send path's.
+    fn gate_for(
+        &self,
+        residency: &AccountResidency,
+        custody: CustodyPolicy,
+    ) -> Result<std::sync::MutexGuard<'_, Option<UnlockGate>>, TakeError> {
+        let Some(Ok(address)) = residency.receiving_address() else {
+            return Err(TakeError::Locked);
+        };
+
+        let mut held = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if !held.as_ref().is_some_and(|gate| gate.address == address) {
+            let money = MoneyPath::new(
+                residency.clone(),
+                HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this swap")),
+                dig_account::AccountId::new(crate::account::boot::DEFAULT_ACCOUNT_ID),
+                dig_wallet_backend::types::Network::Mainnet,
+                custody,
+                dig_account::AutoSendPolicy::default(),
+                std::sync::Arc::new(dig_account::SystemClock),
+            )
+            .map_err(|_| TakeError::Locked)?;
+            *held = Some(UnlockGate {
+                address,
+                money: std::sync::Arc::new(money),
+            });
+        }
+        Ok(held)
+    }
+
+    /// Take the progress lock, recovering from a poisoned one.
+    ///
+    /// A poisoned lock means an earlier take panicked. Refusing every later take — leaving a person
+    /// with a wallet that has silently stopped working — is the worse answer, and it is the call the
+    /// send path's own lock makes.
+    fn lock(&self) -> std::sync::MutexGuard<'_, TakeProgress> {
+        self.progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -447,5 +697,156 @@ mod tests {
             "the refusal must name what is needed: {why}"
         );
         assert_eq!(bench.confirmations_asked(), 0);
+    }
+
+    /// A chain that answers one puzzle hash with fixed records, or refuses every read.
+    ///
+    /// Hand-written rather than wrapping the canonical mock because the two properties under test —
+    /// a refusal, and a list containing a SPENT coin — are exactly the two the mock's fixture chain
+    /// is built never to produce.
+    struct StubChain {
+        records: Vec<dig_chainsource_interface::CoinRecord>,
+        refuses: bool,
+    }
+
+    impl StubChain {
+        fn holding(records: Vec<dig_chainsource_interface::CoinRecord>) -> Self {
+            Self {
+                records,
+                refuses: false,
+            }
+        }
+
+        fn that_cannot_answer() -> Self {
+            Self {
+                records: Vec::new(),
+                refuses: true,
+            }
+        }
+    }
+
+    impl dig_chainsource_interface::ChainSource for StubChain {
+        type Error = dig_chainsource_interface::ChainSourceError;
+
+        fn coin_record(
+            &self,
+            _coin_id: Bytes32,
+        ) -> Result<Option<dig_chainsource_interface::CoinRecord>, Self::Error> {
+            Ok(None)
+        }
+
+        fn coin_records_by_puzzle_hash(
+            &self,
+            _puzzle_hash: Bytes32,
+            _include_spent: bool,
+        ) -> Result<Vec<dig_chainsource_interface::CoinRecord>, Self::Error> {
+            match self.refuses {
+                true => Err(dig_chainsource_interface::ChainSourceError::Transport(
+                    "the node did not answer".into(),
+                )),
+                false => Ok(self.records.clone()),
+            }
+        }
+
+        fn coin_records_by_parent(
+            &self,
+            _parent_coin_id: Bytes32,
+        ) -> Result<Vec<dig_chainsource_interface::CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+
+        fn coin_spend(
+            &self,
+            _coin_id: Bytes32,
+        ) -> Result<Option<chia_protocol::CoinSpend>, Self::Error> {
+            Ok(None)
+        }
+
+        fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
+            Ok(Some(1))
+        }
+
+        fn resolve_singleton_lineage(
+            &self,
+            _launcher_id: Bytes32,
+        ) -> Result<Option<dig_chainsource_interface::SingletonLineage>, Self::Error> {
+            Ok(None)
+        }
+
+        fn block_timestamp(&self, _height: u32) -> Result<Option<u64>, Self::Error> {
+            Ok(None)
+        }
+    }
+
+    fn record(amount: u64, spent_height: Option<u32>) -> dig_chainsource_interface::CoinRecord {
+        dig_chainsource_interface::CoinRecord {
+            coin: Coin::new(Bytes32::new([0x01; 32]), Bytes32::new([0x02; 32]), amount),
+            confirmed_height: Some(1),
+            spent_height,
+            timestamp: None,
+            coinbase: false,
+        }
+    }
+
+    /// **A spent coin is not spendable, and an unspent one is.**
+    ///
+    /// Both are present in one answer, because a filter that dropped everything and a filter that
+    /// dropped nothing each satisfy a single-coin fixture. The amounts differ so the surviving coin
+    /// is identifiable rather than merely counted.
+    #[test]
+    fn a_spent_coin_is_not_offered_as_funding_and_an_unspent_one_is() {
+        let chain = StubChain::holding(vec![record(700, Some(9)), record(1_300, None)]);
+
+        let funds = SpendableXch::read_from(&chain, Bytes32::new([0x02; 32]))
+            .expect("a chain that answered has stated what the wallet holds");
+
+        assert_eq!(
+            funds.coins.iter().map(|c| c.amount).collect::<Vec<_>>(),
+            vec![1_300],
+            "only the unspent coin may fund a take"
+        );
+    }
+
+    /// **A chain that could not answer is NOT an empty wallet.**
+    ///
+    /// The nearest wrong version returns `Ok(SpendableXch::default())` on a read error, and every
+    /// downstream assertion would still pass — until a funded person was told their swap was
+    /// unaffordable. The test above supplies the honest control: the same call on a chain that DOES
+    /// answer produces coins, so this refusal cannot be the reader simply never working.
+    #[test]
+    fn a_chain_that_could_not_answer_is_never_read_as_an_empty_wallet() {
+        let err =
+            SpendableXch::read_from(&StubChain::that_cannot_answer(), Bytes32::new([0x02; 32]))
+                .expect_err("an unanswered read states nothing about the money");
+
+        assert!(matches!(err, TakeError::FundsUnreadable(_)), "{err}");
+    }
+
+    /// **A second take is refused while one is in flight, and the first is left undisturbed.**
+    ///
+    /// The refusal is what stops a person confirming a swap whose coins are already committed to an
+    /// identical one. Asserting the progress afterwards is what separates "refused" from "refused
+    /// and quietly reset the state the first take is relying on".
+    #[test]
+    fn a_second_take_is_refused_while_one_is_in_flight() {
+        let holder = TakeHolder::default();
+
+        assert!(holder.begin(), "the first take claims the slot");
+        assert!(!holder.begin(), "the second is refused");
+        assert_eq!(holder.progress(), TakeProgress::Working);
+    }
+
+    /// **A finished take can always be dismissed**, so neither terminal state becomes furniture a
+    /// person cannot clear (`professional-ui`: never trap the user).
+    #[test]
+    fn a_finished_take_can_be_dismissed_back_to_rest() {
+        let holder = TakeHolder::default();
+        *holder.lock() = TakeProgress::Failed {
+            why: "something went wrong".into(),
+        };
+
+        holder.dismiss();
+
+        assert_eq!(holder.progress(), TakeProgress::Idle);
     }
 }
