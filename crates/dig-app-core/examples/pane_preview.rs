@@ -25,13 +25,13 @@ use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{open_pane_preview, preview_theme};
-use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::profile_edit::{
     BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
     ProfileSnapshot, SlotChange,
 };
 use dig_app_core::transaction::Feed;
+use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::window_model::TabId;
 
 /// The view every pane is photographed against: the richest state, so nothing reads as empty by
