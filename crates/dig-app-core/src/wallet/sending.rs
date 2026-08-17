@@ -556,6 +556,35 @@ impl SendDraft<'_> {
     }
 }
 
+/// The activity row for a payment this app just broadcast.
+///
+/// Split out of [`SendController::list_as_sent`] so it can be TESTED: the listing itself writes into
+/// a process-wide log, and a rule about which asset a row is labelled with should not be checkable
+/// only through a global. Everything that decides the row's content is here; the caller only stores it.
+fn sent_record(
+    recipient: chia_protocol::Bytes32,
+    asset: Asset,
+    amount: u64,
+    reference: String,
+) -> crate::wallet::state::SpendRecord {
+    // The `xch1…` form for BOTH assets, deliberately: a $DIG payment is addressed to the recipient's
+    // ordinary p2 puzzle hash, and it is that address — not the curried CAT puzzle hash the coin ends
+    // up at — that the person typed and would recognise here.
+    let address = chia_sdk_utils::Address::new(recipient, "xch".to_string())
+        .encode()
+        .ok();
+    crate::wallet::state::SpendRecord {
+        recipient: address.unwrap_or_default(),
+        asset,
+        amount,
+        broadcast_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or_default(),
+        transaction_id: reference,
+    }
+}
+
 /// A push a mempool accepted, and how much of it can be followed afterwards.
 ///
 /// The two arms are NOT two shades of success. An XCH push yields something watchable to
@@ -1041,22 +1070,7 @@ impl SendHolder {
         amount: u64,
         reference: String,
     ) {
-        // The `xch1…` form for BOTH assets, deliberately: a $DIG payment is addressed to the
-        // recipient's ordinary p2 puzzle hash, and it is that address — not the curried CAT puzzle
-        // hash the coin ends up at — that the person typed and would recognise here.
-        let address = chia_sdk_utils::Address::new(recipient, "xch".to_string())
-            .encode()
-            .ok();
-        crate::wallet::activity::remember_spend(crate::wallet::state::SpendRecord {
-            recipient: address.unwrap_or_default(),
-            asset,
-            amount,
-            broadcast_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|since| since.as_secs())
-                .unwrap_or_default(),
-            transaction_id: reference,
-        });
+        crate::wallet::activity::remember_spend(sent_record(recipient, asset, amount, reference));
     }
 
     /// The money gate for this unlock, built once and reused (dig_ecosystem#2890).
@@ -1830,5 +1844,323 @@ mod tests {
             "the stale click was honoured"
         );
         assert_eq!(holder.progress(), settled);
+    }
+
+    // ---- $DIG sending (dig_ecosystem#2396) ----------------------------------------------------
+
+    /// A reading with `dig_units` $DIG base units and `xch_mojos` mojos.
+    fn holding(xch_mojos: u64, dig_units: u64) -> BalanceReading {
+        BalanceReading::Known {
+            balances: Balances {
+                xch_mojos,
+                dig_units,
+            },
+            as_of: BalanceAsOf::Replica {
+                height: 7_000_000,
+                caught_up: true,
+            },
+        }
+    }
+
+    /// A $DIG draft, varied one field at a time like [`ready`].
+    fn dig_draft<'a>(
+        amount: &'a str,
+        balance: &'a BalanceReading,
+        progress: &'a SendProgress,
+    ) -> SendDraft<'a> {
+        SendDraft {
+            asset: Asset::Dig,
+            destination: PAYABLE,
+            amount,
+            account_open: true,
+            balance,
+            progress,
+        }
+    }
+
+    /// **A $DIG amount is read to $DIG's decimal places, not to XCH's.**
+    ///
+    /// The fixture is chosen so the two readings CANNOT agree: `1.5` is 1 500 $DIG base units and
+    /// 1 500 000 000 000 mojos. An `assess` that had kept `parse_asset_amount(Asset::Xch, …)` — the
+    /// nearest wrong implementation, and the code that was there before this ticket — produces a
+    /// number a billion times too large and still yields a perfectly well-formed request.
+    ///
+    /// A fixture of `"2"` would differ only by that scale factor with nothing else to catch it, and
+    /// one with four decimal places would be refused before the reading happened, so it would prove
+    /// the refusal rather than the reading.
+    #[test]
+    fn a_dig_amount_is_read_in_dig_base_units_and_carries_the_xch_fee() {
+        let balance = holding(1_000_000_000_000, 100_000);
+        let progress = SendProgress::Idle;
+        let SendIntent::Dig(request) = dig_draft("1.5", &balance, &progress)
+            .assess()
+            .expect("a funded, open, well-formed $DIG draft is sendable")
+        else {
+            panic!("a $DIG draft produced a non-$DIG intent");
+        };
+        assert_eq!(
+            request.amount_base_units(),
+            1_500,
+            "the amount was read to the wrong asset's decimal places"
+        );
+        assert_eq!(
+            request.fee_mojos(),
+            DEFAULT_SEND_FEE_MOJOS,
+            "the fee is paid in XCH mojos and must be carried as such"
+        );
+    }
+
+    /// **The SAME typed string produces two different amounts under the two assets.**
+    ///
+    /// The cross-check for the test above, and the one that cannot be satisfied by a reading stuck in
+    /// EITHER direction: whichever single asset an implementation read everything as, one of these two
+    /// assertions fails.
+    #[test]
+    fn the_same_typed_amount_means_different_things_for_the_two_assets() {
+        // Funded well beyond 1.5 XCH so the XCH arm is decided by the READING, never by an
+        // affordability refusal that would never reach the comparison this test is about.
+        let balance = holding(10_000_000_000_000, 100_000);
+        let progress = SendProgress::Idle;
+        let xch = SendDraft {
+            asset: Asset::Xch,
+            ..dig_draft("1.5", &balance, &progress)
+        }
+        .assess()
+        .expect("a funded XCH draft");
+        let dig = dig_draft("1.5", &balance, &progress)
+            .assess()
+            .expect("a funded $DIG draft");
+        assert_eq!(xch.amount(), 1_500_000_000_000);
+        assert_eq!(dig.amount(), 1_500);
+        assert_ne!(
+            xch.asset(),
+            dig.asset(),
+            "the intent did not carry the asset it was built for"
+        );
+    }
+
+    /// **A $DIG send is weighed against the $DIG holding, never against the XCH one.**
+    ///
+    /// # The fixture is deliberately XCH-RICH and $DIG-POOR
+    ///
+    /// The nearest wrong implementation is the one that shipped before this ticket: an affordability
+    /// check reading `balances.xch_mojos` whatever the asset. Against a wallet holding plenty of both
+    /// it is indistinguishable from the correct one. So this wallet holds an XCH fortune and almost no
+    /// $DIG, and the send is of $DIG — which the wrong check waves through and the right one refuses.
+    ///
+    /// Both sides of the bound are asserted: one base unit over the holding is refused, and exactly
+    /// the holding passes. A bound tested only from above can only confirm itself.
+    #[test]
+    fn a_dig_send_is_measured_against_the_dig_holding_from_both_sides_of_the_bound() {
+        let progress = SendProgress::Idle;
+        let rich_in_xch_poor_in_dig = holding(u64::MAX / 2, 2_000);
+
+        assert_eq!(
+            dig_draft("2.001", &rich_in_xch_poor_in_dig, &progress).assess(),
+            Err(SendBlocked::NotEnough {
+                asset: Asset::Dig,
+                needed: 2_001,
+                spendable: 2_000,
+            }),
+            "a $DIG send was allowed on the strength of an XCH balance"
+        );
+        assert!(
+            dig_draft("2", &rich_in_xch_poor_in_dig, &progress)
+                .assess()
+                .is_ok(),
+            "a wallet holding exactly the amount was refused its own $DIG"
+        );
+    }
+
+    /// **The shortfall sentence quotes $DIG, not XCH.**
+    ///
+    /// A refusal naming the wrong ticker sends someone to acquire the wrong token, and
+    /// `format_asset_amount` additionally places the point nine digits away from where the person can
+    /// read their own balance.
+    #[test]
+    fn a_dig_shortfall_is_stated_in_dig() {
+        let progress = SendProgress::Idle;
+        let balance = holding(u64::MAX / 2, 1_000);
+        let sentence = dig_draft("9", &balance, &progress)
+            .assess()
+            .expect_err("nine $DIG is more than one $DIG")
+            .sentence();
+        assert!(
+            sentence.contains("$DIG"),
+            "a $DIG shortfall did not name $DIG: {sentence}"
+        );
+        assert!(
+            !sentence.contains("XCH"),
+            "a $DIG shortfall named XCH, sending the person to acquire the wrong token: {sentence}"
+        );
+    }
+
+    /// **A $DIG-rich, XCH-empty wallet is told it needs XCH — and it is NOT called a $DIG shortfall.**
+    ///
+    /// `dig-account` separates these two for a reason (`CatTransferError::NoXchForFee`) and this
+    /// surface must not re-merge them. The fixture holds a $DIG fortune, so a check reporting a
+    /// shortfall here would be reporting one against a balance that plainly covers the payment.
+    ///
+    /// Bounded from both sides on the FEE, which is the figure that actually decides it: one mojo
+    /// short refuses, exactly the fee passes.
+    #[test]
+    fn a_dig_wallet_with_no_xch_is_told_it_needs_xch_and_not_more_dig() {
+        let progress = SendProgress::Idle;
+        let one_mojo_short = holding(DEFAULT_SEND_FEE_MOJOS - 1, 1_000_000);
+
+        let blocked = dig_draft("1", &one_mojo_short, &progress)
+            .assess()
+            .expect_err("a wallet that cannot pay the fee cannot send");
+        assert_eq!(
+            blocked,
+            SendBlocked::NoXchForFee {
+                needed: DEFAULT_SEND_FEE_MOJOS,
+                spendable: DEFAULT_SEND_FEE_MOJOS - 1,
+            },
+            "a missing fee coin was reported as something other than a missing fee coin"
+        );
+        let sentence = blocked.sentence();
+        assert!(
+            sentence.contains("XCH") && sentence.contains("$DIG"),
+            "the sentence must name both tokens to explain why one cannot pay for the other: \
+             {sentence}"
+        );
+
+        let exactly_the_fee = holding(DEFAULT_SEND_FEE_MOJOS, 1_000_000);
+        assert!(
+            dig_draft("1", &exactly_the_fee, &progress).assess().is_ok(),
+            "a wallet holding exactly the fee was refused"
+        );
+    }
+
+    /// **An unread balance refuses nothing, for $DIG exactly as for XCH.**
+    ///
+    /// The control for every affordability test above: without it, an `affordable` that refused
+    /// whenever it could not see a figure would satisfy all of them. Refusing over a balance nobody
+    /// has read would be inventing the figure.
+    #[test]
+    fn an_unread_balance_blocks_no_dig_send() {
+        let progress = SendProgress::Idle;
+        let unread = BalanceReading::Unknown(BalanceUnknown::NoNode);
+        assert!(
+            dig_draft("999999", &unread, &progress).assess().is_ok(),
+            "an unread balance was treated as a zero balance"
+        );
+    }
+
+    /// **A $DIG destination is judged by the SAME address rule as an XCH one.**
+    ///
+    /// A CAT is addressed to the owner's ordinary `xch1…` destination — the builder is what wraps it
+    /// in the CAT puzzle — so the prefix rule that stops funds being burned must apply identically.
+    /// The fixture is a `txch` address: well-formed bech32m with a real 32-byte payload, so it decodes
+    /// perfectly and only the PREFIX makes it unpayable. A length or shape check would let it through.
+    #[test]
+    fn a_dig_send_refuses_a_non_mainnet_address_exactly_as_an_xch_send_does() {
+        let balance = holding(1_000_000_000_000, 1_000_000);
+        let progress = SendProgress::Idle;
+        // Built rather than pasted, so it is guaranteed to be well-formed bech32m over a real
+        // 32-byte payload: the ONLY thing wrong with it is the prefix, which is the property.
+        let testnet = chia_sdk_utils::Address::new(
+            chia_protocol::Bytes32::new([0x4D; 32]),
+            "txch".to_string(),
+        )
+        .encode()
+        .expect("a 32-byte payload always encodes");
+        let testnet = testnet.as_str();
+        for asset in [Asset::Xch, Asset::Dig] {
+            let draft = SendDraft {
+                asset,
+                destination: testnet,
+                ..dig_draft("1", &balance, &progress)
+            };
+            assert!(
+                matches!(draft.assess(), Err(SendBlocked::BadDestination(_))),
+                "{asset:?} accepted a testnet address, whose puzzle hash would burn the funds"
+            );
+        }
+    }
+
+    /// **An activity row is labelled with the asset that was actually sent.**
+    ///
+    /// # This is the regression test for a live mislabel
+    ///
+    /// `sent_record`'s ancestor hard-coded `asset: Asset::Xch`. That was correct while XCH was the
+    /// only sendable asset and became a lie the moment $DIG sends landed: the wallet's own history
+    /// would show every $DIG payment under an XCH ticker, at XCH's twelve decimal places.
+    ///
+    /// Both rows are asserted in one test on purpose. Asserting only the $DIG row would pass for an
+    /// implementation that had merely flipped the literal the other way — the property is *the row
+    /// follows the argument*, and a single row cannot express it.
+    #[test]
+    fn a_sent_row_carries_the_asset_that_was_sent_and_not_a_fixed_one() {
+        let recipient = chia_protocol::Bytes32::new([0x2C; 32]);
+        for (asset, amount) in [(Asset::Xch, 250_000_000_000_u64), (Asset::Dig, 1_500_u64)] {
+            let record = sent_record(recipient, asset, amount, "reference".to_string());
+            assert_eq!(
+                record.asset, asset,
+                "the row was labelled with a fixed asset rather than the one sent"
+            );
+            assert_eq!(record.amount, amount);
+            assert!(
+                record.recipient.starts_with("xch1"),
+                "the row must show the address the person typed, not the curried CAT puzzle hash"
+            );
+        }
+    }
+
+    /// **A broadcast $DIG payment does not hold the send form closed.**
+    ///
+    /// # Why `in_flight` is the assertion
+    ///
+    /// `in_flight` closes the form, and the only documented way back out is [`ReleaseDraft`], which
+    /// requires naming the payment COIN id being released. A $DIG send has no such id, so an in-flight
+    /// $DIG state would close the form for the life of the process with no escape and nothing to
+    /// check — `professional-ui`'s trap, reached from the safe-looking direction.
+    ///
+    /// An in-flight state is asserted beside it as the control, so this cannot pass by `in_flight`
+    /// having become uniformly false.
+    #[test]
+    fn a_broadcast_dig_payment_reopens_the_form_while_a_watched_transfer_still_closes_it() {
+        let broadcast = SendProgress::Broadcast {
+            bundle_id: "b0117d1e".to_string(),
+        };
+        assert!(
+            !broadcast.in_flight(),
+            "a $DIG payment nobody can watch closed the form with no way to reopen it"
+        );
+        assert!(
+            SendProgress::Pending {
+                payment_coin_id: "aa".to_string(),
+                blocks_since_push: 1,
+            }
+            .in_flight(),
+            "no state is in flight, so the assertion above proves nothing"
+        );
+    }
+
+    /// **A $DIG push nobody answered is never reported as a failure.**
+    ///
+    /// `Failed`'s copy opens with *"Nothing was sent and no money has moved"*. Reaching it from a push
+    /// that may be sitting in a mempool would make that sentence a claim about the person's money
+    /// manufactured out of this app's inability to look — the money-lie class. `Abandoned` states the
+    /// inability instead, needs no coin id, and reopens the form behind a warning.
+    ///
+    /// A genuinely-unsent error is asserted beside it as the control, so a mapping that had collapsed
+    /// everything into `Abandoned` fails here.
+    #[test]
+    fn an_unanswered_dig_push_is_abandoned_and_a_provably_unsent_one_is_failed() {
+        let unwatchable = SendProgress::of_error(&SendError::PushUnwatchable {
+            detail: "the node closed the connection".to_string(),
+        });
+        assert!(
+            matches!(unwatchable, SendProgress::Abandoned { .. }),
+            "a $DIG push that may be in a mempool was reported as {unwatchable:?}"
+        );
+
+        let never_built = SendProgress::of_error(&SendError::Locked);
+        assert!(
+            matches!(never_built, SendProgress::Failed { .. }),
+            "nothing maps to Failed any more, so the assertion above proves nothing"
+        );
     }
 }
