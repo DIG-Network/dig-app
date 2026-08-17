@@ -75,16 +75,23 @@ pub mod copy {
     /// people *"nothing has gone wrong"* and they went looking for a setting that would bring their
     /// profile back. It does not offer a retry, because a hash has no preimage to find. It names the
     /// root, so the claim is checkable rather than taken on trust. And it ends on the door — typing
-    /// the details in again — because a statement of permanent loss with no next action is the dead
-    /// end `professional-ui`'s first rule exists to forbid.
+    /// the details in again — because a statement of loss with no next action is the dead end
+    /// `professional-ui`'s first rule exists to forbid.
+    ///
+    /// # What it deliberately does NOT claim
+    ///
+    /// Three MEASURED facts — not on your node, not found anywhere else, not rebuildable — rather
+    /// than a universal *this can never be recovered*. The rebuild candidate list is complete only
+    /// once [`install_recorded_seeds`](super::recovery::install_recorded_seeds) has run, and what
+    /// guarantees that before a person reaches this card is an ORDERING rather than an invariant. So
+    /// the sentence says what this app looked for and did not find, and stops there.
     pub fn body_lost(root: &str) -> String {
         format!(
             "This profile's details are gone. The blockchain still records that they existed \
-             (as {root}), but the details themselves are not on your node and could not be found \
-             anywhere else, and they cannot be recovered — not by waiting, retrying, or \
-             reinstalling. Your profile itself is safe and still yours. To use it again, type the \
-             details in below and publish them; that writes to the blockchain and costs a small \
-             amount of XCH."
+             (as {root}), but the details themselves are not on your node, could not be found \
+             anywhere else, and cannot be rebuilt. Your profile itself is safe and still yours. To \
+             use it again, type the details in below and publish them; that writes to the \
+             blockchain and costs a small amount of XCH."
         )
     }
 
