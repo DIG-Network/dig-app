@@ -740,9 +740,49 @@ impl SendHolder {
         let outcome = self.perform(status, residency, request);
         guard.completed();
         match outcome {
-            Ok(in_flight) => self.accepted(in_flight.finish()),
+            Ok(in_flight) => {
+                let pending = in_flight.finish();
+                Self::list_as_sent(&pending);
+                self.accepted(pending);
+            }
             Err(error) => self.finished(&error),
         }
+    }
+
+    /// List an accepted transfer on the Wallet tab's activity list (dig_ecosystem#3077).
+    ///
+    /// # What the row is allowed to say, and what it is not
+    ///
+    /// It says *this app broadcast this payment, at this time, to this address*, and nothing more.
+    /// It carries no height and reports [`is_settled`](crate::wallet::activity::ActivityEntry::is_settled)
+    /// `false`, because reaching this point means a node ACCEPTED a bundle — a submission. Whether
+    /// the money moved is [`InFlightSend::status`](crate::wallet::send::InFlightSend::status)'s
+    /// answer, from a chain read, and the two must not be joined into one confident row.
+    ///
+    /// # The reference is the payment COIN id
+    ///
+    /// [`PendingTransfer::payment_coin_id`] is the value whose confirmation IS this transfer's
+    /// evidence, so it is the one a person can take to an explorer and the one the status poll
+    /// watches. A bundle name would identify the submission instead of the money.
+    ///
+    /// A recipient whose puzzle hash will not encode is listed with no address rather than not
+    /// listed: the payment happened, and dropping the row would be a wallet quietly forgetting a
+    /// send. This cannot occur in practice — bech32m over a fixed 32-byte payload and a fixed HRP
+    /// has no failing input — which is exactly why the arm must not be a panic on a money path.
+    fn list_as_sent(pending: &PendingTransfer) {
+        let recipient = chia_sdk_utils::Address::new(pending.recipient(), "xch".to_string())
+            .encode()
+            .ok();
+        crate::wallet::activity::remember_spend(crate::wallet::state::SpendRecord {
+            recipient: recipient.unwrap_or_default(),
+            asset: Asset::Xch,
+            amount: pending.amount_mojos(),
+            broadcast_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_secs())
+                .unwrap_or_default(),
+            transaction_id: hex::encode(pending.payment_coin_id()),
+        });
     }
 
     /// The money gate for this unlock, built once and reused (dig_ecosystem#2890).

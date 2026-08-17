@@ -598,24 +598,6 @@ pub fn balance_line(balance: &BalanceReading, peers_peak: Option<u32>) -> String
 /// `None` — no peer has announced a peak — can never produce the current claim. There is nothing to
 /// have reached, so the fail-closed reading is the as-of one, which is true either way.
 pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
-    /// Whether `height` is level with, or past, the peak this node's peers announced.
-    ///
-    /// Fail-closed on `None`: an unobservable tip licenses no claim that anything reached it.
-    /// `>=` rather than `==` because a replica that copied another block between the sync poll and
-    /// the balance read is momentarily higher, which is still up to date.
-    /// A block height with thousands separators — seven bare digits are a number nobody reads.
-    fn grouped(height: u32) -> String {
-        let digits = height.to_string();
-        let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-        for (i, digit) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
-                out.push(',');
-            }
-            out.push(digit);
-        }
-        out
-    }
-
     match as_of {
         // LEVEL with the peak this node's own peers announced: the figure is current, and saying so
         // is the point. A replica genuinely does reach its peers' peak and track it — measured on an
@@ -628,7 +610,10 @@ pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
         // something is the day it changes. The height stays, because it is what makes the claim
         // checkable rather than a reassurance.
         BalanceAsOf::Replica { height, caught_up } if is_level(height, caught_up, peers_peak) => {
-            format!("Up to date with the chain, at block {}.", grouped(height))
+            format!(
+                "Up to date with the chain, at block {}.",
+                grouped_height(height)
+            )
         }
         // BEHIND, and the sentence says both halves. The as-of alone was true but incomplete: a
         // reader can take "the last your node has read" for a node that has finished and simply
@@ -638,7 +623,7 @@ pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
         BalanceAsOf::Replica { height, .. } => {
             format!(
                 "Still syncing — correct as of block {}, the last your node has read.",
-                grouped(height)
+                grouped_height(height)
             )
         }
         // Current, and NOT the user's own node: the oracle answered because the replica has not
@@ -728,6 +713,23 @@ fn menu_provenance(as_of: BalanceAsOf, peers_peak: Option<u32>) -> &'static str 
         BalanceAsOf::Oracle => " (syncing·public)",
         BalanceAsOf::Undisclosed => " (older node)",
     }
+}
+
+/// A block height with thousands separators — seven bare digits are a number nobody reads.
+///
+/// Crate-visible so every surface that prints a height prints it the same way: the balance card's
+/// as-of line and the activity list's confirmed rows sit inches apart, and one of them showing
+/// `5400112` beside the other's `7,000,000` reads as two different kinds of number.
+pub fn grouped_height(height: u32) -> String {
+    let digits = height.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// Whether a replica reading is LEVEL with the chain — the node's own claim, corroborated by the

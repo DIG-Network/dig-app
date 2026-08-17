@@ -21,6 +21,7 @@
 //! SIGNED bytes to the engine via [`engine::WalletEngine::broadcast`]. The private key stays inside the
 //! `dig-account` signer; the engine only ever sees signed bytes.
 
+pub mod activity;
 pub mod engine;
 pub mod enrol;
 /// The §908 on-wire custody proof. Crate-internal because it drives a real loopback node

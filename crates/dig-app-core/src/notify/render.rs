@@ -63,7 +63,7 @@ pub(super) fn direction_line(
 
 /// The human label for an asset: `XCH` for the native asset, `$DIG` for the DIG CAT, otherwise a
 /// short form of the CAT asset id. Never a false ticker (§6.0 honest).
-pub(super) fn asset_label(asset: Option<&AssetId>, dig_asset_id: Option<&AssetId>) -> String {
+pub(crate) fn asset_label(asset: Option<&AssetId>, dig_asset_id: Option<&AssetId>) -> String {
     match asset {
         None => "XCH".to_string(),
         Some(id) if Some(id) == dig_asset_id => "$DIG".to_string(),
@@ -82,7 +82,7 @@ fn short_asset(id: &str) -> String {
 
 /// Format a base-unit amount for an asset: XCH has 12 decimals (mojos), CATs 3 (the Chia CAT
 /// convention), with trailing zeros trimmed for a glanceable value.
-pub(super) fn format_amount(asset: Option<&AssetId>, mojos: u128) -> String {
+pub(crate) fn format_amount(asset: Option<&AssetId>, mojos: u128) -> String {
     let decimals = match asset {
         None => XCH_DECIMALS,
         Some(_) => CAT_DECIMALS,

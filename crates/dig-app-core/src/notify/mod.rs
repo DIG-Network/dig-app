@@ -15,7 +15,10 @@
 //! - [`NotifyingSink`] + [`run_notifier`] — the wiring: the sink forwards funds events over a
 //!   channel; the async task applies the debounce window and shows the coalesced result.
 
-mod render;
+/// Crate-visible so the money surfaces that must render an asset the same way this one does — the
+/// wallet's activity list ([`crate::wallet::activity`]) — reuse the mapping instead of copying it.
+/// A second "which id is $DIG" is how a surface comes to call somebody else's CAT $DIG.
+pub(crate) mod render;
 
 use std::collections::BTreeMap;
 

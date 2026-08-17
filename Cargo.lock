@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "12.19.0"
+version = "12.20.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "12.19.0"
+version = "12.20.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "12.19.0"
+version = "12.20.0"
 dependencies = [
  "clap",
  "dig-app-core",

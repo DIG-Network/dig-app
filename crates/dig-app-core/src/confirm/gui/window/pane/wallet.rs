@@ -125,6 +125,9 @@ pub(crate) fn draw(
     };
 
     flow.gap(space::S4);
+    activity_card(flow, t, &crate::wallet::activity::entries());
+
+    flow.gap(space::S4);
     // The tab's own verbs, LAST and in a card of their own — but only where the model offers one
     // this pane has not already drawn. See [`spare_verbs`].
     //
@@ -134,6 +137,84 @@ pub(crate) fn draw(
     // `open` on, and re-asking would report no copy control on the very frame one was drawn — putting
     // the menu's row back beside it and offering the same verb twice.
     sent.or(spare_verbs_card(flow, t, tab, showing_receive))
+}
+
+/// What came in and what went out, newest first (dig_ecosystem#3077).
+///
+/// # The two directions are not the same claim, and the rows say so
+///
+/// A received row states the HEIGHT its coin was confirmed at, because dig-node's arrival ledger
+/// records confirmed coins and nothing else. A sent row states only that it was BROADCAST, because
+/// reaching the list means a node accepted a bundle — a submission. Whether it settled is
+/// [`crate::wallet::send::InFlightSend::status`]'s answer, from a chain read, and this card has no
+/// access to it and does not guess.
+///
+/// The asymmetry is visible and it is the honest one: the row that can cite chain evidence cites
+/// it, and the row that cannot says what it actually knows.
+///
+/// # Why an empty list is a sentence rather than a hidden card
+///
+/// A wallet with no listed activity is the ordinary state of a new install, and a card that
+/// disappears in that state teaches a person the feature does not exist. The sentence names the two
+/// sources instead, so an empty list reads as *nothing yet* rather than as *nothing ever*.
+///
+/// # Why the scope caption is on every non-empty list
+///
+/// The list is a recent view: arrivals are those the node has reported since this app began
+/// following its ledger, and sends are those made from this app. Showing a partial history of
+/// somebody's money without saying it is partial invites the reader to conclude the missing rows
+/// never happened.
+fn activity_card(flow: &mut Flow, t: &Tokens, entries: &[crate::wallet::activity::ActivityEntry]) {
+    let items: Vec<Readout> = entries.iter().map(activity_row).collect();
+    flow.place(|ui, at| {
+        (
+            card::card(ui, at, t, Some(copy::wallet::ACTIVITY_CARD), |inner| {
+                if items.is_empty() {
+                    inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::ACTIVITY_EMPTY), ()));
+                    return;
+                }
+                inner.place(|ui, at| (data::rows(ui, at, t, &items), ()));
+                inner.gap(space::S3);
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::wallet::ACTIVITY_SCOPE), ()));
+            }),
+            (),
+        )
+    });
+}
+
+/// One activity row: which way the money went and on what evidence, against the amount.
+fn activity_row(entry: &crate::wallet::activity::ActivityEntry) -> Readout {
+    use crate::wallet::activity::{Direction, Settlement};
+
+    let label = match (entry.direction, entry.settlement) {
+        (Direction::Received, Settlement::Confirmed { height }) => {
+            format!(
+                "{} — at height {}",
+                copy::wallet::ACTIVITY_RECEIVED,
+                crate::wallet::overview::grouped_height(height)
+            )
+        }
+        (Direction::Sent, _) => {
+            format!(
+                "{} — {}",
+                copy::wallet::ACTIVITY_SENT,
+                copy::wallet::ACTIVITY_BROADCAST
+            )
+        }
+        // Unreachable by construction today (only an arrival carries a confirmation), and written
+        // as a case rather than an `unreachable!` because the alternative on a money surface is a
+        // panic in a repaint loop. It says the direction and claims no evidence.
+        (Direction::Received, Settlement::Broadcast { .. }) => {
+            copy::wallet::ACTIVITY_RECEIVED.to_string()
+        }
+    };
+    Readout::new(
+        label,
+        Value::Measure {
+            amount: crate::wallet::activity::format_entry_amount(entry),
+            unit: crate::wallet::activity::asset_label(entry.asset_id.as_ref()),
+        },
+    )
 }
 
 /// Which of the tab's two disclosed cards is showing.
@@ -1132,6 +1213,72 @@ mod tests {
 
     /// The address a live account derives.
     const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+
+    /// **A SENT row never cites a height, and a RECEIVED row always does.**
+    ///
+    /// The nearest wrong implementation renders one row shape for both directions, which reads as a
+    /// confirmation on the half that has none — a settled claim from a submission. The fixture is
+    /// the two directions side by side, because a test over the received row alone passes against
+    /// exactly that wrong implementation.
+    #[test]
+    fn a_sent_row_claims_no_height_while_a_received_row_states_one() {
+        use crate::wallet::activity::{ActivityEntry, Direction, Settlement};
+
+        let received = activity_row(&ActivityEntry {
+            direction: Direction::Received,
+            asset_id: None,
+            amount: 1_500_000_000_000,
+            settlement: Settlement::Confirmed { height: 5_400_112 },
+            counterparty: None,
+            reference: "ab".into(),
+            learned_at: 1,
+        });
+        let sent = activity_row(&ActivityEntry {
+            direction: Direction::Sent,
+            asset_id: None,
+            amount: 1_000_000_000_000,
+            settlement: Settlement::Broadcast { at: 1_600_000_000 },
+            counterparty: Some("xch1alice".into()),
+            reference: "cd".into(),
+            learned_at: 0,
+        });
+
+        assert!(
+            received.label.contains("5,400,112"),
+            "a confirmed arrival cites the height it was confirmed at: {}",
+            received.label
+        );
+        assert!(
+            !sent.label.contains("height"),
+            "a broadcast row must cite no height: {}",
+            sent.label
+        );
+        assert!(
+            sent.label.contains("broadcast"),
+            "a sent row says what it actually knows: {}",
+            sent.label
+        );
+        assert!(
+            !sent.label.to_lowercase().contains("confirm"),
+            "a sent row must never claim confirmation: {}",
+            sent.label
+        );
+        assert_eq!(received.value.shown(), "1.5");
+        assert_eq!(sent.value.shown(), "1");
+    }
+
+    /// **An empty activity list draws its sentence, never a silent card.** A card that vanishes
+    /// teaches a new install the feature does not exist.
+    #[test]
+    fn an_empty_activity_list_still_says_what_will_appear_there() {
+        let painted = painted_pane(&TrayView::default(), 480.0);
+        assert!(
+            painted
+                .iter()
+                .any(|line| line.contains(copy::wallet::ACTIVITY_CARD)),
+            "the Activity card is drawn even with nothing to list: {painted:?}"
+        );
+    }
 
     fn facts_with(view: TrayView) -> PaneFacts {
         PaneFacts::of_tray(&view)

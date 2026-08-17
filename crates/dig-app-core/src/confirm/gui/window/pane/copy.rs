@@ -751,6 +751,39 @@ pub(crate) mod wallet {
     // a whole sentence for each account state, and prefixing it produced "No address yet — Your
     // address is not shown because your account is locked" — the same fact twice, capitalised
     // mid-sentence. See `pane::wallet::receive_refusal`.
+    /// The card listing what came in and what went out (dig_ecosystem#3077).
+    pub(crate) const ACTIVITY_CARD: &str = "Activity";
+
+    /// What the Activity card says when it has nothing to list.
+    ///
+    /// It names the two sources rather than saying "no activity", because an empty list here is not
+    /// a claim that this wallet has never been used: it is a new list, filled by arrivals the node
+    /// reports and by sends made from this app.
+    pub(crate) const ACTIVITY_EMPTY: &str =
+        "Payments into this wallet appear here as your node confirms them, and payments you send \
+         appear as you make them.";
+
+    /// The caption bounding what the Activity list COVERS.
+    ///
+    /// Present on every non-empty list, because the list is a recent view rather than a full
+    /// statement, and a wallet that shows a partial history without saying so has invited the
+    /// reader to conclude the rest never happened.
+    pub(crate) const ACTIVITY_SCOPE: &str =
+        "Recent activity only — arrivals your node has reported since this app started following \
+         it, and payments sent from this app.";
+
+    /// The word for money that came in.
+    pub(crate) const ACTIVITY_RECEIVED: &str = "Received";
+    /// The word for money that went out.
+    pub(crate) const ACTIVITY_SENT: &str = "Sent";
+
+    /// What a SENT row says instead of a confirmation.
+    ///
+    /// "Broadcast", never "confirmed": reaching this list means a node ACCEPTED a bundle, which is
+    /// a submission. Whether it settled is a chain read this row does not have, and a row that
+    /// borrowed the confident word would be reporting settled money from a submission.
+    pub(crate) const ACTIVITY_BROADCAST: &str = "broadcast";
+
     /// The card that reserves the place sending will take (dig_ecosystem#2207).
     pub(crate) const SENDING_CARD: &str = "Sending";
     /// The card holding the tab's own verbs.
@@ -1151,6 +1184,8 @@ mod tests {
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
             wallet::BALANCE_PENDING,
+            wallet::ACTIVITY_EMPTY,
+            wallet::ACTIVITY_SCOPE,
             wallet::SEND_TO_HINT,
             wallet::SEND_AMOUNT_HINT,
             wallet::SEND_SIGNING_BODY,
