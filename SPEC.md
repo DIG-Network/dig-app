@@ -1405,9 +1405,28 @@ done. A store that accepts a body and does not hold it MUST fail the commit. Thi
 error of its own: the root reaches the chain, nothing holds its preimage, the profile becomes unreadable
 permanently, and every layer reports success.
 
+**The bytes MUST be written to local durable storage BEFORE the spend is pushed (MUST).** The node accepts a
+body only at the store's CONFIRMED on-chain root, so between the push and the confirmation the new root is
+committed permanently while its preimage exists only in the running process. The implementation MUST
+therefore compute the body the edit will publish, and persist `(store_id, root, body)` to a local pending
+file, BEFORE anything is signed or pushed. A write performed only after the commit returns, or only when
+`putBody` is refused, does NOT satisfy this: it is absent for exactly the crash it exists to survive.
+
+The pending file MUST live in the per-profile AppData directory and MUST be sealed at rest to the user's key
+(NC-2 / NC-3). It MUST be drained — every entry re-offered to `control.profile.putBody` — on a later attempt
+and at the next launch, and an entry MUST be removed ONLY after `control.profile.getBody` returns those exact
+bytes at that root; a successful `putBody` alone MUST NOT clear it. An edit whose outcome is UNKNOWN (an
+unanswered chain) MUST keep its entry; only an outcome proving nothing reached a mempool may drop it.
+
+Where the body must be predicted rather than obtained from the commit, the implementation MUST compare the
+predicted root against the root the commit returns and MUST discard a prediction the commit contradicts, in
+the same call that made it.
+
 **A failed persist MUST be reported as an edit that HAPPENED (MUST).** It occurs after a successful push, so
-the surface MUST say both true things — the change was sent, and the content is not stored — and MUST NOT
-offer the form again as though nothing had happened.
+the surface MUST say both true things — the change was sent, and the content is not stored on the node — and
+MUST NOT offer the form again as though nothing had happened. It MUST also say whether a local copy was
+kept: a promise to retry that the implementation cannot keep is the most damaging sentence the editor can
+say, so the two cases MUST be distinguished by fact and not assumed.
 
 **Size MUST be refused before the form is filled in (MUST).** A body has two ceilings — 1,400,000 bytes for
 any one slot and 4 MiB for the whole body — and both MUST be checked against the projected body as a person
