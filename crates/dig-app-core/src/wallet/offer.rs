@@ -169,7 +169,8 @@ impl ReviewedOffer {
 /// `ProtocolStructure` BY NAME, and the offer settlement puzzle is exactly that. The refusal is
 /// correct — it is what keeps the 24-hour clawback window unavoidable — so the surface states the
 /// remedy rather than presenting a control that would fail at signing time.
-pub const VAULT_CANNOT_TAKE: &str = "This profile keeps its funds in the vault, and vault funds may \
+pub const VAULT_CANNOT_TAKE: &str =
+    "This profile keeps its funds in the vault, and vault funds may \
                                      only be paid to your own hot wallet. Move what you want to \
                                      spend to the hot wallet first — it clears after the 24-hour \
                                      clawback window — then take the offer from there.";

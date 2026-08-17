@@ -140,6 +140,10 @@ dig-social-profile = "0.6"
 # Pinned to the 0.36.1/0.34 chia line dig-account 0.16 resolves, so the `CoinSpend`/`SpendBundle`
 # types crossing the two seams are ONE definition rather than a silently-drifted second copy.
 dig-offers = "0.2"
+# `dig-offers` names `IndexMap` in its PUBLIC API (`OfferedSide::owner_keys`, `TakerFunds::owner_keys`),
+# so constructing a take is impossible without it. Pinned to the same major line dig-offers resolves so
+# the map crossing that seam is one definition, not a drifted copy.
+indexmap = "2"
 # The BIP-39 recovery phrase (dig_ecosystem#1752, the #1500 derived account model): the 24-word
 # mnemonic that IS an account's portable custody root. Standard, audited wordlist + checksum + PBKDF2
 # implementation — never hand-rolled. `zeroize` wipes the crate's own internal buffers; `rand` supplies

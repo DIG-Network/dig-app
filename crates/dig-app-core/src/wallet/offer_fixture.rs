@@ -36,9 +36,11 @@ pub enum OfferShape {
 /// 1,000 mojos offered for 400 requested — see [`OfferShape::XchForXch`].
 pub const XCH_FOR_XCH: OfferShape = OfferShape::XchForXch;
 
-/// The maker's deterministic key. Distinct from [`taker`] so a spend built for one is never
-/// accidentally satisfiable by the other.
-fn maker() -> BlsPair {
+/// The maker's deterministic key — also the payee the requested payment is made to. Distinct from
+/// [`taker`] so a spend built for one is never accidentally satisfiable by the other, and so a test
+/// can tell the payment leg from the taker's own change.
+#[must_use]
+pub fn maker() -> BlsPair {
     BlsPair::new(1)
 }
 
