@@ -378,7 +378,10 @@ mod tests {
         let draft = lost.draft().expect(
             "a person whose content is unrecoverable was given no way to publish a fresh body",
         );
-        assert!(draft.is_empty(), "the re-entry form was pre-filled from somewhere");
+        assert!(
+            draft.is_empty(),
+            "the re-entry form was pre-filled from somewhere"
+        );
         assert!(
             lost.is_re_entry(),
             "the form is indistinguishable from an ordinary edit of this person's own values"
@@ -393,7 +396,10 @@ mod tests {
         );
 
         let said = lost.says().expect("the state says nothing at all");
-        assert!(said.contains(ROOT), "the sentence does not name the root: {said}");
+        assert!(
+            said.contains(ROOT),
+            "the sentence does not name the root: {said}"
+        );
         assert!(
             !said.contains("Nothing has gone wrong"),
             "the reassurance from the UNPUBLISHED sentence survived onto a destroyed profile:              {said}"

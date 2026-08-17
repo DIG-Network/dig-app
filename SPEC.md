@@ -1435,6 +1435,23 @@ Where the body must be predicted rather than obtained from the commit, the imple
 predicted root against the root the commit returns and MUST discard a prediction the commit contradicts, in
 the same call that made it.
 
+**A body that is UNRECOVERABLE MUST be named as lost, and MUST still be offered the form (MUST,
+dig_ecosystem#3041).** When the node answers `body_b64: null` at the store's confirmed root and no seed this
+app mints from rebuilds to that root, the root was produced by a real edit whose bytes exist nowhere. The
+implementation MUST distinguish that state from *nothing has ever been published*, which reaches the surface
+through the identical node answer, and MUST NOT describe it with the unpublished wording — a person whose
+content was destroyed MUST NOT be told that nothing has gone wrong. The sentence MUST name the root, MUST
+NOT offer a retry, and MUST name the one remedy that exists: publishing a fresh body.
+
+The implementation MUST therefore offer the editing form over this state, with EMPTY fields, even though no
+read succeeded. This is the sole exception to the rule that a failed read withholds the form, and it holds
+only because there is nothing left to overwrite. The surface MUST NOT draw the resulting empty form as an
+unfilled profile: the loss MUST be stated above the fields, so the form reads as a re-entry rather than as
+the person's own values. Publishing from it is an ordinary edit and MUST satisfy every rule above, the
+pending-file write before the spend included.
+
+The 1-mojo singleton amount and the previous content MUST NOT be promised back by any wording.
+
 **A failed persist MUST be reported as an edit that HAPPENED (MUST).** It occurs after a successful push, so
 the surface MUST say both true things — the change was sent, and the content is not stored on the node — and
 MUST NOT offer the form again as though nothing had happened. It MUST also say whether a local copy was

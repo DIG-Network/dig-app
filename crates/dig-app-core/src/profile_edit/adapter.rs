@@ -243,9 +243,7 @@ where
             .map_err(|error| match error {
             // The crate flattens every content failure into one string, and this is the only
             // layer that still knows which of them it was.
-            EditError::ContentUnavailable(_)
-                if self.content.saw_body_missing_at().is_some() =>
-            {
+            EditError::ContentUnavailable(_) if self.content.saw_body_missing_at().is_some() => {
                 // `expect` cannot fire: the guard above just observed it, and nothing clears the
                 // observation between the guard and here.
                 ProfileEditError::BodyLost {
