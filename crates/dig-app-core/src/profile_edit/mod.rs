@@ -85,13 +85,22 @@ pub mod copy {
     /// once [`install_recorded_seeds`](super::recovery::install_recorded_seeds) has run, and what
     /// guarantees that before a person reaches this card is an ORDERING rather than an invariant. So
     /// the sentence says what this app looked for and did not find, and stops there.
+    ///
+    /// # Why the remedy is worded as *add the details*
+    ///
+    /// [`label_names_a_remedy`](crate::window_model::label_names_a_remedy) checks for a remedy VERB,
+    /// and an earlier draft of this sentence cleared it only because the phrase *not by waiting,
+    /// retrying, or reinstalling* contains "install" — a verb inside a NEGATION, telling the person
+    /// the one thing that would not help. The check was passing on a coincidence. The remedy is
+    /// named with a listed verb deliberately now, so the guard is measuring the door rather than a
+    /// substring of the sentence that says there isn't one.
     pub fn body_lost(root: &str) -> String {
         format!(
             "This profile's details are gone. The blockchain still records that they existed \
              (as {root}), but the details themselves are not on your node, could not be found \
              anywhere else, and cannot be rebuilt. Your profile itself is safe and still yours. To \
-             use it again, type the details in below and publish them; that writes to the \
-             blockchain and costs a small amount of XCH."
+             use it again, add the details below and publish them; that writes to the blockchain \
+             and costs a small amount of XCH."
         )
     }
 
