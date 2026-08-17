@@ -499,6 +499,16 @@ pub(crate) mod profile_edit {
     /// goes into the profile, and only pressing Save publishes anything.
     pub(crate) const CHOOSE: &str = "Choose an image";
 
+    /// The control that empties an image field.
+    ///
+    /// Not a nicety. The image well draws no text box (dig_ecosystem#3069, criterion 9), and
+    /// emptying that box was the ONLY way to clear a picture — so this control is the capability
+    /// the removal takes away, put back. Without it an image field is a one-way door.
+    ///
+    /// Says PICTURE rather than "clear" or "delete": it removes the picture from this form, and
+    /// nothing is published until Save is pressed.
+    pub(crate) const REMOVE_PICTURE: &str = "Remove picture";
+
     /// Said beside the control while the system's chooser is open.
     ///
     /// A dialog can end up behind the window, and a person who cannot see it is looking at a DIG
@@ -530,6 +540,21 @@ pub(crate) mod profile_edit {
 }
 
 pub(crate) mod profiles {
+    /// The control that steps back one profile.
+    pub(crate) const PREVIOUS: &str = "Previous";
+
+    /// The control that steps forward one profile.
+    pub(crate) const NEXT: &str = "Next";
+
+    /// The control that opens one profile's edit modal.
+    ///
+    /// Names the profile, like every other per-profile verb on this card: with one profile on
+    /// screen at a time the subject is unambiguous by position, and it is NOT unambiguous to a
+    /// screen reader moving control by control.
+    pub(crate) fn edit(name: &str) -> String {
+        format!("Edit {name}\u{2026}")
+    }
+
     use crate::profiles::CreationBlocked;
 
     /// The card holding the list and its controls.

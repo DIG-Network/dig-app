@@ -30,6 +30,7 @@
 //! the half that is still true: **hiding is not deleting**, and the hide copy must keep saying so
 //! now that a control one row away really does end the profile.
 
+use super::super::profile_modal::Editing;
 use super::action::{self, Action};
 use super::card;
 use super::copy;
@@ -40,7 +41,7 @@ use super::identity;
 use super::profile_form::{self, Form, Scope};
 use super::state::{self, PaneState};
 use super::text;
-use crate::confirm::gui::render::space;
+use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::profile_edit::{seed, ProfileDraft, ProfileSeedRequest};
 use crate::profiles::{ProfileCreation, ProfileRow, ProfilesReading};
@@ -99,13 +100,13 @@ fn list(
         }
     };
 
-    let mut pressed = None;
-    for (index, profile) in rows.iter().enumerate() {
-        if index > 0 {
-            flow.gap(space::S3);
-        }
-        pressed = pressed.or(profile_row(flow, t, profile, verbs));
-    }
+    // ONE profile at a time, browsed with Previous and Next (dig_ecosystem#3069, criterion 1). A
+    // person with four identities was reading four stacked cards each carrying two 64-character
+    // ids; the pager is what makes each one readable without making any of them unreachable.
+    let showing = showing_page(flow, rows);
+    let mut pressed = pager(flow, t, rows, showing);
+    flow.gap(space::S3);
+    pressed = pressed.or(profile_row(flow, t, &rows[showing], verbs));
 
     flow.gap(space::S3);
     // What is said under the list depends on whether there is anything to switch BETWEEN, and both
@@ -133,6 +134,95 @@ fn list(
         });
     }
     pressed
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pager
+// ---------------------------------------------------------------------------------------------
+
+/// Which row of `rows` is showing, as an index INTO THAT LIST.
+///
+/// # What is remembered is the `ProfileIx`, never the ordinal
+///
+/// The list can change under a person: a profile is deleted, another is created, the registry is
+/// re-read. An ordinal survives all of those and names a DIFFERENT profile afterwards — with a
+/// Delete control on it, under the same page number, with nothing on screen having appeared to
+/// change. So the identity is remembered and the ordinal is recomputed from it, and a profile that
+/// has genuinely gone falls back to the first page rather than to whoever inherited its position.
+fn showing_page(flow: &mut Flow, rows: &[ProfileRow]) -> usize {
+    flow.place(|ui, _| {
+        let remembered = ui.data(|d| d.get_temp::<u32>(pager_id()));
+        let found = remembered
+            .and_then(|ix| rows.iter().position(|row| row.ix.0 == ix))
+            .unwrap_or(0);
+        (0.0, found)
+    })
+}
+
+/// Remember that `profile` is the one being shown.
+fn remember_page(flow: &mut Flow, profile: &ProfileRow) {
+    let ix = profile.ix.0;
+    flow.place(|ui, _| (0.0, ui.data_mut(|d| d.insert_temp(pager_id(), ix))));
+}
+
+/// The id the browsed profile's index is kept under, for the life of the window.
+fn pager_id() -> egui::Id {
+    egui::Id::new("dig-window-profiles-page")
+}
+
+/// The pager's own row: where the person is, and the two ways to move.
+///
+/// Drawn even for a single profile, so the card never silently changes shape as an account gains a
+/// second identity — but with both controls disabled, because there is nowhere to go. The position
+/// line says *Profile 1 of 1*, which is the honest reading and the answer to the report that the
+/// app looked like it supported only one (dig_ecosystem#3057).
+fn pager(flow: &mut Flow, t: &Tokens, rows: &[ProfileRow], showing: usize) -> Option<TrayAction> {
+    let live = flow.live();
+    let position = format!("Profile {} of {}", showing + 1, rows.len());
+    let controls = [
+        Action {
+            label: copy::profiles::PREVIOUS.to_string(),
+            weight: Weight::Ghost,
+            enabled: live && showing > 0,
+            id: Step::Back,
+            element: egui::Id::new("dig-window-profiles-previous"),
+        },
+        Action {
+            label: copy::profiles::NEXT.to_string(),
+            weight: Weight::Ghost,
+            enabled: live && showing + 1 < rows.len(),
+            id: Step::Forward,
+            element: egui::Id::new("dig-window-profiles-next"),
+        },
+    ];
+
+    flow.place(|ui, at| (text::caption(ui, at, t, &position), ()));
+    flow.gap(space::S2);
+    let stepped = flow.place(|ui, at| action::buttons(ui, at, t, live, &controls));
+
+    // Clamped rather than wrapped: a Next that jumped to the first profile would move a person
+    // somewhere they did not ask to go, and both controls already refuse at the ends.
+    let moved = match stepped {
+        Some(Step::Back) => showing.checked_sub(1),
+        Some(Step::Forward) => Some((showing + 1).min(rows.len() - 1)),
+        None => None,
+    };
+    if let Some(landed) = moved {
+        remember_page(flow, &rows[landed]);
+    }
+    None
+}
+
+/// A press of one of the pager's controls.
+///
+/// Its own type rather than a [`TrayAction`]: moving between pages reaches no worker, spends
+/// nothing and belongs on no menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// Show the profile before this one.
+    Back,
+    /// Show the profile after it.
+    Forward,
 }
 
 /// The state to draw for a reading that produced no list.
@@ -175,6 +265,11 @@ fn profile_row(
     let store = profile.store_id.clone();
     let store_slot = store_element(profile);
     let actions = verbs.for_profile(profile);
+    let opened = Editing {
+        ix: profile.ix.0,
+        name: name.clone(),
+        active: profile.active,
+    };
     let live = flow.live();
 
     flow.place(|ui, at| {
@@ -218,14 +313,67 @@ fn profile_row(
                     (),
                 )
             });
+            // The Edit control comes FIRST and is drawn for every profile — the verb a person
+            // reaches for most, and the one the redesign is about (criterion 4). It is built here
+            // rather than taken from the model because it reaches no worker and spends nothing: it
+            // opens a modal, and the modal is what may later spend.
+            inner.gap(space::S3);
+            let edit = [Action {
+                label: copy::profiles::edit(&name),
+                weight: Weight::Ghost,
+                enabled: live,
+                id: (),
+                element: edit_element(&opened),
+            }];
+            if inner
+                .place(|ui, at| action::buttons(ui, at, t, live, &edit))
+                .is_some()
+            {
+                inner.place(|ui, _| (0.0, EditRequest::record(ui.ctx(), opened.clone())));
+            }
+
             if actions.is_empty() {
                 return None;
             }
-            inner.gap(space::S3);
+            inner.gap(space::S2);
             inner.place(|ui, at| action::buttons(ui, at, t, live, &actions))
         });
         (height, hit.flatten())
     })
+}
+
+/// A request from this card that the shell open the edit modal.
+///
+/// # Why it travels through the frame context
+///
+/// A modal covers the whole window and owns Escape while it is up; a pane drawn INSIDE the shell
+/// can do neither. So the card records what was asked and the shell honours it on the same frame —
+/// the device [`super::settings::appearance::Exchange`] already uses to hand the shell a theme.
+pub(crate) struct EditRequest;
+
+impl EditRequest {
+    /// Record that the person asked to edit `profile`.
+    pub(crate) fn record(ctx: &egui::Context, profile: Editing) {
+        ctx.data_mut(|d| d.insert_temp(Self::slot(), profile));
+    }
+
+    /// Take whatever was recorded, leaving nothing behind.
+    ///
+    /// Taken rather than read, so one press opens the modal once. A request left in place would
+    /// reopen it on the frame after it was closed, which is a modal a person cannot get out of.
+    pub(crate) fn take(ctx: &egui::Context) -> Option<Editing> {
+        ctx.data_mut(|d| d.remove_temp::<Editing>(Self::slot()))
+    }
+
+    /// Where the request is kept.
+    fn slot() -> egui::Id {
+        egui::Id::new("dig-window-profile-edit-request")
+    }
+}
+
+/// One profile's Edit-control element id, keyed on its INDEX for [`did_element`]'s reason.
+fn edit_element(profile: &Editing) -> egui::Id {
+    egui::Id::new(("dig-window-profile-edit-open", profile.ix))
 }
 
 /// A profile's badges, drawn left to right on one line. Returns the height used.
@@ -556,6 +704,15 @@ mod tests {
     /// person SEES: a helper returning the right sentence proves nothing about a card that draws an
     /// empty list beside it.
     fn card_says(view: &TrayView, width: f32) -> String {
+        card_says_on(view, width, None)
+    }
+
+    /// The same, with the browser opened on the profile at `showing`.
+    ///
+    /// The pager remembers a `ProfileIx`, so a test names the profile it wants to look at rather
+    /// than a page number — which is the same property production relies on, exercised the same
+    /// way. Without this a test could only ever read the first page.
+    fn card_says_on(view: &TrayView, width: f32, showing: Option<ProfileIx>) -> String {
         let tab = crate::window_model::build(view)
             .tab(TabId::Account)
             .cloned()
@@ -566,6 +723,9 @@ mod tests {
         crate::confirm::gui::window::install_fonts(&ctx);
         let t = crate::confirm::gui::theme::Theme::Light.tokens();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(width, 8_000.0));
+        if let Some(ix) = showing {
+            ctx.data_mut(|d| d.insert_temp(super::pager_id(), ix.0));
+        }
 
         let mut output = egui::FullOutput::default();
         // Two frames: the first builds the font atlas, the second lays out against it.
@@ -683,17 +843,27 @@ mod tests {
         }
     }
 
-    /// **Every profile reaches the card — hidden ones included — with its own DID and its own
-    /// badges.**
+    /// **Every profile is reachable, ONE page at a time, each with its own ids and badges**
+    /// (dig_ecosystem#3069, criterion 1).
     ///
-    /// The fixture hides the MIDDLE profile of three and leaves the outer two shown, so a card that
-    /// dropped hidden rows loses exactly one, and one that badged every row identically disagrees at
-    /// two of the three. A fixture hiding all or none could tell neither apart.
+    /// This replaces `every_profile_reaches_the_card_with_its_own_did_and_badges`, which asserted
+    /// all three profiles were on screen together — true of the stacked list and false by design of
+    /// the pager. The property it protected survives and is what is checked here: no profile
+    /// becomes unreachable, and each still carries its own DID, its own store and its own badges.
     ///
-    /// Asserted at BOTH widths the window spans, because the badge row and the copy control both
-    /// reflow at the narrow one.
+    /// # Why the fixture hides the MIDDLE profile
+    ///
+    /// A card that dropped hidden rows loses exactly one, and one that badged every row identically
+    /// disagrees at two of the three. A fixture hiding all or none could tell neither apart.
+    ///
+    /// # Why the OTHER profiles are required ABSENT
+    ///
+    /// That is the pager working. Without this leg, the shipped stacked list passes every positive
+    /// assertion here — it draws all three ids on every page — so nothing would distinguish a
+    /// browser from the layout it replaces.
     #[test]
-    fn every_profile_reaches_the_card_with_its_own_did_and_badges() {
+    fn every_profile_is_reachable_one_page_at_a_time_with_its_own_ids_and_badges() {
+        let listed = [ProfileIx::ROOT, ProfileIx(1), ProfileIx(2)];
         let reading = reading_of(
             &[
                 (ProfileIx::ROOT, Some("home")),
@@ -703,12 +873,15 @@ mod tests {
             &[ProfileIx(1)],
         );
 
+        // Asserted at BOTH widths the window spans, because the badge row and the copy control both
+        // reflow at the narrow one.
         for width in [960.0_f32, 480.0] {
-            let said = card_says(&view_with(reading.clone()), width);
-            for ix in [ProfileIx::ROOT, ProfileIx(1), ProfileIx(2)] {
+            for (page, ix) in listed.into_iter().enumerate() {
+                let said = card_says_on(&view_with(reading.clone()), width, Some(ix));
+
                 assert!(
                     said.contains(&expected_did(ix)),
-                    "at {width} px profile {ix} is in the registry and not on the card: {said}"
+                    "at {width} px profile {ix} cannot be browsed to: {said}"
                 );
                 // In FULL, at every width. A 66-character store id beside a 60-odd-character DID is
                 // exactly the pair that overflows the narrow card, and a truncation introduced to
@@ -718,19 +891,119 @@ mod tests {
                     "at {width} px profile {ix}'s store id never reached the card in full, so the \
                      half of the profile that holds its content is unnameable: {said}"
                 );
+                assert!(
+                    said.contains(&format!("Profile {} of 3", page + 1)),
+                    "at {width} px the browser does not say where in the list this is: {said}"
+                );
+
+                // And nobody else's ids are on this page.
+                for other in listed.into_iter().filter(|other| *other != ix) {
+                    assert!(
+                        !said.contains(&expected_did(other)),
+                        "at {width} px profile {other} is drawn on profile {ix}'s page, so the \
+                         browser is showing the whole stacked list: {said}"
+                    );
+                }
             }
+
+            // The badges belong to the profile whose page they are on, and to no other.
+            let active_page =
+                card_says_on(&view_with(reading.clone()), width, Some(ProfileIx::ROOT));
             assert!(
-                said.contains(copy::profiles::ACTIVE_BADGE),
-                "at {width} px nothing on the card says which profile is in use: {said}"
+                active_page.contains(copy::profiles::ACTIVE_BADGE),
+                "at {width} px nothing says the profile in use is in use: {active_page}"
             );
             assert!(
-                said.contains(copy::profiles::HIDDEN_BADGE),
-                "at {width} px a hidden profile is listed without saying it is hidden, so the \
-                 control beside it reads as hiding something already visible: {said}"
+                !active_page.contains(copy::profiles::HIDDEN_BADGE),
+                "at {width} px the profile in use is badged as hidden: {active_page}"
+            );
+
+            let hidden_page = card_says_on(&view_with(reading.clone()), width, Some(ProfileIx(1)));
+            assert!(
+                hidden_page.contains(copy::profiles::HIDDEN_BADGE),
+                "at {width} px a hidden profile is shown without saying it is hidden, so the \
+                 control beside it reads as hiding something already visible: {hidden_page}"
             );
             assert!(
-                said.contains("“home”") && said.contains("“work”"),
-                "at {width} px a profile's own name did not reach its row: {said}"
+                !hidden_page.contains(copy::profiles::ACTIVE_BADGE),
+                "at {width} px a profile that is not in use is badged as in use: {hidden_page}"
+            );
+            assert!(
+                hidden_page.contains("\u{201c}work\u{201d}"),
+                "at {width} px a profile's own name did not reach its page: {hidden_page}"
+            );
+        }
+    }
+
+    /// **A page is remembered by the profile's INDEX, so a delete cannot silently swap who is on
+    /// screen** (the pager hazard).
+    ///
+    /// The fixture is the exact failure: three profiles, the browser on the SECOND, and then that
+    /// second profile is gone. An ordinal-keyed pager stays on page 2 and now shows a different
+    /// person's identity — with a Delete control on it — having changed nothing visible.
+    ///
+    /// The control leg is the same list with the profile still present, which must resolve to its
+    /// own page rather than to the fallback.
+    #[test]
+    fn a_deleted_profile_does_not_leave_the_browser_pointing_at_its_neighbour() {
+        let full = reading_of(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+                (ProfileIx(2), Some("spare")),
+            ],
+            &[],
+        );
+        let after_delete = reading_of(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(2), Some("spare")),
+            ],
+            &[],
+        );
+
+        let still_there = card_says_on(&view_with(full), 960.0, Some(ProfileIx(1)));
+        assert!(
+            still_there.contains(&expected_did(ProfileIx(1))),
+            "the browser did not open on the profile it was remembering: {still_there}"
+        );
+
+        let gone = card_says_on(&view_with(after_delete), 960.0, Some(ProfileIx(1)));
+        assert!(
+            gone.contains(&expected_did(ProfileIx::ROOT)),
+            "a browser remembering a deleted profile did not fall back to the first page: {gone}"
+        );
+        assert!(
+            !gone.contains(&expected_did(ProfileIx(2))),
+            "the browser landed on the profile that inherited the deleted one's POSITION, which is \
+             a different identity under the same page number, with a Delete control on it: {gone}"
+        );
+    }
+
+    /// **Every profile has an Edit control, not only the one in use** (dig_ecosystem#3069,
+    /// criterion 4).
+    ///
+    /// The control is drawn for the active profile AND for one that is not, because the reduction
+    /// this rejects — offering Edit only where the app can currently save — would leave a person
+    /// making a chain-visible state change to fix a typo somewhere else.
+    #[test]
+    fn every_profile_is_offered_a_way_to_edit_it() {
+        let reading = reading_of(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
+            &[],
+        );
+
+        for (ix, name) in [
+            (ProfileIx::ROOT, "\u{201c}home\u{201d}"),
+            (ProfileIx(1), "\u{201c}work\u{201d}"),
+        ] {
+            let said = card_says_on(&view_with(reading.clone()), 960.0, Some(ix));
+            assert!(
+                said.contains(&copy::profiles::edit(name)),
+                "profile {ix} is offered no way to change what it says: {said}"
             );
         }
     }
@@ -973,12 +1246,43 @@ mod tests {
         };
         let painted = card_says(&capable, 960.0);
 
-        for field in crate::profile_edit::ProfileField::ALL {
+        // The Basic set is on screen; the Enhanced set is one press away, named and summarised so
+        // nobody has to guess what is inside it (dig_ecosystem#3069, criterion 8). Both halves are
+        // asserted, because "collects everything" and "opens with three boxes" are the two claims
+        // this form has to hold at once.
+        use crate::profile_edit::{FieldGroup, ProfileField};
+        for field in ProfileField::of_group(FieldGroup::Basic) {
             assert!(
                 painted.contains(field.label()),
-                "the wizard collects nothing for {field:?}, so it can only be filled in after the                  mint -- a second chain write: {painted}"
+                "the wizard's opening form collects nothing for {field:?}: {painted}"
             );
         }
+        for group in FieldGroup::ALL {
+            assert!(
+                painted.contains(group.title()) && painted.contains(group.summary()),
+                "{group:?} is neither drawn nor named, so whatever it holds is unreachable: \
+                 {painted}"
+            );
+        }
+        // And the fold is REAL: the collapsed set's fields are genuinely not on screen. Without
+        // this leg, a form that drew all eight boxes under two headings would pass everything
+        // above while being exactly the intimidating form the redesign removes.
+        //
+        // Read from each field's HELP sentence rather than from its LABEL, because the Enhanced
+        // fieldset's summary names the fields it contains — that is its whole job — so a label
+        // sweep matches the summary and reports a fold that works as broken. (It did.)
+        for field in ProfileField::of_group(FieldGroup::Enhanced) {
+            assert!(
+                !painted.contains(field.help()),
+                "{field:?} is drawn although its fieldset is collapsed: {painted}"
+            );
+        }
+        // The control: the SAME reading, over a Basic field, must find its help — so the sweep
+        // above is about the fold and not about a sentence the form never paints anywhere.
+        assert!(
+            painted.contains(ProfileField::DisplayName.help()),
+            "no field's help reaches the screen, so the absences above prove nothing: {painted}"
+        );
         assert!(
             painted.contains(copy::profiles::SEED_INVITATION),
             "the form never says every box is optional, so it reads as a set of requirements:              {painted}"
@@ -1174,7 +1478,7 @@ mod tests {
             ],
             &[],
         );
-        let switching = card_says(&view_with(two), 960.0);
+        let switching = card_says_on(&view_with(two), 960.0, Some(ProfileIx(1)));
         assert!(
             switching.contains("Use “work” for this account"),
             "the card offers no way to put the other profile in use: {switching}"
@@ -1235,7 +1539,11 @@ mod tests {
                 &[ProfileIx(2)],
             ))
         };
-        let painted = card_says(&view, 960.0);
+        // One page per profile, so both arms of the visibility label and the delete label are
+        // read from the pages that actually carry them (dig_ecosystem#3069's browser).
+        let painted = [ProfileIx::ROOT, ProfileIx(1), ProfileIx(2)]
+            .map(|ix| card_says_on(&view, 960.0, Some(ix)))
+            .join(" | ");
 
         let tab = crate::window_model::build(&view)
             .tab(TabId::Account)

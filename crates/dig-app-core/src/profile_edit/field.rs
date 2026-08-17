@@ -56,6 +56,54 @@ pub enum FieldKind {
     Address,
 }
 
+/// Which fieldset a field is drawn inside.
+///
+/// # Why the split is three fields and not "the ones with short answers"
+///
+/// [`Basic`](Self::Basic) is what a person would put on a name badge: who they are, what they look
+/// like, and a sentence about themselves. It is deliberately SMALL — the fieldset is open when the
+/// form opens, so its size is the whole of the first impression, and eight boxes at once is the
+/// "busy and intimidating" the redesign exists to remove (dig_ecosystem#3069).
+///
+/// Everything else is real and reachable one click away. Nothing is hidden that a person needs in
+/// order to finish: an empty profile is publishable, so the collapsed set never holds a requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FieldGroup {
+    /// Shown when the form opens.
+    Basic,
+    /// Folded away until asked for.
+    Enhanced,
+}
+
+impl FieldGroup {
+    /// Both groups, in the order they are drawn.
+    pub const ALL: [Self; 2] = [Self::Basic, Self::Enhanced];
+
+    /// The fieldset's heading, as a person reads it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Basic => "Basic information",
+            Self::Enhanced => "Enhanced information",
+        }
+    }
+
+    /// The sentence under the heading, saying what is inside before it is opened.
+    ///
+    /// A collapsed group with an opaque title is a person guessing whether the thing they want is
+    /// in there; the summary is what makes the fold cheaper than the scroll it replaces.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Basic => "Your name, your picture, and a line about you.",
+            Self::Enhanced => "Pronouns, location, links and a payment address. All optional.",
+        }
+    }
+
+    /// Whether the fieldset starts open.
+    pub fn starts_open(self) -> bool {
+        matches!(self, Self::Basic)
+    }
+}
+
 impl ProfileField {
     /// Every editable field, in the order the editor draws them.
     pub const ALL: [Self; 8] = [
@@ -92,6 +140,24 @@ impl ProfileField {
     /// show. Used to project a snapshot's fields into a draft without a second table.
     pub fn of_slot(slot: ProfileSlot) -> Option<Self> {
         Self::ALL.into_iter().find(|field| field.slot() == slot)
+    }
+
+    /// Which fieldset it is drawn inside.
+    pub fn group(self) -> FieldGroup {
+        match self {
+            Self::DisplayName | Self::Avatar | Self::Bio => FieldGroup::Basic,
+            Self::Banner | Self::Pronouns | Self::Location | Self::Links | Self::XchAddress => {
+                FieldGroup::Enhanced
+            }
+        }
+    }
+
+    /// The fields of `group`, in [`ALL`](Self::ALL)'s order.
+    pub fn of_group(group: FieldGroup) -> Vec<Self> {
+        Self::ALL
+            .into_iter()
+            .filter(|field| field.group() == group)
+            .collect()
     }
 
     /// What sort of value it holds.
@@ -148,12 +214,18 @@ impl ProfileField {
             }
             Self::Pronouns => "How you would like to be referred to. Optional, and public.",
             Self::Location => "Wherever you would like to say you are. Public, and up to you.",
-            // Says SPACES, not lines, because the shared form control is single-line: an
-            // instruction to press Return in a box that cannot take a Return is an instruction
-            // nobody can follow. A multi-line control is dig_ecosystem#3026.
+            // Says LINES, which is what `dig-social-profile`'s slot `0x0007` actually defines:
+            // *"UTF-8 newline-separated social/verification links"* (`slot.rs`). The sentence said
+            // SPACES until dig_ecosystem#3070, because the shared control was single-line and an
+            // instruction to press Return in a box that cannot take one is unfollowable. The box
+            // takes a Return now, so the instruction matches the schema again.
+            //
+            // Nothing already published is rewritten. A space-separated value written by the old
+            // copy stays exactly as it is until its owner edits it, and readers that split on
+            // whitespace keep working — this changes what DIG ASKS FOR, never what it stores.
             Self::Links => {
-                "Web addresses, separated by spaces. Anyone can read them, and nobody checks that \
-                 they are yours."
+                "Web addresses, one per line. Anyone can read them, and nobody checks that they \
+                 are yours."
             }
             Self::XchAddress => {
                 "An address anyone can send money to. Check it character by character — money sent \
@@ -238,6 +310,129 @@ mod tests {
         }
         for field in ProfileField::ALL {
             assert!(!MACHINE_SLOTS.contains(&field.slot().id()));
+        }
+    }
+
+    /// **Every field is in exactly one fieldset, and the two together are the whole form.**
+    ///
+    /// A field in neither group is one no fieldset draws — the quietest possible way to make a
+    /// setting unreachable, since the pane would simply render one box fewer and say nothing.
+    #[test]
+    fn the_two_fieldsets_partition_every_field() {
+        let mut collected: Vec<ProfileField> = FieldGroup::ALL
+            .into_iter()
+            .flat_map(ProfileField::of_group)
+            .collect();
+        let unique: BTreeSet<ProfileField> = collected.iter().copied().collect();
+
+        assert_eq!(
+            unique.len(),
+            collected.len(),
+            "a field is drawn in both fieldsets, so one person sees two boxes for one value"
+        );
+        collected.sort();
+        assert_eq!(
+            collected,
+            ProfileField::ALL
+                .into_iter()
+                .collect::<Vec<_>>()
+                .tap_sorted(),
+            "the fieldsets do not add up to the form"
+        );
+    }
+
+    /// **The set that opens first is the SMALL one, and it holds the three things a person would
+    /// put on a name badge.**
+    ///
+    /// Pinned by NAME rather than by count. A count alone passes on any three fields — including
+    /// the payment address as an opening box, which is the intimidating form the redesign is
+    /// removing — and the identity of these three is the whole of criterion 7.
+    #[test]
+    fn the_open_fieldset_holds_who_you_are_and_nothing_heavier() {
+        assert!(FieldGroup::Basic.starts_open());
+        assert!(!FieldGroup::Enhanced.starts_open());
+
+        assert_eq!(
+            ProfileField::of_group(FieldGroup::Basic),
+            vec![
+                ProfileField::DisplayName,
+                ProfileField::Bio,
+                ProfileField::Avatar,
+            ]
+            .tap_ordered_like_all(),
+        );
+        assert!(
+            ProfileField::of_group(FieldGroup::Enhanced).contains(&ProfileField::XchAddress),
+            "the payment address opens with the form, where a person meets it before they have \
+             decided they want one"
+        );
+    }
+
+    /// **The Links help asks for the separator the SCHEMA defines** (dig_ecosystem#3070).
+    ///
+    /// `dig-social-profile`'s slot `0x0007` is *newline-separated*, and the editor spent a release
+    /// telling people to use spaces — so the app wrote a format the reader does not define. The
+    /// negative leg is what pins the fix: an implementation that added "or lines" beside the old
+    /// sentence would satisfy a contains-check for "line" and still be asking for the wrong thing.
+    #[test]
+    fn the_links_help_asks_for_one_address_per_line_and_never_for_spaces() {
+        let said = ProfileField::Links.help().to_lowercase();
+        assert!(
+            said.contains("one per line") || said.contains("per line"),
+            "the links help does not ask for one address per line: {said}"
+        );
+        assert!(
+            !said.contains("separated by spaces"),
+            "the links help still asks for a separator the schema does not define: {said}"
+        );
+        // The control: no OTHER field's help mentions lines, so the assertion above is about this
+        // field's own sentence rather than about a word that happens to be everywhere.
+        for field in ProfileField::ALL {
+            if field != ProfileField::Links {
+                assert!(
+                    !field.help().to_lowercase().contains("per line"),
+                    "{field:?} also asks for one per line"
+                );
+            }
+        }
+    }
+
+    /// **The fields a person types prose into are the ones drawn as paragraphs.**
+    ///
+    /// Links joins Bio here because of the separator above: a newline-separated value cannot be
+    /// entered in a control that cannot take a newline, so the kind and the help have to agree or
+    /// one of them is lying.
+    #[test]
+    fn the_prose_fields_are_paragraphs_and_the_image_fields_are_images() {
+        assert_eq!(ProfileField::Bio.kind(), FieldKind::Paragraph);
+        assert_eq!(ProfileField::Links.kind(), FieldKind::Paragraph);
+        assert_eq!(ProfileField::XchAddress.kind(), FieldKind::Address);
+        for field in [ProfileField::Avatar, ProfileField::Banner] {
+            assert_eq!(field.kind(), FieldKind::Image);
+            assert!(field.is_image());
+        }
+        assert_eq!(ProfileField::DisplayName.kind(), FieldKind::Line);
+    }
+
+    /// Sorting helpers, so the partition test compares sets rather than orders.
+    trait Sorted {
+        fn tap_sorted(self) -> Self;
+        fn tap_ordered_like_all(self) -> Self;
+    }
+
+    impl Sorted for Vec<ProfileField> {
+        fn tap_sorted(mut self) -> Self {
+            self.sort();
+            self
+        }
+
+        /// Put the fields into [`ProfileField::ALL`]'s order, which is the order the form draws
+        /// them — so a group's expected contents can be written in any order here.
+        fn tap_ordered_like_all(self) -> Self {
+            ProfileField::ALL
+                .into_iter()
+                .filter(|field| self.contains(field))
+                .collect()
         }
     }
 
