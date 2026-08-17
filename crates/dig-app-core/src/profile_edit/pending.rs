@@ -28,8 +28,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use super::bodies::{BodyRead, BodyStore};
@@ -329,12 +327,15 @@ mod tests {
         }
     }
 
+    /// The DID a blob was sealed under, and the plaintext it holds.
+    type SealedUnder = (String, Vec<u8>);
+
     /// A sealer that is a real AEAD in the one respect these tests depend on: bytes sealed under
     /// one DID do not open under another, and the ciphertext is not the plaintext.
     #[derive(Default)]
     struct DidKeyedSealer {
         /// Ciphertext handed out, by the DID it was sealed under.
-        vault: Mutex<HashMap<Vec<u8>, (String, Vec<u8>)>>,
+        vault: Mutex<HashMap<Vec<u8>, SealedUnder>>,
     }
 
     impl ProfileSealer for DidKeyedSealer {

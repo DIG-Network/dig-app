@@ -578,7 +578,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    use dig_social_profile::body::{AnchoredRoot, VerifiedBody};
+    use dig_social_profile::body::VerifiedBody;
     use dig_social_profile::profile::Profile;
     use dig_social_profile::slot::SlotId;
     use dig_social_profile::value::Value;
@@ -951,17 +951,21 @@ mod tests {
 
     // -- the copy that survives a restart (dig_ecosystem#3066) ----------------------------------
 
-    /// **The body is written down BEFORE the spend, not after.**
+    /// **A body the node will not take yet is kept on this computer.**
     ///
-    /// # The fixture, and why the node must REFUSE
+    /// # The fixture, and what this test does NOT prove
     ///
     /// The node here answers the way the live one did when this was measured: the chain has not
-    /// confirmed the new root yet, so `putBody` is refused. That is the state the whole ticket is
-    /// about, and it is what makes the assertion below load-bearing — a store that accepted the
-    /// body would clear the entry, and this test would pass against an implementation that never
-    /// wrote one.
+    /// confirmed the new root yet, so `putBody` is refused. A store that ACCEPTED the body would
+    /// clear the entry, so the refusal is what makes the assertion below load-bearing at all.
+    ///
+    /// It does not prove the write happened BEFORE the push — the post-commit write satisfies it
+    /// identically, which was confirmed by reverting the pre-spend call and watching this stay
+    /// green. The ordering is pinned by
+    /// [`a_commit_whose_outcome_is_unknown_keeps_the_copy`], which is the only test here that a
+    /// commit-answer-only implementation cannot pass.
     #[test]
-    fn a_body_is_on_disk_before_the_node_will_take_it() {
+    fn a_body_the_node_will_not_take_yet_is_kept_on_this_computer() {
         let pending = InMemoryPending::default();
         let changes = a_change();
         let (expected_root, expected_body) = Honest::published(&changes);
