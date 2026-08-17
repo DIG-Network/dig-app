@@ -1341,10 +1341,23 @@ happens, and MUST be described in terms of what the chain has actually proved.
 - **A multi-bundle ceremony MUST NOT be reported as finished by one bundle (MUST).** Creating a profile
   confirms a DID and only then launches a store, so it reaches a genuine chain-proved confirmation halfway
   through. That confirmation MUST be shown as the fact it is AND MUST NOT settle the ceremony.
-- **The surface MUST be dismissible, and dismissing MUST NOT touch the transaction (MUST).** It MUST NOT
-  hold the app for the length of a confirmation — that is the freeze it exists to end — so it MUST NOT
-  scrim or otherwise disable the window. While a write is in flight the surface MUST remain reachable, and
-  the implementation MUST NOT forget a write that has not settled.
+- **A write MUST raise the surface by itself, and no write site may opt in (MUST, dig_ecosystem#3075).**
+  The surface MUST be defined once and MUST observe the transaction feed, so that a write started anywhere
+  raises it. A write site MUST NOT construct, receive or show the surface, so that a site added later
+  cannot omit it.
+- **The surface MUST be a modal, and it MUST keep painting (MUST, dig_ecosystem#3075).** While an
+  unsettled write is in flight the surface MUST scrim the window and MUST show indeterminate progress that
+  advances on wall-clock time, so that a stopped process is visibly stopped. Every frame that draws it MUST
+  request the next one. It MUST NOT perform or wait on the write itself.
+- **The surface MUST be dismissible, and dismissing MUST NOT touch the transaction (MUST).** Dismissal MUST
+  be available at every moment, by both a keyboard escape and a control, and MUST leave the write running
+  and reachable — a compact indicator MUST remain, carrying the live stage. The surface MUST NOT close
+  itself before the write settles, and the implementation MUST NOT forget a write that has not settled.
+- **A ceremony's position MUST be stated only as far as it is known (MUST, dig_ecosystem#3075).** Where a
+  write is one of several, the surface MUST say which step is in flight and whether more follow. It MUST
+  NOT state a total, which no publisher declares.
+- **The surface MUST hold no authoritative copy of anything (MUST, dig_ecosystem#3066).** It MUST read the
+  feed and nothing else; durable data MUST already be on disk before a bundle is pushed.
 - **Every state MUST offer an action, and a failure MUST name a next step (MUST).** Where an interrupted
   ceremony cannot be resumed, the failure MUST say so and MUST tell the person what NOT to do, rather than
   implying a retry that would pay twice.
