@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.16.0] - 2026-08-17
+
+### Features
+- **profiles:** Delete a profile by melting its DID and store singletons (#187)- **window:** A centralized transaction confirmation modal, raised by any broadcast (#192)
+
+### Bug Fixes
+- **profile:** Persist the profile body locally before the spend so it survives a restart (#191)
+
 ## [12.13.0] - 2026-08-17
 
 ### Bug Fixes
