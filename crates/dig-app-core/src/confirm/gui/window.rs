@@ -4327,8 +4327,7 @@ mod tests {
 
     /// The address the deposit window shows — a real 62-character bech32 `xch1…` string, because
     /// the whole defect is about a value nobody can retype.
-    const DEPOSIT_ADDRESS: &str =
-        "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+    const DEPOSIT_ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
 
     /// Where the address actually landed on screen, as a drag from just inside its left edge to
     /// just past its right one.
@@ -7248,5 +7247,4 @@ mod tests {
              nothing about where selection is attached: {copied:?}"
         );
     }
-
 }

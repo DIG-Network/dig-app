@@ -1679,7 +1679,10 @@ mod tests {
     #[test]
     fn the_card_names_a_profile_the_way_its_row_does() {
         let reading = reading_of(
-            &[(ProfileIx::ROOT, Some("personal")), (ProfileIx(1), Some("work"))],
+            &[
+                (ProfileIx::ROOT, Some("personal")),
+                (ProfileIx(1), Some("work")),
+            ],
             &[],
         );
         let view = TrayView {
@@ -1710,5 +1713,4 @@ mod tests {
             );
         }
     }
-
 }

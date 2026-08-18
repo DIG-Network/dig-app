@@ -1630,13 +1630,11 @@ mod tests {
         // one of them is a sweep for one of them. The indentation guard below found a real defect
         // in exactly these the day they were written, which is why they are here rather than
         // trusted. Built rather than constant since dig_ecosystem#2939 gave one arm a payload.
-        said.extend(
-            crate::profiles::CreationBlocked::EVERY.map(|blocked| {
-                // Named against a REAL list holding a labelled row, so the guard below reads the
-                // sentence a card actually draws rather than an ordinal-only variant of it.
-                profiles::cannot_create(blocked, crate::profiles::ProfileNames::of(&labelled()))
-            }),
-        );
+        said.extend(crate::profiles::CreationBlocked::EVERY.map(|blocked| {
+            // Named against a REAL list holding a labelled row, so the guard below reads the
+            // sentence a card actually draws rather than an ordinal-only variant of it.
+            profiles::cannot_create(blocked, crate::profiles::ProfileNames::of(&labelled()))
+        }));
         // Every reason a store list can be missing, enumerated from the reading's own list rather
         // than sampled — a sweep that visits some of the sentences is a sweep for some of them.
         said.extend(

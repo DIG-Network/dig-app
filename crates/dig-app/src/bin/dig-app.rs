@@ -4705,8 +4705,10 @@ mod tray {
         // test can see (dig_ecosystem#2587).
         // Named off the SAME reading the count above came from, so this notice and the Account
         // tab's list cannot call one profile two things (dig_ecosystem#2981).
-        let body = match copy::about_creation(creation, dig_app_core::profiles::ProfileNames::of(&reading))
-        {
+        let body = match copy::about_creation(
+            creation,
+            dig_app_core::profiles::ProfileNames::of(&reading),
+        ) {
             Some(sentence) => format!(
                 "{}\n\n{held}{}\n\n{}",
                 copy::WHAT_A_PROFILE_IS,

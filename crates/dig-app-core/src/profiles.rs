@@ -1421,11 +1421,10 @@ mod tests {
     #[test]
     fn the_about_notice_explains_an_unmeasured_node_differently_from_an_unreachable_one() {
         let checking = copy::about_creation(ProfileCreation::Unknown, ProfileNames::NONE);
-        let unreachable =
-            copy::about_creation(
-                ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
-                ProfileNames::NONE,
-            );
+        let unreachable = copy::about_creation(
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            ProfileNames::NONE,
+        );
 
         assert_eq!(Some(copy::CHECKING_CREATION.to_string()), checking);
         assert_eq!(
@@ -1567,10 +1566,7 @@ mod tests {
         let unlocked = AccountState::Unlocked { recoverable: true };
         assert_eq!(
             ProfileCreation::Possible,
-            ProfileCreation::of_account(
-                Some(&unlocked),
-                Some(ProfileMintAvailability::Possible)
-            ),
+            ProfileCreation::of_account(Some(&unlocked), Some(ProfileMintAvailability::Possible)),
             "an unlocked account with a healthy node stopped being offered creation"
         );
         assert_eq!(
@@ -1581,8 +1577,11 @@ mod tests {
 
         // An account that does not exist is NOT locked, and must not be told it is. This is the
         // arm that keeps the fix from trading one false sentence for another.
-        for absent in [AccountState::Absent, AccountState::Unsupported, AccountState::NeedsPassword]
-        {
+        for absent in [
+            AccountState::Absent,
+            AccountState::Unsupported,
+            AccountState::NeedsPassword,
+        ] {
             assert_eq!(
                 ProfileCreation::Unknown,
                 ProfileCreation::of_account(Some(&absent), None),
@@ -1608,8 +1607,8 @@ mod tests {
     /// remedy fails.
     #[test]
     fn the_locked_sentence_names_the_unlock_and_not_a_node_or_a_build() {
-        let said = copy::cannot_create(CreationBlocked::AccountLocked, ProfileNames::NONE)
-            .to_lowercase();
+        let said =
+            copy::cannot_create(CreationBlocked::AccountLocked, ProfileNames::NONE).to_lowercase();
 
         assert!(
             said.contains("unlock"),
@@ -1653,7 +1652,10 @@ mod tests {
 
         let named = copy::cannot_create(blocked, ProfileNames::of(&reading));
         for ix in [ProfileIx::ROOT, ProfileIx(1)] {
-            let row_says = reading.row(ix).expect("the fixture holds both rows").display_name();
+            let row_says = reading
+                .row(ix)
+                .expect("the fixture holds both rows")
+                .display_name();
             assert!(
                 named.contains(&row_says),
                 "the sentence does not call this profile {row_says}, which is what its row is \
@@ -1682,12 +1684,53 @@ mod tests {
     /// implementation detail nobody has been shown.
     #[test]
     fn a_profile_with_no_row_or_no_label_is_named_by_its_ordinal() {
-        let reading =
-            ProfilesReading::of_registry(&registry_with(&[(ProfileIx::ROOT, None)]));
+        let reading = ProfilesReading::of_registry(&registry_with(&[(ProfileIx::ROOT, None)]));
         let names = ProfileNames::of(&reading);
 
-        assert_eq!("profile 1", names.name(ProfileIx::ROOT), "an unlabelled row");
-        assert_eq!("profile 3", names.name(ProfileIx(2)), "an index with no row at all");
+        assert_eq!(
+            "profile 1",
+            names.name(ProfileIx::ROOT),
+            "an unlabelled row"
+        );
+        assert_eq!(
+            "profile 3",
+            names.name(ProfileIx(2)),
+            "an index with no row at all"
+        );
     }
+    /// **No sentence this module renders carries a run of spaces from the way its literal was
+    /// wrapped.**
+    ///
+    /// The failure this guards is invisible in review and obvious on screen: a `\` lost from the end
+    /// of a continued literal leaves the source's own indentation INSIDE the string, `cargo fmt`
+    /// preserves it, and the reader gets *"held by ␣␣␣␣␣␣␣␣ “work”"* in the middle of a card. Nine
+    /// such sentences reached the screen in one day.
+    ///
+    /// Asserted on the RENDERED string rather than on the source line, so it holds however the
+    /// literal is spelled — a `concat!`, a continuation, or a `format!` — and cannot be satisfied by
+    /// reformatting the file. Every arm is visited from
+    /// [`CreationBlocked::EVERY`](CreationBlocked::EVERY), which is exhaustive by construction, and
+    /// the payload arm is rendered with real NAMES so the interpolated form is the one measured.
+    #[test]
+    fn no_sentence_this_module_renders_carries_a_run_of_spaces() {
+        let reading = ProfilesReading::of_registry(&registry_with(&[
+            (ProfileIx::ROOT, Some("personal")),
+            (ProfileIx(1), Some("work")),
+        ]));
 
+        let mut said = vec![copy::CHECKING_CREATION.to_string()];
+        for blocked in CreationBlocked::EVERY {
+            for names in [ProfileNames::NONE, ProfileNames::of(&reading)] {
+                said.push(copy::cannot_create(blocked, names));
+            }
+        }
+
+        for sentence in &said {
+            assert!(
+                !sentence.contains("    "),
+                "a rendered sentence carries a run of spaces, which reaches the screen verbatim: \
+                 {sentence:?}"
+            );
+        }
+    }
 }
