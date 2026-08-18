@@ -32,8 +32,7 @@
 use dig_offers::{OfferAsset, OfferSummary};
 
 use crate::account::narrative::TradeNarrative;
-use crate::amount::format_asset_amount;
-use crate::wallet::state::Asset;
+use crate::amount::{format_dig, format_xch};
 
 /// Whether `asset_id` is $DIG, compared against the canonical constant rather than a second copy of
 /// it. Case-insensitive because the id arrives as a hex STRING and a case difference between two
@@ -94,9 +93,9 @@ impl OfferLeg {
     #[must_use]
     pub fn phrase(&self) -> String {
         match self {
-            Self::Xch { mojos } => format!("{} XCH", format_asset_amount(Asset::Xch, *mojos)),
+            Self::Xch { mojos } => format!("{} XCH", format_xch(*mojos)),
             Self::Cat { asset_id, amount } if is_dig(asset_id) => {
-                format!("{} $DIG", format_asset_amount(Asset::Dig, *amount))
+                format!("{} $DIG", format_dig(*amount))
             }
             Self::Cat { asset_id, amount } => {
                 format!("{amount} base units of token {asset_id}")

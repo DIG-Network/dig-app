@@ -98,7 +98,9 @@ fn draft_from(
     };
     let wanted = match want_asset {
         Asset::Xch => Wanted::Xch { mojos: want },
-        Asset::Dig => Wanted::Cat {
+        // See `copy::make_offer::amount_help`: the chooser offers XCH and $DIG only, and $DIG is a
+        // constant rather than a variant, so the remaining arm is the $DIG one.
+        _ => Wanted::Cat {
             asset_id: dig_constants::DIG_ASSET_ID,
             amount: want,
         },
@@ -172,7 +174,7 @@ fn asset_chooser(flow: &mut Flow, t: &Tokens) -> Asset {
         },
         Choice {
             label: copy::make_offer::ASSET_DIG.to_string(),
-            id: Asset::Dig,
+            id: Asset::DIG,
         },
     ];
     let at = options.iter().position(|choice| choice.id == selected);
@@ -349,7 +351,7 @@ mod tests {
     #[test]
     fn the_wanted_asset_decides_what_the_typed_amount_means() {
         let xch = draft_from(Ok(500), Asset::Xch, Ok(1_000)).expect("both sides are non-zero");
-        let dig = draft_from(Ok(500), Asset::Dig, Ok(1_000)).expect("both sides are non-zero");
+        let dig = draft_from(Ok(500), Asset::DIG, Ok(1_000)).expect("both sides are non-zero");
 
         assert_eq!(xch.want(), &Wanted::Xch { mojos: 1_000 });
         assert_eq!(

@@ -899,7 +899,9 @@ pub(crate) mod make_offer {
     pub(crate) fn amount_help(asset: Asset) -> &'static str {
         match asset {
             Asset::Xch => "In XCH — 0.5 means half an XCH.",
-            Asset::Dig => "In $DIG — 1.5 means one and a half $DIG.",
+            // $DIG is an associated CONSTANT rather than a variant, so it cannot be a pattern; the
+            // chooser offers exactly XCH and $DIG, so every other arm is the $DIG one.
+            _ => "In $DIG — 1.5 means one and a half $DIG.",
         }
     }
 

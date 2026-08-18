@@ -409,13 +409,19 @@ fn render_spend(summary: &SpendSummary, narrative: Option<&TradeNarrative>) -> S
             .collect::<Vec<_>>()
             .join(", "),
     };
-    let derived = format!("{paid}
+    let derived = format!(
+        "{paid}
 
-Network fee: {} XCH", format_xch(summary.fee));
+Network fee: {} XCH",
+        format_xch(summary.fee)
+    );
     match narrative {
-        None => format!("Approve this {:?}-tier spend?
+        None => format!(
+            "Approve this {:?}-tier spend?
 
-{derived}", summary.tier),
+{derived}",
+            summary.tier
+        ),
         Some(narrative) => format!(
             "{}
 
