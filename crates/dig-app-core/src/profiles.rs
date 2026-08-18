@@ -980,7 +980,7 @@ mod deletion_tests {
         let locked = ProfileDeletion::of_seams(true, Some(&AccountState::Locked));
         assert!(
             !locked.is_possible(),
-            "a LOCKED account was offered the irreversible delete control: a session outlives its              keys, so nothing here may read the session's existence as an unlocked account"
+            "a LOCKED account was offered the irreversible delete control"
         );
         assert_eq!(locked.blocked(), Some(DeletionBlocked::Locked));
 
@@ -999,7 +999,7 @@ mod deletion_tests {
             assert_eq!(
                 reading.blocked(),
                 None,
-                "{closed:?} was told its account is locked, which is not what is true of it and                  not the remedy it needs"
+                "{closed:?} was told its account is locked, which is neither true of it nor its remedy"
             );
         }
     }

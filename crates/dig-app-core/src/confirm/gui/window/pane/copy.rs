@@ -1503,13 +1503,6 @@ pub(crate) mod content {
 mod tests {
     use super::*;
 
-    /// **No sentence carries a run of spaces from the way its literal was wrapped.**
-    ///
-    /// Found on screen, not in review: a continued literal lost its `\` and rendered *"so the
-    /// ␣␣␣␣␣␣␣␣␣ control above does nothing"* in the middle of a card. The reader sees a typographic
-    /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
-    /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
-    /// it.
     /// A profiles list whose rows carry LABELS, so a sentence naming a profile names it the way a
     /// card's row would rather than by its ordinal.
     ///
@@ -1547,6 +1540,7 @@ mod tests {
             home::CACHE_UNKNOWN,
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
+            clipboard::CLICK_TO_COPY,
             offer::PASTE_HINT,
             offer::EMPTY_HINT,
             offer::DROP_ACTIVE,
@@ -1681,6 +1675,13 @@ mod tests {
         "wired up to it",
     ];
 
+    /// **No sentence carries a run of spaces from the way its literal was wrapped.**
+    ///
+    /// Found on screen, not in review: a continued literal lost its `\` and rendered *"so the
+    /// ␣␣␣␣␣␣␣␣␣ control above does nothing"* in the middle of a card. The reader sees a typographic
+    /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
+    /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
+    /// it.
     #[test]
     fn no_sentence_carries_its_own_indentation() {
         for sentence in every_sentence() {

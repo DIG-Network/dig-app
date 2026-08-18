@@ -7238,11 +7238,18 @@ mod tests {
     }
     /// **The deposit window's address can be selected and copied.**
     ///
-    /// dig_ecosystem#2951. Both control slots on this window are spoken for — *Recheck balance* and
-    /// *Remind me later* — so the address had no copy control and, drawn as a plain label, could
-    /// not be selected either. That leaves the person this screen was designed for — somebody
-    /// funding from a desktop wallet on this same machine, who cannot point a camera at their own
-    /// screen — retyping 62 base32 characters, and a mistyped address sends real XCH to nobody.
+    /// # This pins behaviour the window ALREADY had — it does not prove a fix
+    ///
+    /// dig_ecosystem#2951 reads *"an egui `Label` is not selectable unless it opts in"*, and that is
+    /// not true of this egui: `Label` defaults to `Style::interaction::selectable_labels`, which
+    /// defaults to on and is never turned off in this crate. Measured, not reasoned — this test
+    /// passes unchanged against the plain `ui.label` the identifier was drawn with before, so
+    /// dragging across the address has always copied it. Kept anyway, because the property is worth
+    /// holding: the day something switches selection off for this window, this is what says so.
+    ///
+    /// The half of #2951 that was real is a person who cannot drag accurately across 62 characters
+    /// and has no button to press instead — that is `pressing_the_deposit_address_copies_it`, which
+    /// DOES fail without its fix.
     ///
     /// # What this fixture is built to distinguish
     ///
@@ -7347,7 +7354,7 @@ mod tests {
         let copied = click_and_collect(deposit_screen(), the_address_rect().center());
         assert!(
             copied.iter().any(|said| said == DEPOSIT_ADDRESS),
-            "pressing the address copied nothing, so the only route to a 62-character address is              an accurate drag: {copied:?}"
+            "pressing the address copied nothing, so an accurate drag is the only route: {copied:?}"
         );
     }
 
@@ -7363,7 +7370,7 @@ mod tests {
         let copied = click_and_collect(deposit_screen(), rect.center());
         assert!(
             copied.is_empty(),
-            "a press that never touched the address copied something anyway, so the test above              proves nothing about where the copy is attached: {copied:?}"
+            "a press away from the address copied anyway, so the copy is not attached to it: {copied:?}"
         );
     }
 
