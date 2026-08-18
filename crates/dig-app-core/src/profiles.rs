@@ -118,6 +118,12 @@ impl ProfileRow {
             active: active == Some(entry.ix()),
             // The registry holds no root, and inventing one from the mint would be a claim about
             // what the chain currently anchors. Nobody has read it yet, and the row says so.
+            //
+            // A SIBLING row therefore keeps saying so for as long as it exists, because the one
+            // edit seam is bound to the active profile. That is honest today only because no
+            // production account can hold a second profile; dig_ecosystem#3071 removes the
+            // condition. If it stalls, the right shape is a state naming this condition and its
+            // remedy — as `CreationBlocked::AccountLocked` does — not `Pending` forever.
             root: RootReading::Pending,
         }
     }
