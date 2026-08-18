@@ -533,15 +533,16 @@ mod tests {
     }
 
     impl ProfileEditSeam for Reading {
-        fn store_id(&self) -> String {
-            a_profile().store_id
+        fn store_id(&self, _: ProfileTarget) -> Option<String> {
+            Some(a_profile().store_id)
         }
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, _: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
             *self.reads.lock().expect("reads") += 1;
             self.answer.clone()
         }
         fn commit(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             *self.commits.lock().expect("commits") += 1;
@@ -549,12 +550,13 @@ mod tests {
         }
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             *self.fresh_publishes.lock().expect("fresh publishes") += 1;
             Err(ProfileEditError::Locked)
         }
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(&self, _: ProfileTarget, _: &str) -> Result<Option<u32>, ProfileEditError> {
             Ok(None)
         }
     }
@@ -570,6 +572,10 @@ mod tests {
         }
     }
 
+    /// The profile every helper below is about. Named rather than inlined so a test that means a
+    /// DIFFERENT profile has to say so, which is the property dig_ecosystem#3071 turns on.
+    const A_PROFILE: ProfileTarget = ProfileTarget(0);
+
     fn service_over(seam: Arc<dyn ProfileEditSeam>) -> Arc<EditService> {
         EditService::detached(EditSeams::Wired {
             seam,
@@ -582,7 +588,7 @@ mod tests {
     /// rather than hanging the suite.
     fn settled(service: &Arc<EditService>) -> ProfileReading {
         for _ in 0..500 {
-            let reading = service.reading();
+            let reading = service.reading(A_PROFILE);
             if !matches!(reading, ProfileReading::Pending) {
                 return reading;
             }
@@ -615,7 +621,7 @@ mod tests {
     /// Wait for any in-flight read to finish, so the next frame sees the state a real frame would.
     fn idle(service: &Arc<EditService>) {
         for _ in 0..500 {
-            if !*service.reading_now.lock().expect("the guard") {
+            if service.reading_now.lock().expect("the guard").is_empty() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -660,7 +666,7 @@ mod tests {
 
         let frames = Duration::from_secs(RUN_SECS).as_millis() / FRAME.as_millis();
         for _ in 0..frames {
-            service.refresh();
+            service.refresh(A_PROFILE);
             idle(&service);
             clock.advance(FRAME);
         }
@@ -708,10 +714,10 @@ mod tests {
             root: "33".repeat(32),
         }));
         let service = service_over(lost.clone());
-        service.refresh();
+        service.refresh(A_PROFILE);
         assert!(matches!(settled(&service), ProfileReading::BodyLost { .. }));
 
-        service.save(changes.clone());
+        service.save(A_PROFILE, changes.clone());
         assert!(
             waited_for(|| *lost.fresh_publishes.lock().expect("fresh publishes") > 0),
             "pressing publish on the re-entry form reached no seam: it wrote nothing, said \
@@ -733,10 +739,10 @@ mod tests {
         // fields and would delete every slot the form does not carry.
         let known = Reading::of(Ok(a_profile()));
         let editing = service_over(known.clone());
-        editing.refresh();
+        editing.refresh(A_PROFILE);
         assert!(matches!(settled(&editing), ProfileReading::Known(_)));
 
-        editing.save(changes.clone());
+        editing.save(A_PROFILE, changes.clone());
         assert!(
             waited_for(|| *known.commits.lock().expect("commits") > 0),
             "an ordinary edit reached no seam at all"
@@ -752,10 +758,10 @@ mod tests {
         // intact behind a node that is not answering.
         let unread = Reading::of(Err(ProfileEditError::ChainUnreachable("no node".into())));
         let refusing = service_over(unread.clone());
-        refusing.refresh();
+        refusing.refresh(A_PROFILE);
         assert!(matches!(settled(&refusing), ProfileReading::Unreadable(_)));
 
-        refusing.save(changes);
+        refusing.save(A_PROFILE, changes);
         assert!(
             !waited_for(|| *unread.commits.lock().expect("commits") > 0),
             "a commit was built over a profile this app could not read, so it would publish a \
@@ -792,11 +798,11 @@ mod tests {
     fn pressing_save_does_not_read_the_chain_on_the_calling_thread() {
         let seam = Reading::of(Ok(a_profile()));
         let service = service_over(seam.clone());
-        service.refresh();
+        service.refresh(A_PROFILE);
         assert!(matches!(settled(&service), ProfileReading::Known(_)));
         let after_the_read = *seam.reads.lock().expect("reads");
 
-        service.save(vec![(
+        service.save(A_PROFILE, vec![(
             ProfileField::DisplayName,
             SlotChange::Set("Grace".into()),
         )]);
@@ -832,26 +838,28 @@ mod tests {
             /// took the wrong route fails instead of quietly passing on the other one.
             fn publish_fresh(
                 &self,
+                _: ProfileTarget,
                 _: &[(ProfileField, SlotChange)],
             ) -> Result<CommitOutcome, ProfileEditError> {
                 Err(ProfileEditError::Refused(
                     "this double publishes deltas only".into(),
                 ))
             }
-            fn store_id(&self) -> String {
-                a_profile().store_id
+            fn store_id(&self, _: ProfileTarget) -> Option<String> {
+                Some(a_profile().store_id)
             }
-            fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            fn read(&self, _: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
                 self.release.wait();
                 Ok(a_profile())
             }
             fn commit(
                 &self,
+                _: ProfileTarget,
                 _: &[(ProfileField, SlotChange)],
             ) -> Result<CommitOutcome, ProfileEditError> {
                 Err(ProfileEditError::Locked)
             }
-            fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            fn confirmation(&self, _: ProfileTarget, _: &str) -> Result<Option<u32>, ProfileEditError> {
                 Ok(None)
             }
         }
@@ -863,10 +871,10 @@ mod tests {
 
         // Returns only if the read is somewhere else; a synchronous one deadlocks here, because
         // nothing has reached the barrier's second party yet.
-        service.refresh();
+        service.refresh(A_PROFILE);
 
         assert_eq!(
-            service.reading(),
+            service.reading(A_PROFILE),
             ProfileReading::Pending,
             "the read answered before it was released, so it did not run where the test thinks"
         );
@@ -879,7 +887,7 @@ mod tests {
     #[test]
     fn an_unpublished_profile_reaches_the_surface_as_its_own_state() {
         let service = service_over(Reading::of(Err(ProfileEditError::Unpublished)));
-        service.refresh();
+        service.refresh(A_PROFILE);
         let reading = settled(&service);
 
         assert_eq!(reading, ProfileReading::Unpublished);
@@ -892,7 +900,7 @@ mod tests {
         let failed = service_over(Reading::of(Err(ProfileEditError::ChainUnreachable(
             "no node".into(),
         ))));
-        failed.refresh();
+        failed.refresh(A_PROFILE);
         assert!(settled(&failed).is_retryable());
     }
 
@@ -930,13 +938,13 @@ mod tests {
     #[test]
     fn a_service_starts_out_having_asked_nothing() {
         let service = service_over(Reading::of(Ok(a_profile())));
-        assert_eq!(service.reading(), ProfileReading::Pending);
+        assert_eq!(service.reading(A_PROFILE), ProfileReading::Pending);
     }
 
     #[test]
     fn a_refresh_publishes_what_the_seam_read() {
         let service = service_over(Reading::of(Ok(a_profile())));
-        service.refresh();
+        service.refresh(A_PROFILE);
         let reading = settled(&service);
         let draft = reading.draft().expect("a draft");
         assert_eq!(draft.value(ProfileField::DisplayName), "Ada");
@@ -948,7 +956,7 @@ mod tests {
         let service = service_over(Reading::of(Err(ProfileEditError::ChainUnreachable(
             "no node".into(),
         ))));
-        service.refresh();
+        service.refresh(A_PROFILE);
         let reading = settled(&service);
         assert!(reading.is_retryable());
         assert!(!reading.is_empty());
@@ -961,7 +969,7 @@ mod tests {
         let seam = Reading::of(Ok(a_profile()));
         let service = service_over(Arc::clone(&seam) as Arc<dyn ProfileEditSeam>);
         for _ in 0..100 {
-            service.refresh();
+            service.refresh(A_PROFILE);
         }
         settled(&service);
         let reads = *seam.reads.lock().expect("reads");
@@ -974,7 +982,7 @@ mod tests {
     fn a_build_with_no_chain_transport_says_so_instead_of_waiting_forever() {
         let service = EditService::detached(EditSeams::NoChainTransport);
         assert!(!service.is_possible());
-        service.refresh();
+        service.refresh(A_PROFILE);
         match settled(&service) {
             ProfileReading::Unreadable(why) => assert!(why.contains("cannot reach")),
             other => panic!("a transport-less build reported {other:?}"),
@@ -989,9 +997,9 @@ mod tests {
         let service = service_over(Reading::of(Err(ProfileEditError::ChainUnreachable(
             "no node".into(),
         ))));
-        service.refresh();
+        service.refresh(A_PROFILE);
         settled(&service);
-        service.save(vec![(ProfileField::Bio, SlotChange::Remove)]);
+        service.save(A_PROFILE, vec![(ProfileField::Bio, SlotChange::Remove)]);
         assert!(
             service.feed.read().is_none(),
             "a commit was started over a profile nobody could read"

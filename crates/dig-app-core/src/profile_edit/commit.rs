@@ -348,6 +348,7 @@ pub trait ProfileEditSeam: Send + Sync {
     /// [`EditService::save`](super::service::EditService::save)'s, not a surface's.
     fn publish_fresh(
         &self,
+        target: ProfileTarget,
         changes: &[(ProfileField, SlotChange)],
     ) -> Result<CommitOutcome, ProfileEditError>;
 
@@ -486,12 +487,13 @@ pub fn commit_and_persist(
 /// [`ProfileEditSeam::publish_fresh`].
 fn publish(
     seam: &dyn ProfileEditSeam,
+    target: ProfileTarget,
     changes: &[(ProfileField, SlotChange)],
     route: EditRoute,
 ) -> Result<CommitOutcome, ProfileEditError> {
     match route {
-        EditRoute::Delta => seam.commit(changes),
-        EditRoute::FreshBody => seam.publish_fresh(changes),
+        EditRoute::Delta => seam.commit(target, changes),
+        EditRoute::FreshBody => seam.publish_fresh(target, changes),
     }
 }
 
@@ -649,7 +651,15 @@ pub fn start_commit(
         // published before the call rather than after, because the call is the slow part and a
         // person watching deserves to know which slow part it is.
         feed.publish(opening.at(Stage::Signing));
-        match commit_and_persist(&*seam, target, &*bodies, &*pending, &store_id, &changes, route) {
+        match commit_and_persist(
+            &*seam,
+            target,
+            &*bodies,
+            &*pending,
+            &store_id,
+            &changes,
+            route,
+        ) {
             Ok(outcome) => {
                 // Published BEFORE the watch begins, because the push is a fact the moment it
                 // happens and the watch takes minutes. The stage is `Pushed` — never `Confirmed` —
@@ -1050,6 +1060,7 @@ mod tests {
         let bodies = InMemoryBodies::default();
         let outcome = commit_and_persist(
             &seam,
+            EDITED,
             &bodies,
             &InMemoryPending::default(),
             STORE,
@@ -1075,6 +1086,7 @@ mod tests {
     fn a_store_that_accepts_and_forgets_fails_the_commit_rather_than_reporting_success() {
         let error = commit_and_persist(
             &Committing::pushed(),
+            EDITED,
             &ForgetfulBodies,
             &InMemoryPending::default(),
             STORE,
@@ -1117,6 +1129,7 @@ mod tests {
         }
         let error = commit_and_persist(
             &Committing::pushed(),
+            EDITED,
             &Substituting,
             &InMemoryPending::default(),
             STORE,
@@ -1134,6 +1147,7 @@ mod tests {
         let bodies = RefusingBodies(BodyStoreError::Unreachable("no node".into()));
         let error = commit_and_persist(
             &Committing::pushed(),
+            EDITED,
             &bodies,
             &InMemoryPending::default(),
             STORE,
@@ -1177,6 +1191,7 @@ mod tests {
         let seam = Refusing(ProfileEditError::Rejected("bad signature".into()));
         let error = commit_and_persist(
             &seam,
+            EDITED,
             &InMemoryBodies::default(),
             &InMemoryPending::default(),
             STORE,
@@ -1194,6 +1209,7 @@ mod tests {
         let seam = Refusing(ProfileEditError::ChainUnreachable("timed out".into()));
         let error = commit_and_persist(
             &seam,
+            EDITED,
             &InMemoryBodies::default(),
             &InMemoryPending::default(),
             STORE,
@@ -1213,6 +1229,7 @@ mod tests {
         let seam = Refusing(ProfileEditError::Rejected("declined".into()));
         let _ = commit_and_persist(
             &seam,
+            EDITED,
             &bodies,
             &InMemoryPending::default(),
             STORE,
@@ -1245,6 +1262,7 @@ mod tests {
 
         let error = commit_and_persist(
             &Honest,
+            EDITED,
             &a_node_awaiting_confirmation(),
             &pending,
             STORE,
@@ -1393,6 +1411,7 @@ mod tests {
         let pending = InMemoryPending::default();
         let _ = commit_and_persist(
             &Declining,
+            EDITED,
             &InMemoryBodies::default(),
             &pending,
             STORE,
@@ -1414,6 +1433,7 @@ mod tests {
         let pending = InMemoryPending::default();
         commit_and_persist(
             &Committing::pushed(),
+            EDITED,
             &InMemoryBodies::default(),
             &pending,
             STORE,
@@ -1435,6 +1455,7 @@ mod tests {
         let node = InMemoryBodies::default();
         let outcome = commit_and_persist(
             &Honest,
+            EDITED,
             &node,
             &pending,
             STORE,
@@ -1457,6 +1478,7 @@ mod tests {
     fn a_copy_that_could_not_be_kept_is_never_reported_as_kept() {
         let error = commit_and_persist(
             &Honest,
+            EDITED,
             &a_node_awaiting_confirmation(),
             &RefusingPending,
             STORE,
@@ -1549,6 +1571,7 @@ mod tests {
         ];
         commit_and_persist(
             &seam,
+            EDITED,
             &InMemoryBodies::default(),
             &InMemoryPending::default(),
             STORE,
@@ -1571,6 +1594,7 @@ mod tests {
         let feed = Feed::detached();
         start_commit(
             Arc::new(Committing::pushed()),
+            EDITED,
             Arc::new(InMemoryBodies::default()),
             Arc::new(InMemoryPending::default()),
             STORE.to_string(),
@@ -1602,6 +1626,7 @@ mod tests {
         let feed = Feed::detached();
         start_commit(
             Arc::new(Committing::pushed()),
+            EDITED,
             Arc::new(ForgetfulBodies),
             Arc::new(InMemoryPending::default()),
             STORE.to_string(),
@@ -1645,6 +1670,7 @@ mod tests {
             let feed = Feed::detached();
             start_commit(
                 Arc::new(Refusing(error)),
+                EDITED,
                 Arc::new(InMemoryBodies::default()),
                 Arc::new(InMemoryPending::default()),
                 STORE.to_string(),
@@ -1693,6 +1719,7 @@ mod tests {
         };
         watch_for_confirmation(
             &seam,
+            EDITED,
             &outcome,
             &Transaction::starting(WHAT, None),
             &feed,
@@ -1739,6 +1766,7 @@ mod tests {
         };
         watch_for_confirmation(
             &seam,
+            EDITED,
             &outcome,
             &Transaction::starting(WHAT, None),
             &feed,

@@ -318,11 +318,10 @@ const CANCEL: &str = "Close";
 mod tests {
     use super::*;
 
-    fn a_profile(active: bool) -> Editing {
+    fn a_profile() -> Editing {
         Editing {
             ix: 2,
             name: "“work”".to_string(),
-            active,
         }
     }
 
@@ -340,7 +339,7 @@ mod tests {
             "a closed modal swallowed Escape, so the window can no longer be closed with it"
         );
 
-        modal.open(a_profile(true));
+        modal.open(a_profile());
         assert!(modal.is_open());
         assert!(
             modal.take_escape(&ctx),
@@ -363,7 +362,7 @@ mod tests {
     fn closing_the_modal_leaves_no_typing_behind() {
         let ctx = egui::Context::default();
         let mut modal = ProfileModal::default();
-        modal.open(a_profile(true));
+        modal.open(a_profile());
 
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -390,11 +389,10 @@ mod tests {
     #[test]
     fn opening_a_second_profile_replaces_the_first() {
         let mut modal = ProfileModal::default();
-        modal.open(a_profile(true));
+        modal.open(a_profile());
         modal.open(Editing {
             ix: 7,
             name: "“home”".to_string(),
-            active: false,
         });
         assert_eq!(modal.open.as_ref().map(|open| open.ix), Some(7));
     }
@@ -418,7 +416,7 @@ mod tests {
         let tall = viewport + 300.0;
 
         let mut modal = ProfileModal::default();
-        modal.open(a_profile(true));
+        modal.open(a_profile());
 
         // Wheeled down, twice, over a form that overflows by 300.
         modal.take_scroll(&wheeled(-200.0, at.center()), at, tall);
@@ -441,7 +439,7 @@ mod tests {
 
         // The control: content that FITS never moves at all, however hard it is wheeled.
         let mut fits = ProfileModal::default();
-        fits.open(a_profile(true));
+        fits.open(a_profile());
         fits.take_scroll(&wheeled(-500.0, at.center()), at, viewport - 50.0);
         assert_eq!(
             fits.scroll, 0.0,
@@ -460,7 +458,7 @@ mod tests {
         let tall = at.height() + 300.0;
 
         let mut modal = ProfileModal::default();
-        modal.open(a_profile(true));
+        modal.open(a_profile());
         modal.take_scroll(&wheeled(-300.0, egui::Pos2::new(20.0, 20.0)), at, tall);
         assert_eq!(
             modal.scroll, 0.0,
@@ -505,32 +503,23 @@ mod tests {
         assert_ne!(title("“work”"), title("“home”"));
     }
 
-    /// **A profile this build cannot reach is told which one DIG can, and what to do — never that
-    /// the feature is unavailable.**
+    /// **The modal edits the profile it was OPENED on, not whichever one the account is active
+    /// at.**
     ///
-    /// The sentence has to name the remedy, because the alternative wording — *not available* —
-    /// tells a person to stop looking when a control one surface away would fix it. The remedy it
-    /// names is the label the profiles card actually draws.
+    /// The seam is addressed per call now (dig_ecosystem#3071), so the target the modal hands it is
+    /// the only thing deciding which profile a save reaches. Two different profiles are opened in
+    /// turn over the SAME modal, because the defect this replaces was a single pinned index: a
+    /// target computed from anything but the open profile would answer the same value twice here.
     #[test]
-    fn an_unreachable_profile_is_told_the_remedy_rather_than_that_dig_cannot() {
-        let said = unreachable_sentence("“work”");
-        let lowered = said.to_lowercase();
+    fn the_modal_targets_the_profile_it_was_opened_on() {
+        let work = a_profile();
+        let home = Editing {
+            ix: 7,
+            name: "“home”".to_string(),
+        };
 
-        assert!(
-            said.contains("“work”"),
-            "the sentence never names the profile it is about: {said}"
-        );
-        assert!(
-            lowered.contains("put it in use"),
-            "the sentence names no remedy, so a person is told to stop looking: {said}"
-        );
-        assert!(
-            !lowered.contains("not available"),
-            "a per-profile limit of THIS BUILD is worded as a missing DIG capability: {said}"
-        );
-        assert!(
-            !lowered.contains("nothing for you to do"),
-            "a person with a one-click remedy is told there is nothing they can do: {said}"
-        );
+        assert_eq!(work.target(), ProfileTarget(2));
+        assert_eq!(home.target(), ProfileTarget(7));
+        assert_ne!(work.target(), home.target());
     }
 }

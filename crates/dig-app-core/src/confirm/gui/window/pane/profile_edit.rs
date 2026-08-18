@@ -235,9 +235,11 @@ fn content(
             let lost = PaneState::Unreachable(crate::profile_edit::copy::body_lost(root));
             flow.place(|ui, at| (state::banner(ui, at, t, &lost), ()));
             flow.gap(space::S3);
-            form(flow, t, draft, verbs, form_id, reading.is_re_entry())
+            form(flow, t, target, draft, verbs, form_id, reading.is_re_entry())
         }
-        ProfileReading::Known(committed) => form(flow, t, committed, verbs, form_id, false),
+        ProfileReading::Known(committed) => {
+            form(flow, t, target, committed, verbs, form_id, false)
+        }
     }
 }
 
@@ -685,7 +687,7 @@ mod tests {
                                 egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = Flow::new(ui, column, true);
-                            super::form(&mut flow, &t, committed, &[], CARD_FORM, re_entry);
+                            super::form(&mut flow, &t, ProfileTarget(0), committed, &[], CARD_FORM, re_entry);
                         });
                 },
             );

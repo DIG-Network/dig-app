@@ -28,7 +28,7 @@ use dig_app_core::confirm::gui::{open_pane_preview, preview_theme};
 use dig_app_core::profile_edit::{
     BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
-    ProfileSnapshot, SlotChange,
+    ProfileSnapshot, ProfileTarget, SlotChange,
 };
 use dig_app_core::transaction::Feed;
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
@@ -92,22 +92,24 @@ fn install_a_profile_whose_content_is_gone() {
         /// took the wrong route fails instead of quietly passing on the other one.
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Refused(
                 "this double publishes deltas only".into(),
             ))
         }
-        fn store_id(&self) -> String {
-            "111e8bce53a9b46bedc6a8883b50b6e503ee333384930e93ef3054b25e992be0".to_string()
+        fn store_id(&self, _: ProfileTarget) -> Option<String> {
+            Some("111e8bce53a9b46bedc6a8883b50b6e503ee333384930e93ef3054b25e992be0".to_string())
         }
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, _: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
             Err(ProfileEditError::BodyLost {
                 root: LOST_ROOT.to_string(),
             })
         }
         fn commit(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             // A preview never spends. Reaching here means somebody pressed publish while
@@ -116,7 +118,7 @@ fn install_a_profile_whose_content_is_gone() {
                 root: LOST_ROOT.to_string(),
             })
         }
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(&self, _: ProfileTarget, _: &str) -> Result<Option<u32>, ProfileEditError> {
             Ok(None)
         }
     }
