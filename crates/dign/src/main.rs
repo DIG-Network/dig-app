@@ -6,10 +6,12 @@
 //! object on stdout under `--json`. The app (not `dign`) decides whether the command is served
 //! locally with the user identity or proxied to the engine.
 //!
-//! The per-user IPC session client is owned by the dig-app IPC layer (APP-1 / U6). Until it lands,
-//! `send_to_app` reports a clean `NOT_CONNECTED` error, so `dign` already offers its full parsed
-//! command surface + `--help`/`--json` discovery and drops onto the real session with a one-line
-//! swap.
+//! The per-user IPC session client is owned by the dig-app IPC layer ([`dig_app_core::cli_session`],
+//! APP-1 / U6). `send_to_app` dials it: it resolves this user's own endpoint and session token,
+//! attaches, and asks its one question. Both boundaries in front of that lane — an OS-enforced
+//! per-user pipe or socket, and a token minted fresh at each app start — are the session module's,
+//! not this binary's, because a binary is a test-free zone and those are the parts that must be
+//! proven.
 
 mod account;
 mod cli;
@@ -112,15 +114,11 @@ fn account_json(report: &account::AccountReport) -> serde_json::Value {
 /// Send `command` to the running dig-app over the identity-authenticated session and return its
 /// [`Outcome`].
 ///
-/// The concrete IPC client lands with APP-1 (U6); until then this reports `NOT_CONNECTED` so the
-/// failure is catalogued and scriptable rather than a panic. At integration this becomes the real
-/// per-user channel round-trip — the gateway itself already lives in `dig-app-core`.
-fn send_to_app(_command: &Command) -> Result<Outcome, GatewayError> {
-    Err(GatewayError::new(
-        ErrorCode::NotConnected,
-        "the dig-app session is not available yet",
-    )
-    .with_hint("the per-user IPC session to dig-app lands with APP-1 (U6)"))
+/// One line, because everything it does is owned and tested next to the lane itself: resolving this
+/// user's endpoint and token, attaching, and reading the one answer back. When dig-app is not
+/// running this surfaces `NOT_CONNECTED` with the remedy rather than a raw OS error.
+fn send_to_app(command: &Command) -> Result<Outcome, GatewayError> {
+    dig_app_core::cli_session::send(command)
 }
 
 /// Render a successful outcome and return the process exit code (always `OK`).
