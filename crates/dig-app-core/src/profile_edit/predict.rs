@@ -101,7 +101,6 @@ fn slot_edits(changes: &[(ProfileField, SlotChange)]) -> Vec<SlotEdit> {
 #[cfg(test)]
 mod tests {
 
-
     use super::*;
 
     /// A profile publishing a name, a bio, and a slot this editor has no field for.

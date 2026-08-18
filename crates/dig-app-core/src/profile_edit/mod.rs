@@ -132,7 +132,9 @@ pub mod copy {
 
 pub use adapter::{AccountEditSeam, MintNetwork, NodeProfileContent};
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
-pub use commit::{CommitOutcome, EditRoute, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
+pub use commit::{
+    CommitOutcome, EditRoute, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot,
+};
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};
 pub use field::{FieldGroup, FieldKind, ProfileField};
 pub use offer::{EditBlocked, ProfileEditing};

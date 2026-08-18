@@ -1296,8 +1296,15 @@ mod tests {
     fn a_body_the_node_verifiably_holds_is_no_longer_kept_here() {
         let pending = InMemoryPending::default();
         let node = InMemoryBodies::default();
-        let outcome = commit_and_persist(&Honest, &node, &pending, STORE, &a_change(), EditRoute::Delta)
-            .expect("the edit commits");
+        let outcome = commit_and_persist(
+            &Honest,
+            &node,
+            &pending,
+            STORE,
+            &a_change(),
+            EditRoute::Delta,
+        )
+        .expect("the edit commits");
 
         assert!(pending.all().expect("reads").is_empty());
         assert_eq!(
@@ -1474,7 +1481,6 @@ mod tests {
             other => panic!("a lost body settled as {other:?}"),
         }
     }
-
 
     /// **dig_ecosystem#3041.** A failure that PROVES nothing reached a mempool says so, in money.
     ///

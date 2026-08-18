@@ -1447,8 +1447,23 @@ The implementation MUST therefore offer the editing form over this state, with E
 read succeeded. This is the sole exception to the rule that a failed read withholds the form, and it holds
 only because there is nothing left to overwrite. The surface MUST NOT draw the resulting empty form as an
 unfilled profile: the loss MUST be stated above the fields, so the form reads as a re-entry rather than as
-the person's own values. Publishing from it is an ordinary edit and MUST satisfy every rule above, the
-pending-file write before the spend included.
+the person's own values. Publishing from it MUST satisfy every rule above, the pending-file write
+before the spend included.
+
+Publishing from it MUST NOT be routed through the DELTA edit operation. A delta reads the published body
+before it can apply a change, so over a body that is gone it fails inside the very call carrying out the
+remedy, and the person is returned to the state they started in. The implementation MUST use an operation
+that writes a whole body without reading one (`ProfileEditor::publish_profile`, dig-account ≥ 0.18), and MUST
+route to it ONLY from the unrecoverable state: a profile that READ MUST take the delta path, because a fresh
+publish replaces the whole body and would delete every slot the form does not carry. The body written to the
+pending file before the spend MUST be built by the same constructor the publish uses, so the copy kept is the
+preimage of the root the chain confirms.
+
+**A failed publish MUST say whether any XCH was spent (MUST).** Publishing spends real XCH, so a failure
+MUST state, alongside what went wrong, that nothing was sent and nothing was spent — and MUST state it ONLY
+on outcomes that PROVE no bundle reached a mempool. An outcome whose fate is unknown (an unanswered chain, a
+failed persist) MUST NOT be given that sentence: it would invite a second spend over a first that may still
+confirm.
 
 The 1-mojo singleton amount and the previous content MUST NOT be promised back by any wording.
 
