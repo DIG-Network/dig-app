@@ -22,6 +22,7 @@
 //! `dig-account` signer; the engine only ever sees signed bytes.
 
 pub mod activity;
+pub mod cancelling;
 pub mod engine;
 pub mod enrol;
 /// The §908 on-wire custody proof. Crate-internal because it drives a real loopback node

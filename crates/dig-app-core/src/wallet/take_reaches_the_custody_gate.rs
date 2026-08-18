@@ -83,7 +83,7 @@ fn a_hot_wallet_take_is_admitted_by_the_custody_gate_and_escalated_to_the_human(
     );
 }
 
-/// **MEASURED, and it is a finding: the ceremony names only the side the taker PAYS.**
+/// **MEASURED: the re-derived summary names only the side the taker PAYS.**
 ///
 /// A swap has two sides, and the gate's summary carries one. The received leg — the maker's offered
 /// coins, claimed to the taker's own change address — is dropped as change, and the settlement
@@ -91,8 +91,10 @@ fn a_hot_wallet_take_is_admitted_by_the_custody_gate_and_escalated_to_the_human(
 /// person is asked to approve reads as an ordinary payment out, with nothing said about what arrives.
 ///
 /// That is not dishonest (every figure it shows is true) but it is incomplete for an irreversible
-/// swap, which is why NC-14 lands on the OFFER surface: `wallet::offer::OfferTerms` names both sides
-/// from `summarize` BEFORE the ceremony is ever reached, so consent is given against the full trade.
+/// swap. It is a property of the RE-DERIVATION and cannot be fixed there — the received leg genuinely
+/// is change, as far as the coin spends are concerned. So this test still records it, and
+/// [`the_confirm_prompt_names_the_leg_the_summary_cannot_see`] proves the missing leg is supplied
+/// alongside it (dig_ecosystem#3109).
 ///
 /// The assertion pins the exact leg rather than merely counting lines: it must be the MAKER's payee
 /// address for the requested amount. A summary that instead showed the taker's change would satisfy
@@ -137,6 +139,61 @@ fn the_ceremony_names_the_paid_leg_of_the_swap_and_not_the_received_one() {
     assert!(
         !paid.iter().any(|(address, _)| *address == taker_change),
         "the received leg is invisible to the ceremony — that is the finding this test records"
+    );
+}
+
+/// **THE FIX (dig_ecosystem#3109): the confirm prompt names the leg the summary cannot see.**
+///
+/// The test above pins what the re-derivation shows — the 1,000 mojos paid to the maker — and proves
+/// the 400 mojos arriving are invisible to it. This one proves the prompt does not stop there: the
+/// staged narrative carries the received leg, so a person reads BOTH sides before signing.
+///
+/// # Why the fixture's two figures must differ
+///
+/// They are 400 and 1,000 on purpose. A narrative builder that read the terms in the maker's
+/// direction — the nearest wrong version, and an easy one to write since `OfferTerms` is documented as
+/// the taker's view — would print the paid leg on the received line. With equal figures that renders
+/// identically to the correct version. So the assertion pins the received figure AND its position,
+/// and a swapped implementation fails on both.
+///
+/// # What this does NOT prove
+///
+/// It does not prove the OS confirm window paints these sentences; that is a per-platform surface no
+/// test on this host can drive. It proves the narrative the window is handed contains both legs.
+#[test]
+fn the_confirm_prompt_names_the_leg_the_summary_cannot_see() {
+    use crate::wallet::offer::ReviewedOffer;
+    use crate::wallet::offer_words;
+
+    let reviewed = ReviewedOffer::read(&an_offer_of(XCH_FOR_XCH)).expect("the fixture offer reads");
+    let body = reviewed
+        .terms()
+        .narrative(
+            offer_words::TAKE_HEADLINE,
+            Some(offer_words::TAKE_CAUTION.to_string()),
+        )
+        .render();
+
+    let receive_line = body
+        .lines()
+        .find(|line| line.starts_with("You receive:"))
+        .expect("the prompt names what arrives");
+    let give_line = body
+        .lines()
+        .find(|line| line.starts_with("You give:"))
+        .expect("the prompt names what leaves");
+
+    assert!(
+        receive_line.contains("0.0000000004 XCH"),
+        "the ARRIVING 400 mojos — invisible to the re-derived summary — must be named: {body}"
+    );
+    assert!(
+        give_line.contains("0.000000001 XCH"),
+        "the PAID 1,000 mojos belong on the give side: {body}"
+    );
+    assert!(
+        !receive_line.contains("0.000000001 XCH"),
+        "reading the terms in the maker's direction would promise the taker what they are paying:          {body}"
     );
 }
 

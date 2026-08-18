@@ -48,6 +48,7 @@ use crate::account::ceremony::PromptedCeremony;
 use crate::account::money::{MoneyPath, MoneyPathError};
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
+use crate::transaction::{Feed, Stage, Transaction};
 use crate::wallet::offer::{take_permitted_by, OfferError, ReviewedOffer};
 use crate::wallet::offer_words as copy;
 
@@ -370,14 +371,29 @@ impl TakeHolder {
         if !self.begin() {
             return;
         }
-        let outcome = self.perform(status, residency, reviewed);
-        *self.lock() = match outcome {
-            Ok(taken) => TakeProgress::Broadcast {
-                bundle_name: taken.bundle_name,
-            },
-            Err(error) => TakeProgress::Failed {
-                why: error.to_string(),
-            },
+        // Every broadcast this app makes raises the ONE centralized progress modal
+        // (dig_ecosystem#3075); a take used to be the exception, which is dig_ecosystem#3110.
+        let feed = Feed::app();
+        let opening = Transaction::starting("Taking an offer", None);
+        feed.publish(opening.clone());
+
+        *self.lock() = match self.perform(status, residency, reviewed, &feed, &opening) {
+            Ok(taken) => {
+                feed.publish(opening.at(Stage::Pushed {
+                    id: taken.bundle_name.clone(),
+                }));
+                TakeProgress::Broadcast {
+                    bundle_name: taken.bundle_name,
+                }
+            }
+            Err(error) => {
+                let why = error.to_string();
+                feed.publish(opening.at(Stage::Failed {
+                    why: why.clone(),
+                    next: NEXT_AFTER_A_FAILED_TAKE.to_string(),
+                }));
+                TakeProgress::Failed { why }
+            }
         };
     }
 
@@ -401,6 +417,8 @@ impl TakeHolder {
         status: &crate::agent::SharedStatus,
         residency: Option<&AccountResidency>,
         reviewed: &ReviewedOffer,
+        feed: &Feed,
+        opening: &Transaction,
     ) -> Result<TakenOffer, TakeError> {
         let residency = residency.ok_or(TakeError::Locked)?;
 
@@ -433,6 +451,8 @@ impl TakeHolder {
             Some(copy::TAKE_CAUTION.to_string()),
         ));
         let publisher = crate::chain::ControlSpendPublisher::new(endpoint);
+
+        feed.publish(opening.at(Stage::Signing));
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -488,6 +508,13 @@ impl TakeHolder {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
+
+/// What a person can do after a take did not go through.
+///
+/// [`Stage::Failed`] refuses a blank `next`, and the honest step after most take failures is to look
+/// again rather than to retry: an offer somebody else has already taken will never become takeable.
+const NEXT_AFTER_A_FAILED_TAKE: &str =
+    "Check the offer is still open before trying again — somebody else may have taken it.";
 
 #[cfg(test)]
 mod tests {

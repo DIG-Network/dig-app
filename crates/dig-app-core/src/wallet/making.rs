@@ -514,7 +514,7 @@ mod tests {
     use dig_account::Vault;
 
     fn a_dig_asset_id() -> Bytes32 {
-        Bytes32::new(dig_constants::DIG_ASSET_ID)
+        dig_constants::DIG_ASSET_ID
     }
 
     /// **Both empty sides are refused, and they are refused DIFFERENTLY.**

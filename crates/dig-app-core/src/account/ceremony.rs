@@ -660,6 +660,69 @@ mod tests {
         );
     }
 
+    /// **A narrative ADDS the missing side; it does not replace the re-derived figures**
+    /// (dig_ecosystem#3109).
+    ///
+    /// This is the property that keeps the fix honest. If the narrative replaced the derived block, a
+    /// narrative that ever disagreed with the bytes being signed would be unfalsifiable on the one
+    /// screen where it matters. So the fixture's narrative names an asset the summary has NO figure
+    /// for — an NFT, which is the case the whole ticket was filed about, since its XCH leg nets to
+    /// dust — and both must survive into the body.
+    ///
+    /// A narrative-only renderer passes the first two assertions and fails the last two; a
+    /// summary-only renderer (the shipped behaviour) fails the first two. Neither can pass by
+    /// accident.
+    #[test]
+    fn a_narrative_is_printed_beside_the_re_derived_figures_and_not_instead_of_them() {
+        use crate::account::narrative::TradeNarrative;
+        use dig_account::{SpendRecipient, SpendTier};
+
+        let body = render_spend(
+            &SpendSummary::new(
+                SpendTier::Confirm,
+                vec![SpendRecipient::to_address("xch1settlement", 1, None::<String>)],
+                500_000_000_000,
+            ),
+            Some(&TradeNarrative {
+                headline: "Take this offer?".to_string(),
+                you_give: vec!["0.000000000001 XCH".to_string()],
+                you_receive: vec!["the NFT beef".to_string()],
+                caution: Some("This cannot be reversed.".to_string()),
+            }),
+        );
+
+        assert!(
+            body.contains("the NFT beef"),
+            "the arriving asset, which the summary has no figure for at all, is missing: {body}"
+        );
+        assert!(
+            body.contains("This cannot be reversed."),
+            "the caution is missing: {body}"
+        );
+        assert!(
+            body.contains("xch1settlement"),
+            "the re-derived recipient was replaced rather than kept: {body}"
+        );
+        assert!(
+            body.contains("0.5 XCH"),
+            "the re-derived fee was replaced rather than kept: {body}"
+        );
+    }
+
+    /// **An ordinary send is unchanged: no narrative, no extra heading.**
+    ///
+    /// The narrative is for offers. A send whose recipients ARE the act must not grow a
+    /// "You receive: Nothing" line, which would read as though something were missing from a
+    /// perfectly complete payment.
+    #[test]
+    fn an_ordinary_send_still_reads_as_a_plain_approval() {
+        use dig_account::SpendTier;
+
+        let body = render_spend(&SpendSummary::new(SpendTier::Confirm, vec![], 1), None);
+        assert!(body.starts_with("Approve this"), "{body}");
+        assert!(!body.contains("You receive"), "{body}");
+    }
+
     /// **A spend paying nobody says so, rather than rendering an empty line.**
     ///
     /// The state exists — a fee-only spend derives no recipients — and a body that fell silent there
