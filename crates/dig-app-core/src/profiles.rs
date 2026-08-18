@@ -419,11 +419,24 @@ impl ProfileCreation {
         })
     }
 
-    /// Creation as an account whose LOCK is known reads it.
+    /// Creation as an account whose own STATE reads it.
     ///
     /// The lock is answered first and the reading is not consulted at all when it is closed, for
     /// [`CreationBlocked::AccountLocked`]'s reason: a locked account runs no probe, so every other
     /// answer available here is a consequence of the lock rather than a measurement of the node.
+    ///
+    /// # Why this takes the account's STATE and not an `unlocked` flag
+    ///
+    /// Because a session OUTLIVES its key material. Lock-now and the idle auto-lock drop the keys
+    /// and keep the session, so `session.is_some()` is true for an account that is locked — which is
+    /// exactly the case reported: *"the profile worked when i unlocked it, so the message only
+    /// shows when the wallet is locked"*. A predicate built on the session existing cannot see it.
+    ///
+    /// [`AccountState`](crate::tray_menu::AccountState) is also the only source that separates
+    /// *locked* from *no account at all*. Saying "your account is locked" to somebody who has no
+    /// account would be a surface asserting a fact it does not have — so every state other than
+    /// `Locked` falls through to the reading, and an account that has not been made yet keeps the
+    /// honest unmeasured answer.
     ///
     /// # Why this decision lives in the crate and not at its one caller
     ///
@@ -433,10 +446,15 @@ impl ProfileCreation {
     /// run (dig_ecosystem#3059). Moving the branch here makes the precedence testable, exactly as
     /// [`ProfileEditing::of_seams`](crate::profile_edit::ProfileEditing::of_seams) does with the
     /// same fact.
-    pub fn of_account(unlocked: bool, mint: Option<ProfileMintAvailability>) -> Self {
-        match unlocked {
-            false => Self::Blocked(CreationBlocked::AccountLocked),
-            true => Self::of_reading(mint),
+    pub fn of_account(
+        account: Option<&crate::tray_menu::AccountState>,
+        mint: Option<ProfileMintAvailability>,
+    ) -> Self {
+        match account {
+            Some(crate::tray_menu::AccountState::Locked) => {
+                Self::Blocked(CreationBlocked::AccountLocked)
+            }
+            _ => Self::of_reading(mint),
         }
     }
 
@@ -1530,26 +1548,51 @@ mod tests {
     /// real state and this must not have swallowed it.
     #[test]
     fn a_locked_account_is_told_about_the_lock_and_not_about_the_node() {
+        use crate::tray_menu::AccountState;
+
         assert_eq!(
             ProfileCreation::Blocked(CreationBlocked::AccountLocked),
-            ProfileCreation::of_account(false, Some(ProfileMintAvailability::Possible)),
+            ProfileCreation::of_account(
+                Some(&AccountState::Locked),
+                Some(ProfileMintAvailability::Possible)
+            ),
             "a locked account was answered from the node reading, so the lock went unsaid"
         );
         assert_eq!(
             ProfileCreation::Blocked(CreationBlocked::AccountLocked),
-            ProfileCreation::of_account(false, None),
+            ProfileCreation::of_account(Some(&AccountState::Locked), None),
             "a locked account with nothing measured was left on the never-ending check"
         );
 
+        let unlocked = AccountState::Unlocked { recoverable: true };
         assert_eq!(
             ProfileCreation::Possible,
-            ProfileCreation::of_account(true, Some(ProfileMintAvailability::Possible)),
+            ProfileCreation::of_account(
+                Some(&unlocked),
+                Some(ProfileMintAvailability::Possible)
+            ),
             "an unlocked account with a healthy node stopped being offered creation"
         );
         assert_eq!(
             ProfileCreation::Unknown,
-            ProfileCreation::of_account(true, None),
+            ProfileCreation::of_account(Some(&unlocked), None),
             "an unmeasured node stopped being an unknown, which is a real and different state"
+        );
+
+        // An account that does not exist is NOT locked, and must not be told it is. This is the
+        // arm that keeps the fix from trading one false sentence for another.
+        for absent in [AccountState::Absent, AccountState::Unsupported, AccountState::NeedsPassword]
+        {
+            assert_eq!(
+                ProfileCreation::Unknown,
+                ProfileCreation::of_account(Some(&absent), None),
+                "{absent:?} was reported as a locked account, which is a lock nobody has"
+            );
+        }
+        assert_eq!(
+            ProfileCreation::Unknown,
+            ProfileCreation::of_account(None, None),
+            "an account nothing has read yet was reported as locked"
         );
     }
 

@@ -1666,7 +1666,7 @@ mod tray {
             running,
             node,
             node_connected,
-            account: Some(account),
+            account: Some(account.clone()),
             profile_id: session.map(|s| s.account.profile_id.clone()),
             // Derived LIVE from the residency on each repaint rather than cached at unlock, so a lock
             // takes the address away with the keys it comes from. Unlike `profile_id` (cached because
@@ -1766,7 +1766,7 @@ mod tray {
             profiles: profiles_reading(env, session),
             // What the node ANSWERED about whether a whole profile can be minted here
             // (dig_ecosystem#2398) — never what this binary asserts. See `profile_creation_of`.
-            profile_creation: profile_creation_of(status, session),
+            profile_creation: profile_creation_of(status, session, Some(&account)),
             // What the node itself says about servicing a mint (dig_ecosystem#2398). Read for the
             // DID explainer, which without it names a cause nobody measured. The SAME poller feeds
             // `profile_creation` above, so the explainer and the gate can never disagree about what
@@ -1947,22 +1947,28 @@ mod tray {
     fn profile_creation_of(
         status: &SharedStatus,
         session: Option<&TraySession>,
+        account: Option<&crate::AccountState>,
     ) -> dig_app_core::profiles::ProfileCreation {
         use dig_app_core::account::profile_mint::ProfileMint;
         use dig_app_core::account::profile_mint::ProfileMintSeams;
         use dig_app_core::profiles::ProfileCreation;
 
-        // No unlocked account means no registry to mint into and no residency to derive from, so
-        // nothing about this machine's node has been measured FOR creation. `Unknown` withholds the
-        // offer exactly as a blocker would, and unlike a blocker it names no cause: telling a locked
-        // user their chain is unreachable would send them to fix a node that is answering fine.
-        // A LOCKED account is a known, nameable, user-fixable condition — never an unmeasured one.
-        // This used to return `Unknown`, which the card renders as "DIG is still checking…", so a
-        // locked person watched a check that was never going to run and was told nothing about the
-        // one act that would move it (dig_ecosystem#3059). The precedence lives in the library
-        // because this file is one no guard test can see (dig_ecosystem#2587).
+        // The ACCOUNT is asked before anything else, and it is asked by its own state rather than
+        // by whether a session exists — a session outlives its key material, so a locked account
+        // still has one. A locked account used to fall through to `Unknown`, which the card renders
+        // as "DIG is still checking whether this computer can create a profile", so a locked person
+        // watched a check that was never going to run and was told nothing about the one act that
+        // would move it (dig_ecosystem#3059). Every rule lives in `of_account`, because this file
+        // is one no guard test can see (dig_ecosystem#2587).
+        if let creation @ ProfileCreation::Blocked(_) = ProfileCreation::of_account(account, None) {
+            return creation;
+        }
+
+        // Beyond the lock there is nothing to measure without a session: no registry to mint into
+        // and no residency to derive from. That is an absence of measurement, not a blocker, and
+        // `Unknown` is how the card says so without naming a cause nobody looked for.
         let Some(live) = session else {
-            return ProfileCreation::of_account(false, None);
+            return ProfileCreation::Unknown;
         };
 
         // A poisoned lock says nothing about the node, and "nothing" is not a blocker.
@@ -1991,7 +1997,7 @@ mod tray {
         );
 
         ProfileCreation::of_account(
-            true,
+            account,
             Some(ProfileMintSeams::from_readiness(reading, &door).availability()),
         )
     }
