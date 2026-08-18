@@ -18,9 +18,21 @@
 //! # What this module deliberately does NOT do
 //!
 //! It reports no settlement. [`TakenOffer`] names a bundle a mempool accepted, which is a statement
-//! about a node and not about the chain; the settled verdict comes from a later chain read. And it
-//! draws no progress: the centralized modal observes the transaction feed and is raised by ANY
-//! broadcast, so a take inherits it with no opt-in.
+//! about a node and not about the chain.
+//!
+//! **Two mechanisms this module does NOT reach, stated so nobody builds on a promise:**
+//!
+//! * **The centralized progress modal (dig_ecosystem#3075) does NOT fire for a take.** That modal
+//!   observes [`crate::transaction::Feed`] and nothing else, and every producer calls
+//!   `Feed::publish` explicitly. This path pushes through `ControlSpendPublisher::push_detailed`
+//!   and never publishes, so no modal is raised. The offer card draws its own Working/Broadcast/
+//!   Failed states instead — honest, but local.
+//! * **No later chain read follows.** A take creates no `InFlightSend`, so nothing performs the
+//!   settlement read that `InFlightSend::status` performs for an ordinary send. Whether the swap
+//!   settled is currently unobserved by this app.
+//!
+//! Both gaps are tracked as dig_ecosystem#3111. Do not read this module's honest local states as
+//! evidence that centralized progress or settlement follow-up already exist.
 
 use chia_protocol::Coin;
 use chia_sdk_driver::SpendContext;
@@ -252,8 +264,12 @@ where
 ///
 /// The four states are the four `professional-ui` async states, and none of them claims a settled
 /// swap: [`Broadcast`](Self::Broadcast) says a node accepted the bundle, which is a statement about a
-/// node. Whether the swap happened is a chain read the centralized progress modal already performs
-/// for every broadcast, and this enum deliberately has no variant that could be mistaken for it.
+/// node.
+///
+/// Whether the swap happened is a chain read, and **nothing in this app performs it for a take**
+/// today — a take creates no `InFlightSend`, so the settlement read an ordinary send gets never
+/// runs (dig_ecosystem#3111). This enum deliberately has no variant that could be mistaken for a
+/// settled swap, which is what keeps the surface honest while that gap is open.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TakeProgress {
     /// Nothing is being taken.

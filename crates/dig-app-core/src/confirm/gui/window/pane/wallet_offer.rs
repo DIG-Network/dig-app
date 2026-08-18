@@ -21,11 +21,15 @@
 //! surface on which both halves of the swap are ever visible, and it is where consent is really
 //! given.
 //!
-//! # Why there is no progress bar here
+//! # Why the progress this card draws is its OWN
 //!
-//! A broadcast raises the centralized progress modal by observing the transaction feed, with no
-//! caller opt-in. This card reports only what it knows itself: a node accepted the bundle. Whether
-//! the swap settled is a chain read, and nothing here claims one.
+//! The centralized progress modal (dig_ecosystem#3075) observes [`crate::transaction::Feed`], and
+//! the take path never publishes to it — so **no modal is raised for a take**. This card therefore
+//! draws its own Working/Broadcast/Failed states rather than inheriting them.
+//!
+//! It reports only what it knows itself: a node accepted the bundle. Whether the swap settled is a
+//! chain read that **nothing currently performs for a take**, and nothing here claims one. Both
+//! gaps are dig_ecosystem#3111 — this card's honesty is a stopgap, not evidence they are covered.
 
 use super::card;
 use super::copy;
