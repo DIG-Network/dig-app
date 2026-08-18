@@ -22,10 +22,10 @@ use dig_account::{
     CatTransferRequest, PayableDestination, PendingTransfer, TransferRequest, TransferStatus,
 };
 
-use crate::amount::{parse_asset_amount, AmountProblem};
+use crate::amount::{amount_with_unit, format_xch, parse_asset_amount, ticker, AmountProblem};
 use crate::wallet::overview::BalanceReading;
 use crate::wallet::send::{SendError, DEFAULT_SEND_FEE_MOJOS};
-use crate::wallet::state::Asset;
+use crate::wallet::state::{Asset, AssetId};
 
 /// How far the current send has got, or that there is none.
 ///
@@ -351,6 +351,11 @@ pub enum SendBlocked {
     /// `dig-account` draws exactly this distinction in `CatTransferError::NoXchForFee` and the
     /// surface must not collapse what the builder took care to separate.
     NoXchForFee {
+        /// The token being SENT — named in the sentence so it says which two tokens are involved.
+        ///
+        /// Carried rather than assumed to be $DIG: with arbitrary CATs sendable, a sentence that
+        /// wrote "$DIG" would name the wrong token for every other one (dig_ecosystem#3077).
+        asset: Asset,
         /// The fee, in mojos.
         needed: u64,
         /// The wallet's whole XCH holding, in mojos, as last read.
@@ -379,31 +384,23 @@ impl SendBlocked {
                 asset,
                 needed,
                 spendable,
-            } => {
-                let ticker = ticker(*asset);
-                format!(
-                    "That is more than this wallet holds. This payment comes to {} {ticker}, and \
-                     the last reading was {} {ticker}.",
-                    crate::amount::format_asset_amount(*asset, *needed),
-                    crate::amount::format_asset_amount(*asset, *spendable)
-                )
-            }
-            Self::NoXchForFee { needed, spendable } => format!(
-                "A network fee is paid in XCH, not in $DIG, and this wallet holds {} XCH against a \
-                 fee of {} XCH. Add a little XCH and this send becomes available.",
-                crate::amount::format_asset_amount(Asset::Xch, *spendable),
-                crate::amount::format_asset_amount(Asset::Xch, *needed)
+            } => format!(
+                "That is more than this wallet holds. This payment comes to {}, and the last \
+                 reading was {}.",
+                amount_with_unit(*asset, *needed),
+                amount_with_unit(*asset, *spendable)
+            ),
+            Self::NoXchForFee {
+                asset,
+                needed,
+                spendable,
+            } => format!(
+                "A network fee is paid in XCH, not in {}, and this wallet holds {} XCH against a                  fee of {} XCH. Add a little XCH and this send becomes available.",
+                ticker(*asset),
+                format_xch(*spendable),
+                format_xch(*needed)
             ),
         }
-    }
-}
-
-/// How an asset is named to a person. The one place the two tickers are written, so a sentence about
-/// a $DIG shortfall can never quote an XCH ticker.
-fn ticker(asset: Asset) -> &'static str {
-    match asset {
-        Asset::Xch => "XCH",
-        Asset::Dig => "$DIG",
     }
 }
 
@@ -425,6 +422,15 @@ fn amount_sentence(asset: Asset, problem: AmountProblem) -> String {
              smaller amount than that."
         ),
         AmountProblem::TooLarge => format!("That is more {ticker} than can exist."),
+        // Nothing is wrong with what was typed, so the sentence does not correct it: it says which
+        // fact is missing and what CAN be done instead. Reading the amount would mean choosing a
+        // decimal point on the person's behalf, and the number that comes out of a guessed divisor
+        // is a different payment from the one they meant to make.
+        AmountProblem::PrecisionUnknown => format!(
+            "DIG has not been told how many decimal places {ticker} has, so amounts of it are \
+             entered as whole base units — the same unit your balance is shown in. Enter a whole \
+             number, with no decimal point."
+        ),
     }
 }
 
@@ -489,14 +495,20 @@ impl SendDraft<'_> {
                     .map_err(|e| SendBlocked::BadDestination(e.to_string()))?
                     .with_fee(DEFAULT_SEND_FEE_MOJOS),
             ),
-            Asset::Dig => SendIntent::Dig(
-                CatTransferRequest::new(
+            // Every CAT takes the same arm, $DIG included, because the builder behind it genuinely
+            // is one mechanism: `dig_account::WalletOps::build_cat_transfer` is generic over the
+            // asset id and `build_dig_transfer` is that method with $DIG passed in. Branching on
+            // $DIG here would create a second CAT send path whose only distinguishing feature is
+            // which of the two got the next fix.
+            Asset::Cat(asset_id) => SendIntent::Cat {
+                asset_id,
+                request: CatTransferRequest::new(
                     PayableDestination::from_address(destination)
                         .map_err(|e| SendBlocked::BadDestination(e.to_string()))?,
                     amount,
                 )
                 .with_fee_mojos(DEFAULT_SEND_FEE_MOJOS),
-            ),
+            },
         };
 
         self.affordable(amount)?;
@@ -528,26 +540,33 @@ impl SendDraft<'_> {
                             asset: Asset::Xch,
                             problem: AmountProblem::TooLarge,
                         })?;
-                if needed > balances.xch_mojos {
+                if needed > balances.xch_mojos() {
                     return Err(SendBlocked::NotEnough {
                         asset: Asset::Xch,
                         needed,
-                        spendable: balances.xch_mojos,
+                        spendable: balances.xch_mojos(),
                     });
                 }
             }
-            Asset::Dig => {
-                if amount > balances.dig_units {
+            // Every CAT is weighed against ITS OWN holding, read from the balance by asset rather
+            // than from a field named after one token. `Balances::of` answers `0` for an asset this
+            // reading did not cover, which refuses the send — the fail-closed direction, and the
+            // only one available: a wallet that shrugged and allowed it would build a spend against
+            // coins nobody has confirmed are there.
+            Asset::Cat(_) => {
+                let held = balances.of(self.asset);
+                if amount > held {
                     return Err(SendBlocked::NotEnough {
-                        asset: Asset::Dig,
+                        asset: self.asset,
                         needed: amount,
-                        spendable: balances.dig_units,
+                        spendable: held,
                     });
                 }
-                if DEFAULT_SEND_FEE_MOJOS > balances.xch_mojos {
+                if DEFAULT_SEND_FEE_MOJOS > balances.xch_mojos() {
                     return Err(SendBlocked::NoXchForFee {
+                        asset: self.asset,
                         needed: DEFAULT_SEND_FEE_MOJOS,
-                        spendable: balances.xch_mojos,
+                        spendable: balances.xch_mojos(),
                     });
                 }
             }
@@ -595,7 +614,13 @@ enum Accepted {
     /// An XCH transfer that can be polled to a verdict.
     Xch(crate::wallet::send::InFlightSend),
     /// A $DIG payment that cannot.
-    Dig(crate::wallet::send::BroadcastDig),
+    Cat {
+        /// Which token moved — carried out of the intent so the activity row can name it. A
+        /// `BroadcastDig` does not know its own asset, and the row must not guess one.
+        asset: Asset,
+        /// What the mempool accepted.
+        broadcast: crate::wallet::send::BroadcastDig,
+    },
 }
 
 /// A validated send, ready to be performed — one variant per asset the wallet can move.
@@ -611,8 +636,19 @@ enum Accepted {
 pub enum SendIntent {
     /// A native XCH payment, fee included in the same holding.
     Xch(TransferRequest),
-    /// A $DIG (CAT) payment. The fee rides alongside it in XCH.
-    Dig(CatTransferRequest),
+    /// A CAT payment — $DIG or any other token — with the fee riding alongside it in XCH.
+    ///
+    /// The asset id travels WITH the request because `CatTransferRequest` does not carry one: it
+    /// describes the recipient, the amount and the fee, and the token it is an amount OF is a
+    /// separate argument to the builder. Keeping the two together in one variant is what stops a
+    /// caller pairing a request with the wrong asset id — the one mistake in this whole slice that
+    /// would move somebody else's token.
+    Cat {
+        /// Which CAT moves. [`Asset::DIG`]'s id for a $DIG payment; any other token's for theirs.
+        asset_id: AssetId,
+        /// Recipient, amount and fee.
+        request: CatTransferRequest,
+    },
 }
 
 /// Written out rather than derived because `CatTransferRequest` is not `PartialEq`.
@@ -625,8 +661,21 @@ impl PartialEq for SendIntent {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Xch(mine), Self::Xch(theirs)) => mine == theirs,
-            (Self::Dig(mine), Self::Dig(theirs)) => {
-                mine.recipient() == theirs.recipient()
+            (
+                Self::Cat {
+                    asset_id: my_asset,
+                    request: mine,
+                },
+                Self::Cat {
+                    asset_id: their_asset,
+                    request: theirs,
+                },
+            ) => {
+                // The ASSET is compared first and is not optional: two payments of the same amount
+                // to the same address in two different tokens are two different payments, and
+                // `TrayAction`'s equality decides whether the shell has already handled one.
+                my_asset == their_asset
+                    && mine.recipient() == theirs.recipient()
                     && mine.amount_base_units() == theirs.amount_base_units()
                     && mine.fee_mojos() == theirs.fee_mojos()
             }
@@ -642,7 +691,7 @@ impl SendIntent {
     pub fn asset(&self) -> Asset {
         match self {
             Self::Xch(_) => Asset::Xch,
-            Self::Dig(_) => Asset::Dig,
+            Self::Cat { asset_id, .. } => Asset::Cat(*asset_id),
         }
     }
 
@@ -650,7 +699,7 @@ impl SendIntent {
     pub fn amount(&self) -> u64 {
         match self {
             Self::Xch(request) => request.amount_mojos(),
-            Self::Dig(request) => request.amount_base_units(),
+            Self::Cat { request, .. } => request.amount_base_units(),
         }
     }
 }
@@ -1021,10 +1070,13 @@ impl SendHolder {
                 );
                 self.accepted(pending);
             }
-            Ok(Accepted::Dig(broadcast)) => {
+            // The asset comes from the ACCEPTED send, never from a literal: this row's ticker and
+            // its decimal places both belong to whichever token was actually moved, and a literal
+            // here is exactly the defect dig_ecosystem#2396 fixed one token too early.
+            Ok(Accepted::Cat { asset, broadcast }) => {
                 Self::list_as_sent(
                     broadcast.recipient(),
-                    Asset::Dig,
+                    asset,
                     broadcast.amount_base_units(),
                     broadcast.bundle_id().to_string(),
                 );
@@ -1168,9 +1220,17 @@ impl SendHolder {
         let session = SendSession::new(residency, money, custody, &chain, &publisher);
         match intent {
             SendIntent::Xch(request) => runtime.block_on(session.send(request)).map(Accepted::Xch),
-            SendIntent::Dig(request) => runtime
-                .block_on(session.send_dig(request))
-                .map(Accepted::Dig),
+            // The asset id is carried straight through to `dig-account`'s generic CAT builder. This
+            // is the whole of what "send any CAT" costs here: 32 different bytes, not a second
+            // spend path (dig_ecosystem#3077).
+            SendIntent::Cat { asset_id, request } => runtime
+                .block_on(
+                    session.send_cat(chia_protocol::Bytes32::new(*asset_id.as_bytes()), request),
+                )
+                .map(|broadcast| Accepted::Cat {
+                    asset: Asset::Cat(*asset_id),
+                    broadcast,
+                }),
         }
     }
 
@@ -1281,10 +1341,7 @@ mod tests {
     /// A funded reading: one XCH, comfortably more than the fixtures spend.
     fn funded() -> BalanceReading {
         BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_000_000_000_000,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(1_000_000_000_000, 0),
             as_of: BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -1474,10 +1531,7 @@ mod tests {
         let progress = SendProgress::Idle;
         let amount = 250_000_000_000_u64;
         let holding = |xch_mojos: u64| BalanceReading::Known {
-            balances: Balances {
-                xch_mojos,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(xch_mojos, 0),
             as_of: BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -1851,10 +1905,7 @@ mod tests {
     /// A reading with `dig_units` $DIG base units and `xch_mojos` mojos.
     fn holding(xch_mojos: u64, dig_units: u64) -> BalanceReading {
         BalanceReading::Known {
-            balances: Balances {
-                xch_mojos,
-                dig_units,
-            },
+            balances: Balances::of_xch_and_dig(xch_mojos, dig_units),
             as_of: BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -1869,7 +1920,7 @@ mod tests {
         progress: &'a SendProgress,
     ) -> SendDraft<'a> {
         SendDraft {
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             destination: PAYABLE,
             amount,
             account_open: true,
@@ -1892,12 +1943,17 @@ mod tests {
     fn a_dig_amount_is_read_in_dig_base_units_and_carries_the_xch_fee() {
         let balance = holding(1_000_000_000_000, 100_000);
         let progress = SendProgress::Idle;
-        let SendIntent::Dig(request) = dig_draft("1.5", &balance, &progress)
+        let SendIntent::Cat { asset_id, request } = dig_draft("1.5", &balance, &progress)
             .assess()
             .expect("a funded, open, well-formed $DIG draft is sendable")
         else {
-            panic!("a $DIG draft produced a non-$DIG intent");
+            panic!("a $DIG draft produced a non-CAT intent");
         };
+        assert_eq!(
+            Asset::Cat(asset_id),
+            Asset::DIG,
+            "a $DIG draft must name $DIG's own asset id, not another token's"
+        );
         assert_eq!(
             request.amount_base_units(),
             1_500,
@@ -1944,7 +2000,7 @@ mod tests {
     /// # The fixture is deliberately XCH-RICH and $DIG-POOR
     ///
     /// The nearest wrong implementation is the one that shipped before this ticket: an affordability
-    /// check reading `balances.xch_mojos` whatever the asset. Against a wallet holding plenty of both
+    /// check reading `balances.xch_mojos()` whatever the asset. Against a wallet holding plenty of both
     /// it is indistinguishable from the correct one. So this wallet holds an XCH fortune and almost no
     /// $DIG, and the send is of $DIG — which the wrong check waves through and the right one refuses.
     ///
@@ -1958,7 +2014,7 @@ mod tests {
         assert_eq!(
             dig_draft("2.001", &rich_in_xch_poor_in_dig, &progress).assess(),
             Err(SendBlocked::NotEnough {
-                asset: Asset::Dig,
+                asset: Asset::DIG,
                 needed: 2_001,
                 spendable: 2_000,
             }),
@@ -2014,6 +2070,7 @@ mod tests {
         assert_eq!(
             blocked,
             SendBlocked::NoXchForFee {
+                asset: Asset::DIG,
                 needed: DEFAULT_SEND_FEE_MOJOS,
                 spendable: DEFAULT_SEND_FEE_MOJOS - 1,
             },
@@ -2067,7 +2124,7 @@ mod tests {
         .encode()
         .expect("a 32-byte payload always encodes");
         let testnet = testnet.as_str();
-        for asset in [Asset::Xch, Asset::Dig] {
+        for asset in [Asset::Xch, Asset::DIG] {
             let draft = SendDraft {
                 asset,
                 destination: testnet,
@@ -2094,7 +2151,7 @@ mod tests {
     #[test]
     fn a_sent_row_carries_the_asset_that_was_sent_and_not_a_fixed_one() {
         let recipient = chia_protocol::Bytes32::new([0x2C; 32]);
-        for (asset, amount) in [(Asset::Xch, 250_000_000_000_u64), (Asset::Dig, 1_500_u64)] {
+        for (asset, amount) in [(Asset::Xch, 250_000_000_000_u64), (Asset::DIG, 1_500_u64)] {
             let record = sent_record(recipient, asset, amount, "reference".to_string());
             assert_eq!(
                 record.asset, asset,

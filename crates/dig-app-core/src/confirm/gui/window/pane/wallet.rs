@@ -54,13 +54,14 @@ use super::flow::Flow;
 use super::identity;
 use super::select::{self, Choice};
 use super::text;
+use crate::amount::{format_asset_amount, format_xch, ticker};
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
-    address_line, as_of_sentence, format_amount, is_syncing, unknown_reason, AddressReading,
-    BalanceReading, Balances,
+    address_line, as_of_sentence, is_syncing, unknown_reason, AddressReading, BalanceReading,
+    Balances,
 };
 use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
 use crate::wallet::sending::{
@@ -574,27 +575,55 @@ fn holdings(balance: &BalanceReading) -> Vec<Readout> {
     }
 }
 
-/// The two held amounts, each formatted by the one formatter that knows its decimals.
+/// One readout per held asset, each formatted by the one formatter that knows — or admits it does
+/// not know — that asset's decimals (dig_ecosystem#3077).
 ///
-/// $DIG first: it is the network's own token and the reason most people have this wallet, and XCH is
-/// the fee currency beside it.
+/// $DIG leads: it is the network's own token and the reason most people have this wallet. XCH is the
+/// fee currency beside it, and every other token follows in the order it was read, which is the
+/// order the person added them — a list that re-sorted itself as balances moved would make somebody
+/// re-find their own token every time they looked.
+///
+/// # A token whose precision is unknown is not rendered as a whole-coin figure
+///
+/// Its row reads `1500 base units` rather than `1500`, because those are different claims about
+/// somebody's money and only the first is true here. The label and the unit both come from the
+/// asset, so no row can borrow a neighbour's decimal point.
 fn figures(held: &Balances) -> Vec<Readout> {
-    vec![
-        Readout::new(
-            copy::wallet::DIG_LABEL,
-            Value::Measure {
-                amount: format_amount(Asset::Dig, held.dig_units),
-                unit: copy::wallet::DIG_UNIT.to_string(),
-            },
+    let (dig, rest): (Vec<_>, Vec<_>) = held.holdings.iter().partition(|h| h.asset.is_dig());
+    dig.into_iter().chain(rest).map(holding_row).collect()
+}
+
+/// One held asset as a labelled figure with its unit.
+fn holding_row(held: &crate::wallet::overview::Holding) -> Readout {
+    let (label, unit) = match held.asset {
+        Asset::Xch => (
+            copy::wallet::XCH_LABEL.to_string(),
+            copy::wallet::XCH_UNIT.to_string(),
         ),
-        Readout::new(
-            copy::wallet::XCH_LABEL,
-            Value::Measure {
-                amount: format_amount(Asset::Xch, held.xch_mojos),
-                unit: copy::wallet::XCH_UNIT.to_string(),
-            },
+        _ if held.asset.is_dig() => (
+            copy::wallet::DIG_LABEL.to_string(),
+            copy::wallet::DIG_UNIT.to_string(),
         ),
-    ]
+        // A token this app has only been told the id of: the id IS the label, shortened, and the
+        // unit says base units because that is the only unit its figure is true in.
+        Asset::Cat(_) => (
+            format!("{} {}", copy::wallet::CAT_LABEL, ticker(held.asset)),
+            copy::wallet::BASE_UNITS_SUFFIX.to_string(),
+        ),
+    };
+    Readout::new(
+        label,
+        Value::Measure {
+            amount: match crate::amount::decimals(held.asset) {
+                // Known precision: the whole-coin figure, and the unit is the ticker.
+                Some(_) => format_asset_amount(held.asset, held.base_units)
+                    .expect("a known precision renders"),
+                // Unknown: the raw base units, under the `base units` unit above.
+                None => held.base_units.to_string(),
+            },
+            unit,
+        },
+    )
 }
 
 /// Sending: what the last payment came to, and the form for the next one (dig_ecosystem#2819).
@@ -981,7 +1010,7 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
     }
     .assess();
 
-    if let Some(picked) = asset_chooser(flow, t, live, element, asset) {
+    if let Some(picked) = asset_chooser(flow, t, live, element, asset, &facts.balance) {
         asset = picked;
     }
     flow.gap(space::S3);
@@ -1031,7 +1060,7 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
     // stays XCH for BOTH assets because the fee genuinely is: Chia charges fees in native mojos and
     // a CAT cannot pay its own. Formatting it as $DIG when $DIG is selected would show a number a
     // thousand times off, in the one place a person is deciding what a payment costs.
-    let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
+    let fee = format_xch(DEFAULT_SEND_FEE_MOJOS);
     flow.place(|ui, at| (text::caption(ui, at, t, &copy::wallet::send_fee(&fee)), ()));
     flow.gap(space::S3);
 
@@ -1190,17 +1219,9 @@ fn asset_chooser(
     live: bool,
     element: egui::Id,
     asset: Asset,
+    balance: &BalanceReading,
 ) -> Option<Asset> {
-    let options = [
-        Choice {
-            label: copy::wallet::SEND_ASSET_XCH.to_string(),
-            id: Asset::Xch,
-        },
-        Choice {
-            label: copy::wallet::SEND_ASSET_DIG.to_string(),
-            id: Asset::Dig,
-        },
-    ];
+    let options = sendable_assets(balance);
     let selected = options.iter().position(|choice| choice.id == asset);
     flow.place(|ui, at| {
         select::select(
@@ -1217,6 +1238,44 @@ fn asset_chooser(
             },
         )
     })
+}
+
+/// What the chooser offers: exactly the assets the balance reading covers (dig_ecosystem#3077).
+///
+/// # The chooser is derived from the READING, not from a list of tokens dig-app knows
+///
+/// You can send what you can see you hold. Deriving the options from the same reading the holdings
+/// card is drawn from means the two surfaces cannot disagree about which tokens exist — a chooser
+/// offering a token absent from the card above it would be offering to spend something this app has
+/// no figure for, and the send would then be weighed against a balance of zero and refused, with no
+/// visible reason.
+///
+/// # Why the fallback is the two assets and not an empty list
+///
+/// Before any read completes there is no reading to derive from, and an EMPTY chooser is a trap:
+/// the form would be unusable with nothing on screen explaining why. The two assets dig-app knows
+/// by definition are the honest default — they are the two it can always speak about precisely, and
+/// the send is still refused later by `affordable` if the money is not there.
+fn sendable_assets(balance: &BalanceReading) -> Vec<Choice<Asset>> {
+    let assets: Vec<Asset> = match balance {
+        BalanceReading::Known { balances, .. } => {
+            balances.holdings.iter().map(|held| held.asset).collect()
+        }
+        BalanceReading::Pending | BalanceReading::Unknown(_) => vec![Asset::Xch, Asset::DIG],
+    };
+    assets
+        .into_iter()
+        .map(|asset| Choice {
+            // The chooser's label is the asset's own ticker, so an unfamiliar CAT appears by its
+            // shortened id rather than under a name nobody supplied.
+            label: match asset {
+                Asset::Xch => copy::wallet::SEND_ASSET_XCH.to_string(),
+                _ if asset.is_dig() => copy::wallet::SEND_ASSET_DIG.to_string(),
+                Asset::Cat(_) => ticker(asset),
+            },
+            id: asset,
+        })
+        .collect()
 }
 
 /// Whatever the model puts on this tab that the pane has not already drawn as a control.
@@ -1668,10 +1727,7 @@ mod tests {
     /// so a swapped-asset bug cannot hide behind two different-looking numbers being present.
     #[test]
     fn each_asset_is_scaled_by_its_own_decimals() {
-        let items = figures(&Balances {
-            xch_mojos: 1_000_000_000_000,
-            dig_units: 1_000,
-        });
+        let items = figures(&Balances::of_xch_and_dig(1_000_000_000_000, 1_000));
         let shown = |label: &str| {
             items
                 .iter()
@@ -1702,10 +1758,7 @@ mod tests {
     /// divisor gets both of these visibly wrong.
     #[test]
     fn a_fraction_of_an_asset_survives_formatting() {
-        let items = figures(&Balances {
-            xch_mojos: 1,
-            dig_units: 1,
-        });
+        let items = figures(&Balances::of_xch_and_dig(1, 1));
         assert_eq!(items[0].value.shown(), "0.001");
         assert_eq!(items[1].value.shown(), "0.000000000001");
     }
@@ -1765,10 +1818,7 @@ mod tests {
         // A real reading, by contrast, DOES produce figures — without this the assertions above are
         // satisfied by a `holdings` that never returns a number at all.
         let known = holdings(&BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_000_000_000_000,
-                dig_units: 2_000,
-            },
+            balances: Balances::of_xch_and_dig(1_000_000_000_000, 2_000),
             as_of: crate::wallet::engine::BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -2186,10 +2236,7 @@ mod tests {
             account: Some(AccountState::Unlocked { recoverable: true }),
             receive_address: Some(ADDRESS.to_string()),
             balance: BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_000_000_000_000,
-                    dig_units: 0,
-                },
+                balances: Balances::of_xch_and_dig(1_000_000_000_000, 0),
                 as_of: crate::wallet::engine::BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,
@@ -2349,7 +2396,7 @@ mod tests {
     #[test]
     fn the_fee_is_shown_in_xch_and_never_as_a_raw_mojo_count() {
         let said = painted_pane_with(&sendable(SendProgress::Idle), 900.0, Disclosed::Send);
-        let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
+        let fee = format_xch(DEFAULT_SEND_FEE_MOJOS);
         assert_eq!(fee, "0.000001", "the fixture no longer pins a real fee");
         assert!(
             said.iter().any(|line| line.contains(&fee)),
@@ -2418,10 +2465,7 @@ mod tests {
     #[test]
     fn the_pane_returns_a_validated_transfer_and_only_when_one_is_sendable() {
         let balance = BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_000_000_000_000,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(1_000_000_000_000, 0),
             as_of: crate::wallet::engine::BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,

@@ -23,16 +23,40 @@ use crate::storage::{did_hash, profile_dir, write_durably};
 
 use super::WalletError;
 
-/// The asset a coin or balance is denominated in. Kept small + explicit; extended additively as the
-/// wallet grows to hold more CAT types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Asset {
-    /// Native Chia (XCH), in mojos.
-    Xch,
-    /// The DIG CAT, in base units.
-    Dig,
-}
+/// The asset a coin or balance is denominated in: native XCH, or any CAT named by its asset id.
+///
+/// # Re-exported from the wire contract rather than restated
+///
+/// This is `dig-node-control-interface`'s own [`Asset`](dig_node_control_interface::params::Asset),
+/// the type the node parses `control.wallet.balance` / `.coins` params into. dig-app and the node
+/// therefore hold ONE definition of what an asset is and one definition of how it is spelled on the
+/// wire — the byte-identical contract recorded in the `canonical` skill is a compile-time fact here
+/// rather than two implementations that agree today. The conversion functions this module's
+/// consumers used to need (`app_asset` / `wire_asset` in [`super::node`]) are gone with it.
+///
+/// # Two cases, never three — this is the money-truth part
+///
+/// $DIG is a CAT, so it is [`Asset::DIG`], an associated CONSTANT and not a variant. A three-case
+/// `{Xch, Dig, Cat(id)}` would give $DIG two INEQUAL spellings, and every filter in this file is an
+/// `asset == asset` comparison: [`WalletState::balance`], [`WalletState::total_sent`], the engine's
+/// coin read. A wallet holding $DIG coins under both spellings would sum only the half matching
+/// whichever spelling the caller happened to pass, and report it as the whole balance. One token,
+/// one value.
+///
+/// # Wire + at-rest form
+///
+/// | Value | JSON |
+/// |---|---|
+/// | [`Asset::Xch`] | `"xch"` |
+/// | [`Asset::DIG`] | `"dig"` |
+/// | any other CAT | `{"cat":"<64-hex>"}` |
+///
+/// The two bare tokens are what every sealed `wallet-state.seal` written before this widening
+/// contains, and they are still ACCEPTED — so an existing wallet opens unchanged — while `"dig"` is
+/// still EMITTED, so a node built before the widening still understands what this app sends.
+/// `asset_serde` in this module's tests pins BOTH directions, because an accept-test cannot see a
+/// broken emit.
+pub use dig_node_control_interface::params::{Asset, AssetId};
 
 /// A single spendable coin as the wallet last saw it — the cached view the engine's chain reads
 /// populate. Amounts are the asset's base unit (mojos for XCH, base units for DIG).
@@ -118,6 +142,37 @@ pub struct WalletState {
     /// rather than a wallet with no addresses.
     #[serde(default)]
     pub notes: Vec<AddressNote>,
+    /// The CATs this wallet WATCHES beyond XCH and $DIG — the tokens the user has added by asset id
+    /// (dig_ecosystem#3077).
+    ///
+    /// # Why a wallet has to be TOLD which CATs it holds
+    ///
+    /// The node's wallet seam answers per-asset: `control.wallet.balance` and `control.wallet.coins`
+    /// both take the asset to read as a parameter, and there is no method that enumerates what an
+    /// address holds. So this app can read the balance of any CAT it can NAME and cannot discover
+    /// one it has never heard of. XCH and $DIG are always read because dig-app knows them by
+    /// definition; everything else is here because a person added it.
+    ///
+    /// That is a real limit and it is stated rather than papered over: a token a person has not
+    /// added is ABSENT from the wallet, never shown as zero. Enumerating held assets needs a node
+    /// method that does not exist yet (dig_ecosystem#3115).
+    ///
+    /// [`Asset::Xch`] and [`Asset::DIG`] are refused entry by [`watch`](Self::watch) — they are read
+    /// unconditionally, and a duplicate here would list them twice.
+    #[serde(default)]
+    pub watched: Vec<Asset>,
+}
+
+/// Why a token was not added to the watch list.
+///
+/// A reason and not a silent no-op: a person who pastes the $DIG asset id and sees nothing happen
+/// concludes the field is broken, when in fact the token they asked for was already on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchRefused {
+    /// XCH and $DIG are read unconditionally, so this token is already on the list.
+    AlreadyShown,
+    /// This CAT is already being watched.
+    AlreadyWatched,
 }
 
 impl WalletState {
@@ -128,6 +183,47 @@ impl WalletState {
             .filter(|c| c.asset == asset)
             .map(|c| c.amount)
             .sum()
+    }
+
+    /// Every asset this wallet reads a balance for, in display order: XCH, then $DIG, then each
+    /// watched CAT in the order it was added.
+    ///
+    /// The order is stable and deliberate rather than sorted: a list that reorders itself when a
+    /// balance changes makes a person re-find their own token every time they look, and the two
+    /// assets dig-app knows by name belong at the top because they are the two it can always speak
+    /// about precisely.
+    pub fn read_list(&self) -> Vec<Asset> {
+        let mut assets = vec![Asset::Xch, Asset::DIG];
+        assets.extend(self.watched.iter().copied());
+        assets
+    }
+
+    /// Add `asset` to the watch list, or say why it was not added.
+    ///
+    /// Idempotent: watching a token twice is the same wallet, not an error a person needs to see.
+    ///
+    /// # Errors
+    ///
+    /// [`WatchRefused`], naming which of the two it was so the surface can say it.
+    pub fn watch(&mut self, asset: Asset) -> Result<(), WatchRefused> {
+        if asset == Asset::Xch || asset == Asset::DIG {
+            return Err(WatchRefused::AlreadyShown);
+        }
+        if self.watched.contains(&asset) {
+            return Err(WatchRefused::AlreadyWatched);
+        }
+        self.watched.push(asset);
+        Ok(())
+    }
+
+    /// Stop watching `asset`; `true` when it was being watched.
+    ///
+    /// The escape hatch `professional-ui` requires: a token added by a mistyped id must be
+    /// removable, or the wallet has acquired a permanent row nobody can get rid of.
+    pub fn unwatch(&mut self, asset: Asset) -> bool {
+        let before = self.watched.len();
+        self.watched.retain(|watched| *watched != asset);
+        self.watched.len() != before
     }
 
     /// Append an outbound spend to the history log. History is kept oldest-first, so the read
@@ -338,6 +434,163 @@ mod tests {
         WalletStore::new(dir, test_sealer(did))
     }
 
+    /// A CAT dig-app has never been told anything about but its id. Deliberately NOT $DIG's id and
+    /// not a repeated byte, so a filter that matched loosely, or an implementation that fell back to
+    /// $DIG, produces a visibly different value rather than an accidentally-equal one.
+    const SPACEBUCKS_HEX: &str = "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+
+    /// [`SPACEBUCKS_HEX`] as an [`Asset`].
+    fn spacebucks() -> Asset {
+        Asset::Cat(AssetId::from_hex(SPACEBUCKS_HEX).expect("a 64-hex asset id"))
+    }
+
+    /// **$DIG still EMITS the bare `"dig"` token, and another CAT emits the tagged form.**
+    ///
+    /// This is the direction a round-trip test structurally cannot see. `parse(emit(x)) == x` holds
+    /// for BOTH spellings of $DIG, so an implementation that emitted `{"cat":"a406…"}` for $DIG
+    /// would round-trip perfectly here and break every node built before the widening — which reads
+    /// only the two bare strings. The exact bytes are therefore asserted, not the round trip.
+    ///
+    /// The second assertion is the control that makes the first meaningful: a serializer that
+    /// emitted `"dig"` for EVERY CAT would satisfy the $DIG line on its own, and would name
+    /// somebody else's token $DIG on the wire.
+    #[test]
+    fn dig_emits_its_legacy_token_while_another_cat_emits_the_tagged_form() {
+        assert_eq!(serde_json::to_string(&Asset::DIG).unwrap(), r#""dig""#);
+        assert_eq!(serde_json::to_string(&Asset::Xch).unwrap(), r#""xch""#);
+        assert_eq!(
+            serde_json::to_string(&spacebucks()).unwrap(),
+            format!(r#"{{"cat":"{SPACEBUCKS_HEX}"}}"#)
+        );
+    }
+
+    /// **Every spelling a peer or an older sealed state can produce is ACCEPTED, and the two
+    /// spellings of $DIG are ONE value.**
+    ///
+    /// The `{"cat":"<the $DIG id>"}` line is the money-truth one: it must come back EQUAL to
+    /// `Asset::DIG`, because `WalletState::balance` filters with `asset == asset`. On a
+    /// three-variant `{Xch, Dig, Cat(id)}` this assertion fails, and a wallet holding coins under
+    /// both spellings would sum only one of them and report it as the whole balance.
+    #[test]
+    fn both_spellings_of_dig_deserialize_to_the_same_value() {
+        let parse = |json: &str| serde_json::from_str::<Asset>(json).expect(json);
+        assert_eq!(parse(r#""xch""#), Asset::Xch);
+        assert_eq!(parse(r#""dig""#), Asset::DIG);
+        assert_eq!(
+            parse(&format!(r#"{{"cat":"{}"}}"#, Asset::DIG_ASSET_ID_HEX)),
+            Asset::DIG,
+            "the tagged spelling of $DIG must be the SAME value as the bare token, or a balance \
+             filtered by one silently omits everything carrying the other"
+        );
+        assert_eq!(
+            parse(&format!(r#"{{"cat":"{SPACEBUCKS_HEX}"}}"#)),
+            spacebucks()
+        );
+        assert_ne!(spacebucks(), Asset::DIG, "the fixture must not be $DIG");
+    }
+
+    /// **A sealed wallet written before the widening opens unchanged.**
+    ///
+    /// The at-rest form is the wire form, so this is the same acceptance as above — but asserted
+    /// through `CoinRecord`, the type actually persisted, because that is what a person's existing
+    /// `wallet-state.seal` contains. A widening that broke it would lose somebody's coin view.
+    #[test]
+    fn a_coin_record_written_with_the_legacy_token_still_reads() {
+        let legacy = r#"{"coin_id":"ab","asset":"dig","amount":1500}"#;
+        let record: CoinRecord = serde_json::from_str(legacy).expect("the legacy at-rest form");
+        assert_eq!(record.asset, Asset::DIG);
+        assert_eq!(record.amount, 1_500);
+        // And it is written back in the same spelling, so a downgrade to an older build reads it.
+        assert!(serde_json::to_string(&record)
+            .unwrap()
+            .contains(r#""asset":"dig""#));
+    }
+
+    /// **A $DIG balance is whole however its coins were spelled.**
+    ///
+    /// The fixture is the point: the same 100 + 50 base units of $DIG, one coin recorded under each
+    /// spelling, plus an unrelated CAT and some XCH that must NOT be counted. A three-variant enum
+    /// answers 100 here — half the money, reported as the whole — and no single-spelling fixture can
+    /// see that, because with one spelling both implementations agree.
+    #[test]
+    fn a_dig_balance_sums_coins_recorded_under_either_spelling() {
+        let tagged_dig =
+            serde_json::from_str::<Asset>(&format!(r#"{{"cat":"{}"}}"#, Asset::DIG_ASSET_ID_HEX))
+                .expect("the tagged spelling of $DIG");
+        let state = WalletState {
+            coins: vec![
+                CoinRecord {
+                    coin_id: "01".into(),
+                    asset: Asset::DIG,
+                    amount: 100,
+                },
+                CoinRecord {
+                    coin_id: "02".into(),
+                    asset: tagged_dig,
+                    amount: 50,
+                },
+                CoinRecord {
+                    coin_id: "03".into(),
+                    asset: spacebucks(),
+                    amount: 999,
+                },
+                CoinRecord {
+                    coin_id: "04".into(),
+                    asset: Asset::Xch,
+                    amount: 7,
+                },
+            ],
+            ..WalletState::default()
+        };
+        assert_eq!(
+            state.balance(Asset::DIG),
+            150,
+            "both spellings name one token, so both coins count"
+        );
+        assert_eq!(
+            state.balance(spacebucks()),
+            999,
+            "each CAT is its own holding"
+        );
+        assert_eq!(state.balance(Asset::Xch), 7);
+    }
+
+    /// **A watched token joins the read list; the two dig-app knows are refused entry.**
+    ///
+    /// Adding $DIG must not produce a second $DIG row, and it must SAY why rather than doing
+    /// nothing — a person who pastes the $DIG id and sees no change concludes the field is broken.
+    #[test]
+    fn watching_adds_a_cat_once_and_refuses_the_two_already_shown() {
+        let mut state = WalletState::default();
+        assert_eq!(state.read_list(), vec![Asset::Xch, Asset::DIG]);
+
+        assert_eq!(state.watch(spacebucks()), Ok(()));
+        assert_eq!(
+            state.read_list(),
+            vec![Asset::Xch, Asset::DIG, spacebucks()],
+            "a watched token is read after the two dig-app knows by name"
+        );
+
+        assert_eq!(state.watch(spacebucks()), Err(WatchRefused::AlreadyWatched));
+        assert_eq!(state.watch(Asset::DIG), Err(WatchRefused::AlreadyShown));
+        assert_eq!(state.watch(Asset::Xch), Err(WatchRefused::AlreadyShown));
+        assert_eq!(
+            state.read_list().len(),
+            3,
+            "a refused watch must not lengthen the list"
+        );
+
+        assert!(
+            state.unwatch(spacebucks()),
+            "a mistyped token must be removable"
+        );
+        assert_eq!(state.read_list(), vec![Asset::Xch, Asset::DIG]);
+        assert!(
+            !state.unwatch(spacebucks()),
+            "unwatching twice changes nothing"
+        );
+    }
+
     #[test]
     fn balance_sums_only_the_requested_asset() {
         let state = WalletState {
@@ -345,12 +598,12 @@ mod tests {
             coins: vec![
                 CoinRecord {
                     coin_id: "01".into(),
-                    asset: Asset::Dig,
+                    asset: Asset::DIG,
                     amount: 100,
                 },
                 CoinRecord {
                     coin_id: "02".into(),
-                    asset: Asset::Dig,
+                    asset: Asset::DIG,
                     amount: 50,
                 },
                 CoinRecord {
@@ -361,7 +614,7 @@ mod tests {
             ],
             ..WalletState::default()
         };
-        assert_eq!(state.balance(Asset::Dig), 150);
+        assert_eq!(state.balance(Asset::DIG), 150);
         assert_eq!(state.balance(Asset::Xch), 7);
     }
 
@@ -369,7 +622,7 @@ mod tests {
     fn dig_spend(recipient: &str, amount: u64, at: u64) -> SpendRecord {
         SpendRecord {
             recipient: recipient.into(),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             amount,
             broadcast_at: at,
             transaction_id: format!("{at:064x}"),
@@ -421,7 +674,7 @@ mod tests {
             asset: Asset::Xch,
             ..dig_spend("xch1carol", 7, 3)
         });
-        assert_eq!(state.total_sent(Asset::Dig), 150);
+        assert_eq!(state.total_sent(Asset::DIG), 150);
         assert_eq!(state.total_sent(Asset::Xch), 7);
     }
 
@@ -545,7 +798,7 @@ mod tests {
             addresses: vec!["xch1primary".into()],
             coins: vec![CoinRecord {
                 coin_id: "ab".into(),
-                asset: Asset::Dig,
+                asset: Asset::DIG,
                 amount: 42,
             }],
             ..WalletState::default()

@@ -289,18 +289,28 @@ impl AccountResidency {
         })
     }
 
-    /// The unsigned spends of a **$DIG** payment, or `None` once the residency is locked.
+    /// The unsigned spends of a payment of the CAT `asset_id`, or `None` once the residency is
+    /// locked.
     ///
-    /// The $DIG twin of [`build_transfer`](Self::build_transfer), and it adds exactly the same two
+    /// The CAT twin of [`build_transfer`](Self::build_transfer), and it adds exactly the same two
     /// residency facts and nothing else: the coin selection, the lineage proofs, the CAT puzzle
     /// wrapping, the change output and the separate XCH fee coin are all
-    /// [`WalletOps::build_dig_transfer`](dig_account::WalletOps::build_dig_transfer)'s.
+    /// [`WalletOps::build_cat_transfer`](dig_account::WalletOps::build_cat_transfer)'s.
+    ///
+    /// # Why this takes an asset id rather than being $DIG-shaped
+    ///
+    /// `dig-account` ships ONE CAT builder, generic over the asset id, and `build_dig_transfer` is
+    /// that method with $DIG's id passed in — the ring, the lineage walk and the XCH fee leg are
+    /// identical for every token. So a $DIG payment here is a CAT payment whose id happens to be
+    /// $DIG's, and there is no second code path for a second token to drift away from
+    /// (dig_ecosystem#3077).
     ///
     /// The result is a PLAN, never a spend: nothing here signs, and nothing here reaches the network.
-    pub fn build_dig_transfer<C>(
+    pub fn build_cat_transfer<C>(
         &self,
         chain: &C,
         custody: &CustodyPolicy,
+        asset_id: chia_protocol::Bytes32,
         request: &CatTransferRequest,
     ) -> Option<Result<CatTransferPlan, SendError>>
     where
@@ -315,7 +325,7 @@ impl AccountResidency {
         }
         self.guard().as_ref().map(|acct| {
             acct.wallet_ops()
-                .build_dig_transfer(chain, custody, request)
+                .build_cat_transfer(chain, custody, asset_id, request)
                 .map_err(SendError::BuildDig)
         })
     }

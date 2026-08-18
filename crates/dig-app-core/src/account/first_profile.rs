@@ -395,7 +395,7 @@ impl MintFunds {
     pub fn of_balance(reading: &BalanceReading) -> Self {
         match reading {
             BalanceReading::Known { balances, .. } => Self::Measured {
-                spendable_mojos: balances.xch_mojos,
+                spendable_mojos: balances.xch_mojos(),
             },
             BalanceReading::Pending | BalanceReading::Unknown(_) => Self::Unmeasured,
         }
@@ -1017,10 +1017,7 @@ mod tests {
         use crate::wallet::overview::Balances;
 
         let funded = BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_599_179_999_973,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(1_599_179_999_973, 0),
             as_of: BalanceAsOf::Replica {
                 height: 9_150_343,
                 caught_up: true,

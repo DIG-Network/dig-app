@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use dig_node_control_interface::error::ControlErrorCode;
 use dig_node_control_interface::method::ControlMethod;
 use dig_node_control_interface::params::{
-    Asset as WireAsset, WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
+    WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
 };
 use dig_node_control_interface::results::{WalletCoinRecord, WalletReadSource};
 
@@ -48,7 +48,9 @@ use super::engine::{
     CoinsRequest, CoinsResponse, WalletEngine,
 };
 use super::overview::{AddressReading, BalanceReading, ChainSource, WalletOverview};
-use super::state::{Asset, CoinRecord};
+#[cfg(test)]
+use super::state::Asset;
+use super::state::CoinRecord;
 use super::WalletError;
 
 /// How long a balance reading is reused before the node is asked again.
@@ -129,7 +131,7 @@ impl WalletEngine for NodeWalletEngine {
     fn coins(&self, request: CoinsRequest) -> Result<CoinsResponse, WalletError> {
         let params = WalletCoinsParams {
             address: request.address,
-            asset: wire_asset(request.asset),
+            asset: request.asset,
         };
         let result = self.call(&params, ControlMethod::WalletCoins)?;
         Ok(CoinsResponse {
@@ -151,7 +153,7 @@ impl WalletEngine for NodeWalletEngine {
     fn balance(&self, request: BalanceRequest) -> Result<BalanceResponse, WalletError> {
         let params = WalletBalanceParams {
             address: request.address,
-            asset: wire_asset(request.asset),
+            asset: request.asset,
         };
         let result = control::call_control_result(
             &self.endpoint,
@@ -203,6 +205,11 @@ impl NodeWalletEngine {
 /// one is the node declining to say which asset it is — and taking the asset from the REQUEST
 /// instead would relabel it. A $DIG figure shown with the XCH divisor is wrong by a factor of a
 /// billion, so silence is the only honest handling.
+///
+/// The record's asset needs no CONVERSION: since dig-app's [`Asset`] IS the contract's own type
+/// (see [`crate::wallet::state::Asset`]), the value is carried across verbatim. The pair of
+/// mapping functions that used to sit here — one per direction, each a place a new CAT could be
+/// forgotten — are gone with the second definition that made them necessary.
 fn app_coin(record: &WalletCoinRecord) -> Option<CoinRecord> {
     let Some(asset) = record.asset else {
         tracing::debug!(
@@ -213,26 +220,9 @@ fn app_coin(record: &WalletCoinRecord) -> Option<CoinRecord> {
     };
     Some(CoinRecord {
         coin_id: record.coin_id.clone(),
-        asset: app_asset(asset),
+        asset,
         amount: record.amount,
     })
-}
-
-/// The contract's wire enum as dig-app's [`Asset`] — the inverse of [`wire_asset`].
-fn app_asset(asset: WireAsset) -> Asset {
-    match asset {
-        WireAsset::Xch => Asset::Xch,
-        WireAsset::Dig => Asset::Dig,
-    }
-}
-
-/// dig-app's [`Asset`] as the control contract's wire enum. Both serialize to the same lowercase
-/// token; this conversion is what keeps that a compile-time fact rather than a coincidence.
-fn wire_asset(asset: Asset) -> WireAsset {
-    match asset {
-        Asset::Xch => WireAsset::Xch,
-        Asset::Dig => WireAsset::Dig,
-    }
 }
 
 /// The stable `data.code` symbols that mean "this build cannot serve the method at all".
@@ -654,6 +644,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -667,10 +658,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: XCH_MOJOS,
-                    dig_units: DIG_UNITS,
-                },
+                balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
                 as_of: BalanceAsOf::Replica {
                     height: 6_000_000,
                     caught_up: true
@@ -717,6 +705,57 @@ mod tests {
         );
     }
 
+    /// A CAT dig-app knows nothing about but its id — deliberately not $DIG's, so an
+    /// implementation that fell back to $DIG produces a visibly different value.
+    const SPACEBUCKS_HEX: &str = "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+
+    /// [`SPACEBUCKS_HEX`] as an [`Asset`].
+    fn spacebucks() -> Asset {
+        Asset::Cat(
+            crate::wallet::state::AssetId::from_hex(SPACEBUCKS_HEX).expect("a 64-hex asset id"),
+        )
+    }
+
+    /// **A token dig-app was never built knowing about is read from the node and shown.**
+    ///
+    /// The end-to-end property of this slice, over the real control wire: the request is serialized,
+    /// the fake node parses `{"cat":"<id>"}` out of it, and answers that token's OWN figure.
+    ///
+    /// # The fixture is what makes this falsifiable
+    ///
+    /// The three amounts are all DIFFERENT and the third is the largest, so an implementation that
+    /// asked for $DIG and labelled the answer as the CAT, or that reused one figure for every asset,
+    /// lands on a wrong number rather than an accidentally-right one. The fake answers `0` for any
+    /// token its fixture does not name, so a reader still keyed to $DIG's id gets `0` here — not
+    /// `4_200`.
+    #[test]
+    fn a_cat_the_app_was_never_built_knowing_is_read_by_its_own_id() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: 1_000_000_000_000,
+            dig: 2_500,
+            other_cat: Some((SPACEBUCKS_HEX, 4_200)),
+            synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
+        });
+        let overview = WalletOverview::read_assets(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+            &[Asset::Xch, Asset::DIG, spacebucks()],
+        );
+        let BalanceReading::Known { balances, .. } = &overview.balance else {
+            panic!("the node answered every asset: {:?}", overview.balance);
+        };
+        assert_eq!(balances.of(spacebucks()), 4_200, "the CAT's own figure");
+        assert_eq!(balances.dig_units(), 2_500, "and $DIG keeps its own");
+        assert_eq!(balances.xch_mojos(), 1_000_000_000_000);
+        assert_eq!(
+            balances.holdings.len(),
+            3,
+            "every asset asked for is present, so no held token is silently absent"
+        );
+    }
+
     /// A syncing node's own refusal reaches the user as "still catching up".
     #[test]
     fn a_syncing_node_is_reported_as_syncing_not_as_a_failure() {
@@ -741,6 +780,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: false,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -752,10 +792,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: XCH_MOJOS,
-                    dig_units: DIG_UNITS,
-                },
+                balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
                 as_of: BalanceAsOf::Replica {
                     height: 6_000_000,
                     caught_up: false,
@@ -784,6 +821,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: 0,
             dig: 0,
+            other_cat: None,
             synced: false,
             source: Some("db"),
             peak_height: None,
@@ -821,6 +859,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: 0,
             dig: 0,
+            other_cat: None,
             synced: false,
             source: Some("db"),
             peak_height: Some(9_140_640),
@@ -855,6 +894,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: 0,
             dig: 0,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(5_123_456),
@@ -866,10 +906,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 0,
-                    dig_units: 0,
-                },
+                balances: Balances::of_xch_and_dig(0, 0),
                 as_of: BalanceAsOf::Replica {
                     height: 5_123_456,
                     caught_up: true
@@ -889,6 +926,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: false,
             source: Some("db"),
             peak_height: Some(9_144_674),
@@ -927,6 +965,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(9_145_204),
@@ -960,6 +999,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: false,
             source: Some("fallback"),
             peak_height: None,
@@ -997,6 +1037,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: false,
             source: Some("fallback"),
             peak_height: Some(6_000_000),
@@ -1008,10 +1049,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: XCH_MOJOS,
-                    dig_units: DIG_UNITS,
-                },
+                balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
                 as_of: BalanceAsOf::Oracle,
             }
         );
@@ -1033,6 +1071,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: None,
             peak_height: Some(6_000_000),
@@ -1044,10 +1083,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: XCH_MOJOS,
-                    dig_units: DIG_UNITS,
-                },
+                balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
                 as_of: BalanceAsOf::Undisclosed,
             }
         );
@@ -1102,10 +1138,7 @@ mod tests {
         assert_ne!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 0,
-                    dig_units: 0
-                },
+                balances: Balances::of_xch_and_dig(0, 0),
                 as_of: BalanceAsOf::Replica {
                     height: 6_000_000,
                     caught_up: true
@@ -1124,6 +1157,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -1145,6 +1179,7 @@ mod tests {
             WalletReply::Balance {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
+                other_cat: None,
                 synced: true,
                 source: Some("db"),
                 peak_height: Some(6_000_000),
@@ -1177,6 +1212,7 @@ mod tests {
             WalletReply::Balance {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
+                other_cat: None,
                 synced: true,
                 source: Some("db"),
                 peak_height: Some(6_000_000),
@@ -1259,7 +1295,7 @@ mod tests {
             FakeCoin::confirmed("dig", 1_500),
             FakeCoin::confirmed("dig", 2_500),
         ]));
-        let read = read_coins(&engine_for(&node), Asset::Dig).expect("the node answered");
+        let read = read_coins(&engine_for(&node), Asset::DIG).expect("the node answered");
 
         assert_eq!(
             read.coins.iter().map(|c| c.amount).collect::<Vec<_>>(),
@@ -1272,7 +1308,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [format!("{:064x}", 1_500), format!("{:064x}", 2_500)]
         );
-        assert!(read.coins.iter().all(|c| c.asset == Asset::Dig));
+        assert!(read.coins.iter().all(|c| c.asset == Asset::DIG));
         assert!(node.received().contains("control.wallet.coins"));
     }
 
@@ -1433,6 +1469,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -1442,10 +1479,7 @@ mod tests {
         assert_eq!(
             settle(&poller, &connected_to(&node)),
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: XCH_MOJOS,
-                    dig_units: DIG_UNITS,
-                },
+                balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
                 as_of: BalanceAsOf::Replica {
                     height: 6_000_000,
                     caught_up: true
@@ -1467,6 +1501,7 @@ mod tests {
             WalletReply::Balance {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
+                other_cat: None,
                 synced: true,
                 source: Some("db"),
                 peak_height: Some(6_000_000),
@@ -1493,10 +1528,7 @@ mod tests {
         assert_eq!(
             settle(&poller, &link),
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: XCH_MOJOS,
-                    dig_units: DIG_UNITS,
-                },
+                balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
                 as_of: BalanceAsOf::Replica {
                     height: 6_000_000,
                     caught_up: true
@@ -1526,6 +1558,7 @@ mod tests {
             WalletReply::Balance {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
+                other_cat: None,
                 synced: true,
                 source: Some("db"),
                 peak_height: Some(6_000_000),
@@ -1540,10 +1573,7 @@ mod tests {
         );
         let link = connected_to(&node);
         let held = BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: XCH_MOJOS,
-                dig_units: DIG_UNITS,
-            },
+            balances: Balances::of_xch_and_dig(XCH_MOJOS, DIG_UNITS),
             as_of: BalanceAsOf::Replica {
                 height: 6_000_000,
                 caught_up: true,
@@ -1599,6 +1629,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -1663,6 +1694,7 @@ mod tests {
             WalletReply::Balance {
                 xch: XCH_MOJOS,
                 dig: DIG_UNITS,
+                other_cat: None,
                 synced: true,
                 source: Some("db"),
                 peak_height: Some(6_000_000),
@@ -1736,6 +1768,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -1766,6 +1799,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -1791,6 +1825,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),
@@ -1821,6 +1856,7 @@ mod tests {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
+            other_cat: None,
             synced: true,
             source: Some("db"),
             peak_height: Some(6_000_000),

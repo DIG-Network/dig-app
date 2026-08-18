@@ -36,10 +36,9 @@ use zeroize::Zeroizing;
 
 use crate::account::auth::{AuthCeremony, CeremonyError};
 use crate::account::password::{establish_password, request_password, PasswordOutcome};
-use crate::amount::format_asset_amount;
+use crate::amount::{format_dig, format_xch};
 use crate::confirm::{native_confirmer, ConfirmDecision, NativeConfirmer, SignPrompt};
 use crate::keystore::CredentialStore;
-use crate::wallet::state::Asset;
 
 /// The number of random bytes in a generated account master password before hex-encoding — 32 bytes
 /// (256 bits) of CSPRNG entropy, well beyond any Argon2id-stretched brute-force reach.
@@ -380,16 +379,16 @@ fn render_spend(summary: &SpendSummary) -> String {
     format!(
         "Approve this {:?}-tier spend?\n\n{paid}\n\nNetwork fee: {} XCH",
         summary.tier,
-        format_asset_amount(Asset::Xch, summary.fee)
+        format_xch(summary.fee)
     )
 }
 
 /// One recipient's amount, in the units a person reads.
 fn paid_amount(to: &dig_account::SpendRecipient) -> String {
     match &to.asset_id {
-        None => format!("{} XCH", format_asset_amount(Asset::Xch, to.amount_mojos)),
+        None => format!("{} XCH", format_xch(to.amount_mojos)),
         Some(asset) if is_dig(asset) => {
-            format!("{} $DIG", format_asset_amount(Asset::Dig, to.amount_mojos))
+            format!("{} $DIG", format_dig(to.amount_mojos))
         }
         // Named as base units precisely because this function does not know THIS CAT's precision —
         // see the caller's docs.

@@ -31,8 +31,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::amount::format_asset_amount;
-use crate::wallet::state::Asset;
+use crate::amount::format_xch;
 
 /// How far along a chain write is.
 ///
@@ -216,13 +215,12 @@ pub struct Money {
 impl Money {
     /// The amount as a person reads it, whole-coin.
     pub fn amount(&self) -> String {
-        format_asset_amount(Asset::Xch, self.amount_mojos)
+        format_xch(self.amount_mojos)
     }
 
     /// The fee as a person reads it, whole-coin — or `None` when it was never measured.
     pub fn fee(&self) -> Option<String> {
-        self.fee_mojos
-            .map(|mojos| format_asset_amount(Asset::Xch, mojos))
+        self.fee_mojos.map(format_xch)
     }
 
     /// The cost, in one line, saying only what is known.

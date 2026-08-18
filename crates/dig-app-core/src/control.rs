@@ -820,6 +820,7 @@ mod tests {
             reply: crate::test_support::node::WalletReply::Balance {
                 xch: 1,
                 dig: 1,
+                other_cat: None,
                 synced: true,
                 source: Some("db"),
                 peak_height: Some(6_000_000),

@@ -423,6 +423,14 @@ pub mod node {
             xch: u64,
             /// The DIG balance in base units.
             dig: u64,
+            /// A THIRD token: its asset id as lowercase hex, and what this address holds of it.
+            ///
+            /// Present so a fixture can express a wallet holding a CAT dig-app was never built
+            /// knowing about. Without it the fake could only ever answer the two assets the app
+            /// knows by name, and every "reads an arbitrary CAT" assertion would be satisfied by an
+            /// implementation that still had $DIG hard-coded — the fixture would be structurally
+            /// unable to fail (dig_ecosystem#3077).
+            other_cat: Option<(&'static str, u64)>,
             /// The node's `synced` flag: `false` means the figures are STALE.
             synced: bool,
             /// The disclosed read tier (`"db"` / `"fallback"`), or `None` for a node too old to
@@ -871,11 +879,7 @@ pub mod node {
             ]
             .into_iter()
             .find(|m| method == Some(*m));
-            let asset = if request.contains("\"asset\":\"dig\"") {
-                Asset::Dig
-            } else {
-                Asset::Xch
-            };
+            let asset = requested_asset(&request);
             let _ = tx.send(request.clone());
 
             let (code, body) = match &behaviour {
@@ -989,11 +993,35 @@ pub mod node {
         }
     }
 
-    /// Which asset a balance request named.
-    #[derive(Clone, Copy)]
+    /// Which asset a balance request named, as the FAKE understands it.
+    ///
+    /// Three cases where the contract has two, deliberately and only here: this is a test double
+    /// that has to distinguish "the request named $DIG" from "the request named some other token"
+    /// in order to answer them differently. The production type must never make that distinction —
+    /// see `wallet::state::Asset` for why a second spelling of $DIG halves a balance.
+    #[derive(Clone, Debug, PartialEq, Eq)]
     enum Asset {
         Xch,
         Dig,
+        OtherCat(String),
+    }
+
+    /// Which asset a raw request body named, read the way the node reads it.
+    ///
+    /// The tagged form is matched on the KEY rather than on a whole-body substring, so a request
+    /// naming an arbitrary CAT is recognised as that CAT and not silently served XCH — which is what
+    /// the previous `contains("\"asset\":\"dig\"")` check did to every token except $DIG.
+    fn requested_asset(request: &str) -> Asset {
+        if request.contains("\"asset\":\"dig\"") {
+            return Asset::Dig;
+        }
+        match request.split_once("\"asset\":{\"cat\":\"") {
+            Some((_, rest)) => match rest.split_once('"') {
+                Some((id, _)) => Asset::OtherCat(id.to_string()),
+                None => Asset::Xch,
+            },
+            None => Asset::Xch,
+        }
     }
 
     /// The `control.wallet.balance` reply for `asset`, in the exact envelope
@@ -1003,13 +1031,21 @@ pub mod node {
             WalletReply::Balance {
                 xch,
                 dig,
+                other_cat,
                 synced,
                 source,
                 peak_height,
             } => {
-                let balance = match asset {
+                let balance = match &asset {
                     Asset::Xch => *xch,
                     Asset::Dig => *dig,
+                    // A token this fixture does not name holds NOTHING, never $DIG's figure. A fake
+                    // that answered one asset's balance for another would let a wallet still keyed
+                    // to $DIG pass every arbitrary-CAT assertion.
+                    Asset::OtherCat(id) => match other_cat {
+                        Some((fixture_id, held)) if fixture_id == id => *held,
+                        _ => 0,
+                    },
                 };
                 let mut result = serde_json::json!({
                     "balance": balance,
