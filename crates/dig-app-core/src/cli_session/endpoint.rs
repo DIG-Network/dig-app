@@ -47,7 +47,10 @@ mod tests {
         assert_ne!(alice, cli_endpoint(Os::Windows, "bob", Path::new("")));
         // The engine lane must not be reachable at the CLI address, or a client that knows one hop
         // can dial the other.
-        assert_ne!(alice, crate::ipc::channel_endpoint(Os::Windows, "alice", ""));
+        assert_ne!(
+            alice,
+            crate::ipc::channel_endpoint(Os::Windows, "alice", "")
+        );
     }
 
     /// The pipe address must be a real UNC pipe name, not a rooted path that merely looks like one.
@@ -63,7 +66,13 @@ mod tests {
             .expect("the engine lane is a dignetwork pipe")
             .0
             .to_string();
-        assert_eq!(namespace, format!("{}{}.{}pipe{}", NAMESPACE_SLASH, NAMESPACE_SLASH, NAMESPACE_SLASH, NAMESPACE_SLASH));
+        assert_eq!(
+            namespace,
+            format!(
+                "{}{}.{}pipe{}",
+                NAMESPACE_SLASH, NAMESPACE_SLASH, NAMESPACE_SLASH, NAMESPACE_SLASH
+            )
+        );
         assert!(
             cli_endpoint(Os::Windows, "alice", Path::new("")).starts_with(&namespace),
             "the CLI pipe must live in the same pipe namespace as the working engine lane"

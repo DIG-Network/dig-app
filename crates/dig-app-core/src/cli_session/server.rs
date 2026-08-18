@@ -213,13 +213,11 @@ struct UnproxiedEngine;
 
 impl EngineProxy for UnproxiedEngine {
     fn call(&self, method: &str, _params: Value) -> Result<Value, GatewayError> {
-        Err(
-            GatewayError::new(
-                ErrorCode::NotConnected,
-                format!("dig-app does not yet proxy `{method}` to the node on behalf of the CLI"),
-            )
-            .with_hint("the local verbs — `dign profiles` and `dign wallet` — are served now"),
+        Err(GatewayError::new(
+            ErrorCode::NotConnected,
+            format!("dig-app does not yet proxy `{method}` to the node on behalf of the CLI"),
         )
+        .with_hint("the local verbs — `dign profiles` and `dign wallet` — are served now"))
     }
 }
 
@@ -237,7 +235,9 @@ mod tests {
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
         let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
         let mut duplex = ScriptedDuplex::of(requests);
-        session.converse(&mut duplex).expect("the conversation ends cleanly");
+        session
+            .converse(&mut duplex)
+            .expect("the conversation ends cleanly");
         duplex.responses()
     }
 
@@ -253,7 +253,10 @@ mod tests {
             ],
         );
         assert!(out[0].error.is_none(), "the attach must succeed");
-        let listed = out[1].clone().into_result().expect("profiles list is served");
+        let listed = out[1]
+            .clone()
+            .into_result()
+            .expect("profiles list is served");
         assert_eq!(listed.result["profiles"][0]["did"], "did:chia:one");
     }
 
@@ -268,7 +271,10 @@ mod tests {
                 Request::dispatch(2, Command::Wallet(WalletAction::Balance)),
             ],
         );
-        let balance = out[1].clone().into_result().expect("wallet balance is served");
+        let balance = out[1]
+            .clone()
+            .into_result()
+            .expect("wallet balance is served");
         assert_eq!(balance.result["balance_mojos"], 4_200);
     }
 
@@ -280,7 +286,10 @@ mod tests {
         let token = SessionToken::mint();
         let out = conversation(
             &token,
-            &[Request::dispatch(1, Command::Profiles(ProfilesAction::List))],
+            &[Request::dispatch(
+                1,
+                Command::Profiles(ProfilesAction::List),
+            )],
         );
         assert_eq!(
             out[0].clone().into_result().unwrap_err().code,
@@ -352,7 +361,11 @@ mod tests {
         let mut duplex = ScriptedDuplex::of_lines(&["{not json"]);
         session.converse(&mut duplex).unwrap();
         assert_eq!(
-            duplex.responses()[0].clone().into_result().unwrap_err().code,
+            duplex.responses()[0]
+                .clone()
+                .into_result()
+                .unwrap_err()
+                .code,
             ErrorCode::Usage
         );
     }

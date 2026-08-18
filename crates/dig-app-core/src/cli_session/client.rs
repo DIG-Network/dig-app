@@ -29,12 +29,20 @@ pub fn send(command: &Command) -> Result<Outcome, GatewayError> {
     let brand_dir = env
         .brand_dir()
         .map_err(|e| GatewayError::new(ErrorCode::IoError, e.to_string()))?;
-    send_via(&cli_endpoint(env.os, &env.user, &brand_dir), &brand_dir, command)
+    send_via(
+        &cli_endpoint(env.os, &env.user, &brand_dir),
+        &brand_dir,
+        command,
+    )
 }
 
 /// [`send`], with the endpoint and token directory named explicitly — the seam an integration test
 /// drives against a server it started itself.
-pub fn send_via(endpoint: &str, brand_dir: &Path, command: &Command) -> Result<Outcome, GatewayError> {
+pub fn send_via(
+    endpoint: &str,
+    brand_dir: &Path,
+    command: &Command,
+) -> Result<Outcome, GatewayError> {
     let token = SessionToken::read_published(brand_dir).map_err(not_running)?;
     let stream = transport::connect(endpoint).map_err(not_running)?;
     let mut frames = transport::frames(stream).map_err(io_failed)?;
@@ -45,8 +53,12 @@ pub fn send_via(endpoint: &str, brand_dir: &Path, command: &Command) -> Result<O
 
 /// Send one request and read its answer.
 fn ask(frames: &mut impl FrameTransport, request: Request) -> Result<Outcome, GatewayError> {
-    let line = serde_json::to_string(&request)
-        .map_err(|e| GatewayError::new(ErrorCode::IoError, format!("could not encode the request: {e}")))?;
+    let line = serde_json::to_string(&request).map_err(|e| {
+        GatewayError::new(
+            ErrorCode::IoError,
+            format!("could not encode the request: {e}"),
+        )
+    })?;
     frames.send_frame(&line).map_err(io_failed)?;
     let reply = frames.recv_frame().map_err(io_failed)?;
     let response: Response = serde_json::from_str(&reply).map_err(|e| {
@@ -82,8 +94,8 @@ pub fn host_endpoint(os: Os, user: &str, brand_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_session::test_support::{ApprovingConfirmer, StubIdentity, UnusedOpener};
     use crate::cli_session::server::CliSessionServer;
+    use crate::cli_session::test_support::{ApprovingConfirmer, StubIdentity, UnusedOpener};
     use crate::gateway::ProfilesAction;
 
     /// The FULL round trip over a real OS channel: a server bound on this host's native transport,
@@ -121,13 +133,19 @@ mod tests {
             // Two conversations: one per verb, because `dign` is a one-shot process.
             for _ in 0..2 {
                 let stream = server.accept_one().expect("a client connects");
-                server.serve_one(stream).expect("the conversation completes");
+                server
+                    .serve_one(stream)
+                    .expect("the conversation completes");
             }
         });
         ready_rx.recv().expect("the server publishes its token");
 
-        let listed = send_via(&endpoint, &brand_dir, &Command::Profiles(ProfilesAction::List))
-            .expect("profiles list crosses the channel");
+        let listed = send_via(
+            &endpoint,
+            &brand_dir,
+            &Command::Profiles(ProfilesAction::List),
+        )
+        .expect("profiles list crosses the channel");
         assert_eq!(listed.result["profiles"][0]["did"], "did:chia:one");
 
         let balance = send_via(
@@ -153,7 +171,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::NotConnected);
-        assert_eq!(err.hint.as_deref(), Some("start the DIG app, then run this command again"));
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("start the DIG app, then run this command again")
+        );
     }
 
     /// A token file that does NOT match the running app's is refused by the server, and the client
@@ -195,8 +216,12 @@ mod tests {
         // from a previous app run would be.
         SessionToken::mint().publish(&brand_dir).unwrap();
 
-        let err = send_via(&endpoint, &brand_dir, &Command::Profiles(ProfilesAction::List))
-            .expect_err("a stale token must not be served");
+        let err = send_via(
+            &endpoint,
+            &brand_dir,
+            &Command::Profiles(ProfilesAction::List),
+        )
+        .expect_err("a stale token must not be served");
         assert_eq!(err.code, ErrorCode::Denied);
         server.join().unwrap();
     }

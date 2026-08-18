@@ -253,7 +253,10 @@ mod tests {
     fn a_host_that_never_minted_lists_nothing_rather_than_failing() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(HostIdentity::under(dir.path()).profiles().unwrap(), vec![]);
-        assert_eq!(HostIdentity::under(dir.path()).default_profile().unwrap(), None);
+        assert_eq!(
+            HostIdentity::under(dir.path()).default_profile().unwrap(),
+            None
+        );
     }
 
     /// The default profile is the registry's ACTIVE one, read through the same path.
@@ -263,11 +266,17 @@ mod tests {
         registry_under(dir.path(), &[(0, Some("home")), (1, Some("work"))], 1);
 
         let identity = HostIdentity::under(dir.path());
-        let default = identity.default_profile().unwrap().expect("a profile is active");
+        let default = identity
+            .default_profile()
+            .unwrap()
+            .expect("a profile is active");
         let listed = identity.profiles().unwrap();
 
         assert_eq!(default, listed[1].did);
-        assert_ne!(default, listed[0].did, "the default is not merely the first row");
+        assert_ne!(
+            default, listed[0].did,
+            "the default is not merely the first row"
+        );
     }
 
     /// Every seed-bound verb refuses with a catalogued code and a remedy — and, critically, none of
@@ -281,7 +290,9 @@ mod tests {
         for error in [
             identity.wallet_address().unwrap_err(),
             identity.select_profile("did:chia:whatever").unwrap_err(),
-            identity.set_default_profile("did:chia:whatever").unwrap_err(),
+            identity
+                .set_default_profile("did:chia:whatever")
+                .unwrap_err(),
         ] {
             assert_eq!(error.code, ErrorCode::Locked);
             assert_eq!(error.hint.as_deref(), Some(UNLOCK_HINT));

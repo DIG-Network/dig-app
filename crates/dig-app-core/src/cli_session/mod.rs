@@ -65,14 +65,15 @@ pub fn serve_in_background(endpoint: String, brand_dir: std::path::PathBuf) {
                 UnopenedLinks,
                 UnavailableConfirmer,
             );
-            let server =
-                match CliSessionServer::bind(&endpoint, &brand_dir, &identity, &opener, &confirmer) {
-                    Ok(server) => server,
-                    Err(e) => {
-                        tracing::warn!(error = %e, %endpoint, "the dign CLI lane could not be bound");
-                        return;
-                    }
-                };
+            let server = match CliSessionServer::bind(
+                &endpoint, &brand_dir, &identity, &opener, &confirmer,
+            ) {
+                Ok(server) => server,
+                Err(e) => {
+                    tracing::warn!(error = %e, %endpoint, "the dign CLI lane could not be bound");
+                    return;
+                }
+            };
             tracing::info!(%endpoint, "the dign CLI lane is serving");
             if let Err(e) = server.serve_blocking() {
                 tracing::error!(error = %e, "the dign CLI lane stopped serving");
