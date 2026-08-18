@@ -18,11 +18,29 @@ pwsh tools/shoot-gallery.ps1
 | `account-<state>.png` | the Account pane in one of the account states that is **not** the happy path |
 | `account-second-factor-on.png` | the Account pane with a second factor enrolled — the one control that appears and disappears with a setting rather than with the account's state |
 | `profiles-<fixture>-<width>.png` | the Account tab's profiles card with a list on it — see below |
+| `profiles-locked-<width>.png` | the profiles card on a LOCKED account — what a person who has not unlocked yet is told about creating one |
+| `profiles-funding-elsewhere-<width>.png` | the profiles card explaining that the money sits at another profile, with that profile NAMED |
 | `did-<screen>-<theme>.png` | one screen of the first-run DID wizard |
 | `<tab>-live-<width>.png` | the two node-backed cards filled from a **running local dig-node** rather than from the fixture — the Home tab's sharing card and the Content tab's hosted-store list |
 | `offer-loaded-<theme>-<width>.png` | the Wallet tab with a real offer in the field and both sides of the swap named |
 | `offer-drop-active-<theme>-<width>.png` | an offer file held over the Offers card: the accent outline showing where it will land, and the sentence saying a drop only READS it |
 | `offer-drop-refused-<theme>-<width>.png` | the Offers card answering a drop it cannot load, naming the file and what was wrong with it |
+
+### The two blocked-creation captures
+
+`profiles-locked-*` and `profiles-funding-elsewhere-*` photograph the two states the *Creating a
+profile* explainer can be in that a healthy unlocked account never reaches.
+
+The locked pair exists because that card used to sit on *"DIG is still checking whether this computer
+can create a profile"* for as long as the person stayed locked — a check that was never going to run,
+with nothing on screen naming the one act that would move it (dig_ecosystem#3059). The capture is
+taken through `ProfileCreation::of_account`, the same derivation the binary uses, so it shows what a
+locked account is actually told rather than a sentence the gallery chose for it.
+
+The funding pair exists because that sentence NAMES two profiles, and it used to name them
+differently from the list directly above it — *"held by profile 1"* under a row headed *"Everyday"*
+(dig_ecosystem#2981). Both names now come from `ProfileRow::display_name`, so the picture is the
+check: the card and its explanation have to agree by eye.
 
 ### What `profiles-` means, and why it is a fixture
 

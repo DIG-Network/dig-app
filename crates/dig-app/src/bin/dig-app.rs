@@ -1648,9 +1648,13 @@ mod tray {
             // Read off the seams a deletion would ACTUALLY run through, plus the lock, which they
             // cannot know. One value, never a second independent check — that is how a surface comes
             // to offer an irreversible control whose implementation refuses (dig_ecosystem#3037).
+            //
+            // The lock is the ACCOUNT's state, never `session.is_some()`: a session outlives its key
+            // material, so the session test offered this irreversible control to a locked account
+            // (dig_ecosystem#3059 review). The reading itself now refuses that spelling.
             profile_deletion: dig_app_core::profiles::ProfileDeletion::of_seams(
                 dig_app_core::profile_melt::app_seams().is_possible(),
-                session.is_some(),
+                Some(&account),
             ),
             profile_editing: dig_app_core::profile_edit::EditService::app().editing(
                 session.is_some_and(|s| {
@@ -1666,7 +1670,7 @@ mod tray {
             running,
             node,
             node_connected,
-            account: Some(account),
+            account: Some(account.clone()),
             profile_id: session.map(|s| s.account.profile_id.clone()),
             // Derived LIVE from the residency on each repaint rather than cached at unlock, so a lock
             // takes the address away with the keys it comes from. Unlike `profile_id` (cached because
@@ -1766,7 +1770,7 @@ mod tray {
             profiles: profiles_reading(env, session),
             // What the node ANSWERED about whether a whole profile can be minted here
             // (dig_ecosystem#2398) — never what this binary asserts. See `profile_creation_of`.
-            profile_creation: profile_creation_of(status, session),
+            profile_creation: profile_creation_of(status, session, Some(&account)),
             // What the node itself says about servicing a mint (dig_ecosystem#2398). Read for the
             // DID explainer, which without it names a cause nobody measured. The SAME poller feeds
             // `profile_creation` above, so the explainer and the gate can never disagree about what
@@ -1947,15 +1951,26 @@ mod tray {
     fn profile_creation_of(
         status: &SharedStatus,
         session: Option<&TraySession>,
+        account: Option<&crate::AccountState>,
     ) -> dig_app_core::profiles::ProfileCreation {
         use dig_app_core::account::profile_mint::ProfileMint;
         use dig_app_core::account::profile_mint::ProfileMintSeams;
         use dig_app_core::profiles::ProfileCreation;
 
-        // No unlocked account means no registry to mint into and no residency to derive from, so
-        // nothing about this machine's node has been measured FOR creation. `Unknown` withholds the
-        // offer exactly as a blocker would, and unlike a blocker it names no cause: telling a locked
-        // user their chain is unreachable would send them to fix a node that is answering fine.
+        // The ACCOUNT is asked before anything else, and it is asked by its own state rather than
+        // by whether a session exists — a session outlives its key material, so a locked account
+        // still has one. A locked account used to fall through to `Unknown`, which the card renders
+        // as "DIG is still checking whether this computer can create a profile", so a locked person
+        // watched a check that was never going to run and was told nothing about the one act that
+        // would move it (dig_ecosystem#3059). Every rule lives in `of_account`, because this file
+        // is one no guard test can see (dig_ecosystem#2587).
+        if let creation @ ProfileCreation::Blocked(_) = ProfileCreation::of_account(account, None) {
+            return creation;
+        }
+
+        // Beyond the lock there is nothing to measure without a session: no registry to mint into
+        // and no residency to derive from. That is an absence of measurement, not a blocker, and
+        // `Unknown` is how the card says so without naming a cause nobody looked for.
         let Some(live) = session else {
             return ProfileCreation::Unknown;
         };
@@ -1985,9 +2000,10 @@ mod tray {
             &publisher,
         );
 
-        ProfileCreation::of_reading(Some(
-            ProfileMintSeams::from_readiness(reading, &door).availability(),
-        ))
+        ProfileCreation::of_account(
+            account,
+            Some(ProfileMintSeams::from_readiness(reading, &door).availability()),
+        )
     }
 
     fn network_poller() -> &'static dig_app_core::network::NodeNetworkStanding {
@@ -4673,7 +4689,8 @@ mod tray {
 
         // Read ONCE. A second, shadowing read of the same registry survived a merge here
         // and left this function asking twice on the blocked path (dig_ecosystem#2582).
-        let held = match profiles_reading(env, session) {
+        let reading = profiles_reading(env, session);
+        let held = match &reading {
             ProfilesReading::Known(rows) if !rows.is_empty() => format!(
                 "This account holds {} profile(s), and the Account tab lists them.\n\n",
                 rows.len()
@@ -4690,7 +4707,12 @@ mod tray {
         // explanation for an UNMEASURED node the day this reads a node rather than a constant
         // (dig_ecosystem#2690). The selection lives in the library because this file is one no guard
         // test can see (dig_ecosystem#2587).
-        let body = match copy::about_creation(creation) {
+        // Named off the SAME reading the count above came from, so this notice and the Account
+        // tab's list cannot call one profile two things (dig_ecosystem#2981).
+        let body = match copy::about_creation(
+            creation,
+            dig_app_core::profiles::ProfileNames::of(&reading),
+        ) {
             Some(sentence) => format!(
                 "{}\n\n{held}{}\n\n{}",
                 copy::WHAT_A_PROFILE_IS,

@@ -11,12 +11,7 @@ use super::text;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
-
-/// How long the control reads "Copied" before returning to "Copy", in seconds.
-///
-/// Long enough to be seen after the eye returns from wherever it was pasting, short enough that the
-/// control is honest about its resting state by the time anyone looks again.
-const CONFIRMATION: f64 = 1.6;
+use crate::confirm::gui::window::copied::{confirming, remember as remember_copy};
 
 /// A value with a copy control beside it. Returns the height used.
 ///
@@ -93,32 +88,6 @@ pub(crate) fn copyable(
         remember_copy(ui, element);
     }
     height
-}
-
-/// Whether `element` copied something recently enough to still be confirming it.
-///
-/// Reading the clock rather than holding a countdown: an immediate-mode surface has no frame loop of
-/// its own to tick, and a repaint is requested for the moment the confirmation expires so the label
-/// reverts even if nothing else on the window changes.
-fn confirming(ui: &Ui, element: egui::Id) -> bool {
-    let now = ui.input(|i| i.time);
-    let at: Option<f64> = ui.ctx().data(|d| d.get_temp(element));
-    match at {
-        Some(at) if now - at < CONFIRMATION => {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_secs_f64(
-                    CONFIRMATION - (now - at),
-                ));
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Record that `element` just copied, so the next frames show the confirmation.
-fn remember_copy(ui: &Ui, element: egui::Id) {
-    let now = ui.input(|i| i.time);
-    ui.ctx().data_mut(|d| d.insert_temp(element, now));
 }
 
 /// The largest a scannable code is drawn, in pixels.

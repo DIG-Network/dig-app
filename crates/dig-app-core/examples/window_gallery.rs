@@ -41,7 +41,6 @@ mod shared_offer;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dig_app_core::account::chain_mint::MintAvailability;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::config::AgentConfig;
 use dig_app_core::confirm::gui::{photograph_shell, CaptureStaging, Theme};
@@ -53,6 +52,7 @@ use dig_app_core::hosted_stores::{
 };
 use dig_app_core::network::{ChainSync, NetworkStanding, NodeNetworkStanding, PeerCount};
 use dig_app_core::node_facts::NodeFacts;
+use dig_app_core::profiles::CreationBlocked;
 use dig_app_core::profiles::{ProfileCreation, ProfilesReading};
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::wallet::overview::{BalanceReading, Balances};
@@ -319,6 +319,7 @@ fn view_for(
     second_factor: bool,
     profiles: Profiles,
     can_create: bool,
+    funding_elsewhere: bool,
 ) -> TrayView {
     let sealed = !matches!(account, AccountState::Unlocked { .. });
     TrayView {
@@ -329,7 +330,7 @@ fn view_for(
         running: true,
         node_connected: true,
         node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),
-        account: Some(account),
+        account: Some(account.clone()),
         profile_id: (!sealed).then(|| {
             "4f3a9c2e7b81d05fa6c34e19b7d208fc5e6a1b93d47f0c28ae5b6139d0f7a24c".to_string()
         }),
@@ -354,9 +355,26 @@ fn view_for(
         // in this gallery would show a *still checking* card that no build any user runs can
         // produce: a picture that contradicts the product, which is the one thing a gallery must
         // never do.
-        profile_creation: match can_create {
-            true => ProfileCreation::Possible,
-            false => ProfileCreation::of(MintAvailability::NoChainTransport),
+        // Routed through `ProfileCreation::of_account`, the SAME derivation the binary uses, so a
+        // capture of a locked account shows what a locked account is actually told rather than a
+        // sentence this file chose for it (dig_ecosystem#3059). A posed constant here is how the
+        // gallery came to be unable to photograph the defect it was meant to be evidence against.
+        profile_creation: match funding_elsewhere {
+            // The one blocker whose sentence NAMES two profiles, so it is the only state in which a
+            // capture can show the list and the explanation agreeing (dig_ecosystem#2981). Stated
+            // directly because the seam's own arm carries authority tokens a fixture has no way to
+            // mint, and the copy layer takes bare indices.
+            true => ProfileCreation::Blocked(CreationBlocked::FundingElsewhere {
+                funding: dig_account::ProfileIx::ROOT,
+                target: dig_account::ProfileIx(1),
+            }),
+            false => ProfileCreation::of_account(
+                Some(&account),
+                Some(match can_create {
+                    true => dig_app_core::account::profile_mint::ProfileMintAvailability::Possible,
+                    false => dig_app_core::account::profile_mint::ProfileMintAvailability::NoChainTransport,
+                }),
+            ),
         },
         // A fixture takes no reading (dig_ecosystem#2398).
         mint_chain: None,
@@ -719,6 +737,11 @@ fn main() {
     let can_create = all
         .iter()
         .any(|argument| argument == "--can-create-profile");
+
+    // Pose the one blocker that names two profiles, so the profiles card can be photographed with
+    // its list and its explanation side by side (dig_ecosystem#2981). Off by default: it is a state
+    // only an account that already HOLDS a profile can be in, and every real account holds none.
+    let funding_elsewhere = all.iter().any(|argument| argument == "--funding-elsewhere");
     // `--profiles X` takes a value, so it is read from the FULL argument list by position after the
     // flag rather than from the positionals — which the filter above has already had it removed
     // from, along with its value.
@@ -783,7 +806,13 @@ fn main() {
     };
 
     let view = Arc::new(move || {
-        let mut fixture = view_for(account.clone(), second_factor, profiles, can_create);
+        let mut fixture = view_for(
+            account.clone(),
+            second_factor,
+            profiles,
+            can_create,
+            funding_elsewhere,
+        );
         // Applied over the fixture rather than threaded through `view_for`, so every other axis of
         // the gallery keeps the signature it had.
         fixture.profile_editing = editing;
@@ -937,6 +966,7 @@ mod tests {
             false,
             Profiles::None,
             false,
+            false,
         );
         let live = with_live(base.clone(), &readings());
 
@@ -988,6 +1018,7 @@ mod tests {
             AccountState::Unlocked { recoverable: true },
             false,
             Profiles::None,
+            false,
             false,
         );
         assert!(

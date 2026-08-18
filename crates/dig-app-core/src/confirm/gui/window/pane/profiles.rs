@@ -65,7 +65,7 @@ pub(crate) fn card(
             card::interactive_card(ui, at, t, live, Some(copy::profiles::CARD), |inner| {
                 let mut hit = list(inner, t, &reading, &verbs);
                 inner.gap(space::S4);
-                hit = hit.or(create_panel(inner, t, creation, &verbs));
+                hit = hit.or(create_panel(inner, t, creation, &reading, &verbs));
                 if !verbs.about.is_empty() {
                     inner.gap(space::S3);
                     hit = hit
@@ -548,6 +548,7 @@ fn create_panel(
     flow: &mut Flow,
     t: &Tokens,
     creation: ProfileCreation,
+    reading: &ProfilesReading,
     verbs: &ProfileVerbs,
 ) -> Option<TrayAction> {
     let sentence = match creation {
@@ -555,7 +556,11 @@ fn create_panel(
         // a blocked cause here would tell a person with a stopped node that nothing is missing from
         // their setup (dig_ecosystem#2690).
         ProfileCreation::Unknown => copy::profiles::CHECKING_CREATION.to_string(),
-        ProfileCreation::Blocked(blocked) => copy::profiles::cannot_create(blocked),
+        // Named from the SAME reading the rows above were drawn from, so the sentence and the
+        // list cannot call one profile two things (dig_ecosystem#2981).
+        ProfileCreation::Blocked(blocked) => {
+            copy::profiles::cannot_create(blocked, crate::profiles::ProfileNames::of(reading))
+        }
         // What a profile IS, reused rather than rewritten: the control's own label says what
         // pressing it does, and the funding window it opens states the cost. A second sentence here
         // promising that creation COMPLETES would be false — nothing in this build runs the ceremony
@@ -669,7 +674,14 @@ mod tests {
     use crate::account::profile_session::test_support::{
         expected_did, expected_store_id, session_with,
     };
-    use crate::profiles::{CreationBlocked, ProfilesUnknown};
+    use crate::profiles::{CreationBlocked, ProfileNames, ProfilesUnknown};
+
+    /// The naming these assertions compare against: no list, so every profile is its ordinal.
+    ///
+    /// The card under test is fed an EMPTY reading in these fixtures, which names nothing either —
+    /// so the two agree by construction. The label-derived naming has its own test, where a
+    /// labelled row is the whole point (`the_card_names_a_profile_the_way_its_row_does`).
+    const NAMES: ProfileNames<'static> = ProfileNames::NONE;
     use crate::tray_menu::{AccountState, TrayView};
     use crate::window_model::TabId;
     use dig_account::registry::ProfileVisibility;
@@ -1167,7 +1179,7 @@ mod tests {
         );
         for blocked in CreationBlocked::EVERY {
             assert!(
-                !painted.contains(&copy::profiles::cannot_create(blocked)),
+                !painted.contains(&copy::profiles::cannot_create(blocked, NAMES)),
                 "{blocked:?} was stated as a cause on a node nobody had measured: {painted}"
             );
         }
@@ -1181,7 +1193,8 @@ mod tests {
         let measured_says = card_says(&measured, 960.0);
         assert!(
             measured_says.contains(&copy::profiles::cannot_create(
-                CreationBlocked::NoChainTransport
+                CreationBlocked::NoChainTransport,
+                NAMES
             )),
             "a measured blocker stopped being explained: {measured_says}"
         );
@@ -1225,7 +1238,7 @@ mod tests {
         );
         for blocked in CreationBlocked::EVERY {
             assert!(
-                !painted.contains(&copy::profiles::cannot_create(blocked)),
+                !painted.contains(&copy::profiles::cannot_create(blocked, NAMES)),
                 "a node that CAN mint is told {blocked:?} is missing: {painted}"
             );
         }
@@ -1392,7 +1405,7 @@ mod tests {
             let creation = ProfileCreation::Blocked(blocked);
             assert!(
                 !creation.is_possible(),
-                "no build shipped so far can create a profile, so a fixture that says otherwise is                  not a state this card can be in"
+                "no build shipped so far can create a profile, so a fixture that says otherwise                  is not a state this card can be in"
             );
             let view = TrayView {
                 profile_creation: creation,
@@ -1400,10 +1413,10 @@ mod tests {
             };
             let painted = card_says(&view, 960.0);
             assert!(
-                painted.contains(&copy::profiles::cannot_create(blocked)),
+                painted.contains(&copy::profiles::cannot_create(blocked, NAMES)),
                 "{blocked:?} did not reach the card as its own sentence: {painted}"
             );
-            said.push(copy::profiles::cannot_create(blocked));
+            said.push(copy::profiles::cannot_create(blocked, NAMES));
         }
         assert_ne!(
             said[0], said[1],
@@ -1421,7 +1434,7 @@ mod tests {
             (CreationBlocked::NoLineageWalk, "update", "start"),
         ];
         for (blocked, remedy, other) in remedies {
-            let lowered = copy::profiles::cannot_create(blocked).to_lowercase();
+            let lowered = copy::profiles::cannot_create(blocked, NAMES).to_lowercase();
             assert!(
                 lowered.contains(remedy),
                 "{blocked:?} does not tell the person to {remedy} anything, so a measured cause \
@@ -1529,7 +1542,10 @@ mod tests {
     #[test]
     fn hiding_is_never_worded_as_deleting_even_beside_a_real_delete_control() {
         let view = TrayView {
-            profile_deletion: crate::profiles::ProfileDeletion::of_seams(true, true),
+            profile_deletion: crate::profiles::ProfileDeletion::of_seams(
+                true,
+                Some(&crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            ),
             ..view_with(reading_of(
                 &[
                     (ProfileIx::ROOT, Some("home")),
@@ -1611,7 +1627,10 @@ mod tests {
         let alone = reading_of(&[(ProfileIx::ROOT, Some("home"))], &[]);
 
         let capable = TrayView {
-            profile_deletion: crate::profiles::ProfileDeletion::of_seams(true, true),
+            profile_deletion: crate::profiles::ProfileDeletion::of_seams(
+                true,
+                Some(&crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            ),
             ..view_with(alone.clone())
         };
         assert!(
@@ -1649,5 +1668,55 @@ mod tests {
         let rows = rows.rows().expect("a read list").to_vec();
         assert_ne!(did_element(&rows[0]), did_element(&rows[1]));
         assert_eq!(did_element(&rows[0]), did_element(&rows[0].clone()));
+    }
+    /// **The card's cannot-create sentence calls a profile what the row three lines above calls
+    /// it.**
+    ///
+    /// The PLACEMENT half of dig_ecosystem#2981. The copy layer's own test proves the sentence CAN
+    /// be named from a list; this proves the card actually hands it the list it drew the rows from.
+    /// Without this, a `create_panel` that passed [`ProfileNames::NONE`] — the wrong layer, and the
+    /// state this file was in before the fix — leaves the copy test green and still paints two
+    /// names for one profile.
+    ///
+    /// Both names are read back off the rendered card, and both come from
+    /// [`ProfileRow::display_name`] rather than from literals, so the row and the sentence are
+    /// pinned to ONE derivation. The ordinal forms are asserted ABSENT because an implementation
+    /// naming the profile twice — label and number — would satisfy a contains check alone.
+    #[test]
+    fn the_card_names_a_profile_the_way_its_row_does() {
+        let reading = reading_of(
+            &[
+                (ProfileIx::ROOT, Some("personal")),
+                (ProfileIx(1), Some("work")),
+            ],
+            &[],
+        );
+        let view = TrayView {
+            profile_creation: ProfileCreation::Blocked(CreationBlocked::FundingElsewhere {
+                funding: ProfileIx::ROOT,
+                target: ProfileIx(1),
+            }),
+            ..view_with(reading.clone())
+        };
+
+        let painted = card_says(&view, 960.0);
+        for ix in [ProfileIx::ROOT, ProfileIx(1)] {
+            let row_says = reading
+                .row(ix)
+                .expect("the fixture holds both rows")
+                .display_name();
+            assert!(
+                painted.contains(&row_says),
+                "the card explains itself without using {row_says}, the name its own row carries: \
+                 {painted}"
+            );
+        }
+        for numbered in ["profile 1", "profile 2"] {
+            assert!(
+                !painted.contains(numbered),
+                "the card numbers a profile it also names, so one profile wears two names on one \
+                 screen: {painted}"
+            );
+        }
     }
 }

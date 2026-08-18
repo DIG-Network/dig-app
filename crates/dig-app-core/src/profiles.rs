@@ -257,6 +257,27 @@ pub enum CreationBlocked {
     /// Named to match [`ProfileMintSeams::NoLineageWalk`](crate::account::profile_mint::ProfileMintSeams::NoLineageWalk),
     /// which is where the fact is measured.
     NoLineageWalk,
+    /// The account is LOCKED, so nothing can be derived, signed or spent — and so nothing about
+    /// this machine's node has been measured for creation either.
+    ///
+    /// # Why a lock is a blocker and not an absence of measurement
+    ///
+    /// It reads as one: a locked account has no session, so no probe runs and the reading really is
+    /// unmeasured. That is exactly the trap. `ProfileCreation::Unknown` renders as
+    /// [`CHECKING_CREATION`](copy::CHECKING_CREATION) — *"DIG is still checking…"* — a sentence that
+    /// promises an answer is coming. No answer is coming while the account is locked, so the card
+    /// sat on that sentence for as long as the person stayed locked, with nothing on screen naming
+    /// the one act that would move it (dig_ecosystem#3059).
+    ///
+    /// A lock is not an unknown. It is a known, nameable, user-fixable condition, and
+    /// `professional-ui`'s never-trap rule requires a surface a person cannot satisfy to say what
+    /// would satisfy it. This is the same call [`EditBlocked::Locked`](crate::profile_edit::EditBlocked::Locked)
+    /// makes for the editor, after a locked account was told to *install a newer DIG*
+    /// (dig_ecosystem#3057) — the identical mis-reading of a lock as a statement about the build.
+    ///
+    /// It is reported AHEAD of every other blocker, for that same precedent's reason: while the
+    /// account is locked the other facts are consequences of the lock rather than measurements.
+    AccountLocked,
     /// The node is healthy and the CEREMONY would refuse: this account's money is at one profile's
     /// index and the next profile would be created at another.
     ///
@@ -297,9 +318,10 @@ impl CreationBlocked {
     /// next — which is enough for a sweep asking *does every arm get a sentence*. It is NOT enough
     /// for a guard asserting the sentence VARIES with the payload: that needs its own case, built
     /// from two different payloads, because every element of `EVERY` yields one fixed string.
-    pub const EVERY: [Self; 3] = [
+    pub const EVERY: [Self; 4] = [
         Self::NoChainTransport,
         Self::NoLineageWalk,
+        Self::AccountLocked,
         Self::FundingElsewhere {
             funding: ProfileIx::ROOT,
             target: ProfileIx(1),
@@ -395,6 +417,45 @@ impl ProfileCreation {
             MintAvailability::NoChainTransport => CreationBlocked::NoChainTransport,
             MintAvailability::Possible => CreationBlocked::NoLineageWalk,
         })
+    }
+
+    /// Creation as an account whose own STATE reads it.
+    ///
+    /// The lock is answered first and the reading is not consulted at all when it is closed, for
+    /// [`CreationBlocked::AccountLocked`]'s reason: a locked account runs no probe, so every other
+    /// answer available here is a consequence of the lock rather than a measurement of the node.
+    ///
+    /// # Why this takes the account's STATE and not an `unlocked` flag
+    ///
+    /// Because a session OUTLIVES its key material. Lock-now and the idle auto-lock drop the keys
+    /// and keep the session, so `session.is_some()` is true for an account that is locked — which is
+    /// exactly the case reported: *"the profile worked when i unlocked it, so the message only
+    /// shows when the wallet is locked"*. A predicate built on the session existing cannot see it.
+    ///
+    /// [`AccountState`](crate::tray_menu::AccountState) is also the only source that separates
+    /// *locked* from *no account at all*. Saying "your account is locked" to somebody who has no
+    /// account would be a surface asserting a fact it does not have — so every state other than
+    /// `Locked` falls through to the reading, and an account that has not been made yet keeps the
+    /// honest unmeasured answer.
+    ///
+    /// # Why this decision lives in the crate and not at its one caller
+    ///
+    /// Its caller is `dig-app`'s binary, which no test can see (dig_ecosystem#2587) — and the
+    /// binary is where the defect was: it early-returned [`Unknown`](Self::Unknown) for a locked
+    /// account, leaving the card promising that a check was still running when nothing was going to
+    /// run (dig_ecosystem#3059). Moving the branch here makes the precedence testable, exactly as
+    /// [`ProfileEditing::of_seams`](crate::profile_edit::ProfileEditing::of_seams) does with the
+    /// same fact.
+    pub fn of_account(
+        account: Option<&crate::tray_menu::AccountState>,
+        mint: Option<ProfileMintAvailability>,
+    ) -> Self {
+        match account {
+            Some(crate::tray_menu::AccountState::Locked) => {
+                Self::Blocked(CreationBlocked::AccountLocked)
+            }
+            _ => Self::of_reading(mint),
+        }
     }
 
     /// Derive creation from a whole-profile READING, which may not have been taken yet.
@@ -547,8 +608,55 @@ impl SwitchPlan {
 /// two sentence sets that drifted (dig_ecosystem#2357), and `copy::profiles` cannot be reached from
 /// the binary anyway. Card titles, badge words and captions stay in the pane's copy module, because
 /// only the pane has cards.
+/// How the profiles a sentence NAMES are spelled — always the spelling the list beside it draws.
+///
+/// # Why a sentence may not spell a profile for itself
+///
+/// [`ProfileRow::display_name`] gives a profile its user-visible name: its own label when it has
+/// one, and the ordinal otherwise. The cannot-create sentence used to format its indices directly
+/// as `profile N`, so a card listing a row headed *"work"* explained itself with *"…is held by
+/// profile 1"* — two names for one profile, on one screen, three lines apart
+/// (dig_ecosystem#2981). A reader has no way to tell those are the same thing.
+///
+/// So the sentence does not spell a name at all. It asks this, and this asks the same
+/// [`ProfilesReading`] the rows were drawn from.
+///
+/// # Why the list is optional rather than required
+///
+/// The first-run wizard states the same fault on an account that has no list — it has no profiles,
+/// which is why it is running. [`NONE`](Self::NONE) is that case said out loud, and it falls back
+/// to the ordinal, which is what a profile with no row has ever been called.
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileNames<'a>(Option<&'a ProfilesReading>);
+
+impl<'a> ProfileNames<'a> {
+    /// Names read off the list a surface is DRAWING, so the sentence and the rows agree by
+    /// construction.
+    pub fn of(reading: &'a ProfilesReading) -> Self {
+        Self(Some(reading))
+    }
+
+    /// No list to read from: every profile is named by its ordinal.
+    ///
+    /// For the surfaces that genuinely have none — the first-run wizard, and the tray's About
+    /// notice, which explains creation without listing anything.
+    pub const NONE: Self = Self(None);
+
+    /// What to call the profile at `ix`.
+    ///
+    /// Falls back to the ordinal — counting from ONE, as [`ProfileRow::display_name`] does — for an
+    /// index with no row. That is the ordinary case for a profile that does not exist YET, which
+    /// is precisely what the cannot-create sentence's `target` is.
+    pub fn name(&self, ix: ProfileIx) -> String {
+        match self.0.and_then(|reading| reading.row(ix)) {
+            Some(row) => row.display_name(),
+            None => format!("profile {}", ix.0.saturating_add(1)),
+        }
+    }
+}
+
 pub mod copy {
-    use super::CreationBlocked;
+    use super::{CreationBlocked, ProfileNames};
 
     /// The title of the notice the explainer row opens.
     pub const ABOUT_TITLE: &str = "DIG — Profiles";
@@ -586,10 +694,13 @@ pub mod copy {
     ///
     /// Matching here makes the mapping exhaustive, testable, and impossible for the binary to get
     /// wrong: a new arm breaks this compile rather than quietly falling into a catch-all.
-    pub fn about_creation(creation: super::ProfileCreation) -> Option<String> {
+    pub fn about_creation(
+        creation: super::ProfileCreation,
+        names: ProfileNames<'_>,
+    ) -> Option<String> {
         match creation {
             super::ProfileCreation::Unknown => Some(CHECKING_CREATION.to_string()),
-            super::ProfileCreation::Blocked(blocked) => Some(cannot_create(blocked)),
+            super::ProfileCreation::Blocked(blocked) => Some(cannot_create(blocked, names)),
             // Creation is possible: the Account tab's card carries the control, and a notice cannot
             // explain an absence there is none of.
             super::ProfileCreation::Possible => None,
@@ -623,15 +734,15 @@ pub mod copy {
     /// build, and its remedy is *put the money at profile N's address*. A `&'static str` cannot
     /// carry N, and a sentence that drops it would tell somebody they are blocked and leave out the
     /// one thing they need to act.
-    pub fn cannot_create(blocked: CreationBlocked) -> String {
-        /// How a profile at `ix` is NAMED to a person: counting from one, as
-        /// `ProfileRow::display_name` does. An HD index is an implementation detail nobody has
-        /// been shown.
-        fn ordinal(ix: super::ProfileIx) -> u32 {
-            ix.0.saturating_add(1)
-        }
-
+    pub fn cannot_create(blocked: CreationBlocked, names: ProfileNames<'_>) -> String {
         match blocked {
+            CreationBlocked::AccountLocked => {
+                "Your DIG Account is locked, so DIG cannot create a profile — making one signs \
+                 with your account's own key, and a locked account holds no key to sign with. \
+                 Unlock your account and this card will check whether a profile can be created \
+                 here."
+                    .to_string()
+            }
             CreationBlocked::NoChainTransport => {
                 "Creating a profile mints a DID and a store on the Chia blockchain, and DIG could \
                  not reach the chain to check whether this computer can do it. Your DIG node is \
@@ -646,22 +757,22 @@ pub mod copy {
                  offer creation."
                     .to_string()
             }
-            // Deliberately free of the words the other two arms' remedies are keyed on — this
-            // cause is neither started nor updated, and a card carrying all three verbs would let a
-            // per-arm remedy check pass on a sentence that answers every fault at once.
+            // Deliberately free of the words the other arms' remedies are keyed on — this cause is
+            // neither started, nor updated, nor unlocked, and a card carrying every verb would let
+            // a per-arm remedy check pass on a sentence that answers every fault at once.
             CreationBlocked::FundingElsewhere { funding, target } => {
-                // ORDINALS, not raw indices. The list above this sentence names an unlabelled
-                // profile by `ProfileRow::display_name`, which counts from one — so "profile 0"
-                // here would point a reader at a row this card calls "profile 1". The door's own
-                // refusal string still prints the raw index; it is not user-facing today, and
-                // reconciling the two is a follow-up rather than a silent change to a message
-                // existing tests pin.
-                let (funding, target) = (ordinal(funding), ordinal(target));
+                // NAMED, not numbered. The list above this sentence heads each row with
+                // `ProfileRow::display_name`, so formatting `profile 1` here pointed a reader at a
+                // row this very card calls “work” (dig_ecosystem#2981). One derivation, two
+                // surfaces. The door's own refusal string still prints the raw index; it is not
+                // user-facing, and reconciling it is a follow-up rather than a silent change to a
+                // message existing tests pin.
+                let (funding, target) = (names.name(funding), names.name(target));
                 format!(
                     "Your DIG node is working. Creating a profile pays for it from that \
-                     profile's own wallet, and this account's XCH is held by profile {funding}, \
-                     so a new profile {target} cannot be paid for yet. Move funds to profile \
-                     {target}'s address first and this card will offer creation."
+                     profile's own wallet, and this account's XCH is held by {funding}, so \
+                     {target} cannot be paid for yet. Move funds to {target}'s address first and \
+                     this card will offer creation."
                 )
             }
         }
@@ -753,16 +864,34 @@ pub enum ProfileDeletion {
 }
 
 impl ProfileDeletion {
-    /// Read the offer off the seams that exist, plus the lock, which they cannot know.
+    /// Read the offer off the seams that exist, plus the ACCOUNT, which they cannot know.
     ///
-    /// The lock is reported FIRST for the reason `ProfileEditing::of_seams` records: the shell
+    /// The account is asked FIRST for the reason `ProfileEditing::of_seams` records: the shell
     /// derives the seams from an unlocked account, so a locked one leaves them uninstalled and
     /// reading the transport off that state fabricates a claim about the BUILD (dig_ecosystem#3057).
-    pub fn of_seams(seams_exist: bool, unlocked: bool) -> Self {
-        match (unlocked, seams_exist) {
-            (false, _) => Self::Blocked(DeletionBlocked::Locked),
-            (true, false) => Self::Blocked(DeletionBlocked::NoChainTransport),
-            (true, true) => Self::Possible,
+    ///
+    /// # Why this takes an [`AccountState`](crate::tray_menu::AccountState) and not a `bool`
+    ///
+    /// Because a session OUTLIVES its key material — lock-now and the idle auto-lock drop the keys
+    /// and keep the session — so `session.is_some()` is true for an account that is LOCKED. That is
+    /// exactly what the one caller passed, which offered an irreversible delete control to an
+    /// account that cannot sign a melt (dig_ecosystem#3059 review). A `bool` parameter cannot
+    /// refuse a wrong answer; a state that only `Unlocked` satisfies can, and the caller has no
+    /// second way to spell it.
+    ///
+    /// Every other state withholds the offer WITHOUT naming a cause: `Locked` is the one condition
+    /// this reading can honestly name and route out of. Telling somebody with no account — or one
+    /// sealed under a machine password, or one that will not open at all — that their account is
+    /// "locked" would send them to an `Unlock…` that is not their remedy, and the account surface
+    /// already says what is really true of those states.
+    pub fn of_seams(seams_exist: bool, account: Option<&crate::tray_menu::AccountState>) -> Self {
+        match account {
+            Some(crate::tray_menu::AccountState::Unlocked { .. }) => match seams_exist {
+                true => Self::Possible,
+                false => Self::Blocked(DeletionBlocked::NoChainTransport),
+            },
+            Some(crate::tray_menu::AccountState::Locked) => Self::Blocked(DeletionBlocked::Locked),
+            _ => Self::Unknown,
         }
     }
 
@@ -784,6 +913,7 @@ impl ProfileDeletion {
 #[cfg(test)]
 mod deletion_tests {
     use super::*;
+    use crate::tray_menu::AccountState;
 
     /// **An unmeasured build offers no delete control and names no cause.**
     ///
@@ -811,16 +941,67 @@ mod deletion_tests {
     #[test]
     fn a_locked_account_is_told_to_unlock_and_an_open_one_still_hears_about_its_transport() {
         assert_eq!(
-            ProfileDeletion::of_seams(false, false).blocked(),
+            ProfileDeletion::of_seams(false, Some(&AccountState::Locked)).blocked(),
             Some(DeletionBlocked::Locked),
             "a locked account was told its build cannot reach the blockchain"
         );
         assert_eq!(
-            ProfileDeletion::of_seams(false, true).blocked(),
+            ProfileDeletion::of_seams(false, Some(&OPEN)).blocked(),
             Some(DeletionBlocked::NoChainTransport),
             "an unlocked build with no transport lost the sentence naming its real cause"
         );
-        assert!(ProfileDeletion::of_seams(true, true).is_possible());
+        assert!(ProfileDeletion::of_seams(true, Some(&OPEN)).is_possible());
+    }
+
+    /// An account that is open, so the seams decide.
+    const OPEN: AccountState = AccountState::Unlocked { recoverable: true };
+
+    /// **Only an OPEN account is offered the delete control — every other state withholds it.**
+    ///
+    /// dig_ecosystem#3059 review. The caller used to pass `session.is_some()`, and a session
+    /// deliberately outlives its key material, so a LOCKED account read as unlocked and was offered
+    /// an irreversible melt it could not sign. The locked leg carries `seams_exist = true` on
+    /// purpose: that is the state a machine whose account locked on the idle timer is really in —
+    /// the seams were installed while it was open — so an implementation that only ever reported
+    /// the lock when the seams were missing would pass a `false` fixture and still ship the defect.
+    ///
+    /// The three states BESIDE locked are what stops the nearest wrong fix from passing: a
+    /// `!matches!(Locked)` predicate — "anything that is not locked is open" — offers the delete
+    /// control to an account sealed under a machine password, to one that will not open at all, and
+    /// to a machine with no account whatsoever. Each must withhold, and none may claim the account
+    /// is locked, because "unlock it" is not their remedy.
+    #[test]
+    fn only_an_unlocked_account_may_be_offered_the_delete_control() {
+        assert!(
+            ProfileDeletion::of_seams(true, Some(&OPEN)).is_possible(),
+            "an open account with working seams lost its delete control"
+        );
+
+        let locked = ProfileDeletion::of_seams(true, Some(&AccountState::Locked));
+        assert!(
+            !locked.is_possible(),
+            "a LOCKED account was offered the irreversible delete control"
+        );
+        assert_eq!(locked.blocked(), Some(DeletionBlocked::Locked));
+
+        for closed in [
+            Some(&AccountState::NeedsPassword),
+            Some(&AccountState::Unopenable),
+            Some(&AccountState::Absent),
+            Some(&AccountState::Unsupported),
+            None,
+        ] {
+            let reading = ProfileDeletion::of_seams(true, closed);
+            assert!(
+                !reading.is_possible(),
+                "{closed:?} was offered a delete control it cannot sign"
+            );
+            assert_eq!(
+                reading.blocked(),
+                None,
+                "{closed:?} was told its account is locked, which is neither true of it nor its remedy"
+            );
+        }
     }
 
     /// **Every blocker names a door**, and the locked one sends nobody to install anything.
@@ -1309,13 +1490,18 @@ mod tests {
     /// "is some" assertion and still be the exact defect.
     #[test]
     fn the_about_notice_explains_an_unmeasured_node_differently_from_an_unreachable_one() {
-        let checking = copy::about_creation(ProfileCreation::Unknown);
-        let unreachable =
-            copy::about_creation(ProfileCreation::Blocked(CreationBlocked::NoChainTransport));
+        let checking = copy::about_creation(ProfileCreation::Unknown, ProfileNames::NONE);
+        let unreachable = copy::about_creation(
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+            ProfileNames::NONE,
+        );
 
         assert_eq!(Some(copy::CHECKING_CREATION.to_string()), checking);
         assert_eq!(
-            Some(copy::cannot_create(CreationBlocked::NoChainTransport)),
+            Some(copy::cannot_create(
+                CreationBlocked::NoChainTransport,
+                ProfileNames::NONE
+            )),
             unreachable
         );
         assert_ne!(
@@ -1327,14 +1513,14 @@ mod tests {
         // Every blocked arm gets its own sentence, so a new one cannot arrive unexplained.
         for blocked in CreationBlocked::EVERY {
             assert_eq!(
-                Some(copy::cannot_create(blocked)),
-                copy::about_creation(ProfileCreation::Blocked(blocked))
+                Some(copy::cannot_create(blocked, ProfileNames::NONE)),
+                copy::about_creation(ProfileCreation::Blocked(blocked), ProfileNames::NONE)
             );
         }
 
         assert_eq!(
             None,
-            copy::about_creation(ProfileCreation::Possible),
+            copy::about_creation(ProfileCreation::Possible, ProfileNames::NONE),
             "a notice cannot explain an absence there is none of"
         );
     }
@@ -1410,5 +1596,211 @@ mod tests {
         assert_eq!(ProfilesReading::default(), ProfilesReading::Pending);
         assert_eq!(ProfilesReading::Pending.rows(), None);
         assert_eq!(ProfilesReading::Pending.row(ProfileIx::ROOT), None);
+    }
+    /// **A locked account is told it is LOCKED, even when the node behind it is perfectly healthy.**
+    ///
+    /// The defect (dig_ecosystem#3059) was that a locked account produced
+    /// [`ProfileCreation::Unknown`], which the card renders as *"DIG is still checking whether this
+    /// computer can create a profile"* — a sentence promising an answer that could never arrive,
+    /// because nothing runs while the account is closed.
+    ///
+    /// # What this fixture is built to distinguish
+    ///
+    /// The nearest wrong implementation consults the READING first and only falls back to the lock,
+    /// which is indistinguishable from this one on a locked account whose node is also broken. So
+    /// the locked case is given `Possible` — the healthiest reading there is. An implementation
+    /// that ordered the two the other way answers `Possible` here and offers a locked person a
+    /// control that cannot work; the old implementation answers `Unknown`. Both are visible.
+    ///
+    /// The UNLOCKED cases are the honest controls: without them an implementation that always said
+    /// `AccountLocked` would pass, and `Unknown` must still be reachable — an unmeasured node is a
+    /// real state and this must not have swallowed it.
+    #[test]
+    fn a_locked_account_is_told_about_the_lock_and_not_about_the_node() {
+        use crate::tray_menu::AccountState;
+
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::AccountLocked),
+            ProfileCreation::of_account(
+                Some(&AccountState::Locked),
+                Some(ProfileMintAvailability::Possible)
+            ),
+            "a locked account was answered from the node reading, so the lock went unsaid"
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::AccountLocked),
+            ProfileCreation::of_account(Some(&AccountState::Locked), None),
+            "a locked account with nothing measured was left on the never-ending check"
+        );
+
+        let unlocked = AccountState::Unlocked { recoverable: true };
+        assert_eq!(
+            ProfileCreation::Possible,
+            ProfileCreation::of_account(Some(&unlocked), Some(ProfileMintAvailability::Possible)),
+            "an unlocked account with a healthy node stopped being offered creation"
+        );
+        assert_eq!(
+            ProfileCreation::Unknown,
+            ProfileCreation::of_account(Some(&unlocked), None),
+            "an unmeasured node stopped being an unknown, which is a real and different state"
+        );
+
+        // An account that does not exist is NOT locked, and must not be told it is. This is the
+        // arm that keeps the fix from trading one false sentence for another.
+        for absent in [
+            AccountState::Absent,
+            AccountState::Unsupported,
+            AccountState::NeedsPassword,
+        ] {
+            assert_eq!(
+                ProfileCreation::Unknown,
+                ProfileCreation::of_account(Some(&absent), None),
+                "{absent:?} was reported as a locked account, which is a lock nobody has"
+            );
+        }
+        assert_eq!(
+            ProfileCreation::Unknown,
+            ProfileCreation::of_account(None, None),
+            "an account nothing has read yet was reported as locked"
+        );
+    }
+
+    /// **A locked account's sentence names the UNLOCK, and never the node or the build.**
+    ///
+    /// The lock's sentence must not borrow the remedy of a fault it is not: a person told to
+    /// install a newer DIG goes and does that, and their wallet is still locked afterwards. That is
+    /// the exact mis-reading dig_ecosystem#3057 shipped, on the editor, for the same underlying
+    /// state.
+    ///
+    /// Asserted against the OTHER arms' remedy words rather than against a fixed string, so a
+    /// rewording that keeps the meaning passes and a rewording that drifts back onto the node's
+    /// remedy fails.
+    #[test]
+    fn the_locked_sentence_names_the_unlock_and_not_a_node_or_a_build() {
+        let said =
+            copy::cannot_create(CreationBlocked::AccountLocked, ProfileNames::NONE).to_lowercase();
+
+        assert!(
+            said.contains("unlock"),
+            "the one act that would move this card is not named: {said}"
+        );
+        for misdirection in ["install", "update", "newer", "start your dig node"] {
+            assert!(
+                !said.contains(misdirection),
+                "a locked person is sent to fix {misdirection:?}, which is not what is wrong: {said}"
+            );
+        }
+    }
+
+    /// **The cannot-create sentence spells a profile exactly the way the list beside it does.**
+    ///
+    /// The defect (dig_ecosystem#2981) put *"…is held by profile 1"* under a row headed *"work"* —
+    /// two names for one profile, three lines apart, with nothing telling a reader they are the
+    /// same thing.
+    ///
+    /// # What this fixture is built to distinguish
+    ///
+    /// Both indices in the sentence are given LABELLED rows, and the labels are compared against
+    /// [`ProfileRow::display_name`] rather than against literal strings — so this pins the two
+    /// surfaces to ONE derivation instead of to two constants that happen to agree today. The
+    /// ordinal forms are asserted absent, because an implementation that appended the label to the
+    /// number would satisfy a contains-the-label check while still printing both names.
+    ///
+    /// The `ProfileNames::NONE` control is what a surface with no list to read may still say, and
+    /// it must remain the ordinal — the fallback is not a bug, it is the name a profile that has no
+    /// row has always had.
+    #[test]
+    fn the_cannot_create_sentence_names_a_profile_the_way_its_row_does() {
+        let reading = ProfilesReading::of_registry(&registry_with(&[
+            (ProfileIx::ROOT, Some("personal")),
+            (ProfileIx(1), Some("work")),
+        ]));
+        let blocked = CreationBlocked::FundingElsewhere {
+            funding: ProfileIx::ROOT,
+            target: ProfileIx(1),
+        };
+
+        let named = copy::cannot_create(blocked, ProfileNames::of(&reading));
+        for ix in [ProfileIx::ROOT, ProfileIx(1)] {
+            let row_says = reading
+                .row(ix)
+                .expect("the fixture holds both rows")
+                .display_name();
+            assert!(
+                named.contains(&row_says),
+                "the sentence does not call this profile {row_says}, which is what its row is \
+                 headed: {named}"
+            );
+        }
+        for numbered in ["profile 1", "profile 2"] {
+            assert!(
+                !named.contains(numbered),
+                "the sentence still numbers a profile the list names: {named}"
+            );
+        }
+
+        let unnamed = copy::cannot_create(blocked, ProfileNames::NONE);
+        assert!(
+            unnamed.contains("profile 1") && unnamed.contains("profile 2"),
+            "a surface with no list to read stopped falling back to the ordinal: {unnamed}"
+        );
+    }
+
+    /// **A profile with no row, and a profile with no label, are both called by their ordinal.**
+    ///
+    /// The cannot-create sentence's `target` is the profile that does not exist YET, so it has no
+    /// row by construction — the fallback is the ordinary path there, not an edge case. Counting
+    /// from ONE, because that is what [`ProfileRow::display_name`] shows and an HD index is an
+    /// implementation detail nobody has been shown.
+    #[test]
+    fn a_profile_with_no_row_or_no_label_is_named_by_its_ordinal() {
+        let reading = ProfilesReading::of_registry(&registry_with(&[(ProfileIx::ROOT, None)]));
+        let names = ProfileNames::of(&reading);
+
+        assert_eq!(
+            "profile 1",
+            names.name(ProfileIx::ROOT),
+            "an unlabelled row"
+        );
+        assert_eq!(
+            "profile 3",
+            names.name(ProfileIx(2)),
+            "an index with no row at all"
+        );
+    }
+    /// **No sentence this module renders carries a run of spaces from the way its literal was
+    /// wrapped.**
+    ///
+    /// The failure this guards is invisible in review and obvious on screen: a `\` lost from the end
+    /// of a continued literal leaves the source's own indentation INSIDE the string, `cargo fmt`
+    /// preserves it, and the reader gets *"held by ␣␣␣␣␣␣␣␣ “work”"* in the middle of a card. Nine
+    /// such sentences reached the screen in one day.
+    ///
+    /// Asserted on the RENDERED string rather than on the source line, so it holds however the
+    /// literal is spelled — a `concat!`, a continuation, or a `format!` — and cannot be satisfied by
+    /// reformatting the file. Every arm is visited from
+    /// [`CreationBlocked::EVERY`](CreationBlocked::EVERY), which is exhaustive by construction, and
+    /// the payload arm is rendered with real NAMES so the interpolated form is the one measured.
+    #[test]
+    fn no_sentence_this_module_renders_carries_a_run_of_spaces() {
+        let reading = ProfilesReading::of_registry(&registry_with(&[
+            (ProfileIx::ROOT, Some("personal")),
+            (ProfileIx(1), Some("work")),
+        ]));
+
+        let mut said = vec![copy::CHECKING_CREATION.to_string()];
+        for blocked in CreationBlocked::EVERY {
+            for names in [ProfileNames::NONE, ProfileNames::of(&reading)] {
+                said.push(copy::cannot_create(blocked, names));
+            }
+        }
+
+        for sentence in &said {
+            assert!(
+                !sentence.contains("    "),
+                "a rendered sentence carries a run of spaces, which reaches the screen verbatim: \
+                 {sentence:?}"
+            );
+        }
     }
 }

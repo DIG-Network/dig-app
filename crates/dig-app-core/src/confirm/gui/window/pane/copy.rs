@@ -665,8 +665,11 @@ pub(crate) mod profiles {
     /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
     /// because the shell says the same thing in a native notice and two constants stating one fact
     /// is how the account state machine came to have two sentence sets that drifted (#2357).
-    pub(crate) fn cannot_create(blocked: CreationBlocked) -> String {
-        crate::profiles::copy::cannot_create(blocked)
+    pub(crate) fn cannot_create(
+        blocked: CreationBlocked,
+        names: crate::profiles::ProfileNames<'_>,
+    ) -> String {
+        crate::profiles::copy::cannot_create(blocked, names)
     }
 
     /// Said above the switch controls, BEFORE anything is pressed.
@@ -709,6 +712,9 @@ pub(crate) mod clipboard {
     pub(crate) const COPY: &str = "Copy";
     /// What it says immediately after a successful copy, before returning to [`COPY`].
     pub(crate) const COPIED: &str = "Copied";
+    /// The caption under a bare identifier that copies itself when pressed — the affordance, since
+    /// a click target nobody can see is not a control (dig_ecosystem#2951).
+    pub(crate) const CLICK_TO_COPY: &str = "Click to copy";
 }
 
 /// The scannable-code block.
@@ -1497,13 +1503,29 @@ pub(crate) mod content {
 mod tests {
     use super::*;
 
-    /// **No sentence carries a run of spaces from the way its literal was wrapped.**
+    /// A profiles list whose rows carry LABELS, so a sentence naming a profile names it the way a
+    /// card's row would rather than by its ordinal.
     ///
-    /// Found on screen, not in review: a continued literal lost its `\` and rendered *"so the
-    /// ␣␣␣␣␣␣␣␣␣ control above does nothing"* in the middle of a card. The reader sees a typographic
-    /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
-    /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
-    /// it.
+    /// The two indices are the ones [`CreationBlocked::FundingElsewhere`] carries in
+    /// `CreationBlocked::EVERY` — so every sentence built from it below is the sentence a person
+    /// with a labelled list actually reads (dig_ecosystem#2981).
+    fn labelled() -> crate::profiles::ProfilesReading {
+        fn row(ix: u32, label: &str, active: bool) -> crate::profiles::ProfileRow {
+            crate::profiles::ProfileRow {
+                ix: dig_account::ProfileIx(ix),
+                did: format!("did:chia:{ix}"),
+                store_id: format!("0x{ix:064}"),
+                label: Some(label.to_string()),
+                hidden: false,
+                active,
+            }
+        }
+        crate::profiles::ProfilesReading::Known(vec![
+            row(0, "personal", true),
+            row(1, "work", false),
+        ])
+    }
+
     /// Every sentence this module hands a paint call, so a guard asserted "over all the copy" is.
     ///
     /// Written out because these are `const`s in nested modules and nothing enumerates them. The
@@ -1518,6 +1540,7 @@ mod tests {
             home::CACHE_UNKNOWN,
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
+            clipboard::CLICK_TO_COPY,
             offer::PASTE_HINT,
             offer::EMPTY_HINT,
             offer::DROP_ACTIVE,
@@ -1604,7 +1627,11 @@ mod tests {
         // one of them is a sweep for one of them. The indentation guard below found a real defect
         // in exactly these the day they were written, which is why they are here rather than
         // trusted. Built rather than constant since dig_ecosystem#2939 gave one arm a payload.
-        said.extend(crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create));
+        said.extend(crate::profiles::CreationBlocked::EVERY.map(|blocked| {
+            // Named against a REAL list holding a labelled row, so the guard below reads the
+            // sentence a card actually draws rather than an ordinal-only variant of it.
+            profiles::cannot_create(blocked, crate::profiles::ProfileNames::of(&labelled()))
+        }));
         // Every reason a store list can be missing, enumerated from the reading's own list rather
         // than sampled — a sweep that visits some of the sentences is a sweep for some of them.
         said.extend(
@@ -1648,6 +1675,13 @@ mod tests {
         "wired up to it",
     ];
 
+    /// **No sentence carries a run of spaces from the way its literal was wrapped.**
+    ///
+    /// Found on screen, not in review: a continued literal lost its `\` and rendered *"so the
+    /// ␣␣␣␣␣␣␣␣␣ control above does nothing"* in the middle of a card. The reader sees a typographic
+    /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
+    /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
+    /// it.
     #[test]
     fn no_sentence_carries_its_own_indentation() {
         for sentence in every_sentence() {
@@ -1779,6 +1813,10 @@ mod tests {
         assert_ne!(agent_state(true), agent_state(false));
 
         assert_ne!(clipboard::COPY, clipboard::COPIED);
+        // The bare-identifier affordance and its acknowledgement are the same pair one step apart:
+        // a caption that said the same thing before and after a press would leave the person
+        // unsure whether it took (dig_ecosystem#2951).
+        assert_ne!(clipboard::CLICK_TO_COPY, clipboard::COPIED);
     }
 
     /// **Every reason a store list is missing gets its OWN sentence** (dig_ecosystem#2397).

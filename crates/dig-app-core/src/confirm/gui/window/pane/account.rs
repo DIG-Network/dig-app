@@ -1123,7 +1123,10 @@ mod tests {
         allowed.extend(
             crate::profiles::CreationBlocked::EVERY
                 .into_iter()
-                .map(|blocked| copy::profiles::cannot_create(blocked).to_string()),
+                .map(|blocked| {
+                    copy::profiles::cannot_create(blocked, crate::profiles::ProfileNames::NONE)
+                        .to_string()
+                }),
         );
         // Every sentence the profile editor's card can draw, keyed on the EDITING reading rather
         // than on the account's state — so none of them is a second per-state sentence set. All
