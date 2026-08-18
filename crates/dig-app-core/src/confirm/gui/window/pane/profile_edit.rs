@@ -567,7 +567,8 @@ mod tests {
     ///
     /// A `BodyLost` draft is ALWAYS empty, and the empty-profile banner is drawn off
     /// `ProfileDraft::is_empty()` — so the form said *"Your profile is empty. Nothing has gone
-    /// wrong"* one line below *"This profile's details are gone."* The model was never wrong:
+    /// wrong"* one line below *"This profile's details are not on this computer."* The model was
+    /// never wrong:
     /// `ProfileReading::is_empty()` is correctly false for the state. The surface consulted the
     /// draft instead, which is how an invariant defended in one layer is bypassed in the next.
     ///

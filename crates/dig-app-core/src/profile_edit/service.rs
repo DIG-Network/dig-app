@@ -286,8 +286,9 @@ impl EditService {
         // against what was read, so against a failed read it would be computed against nothing and
         // would publish a body missing everything the profile still held.
         //
-        // `BodyLost` is not that. Its content is unrecoverable, so there is nothing left for a fresh
-        // body to lose, and refusing here is what made the remedy a silent no-op: the form invited a
+        // `BodyLost` is not that. Its content is not on this computer and no seed rebuilds it, so
+        // there is nothing LOCAL left for a fresh body to lose, and refusing here is what made the
+        // remedy a silent no-op: the form invited a
         // person to publish, the press did nothing, and the modal closed exactly as it does on a
         // real save (dig_ecosystem#3041, the shape of #3069). The attempt now runs, and whatever the
         // seam answers — today a refusal, because dig-account computes an edit as a delta over a
@@ -649,25 +650,13 @@ mod tests {
         );
     }
 
-    /// Pressing Save does not perform a CHAIN READ on the thread that pressed it.
-    ///
-    /// # What this catches, and why the count is the assertion
-    ///
-    /// `save` needs the store id, and the obvious way to get one is to ask the seam to read the
-    /// profile — which is a node round trip and a chain walk, run on the painting thread. dig-app
-    /// 12.6.0 exists because a chain call ran there during a mint and the window stopped repainting
-    /// for the length of the ceremony; from outside, that is a crash.
-    ///
-    /// A test asserting only that the commit happened cannot see this: the version that blocks
-    /// commits too, just after freezing the window. So the observable is the READ COUNT across the
-    /// call. The seam counts, one read has already happened to produce the reading `save` requires,
-    /// and any read `save` itself performs is a second one.
     /// **dig_ecosystem#3041.** Publishing from the re-entry form is a real ATTEMPT, not a silent
     /// no-op.
     ///
     /// # The defect this is the observable for
     ///
-    /// The card tells a person whose content is unrecoverable to type the details in and publish
+    /// The card tells a person whose content is not on this computer to type the details in and
+    /// publish
     /// them. `save` returned early on every reading that was not `Known`, so the press reached no
     /// seam, produced no error, and closed the modal exactly as a real save does — a promise in
     /// copy that the code did not keep, and the dead-control shape of #3069 arriving through a door
@@ -695,7 +684,8 @@ mod tests {
         service.save(changes.clone());
         assert!(
             waited_for(|| *lost.fresh_publishes.lock().expect("fresh publishes") > 0),
-            "pressing publish on the re-entry form reached no seam: it wrote nothing, said              nothing, and closed as though it had saved"
+            "pressing publish on the re-entry form reached no seam: it wrote nothing, said \
+             nothing, and closed as though it had saved"
         );
         // The ROUTE, not merely the attempt. A delta commit reads the published body first, so over
         // a body that is gone it fails inside the very call meant to carry out the remedy — which
@@ -704,7 +694,8 @@ mod tests {
         assert_eq!(
             *lost.commits.lock().expect("commits"),
             0,
-            "the fresh publish was routed through the DELTA commit, which must read the body that              is gone before it can write anything"
+            "the fresh publish was routed through the DELTA commit, which must read the body \
+             that is not on this computer before it can write anything"
         );
 
         // The other side of the routing, and the reason it is a route rather than a fallback: a
@@ -723,7 +714,8 @@ mod tests {
         assert_eq!(
             *known.fresh_publishes.lock().expect("fresh publishes"),
             0,
-            "an ordinary edit was published as a WHOLE fresh profile, which deletes every slot the              form does not carry"
+            "an ordinary edit was published as a WHOLE fresh profile, which deletes every slot \
+             the form does not carry"
         );
 
         // The control: a profile that merely FAILED to read still refuses, because its bytes may be
@@ -736,7 +728,8 @@ mod tests {
         refusing.save(changes);
         assert!(
             !waited_for(|| *unread.commits.lock().expect("commits") > 0),
-            "a commit was built over a profile this app could not read, so it would publish a body              missing everything the profile still holds"
+            "a commit was built over a profile this app could not read, so it would publish a \
+             body missing everything the profile still holds"
         );
     }
 
@@ -752,6 +745,19 @@ mod tests {
         false
     }
 
+    /// Pressing Save does not perform a CHAIN READ on the thread that pressed it.
+    ///
+    /// # What this catches, and why the count is the assertion
+    ///
+    /// `save` needs the store id, and the obvious way to get one is to ask the seam to read the
+    /// profile — which is a node round trip and a chain walk, run on the painting thread. dig-app
+    /// 12.6.0 exists because a chain call ran there during a mint and the window stopped repainting
+    /// for the length of the ceremony; from outside, that is a crash.
+    ///
+    /// A test asserting only that the commit happened cannot see this: the version that blocks
+    /// commits too, just after freezing the window. So the observable is the READ COUNT across the
+    /// call. The seam counts, one read has already happened to produce the reading `save` requires,
+    /// and any read `save` itself performs is a second one.
     #[test]
     fn pressing_save_does_not_read_the_chain_on_the_calling_thread() {
         let seam = Reading::of(Ok(a_profile()));

@@ -66,25 +66,29 @@ pub mod copy {
                                    never been written. Publishing them writes to the blockchain and \
                                    costs a small amount of XCH.";
 
-    /// Said over a profile whose content is anchored on chain and exists nowhere
+    /// Said over a profile whose content is anchored on chain and is not on this computer
     /// (dig_ecosystem#3041).
+    ///
+    /// # The claim is bounded by what was actually consulted
+    ///
+    /// Exactly TWO sources answer before this sentence is reached: the node's own body store, and
+    /// the seed rebuild in [`NodeProfileContent::rebuilt`](super::adapter). **No peer is ever
+    /// asked.** An earlier version of this sentence said the details "could not be found anywhere
+    /// else", which over a body that merely sits on an unsynced peer declares the data destroyed —
+    /// and then offers a remedy that MAKES it destroyed, because a fresh publish overwrites the
+    /// anchored root. A claim the code cannot support must not be what talks somebody into an
+    /// irreversible act, so the sentence now names the two places that were searched and says
+    /// plainly that no other node was asked.
     ///
     /// # Every clause is load-bearing
     ///
-    /// It states the loss without hedging, because the preceding version of this sentence told those
+    /// It states the two failed lookups without hedging, because the version before that told these
     /// people *"nothing has gone wrong"* and they went looking for a setting that would bring their
-    /// profile back. It does not offer a retry, because a hash has no preimage to find. It names the
-    /// root, so the claim is checkable rather than taken on trust. And it ends on the door — typing
-    /// the details in again — because a statement of loss with no next action is the dead end
+    /// profile back. It names the root, so the claim is checkable rather than taken on trust. It
+    /// discloses that publishing REPLACES what the chain records, because that is the one fact a
+    /// person weighing an overwrite cannot get anywhere else on this card. And it ends on the door —
+    /// typing the details in again — because a statement of loss with no next action is the dead end
     /// `professional-ui`'s first rule exists to forbid.
-    ///
-    /// # What it deliberately does NOT claim
-    ///
-    /// Three MEASURED facts — not on your node, not found anywhere else, not rebuildable — rather
-    /// than a universal *this can never be recovered*. The rebuild candidate list is complete only
-    /// once [`install_recorded_seeds`](super::recovery::install_recorded_seeds) has run, and what
-    /// guarantees that before a person reaches this card is an ORDERING rather than an invariant. So
-    /// the sentence says what this app looked for and did not find, and stops there.
     ///
     /// # Why the remedy is worded as *add the details*
     ///
@@ -96,11 +100,13 @@ pub mod copy {
     /// substring of the sentence that says there isn't one.
     pub fn body_lost(root: &str) -> String {
         format!(
-            "This profile's details are gone. The blockchain still records that they existed \
-             (as {root}), but the details themselves are not on your node, could not be found \
-             anywhere else, and cannot be rebuilt. Your profile itself is safe and still yours. To \
-             use it again, add the details below and publish them; that writes to the blockchain \
-             and costs a small amount of XCH."
+            "This profile's details are not on this computer. The blockchain still records that \
+             they existed (as {root}), but DIG could not find them in your node's storage and \
+             could not rebuild them from what was set when the profile was created. It has not \
+             asked any other node, so a copy may still exist elsewhere. Your profile itself is \
+             safe and still yours. To use it again, add the details below and publish them — that \
+             writes to the blockchain, costs a small amount of XCH, and replaces what the \
+             blockchain records, so any copy held elsewhere would no longer be the published one."
         )
     }
 
@@ -174,23 +180,25 @@ pub enum ProfileReading {
     /// what was read and there is nothing to read. A person here is told what is true and offered
     /// the way to publish something — never a retry (dig_ecosystem#3036).
     Unpublished,
-    /// The chain anchors a root whose content is gone for good (dig_ecosystem#3041).
+    /// The chain anchors a root this computer cannot produce the content for (dig_ecosystem#3041).
     ///
     /// # The one state here that offers a draft it did not read
     ///
     /// Every other failure withholds the form, and for a good reason: a person typing over a profile
-    /// the app merely FAILED to read commits a body missing everything it still held. That reason
-    /// does not apply here, because there is nothing left to lose — the bytes are unrecoverable, so
-    /// an empty form destroys nothing and is the only way back to a working profile.
+    /// the app merely FAILED to read commits a body missing everything it still held. That reason is
+    /// weaker here — the node's store does not hold the body and no seed rebuilds it, so there is
+    /// nothing LOCAL left to lose — and the form is the only way back to a working profile. It is
+    /// weaker rather than absent, because no peer was asked (see [`copy::body_lost`]): publishing
+    /// still replaces the anchored root, and the sentence beneath the form says so.
     ///
     /// So the draft is empty and [`is_empty`](Self::is_empty) is deliberately FALSE. The two facts
-    /// together are what force a surface to draw this as *your details are gone, type them again*
-    /// rather than as *you have not filled this in yet* — which would let a person press Save on
-    /// three blank fields believing they were preserving what was there.
+    /// together are what force a surface to draw this as *your details are not here, type them
+    /// again* rather than as *you have not filled this in yet* — which would let a person press Save
+    /// on three blank fields believing they were preserving what was there.
     BodyLost {
-        /// The unrecoverable root, carried so the sentence can name it.
+        /// The root whose content could not be produced, carried so the sentence can name it.
         root: String,
-        /// An empty draft to type into. Empty because nothing survived, never because the profile
+        /// An empty draft to type into. Empty because nothing was found, never because the profile
         /// was empty.
         draft: ProfileDraft,
     },

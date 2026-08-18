@@ -226,10 +226,10 @@ enum Case {
     Locked,
     /// Nothing answered the §5.3 ladder, so no cache snapshot and no balance.
     NoNode,
-    /// A profile whose content is anchored on chain and exists nowhere (dig_ecosystem#3041).
+    /// A profile whose content is anchored on chain and is not on this computer (dig_ecosystem#3041).
     ///
     /// The state a person is actually stuck in, and the one worth photographing: the card must say
-    /// the details are gone AND draw the form to type them in again, with no sentence anywhere under
+    /// the details are not here AND draw the form to type them in again, with no sentence anywhere under
     /// it claiming nothing has gone wrong. Two separate defects on this card rendered correctly at
     /// the model and wrongly on screen, so it gets a capture of its own.
     ProfileBodyLost,
