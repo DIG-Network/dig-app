@@ -351,12 +351,20 @@ const SPEND_PAYLOAD_TYPE: &str = "wallet.spend";
 /// So amounts go through [`crate::amount`], the one place that knows an asset's decimals, exactly as
 /// every figure on the Wallet tab does.
 ///
-/// # A CAT amount is NOT divided here
+/// # An UNRECOGNISED CAT amount is NOT divided here
 ///
 /// A recipient carries an asset id, not a number of decimal places, and CATs do not agree on one.
-/// Dividing by $DIG's three would be a confidently wrong figure for every other CAT — the same defect
-/// class this function exists to fix. So a CAT amount is shown as its base units, said in those
-/// words, beside the asset it belongs to. Unglamorous, and true.
+/// Dividing every CAT by $DIG's three would be a confidently wrong figure for all the others — the
+/// same defect class this function exists to fix. So an unrecognised CAT amount is shown as its base
+/// units, said in those words, beside the asset it belongs to. Unglamorous, and true.
+///
+/// **$DIG is the exception, because its precision is KNOWN** (dig_ecosystem#2396). Its asset id is a
+/// pinned constant in `dig-constants` and its three decimal places are the same three
+/// [`crate::amount`] formats the Wallet tab's balance with. Once $DIG can be sent, this is the screen
+/// on which a person consents to sending it, and showing `1500 base units of CAT a628…` for a payment
+/// they typed as `1.5` fails the one job the screen has: letting them recognise their own payment.
+/// Matching on the id — never on position or on the amount — is what keeps the exception exactly one
+/// asset wide.
 ///
 /// Plain text only (the per-OS confirmers neutralize markup), never key material.
 fn render_spend(summary: &SpendSummary) -> String {
@@ -380,10 +388,24 @@ fn render_spend(summary: &SpendSummary) -> String {
 fn paid_amount(to: &dig_account::SpendRecipient) -> String {
     match &to.asset_id {
         None => format!("{} XCH", format_asset_amount(Asset::Xch, to.amount_mojos)),
-        // Named as base units precisely because this function does not know the CAT's precision —
+        Some(asset) if is_dig(asset) => {
+            format!("{} $DIG", format_asset_amount(Asset::Dig, to.amount_mojos))
+        }
+        // Named as base units precisely because this function does not know THIS CAT's precision —
         // see the caller's docs.
         Some(asset) => format!("{} base units of CAT {asset}", to.amount_mojos),
     }
+}
+
+/// Whether `asset_id` is $DIG, compared against the canonical constant.
+///
+/// The comparison is case-insensitive because the id arrives as a hex STRING from
+/// `dig-account`'s summary, and a case difference between two renderings of the same 32 bytes would
+/// silently drop $DIG back to the base-units branch — a formatting regression that no type would
+/// catch. It is never a literal: `dig_constants::DIG_ASSET_ID` is the one place the id is written,
+/// and a second copy here is exactly the byte drift that constant exists to prevent.
+fn is_dig(asset_id: &str) -> bool {
+    asset_id.eq_ignore_ascii_case(&hex::encode(dig_constants::DIG_ASSET_ID))
 }
 
 #[cfg(test)]
@@ -808,5 +830,74 @@ mod tests {
             .confirm_spend(&account(), ProfileIx::ROOT, &sample_summary())
             .await;
         assert!(matches!(result, Err(CeremonyError::Unavailable(_))));
+    }
+
+    /// **The consent screen shows a $DIG payment as $DIG, and every OTHER CAT as base units.**
+    ///
+    /// # Both halves are asserted in one test because either alone is satisfied by a wrong answer
+    ///
+    /// Asserting only the $DIG line passes for an implementation that divides EVERY CAT by three —
+    /// which would misstate every non-$DIG CAT by a factor of a thousand on the screen where a person
+    /// authorises money. Asserting only the unknown-CAT line passes for the code as it stood before
+    /// this ticket, which showed $DIG as raw base units.
+    ///
+    /// The two fixtures carry the SAME base-unit figure, so the assertions cannot both be satisfied by
+    /// any single formatting rule: 1 500 must render as `1.5` under one id and as `1500` under the
+    /// other.
+    #[test]
+    fn a_dig_line_is_shown_in_dig_while_an_unknown_cat_stays_in_base_units() {
+        let dig = hex::encode(dig_constants::DIG_ASSET_ID);
+        let other = "f".repeat(64);
+        assert_ne!(dig, other, "the two fixtures must be different assets");
+
+        let dig_line = paid_amount(&dig_account::SpendRecipient::to_address(
+            "xch1recipient",
+            1_500,
+            Some(dig.clone()),
+        ));
+        assert!(
+            dig_line.contains("1.5") && dig_line.contains("$DIG"),
+            "a $DIG payment was not shown in $DIG: {dig_line}"
+        );
+        assert!(
+            !dig_line.contains("base units"),
+            "a $DIG payment whose precision is known was shown as raw base units: {dig_line}"
+        );
+
+        let other_line = paid_amount(&dig_account::SpendRecipient::to_address(
+            "xch1recipient",
+            1_500,
+            Some(other.clone()),
+        ));
+        assert!(
+            other_line.contains("1500") && other_line.contains("base units"),
+            "an unknown CAT was divided by an assumed precision: {other_line}"
+        );
+        assert!(
+            !other_line.contains("1.5 "),
+            "an unknown CAT was given $DIG's decimal places: {other_line}"
+        );
+    }
+
+    /// **The $DIG id is matched whatever its case.**
+    ///
+    /// The id crosses the dig-account seam as a hex STRING, and nothing in either type system pins its
+    /// case. An exact-equality match would drop an upper-case rendering silently back to the base-units
+    /// branch — a regression visible only to someone reading the screen.
+    #[test]
+    fn the_dig_asset_id_is_recognised_in_either_case() {
+        let lower = hex::encode(dig_constants::DIG_ASSET_ID);
+        assert!(
+            is_dig(&lower),
+            "the canonical lower-case id was not matched"
+        );
+        assert!(
+            is_dig(&lower.to_uppercase()),
+            "an upper-case rendering of the same 32 bytes was not recognised as $DIG"
+        );
+        assert!(
+            !is_dig(&"a".repeat(64)),
+            "every id matched, so the assertions above prove nothing"
+        );
     }
 }

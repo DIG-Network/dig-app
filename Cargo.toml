@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "12.21.0"
+version = "12.22.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -225,16 +225,21 @@ dig-identity = { version = "0.6", features = ["bls"] }
 dig-did = "0.6"
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
-# VERSION WALL (dig_ecosystem#2560): chip35-dl-coin 0.8.0 is its only published release and it pins
-# chia-* 0.26 / chia-sdk-* 0.30, while dig-account 0.10 (the crate every spend must be handed to)
-# pins chia-* 0.36.1 / chia-wallet-sdk 0.34. Those are incompatible 0.x lines, so Cargo keeps BOTH in
-# the graph and chip35's `CoinSpend`/`PublicKey` are a DIFFERENT type from dig-account's. A spend
-# built by chip35 therefore cannot be passed to dig-account at all today. Nothing in dig-app builds a
-# $DIG spend yet, so nothing is broken now, but the $DIG spend path (dig_ecosystem#2396) is BLOCKED
-# until chip35-dl-coin publishes on the 0.36.1/0.34 line. Do NOT work around this by re-serialising
-# between the two lines; that puts a hand-rolled conversion in the middle of the money path.
-# chip35-dl-coin is therefore NOT declared as a dependency — it has no call sites in this workspace
-# and its presence would pull the entire 0.30 SDK line into the shipped tray binary for zero use.
+# chip35-dl-coin is deliberately NOT a dependency of this workspace, and the reason has CHANGED —
+# read which one applies before acting on it (dig_ecosystem#2560, updated by #2396).
+#
+# The old reason was a VERSION WALL: chip35-dl-coin's only published release pinned chia-* 0.26 /
+# chia-sdk-* 0.30 against dig-account's 0.36.1 / 0.34, so its `CoinSpend` was a different Rust type
+# and a chip35-built spend could not be handed to dig-account at all. That wall is GONE —
+# chip35-dl-coin 0.10.0 published on 0.36.1 / 0.34, the same line dig-account resolves. Do not cite
+# it as a blocker; #2396 shipped the $DIG spend path over it.
+#
+# The reason that REMAINS is simply that nothing here calls it. $DIG sending goes through
+# `dig_account::WalletOps::build_dig_transfer` (dig-account's own CAT builder, `wallet/cat_transfer.rs`),
+# which dig-app already depends on — so declaring chip35 as well would pull a whole additional SDK
+# surface into the shipped tray binary for zero call sites. Add it only when a spend shape dig-account
+# genuinely does not build appears here, and never as a second route to one it does: two builders for
+# one spend is the drifted-second-copy hazard this comment block exists to prevent.
 #
 # The Chia type line dig-account 0.10 resolves (dig_ecosystem#2560), so every chia type dig-app
 # passes across the dig-account seam is ONE definition rather than a silently-drifted second copy.

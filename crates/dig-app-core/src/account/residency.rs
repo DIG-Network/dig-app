@@ -28,8 +28,9 @@ use std::sync::{Arc, Mutex};
 
 use chia_protocol::CoinSpend;
 use dig_account::{
-    AccountError, CustodyPolicy, LocalMoneySigner, ProfileEditor, ProfileIx, ProfileMinter,
-    Result as AccountResult, SpendSummary, TransferPlan, TransferRequest, UnlockedAccount,
+    AccountError, CatTransferPlan, CatTransferRequest, CustodyPolicy, LocalMoneySigner,
+    ProfileEditor, ProfileIx, ProfileMinter, Result as AccountResult, SpendSummary, TransferPlan,
+    TransferRequest, UnlockedAccount,
 };
 use dig_chainsource_interface::ChainSource;
 use dig_ipc_protocol::domain::{Signature, SigningPublicKey};
@@ -285,6 +286,37 @@ impl AccountResidency {
             acct.wallet_ops()
                 .build_transfer(chain, custody, request)
                 .map_err(SendError::Build)
+        })
+    }
+
+    /// The unsigned spends of a **$DIG** payment, or `None` once the residency is locked.
+    ///
+    /// The $DIG twin of [`build_transfer`](Self::build_transfer), and it adds exactly the same two
+    /// residency facts and nothing else: the coin selection, the lineage proofs, the CAT puzzle
+    /// wrapping, the change output and the separate XCH fee coin are all
+    /// [`WalletOps::build_dig_transfer`](dig_account::WalletOps::build_dig_transfer)'s.
+    ///
+    /// The result is a PLAN, never a spend: nothing here signs, and nothing here reaches the network.
+    pub fn build_dig_transfer<C>(
+        &self,
+        chain: &C,
+        custody: &CustodyPolicy,
+        request: &CatTransferRequest,
+    ) -> Option<Result<CatTransferPlan, SendError>>
+    where
+        C: ChainSource + ?Sized,
+    {
+        if let Err(disagreement) = self.wallet_agrees_with_the_active_profile() {
+            return self.guard().as_ref().map(|_| {
+                Err(SendError::WalletBehindActiveProfile(
+                    disagreement.to_string(),
+                ))
+            });
+        }
+        self.guard().as_ref().map(|acct| {
+            acct.wallet_ops()
+                .build_dig_transfer(chain, custody, request)
+                .map_err(SendError::BuildDig)
         })
     }
 

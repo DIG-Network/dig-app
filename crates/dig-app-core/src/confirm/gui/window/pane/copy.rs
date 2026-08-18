@@ -936,12 +936,54 @@ pub(crate) mod wallet {
     pub(crate) const SEND_AMOUNT_PLACEHOLDER: &str = "0.00";
     /// The sentence under the amount field while nothing is wrong with it.
     ///
-    /// It names the asset because the tab shows two figures and only one of them can be sent from
-    /// here: a person who has just read their $DIG balance would otherwise reasonably type it in.
+    /// It no longer names an asset. It used to read *"In XCH. $DIG cannot be sent from here yet"*,
+    /// which was true and is now false (dig_ecosystem#2396) — and a hint naming one asset above a
+    /// chooser offering two would contradict the control directly above it. The asset in force is
+    /// stated by the chooser, which is where a person changes it.
     pub(crate) const SEND_AMOUNT_HINT: &str =
-        "In XCH. $DIG cannot be sent from here yet — only the XCH above it.";
+        "How much to send, in whole units of the asset chosen above.";
+    /// The label above the asset chooser.
+    pub(crate) const SEND_ASSET_LABEL: &str = "Asset";
+    /// The native-coin option.
+    pub(crate) const SEND_ASSET_XCH: &str = "XCH";
+    /// The DIG CAT option.
+    pub(crate) const SEND_ASSET_DIG: &str = "$DIG";
     /// The control that starts a payment.
-    pub(crate) const SEND_BUTTON: &str = "Send XCH";
+    ///
+    /// Asset-neutral, because the chooser sits directly above it and a button reading `Send XCH`
+    /// while the chooser reads `$DIG` is the more prominent of the two contradicting the more
+    /// authoritative one — on a control that moves money.
+    pub(crate) const SEND_BUTTON: &str = "Send";
+
+    /// The glance-level word for a $DIG payment a mempool took and nothing here can follow.
+    pub(crate) const SEND_BROADCAST_BADGE: &str = "Sent, not tracked";
+    /// Said after a $DIG payment is accepted (dig_ecosystem#2396).
+    ///
+    /// # Every sentence here is load-bearing, and the omissions more than the claims
+    ///
+    /// It says the network TOOK the payment, which is exactly what an accepted push establishes, and
+    /// it never says *arrived*, *settled* or *complete* — DIG cannot watch a $DIG payment to
+    /// confirmation, so any of those words would be a claim about the person's money that nothing
+    /// supports.
+    ///
+    /// It then says so PLAINLY rather than leaving a silence, and points at the one place the person
+    /// can get a real answer. A surface that simply stopped talking would be read as *finished*,
+    /// which is the same false claim made by omission.
+    pub(crate) fn send_broadcast_body() -> String {
+        [
+            "Your node has taken this $DIG payment and passed it to the network.",
+            "DIG cannot yet follow a $DIG payment to confirmation, so it will not tell you when it",
+            "lands — check the recipient, or look the bundle below up on a block explorer.",
+            "The payment is listed in your activity as sent.",
+        ]
+        .join(" ")
+    }
+
+    /// The label on the accepted bundle's id.
+    ///
+    /// Deliberately not "Payment coin": it is the SUBMISSION's name, not the money's, and the two
+    /// labels must not be interchangeable when only one of them is evidence about a payment.
+    pub(crate) const SEND_BUNDLE_LABEL: &str = "Transaction bundle";
 
     /// What the fee costs, stated before the person presses anything.
     ///
@@ -1379,6 +1421,7 @@ mod tests {
         // `""` would leave the guard reading a sentence the reader never sees.
         said.push(wallet::send_pending_body(3));
         said.push(wallet::send_unknown_body("the node closed the connection"));
+        said.push(wallet::send_broadcast_body());
         said.push(wallet::send_fee("0.00001"));
         said.push(wallet::send_abandoned_body("the confirmation fell over"));
         said.push(content::add_field_error(63));

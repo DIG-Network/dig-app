@@ -729,7 +729,7 @@ fn collect_action_ids(rows: &[MenuRow], found: &mut Vec<(String, TrayAction)>) {
 
 /// One thing the user can click. The shell maps each to its handler; the model never performs an action.
 ///
-/// Deliberately NOT `Hash`: [`SendXch`](Self::SendXch) carries a `TransferRequest`, which is not, and
+/// Deliberately NOT `Hash`: [`Send`](Self::Send) carries a `TransferRequest`, which is not, and
 /// nothing keys a map by an action — the shell's verb map is keyed by [`action_id`], a string, so that
 /// two rows performing the same verb can share one handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -974,20 +974,20 @@ pub enum TrayAction {
     ///
     /// There is deliberately no send ROW. That is a statement about menus, not about the app: a menu
     /// cannot hold a form, and an amount is not something a person picks from a list — the same reason
-    /// [`SendXch`](Self::SendXch) is emitted by the Wallet PANE and never by a tray row.
+    /// [`Send`](Self::Send) is emitted by the Wallet PANE and never by a tray row.
     ///
     /// The stronger claim this comment used to make — that no [`TrayAction`] can move funds, so "the tray
-    /// cannot spend" is STRUCTURAL — **expired** when [`SendXch`](Self::SendXch) landed
+    /// cannot spend" is STRUCTURAL — **expired** when [`Send`](Self::Send) landed
     /// (dig_ecosystem#2819). Do not rely on it as an invariant; a `TrayAction` CAN now carry a spend, and
     /// what keeps it off this menu is the row inventory, not the type. The window's body was corrected
     /// alongside this comment, because it was telling users the same expired thing (dig_ecosystem#2988).
     AboutWallet,
-    /// Send XCH from this wallet — the transfer a person filled in on the Wallet tab, ready to build
-    /// (dig_ecosystem#2819).
+    /// Send money from this wallet — the payment a person filled in on the Wallet tab, ready to
+    /// build (dig_ecosystem#2819, extended to $DIG by dig_ecosystem#2396).
     ///
-    /// # Why it carries a `TransferRequest` and not the typed strings
+    /// # Why it carries a validated [`SendIntent`](crate::wallet::sending::SendIntent), not the typed strings
     ///
-    /// [`TransferRequest`](dig_account::TransferRequest) can only be built from a destination that has
+    /// Both of its arms can only be built from a destination that has
     /// already been decoded and judged payable, because
     /// [`PayableDestination`](dig_account::PayableDestination) has no other public route from a string
     /// — its `from_address` refuses any prefix but `xch`, since paying the puzzle hash inside a `txch`
@@ -1000,9 +1000,13 @@ pub enum TrayAction {
     /// [`SendDraft::assess`](crate::wallet::sending::SendDraft::assess), under test — and what reaches
     /// the shell is a request that is payable by construction. The fee is already applied.
     ///
+    /// Carrying the ASSET as part of the validated intent, rather than beside it, is what makes it
+    /// impossible for the shell to pair a $DIG amount with the XCH builder: there is no arm of this
+    /// type in which the amount and the builder disagree.
+    ///
     /// This action is offered by the Wallet PANE and never by a tray row: a menu cannot hold a form,
     /// and an amount is not something a person picks from a list.
-    SendXch(dig_account::TransferRequest),
+    Send(crate::wallet::sending::SendIntent),
     /// Take the Chia offer the person pasted or scanned and is looking at (dig_ecosystem#3077).
     ///
     /// It carries NOTHING, and that is a design choice rather than a limitation of this `Copy` enum.
@@ -1012,20 +1016,20 @@ pub enum TrayAction {
     /// shell cannot take an offer other than the one the pane read and displayed: there is no raw
     /// string in flight for the two to disagree about.
     ///
-    /// Offered by the Wallet PANE only, like [`SendXch`](Self::SendXch): it needs a field to paste
+    /// Offered by the Wallet PANE only, like [`Send`](Self::Send): it needs a field to paste
     /// an `offer1…` string into, and a native menu cannot hold one.
     TakeOffer,
     /// Release a send whose fate this app never learned, on the person's own say-so
     /// (dig_ecosystem#2894).
     ///
-    /// It carries nothing, for the same reason [`SendXch`](Self::SendXch) carries a validated
+    /// It carries nothing, for the same reason [`Send`](Self::Send) carries a validated
     /// request rather than the raw fields: the rule lives where a test can put a wrong answer in
     /// front of it. The typed acknowledgement is judged by
     /// [`ReleaseDraft::assess`](crate::wallet::sending::ReleaseDraft::assess), and this action is
     /// only ever emitted for a draft that passed — so what reaches the shell is an acknowledged
     /// release by construction.
     ///
-    /// Like `SendXch` this is offered by the Wallet PANE only: it needs a field.
+    /// Like `Send` this is offered by the Wallet PANE only: it needs a field.
     ReleaseUnknownSend,
     /// Set the node's content-cache size cap to a specific preset (dig_ecosystem#2002).
     ///
@@ -1852,7 +1856,7 @@ pub const CREATE_PROFILE_LABEL: &str = "Set up funding for a profile…";
 /// # Why there is no `Send`
 ///
 /// A menu cannot hold a form, and an amount is not something a person picks from a list — so spending is
-/// not offered *at all* from this menu. [`SendXch`](Self::SendXch) is emitted by the Wallet pane and
+/// not offered *at all* from this menu. [`Send`](Self::Send) is emitted by the Wallet pane and
 /// never by a tray row. [`AboutWallet`](TrayAction::AboutWallet) explains the situation in a window
 /// that has room for it.
 ///
