@@ -44,6 +44,7 @@ mod shell;
 
 pub use preview::{open_pane_preview, preview_theme, stored_theme};
 pub use shell::photograph as photograph_shell;
+pub use shell::Staging as CaptureStaging;
 
 use super::paint;
 use super::render::{

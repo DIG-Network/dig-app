@@ -35,13 +35,16 @@
 //! This example only ever DRAWS: it raises no prompt, and nothing here reaches a chain, a key or a
 //! wallet.
 
+#[path = "shared/offer.rs"]
+mod shared_offer;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dig_app_core::account::chain_mint::MintAvailability;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::config::AgentConfig;
-use dig_app_core::confirm::gui::{photograph_shell, Theme};
+use dig_app_core::confirm::gui::{photograph_shell, CaptureStaging, Theme};
 use dig_app_core::engine::{EngineConnector, EngineState, NodeConnector};
 use dig_app_core::environment::AppEnvironment;
 use dig_app_core::hosted_stores::{
@@ -614,6 +617,48 @@ DIG cannot tell whether money left your                   wallet."
     })
 }
 
+/// The offer to leave in the Wallet tab's field, when `--offer` asks for one.
+///
+/// A REAL `offer1…` string built by the canonical crate rather than a literal, so the picture is of
+/// what `dig_offers::summarize` actually reports today.
+fn offer_seed(args: &[String]) -> Option<String> {
+    args.iter()
+        .any(|arg| arg == "--offer")
+        .then(shared_offer::gallery_offer)
+}
+
+/// Where in the Offers card to aim a staged drag or drop, at the window width being photographed.
+///
+/// Stated as a coordinate rather than found by clicking, for the reason every other axis of this
+/// gallery is an argument: synthetic input takes the foreground off the window and photographs
+/// whatever was behind it (dig_ecosystem#2326).
+///
+/// The x follows the width so the point stays inside the card at the shell's minimum as well as at
+/// its default. The y is one figure for both, chosen from where the card actually sits at each
+/// width: the narrow layout stacks the tabs into a row and pushes everything down, so a y that
+/// worked at 960 alone landed in the Send row at 480 and the capture came back with no drop state
+/// at all.
+fn over_the_offers_card(width: f32) -> egui::Pos2 {
+    egui::Pos2::new(width * 0.6, 480.0)
+}
+
+fn drag_over(args: &[String], width: f32) -> Option<(String, egui::Pos2)> {
+    args.iter()
+        .any(|arg| arg == "--offer-drop")
+        .then(|| ("swap.offer".to_string(), over_the_offers_card(width)))
+}
+
+/// A file to LET GO over the Offers card, when `--offer-drop-refused` asks for the refusal state.
+///
+/// A directory, because that is a fault the fixture can produce truthfully on any host without
+/// planting a file: the sentence in the picture is then the one the shipping code writes about a real
+/// folder, rather than a message staged for the camera.
+fn drop_over(args: &[String], width: f32) -> Option<(std::path::PathBuf, egui::Pos2)> {
+    args.iter()
+        .any(|arg| arg == "--offer-drop-refused")
+        .then(|| (std::env::temp_dir(), over_the_offers_card(width)))
+}
+
 fn main() {
     let all: Vec<String> = std::env::args().skip(1).collect();
     // Flags are taken out before the positionals are read, so `--second-factor` cannot shift the
@@ -765,7 +810,12 @@ fn main() {
         egui::Vec2::new(width, height),
         view,
         std::path::Path::new(path),
-        edit_modal,
+        CaptureStaging {
+            editing: edit_modal,
+            offer: offer_seed(&all),
+            dragging: drag_over(&all, width),
+            dropping: drop_over(&all, width),
+        },
     ) {
         Ok((pixels_wide, pixels_high)) => println!("{path} — {pixels_wide} x {pixels_high} px"),
         Err(problem) => {

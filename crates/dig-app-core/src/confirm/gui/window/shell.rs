@@ -180,6 +180,31 @@ pub(super) fn draw(
     None
 }
 
+/// What a capture is staged with before its first frame is drawn.
+///
+/// Every field here replaces a gesture. Opening the edit modal, filling the offer field and dragging
+/// a file over a card are all things a person does with a mouse, and a committed screenshot must
+/// never be taken after synthetic input — so each becomes an ARGUMENT and the picture is of the
+/// shell the moment it opens, not of whatever had the foreground when a click landed.
+#[derive(Debug, Clone, Default)]
+pub struct Staging {
+    /// The profile edit modal to open: its row, the profile's name, and whether it is the active one.
+    pub editing: Option<(u32, String, bool)>,
+    /// Text to leave in the Wallet tab's offer field, exactly as a paste would have.
+    pub offer: Option<String>,
+    /// A file to hold over a point in the window, as a drag in progress: its name, and where.
+    ///
+    /// Fed to egui as the raw input a real drag produces, so the drop-active state in the picture is
+    /// the one the shipping code draws — not a second rendering staged for the camera.
+    pub dragging: Option<(String, egui::Pos2)>,
+    /// A file to LET GO over a point in the window, once: its path, and where.
+    ///
+    /// Delivered as `dropped_files` on a single frame, exactly as a windowing system delivers a real
+    /// drop, so the state in the picture is whatever the shipping code made of that file. A refusal
+    /// photographed this way is the refusal a person gets, not a sentence staged for the camera.
+    pub dropping: Option<(std::path::PathBuf, egui::Pos2)>,
+}
+
 /// Open the shell on `tab` at `size`, let it settle, read its framebuffer back into a PNG at `path`,
 /// and close it. Returns the image's pixel dimensions.
 ///
@@ -209,7 +234,7 @@ pub fn photograph(
     size: Vec2,
     view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
     path: &std::path::Path,
-    editing: Option<(u32, String, bool)>,
+    staged: Staging,
 ) -> Result<(usize, usize), String> {
     // The shell reads its theme from a store and its toggle writes back to one. A scratch store
     // keeps both away from the person's own preference — a gallery has no business changing settings
@@ -228,7 +253,7 @@ pub fn photograph(
     // The edit modal is opened by an ARGUMENT rather than by clicking its control, for the reason
     // the tab is: synthetic input takes the foreground off the window and photographs whatever was
     // behind it (dig_ecosystem#2326). Nothing else about the modal differs from the shipped one.
-    if let Some((ix, name, active)) = editing {
+    if let Some((ix, name, active)) = staged.editing.clone() {
         app.profile_modal
             .open(super::profile_modal::Editing { ix, name, active });
     }
@@ -248,6 +273,15 @@ pub fn photograph(
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
+            // Seeded BEFORE the first frame rather than typed, for the reason the tab and the modal
+            // are arguments: a committed screenshot taken after synthetic input is a picture of
+            // whatever had the foreground (dig_ecosystem#2326). The field lives in egui's per-frame
+            // store, and putting the text there is exactly what a paste leaves behind.
+            if let Some(offer) = staged.offer.clone() {
+                cc.egui_ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new("dig-window-wallet-offer").with("text"), offer);
+                });
+            }
             Ok(Box::new(Photographer {
                 app,
                 queue,
@@ -256,6 +290,9 @@ pub fn photograph(
                 frames: 0,
                 path: target,
                 size: size_slot,
+                dragging: staged.dragging,
+                dropping: staged.dropping,
+                dropped: false,
             }))
         }),
     )
@@ -296,9 +333,46 @@ struct Photographer {
     frames: u32,
     path: std::path::PathBuf,
     size: Arc<Mutex<Option<(usize, usize)>>>,
+    /// A file held over a point in the window every frame — see [`Staging::dragging`].
+    dragging: Option<(String, egui::Pos2)>,
+    /// A file to let go once — see [`Staging::dropping`].
+    dropping: Option<(std::path::PathBuf, egui::Pos2)>,
+    /// Whether that drop has been delivered, so it happens once rather than every frame.
+    dropped: bool,
 }
 
 impl eframe::App for Photographer {
+    /// Hold the staged file over its point, as the windowing system would while a drag is in flight.
+    ///
+    /// Every frame, because a hover is a CONTINUING state rather than an event: egui reports
+    /// `hovered_files` for exactly the frames the file is in the air, so a one-shot injection would
+    /// be gone long before the settle frames the capture is read back on.
+    /// Hold the staged file over its point, and let the staged one go, as a real drag would.
+    ///
+    /// The HOVER is re-supplied every frame because it is a CONTINUING state: egui reports
+    /// `hovered_files` for exactly the frames the file is in the air, so a one-shot injection would
+    /// be long gone by the settle frames the capture is read back on. The DROP is the opposite — one
+    /// frame, once — for the same reason a real one is.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some((name, at)) = self.dragging.clone() {
+            raw_input.hovered_files = vec![egui::HoveredFile {
+                path: Some(std::path::PathBuf::from(&name)),
+                mime: String::new(),
+            }];
+            raw_input.events.push(egui::Event::PointerMoved(at));
+        }
+        if let Some((path, at)) = self.dropping.clone() {
+            raw_input.events.push(egui::Event::PointerMoved(at));
+            if !self.dropped {
+                raw_input.dropped_files = vec![egui::DroppedFile {
+                    path: Some(path),
+                    ..Default::default()
+                }];
+                self.dropped = true;
+            }
+        }
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         let bg = self.app.theme.tokens().bg;
         [

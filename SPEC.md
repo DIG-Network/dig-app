@@ -2666,6 +2666,29 @@ NOT decode, summarize, assemble or combine offer bytes itself.
 - XCH-funded takes only: a CAT-funded take needs each coin's lineage proof, which the coins read does
   not carry.
 
+#### 3.3a2b Loading an offer from a dropped file (normative)
+
+An offer may be LOADED by dragging its file onto the Offers card, as an alternative to pasting.
+
+- **A drop MUST load, and MUST NOT take.** The only effect of letting a file go over the card is that
+  its contents reach the offer field. Every subsequent step — the summary, the both-sides reading, the
+  confirm gate, the push — is the paste path unchanged, and taking still requires the take control to
+  be pressed. No drop may reach a spend.
+- **A dropped file's contents MUST be judged by the paste path's parser.** The drop path MUST NOT
+  decide whether text is an offer; it produces text and hands it to `ReviewedOffer::read`, which is
+  the only constructor (§3.3a2). The drop path therefore accepts NOTHING the paste path would refuse.
+- **The drop path's own refusals MUST be narrower than paste, and MUST be stated.** It MAY refuse a
+  directory, an unreadable file, a file that is not valid UTF-8, an empty one, and one larger than
+  1 MiB — each answered in words naming the FILE and the fault. A drop that is silently ignored MUST
+  NOT occur: it is indistinguishable from an application that did not notice the gesture.
+- **Several files at once MUST be refused rather than resolved.** Reading the first would choose which
+  trade a person is about to be shown.
+- **A drop MUST be claimed by the card the pointer is over.** The pane holds several cards, and a drop
+  meant for another one MUST NOT be answered by this one.
+- **The affordance MUST be stated and MUST show where a drop will land.** The field's help line names
+  both routes; while a file is over the card, that line says what letting go will do and does not do,
+  and the card is outlined.
+
 #### 3.3a3 Making and cancelling a Chia offer (normative)
 
 The Wallet tab also MAKES offers and CANCELS them. `dig-offers` remains the only offer authority:
