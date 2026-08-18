@@ -27,7 +27,7 @@
 //! translated where the read happens. A constant in this file claiming to know them is exactly the
 //! defect dig_ecosystem#2206 removed.
 
-use crate::amount::format_asset_amount;
+use crate::amount::amount_with_unit;
 
 use super::engine::{BalanceAsOf, BalanceRequest, WalletEngine};
 use super::state::Asset;
@@ -87,13 +87,57 @@ impl AddressReading {
     }
 }
 
-/// A spendable balance, in each asset's base unit.
+/// One asset's spendable amount, in that asset's own base unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Holding {
+    /// Which token this is an amount of.
+    pub asset: Asset,
+    /// How much is held, in [`asset`](Self::asset)'s base unit. Only meaningful WITH the asset —
+    /// see [`amount_with_unit`](crate::amount::amount_with_unit), which is why the two are one
+    /// struct and never two parallel lists.
+    pub base_units: u64,
+}
+
+/// What this wallet holds, one entry per asset it reads (dig_ecosystem#3077).
+///
+/// # Why this stopped being a pair of named fields
+///
+/// It was `{ xch_mojos, dig_units }` — two fields, two assets, and no way to express a third. A
+/// wallet that holds a CAT could not say so, so the token was simply absent from the surface with
+/// nothing to indicate anything was missing. Widening it to a LIST is what lets a person see the
+/// tokens they hold; [`xch_mojos`](Self::xch_mojos) and [`dig_units`](Self::dig_units) remain as
+/// accessors because the two assets dig-app knows by name are still special — they are the two the
+/// send form weighs an amount and a fee against.
+///
+/// An asset that was not READ is ABSENT from this list, and [`of`](Self::of) answers `0` for it.
+/// That is deliberate but narrow: this type is only ever built from a completed read of a KNOWN
+/// list of assets (see `read_balances`), and a read that failed for any asset produces
+/// [`BalanceReading::Unknown`] for the whole reading rather than a `Balances` with a gap in it. So
+/// a zero here always means a read that came back empty, never a read that did not happen.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Balances {
-    /// Native Chia, in mojos.
-    pub xch_mojos: u64,
-    /// The DIG CAT, in base units.
-    pub dig_units: u64,
+    /// Every asset read, in the order it was asked for — XCH first, then $DIG, then watched CATs.
+    pub holdings: Vec<Holding>,
+}
+
+impl Balances {
+    /// The amount held of `asset`, or `0` when this reading did not cover it.
+    pub fn of(&self, asset: Asset) -> u64 {
+        self.holdings
+            .iter()
+            .find(|holding| holding.asset == asset)
+            .map_or(0, |holding| holding.base_units)
+    }
+
+    /// Native Chia held, in mojos — the currency every network fee is paid in.
+    pub fn xch_mojos(&self) -> u64 {
+        self.of(Asset::Xch)
+    }
+
+    /// $DIG held, in base units.
+    pub fn dig_units(&self) -> u64 {
+        self.of(Asset::DIG)
+    }
 }
 
 /// What the app knows about the balance. **Two states, never collapsed**: an unknown balance is not a
@@ -258,13 +302,31 @@ impl WalletOverview {
     /// The address's availability is checked FIRST: with no address there is nothing to read a balance
     /// for, and the address's reason is the actionable one.
     pub fn read(address: AddressReading, source: &ChainSource<'_>) -> Self {
+        Self::read_assets(address, source, &[Asset::Xch, Asset::DIG])
+    }
+
+    /// Read the overview for `address` against `source`, covering exactly `assets`.
+    ///
+    /// [`read`](Self::read) is this method pinned to the two assets dig-app knows by name. A caller
+    /// that knows the wallet's watch list passes it here so the person sees the tokens they added;
+    /// a caller that does not gets the two, which is what this surface has always shown.
+    ///
+    /// The asset list is a PARAMETER and not something this module reaches for, because dig-app
+    /// cannot discover which CATs an address holds: the node's wallet seam answers one named asset
+    /// at a time and has no enumeration method (dig_ecosystem#3115). A token is read because
+    /// somebody named it.
+    pub fn read_assets(
+        address: AddressReading,
+        source: &ChainSource<'_>,
+        assets: &[Asset],
+    ) -> Self {
         let balance = match (&address, source) {
             (AddressReading::Unavailable(why), _) => {
                 BalanceReading::Unknown(BalanceUnknown::NoAddress(*why))
             }
             (_, ChainSource::Absent) => BalanceReading::Unknown(BalanceUnknown::NoNode),
             (AddressReading::Known(address), ChainSource::Ready(engine)) => {
-                read_balances(address, *engine)
+                read_balances(address, *engine, assets)
             }
         };
         // `read` is the direct-address path (the shell has an address in hand and wants a balance),
@@ -467,26 +529,47 @@ fn unreadable_registry_caveat(unreadable: bool) -> &'static str {
     }
 }
 
-/// Read both assets for `address`. A failure in EITHER makes the whole reading unknown — a window
-/// showing one asset's balance beside a silently-missing other is a half-truth about someone's money.
-fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
-    let read = |asset| {
-        engine.balance(BalanceRequest {
+/// Read every asset in `assets` for `address`.
+///
+/// A failure in ANY of them makes the WHOLE reading unknown — a window showing one asset's balance
+/// beside a silently-missing other is a half-truth about someone's money, and that stays true when
+/// the missing one is the third token rather than the second. The alternative, a partial list, would
+/// render a held token as absent, which is the absent-shown-as-zero mistake wearing a different hat.
+fn read_balances(address: &str, engine: &dyn WalletEngine, assets: &[Asset]) -> BalanceReading {
+    let mut holdings = Vec::with_capacity(assets.len());
+    // Seeded from the FIRST read rather than from a constant, because `BalanceAsOf` deliberately has
+    // no `Default`: every provenance is a claim, and there is no claim to make before a read.
+    let mut as_of: Option<BalanceAsOf> = None;
+
+    for asset in assets {
+        match engine.balance(BalanceRequest {
             address: address.to_string(),
-            asset,
-        })
-    };
-    match (read(Asset::Xch), read(Asset::DIG)) {
-        (Ok(xch), Ok(dig)) => BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: xch.balance,
-                dig_units: dig.balance,
-            },
-            // The two assets are read separately and shown as one holding, so the pair takes the
-            // weaker of the two provenances — see `BalanceAsOf::weaker`.
-            as_of: xch.as_of.weaker(dig.as_of),
+            asset: *asset,
+        }) {
+            Ok(answer) => {
+                holdings.push(Holding {
+                    asset: *asset,
+                    base_units: answer.balance,
+                });
+                // Each asset is read separately and they are shown as one holding, so the set takes
+                // the weakest provenance among them — see `BalanceAsOf::weaker`.
+                as_of = Some(match as_of {
+                    Some(so_far) => so_far.weaker(answer.as_of),
+                    None => answer.as_of,
+                });
+            }
+            Err(e) => return BalanceReading::Unknown(why_unread(e)),
+        }
+    }
+
+    match as_of {
+        Some(as_of) => BalanceReading::Known {
+            balances: Balances { holdings },
+            as_of,
         },
-        (Err(e), _) | (_, Err(e)) => BalanceReading::Unknown(why_unread(e)),
+        // Nothing was asked for, so nothing was learned. Not a `Known` empty holding: that would
+        // state that this wallet holds nothing, on the strength of no read at all.
+        None => BalanceReading::Pending,
     }
 }
 
@@ -507,10 +590,55 @@ fn why_unread(error: WalletError) -> BalanceUnknown {
     }
 }
 
-/// Render a held amount the way a person reads it — see [`format_asset_amount`], which this delegates
-/// to so that the Wallet surface cannot acquire a divisor of its own (dig_ecosystem#2295).
+/// Render a held amount WITH its unit, the way a person reads it — see
+/// [`amount_with_unit`](crate::amount::amount_with_unit), which this delegates to so that the
+/// Wallet surface cannot acquire a divisor of its own (dig_ecosystem#2295).
+///
+/// The unit travels with the figure because for a CAT dig-app has only been told the id of, the
+/// figure is in BASE UNITS and saying so is the whole difference between a true statement and a
+/// whole-coin claim nothing measured.
 pub fn format_amount(asset: Asset, base_units: u64) -> String {
-    format_asset_amount(asset, base_units)
+    amount_with_unit(asset, base_units)
+}
+
+/// Every held amount as one sentence clause: `1.5 $DIG, 2 XCH and 1500 base units of a1b2c3…f80912`.
+///
+/// $DIG leads, because it is the network's own token and the reason most people have this wallet;
+/// the rest follow in the order they were read. Each amount carries its own unit, so a reader never
+/// has to work out which figure belongs to which token — and a token whose precision is unknown
+/// says so in place rather than borrowing a neighbour's decimal point.
+fn holdings_phrase(balances: &Balances) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(balances.holdings.len());
+    parts.extend(dig_first(balances).map(|held| format_amount(held.asset, held.base_units)));
+    match parts.split_last() {
+        None => "nothing".to_string(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The same holdings at menu width: `·`-separated, $DIG first, no conjunction.
+///
+/// A native menu row cannot wrap, so this trades the sentence's readability for width. It is still
+/// the same figures from the same renderer — a menu that formatted its own amounts is exactly how a
+/// second divisor gets into the codebase.
+fn menu_holdings(balances: &Balances) -> String {
+    dig_first(balances)
+        .map(|held| format_amount(held.asset, held.base_units))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The holdings with $DIG moved to the front, everything else keeping its read order.
+///
+/// One ordering used by both renderers, so the window and the menu can never disagree about which
+/// token a person sees first.
+fn dig_first(balances: &Balances) -> impl Iterator<Item = &Holding> {
+    let (dig, others): (Vec<_>, Vec<_>) = balances
+        .holdings
+        .iter()
+        .partition(|held| held.asset.is_dig());
+    dig.into_iter().chain(others)
 }
 
 /// The address line for the Wallet window.
@@ -566,9 +694,8 @@ pub fn balance_line(balance: &BalanceReading, peers_peak: Option<u32>) -> String
     match balance {
         BalanceReading::Pending => "Balance: checking with your node…".to_string(),
         BalanceReading::Known { balances, as_of } => format!(
-            "Balance: {} $DIG and {} XCH. {}",
-            format_amount(Asset::DIG, balances.dig_units),
-            format_amount(Asset::Xch, balances.xch_mojos),
+            "Balance: {}. {}",
+            holdings_phrase(balances),
             as_of_sentence(*as_of, peers_peak)
         ),
         BalanceReading::Unknown(why) => format!("Balance: not known — {}", unknown_reason(why)),
@@ -655,9 +782,8 @@ pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> 
     match balance {
         BalanceReading::Pending => "Balance: checking…".to_string(),
         BalanceReading::Known { balances, as_of } => format!(
-            "Balance: {} $DIG · {} XCH{}",
-            format_amount(Asset::DIG, balances.dig_units),
-            format_amount(Asset::Xch, balances.xch_mojos),
+            "Balance: {}{}",
+            menu_holdings(balances),
             menu_provenance(*as_of, peers_peak)
         ),
         BalanceReading::Unknown(why) => format!("Balance not known — {}…", menu_reason(why)),

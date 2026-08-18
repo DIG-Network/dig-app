@@ -304,10 +304,14 @@ where
     /// destination and amount were typed by the person in this process. The gate never auto-approves
     /// it regardless: `dig-account` forces every spend that moves a non-native asset to the confirm
     /// tier, however generous the auto-send policy.
-    pub async fn send_dig(self, request: &CatTransferRequest) -> Result<BroadcastDig, SendError> {
+    pub async fn send_cat(
+        self,
+        asset_id: chia_protocol::Bytes32,
+        request: &CatTransferRequest,
+    ) -> Result<BroadcastDig, SendError> {
         let plan = self
             .residency
-            .build_dig_transfer(self.chain, &self.custody, request)
+            .build_cat_transfer(self.chain, &self.custody, asset_id, request)
             .ok_or(SendError::Locked)??;
 
         // Sign FIRST. The human is in this call, and it may take minutes.

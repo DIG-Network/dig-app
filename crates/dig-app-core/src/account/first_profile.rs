@@ -395,7 +395,7 @@ impl MintFunds {
     pub fn of_balance(reading: &BalanceReading) -> Self {
         match reading {
             BalanceReading::Known { balances, .. } => Self::Measured {
-                spendable_mojos: balances.xch_mojos,
+                spendable_mojos: balances.xch_mojos(),
             },
             BalanceReading::Pending | BalanceReading::Unknown(_) => Self::Unmeasured,
         }

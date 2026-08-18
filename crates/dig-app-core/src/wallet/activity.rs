@@ -106,10 +106,12 @@ impl ActivityEntry {
 /// The $DIG CAT's asset id, or `None` for XCH — the asset a [`SpendRecord`] names, spelled the way
 /// an arrival spells one, so both halves of the list carry one asset representation.
 fn asset_id_of(asset: Asset) -> Option<AssetId> {
-    match asset {
-        Asset::Xch => None,
-        Asset::DIG => Some(crate::notify::dig_asset_id()),
-    }
+    // The events protocol's `AssetId` is the id's lowercase HEX, while the wallet's is the raw 32
+    // bytes; `to_hex` is the contract's own canonical spelling of the conversion, so no CAT is
+    // special-cased and $DIG is not recognised by name here. A mapping that named $DIG would be a
+    // second answer to "which id is $DIG", which is how a surface comes to call somebody else's
+    // token $DIG.
+    asset.asset_id().map(|id| AssetId(id.to_hex()))
 }
 
 /// The human label for an entry's asset: `XCH`, `$DIG`, or a short form of an unknown CAT's id.

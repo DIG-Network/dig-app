@@ -583,14 +583,14 @@ fn figures(held: &Balances) -> Vec<Readout> {
         Readout::new(
             copy::wallet::DIG_LABEL,
             Value::Measure {
-                amount: format_amount(Asset::DIG, held.dig_units),
+                amount: format_amount(Asset::DIG, held.dig_units()),
                 unit: copy::wallet::DIG_UNIT.to_string(),
             },
         ),
         Readout::new(
             copy::wallet::XCH_LABEL,
             Value::Measure {
-                amount: format_amount(Asset::Xch, held.xch_mojos),
+                amount: format_amount(Asset::Xch, held.xch_mojos()),
                 unit: copy::wallet::XCH_UNIT.to_string(),
             },
         ),

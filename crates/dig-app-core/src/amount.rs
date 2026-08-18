@@ -72,6 +72,25 @@ pub fn format_asset_amount(asset: Asset, base_units: u64) -> Option<String> {
     decimals(asset).map(|decimals| format_units(u128::from(base_units), decimals))
 }
 
+/// Render an amount of mojos as whole XCH (`500_000_000_000` -> `"0.5"`).
+///
+/// A total function, because native Chia's precision is fixed by the chain itself and is the one
+/// figure this crate can always state. Use it where the XCH-ness is the CALLER's invariant — a fee,
+/// a native-only spend summary — rather than reaching for [`format_asset_amount`] and unwrapping,
+/// which is the same thing written in a way that would also silently unwrap a CAT.
+pub fn format_xch(mojos: u64) -> String {
+    format_units(u128::from(mojos), XCH_DECIMALS)
+}
+
+/// Render an amount of $DIG base units as whole $DIG (`1_500` -> `"1.5"`).
+///
+/// Total for [`format_xch`]'s reason: $DIG's precision is one dig-app knows by definition. Every
+/// OTHER CAT goes through [`amount_with_unit`], which cannot state a decimal point it has not been
+/// told about.
+pub fn format_dig(base_units: u64) -> String {
+    format_units(u128::from(base_units), CAT_DECIMALS)
+}
+
 /// How `asset` is named to a person: `XCH`, `$DIG`, or a shortened asset id for a CAT dig-app has
 /// only ever been told the id of.
 ///
