@@ -43,6 +43,7 @@ use dig_account::ProfileIx;
 use crate::account::chain_mint::MintAvailability;
 use crate::account::profile_mint::ProfileMintAvailability;
 use crate::account::profile_session::ProfileSession;
+use crate::profile_edit::{ProfileEditError, ProfileReading, ProfileSnapshot};
 
 /// One profile as a list surface sees it: enough to tell it from its siblings, and nothing secret.
 ///
@@ -72,6 +73,13 @@ pub struct ProfileRow {
     pub hidden: bool,
     /// Whether it is the one profile the account is currently deriving at.
     pub active: bool,
+    /// What the app can honestly say about the root this profile's content is published at.
+    ///
+    /// Not derived from the registry, which does not hold one: a root changes on every publish and
+    /// only a chain read knows the current value, so a row built from local state starts at
+    /// [`RootReading::Pending`] and is overlaid by
+    /// [`ProfilesReading::with_active_root`](ProfilesReading::with_active_root).
+    pub root: RootReading,
 }
 
 impl ProfileRow {
@@ -108,6 +116,111 @@ impl ProfileRow {
             label: entry.label().map(str::to_owned),
             hidden: entry.visibility() == ProfileVisibility::HiddenFromLists,
             active: active == Some(entry.ix()),
+            // The registry holds no root, and inventing one from the mint would be a claim about
+            // what the chain currently anchors. Nobody has read it yet, and the row says so.
+            //
+            // A SIBLING row therefore keeps saying so for as long as it exists, because the one
+            // edit seam is bound to the active profile. That is honest today only because no
+            // production account can hold a second profile; dig_ecosystem#3071 removes the
+            // condition. If it stalls, the right shape is a state naming this condition and its
+            // remedy — as `CreationBlocked::AccountLocked` does — not `Pending` forever.
+            root: RootReading::Pending,
+        }
+    }
+}
+
+/// What the app can honestly say about the root a profile's content is published at.
+///
+/// # Why the root is worth a row of its own beside the store id
+///
+/// The store id is PERMANENT — it names the singleton for the whole life of the profile, and it is
+/// the same string the day the store is launched and every day after. The root is the value that
+/// MOVES: every publish anchors a new one, and it is the root, not the store id, that says which
+/// body the chain currently points at. A card naming only the permanent half can show two healthy
+/// identifiers over a profile whose published content is missing.
+///
+/// # A value can only be spoken here by a chain read — and what that does NOT cover
+///
+/// A predicted root drawn in the same treatment as a confirmed one would have a person check the
+/// wrong hash against a block explorer and conclude their profile is fine. So the type carries as
+/// much of that rule as a type can carry, and this section says exactly where the type stops and
+/// the convention starts — because a guarantee described as structural, but held only by habit,
+/// is the more dangerous of the two.
+///
+/// ENFORCED by the compiler: [`Anchored`](Self::Anchored) is `#[non_exhaustive]`, so no code
+/// outside this crate can name a root and wrap it. `RootReading::Anchored(outcome.root)` — the
+/// one-line mistake, and the one that would land in the shell binary, where no test can reach it —
+/// does not compile:
+///
+/// ```compile_fail
+/// # use dig_app_core::profiles::RootReading;
+/// // A root this app merely PREDICTS. Outside this crate there is no way to say it is anchored.
+/// let predicted = String::from("0x22222222");
+/// let _ = RootReading::Anchored(predicted);
+/// ```
+///
+/// NOT enforced, and held by convention instead: within this crate, [`of_read`](Self::of_read) is
+/// the only constructor of [`Anchored`](Self::Anchored), and it takes the result of a verified
+/// chain read. [`ProfileSnapshot`] keeps public fields — the window gallery builds one to preview
+/// a card without a chain — so a caller who assembles a snapshot around a predicted root can pass
+/// it to `of_read` and be believed. That is not a hole a person stumbles into: it is fabricating a
+/// chain read, deliberately, and calling the read seam a liar. The one accidental route is the one
+/// the compiler now refuses.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RootReading {
+    /// Nobody has read this profile from the chain yet. Not a fault, and not an absence of content.
+    #[default]
+    Pending,
+    /// The root the chain anchors, `0x`-prefixed lowercase hex, as a verified read returned it.
+    ///
+    /// `#[non_exhaustive]` so that only this crate can construct one, and only from a chain read.
+    #[non_exhaustive]
+    Anchored(String),
+    /// The store is real and nothing has ever been published under it, so there is no current root.
+    ///
+    /// An answer rather than a failure: asking again cannot produce content nobody wrote.
+    Unpublished,
+    /// The root could not be read, in the deciding layer's own words.
+    Unreadable(String),
+}
+
+impl RootReading {
+    /// What a completed chain read says about the current root.
+    ///
+    /// # Why a lost body still yields [`Anchored`](Self::Anchored)
+    ///
+    /// [`ProfileEditError::BodyLost`] means the chain anchors a root and nothing holds its preimage.
+    /// The root is not in doubt there — it was read off the chain like any other — so withholding it
+    /// would hide the one value a person needs to check the claim, and the editor already names the
+    /// same root when it offers re-entry. The card and the editor thereby agree: this is what the
+    /// chain holds, and its content is gone.
+    pub fn of_read(read: Result<&ProfileSnapshot, &ProfileEditError>) -> Self {
+        match read {
+            Ok(snapshot) => Self::anchored(&snapshot.root),
+            Err(ProfileEditError::BodyLost { root }) => Self::anchored(root),
+            Err(ProfileEditError::Unpublished) => Self::Unpublished,
+            Err(other) => Self::Unreadable(
+                ProfileReading::of_read_failure(other)
+                    .says()
+                    .unwrap_or_else(|| other.while_reading()),
+            ),
+        }
+    }
+
+    /// A chain-read root in the `0x…` form every DIG surface prints, whether or not the reader
+    /// supplied the prefix.
+    fn anchored(root: &str) -> Self {
+        match root.starts_with("0x") {
+            true => Self::Anchored(root.to_owned()),
+            false => Self::Anchored(format!("0x{root}")),
+        }
+    }
+
+    /// The root itself, when one was read. `None` in every state that has no value to show.
+    pub fn value(&self) -> Option<&str> {
+        match self {
+            Self::Anchored(root) => Some(root),
+            _ => None,
         }
     }
 }
@@ -159,6 +272,35 @@ impl ProfilesReading {
     /// Wallet surface reads this to say so.
     pub fn is_unreadable(&self) -> bool {
         matches!(self, Self::Unknown(ProfilesUnknown::Unreadable(_)))
+    }
+
+    /// The same list, with `root` recorded against the ACTIVE profile.
+    ///
+    /// # Why only the active one
+    ///
+    /// The app holds exactly one profile-edit seam and it is bound to the profile the account is
+    /// deriving at, so that is the only profile any chain read in this process has been made about.
+    /// Copying its answer onto a sibling row would attribute one profile's root to another — the
+    /// same forgery `of_registry` exists to prevent for the DID and the store id, and a worse one
+    /// here, because the root is the value a person would check against a block explorer.
+    ///
+    /// Every other row therefore keeps [`RootReading::Pending`], which is true: nothing has read it.
+    #[must_use]
+    pub fn with_active_root(self, root: RootReading) -> Self {
+        let Self::Known(rows) = self else {
+            return self;
+        };
+        Self::Known(
+            rows.into_iter()
+                .map(|row| match row.active {
+                    true => ProfileRow {
+                        root: root.clone(),
+                        ..row
+                    },
+                    false => row,
+                })
+                .collect(),
+        )
     }
 
     /// Read the list out of the app's live [`ProfileSession`].
@@ -562,11 +704,15 @@ pub enum SwitchPlan {
     /// [`WalletSlot`](crate::account::active_profile::WalletSlot) has no bare constructor for.
     NotFound,
     /// The switch can go ahead, once the person has agreed to what it changes.
+    ///
+    /// Both rows are BOXED. A [`ProfileRow`] carries three long identifiers and a root reading, so
+    /// holding two of them inline would make every value of this enum — including the two empty
+    /// variants a refusal returns — as large as the disclosure, for no reader's benefit.
     Disclose {
         /// The profile being left, as it reads on the list.
-        from: ProfileRow,
+        from: Box<ProfileRow>,
         /// The profile being moved to.
-        to: ProfileRow,
+        to: Box<ProfileRow>,
     },
 }
 
@@ -587,8 +733,8 @@ impl SwitchPlan {
         }
         match rows.iter().find(|row| row.active) {
             Some(from) => Self::Disclose {
-                from: from.clone(),
-                to: to.clone(),
+                from: Box::new(from.clone()),
+                to: Box::new(to.clone()),
             },
             // A list with no active row is an unprofiled account, which cannot hold a profile to
             // switch to either — so this is unreachable through `of_session`. Refused rather than
@@ -1029,6 +1175,135 @@ mod tests {
     use crate::account::profile_session::test_support::{
         expected_did, registry_with, session_with,
     };
+
+    /// A snapshot that read `root` off the chain, over a profile with no fields.
+    fn snapshot_at(root: &str) -> ProfileSnapshot {
+        ProfileSnapshot {
+            store_id: "11".repeat(32),
+            root: root.to_owned(),
+            values: Default::default(),
+            body: Vec::new(),
+        }
+    }
+
+    /// The root in this user's own report (dig-app#212), abbreviated there as `371a39b04742…`.
+    const ANCHORED: &str = "371a39b047420000000000000000000000000000000000000000000000000000";
+
+    /// **A verified chain read produces the root it read, in the `0x…` form every surface prints.**
+    #[test]
+    fn a_chain_read_produces_the_root_it_read() {
+        let snapshot = snapshot_at(ANCHORED);
+        assert_eq!(
+            RootReading::of_read(Ok(&snapshot)),
+            RootReading::Anchored(format!("0x{ANCHORED}"))
+        );
+    }
+
+    /// **A profile whose body is LOST still names the root the chain anchors.**
+    ///
+    /// The case in the ticket, and the one that makes the row worth building: this profile's
+    /// anchored root has no content behind it, and until now nothing on the card said so. The root
+    /// is not in doubt — it was read off the chain — so hiding it would withhold the one value a
+    /// person can check the claim with, while the editor beside it names the same root when it
+    /// offers re-entry.
+    ///
+    /// The nearest wrong implementation treats every `Err` as a failed read, which would report
+    /// this as `Unreadable` and leave the card silent about a real, current, on-chain root.
+    #[test]
+    fn a_lost_body_still_names_the_root_the_chain_anchors() {
+        let lost = ProfileEditError::BodyLost {
+            root: ANCHORED.to_owned(),
+        };
+        assert_eq!(
+            RootReading::of_read(Err(&lost)),
+            RootReading::Anchored(format!("0x{ANCHORED}"))
+        );
+    }
+
+    /// **A store that has never published is not a failed read, and a failed read is not an empty
+    /// store.**
+    ///
+    /// Asserted together because collapsing them is the defect: they have opposite remedies, and
+    /// only one of them may offer a retry (dig_ecosystem#3036).
+    #[test]
+    fn an_unpublished_store_and_an_unreadable_one_are_different_answers() {
+        assert_eq!(
+            RootReading::of_read(Err(&ProfileEditError::Unpublished)),
+            RootReading::Unpublished
+        );
+        let failed = ProfileEditError::Unreadable("your node is not answering".to_owned());
+        let reading = RootReading::of_read(Err(&failed));
+        assert!(
+            matches!(&reading, RootReading::Unreadable(why) if why.contains("node")),
+            "a failed read did not carry the reason: {reading:?}"
+        );
+    }
+
+    /// **No state but a chain-read one carries a value to show.**
+    ///
+    /// The property the card leans on to decide whether to draw an identifier at all.
+    #[test]
+    fn only_a_chain_read_state_has_a_value() {
+        assert_eq!(
+            RootReading::Anchored("0xabc".to_owned()).value(),
+            Some("0xabc")
+        );
+        for empty in [
+            RootReading::Pending,
+            RootReading::Unpublished,
+            RootReading::Unreadable("why".to_owned()),
+        ] {
+            assert_eq!(empty.value(), None, "{empty:?} offered a value to draw");
+        }
+    }
+
+    /// **A root read for the active profile is never attributed to a sibling.**
+    ///
+    /// The forgery this method could introduce: the app holds ONE edit seam, bound to the active
+    /// profile, so a root copied onto every row would print one profile's published content under
+    /// another's name — and the root is exactly the value a person would take to a block explorer.
+    ///
+    /// The fixture is two profiles with only one active, which is the input that distinguishes this
+    /// from the nearest wrong implementation. A single-profile fixture cannot: there, "set the
+    /// active row" and "set every row" produce identical output.
+    #[test]
+    fn a_root_is_recorded_against_the_active_profile_and_no_other() {
+        let registry = registry_with(&[(ProfileIx::ROOT, None), (ProfileIx(1), None)]);
+        let anchored = RootReading::Anchored(format!("0x{ANCHORED}"));
+        let reading = ProfilesReading::of_registry(&registry).with_active_root(anchored.clone());
+
+        let rows = reading.rows().expect("a read list").to_vec();
+        let active: Vec<_> = rows.iter().filter(|row| row.active).collect();
+        assert_eq!(
+            active.len(),
+            1,
+            "the fixture needs exactly one active profile"
+        );
+        assert_eq!(active[0].root, anchored);
+        for row in rows.iter().filter(|row| !row.active) {
+            assert_eq!(
+                row.root,
+                RootReading::Pending,
+                "a sibling was given the active profile's root"
+            );
+        }
+    }
+
+    /// **A list that could not be read gains no root.**
+    ///
+    /// There is no row to record one against, and a state that quietly became `Known` here would
+    /// turn "we could not read your profiles" into "you have none" — the headline failure this
+    /// whole module is shaped to prevent.
+    #[test]
+    fn an_unreadable_list_is_unchanged_by_a_root() {
+        let unknown = ProfilesReading::Unknown(ProfilesUnknown::Unreadable("truncated".to_owned()));
+        assert_eq!(
+            unknown
+                .clone()
+                .with_active_root(RootReading::Anchored("0xabc".to_owned())),
+            unknown
+        );
+    }
 
     /// **A registry that could not be read is never reported as an account with no profiles.**
     ///

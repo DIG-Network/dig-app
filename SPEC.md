@@ -2021,6 +2021,27 @@ common case about all three. A session that failed to LOAD MUST report `Unknown`
 registry it fell back to: an account whose registry will not load may hold several profiles, and
 telling that person they hold none is a claim no read supports.
 
+**Each listed profile MUST show the root the chain anchors, and MUST NOT show any other root
+(MUST).** The store id is permanent and names the singleton for life; the ROOT changes on every
+publish and is what says which body the chain currently points at, so a card naming only the store id
+can present a profile whose published content is missing as entirely healthy.
+`profiles::RootReading` carries the value, is labelled on screen as what the CHAIN holds, and has four
+states: nothing has been read yet, a chain-read root, a store that has never published, and a read
+that failed with its reason. `RootReading::Anchored` is `#[non_exhaustive]`, so only `dig-app-core` may
+construct one, and within that crate `RootReading::of_read` — which takes the result of a verified
+chain read — is its only constructor. A root this app merely PREDICTS, such as the one a commit
+carries before confirmation, therefore cannot be named as anchored by any surface outside the crate,
+and is not named as anchored by any inside it. The compiler enforces the first half; the second is a
+convention, because `ProfileSnapshot` is constructible and a caller who assembles one around a
+predicted root would be believed by `of_read`. A profile whose body is unrecoverable still shows its
+anchored root, matching the re-entry sentence the editor draws for the same root (§3.1c).
+
+**A root MUST be recorded only against the profile it was read for.** The app holds one profile-edit
+seam, bound to the ACTIVE profile, so `ProfilesReading::with_active_root` applies the answer to that
+row alone and every other row stays *not read yet*. Attributing one profile's root to a sibling would
+be the same forgery the anchor check prevents for the DID and the store id, over the value a person is
+most likely to check against a block explorer.
+
 **Hidden profiles MUST be listed by this surface.** Visibility is a LOCAL preference and the surface
 that sets it is the surface that must be able to unset it. `registry.shown()` is for pickers.
 

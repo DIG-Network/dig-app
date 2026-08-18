@@ -619,6 +619,22 @@ pub(crate) mod profiles {
     /// (SYSTEM.md, "Object vocabulary"), and it is already the word the creation window uses when it
     /// reports the same id. `store_launcher_id` is the field's name, not the thing's.
     pub(crate) const STORE_LABEL: &str = "Store";
+    /// The readout naming the root the chain currently anchors for a profile.
+    ///
+    /// The provenance is IN the label, and it is not decoration. A root the app merely expects and
+    /// the root the chain holds are different facts about someone's published identity, and the
+    /// only value this card can ever show is the second — so the label says which one a person is
+    /// looking at, and stays true if a predicted root is ever surfaced somewhere else.
+    pub(crate) const ROOT_LABEL: &str = "Current root (on chain)";
+    /// What the root row says before any chain read has answered for this profile.
+    ///
+    /// Names the profile's own state, never a zero hash: a placeholder in the identifier face is
+    /// indistinguishable from a real root at a glance, and a person would copy it.
+    pub(crate) const ROOT_PENDING: &str = "DIG has not read this from the blockchain yet.";
+    /// What the root row says over a store that has never published anything.
+    ///
+    /// Not a failure and offers no retry: asking again cannot produce content nobody wrote.
+    pub(crate) const ROOT_UNPUBLISHED: &str = "Nothing has been published under this profile yet.";
 
     /// Said while the profile list is still being read.
     ///
@@ -1518,6 +1534,7 @@ mod tests {
                 label: Some(label.to_string()),
                 hidden: false,
                 active,
+                root: crate::profiles::RootReading::Pending,
             }
         }
         crate::profiles::ProfilesReading::Known(vec![

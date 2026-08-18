@@ -33,6 +33,7 @@ use dig_app_core::profile_edit::{
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
     ProfileSnapshot, SlotChange,
 };
+use dig_app_core::profiles::{ProfileRow, ProfilesReading, RootReading};
 use dig_app_core::transaction::Feed;
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
 use dig_app_core::window_model::TabId;
@@ -72,6 +73,31 @@ fn preview_view(beacon: Beacon) -> TrayView {
     }
 }
 
+/// The root from the machine this defect was measured on, so a capture shows a real one.
+const LOST_ROOT: &str = "371a39b04742cd4d4b45bdf61a99f3838b700587fad093330dddb4766feba454";
+
+/// The store that root belongs to, in the `0x…` form the card prints.
+const STORE_ID: &str = "0x111eb8bce53a9b46bedc6a8883b50b6e503ee333384930e93ef3054b25e992be";
+
+/// The DID that store is anchored to.
+const DID: &str = "did:chia:1mhdr5h6pyzqerp6h3cdkqjl24he8aatja24rz68chl7c9lqlluaspqwc6r";
+
+/// One listed profile, before anything has read it from the chain.
+///
+/// The identifiers are the ones from the report this row was built for (dig-app#212), so a capture
+/// shows the three values side by side at the lengths a person actually sees them.
+fn listed_profile() -> ProfilesReading {
+    ProfilesReading::Known(vec![ProfileRow {
+        ix: dig_account::ProfileIx::ROOT,
+        did: DID.to_string(),
+        store_id: STORE_ID.to_string(),
+        label: None,
+        hidden: false,
+        active: true,
+        root: RootReading::Pending,
+    }])
+}
+
 /// Install an editor whose profile READ fails the way an unrecoverable body fails.
 ///
 /// # Why a seam and not a fabricated reading
@@ -84,9 +110,6 @@ fn preview_view(beacon: Beacon) -> TrayView {
 ///
 /// It reads and commits nothing: there is no chain, no node and no key behind it.
 fn install_a_profile_whose_content_is_gone() {
-    /// The root from the machine this defect was measured on, so the capture shows a real one.
-    const LOST_ROOT: &str = "371a39b04742cd4d4b45bdf61a99f3838b700587fad093330dddb4766feba454";
-
     struct ContentIsGone;
 
     impl ProfileEditSeam for ContentIsGone {
@@ -236,6 +259,12 @@ enum Case {
     /// it claiming nothing has gone wrong. Two separate defects on this card rendered correctly at
     /// the model and wrongly on screen, so it gets a capture of its own.
     ProfileBodyLost,
+    /// A profile listed before any chain read has answered for it (dig-app#212).
+    ///
+    /// The state EVERY row is in on the first frame, and the one a wrong implementation renders as a
+    /// blank identifier or a zero hash. Worth its own capture because the failure it guards against
+    /// looks like a working card in every other respect.
+    ProfileRootUnread,
 }
 
 impl Case {
@@ -277,9 +306,21 @@ impl Case {
                 install_a_profile_whose_content_is_gone();
                 TrayView {
                     profile_editing: ProfileEditing::Possible,
+                    // The root is DERIVED from the same failure the seam above returns, through the
+                    // same function the app calls, so the capture shows the value production
+                    // computes rather than a string this example typed out.
+                    profiles: listed_profile().with_active_root(RootReading::of_read(Err(
+                        &ProfileEditError::BodyLost {
+                            root: LOST_ROOT.to_string(),
+                        },
+                    ))),
                     ..view
                 }
             }
+            Self::ProfileRootUnread => TrayView {
+                profiles: listed_profile(),
+                ..view
+            },
         }
     }
 
@@ -291,6 +332,7 @@ impl Case {
             "locked" => Some(Self::Locked),
             "no-node" => Some(Self::NoNode),
             "body-lost" => Some(Self::ProfileBodyLost),
+            "root-unread" => Some(Self::ProfileRootUnread),
             _ => None,
         }
     }
@@ -363,7 +405,7 @@ fn seed_activity() {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let usage = "usage: pane_preview <tab> <light|dark> [width] [height] [live|opted-out|absent] \
-                 [healthy|pending|timedout|locked|no-node|body-lost] [zoom]";
+                 [healthy|pending|timedout|locked|no-node|body-lost|root-unread] [zoom]";
 
     let Some(tab) = args.first().and_then(|name| tab(name)) else {
         eprintln!("{usage}");
