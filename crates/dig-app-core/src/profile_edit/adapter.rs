@@ -412,7 +412,7 @@ fn root_bytes(root: &str) -> Result<[u8; 32], ProfileEditError> {
 /// [`EditError::ChainUnreachable`]: a rejected edit left the store's root unchanged and is rebuilt,
 /// an unanswered one may still confirm and is WAITED on. Collapsing them tells a person to try again
 /// while their first attempt is in the mempool, which spends twice.
-fn edit_error(error: EditError) -> ProfileEditError {
+pub(super) fn edit_error(error: EditError) -> ProfileEditError {
     match error {
         EditError::ChainUnreachable(why) => ProfileEditError::ChainUnreachable(why),
         EditError::Rejected(why) => ProfileEditError::Rejected(why),

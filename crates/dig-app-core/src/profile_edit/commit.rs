@@ -689,6 +689,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    use dig_account::edit::EditError;
     use dig_social_profile::body::VerifiedBody;
     use dig_social_profile::profile::Profile;
     use dig_social_profile::slot::SlotId;
@@ -881,16 +882,13 @@ mod tests {
     struct Refusing(ProfileEditError);
 
     impl ProfileEditSeam for Refusing {
-        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
-        /// replaces the whole profile. Refusing rather than delegating means a test that
-        /// took the wrong route fails instead of quietly passing on the other one.
+        /// The same refusal on both routes: this double stands for the FAILURE, so the route it
+        /// arrived by must not change what a person is told about it.
         fn publish_fresh(
             &self,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
-            Err(ProfileEditError::Refused(
-                "this double publishes deltas only".into(),
-            ))
+            Err(self.0.clone())
         }
         fn store_id(&self) -> String {
             STORE.into()
@@ -1475,6 +1473,64 @@ mod tests {
             }
             other => panic!("a lost body settled as {other:?}"),
         }
+    }
+
+
+    /// **dig_ecosystem#3041.** A failure that PROVES nothing reached a mempool says so, in money.
+    ///
+    /// # The defect
+    ///
+    /// Publishing a profile spends real XCH, and the first question a person has when the control
+    /// refuses them is whether it spent any. The reassurance existed — as a constant no code path
+    /// could reach — while what a person actually saw beneath a refusal said only that their
+    /// profile was unchanged, which is true and silent on the money. A surface that goes quiet on
+    /// whether a spend happened leaves them to choose between paying twice and never trying again.
+    ///
+    /// # Why the errors are built through the ADAPTER's mapping
+    ///
+    /// Every earlier test of this wording constructed a [`ProfileEditError`] by hand, so none of
+    /// them ever exercised the translation a real failure goes through. These start from the
+    /// crate's own [`EditError`], exactly as a failure from dig-account does.
+    ///
+    /// # The control
+    ///
+    /// An unanswered chain may have taken the bundle, so it must NOT be told nothing was spent —
+    /// the nearest wrong version says it unconditionally, and reads identically on the first half.
+    #[test]
+    fn a_refusal_that_never_reached_a_mempool_says_no_xch_was_spent() {
+        let next_after = |error: ProfileEditError| {
+            let feed = Feed::detached();
+            start_commit(
+                Arc::new(Refusing(error)),
+                Arc::new(InMemoryBodies::default()),
+                Arc::new(InMemoryPending::default()),
+                STORE.to_string(),
+                a_change(),
+                EditRoute::FreshBody,
+                feed.clone(),
+                a_brisk_watch(),
+            );
+            match wait_for_settled(&feed).stage {
+                Stage::Failed { next, .. } => next,
+                other => panic!("a refusal settled as {other:?}"),
+            }
+        };
+
+        let refused = next_after(super::super::adapter::edit_error(EditError::Refused(
+            "the spend gate said no".into(),
+        )));
+        assert!(
+            refused.contains("no XCH was spent"),
+            "a person who pressed a control that costs XCH was not told whether it spent any:              {refused}"
+        );
+
+        let unknown = next_after(super::super::adapter::edit_error(
+            EditError::ChainUnreachable("no node answered".into()),
+        ));
+        assert!(
+            !unknown.contains("no XCH was spent"),
+            "an attempt whose fate is UNKNOWN was told nothing was spent, which invites a second              spend over the first: {unknown}"
+        );
     }
 
     // -- the watch -----------------------------------------------------------------------------
