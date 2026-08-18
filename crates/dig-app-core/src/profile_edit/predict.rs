@@ -63,10 +63,19 @@ pub fn predicted_body(
 /// the chain confirms if it is. One constructor, used by both, is the only version of that which
 /// cannot drift.
 ///
-/// [`Profile::new`] carries the schema version, which a published profile may not be without —
-/// dig-account refuses one that lacks it before spending anything.
+/// # The schema version is STAMPED here, because nothing upstream of this supplies it
+///
+/// A published profile may not be without a readable schema version: dig-account refuses one that
+/// lacks it before spending anything, and a reader cannot interpret a body that has none. Nothing
+/// this function is given carries it — the changes are the person's typed fields — so the only
+/// place it can come from is the constructor, and [`Profile::with_schema_v2`] is the constructor
+/// that stamps it. [`Profile::new`] does NOT: it is `Default`, an empty slot map, and building from
+/// it made every fresh publish refusable before it reached the chain (dig-app#211).
+///
+/// No [`ProfileField`] maps to slot `0x0000`, so no edit this editor can express takes the stamp
+/// back off again.
 pub fn fresh_profile(changes: &[(ProfileField, SlotChange)]) -> Profile {
-    let mut profile = Profile::new();
+    let mut profile = Profile::with_schema_v2();
     profile.apply_all(slot_edits(changes));
     profile
 }
@@ -101,11 +110,13 @@ fn slot_edits(changes: &[(ProfileField, SlotChange)]) -> Vec<SlotEdit> {
 #[cfg(test)]
 mod tests {
 
+    use dig_social_profile::slot::standard;
+
     use super::*;
 
     /// A profile publishing a name, a bio, and a slot this editor has no field for.
     fn a_profile() -> Profile {
-        let mut profile = Profile::new();
+        let mut profile = Profile::with_schema_v2();
         profile.set(
             SlotId(ProfileField::DisplayName.slot().id()),
             Value::Utf8("Ada".into()),
@@ -239,6 +250,81 @@ mod tests {
             predicted_root,
             hex::encode(root),
             "the edit changed nothing"
+        );
+    }
+
+    /// A FRESH profile carries a READABLE schema version, which is what dig-account demands before
+    /// it will spend anything on a whole-profile publish.
+    ///
+    /// # Why `schema_version()` and not "the slot is set"
+    ///
+    /// The gate (`dig-account`'s `reject_profile_without_schema_version`) asks
+    /// [`Profile::schema_version`], which answers `Some` only for a `Value::U16`. A slot holding a
+    /// `Value::Utf8` satisfies mere presence and is unreadable by every reader — published,
+    /// anchored, and interpretable by nobody. Asserting presence would pass on exactly the body the
+    /// gate exists to refuse, so this asserts readability and the version it reads.
+    #[test]
+    fn a_fresh_profile_carries_a_readable_schema_version() {
+        let profile = fresh_profile(&[(ProfileField::DisplayName, SlotChange::Set("Ada".into()))]);
+
+        assert_eq!(
+            profile.schema_version(),
+            Some(standard::SCHEMA_VERSION_V2),
+            "a fresh publish builds a profile dig-account refuses before spending, so a person              whose published body is unrecoverable can never publish again"
+        );
+    }
+
+    /// The fresh BODY carries it too — the bytes are what is sealed before the spend and what the
+    /// seam publishes, so the guarantee has to survive the encode/decode round trip and not merely
+    /// hold on the in-memory profile.
+    #[test]
+    fn a_fresh_body_still_carries_the_readable_schema_version_when_reopened() {
+        let changes = [(ProfileField::Bio, SlotChange::Set("Builds engines.".into()))];
+        let (root, bytes) = fresh_body(&changes).expect("a fresh body encodes");
+
+        let opened = VerifiedBody::open(&bytes, AnchoredRoot::from_chain_read(root_bytes(&root)))
+            .expect("the fresh body opens at its own root");
+
+        assert_eq!(
+            opened.profile().schema_version(),
+            Some(standard::SCHEMA_VERSION_V2),
+            "the sealed pre-spend body lacks the version the published one must have"
+        );
+    }
+
+    /// An edit no editor field can express must not be able to take the version away.
+    ///
+    /// # The fixture, and why it is a whole-enum sweep rather than one field
+    ///
+    /// The version survives the delta path only because no [`ProfileField`] maps to slot `0x0000`,
+    /// which is a property of the mapping and not of this function. A single-field fixture would
+    /// pass even if some OTHER field were later pointed at the schema slot, so every variant is
+    /// removed at once — the harshest batch the editor can build — and the version must still be
+    /// readable afterwards.
+    #[test]
+    fn removing_every_editable_field_leaves_the_schema_version_intact() {
+        let (bytes, root) = a_body();
+        let changes: Vec<_> = ProfileField::ALL
+            .into_iter()
+            .map(|field| (field, SlotChange::Remove))
+            .collect();
+
+        let (predicted_root, predicted) = predicted_body(&bytes, root, &changes).expect("predicts");
+        let opened = VerifiedBody::open(
+            &predicted,
+            AnchoredRoot::from_chain_read(root_bytes(&predicted_root)),
+        )
+        .expect("the predicted body opens at the predicted root");
+
+        assert_eq!(
+            opened.profile().display_name(),
+            None,
+            "the control failed: the removals did not take, so this says nothing about the version"
+        );
+        assert_eq!(
+            opened.profile().schema_version(),
+            Some(standard::SCHEMA_VERSION_V2),
+            "an editable field reaches the schema slot, so a person can delete their own              profile's version and publish a body no reader can interpret"
         );
     }
 }
