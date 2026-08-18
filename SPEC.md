@@ -2506,18 +2506,44 @@ so dig-app MUST register its account's WALLET public keys with the node over `co
   to obtain a read-only balance.
 
 **Rendering an amount MUST be asset-aware (MUST).** Every balance on the wire is an integer in the
-asset's OWN base unit, and the two assets do not agree on scale: native XCH carries **12** decimal
-places (mojos), while $DIG is a CAT and carries **3** — `1 $DIG = 1000 base units`. A surface MUST
-divide by `10^decimals` **of the asset the figure belongs to**, and MUST obtain that figure from the
-asset rather than from a per-surface constant. A single asset-agnostic divisor renders one of the two
-assets wrong by a factor of 10^9 — silently, and with the full confidence of a plain numeral — which is
-the defect [dig_ecosystem#2295] fixed after it shipped in v5.31.0. dig-app satisfies this with ONE
+asset's OWN base unit, and assets do not agree on scale: native XCH carries **12** decimal places
+(mojos), while $DIG is a CAT and carries **3** — `1 $DIG = 1000 base units`. A surface MUST divide by
+`10^decimals` **of the asset the figure belongs to**, and MUST obtain that figure from the asset
+rather than from a per-surface constant. A single asset-agnostic divisor renders one of the two assets
+wrong by a factor of 10^9 — silently, and with the full confidence of a plain numeral — which is the
+defect [dig_ecosystem#2295] fixed after it shipped in v5.31.0. dig-app satisfies this with ONE
 formatter (`dig_app_core::amount`) that every money surface calls; a second implementation of this
 arithmetic is a defect regardless of whether it is currently correct.
 
-`asset` is the lowercase wire enum `"xch" | "dig"`. dig-app depends only on the `WalletEngine` trait
-seam, so it compiles + tests standalone; the real IPC-session transport (the §5.3 `SessionClient`)
-drops in as the production implementation without touching the wallet logic.
+**An UNKNOWN precision MUST NOT be rendered as a whole-coin figure (MUST).** dig-app knows the decimal
+places of exactly two assets — native XCH and $DIG — and knows nothing about a CAT it has only been
+told the asset id of. Three decimal places is the Chia CAT *convention*, not a rule, so applying it to
+an unnamed token is a GUESS used as a divisor. `dig_app_core::amount::decimals` therefore answers
+`Option<u32>` and a surface holding `None` MUST render the raw base-unit integer **together with the
+words stating that is what it is** (`1500 base units of a628c1…832913`), never a bare numeral. A typed
+amount for such a token is read as whole base units for the same reason, and a typed decimal point is
+REFUSED rather than scaled by an assumed power of ten.
+
+**The `asset` wire form (MUST).** `asset` is `"xch"`, `"dig"`, or `{"cat":"<64-hex asset id>"}`.
+dig-app's `Asset` is `dig-node-control-interface`'s own type, RE-EXPORTED rather than restated, so the
+byte-identical contract with the node is a compile-time fact rather than two implementations that
+agree today. The type has exactly **two cases** — `Xch` and `Cat(AssetId)` — and $DIG is the associated
+constant `Asset::DIG`, never a third case: a `Dig` variant beside `Cat(DIG_ASSET_ID)` would give $DIG
+two INEQUAL spellings, and every balance, coin and history filter is an `asset == asset` comparison, so
+a wallet holding coins under both spellings would sum one and report it as the whole balance. Both bare
+tokens MUST still be ACCEPTED and `"dig"` MUST still be EMITTED for $DIG, so that a node or a sealed
+`wallet-state.seal` written before the widening keeps working in both directions; `{"cat":"<the $DIG
+asset id>"}` MUST normalize to the same value as `"dig"`.
+
+**Which assets are read (MUST).** `control.wallet.balance` and `control.wallet.coins` are each scoped
+to ONE named asset and there is NO method that enumerates what an address holds, so dig-app can read
+the balance of any CAT it can NAME and cannot discover one it has never heard of. XCH and $DIG are read
+unconditionally; every other token is read because the user added it to `WalletState::watched`. A token
+nobody added is ABSENT from the wallet surface and MUST NOT be rendered as a zero holding.
+
+dig-app depends only on the `WalletEngine` trait seam, so it compiles + tests standalone; the real
+IPC-session transport (the §5.3 `SessionClient`) drops in as the production implementation without
+touching the wallet logic.
 
 [dig_ecosystem#910]: https://github.com/DIG-Network/dig_ecosystem/issues/910
 [dig_ecosystem#2295]: https://github.com/DIG-Network/dig_ecosystem/issues/2295
