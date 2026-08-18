@@ -124,7 +124,7 @@ pub mod copy {
     /// which is deliberately conservative: only outcomes that provably never reached a mempool
     /// answer yes, so an attempt whose fate is UNKNOWN can never be told that nothing was spent.
     pub const NOTHING_WAS_SPENT: &str =
-        "Nothing was sent to the blockchain and no XCH was spent. Your profile is unchanged — you          can change what you typed and try again.";
+        "Nothing was sent to the blockchain and no XCH was spent. Your profile is unchanged — you can change what you typed and try again.";
 
     /// Said over a profile whose stored content does not match what the chain anchors.
     ///
