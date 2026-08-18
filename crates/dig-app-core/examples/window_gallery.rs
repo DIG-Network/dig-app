@@ -966,6 +966,7 @@ mod tests {
             false,
             Profiles::None,
             false,
+            false,
         );
         let live = with_live(base.clone(), &readings());
 
@@ -1017,6 +1018,7 @@ mod tests {
             AccountState::Unlocked { recoverable: true },
             false,
             Profiles::None,
+            false,
             false,
         );
         assert!(
