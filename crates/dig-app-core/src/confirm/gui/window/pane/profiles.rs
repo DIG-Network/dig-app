@@ -1405,7 +1405,7 @@ mod tests {
             let creation = ProfileCreation::Blocked(blocked);
             assert!(
                 !creation.is_possible(),
-                "no build shipped so far can create a profile, so a fixture that says otherwise is                  not a state this card can be in"
+                "no build shipped so far can create a profile, so a fixture that says otherwise                  is not a state this card can be in"
             );
             let view = TrayView {
                 profile_creation: creation,
@@ -1663,4 +1663,52 @@ mod tests {
         assert_ne!(did_element(&rows[0]), did_element(&rows[1]));
         assert_eq!(did_element(&rows[0]), did_element(&rows[0].clone()));
     }
+    /// **The card's cannot-create sentence calls a profile what the row three lines above calls
+    /// it.**
+    ///
+    /// The PLACEMENT half of dig_ecosystem#2981. The copy layer's own test proves the sentence CAN
+    /// be named from a list; this proves the card actually hands it the list it drew the rows from.
+    /// Without this, a `create_panel` that passed [`ProfileNames::NONE`] — the wrong layer, and the
+    /// state this file was in before the fix — leaves the copy test green and still paints two
+    /// names for one profile.
+    ///
+    /// Both names are read back off the rendered card, and both come from
+    /// [`ProfileRow::display_name`] rather than from literals, so the row and the sentence are
+    /// pinned to ONE derivation. The ordinal forms are asserted ABSENT because an implementation
+    /// naming the profile twice — label and number — would satisfy a contains check alone.
+    #[test]
+    fn the_card_names_a_profile_the_way_its_row_does() {
+        let reading = reading_of(
+            &[(ProfileIx::ROOT, Some("personal")), (ProfileIx(1), Some("work"))],
+            &[],
+        );
+        let view = TrayView {
+            profile_creation: ProfileCreation::Blocked(CreationBlocked::FundingElsewhere {
+                funding: ProfileIx::ROOT,
+                target: ProfileIx(1),
+            }),
+            ..view_with(reading.clone())
+        };
+
+        let painted = card_says(&view, 960.0);
+        for ix in [ProfileIx::ROOT, ProfileIx(1)] {
+            let row_says = reading
+                .row(ix)
+                .expect("the fixture holds both rows")
+                .display_name();
+            assert!(
+                painted.contains(&row_says),
+                "the card explains itself without using {row_says}, the name its own row carries: \
+                 {painted}"
+            );
+        }
+        for numbered in ["profile 1", "profile 2"] {
+            assert!(
+                !painted.contains(numbered),
+                "the card numbers a profile it also names, so one profile wears two names on one \
+                 screen: {painted}"
+            );
+        }
+    }
+
 }

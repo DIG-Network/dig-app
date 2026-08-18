@@ -1510,4 +1510,141 @@ mod tests {
         assert_eq!(ProfilesReading::Pending.rows(), None);
         assert_eq!(ProfilesReading::Pending.row(ProfileIx::ROOT), None);
     }
+    /// **A locked account is told it is LOCKED, even when the node behind it is perfectly healthy.**
+    ///
+    /// The defect (dig_ecosystem#3059) was that a locked account produced
+    /// [`ProfileCreation::Unknown`], which the card renders as *"DIG is still checking whether this
+    /// computer can create a profile"* — a sentence promising an answer that could never arrive,
+    /// because nothing runs while the account is closed.
+    ///
+    /// # What this fixture is built to distinguish
+    ///
+    /// The nearest wrong implementation consults the READING first and only falls back to the lock,
+    /// which is indistinguishable from this one on a locked account whose node is also broken. So
+    /// the locked case is given `Possible` — the healthiest reading there is. An implementation
+    /// that ordered the two the other way answers `Possible` here and offers a locked person a
+    /// control that cannot work; the old implementation answers `Unknown`. Both are visible.
+    ///
+    /// The UNLOCKED cases are the honest controls: without them an implementation that always said
+    /// `AccountLocked` would pass, and `Unknown` must still be reachable — an unmeasured node is a
+    /// real state and this must not have swallowed it.
+    #[test]
+    fn a_locked_account_is_told_about_the_lock_and_not_about_the_node() {
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::AccountLocked),
+            ProfileCreation::of_account(false, Some(ProfileMintAvailability::Possible)),
+            "a locked account was answered from the node reading, so the lock went unsaid"
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::AccountLocked),
+            ProfileCreation::of_account(false, None),
+            "a locked account with nothing measured was left on the never-ending check"
+        );
+
+        assert_eq!(
+            ProfileCreation::Possible,
+            ProfileCreation::of_account(true, Some(ProfileMintAvailability::Possible)),
+            "an unlocked account with a healthy node stopped being offered creation"
+        );
+        assert_eq!(
+            ProfileCreation::Unknown,
+            ProfileCreation::of_account(true, None),
+            "an unmeasured node stopped being an unknown, which is a real and different state"
+        );
+    }
+
+    /// **A locked account's sentence names the UNLOCK, and never the node or the build.**
+    ///
+    /// The lock's sentence must not borrow the remedy of a fault it is not: a person told to
+    /// install a newer DIG goes and does that, and their wallet is still locked afterwards. That is
+    /// the exact mis-reading dig_ecosystem#3057 shipped, on the editor, for the same underlying
+    /// state.
+    ///
+    /// Asserted against the OTHER arms' remedy words rather than against a fixed string, so a
+    /// rewording that keeps the meaning passes and a rewording that drifts back onto the node's
+    /// remedy fails.
+    #[test]
+    fn the_locked_sentence_names_the_unlock_and_not_a_node_or_a_build() {
+        let said = copy::cannot_create(CreationBlocked::AccountLocked, ProfileNames::NONE)
+            .to_lowercase();
+
+        assert!(
+            said.contains("unlock"),
+            "the one act that would move this card is not named: {said}"
+        );
+        for misdirection in ["install", "update", "newer", "start your dig node"] {
+            assert!(
+                !said.contains(misdirection),
+                "a locked person is sent to fix {misdirection:?}, which is not what is wrong: {said}"
+            );
+        }
+    }
+
+    /// **The cannot-create sentence spells a profile exactly the way the list beside it does.**
+    ///
+    /// The defect (dig_ecosystem#2981) put *"…is held by profile 1"* under a row headed *"work"* —
+    /// two names for one profile, three lines apart, with nothing telling a reader they are the
+    /// same thing.
+    ///
+    /// # What this fixture is built to distinguish
+    ///
+    /// Both indices in the sentence are given LABELLED rows, and the labels are compared against
+    /// [`ProfileRow::display_name`] rather than against literal strings — so this pins the two
+    /// surfaces to ONE derivation instead of to two constants that happen to agree today. The
+    /// ordinal forms are asserted absent, because an implementation that appended the label to the
+    /// number would satisfy a contains-the-label check while still printing both names.
+    ///
+    /// The `ProfileNames::NONE` control is what a surface with no list to read may still say, and
+    /// it must remain the ordinal — the fallback is not a bug, it is the name a profile that has no
+    /// row has always had.
+    #[test]
+    fn the_cannot_create_sentence_names_a_profile_the_way_its_row_does() {
+        let reading = ProfilesReading::of_registry(&registry_with(&[
+            (ProfileIx::ROOT, Some("personal")),
+            (ProfileIx(1), Some("work")),
+        ]));
+        let blocked = CreationBlocked::FundingElsewhere {
+            funding: ProfileIx::ROOT,
+            target: ProfileIx(1),
+        };
+
+        let named = copy::cannot_create(blocked, ProfileNames::of(&reading));
+        for ix in [ProfileIx::ROOT, ProfileIx(1)] {
+            let row_says = reading.row(ix).expect("the fixture holds both rows").display_name();
+            assert!(
+                named.contains(&row_says),
+                "the sentence does not call this profile {row_says}, which is what its row is \
+                 headed: {named}"
+            );
+        }
+        for numbered in ["profile 1", "profile 2"] {
+            assert!(
+                !named.contains(numbered),
+                "the sentence still numbers a profile the list names: {named}"
+            );
+        }
+
+        let unnamed = copy::cannot_create(blocked, ProfileNames::NONE);
+        assert!(
+            unnamed.contains("profile 1") && unnamed.contains("profile 2"),
+            "a surface with no list to read stopped falling back to the ordinal: {unnamed}"
+        );
+    }
+
+    /// **A profile with no row, and a profile with no label, are both called by their ordinal.**
+    ///
+    /// The cannot-create sentence's `target` is the profile that does not exist YET, so it has no
+    /// row by construction — the fallback is the ordinary path there, not an edge case. Counting
+    /// from ONE, because that is what [`ProfileRow::display_name`] shows and an HD index is an
+    /// implementation detail nobody has been shown.
+    #[test]
+    fn a_profile_with_no_row_or_no_label_is_named_by_its_ordinal() {
+        let reading =
+            ProfilesReading::of_registry(&registry_with(&[(ProfileIx::ROOT, None)]));
+        let names = ProfileNames::of(&reading);
+
+        assert_eq!("profile 1", names.name(ProfileIx::ROOT), "an unlabelled row");
+        assert_eq!("profile 3", names.name(ProfileIx(2)), "an index with no row at all");
+    }
+
 }
