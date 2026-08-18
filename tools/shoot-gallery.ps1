@@ -113,6 +113,27 @@ foreach ($fixture in @('two', 'hidden', 'switched')) {
     }
 }
 
+# The two states the creation explainer reaches that an unlocked, healthy account never does
+# (dig_ecosystem#3059, dig_ecosystem#2981). Both are shot at the profiles height, because the
+# explainer sits under the list it has to agree with and a capture that cannot show both is not
+# evidence of them agreeing.
+$shots += @{
+    file = "profiles-locked-$WIDE.png"
+    args = @('account', 'light', "$WIDE", "$PROFILES_TALL", 'locked', '--profiles', 'two')
+}
+$shots += @{
+    file = "profiles-locked-$NARROW.png"
+    args = @('account', 'light', "$NARROW", "$NARROW_PROFILES_TALL", 'locked', '--profiles', 'two')
+}
+$shots += @{
+    file = "profiles-funding-elsewhere-$WIDE.png"
+    args = @('account', 'light', "$WIDE", "$PROFILES_TALL", 'unlocked', '--profiles', 'two', '--funding-elsewhere')
+}
+$shots += @{
+    file = "profiles-funding-elsewhere-$NARROW.png"
+    args = @('account', 'light', "$NARROW", "$NARROW_PROFILES_TALL", 'unlocked', '--profiles', 'two', '--funding-elsewhere')
+}
+
 # The two cards that read the node (dig_ecosystem#2397): the Home tab's sharing card and the Content
 # tab's hosted-store list. `--live` fills them from the RUNNING node, so these are the only images in
 # the set whose contents depend on the machine that shot them -- and the only ones that cannot be
