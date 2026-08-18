@@ -411,14 +411,14 @@ mod tests {
     /// So the property is the conjunction: honest sentence, no retry, not drawn as an empty
     /// profile, and a form all the same.
     #[test]
-    fn an_unrecoverable_body_is_named_as_gone_and_still_offers_a_form_to_retype_into() {
+    fn a_body_missing_here_is_named_as_missing_and_still_offers_a_form_to_retype_into() {
         const ROOT: &str = "371a39b04742cd4d4b45bdf61a99f3838b700587fad093330dddb4766feba454";
         let lost = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
             root: ROOT.to_string(),
         });
 
         let draft = lost.draft().expect(
-            "a person whose content is unrecoverable was given no way to publish a fresh body",
+            "a person whose content is not on this computer was given no way to publish a fresh body",
         );
         assert!(
             draft.is_empty(),
@@ -430,11 +430,11 @@ mod tests {
         );
         assert!(
             !lost.is_empty(),
-            "a destroyed profile was drawn as one that had simply never been filled in"
+            "a profile whose body is missing here was drawn as one never filled in"
         );
         assert!(
             !lost.is_retryable(),
-            "a retry was offered for bytes no amount of asking can produce"
+            "a retry was offered for bytes this computer cannot produce"
         );
 
         let said = lost.says().expect("the state says nothing at all");
@@ -448,7 +448,59 @@ mod tests {
         );
         assert!(
             crate::window_model::label_names_a_remedy(&said),
-            "a permanent loss was stated with no next action: {said}"
+            "a loss was stated with no next action: {said}"
+        );
+    }
+
+    /// **dig_ecosystem#3041 (F3).** The lost-body sentence claims no more than was searched, and
+    /// discloses the overwrite it is talking somebody into.
+    ///
+    /// # Why this is not a wording preference
+    ///
+    /// Two sources answer before this state is produced — the node's body store and the seed
+    /// rebuild — and no peer is asked. The sentence used to say the details "could not be found
+    /// anywhere else", which over a body sitting on an unsynced peer declares the data destroyed
+    /// and then offers the fresh publish, which OVERWRITES the anchored root and makes the claim
+    /// true retroactively. A person deciding whether to overwrite has to be told that only this
+    /// computer was searched and that publishing replaces what the chain records.
+    ///
+    /// # Why `Unpublished` is the control, and what it distinguishes
+    ///
+    /// The nearest wrong implementation appends the overwrite disclosure to every sentence in this
+    /// module, which satisfies any assertion made over `BodyLost` alone. `Unpublished` also offers
+    /// publishing and has nothing to overwrite, so it must NOT carry the disclosure — that is what
+    /// makes the sentence a statement about THIS state rather than boilerplate.
+    ///
+    /// It is driven through [`of_read_failure`](Self::of_read_failure) rather than by calling
+    /// [`copy::body_lost`] directly, because a test that builds the string by hand proves only that
+    /// the string exists and not that this is what a failed read reaches a person as.
+    #[test]
+    fn the_lost_body_sentence_bounds_its_claim_and_discloses_the_overwrite() {
+        let said = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
+            root: "aa".repeat(32),
+        })
+        .says()
+        .expect("says something");
+
+        assert!(
+            !said.contains("anywhere else"),
+            "the sentence claims the details are absent from places this app never asked: {said}"
+        );
+        assert!(
+            said.contains("any other node"),
+            "the sentence does not disclose that no peer was consulted: {said}"
+        );
+        assert!(
+            said.contains("replaces"),
+            "the remedy overwrites the root the chain anchors and the sentence does not say so: \
+             {said}"
+        );
+
+        let unwritten = ProfileReading::Unpublished.says().expect("says something");
+        assert!(
+            !unwritten.contains("replaces"),
+            "the overwrite disclosure is on every sentence in this module, so it says nothing \
+             about the state that actually overwrites: {unwritten}"
         );
     }
 
