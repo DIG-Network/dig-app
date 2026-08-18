@@ -782,7 +782,7 @@ pub(crate) mod offer {
 
     /// What cancelling does, said on the card rather than discovered at the confirm prompt.
     pub(crate) const CANCEL_ABOUT: &str =
-        "If this is an offer you made, cancelling takes your coins back and the string stops          working for everybody. It cannot be undone.";
+        "If this is an offer you made, cancelling takes your coins back and the string stops working for everybody. It cannot be undone.";
 
     /// Refused because the account is locked.
     pub(crate) const CANCEL_REFUSED_LOCKED: &str =
@@ -809,7 +809,7 @@ pub(crate) mod offer {
     /// again.
     pub(crate) fn cancel_broadcast_body(bundle_name: &str) -> String {
         format!(
-            "A node accepted the cancellation. It races anybody taking the offer, so it is not              final until the chain confirms it — you can follow it as {bundle_name}."
+            "A node accepted the cancellation. It races anybody taking the offer, so it is not final until the chain confirms it — you can follow it as {bundle_name}."
         )
     }
 
@@ -872,7 +872,7 @@ pub(crate) mod make_offer {
 
     /// What the card is for, and the shape of the deal it makes.
     pub(crate) const ABOUT: &str =
-        "Offer some of your XCH for something you want. You get back a string to share — whoever          takes it settles both sides at once.";
+        "Offer some of your XCH for something you want. You get back a string to share — whoever takes it settles both sides at once.";
 
     /// The label over what the offer commits.
     pub(crate) const GIVE_LABEL: &str = "You give";
@@ -914,18 +914,18 @@ pub(crate) mod make_offer {
 
     /// Refused because the account is locked.
     pub(crate) const REFUSED_LOCKED: &str =
-        "Unlock your account to make an offer — making one commits your coins, and that needs your          key.";
+        "Unlock your account to make an offer — making one commits your coins, and that needs your key.";
 
     /// Refused because another make is already in flight.
     pub(crate) const REFUSED_IN_FLIGHT: &str =
-        "One offer is already being made. Making a second now would commit the same coins twice, so          this waits until the first is done.";
+        "One offer is already being made. Making a second now would commit the same coins twice, so this waits until the first is done.";
 
     /// The badge on a make that is building or waiting for confirmation.
     pub(crate) const WORKING_BADGE: &str = "Working";
 
     /// What the working state says. Nothing is broadcast by a make, and it says so.
     pub(crate) const WORKING_BODY: &str =
-        "Building the offer and asking you to confirm it. Nothing is sent to the network — an offer          only reaches the chain when somebody takes it.";
+        "Building the offer and asking you to confirm it. Nothing is sent to the network — an offer only reaches the chain when somebody takes it.";
 
     /// The badge on an offer that now exists.
     pub(crate) const MADE_BADGE: &str = "Ready to share";
@@ -935,7 +935,7 @@ pub(crate) mod make_offer {
     /// "Ready to share" rather than "done", because the trade has not happened: the given side is
     /// committed and the wanted side arrives only if somebody takes it.
     pub(crate) const MADE_BODY: &str =
-        "Your offer exists. Send this string to whoever you want to trade with. Your coins stay          committed to it until somebody takes it or you cancel it.";
+        "Your offer exists. Send this string to whoever you want to trade with. Your coins stay committed to it until somebody takes it or you cancel it.";
 
     /// The label on the offer string itself.
     pub(crate) const MADE_LABEL: &str = "Offer";
@@ -1967,6 +1967,51 @@ mod tests {
             .find("\n    }\n")
             .expect("the enumeration is a normally-indented function");
         body[..end].to_string()
+    }
+
+    /// **No shipping literal carries a run of spaces mid-sentence.**
+    ///
+    /// dig_ecosystem#3117. [`wrapped_copy_items`] finds literals that COULD lose their `\` — it
+    /// keys on an odd unescaped-quote count, the signature of a literal spanning two lines. A
+    /// literal that has ALREADY lost its `\` does not have that signature: the newline collapsed
+    /// into the string, so it is one line with an even quote count. The scanner stops seeing it,
+    /// `every_sentence` never has to name it, and the whitespace guard passes over the exact damage
+    /// it exists to catch.
+    ///
+    /// Seven offer-card sentences shipped this way in dig-app#201 and were found by a human reading
+    /// the diff. This detects the damage directly rather than the risk of it.
+    #[test]
+    fn no_shipping_literal_carries_a_space_run() {
+        let mut damaged: Vec<String> = Vec::new();
+        for (ix, line) in OWN_SOURCE.lines().enumerate() {
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            let bytes = line.as_bytes();
+            let mut run = 0usize;
+            for i in 0..bytes.len() {
+                if bytes[i] == b' ' {
+                    run += 1;
+                    continue;
+                }
+                // A run only counts when text precedes AND follows it: leading indentation, and
+                // the indentation after a legitimate `\` continuation, both start the line.
+                let follows_text = i > run && run >= 4;
+                if follows_text {
+                    damaged.push(format!("line {}: {}", ix + 1, line.trim()));
+                    break;
+                }
+                run = 0;
+            }
+        }
+        assert!(
+            damaged.is_empty(),
+            "a literal carries a run of 4+ spaces mid-sentence, which reaches the screen verbatim: {damaged:#?}"
+        );
     }
 
     /// **Every wrapped sentence in this file is reachable by the whitespace guard.**
