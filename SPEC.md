@@ -2644,10 +2644,10 @@ NOT decode, summarize, assemble or combine offer bytes itself.
   labelled lists, in the taker's direction: `summarize().offered` is what the taker RECEIVES and
   `.requested` is what the taker PAYS. A single net figure MUST NOT be shown — a take changes
   ownership, and a difference describes the act while hiding half of it.
-  - This is load-bearing because the custody ceremony downstream shows only the PAID side: the
-    received leg returns to the taker's own change address and is dropped as change, and the
-    settlement commitment nets out within the bundle. The offer card is therefore the only surface on
-    which the whole trade is visible, and it is where consent is actually given.
+  - The custody ceremony's re-derived summary can only show the PAID side: the received leg returns to
+    the taker's own change address and is dropped as change, and the settlement commitment nets out
+    within the bundle. The confirm prompt MUST therefore ALSO carry a **trade narrative** — see
+    §3.3a4 — so both sides are named where consent is actually given, not only on the card.
 - **The order MUST be: refuse, build, sign, combine, push.** `wallet::offer::take_permitted_by` refuses
   a `CustodyPolicy::Vault` profile BEFORE a spend is built, because dig-account denies a vault outflow
   to the settlement puzzle by name; the refusal MUST reach the control as a stated reason, never a
@@ -2663,8 +2663,71 @@ NOT decode, summarize, assemble or combine offer bytes itself.
   progress modal — raised by ANY broadcast, with no caller opt-in — is what follows it.
 - **A funding read that FAILED MUST NOT be read as an empty wallet** (`TakeError::FundsUnreadable`).
   An unanswered read has made no claim about the money.
-- MAKING and CANCELLING offers are not part of this flow. XCH-funded takes only: a CAT-funded take
-  needs each coin's lineage proof, which the coins read does not carry.
+- XCH-funded takes only: a CAT-funded take needs each coin's lineage proof, which the coins read does
+  not carry.
+
+#### 3.3a3 Making and cancelling a Chia offer (normative)
+
+The Wallet tab also MAKES offers and CANCELS them. `dig-offers` remains the only offer authority:
+dig-app MUST NOT hand-roll a spend bundle for either.
+
+**Making.**
+
+- **The order MUST be: refuse, build, sign, assemble.** `wallet::making::make_permitted_by` refuses a
+  `CustodyPolicy::Vault` profile BEFORE a spend is built, with the SAME sentence the take path uses —
+  it is one rule (a vault may pay only its own hot wallet) and two wordings would read as two limits.
+  Then `dig_offers::make_build`, `MoneyPath::authorize_and_sign`, `dig_offers::make_assemble`.
+- **`make_build` and `make_assemble` MUST run in ONE `SpendContext`.** A requested leg carries
+  allocator-relative pointers that exist only in the context that created them.
+- **A make MUST NOT broadcast, and MUST NOT be reported as a completed trade.** Nothing is sent: the
+  signed maker half lives inside the offer string and reaches a mempool only when somebody takes it.
+  So no progress modal is raised, `MakeProgress::Made` is worded as *ready to share*, and the surface
+  MUST state that what the maker gives is committed NOW while what they asked for arrives only if
+  somebody takes it.
+- **The made `offer1…` string MUST be shown in full with a copy affordance.** An offer nobody can lift
+  off the screen is an offer that was not made.
+- **The offered side is XCH only**; the requested side MAY be XCH or a CAT. A CAT-offered coin needs a
+  lineage proof the app's coin read does not carry, and an NFT leg needs the NFT parsed in the build
+  context. The surface MUST state the limit rather than offer a control that fails at build time.
+- **One make at a time**, refused structurally: two makes select the same funding coins.
+
+**Cancelling.**
+
+- **Cancelling is DESTRUCTIVE and MUST be NAMED as such (NC-14, dig_ecosystem#3079).** A cancellation
+  re-spends the offer's still-unspent offered coins to the maker, which makes the outstanding
+  `offer1…` string unfillable, permanently. A value delta is not consent: the reclaim pays the maker's
+  own address, so every re-derived figure reads as a self-payment and the destroyed thing appears in
+  no number at all. Both the card and the confirm prompt MUST state that the shared string stops
+  working and that it cannot be undone.
+- **A cancellation MUST NOT be reported as a cancelled offer.** It races any taker's settlement, so
+  `CancelProgress::Broadcast` states only that a node accepted the reclaim, and the surface MUST say
+  the race exists.
+- **A vault profile MUST NOT be refused a cancellation.** The reclaim pays the maker's own hot wallet,
+  which is precisely what the vault rule permits; refusing would strand the money.
+- **The cancel control MAY be offered on any readable offer.** Whether an offer's coins are still this
+  wallet's to reclaim is a chain question the card does not answer, and a silently withheld capability
+  reads as a missing feature. The refusal, when it comes, MUST be `dig-offers`' own reason.
+- **One cancellation at a time**, refused structurally.
+
+#### 3.3a4 The trade narrative on the confirm prompt (normative, dig_ecosystem#3109)
+
+A swap has two legs and dig-account's re-derived `SpendSummary` can only see one of them. Every offer
+operation MUST therefore stage a `account::narrative::TradeNarrative` before asking for a signature.
+
+- **The narrative MUST name BOTH sides and the ACT**, in the user's own units, and MUST state an
+  empty side explicitly ("Nothing") rather than omitting the heading.
+- **It MUST be printed BESIDE the re-derived figures, never instead of them.** The recipients and fee
+  dig-account derived from the bytes being signed MUST still appear, under their own heading, so a
+  narrative that ever disagreed with the bytes can be caught against them on the same screen.
+- **It MUST be built from the value the surface displayed and the builder consumed** — the parsed
+  `ReviewedOffer` or the checked `MakeDraft` — never from a second reading of the offer.
+- **It MUST NOT outlive its operation.** `NarrativeSlot::set` returns a guard that clears the slot on
+  drop, so a later, unrelated spend cannot inherit the last operation's story.
+- **An ordinary send MUST carry no narrative.** Its recipients ARE the act, and an added
+  "You receive: Nothing" would read as though something were missing from a complete payment.
+- **A cancellation's narrative MUST read the offer in the MAKER's direction.** `OfferTerms` is the
+  taker's view, so what the offer would have DELIVERED is what the maker reclaims. Reading it the
+  other way would promise a person the side they were asking for — money they never had.
 
 #### 3.3b The send surface (normative)
 

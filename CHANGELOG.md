@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.23.0] - 2026-08-18
+
+### Features
+- **wallet:** Make and cancel Chia offers, with both legs of the trade named at the confirm gate (#201)
+
 ## [12.22.0] - 2026-08-18
 
 ### Features
