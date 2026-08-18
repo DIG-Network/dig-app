@@ -169,10 +169,9 @@ mod windows_pipe {
                     // stated by NOT passing a descriptor rather than by hand-building an ACL.
                     None,
                 )
-            }
-            .map_err(|e| io::Error::other(format!("could not create the pipe instance: {e}")))?;
+            };
             if handle.is_invalid() {
-                return Err(io::Error::other("the pipe instance handle was invalid"));
+                return Err(io::Error::last_os_error());
             }
             self.first_instance_taken.store(true, Ordering::SeqCst);
 

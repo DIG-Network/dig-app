@@ -30,6 +30,7 @@
 pub mod auth;
 pub mod client;
 pub mod endpoint;
+pub mod host_identity;
 pub mod server;
 pub mod transport;
 pub mod wire;
@@ -40,4 +41,5 @@ mod test_support;
 pub use auth::{token_path, SessionToken};
 pub use client::{host_endpoint, send, send_via};
 pub use endpoint::{cli_endpoint, socket_path};
+pub use host_identity::HostIdentity;
 pub use server::{CliSession, CliSessionServer};
