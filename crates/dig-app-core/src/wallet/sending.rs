@@ -351,6 +351,11 @@ pub enum SendBlocked {
     /// `dig-account` draws exactly this distinction in `CatTransferError::NoXchForFee` and the
     /// surface must not collapse what the builder took care to separate.
     NoXchForFee {
+        /// The token being SENT — named in the sentence so it says which two tokens are involved.
+        ///
+        /// Carried rather than assumed to be $DIG: with arbitrary CATs sendable, a sentence that
+        /// wrote "$DIG" would name the wrong token for every other one (dig_ecosystem#3077).
+        asset: Asset,
         /// The fee, in mojos.
         needed: u64,
         /// The wallet's whole XCH holding, in mojos, as last read.
@@ -385,10 +390,13 @@ impl SendBlocked {
                 amount_with_unit(*asset, *needed),
                 amount_with_unit(*asset, *spendable)
             ),
-            Self::NoXchForFee { needed, spendable } => format!(
-                "A network fee is paid in XCH, never in the token being sent, and this wallet \
-                 holds {} XCH against a fee of {} XCH. Add a little XCH and this send becomes \
-                 available.",
+            Self::NoXchForFee {
+                asset,
+                needed,
+                spendable,
+            } => format!(
+                "A network fee is paid in XCH, not in {}, and this wallet holds {} XCH against a                  fee of {} XCH. Add a little XCH and this send becomes available.",
+                ticker(*asset),
                 format_xch(*spendable),
                 format_xch(*needed)
             ),
@@ -556,6 +564,7 @@ impl SendDraft<'_> {
                 }
                 if DEFAULT_SEND_FEE_MOJOS > balances.xch_mojos() {
                     return Err(SendBlocked::NoXchForFee {
+                        asset: self.asset,
                         needed: DEFAULT_SEND_FEE_MOJOS,
                         spendable: balances.xch_mojos(),
                     });
@@ -2061,6 +2070,7 @@ mod tests {
         assert_eq!(
             blocked,
             SendBlocked::NoXchForFee {
+                asset: Asset::DIG,
                 needed: DEFAULT_SEND_FEE_MOJOS,
                 spendable: DEFAULT_SEND_FEE_MOJOS - 1,
             },

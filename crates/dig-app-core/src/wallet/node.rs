@@ -705,6 +705,57 @@ mod tests {
         );
     }
 
+    /// A CAT dig-app knows nothing about but its id — deliberately not $DIG's, so an
+    /// implementation that fell back to $DIG produces a visibly different value.
+    const SPACEBUCKS_HEX: &str = "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+
+    /// [`SPACEBUCKS_HEX`] as an [`Asset`].
+    fn spacebucks() -> Asset {
+        Asset::Cat(
+            crate::wallet::state::AssetId::from_hex(SPACEBUCKS_HEX).expect("a 64-hex asset id"),
+        )
+    }
+
+    /// **A token dig-app was never built knowing about is read from the node and shown.**
+    ///
+    /// The end-to-end property of this slice, over the real control wire: the request is serialized,
+    /// the fake node parses `{"cat":"<id>"}` out of it, and answers that token's OWN figure.
+    ///
+    /// # The fixture is what makes this falsifiable
+    ///
+    /// The three amounts are all DIFFERENT and the third is the largest, so an implementation that
+    /// asked for $DIG and labelled the answer as the CAT, or that reused one figure for every asset,
+    /// lands on a wrong number rather than an accidentally-right one. The fake answers `0` for any
+    /// token its fixture does not name, so a reader still keyed to $DIG's id gets `0` here — not
+    /// `4_200`.
+    #[test]
+    fn a_cat_the_app_was_never_built_knowing_is_read_by_its_own_id() {
+        let node = FakeNode::serving_wallet(WalletReply::Balance {
+            xch: 1_000_000_000_000,
+            dig: 2_500,
+            other_cat: Some((SPACEBUCKS_HEX, 4_200)),
+            synced: true,
+            source: Some("db"),
+            peak_height: Some(6_000_000),
+        });
+        let overview = WalletOverview::read_assets(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&engine_for(&node)),
+            &[Asset::Xch, Asset::DIG, spacebucks()],
+        );
+        let BalanceReading::Known { balances, .. } = &overview.balance else {
+            panic!("the node answered every asset: {:?}", overview.balance);
+        };
+        assert_eq!(balances.of(spacebucks()), 4_200, "the CAT's own figure");
+        assert_eq!(balances.dig_units(), 2_500, "and $DIG keeps its own");
+        assert_eq!(balances.xch_mojos(), 1_000_000_000_000);
+        assert_eq!(
+            balances.holdings.len(),
+            3,
+            "every asset asked for is present, so no held token is silently absent"
+        );
+    }
+
     /// A syncing node's own refusal reaches the user as "still catching up".
     #[test]
     fn a_syncing_node_is_reported_as_syncing_not_as_a_failure() {

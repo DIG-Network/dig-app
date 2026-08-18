@@ -37,13 +37,12 @@ use super::data::{self, Readout, Tone, Value};
 use super::field;
 use super::flow::Flow;
 use super::text;
+use crate::amount::format_xch;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::offer::{OfferError, OfferLeg, OfferTerms, ReviewedOffer};
-use crate::wallet::overview::format_amount;
-use crate::wallet::state::Asset;
 use crate::wallet::taking::TakeProgress;
 
 /// The id the pasted text is remembered under between frames.
@@ -195,10 +194,9 @@ fn side(flow: &mut Flow, t: &Tokens, heading: &str, legs: &[OfferLeg]) {
 /// arbitrary token and inventing one would be a claim about what the token IS.
 fn readout_of(leg: &OfferLeg) -> Readout {
     match leg {
-        OfferLeg::Xch { mojos } => Readout::new(
-            copy::offer::XCH_LABEL,
-            Value::Word(format_amount(Asset::Xch, *mojos)),
-        ),
+        OfferLeg::Xch { mojos } => {
+            Readout::new(copy::offer::XCH_LABEL, Value::Word(format_xch(*mojos)))
+        }
         OfferLeg::Cat { asset_id, amount } => Readout::new(
             copy::offer::cat_label(asset_id),
             Value::Word(amount.to_string()),
@@ -371,8 +369,8 @@ mod tests {
         let receive = readout_of(&terms.you_receive[0]);
         let pay = readout_of(&terms.you_pay[0]);
 
-        assert_eq!(receive.value, Value::Word(format_amount(Asset::Xch, 400)));
-        assert_eq!(pay.value, Value::Word(format_amount(Asset::Xch, 1_000)));
+        assert_eq!(receive.value, Value::Word(format_xch(400)));
+        assert_eq!(pay.value, Value::Word(format_xch(1_000)));
         assert_ne!(
             receive.value, pay.value,
             "the two sides must not render identically"

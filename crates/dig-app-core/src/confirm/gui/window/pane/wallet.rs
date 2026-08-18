@@ -54,14 +54,14 @@ use super::flow::Flow;
 use super::identity;
 use super::select::{self, Choice};
 use super::text;
-use crate::amount::{format_asset_amount, ticker};
+use crate::amount::{format_asset_amount, format_xch, ticker};
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
-    address_line, as_of_sentence, format_amount, is_syncing, unknown_reason, AddressReading,
-    BalanceReading, Balances,
+    address_line, as_of_sentence, is_syncing, unknown_reason, AddressReading, BalanceReading,
+    Balances,
 };
 use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
 use crate::wallet::sending::{
@@ -1060,7 +1060,7 @@ fn send_form(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<TrayActio
     // stays XCH for BOTH assets because the fee genuinely is: Chia charges fees in native mojos and
     // a CAT cannot pay its own. Formatting it as $DIG when $DIG is selected would show a number a
     // thousand times off, in the one place a person is deciding what a payment costs.
-    let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
+    let fee = format_xch(DEFAULT_SEND_FEE_MOJOS);
     flow.place(|ui, at| (text::caption(ui, at, t, &copy::wallet::send_fee(&fee)), ()));
     flow.gap(space::S3);
 
@@ -2396,7 +2396,7 @@ mod tests {
     #[test]
     fn the_fee_is_shown_in_xch_and_never_as_a_raw_mojo_count() {
         let said = painted_pane_with(&sendable(SendProgress::Idle), 900.0, Disclosed::Send);
-        let fee = format_amount(Asset::Xch, DEFAULT_SEND_FEE_MOJOS);
+        let fee = format_xch(DEFAULT_SEND_FEE_MOJOS);
         assert_eq!(fee, "0.000001", "the fixture no longer pins a real fee");
         assert!(
             said.iter().any(|line| line.contains(&fee)),

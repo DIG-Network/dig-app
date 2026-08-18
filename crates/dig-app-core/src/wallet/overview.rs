@@ -1788,26 +1788,131 @@ mod tests {
     /// declared decimals rather than typed as a magic number — the test this replaces asserted a
     /// single asset-agnostic divisor and was therefore perfectly self-consistent with rendering a
     /// whole $DIG as `0.000000001`.
+    /// A CAT dig-app knows nothing about but its id — deliberately not $DIG's, so an implementation
+    /// that fell back to $DIG produces a visibly different value.
+    const SPACEBUCKS_HEX: &str = "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+
+    /// [`SPACEBUCKS_HEX`] as an [`Asset`].
+    fn spacebucks() -> Asset {
+        Asset::Cat(
+            crate::wallet::state::AssetId::from_hex(SPACEBUCKS_HEX).expect("a 64-hex asset id"),
+        )
+    }
+
+    /// **A token with an unknown precision is stated in BASE UNITS, with the words.**
+    ///
+    /// Two actors in one fixture, and that is the point: $DIG renders as a whole-coin `2.5` in the
+    /// same sentence where the unknown CAT renders as `4200 base units`. A renderer that showed
+    /// everything as base units, or that applied the CAT convention's three decimals to every token,
+    /// fails on one half or the other. A single-asset fixture could not tell them apart.
+    #[test]
+    fn an_unknown_precision_reads_as_base_units_beside_a_token_that_reads_whole_coin() {
+        let balances = Balances {
+            holdings: vec![
+                Holding {
+                    asset: Asset::DIG,
+                    base_units: 2_500,
+                },
+                Holding {
+                    asset: spacebucks(),
+                    base_units: 4_200,
+                },
+            ],
+        };
+        let line = balance_line(
+            &BalanceReading::Known {
+                balances,
+                as_of: BalanceAsOf::Replica {
+                    height: 6_000_000,
+                    caught_up: true,
+                },
+            },
+            None,
+        );
+        assert!(
+            line.contains("2.5 $DIG"),
+            "$DIG keeps its own decimals: {line}"
+        );
+        assert!(
+            line.contains("4200 base units of"),
+            "an unknown precision states the unit it is true in: {line}"
+        );
+        assert!(
+            !line.contains("4.2"),
+            "the CAT convention's three decimals must not be applied to a token nobody stated the \
+             precision of: {line}"
+        );
+    }
+
+    /// **A read that fails for ONE asset makes the WHOLE reading unknown.**
+    ///
+    /// The fixture varies exactly one actor: XCH answers, every CAT fails. A partial list would show
+    /// the XCH figure beside a silently-missing $DIG, which reads as a wallet holding no $DIG.
+    ///
+    /// This pins the behaviour at the read layer specifically: the failing asset is the SECOND one
+    /// asked for, so an implementation that returned early with what it had would produce a `Known`
+    /// reading with one holding, and that is what fails here.
+    #[test]
+    fn one_assets_failure_makes_the_whole_reading_unknown() {
+        struct HalfBrokenEngine;
+        impl WalletEngine for HalfBrokenEngine {
+            fn broadcast(
+                &self,
+                _: super::super::engine::BroadcastRequest,
+            ) -> Result<super::super::engine::BroadcastResponse, WalletError> {
+                unreachable!()
+            }
+            fn coins(
+                &self,
+                _: super::super::engine::CoinsRequest,
+            ) -> Result<super::super::engine::CoinsResponse, WalletError> {
+                unreachable!()
+            }
+            fn balance(
+                &self,
+                request: BalanceRequest,
+            ) -> Result<super::super::engine::BalanceResponse, WalletError> {
+                match request.asset {
+                    Asset::Xch => Ok(super::super::engine::BalanceResponse {
+                        as_of: crate::wallet::engine::test_support::FAKE_AS_OF,
+                        balance: 7_000_000_000_000,
+                    }),
+                    Asset::Cat(_) => Err(WalletError::EngineNotSynced),
+                }
+            }
+        }
+        let overview = WalletOverview::read_assets(
+            AddressReading::Known(ADDRESS.to_string()),
+            &ChainSource::Ready(&HalfBrokenEngine),
+            &[Asset::Xch, Asset::DIG],
+        );
+        assert_eq!(
+            overview.balance,
+            BalanceReading::Unknown(BalanceUnknown::NotSynced),
+            "a half-read must never be displayed as a whole one"
+        );
+    }
+
     #[test]
     fn amounts_render_at_each_assets_own_scale() {
         let one_dig = 10u64.pow(crate::amount::decimals(Asset::DIG).expect("$DIG is known"));
         let one_xch = 10u64.pow(crate::amount::decimals(Asset::Xch).expect("XCH is known"));
 
-        assert_eq!(format_amount(Asset::DIG, one_dig), "1");
-        assert_eq!(format_amount(Asset::Xch, one_xch), "1");
-        assert_eq!(format_amount(Asset::DIG, one_dig * 3 / 2), "1.5");
-        assert_eq!(format_amount(Asset::Xch, one_xch * 3 / 2), "1.5");
-        assert_eq!(format_amount(Asset::DIG, 0), "0");
-        assert_eq!(format_amount(Asset::Xch, 0), "0");
+        assert_eq!(format_amount(Asset::DIG, one_dig), "1 $DIG");
+        assert_eq!(format_amount(Asset::Xch, one_xch), "1 XCH");
+        assert_eq!(format_amount(Asset::DIG, one_dig * 3 / 2), "1.5 $DIG");
+        assert_eq!(format_amount(Asset::Xch, one_xch * 3 / 2), "1.5 XCH");
+        assert_eq!(format_amount(Asset::DIG, 0), "0 $DIG");
+        assert_eq!(format_amount(Asset::Xch, 0), "0 XCH");
     }
 
     /// A sub-unit holding is never rounded away to a zero that would read as "nothing".
     #[test]
     fn a_sub_coin_holding_is_never_rendered_as_nothing() {
-        assert_ne!(format_amount(Asset::DIG, 1), "0");
-        assert_ne!(format_amount(Asset::Xch, 1), "0");
-        assert_eq!(format_amount(Asset::DIG, 1), "0.001");
-        assert_eq!(format_amount(Asset::Xch, 1), "0.000000000001");
+        assert_ne!(format_amount(Asset::DIG, 1), "0 $DIG");
+        assert_ne!(format_amount(Asset::Xch, 1), "0 XCH");
+        assert_eq!(format_amount(Asset::DIG, 1), "0.001 $DIG");
+        assert_eq!(format_amount(Asset::Xch, 1), "0.000000000001 XCH");
     }
 
     /// **A real user with a real reading sees the number.** This is the whole of dig_ecosystem#2206
