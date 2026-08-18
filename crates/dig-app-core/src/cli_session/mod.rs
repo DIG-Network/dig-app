@@ -41,5 +41,44 @@ mod test_support;
 pub use auth::{token_path, SessionToken};
 pub use client::{host_endpoint, send, send_via};
 pub use endpoint::{cli_endpoint, socket_path};
-pub use host_identity::HostIdentity;
+pub use host_identity::{HostIdentity, UnavailableConfirmer, UnopenedLinks};
 pub use server::{CliSession, CliSessionServer};
+
+/// Bind this user's CLI lane and serve it on a background thread, for the life of the process.
+///
+/// Best-effort by design: a host that cannot bind the lane still gets a working DIG app, and the
+/// reason is logged rather than fatal. `dign` then reports `NOT_CONNECTED` with its remedy, which is
+/// the same thing a person sees when the app is genuinely not running.
+///
+/// # Why the seams are built INSIDE the thread
+///
+/// [`crate::gateway::LocalIdentity`] and [`crate::gateway::LinkOpener`] are deliberately not
+/// `Send + Sync`: their test doubles use `RefCell`, and widening the traits to move seams across a
+/// thread boundary would force every double to become thread-safe for no behavioural gain. Only the
+/// two owned paths cross the boundary; the seams are constructed where they are used.
+pub fn serve_in_background(endpoint: String, brand_dir: std::path::PathBuf) {
+    let spawned = std::thread::Builder::new()
+        .name("dig-app-cli-lane".to_string())
+        .spawn(move || {
+            let (identity, opener, confirmer) = (
+                HostIdentity::under(&brand_dir),
+                UnopenedLinks,
+                UnavailableConfirmer,
+            );
+            let server =
+                match CliSessionServer::bind(&endpoint, &brand_dir, &identity, &opener, &confirmer) {
+                    Ok(server) => server,
+                    Err(e) => {
+                        tracing::warn!(error = %e, %endpoint, "the dign CLI lane could not be bound");
+                        return;
+                    }
+                };
+            tracing::info!(%endpoint, "the dign CLI lane is serving");
+            if let Err(e) = server.serve_blocking() {
+                tracing::error!(error = %e, "the dign CLI lane stopped serving");
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "could not spawn the dign CLI lane thread");
+    }
+}

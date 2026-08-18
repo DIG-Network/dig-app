@@ -166,6 +166,51 @@ impl LocalIdentity for HostIdentity {
     }
 }
 
+/// The link opener the CLI lane serves with: a refusal naming where links are opened.
+///
+/// Opening a `dig://` link means resolving it and launching a browser at the result. That is the
+/// desktop shell's job and it belongs to the app's own event loop, so the lane refuses rather than
+/// launching a process from a background thread on the CLI's say-so.
+pub struct UnopenedLinks;
+
+impl crate::gateway::LinkOpener for UnopenedLinks {
+    fn open(&self, _link: &str) -> Result<crate::gateway::Outcome, GatewayError> {
+        Err(GatewayError::new(
+            ErrorCode::Denied,
+            "opening a link is done by the DIG app, which owns the window it opens into",
+        )
+        .with_hint("open the link from the DIG app"))
+    }
+}
+
+/// The confirm seam the CLI lane serves with: every ceremony reports `Unavailable`.
+///
+/// # This is the dig_ecosystem#908 boundary, expressed as a type
+///
+/// A confirm window belongs to the app's own event loop. A lane thread cannot raise one, and the
+/// fail-closed default across this whole trait is that a ceremony which cannot be SHOWN is a
+/// ceremony that was not APPROVED. Returning `Unavailable` therefore makes it structurally
+/// impossible for a `dign` invocation to obtain a signature: there is no decision here that any
+/// caller could read as approval, so the CLI cannot become a signing oracle even by mistake.
+pub struct UnavailableConfirmer;
+
+impl crate::confirm::NativeConfirmer for UnavailableConfirmer {
+    fn confirm_pair(&self, _: &crate::confirm::PairPrompt<'_>) -> crate::confirm::ConfirmDecision {
+        crate::confirm::ConfirmDecision::Unavailable
+    }
+
+    fn confirm_connect(
+        &self,
+        _: &crate::confirm::ConnectPrompt<'_>,
+    ) -> crate::confirm::ConfirmDecision {
+        crate::confirm::ConfirmDecision::Unavailable
+    }
+
+    fn confirm_sign(&self, _: &crate::confirm::SignPrompt<'_>) -> crate::confirm::ConfirmDecision {
+        crate::confirm::ConfirmDecision::Unavailable
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

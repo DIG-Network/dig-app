@@ -178,6 +178,18 @@ fn main() {
     tracing::info!(node_endpoints = %ladder, "node endpoint ladder resolved");
     eprintln!("dig-app {version} — user identity agent starting (looking for a node at: {ladder})");
 
+    // Serve `dign` (dig_ecosystem#908). The lane comes up on BOTH form factors and BEFORE any
+    // unlock, because the app holds the account locked on almost every start-up path — a lane bound
+    // only after an unlock would make `dign` tell a person their running app is not running. What it
+    // serves with the seed away is the profile registry; everything seed-bound refuses by name.
+    match env.brand_dir() {
+        Ok(brand_dir) => dig_app_core::cli_session::serve_in_background(
+            dig_app_core::cli_session::cli_endpoint(env.os, &env.user, &brand_dir),
+            brand_dir,
+        ),
+        Err(e) => tracing::warn!(error = %e, "no DIG data directory, so no dign CLI lane"),
+    }
+
     match env.form_factor() {
         FormFactor::Tray => {
             // A desktop session is present, so the terminal native-confirm gate is available — bring
