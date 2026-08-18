@@ -1991,20 +1991,23 @@ mod tests {
             if trimmed.starts_with("//") || !line.contains('"') {
                 continue;
             }
-            let bytes = line.as_bytes();
+            // A run only counts with text on BOTH sides. Leading indentation, and the
+            // indentation following a legitimate `\` continuation, both sit at the start of a
+            // line with nothing before them, so neither can trip this.
+            let mut seen_text = false;
             let mut run = 0usize;
-            for i in 0..bytes.len() {
-                if bytes[i] == b' ' {
-                    run += 1;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    if seen_text {
+                        run += 1;
+                    }
                     continue;
                 }
-                // A run only counts when text precedes AND follows it: leading indentation, and
-                // the indentation after a legitimate `\` continuation, both start the line.
-                let follows_text = i > run && run >= 4;
-                if follows_text {
+                if seen_text && run >= 4 {
                     damaged.push(format!("line {}: {}", ix + 1, line.trim()));
                     break;
                 }
+                seen_text = true;
                 run = 0;
             }
         }
