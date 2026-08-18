@@ -29,10 +29,19 @@ pub mod enrol;
 #[cfg(test)]
 mod no_user_key_on_wire;
 pub mod node;
+pub mod offer;
+/// Real `offer1…` fixtures, built by the canonical crate. Test-only: production never constructs an
+/// offer, it only reads one a person supplies.
+#[cfg(test)]
+pub mod offer_fixture;
 pub mod overview;
 pub mod send;
 pub mod sending;
 pub mod state;
+/// The custody-gate measurement for taking an offer — read its header before building on it.
+#[cfg(test)]
+mod take_reaches_the_custody_gate;
+pub mod taking;
 
 use chia_protocol::SpendBundle;
 use chia_traits::Streamable;

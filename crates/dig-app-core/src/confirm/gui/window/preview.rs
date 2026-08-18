@@ -44,6 +44,7 @@ pub fn open_pane_preview(
     size: (f32, f32),
     zoom: f32,
     view: TrayView,
+    offer: Option<String>,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -61,6 +62,15 @@ pub fn open_pane_preview(
         Box::new(move |cc| {
             super::super::window::install_fonts(&cc.egui_ctx);
             cc.egui_ctx.set_zoom_factor(zoom);
+            // Seed the Wallet tab's offer field, so the card's REVIEWED state can be photographed.
+            // A committed screenshot must never be taken after synthetic input, and the field lives
+            // in egui's per-frame store — so the only honest way to picture a filled card is to put
+            // the text there before the first frame, exactly as a paste would have.
+            if let Some(offer) = offer.clone() {
+                cc.egui_ctx.data_mut(|d| {
+                    d.insert_temp(egui::Id::new("dig-window-wallet-offer").with("text"), offer);
+                });
+            }
             Ok(Box::new(Preview { theme, tab, view }))
         }),
     )

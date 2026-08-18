@@ -2544,6 +2544,42 @@ the chain peak (`TransferPlan::pushed_now`) → **push** the SIGNED bundle
   payment leave with no confirmation.
 - CAT / `$DIG` sending is not part of this flow.
 
+#### 3.3a2 Taking a Chia offer (normative)
+
+The Wallet tab reads and takes Chia offers. `dig-offers` is the ONLY offer authority: dig-app MUST
+NOT decode, summarize, assemble or combine offer bytes itself.
+
+- **What is shown MUST derive from the parser, on the bytes that would be broadcast.** A
+  `wallet::offer::ReviewedOffer` owns an `offer1…` string and the `dig_offers::summarize` of that same
+  string; `ReviewedOffer::read` MUST be its only constructor. The take path MUST be handed that value
+  — never a separately-carried offer string — so the terms displayed and the swap settled cannot
+  diverge.
+- **Both sides MUST be named (NC-14).** The surface states what arrives and what leaves as two
+  labelled lists, in the taker's direction: `summarize().offered` is what the taker RECEIVES and
+  `.requested` is what the taker PAYS. A single net figure MUST NOT be shown — a take changes
+  ownership, and a difference describes the act while hiding half of it.
+  - This is load-bearing because the custody ceremony downstream shows only the PAID side: the
+    received leg returns to the taker's own change address and is dropped as change, and the
+    settlement commitment nets out within the bundle. The offer card is therefore the only surface on
+    which the whole trade is visible, and it is where consent is actually given.
+- **The order MUST be: refuse, build, sign, combine, push.** `wallet::offer::take_permitted_by` refuses
+  a `CustodyPolicy::Vault` profile BEFORE a spend is built, because dig-account denies a vault outflow
+  to the settlement puzzle by name; the refusal MUST reach the control as a stated reason, never a
+  bare disabled control and never a failure at signing time. Then `dig_offers::take_build`,
+  `MoneyPath::authorize_and_sign`, `dig_offers::take_combine`, and the node's push.
+- **Every take is authorized as `SpendOpClass::Undeclared`**, which can never auto-approve, so a take
+  always reaches the human. A swap is irreversible and moves assets no mojo allowance can weigh, so
+  there is no configured bound under which approving one unattended would be honest.
+- **One take at a time**, refused structurally. A second take of the same offer while the first is
+  settling can only fail, after a person has confirmed it.
+- **A broadcast MUST NOT be reported as a settled swap.** `TakeProgress::Broadcast` states that a node
+  accepted the bundle and names it; whether the swap settled is a chain read, and the centralized
+  progress modal — raised by ANY broadcast, with no caller opt-in — is what follows it.
+- **A funding read that FAILED MUST NOT be read as an empty wallet** (`TakeError::FundsUnreadable`).
+  An unanswered read has made no claim about the money.
+- MAKING and CANCELLING offers are not part of this flow. XCH-funded takes only: a CAT-funded take
+  needs each coin's lineage proof, which the coins read does not carry.
+
 #### 3.3b The send surface (normative)
 
 The Wallet tab offers the send, and `dig_app_core::wallet::sending` is the only place that decides

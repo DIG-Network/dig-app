@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "12.20.0"
+version = "12.21.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "12.20.0"
+version = "12.21.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2058,6 +2058,7 @@ dependencies = [
  "dig-ipc-protocol",
  "dig-keystore",
  "dig-node-control-interface",
+ "dig-offers",
  "dig-session",
  "dig-social-profile",
  "dig-wallet-backend",
@@ -2071,6 +2072,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "image",
+ "indexmap",
  "keyring",
  "libc",
  "objc2 0.6.4",
@@ -2474,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "12.20.0"
+version = "12.21.0"
 dependencies = [
  "clap",
  "dig-app-core",

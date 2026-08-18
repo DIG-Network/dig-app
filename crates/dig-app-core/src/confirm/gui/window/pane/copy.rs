@@ -719,6 +719,98 @@ pub(crate) mod qr {
 }
 
 /// The Wallet pane.
+/// The Chia OFFER card on the Wallet tab (dig_ecosystem#3077).
+///
+/// Every sentence here names both sides of a swap or the precondition that refuses one. Nothing in
+/// this module may say a swap COMPLETED: reaching the broadcast state means a node accepted a
+/// bundle, and the chain decides the rest.
+pub(crate) mod offer {
+    /// The card's title.
+    pub(crate) const CARD: &str = "Offers";
+
+    /// The paste field's label.
+    pub(crate) const PASTE_LABEL: &str = "Offer";
+
+    /// What an empty field shows.
+    pub(crate) const PASTE_PLACEHOLDER: &str = "offer1…";
+
+    /// The field's help line.
+    pub(crate) const PASTE_HINT: &str = "Paste a Chia offer to see exactly what it trades.";
+
+    /// The EMPTY state's sentence — what to do, not what went wrong.
+    pub(crate) const EMPTY_HINT: &str =
+ "Nothing to review yet. Paste an offer somebody sent you and its two sides appear here before you agree to anything.";
+
+    /// The heading over what taking the offer delivers.
+    pub(crate) const YOU_RECEIVE: &str = "You receive";
+
+    /// The heading over what taking the offer costs.
+    pub(crate) const YOU_PAY: &str = "You pay";
+
+    /// The label on a side that carries no asset.
+    pub(crate) const NOTHING_LABEL: &str = "Nothing";
+
+    /// What an empty side says, stated rather than left blank.
+    pub(crate) const NOTHING_ON_THIS_SIDE: &str = "this offer names nothing on this side";
+
+    /// The label on a native XCH leg.
+    pub(crate) const XCH_LABEL: &str = "XCH";
+
+    /// The label on an NFT leg.
+    pub(crate) const NFT_LABEL: &str = "NFT";
+
+    /// The label on a CAT leg: the asset id, shortened, because this app has no name for an
+    /// arbitrary token and inventing one would be a claim about what the token IS.
+    pub(crate) fn cat_label(asset_id: &str) -> String {
+        format!("Token {}…", &asset_id[..asset_id.len().min(8)])
+    }
+
+    /// The royalty line: how many legs, and what they come to in total.
+    pub(crate) fn royalties(legs: usize, percent: f64) -> String {
+        format!("Includes {legs} royalty payment(s), {percent:.2}% in total, already priced in.")
+    }
+
+    /// The control that takes the offer.
+    pub(crate) const TAKE_BUTTON: &str = "Take this offer";
+
+    /// Refused because the offer names nothing on either side.
+    pub(crate) const REFUSED_EMPTY: &str =
+        "This offer names nothing to trade, so there is nothing to agree to.";
+
+    /// Refused because the account is locked.
+    pub(crate) const REFUSED_LOCKED: &str =
+ "Unlock your account to take an offer — taking one spends your coins, and that needs your key.";
+
+    /// Refused because another take is already in flight.
+    pub(crate) const REFUSED_IN_FLIGHT: &str =
+ "Another swap is still going through. Taking a second one now could spend the same coins twice, so this waits until the first is settled.";
+
+    /// The badge on a take that is building, waiting for confirmation, or being pushed.
+    pub(crate) const WORKING_BADGE: &str = "Working";
+
+    /// What the working state says.
+    pub(crate) const WORKING_BODY: &str =
+        "Building the swap and asking you to confirm it. Nothing has been sent yet.";
+
+    /// The badge on a take a node accepted. Deliberately not a success word.
+    pub(crate) const BROADCAST_BADGE: &str = "Sent";
+
+    /// What the broadcast state says: an acceptance, and where to look it up.
+    pub(crate) fn broadcast_body(bundle_name: &str) -> String {
+        format!(
+ "A node accepted this swap. It is not settled until the chain confirms it — you can follow it as {bundle_name}."
+ )
+    }
+
+    /// The badge on a take that did not complete.
+    pub(crate) const FAILED_BADGE: &str = "Not taken";
+
+    /// What the failure state says, in the words the failure itself used.
+    pub(crate) fn failed_body(why: &str) -> String {
+        format!("This swap did not go through. {why}")
+    }
+}
+
 pub(crate) mod wallet {
     /// The card carrying the address and its code — now DISCLOSED by the Receive control rather
     /// than drawn permanently at the top of the tab (dig_ecosystem#2967).
@@ -1183,6 +1275,13 @@ mod tests {
             home::CACHE_UNKNOWN,
             home::DIAGNOSTICS_HINT,
             qr::RECEIVE_CAPTION,
+            offer::PASTE_HINT,
+            offer::EMPTY_HINT,
+            offer::NOTHING_ON_THIS_SIDE,
+            offer::REFUSED_EMPTY,
+            offer::REFUSED_LOCKED,
+            offer::REFUSED_IN_FLIGHT,
+            offer::WORKING_BODY,
             wallet::BALANCE_PENDING,
             wallet::ACTIVITY_EMPTY,
             wallet::ACTIVITY_SCOPE,

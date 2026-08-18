@@ -124,6 +124,15 @@ pub(crate) fn draw(
         false => None,
     };
 
+    // The offer card, between the send/receive verbs and the activity list: it is a third errand on
+    // this tab and not a mode of the other two, so it neither joins the verb row nor hides behind it.
+    flow.gap(space::S4);
+    let took = super::wallet_offer::card(
+        flow,
+        t,
+        matches!(facts.account, Some(AccountKind::Unlocked)),
+    );
+
     flow.gap(space::S4);
     activity_card(flow, t, &crate::wallet::activity::entries());
 
@@ -136,7 +145,10 @@ pub(crate) fn draw(
     // `showing_receive`, not a fresh `drew_copy_control(facts, open)`: closing the card above moves
     // `open` on, and re-asking would report no copy control on the very frame one was drawn — putting
     // the menu's row back beside it and offering the same verb twice.
-    sent.or(spare_verbs_card(flow, t, tab, showing_receive))
+    // A send press wins over a take, which wins over a menu verb. Only one can be produced in a
+    // frame in practice; the order states which intent is honoured if that ever stops being true.
+    sent.or(took)
+        .or(spare_verbs_card(flow, t, tab, showing_receive))
 }
 
 /// What came in and what went out, newest first (dig_ecosystem#3077).
