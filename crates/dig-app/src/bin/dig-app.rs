@@ -1648,9 +1648,13 @@ mod tray {
             // Read off the seams a deletion would ACTUALLY run through, plus the lock, which they
             // cannot know. One value, never a second independent check — that is how a surface comes
             // to offer an irreversible control whose implementation refuses (dig_ecosystem#3037).
+            //
+            // The lock is the ACCOUNT's state, never `session.is_some()`: a session outlives its key
+            // material, so the session test offered this irreversible control to a locked account
+            // (dig_ecosystem#3059 review). The reading itself now refuses that spelling.
             profile_deletion: dig_app_core::profiles::ProfileDeletion::of_seams(
                 dig_app_core::profile_melt::app_seams().is_possible(),
-                session.is_some(),
+                Some(&account),
             ),
             profile_editing: dig_app_core::profile_edit::EditService::app().editing(
                 session.is_some_and(|s| {

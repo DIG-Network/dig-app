@@ -864,16 +864,34 @@ pub enum ProfileDeletion {
 }
 
 impl ProfileDeletion {
-    /// Read the offer off the seams that exist, plus the lock, which they cannot know.
+    /// Read the offer off the seams that exist, plus the ACCOUNT, which they cannot know.
     ///
-    /// The lock is reported FIRST for the reason `ProfileEditing::of_seams` records: the shell
+    /// The account is asked FIRST for the reason `ProfileEditing::of_seams` records: the shell
     /// derives the seams from an unlocked account, so a locked one leaves them uninstalled and
     /// reading the transport off that state fabricates a claim about the BUILD (dig_ecosystem#3057).
-    pub fn of_seams(seams_exist: bool, unlocked: bool) -> Self {
-        match (unlocked, seams_exist) {
-            (false, _) => Self::Blocked(DeletionBlocked::Locked),
-            (true, false) => Self::Blocked(DeletionBlocked::NoChainTransport),
-            (true, true) => Self::Possible,
+    ///
+    /// # Why this takes an [`AccountState`](crate::tray_menu::AccountState) and not a `bool`
+    ///
+    /// Because a session OUTLIVES its key material — lock-now and the idle auto-lock drop the keys
+    /// and keep the session — so `session.is_some()` is true for an account that is LOCKED. That is
+    /// exactly what the one caller passed, which offered an irreversible delete control to an
+    /// account that cannot sign a melt (dig_ecosystem#3059 review). A `bool` parameter cannot
+    /// refuse a wrong answer; a state that only `Unlocked` satisfies can, and the caller has no
+    /// second way to spell it.
+    ///
+    /// Every other state withholds the offer WITHOUT naming a cause: `Locked` is the one condition
+    /// this reading can honestly name and route out of. Telling somebody with no account — or one
+    /// sealed under a machine password, or one that will not open at all — that their account is
+    /// "locked" would send them to an `Unlock…` that is not their remedy, and the account surface
+    /// already says what is really true of those states.
+    pub fn of_seams(seams_exist: bool, account: Option<&crate::tray_menu::AccountState>) -> Self {
+        match account {
+            Some(crate::tray_menu::AccountState::Unlocked { .. }) => match seams_exist {
+                true => Self::Possible,
+                false => Self::Blocked(DeletionBlocked::NoChainTransport),
+            },
+            Some(crate::tray_menu::AccountState::Locked) => Self::Blocked(DeletionBlocked::Locked),
+            _ => Self::Unknown,
         }
     }
 
@@ -895,6 +913,7 @@ impl ProfileDeletion {
 #[cfg(test)]
 mod deletion_tests {
     use super::*;
+    use crate::tray_menu::AccountState;
 
     /// **An unmeasured build offers no delete control and names no cause.**
     ///
@@ -922,16 +941,67 @@ mod deletion_tests {
     #[test]
     fn a_locked_account_is_told_to_unlock_and_an_open_one_still_hears_about_its_transport() {
         assert_eq!(
-            ProfileDeletion::of_seams(false, false).blocked(),
+            ProfileDeletion::of_seams(false, Some(&AccountState::Locked)).blocked(),
             Some(DeletionBlocked::Locked),
             "a locked account was told its build cannot reach the blockchain"
         );
         assert_eq!(
-            ProfileDeletion::of_seams(false, true).blocked(),
+            ProfileDeletion::of_seams(false, Some(&OPEN)).blocked(),
             Some(DeletionBlocked::NoChainTransport),
             "an unlocked build with no transport lost the sentence naming its real cause"
         );
-        assert!(ProfileDeletion::of_seams(true, true).is_possible());
+        assert!(ProfileDeletion::of_seams(true, Some(&OPEN)).is_possible());
+    }
+
+    /// An account that is open, so the seams decide.
+    const OPEN: AccountState = AccountState::Unlocked { recoverable: true };
+
+    /// **Only an OPEN account is offered the delete control — every other state withholds it.**
+    ///
+    /// dig_ecosystem#3059 review. The caller used to pass `session.is_some()`, and a session
+    /// deliberately outlives its key material, so a LOCKED account read as unlocked and was offered
+    /// an irreversible melt it could not sign. The locked leg carries `seams_exist = true` on
+    /// purpose: that is the state a machine whose account locked on the idle timer is really in —
+    /// the seams were installed while it was open — so an implementation that only ever reported
+    /// the lock when the seams were missing would pass a `false` fixture and still ship the defect.
+    ///
+    /// The three states BESIDE locked are what stops the nearest wrong fix from passing: a
+    /// `!matches!(Locked)` predicate — "anything that is not locked is open" — offers the delete
+    /// control to an account sealed under a machine password, to one that will not open at all, and
+    /// to a machine with no account whatsoever. Each must withhold, and none may claim the account
+    /// is locked, because "unlock it" is not their remedy.
+    #[test]
+    fn only_an_unlocked_account_may_be_offered_the_delete_control() {
+        assert!(
+            ProfileDeletion::of_seams(true, Some(&OPEN)).is_possible(),
+            "an open account with working seams lost its delete control"
+        );
+
+        let locked = ProfileDeletion::of_seams(true, Some(&AccountState::Locked));
+        assert!(
+            !locked.is_possible(),
+            "a LOCKED account was offered the irreversible delete control: a session outlives its              keys, so nothing here may read the session's existence as an unlocked account"
+        );
+        assert_eq!(locked.blocked(), Some(DeletionBlocked::Locked));
+
+        for closed in [
+            Some(&AccountState::NeedsPassword),
+            Some(&AccountState::Unopenable),
+            Some(&AccountState::Absent),
+            Some(&AccountState::Unsupported),
+            None,
+        ] {
+            let reading = ProfileDeletion::of_seams(true, closed);
+            assert!(
+                !reading.is_possible(),
+                "{closed:?} was offered a delete control it cannot sign"
+            );
+            assert_eq!(
+                reading.blocked(),
+                None,
+                "{closed:?} was told its account is locked, which is not what is true of it and                  not the remedy it needs"
+            );
+        }
     }
 
     /// **Every blocker names a door**, and the locked one sends nobody to install anything.

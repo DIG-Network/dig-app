@@ -1542,7 +1542,10 @@ mod tests {
     #[test]
     fn hiding_is_never_worded_as_deleting_even_beside_a_real_delete_control() {
         let view = TrayView {
-            profile_deletion: crate::profiles::ProfileDeletion::of_seams(true, true),
+            profile_deletion: crate::profiles::ProfileDeletion::of_seams(
+                true,
+                Some(&crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            ),
             ..view_with(reading_of(
                 &[
                     (ProfileIx::ROOT, Some("home")),
@@ -1624,7 +1627,10 @@ mod tests {
         let alone = reading_of(&[(ProfileIx::ROOT, Some("home"))], &[]);
 
         let capable = TrayView {
-            profile_deletion: crate::profiles::ProfileDeletion::of_seams(true, true),
+            profile_deletion: crate::profiles::ProfileDeletion::of_seams(
+                true,
+                Some(&crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            ),
             ..view_with(alone.clone())
         };
         assert!(
