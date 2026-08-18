@@ -1507,6 +1507,29 @@ mod tests {
     /// fault; the file looks fine, because the spaces are the source's own indentation. Asserted over
     /// every string this module hands a paint call, so the next wrapped sentence cannot reintroduce
     /// it.
+    /// A profiles list whose rows carry LABELS, so a sentence naming a profile names it the way a
+    /// card's row would rather than by its ordinal.
+    ///
+    /// The two indices are the ones [`CreationBlocked::FundingElsewhere`] carries in
+    /// `CreationBlocked::EVERY` — so every sentence built from it below is the sentence a person
+    /// with a labelled list actually reads (dig_ecosystem#2981).
+    fn labelled() -> crate::profiles::ProfilesReading {
+        fn row(ix: u32, label: &str, active: bool) -> crate::profiles::ProfileRow {
+            crate::profiles::ProfileRow {
+                ix: dig_account::ProfileIx(ix),
+                did: format!("did:chia:{ix}"),
+                store_id: format!("0x{ix:064}"),
+                label: Some(label.to_string()),
+                hidden: false,
+                active,
+            }
+        }
+        crate::profiles::ProfilesReading::Known(vec![
+            row(0, "personal", true),
+            row(1, "work", false),
+        ])
+    }
+
     /// Every sentence this module hands a paint call, so a guard asserted "over all the copy" is.
     ///
     /// Written out because these are `const`s in nested modules and nothing enumerates them. The
