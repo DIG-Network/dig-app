@@ -22,6 +22,9 @@
 //! `dig-account` signer; the engine only ever sees signed bytes.
 
 pub mod activity;
+/// The closed loop over make + cancel — read its header before treating it as evidence of settlement.
+#[cfg(test)]
+mod an_offer_this_app_makes_is_one_it_can_cancel;
 pub mod cancelling;
 pub mod engine;
 pub mod enrol;

@@ -254,11 +254,6 @@ where
         let mut owner_keys = IndexMap::new();
         owner_keys.insert(change_puzzle_hash, public_key);
 
-        let (xch, cats) = match draft.want() {
-            Wanted::Xch { mojos } => (*mojos, Vec::new()),
-            Wanted::Cat { asset_id, amount } => (0, vec![(*asset_id, *amount)]),
-        };
-
         // ONE context for build and assemble. `make_assemble` rebuilds the requested side from
         // allocator-relative pointers that exist only in the context that created them, so a second
         // context here would produce an offer describing a different requested leg.
@@ -275,13 +270,7 @@ where
                 offer_cats: Vec::new(),
                 _pd: PhantomData,
             },
-            RequestedSide {
-                // Paid to this wallet's own address — the maker is the payee of what it asked for.
-                payee_puzzle_hash: change_puzzle_hash,
-                xch,
-                cats,
-                nfts: Vec::new(),
-            },
+            requested_side(draft, change_puzzle_hash),
             fee,
         )
         .map_err(|e| MakeError::Build(e.to_string()))?;
@@ -300,6 +289,27 @@ where
         .map_err(|e| MakeError::Assemble(e.to_string()))?;
 
         Ok(MadeOffer { offer })
+    }
+}
+
+/// The requested side `draft` describes, paid to `payee`.
+///
+/// Extracted from [`MakeSession::make`] because it is the whole of the give/want mapping and the one
+/// place a wrong version is invisible: an offer built with the two sides transposed encodes and
+/// decodes perfectly and is takeable — it simply trades the opposite way from what the person asked
+/// for. Pulling it out gives that mapping a test.
+///
+/// `payee` is the MAKER's own address: the maker is who the requested payment is made to.
+pub(crate) fn requested_side(draft: &MakeDraft, payee: Bytes32) -> RequestedSide {
+    let (xch, cats) = match draft.want() {
+        Wanted::Xch { mojos } => (*mojos, Vec::new()),
+        Wanted::Cat { asset_id, amount } => (0, vec![(*asset_id, *amount)]),
+    };
+    RequestedSide {
+        payee_puzzle_hash: payee,
+        xch,
+        cats,
+        nfts: Vec::new(),
     }
 }
 

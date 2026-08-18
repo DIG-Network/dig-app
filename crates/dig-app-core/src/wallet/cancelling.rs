@@ -38,7 +38,7 @@ use crate::account::narrative::{NarrativeSlot, TradeNarrative};
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
 use crate::transaction::{Feed, Stage, Transaction};
-use crate::wallet::offer::{OfferLeg, ReviewedOffer};
+use crate::wallet::offer::ReviewedOffer;
 use crate::wallet::offer_words as copy;
 use chia_sdk_driver::SpendContext;
 
@@ -129,12 +129,6 @@ pub fn cancel_narrative(reviewed: &ReviewedOffer) -> TradeNarrative {
         you_receive: reclaimed,
         caution: Some(copy::CANCEL_CAUTION.to_string()),
     }
-}
-
-/// What the offer being cancelled would have delivered, as the card lists it.
-#[must_use]
-pub fn reclaimable(reviewed: &ReviewedOffer) -> &[OfferLeg] {
-    &reviewed.terms().you_receive
 }
 
 /// Build, gate, sign and push one cancellation.
