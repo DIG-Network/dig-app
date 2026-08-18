@@ -1733,6 +1733,21 @@ mod tests {
         assert!(said.contains(&format!("0x{ANCHORED}")), "{said}");
     }
 
+    /// **The root survives the narrow layout, where the copy control stacks under the value.**
+    ///
+    /// 320 px is below `identity::copyable`'s side-by-side threshold, so the row re-flows there and
+    /// a value that only fits beside its control would vanish. Asserted at a real width rather than
+    /// trusted, because the committed captures on this display could not be taken at a phone width
+    /// and this is the property they would have shown.
+    #[test]
+    fn the_root_is_still_shown_where_the_row_has_to_stack() {
+        let reading = reading_of(&[(ProfileIx::ROOT, None)], &[])
+            .with_active_root(RootReading::Anchored(format!("0x{ANCHORED}")));
+        let said = card_says(&view_with(reading), 320.0);
+        assert!(said.contains(copy::profiles::ROOT_LABEL), "{said}");
+        assert!(said.contains(&format!("0x{ANCHORED}")), "{said}");
+    }
+
     /// **A root nobody has read is drawn as a sentence, never as a hash.**
     ///
     /// The fixture is the state EVERY row starts in, so a card that rendered the field
