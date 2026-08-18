@@ -1956,8 +1956,13 @@ mod tray {
         // nothing about this machine's node has been measured FOR creation. `Unknown` withholds the
         // offer exactly as a blocker would, and unlike a blocker it names no cause: telling a locked
         // user their chain is unreachable would send them to fix a node that is answering fine.
+        // A LOCKED account is a known, nameable, user-fixable condition — never an unmeasured one.
+        // This used to return `Unknown`, which the card renders as "DIG is still checking…", so a
+        // locked person watched a check that was never going to run and was told nothing about the
+        // one act that would move it (dig_ecosystem#3059). The precedence lives in the library
+        // because this file is one no guard test can see (dig_ecosystem#2587).
         let Some(live) = session else {
-            return ProfileCreation::Unknown;
+            return ProfileCreation::of_account(false, None);
         };
 
         // A poisoned lock says nothing about the node, and "nothing" is not a blocker.
@@ -1985,9 +1990,10 @@ mod tray {
             &publisher,
         );
 
-        ProfileCreation::of_reading(Some(
-            ProfileMintSeams::from_readiness(reading, &door).availability(),
-        ))
+        ProfileCreation::of_account(
+            true,
+            Some(ProfileMintSeams::from_readiness(reading, &door).availability()),
+        )
     }
 
     fn network_poller() -> &'static dig_app_core::network::NodeNetworkStanding {
@@ -4673,7 +4679,8 @@ mod tray {
 
         // Read ONCE. A second, shadowing read of the same registry survived a merge here
         // and left this function asking twice on the blocked path (dig_ecosystem#2582).
-        let held = match profiles_reading(env, session) {
+        let reading = profiles_reading(env, session);
+        let held = match &reading {
             ProfilesReading::Known(rows) if !rows.is_empty() => format!(
                 "This account holds {} profile(s), and the Account tab lists them.\n\n",
                 rows.len()
@@ -4690,7 +4697,10 @@ mod tray {
         // explanation for an UNMEASURED node the day this reads a node rather than a constant
         // (dig_ecosystem#2690). The selection lives in the library because this file is one no guard
         // test can see (dig_ecosystem#2587).
-        let body = match copy::about_creation(creation) {
+        // Named off the SAME reading the count above came from, so this notice and the Account
+        // tab's list cannot call one profile two things (dig_ecosystem#2981).
+        let body = match copy::about_creation(creation, dig_app_core::profiles::ProfileNames::of(&reading))
+        {
             Some(sentence) => format!(
                 "{}\n\n{held}{}\n\n{}",
                 copy::WHAT_A_PROFILE_IS,

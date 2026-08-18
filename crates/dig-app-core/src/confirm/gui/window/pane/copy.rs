@@ -665,8 +665,11 @@ pub(crate) mod profiles {
     /// Delegated to [`crate::profiles::copy::cannot_create`] rather than written again here,
     /// because the shell says the same thing in a native notice and two constants stating one fact
     /// is how the account state machine came to have two sentence sets that drifted (#2357).
-    pub(crate) fn cannot_create(blocked: CreationBlocked) -> String {
-        crate::profiles::copy::cannot_create(blocked)
+    pub(crate) fn cannot_create(
+        blocked: CreationBlocked,
+        names: crate::profiles::ProfileNames<'_>,
+    ) -> String {
+        crate::profiles::copy::cannot_create(blocked, names)
     }
 
     /// Said above the switch controls, BEFORE anything is pressed.
@@ -1604,7 +1607,13 @@ mod tests {
         // one of them is a sweep for one of them. The indentation guard below found a real defect
         // in exactly these the day they were written, which is why they are here rather than
         // trusted. Built rather than constant since dig_ecosystem#2939 gave one arm a payload.
-        said.extend(crate::profiles::CreationBlocked::EVERY.map(profiles::cannot_create));
+        said.extend(
+            crate::profiles::CreationBlocked::EVERY.map(|blocked| {
+                // Named against a REAL list holding a labelled row, so the guard below reads the
+                // sentence a card actually draws rather than an ordinal-only variant of it.
+                profiles::cannot_create(blocked, crate::profiles::ProfileNames::of(&labelled()))
+            }),
+        );
         // Every reason a store list can be missing, enumerated from the reading's own list rather
         // than sampled — a sweep that visits some of the sentences is a sweep for some of them.
         said.extend(

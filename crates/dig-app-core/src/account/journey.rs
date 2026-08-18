@@ -1816,6 +1816,15 @@ mod copy {
             "be worse than waiting. Nothing is missing from your setup and there is nothing for you ",
             "to do — when it arrives, DIG will offer it here.",
         );
+        /// Said when the account is LOCKED, so nothing can be derived or signed.
+        ///
+        /// A lock is a user-fixable condition and never a statement about the build, so this names
+        /// the unlock and claims nothing about what the machine can do (dig_ecosystem#3059).
+        pub const MINTING_UNAVAILABLE_LOCKED: &str = concat!(
+            "Your DIG Account is locked, so DIG cannot create one — making a profile signs with ",
+            "your account's own key. Unlock your account and DIG will check whether this computer ",
+            "can create one.",
+        );
         /// What an account without a DID still does, on either unavailable build.
         pub const UNTIL_THEN_EVERYTHING_ELSE: &str = concat!(
             "Until then your account reads content, holds funds, pairs with other programs and ",
@@ -1834,6 +1843,11 @@ mod copy {
             let because = match why {
                 CreationBlocked::NoChainTransport => MINTING_UNAVAILABLE_NO_TRANSPORT.to_string(),
                 CreationBlocked::NoLineageWalk => MINTING_UNAVAILABLE_NO_LINEAGE.to_string(),
+                // The first-run wizard runs on an UNLOCKED account by construction — it is reached
+                // from the enrolment that just unlocked one — so this is written for totality
+                // rather than for a screen anybody sees, and says the one thing that would be true
+                // if they did.
+                CreationBlocked::AccountLocked => MINTING_UNAVAILABLE_LOCKED.to_string(),
                 // NOT reachable from the first-run wizard, and the sentence exists anyway. That
                 // wizard runs only on an account with no profile at all, where the funding index
                 // and the target index are both `ProfileIx::ROOT` and so cannot diverge. What the
@@ -1924,6 +1938,17 @@ mod copy {
             "one — when it can, this is where you will start it.",
         );
 
+        /// The middle sentence when the account is locked.
+        ///
+        /// Names the lock rather than the node, for [`MINTING_UNAVAILABLE_LOCKED`]'s reason: no
+        /// probe runs while the account is closed, so any claim about this machine's node here
+        /// would be one nobody measured (dig_ecosystem#3059).
+        pub const EXPLAINER_LOCKED: &str = concat!(
+            "It is what turns the wallet on this computer into a full DIG Account. Your account ",
+            "is locked, so DIG cannot make one yet — unlock it and DIG will check whether this ",
+            "computer can.",
+        );
+
         /// The middle sentence before any node has been asked.
         ///
         /// It names no cause, because none has been measured. Telling somebody their version cannot
@@ -1956,6 +1981,9 @@ mod copy {
             let middle = match why {
                 CreationBlocked::NoChainTransport => EXPLAINER_NO_TRANSPORT.to_string(),
                 CreationBlocked::NoLineageWalk => EXPLAINER_NO_LINEAGE.to_string(),
+                // Unreachable from the first-run wizard for `unavailable_body`'s reason, and
+                // written out so the match stays total.
+                CreationBlocked::AccountLocked => EXPLAINER_LOCKED.to_string(),
                 // Unreachable from the first-run wizard for the reason given at `unavailable_body`
                 // — an unprofiled account's two indices are both ROOT — and written out so the
                 // match stays total.
