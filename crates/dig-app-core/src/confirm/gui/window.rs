@@ -7358,6 +7358,24 @@ mod tests {
         );
     }
 
+    /// **The affordance is on screen: the address says it can be pressed.**
+    ///
+    /// A click target nobody can see is not a control (`professional-ui`). The deposit window has
+    /// no Copy button — that is the whole of dig_ecosystem#2951 — so the only thing that tells a
+    /// person the address will copy itself is this caption, and a fix that copied silently would
+    /// leave them retyping beside a working control they never knew was there.
+    #[test]
+    fn the_deposit_address_says_it_can_be_pressed() {
+        let (_ctx, output) = painted(deposit_screen(), false, Theme::Dark);
+        let drawn = drawn_text(&output.shapes);
+        assert!(
+            drawn
+                .iter()
+                .any(|said| said == pane::copy::clipboard::CLICK_TO_COPY),
+            "the address copies on a press and nothing on screen says so: {drawn:?}"
+        );
+    }
+
     /// **The control: a press on the PROSE copies nothing.**
     ///
     /// The click target is the address and nothing around it. Without this, a window that put its
