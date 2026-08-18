@@ -25,6 +25,7 @@ use super::draft::SlotChange;
 use super::field::ProfileField;
 use super::offer::ProfileEditing;
 use super::ProfileReading;
+use crate::profiles::RootReading;
 use crate::transaction::Feed;
 
 /// The shortest interval between two chain reads of the profile.
@@ -61,6 +62,10 @@ pub struct EditService {
     seams: EditSeams,
     /// The last answer, or the state of the read that is under way.
     reading: Mutex<ProfileReading>,
+    /// What the last read said about the root the chain anchors, kept beside the reading rather
+    /// than inside it: the profile card names the root over a modal nobody has opened, and
+    /// [`ProfileReading::Known`] carries a draft rather than the snapshot the root came off.
+    root: Mutex<RootReading>,
     /// Whether a read is already running, so a pane asking every frame starts one worker and not
     /// a hundred and twenty.
     reading_now: Mutex<bool>,
@@ -114,6 +119,9 @@ impl EditService {
             // `Pending` and not `Unreadable`: nothing has been asked yet, and an app that has not
             // looked has not failed.
             reading: Mutex::new(ProfileReading::Pending),
+            // For the reading's reason: an app that has not looked has not failed, and must not
+            // draw a root it has never asked about.
+            root: Mutex::new(RootReading::Pending),
             reading_now: Mutex::new(false),
             last_read: Mutex::new(None),
             interval: READ_INTERVAL,
@@ -207,6 +215,18 @@ impl EditService {
             })
     }
 
+    /// What the last chain read said about the root this profile publishes at.
+    ///
+    /// Never blocks, like [`reading`](Self::reading), because the profile card asks every frame.
+    pub fn root_reading(&self) -> RootReading {
+        self.root
+            .lock()
+            .map(|held| held.clone())
+            // A poisoned lock says nothing about the chain, so it cannot be reported as a profile
+            // that has published nothing. It reports the fault, in the words the card will print.
+            .unwrap_or_else(|_| RootReading::Unreadable("DIG could not read its own state.".into()))
+    }
+
     /// Read the profile from chain, off the calling thread.
     ///
     /// Safe to call every frame, and it is called every frame: the pane has no cadence of its own.
@@ -231,23 +251,34 @@ impl EditService {
             return;
         }
         let EditSeams::Wired { seam, .. } = &self.seams else {
-            self.finish_reading(ProfileReading::Unreadable(
-                "This version of DIG cannot reach the blockchain to read your profile.".to_string(),
-            ));
+            self.finish_reading(
+                ProfileReading::Unreadable(
+                    "This version of DIG cannot reach the blockchain to read your profile."
+                        .to_string(),
+                ),
+                RootReading::Unreadable(
+                    "This version of DIG cannot reach the blockchain to read your profile."
+                        .to_string(),
+                ),
+            );
             return;
         };
 
         let seam = Arc::clone(seam);
         let service = Arc::clone(self);
         std::thread::spawn(move || {
-            let answer = match seam.read() {
+            let read = seam.read();
+            // Both facts come off the SAME read, so the card can never name a root from one read
+            // beside a state from another.
+            let root = RootReading::of_read(read.as_ref());
+            let answer = match &read {
                 Ok(snapshot) => ProfileReading::Known(snapshot.draft()),
                 // Three states, three sentences: a profile that has published nothing and a node
                 // that could not be asked have opposite remedies (dig_ecosystem#3036), and the
                 // mapping that keeps them apart lives in one place.
-                Err(error) => ProfileReading::of_read_failure(&error),
+                Err(error) => ProfileReading::of_read_failure(error),
             };
-            service.finish_reading(answer);
+            service.finish_reading(answer, root);
         });
     }
 
@@ -260,6 +291,11 @@ impl EditService {
     pub fn read_again(self: &Arc<Self>) {
         if let Ok(mut held) = self.reading.lock() {
             *held = ProfileReading::Pending;
+        }
+        // Forgotten with the reading it came from: a root left behind here would be drawn beside
+        // *reading your profile…* as though it had already been confirmed by the read in flight.
+        if let Ok(mut held) = self.root.lock() {
+            *held = RootReading::Pending;
         }
         if let Ok(mut last) = self.last_read.lock() {
             *last = None;
@@ -454,9 +490,12 @@ impl EditService {
     }
 
     /// Publish an answer and release the claim.
-    fn finish_reading(&self, answer: ProfileReading) {
+    fn finish_reading(&self, answer: ProfileReading, root: RootReading) {
         if let Ok(mut held) = self.reading.lock() {
             *held = answer;
+        }
+        if let Ok(mut held) = self.root.lock() {
+            *held = root;
         }
         if let Ok(mut running) = self.reading_now.lock() {
             *running = false;

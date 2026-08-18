@@ -44,7 +44,7 @@ use super::text;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::profile_edit::{seed, ProfileDraft, ProfileSeedRequest};
-use crate::profiles::{ProfileCreation, ProfileRow, ProfilesReading};
+use crate::profiles::{ProfileCreation, ProfileRow, ProfilesReading, RootReading};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 
@@ -264,6 +264,8 @@ fn profile_row(
     let element = did_element(profile);
     let store = profile.store_id.clone();
     let store_slot = store_element(profile);
+    let root = root_value(&profile.root);
+    let root_slot = root_element(profile);
     let actions = verbs.for_profile(profile);
     let opened = Editing {
         ix: profile.ix.0,
@@ -308,6 +310,24 @@ fn profile_row(
                         copy::profiles::STORE_LABEL,
                         &Value::Identifier(store.clone()),
                         store_slot,
+                        live,
+                    ),
+                    (),
+                )
+            });
+            // The root rides under the store for the same reason the store rides under the DID, and
+            // it comes THIRD because it is the value that moves: the two above it name the profile
+            // for life, this one names what it currently publishes.
+            inner.gap(space::S2);
+            inner.place(|ui, at| {
+                (
+                    identity::copyable(
+                        ui,
+                        at,
+                        t,
+                        copy::profiles::ROOT_LABEL,
+                        &root,
+                        root_slot,
                         live,
                     ),
                     (),
@@ -422,6 +442,37 @@ fn did_element(profile: &ProfileRow) -> egui::Id {
 /// egui treat them as one widget, and pressing either would report the other's value copied.
 fn store_element(profile: &ProfileRow) -> egui::Id {
     egui::Id::new(("dig-window-copy-profile-store", profile.ix.0))
+}
+
+/// What the root row SHOWS for `reading`.
+///
+/// # Why an unread root is a sentence and not an empty identifier
+///
+/// Three of the four states have no hash to draw, and each of them means something different to the
+/// person reading it — nobody asked yet, nothing was ever published, the read failed and here is
+/// why. [`Value::Unknown`] is the one shape that carries the reason and suppresses the Copy control
+/// beside it, so a state with nothing to copy offers nothing to copy.
+///
+/// A blank or a zero-filled hash would be the wrong answer in every one of them: at a glance it is
+/// indistinguishable from a real root, and a root is precisely the value a person lifts off the
+/// screen to check somewhere else.
+fn root_value(reading: &RootReading) -> Value {
+    match reading {
+        RootReading::Anchored(root) => Value::Identifier(root.clone()),
+        RootReading::Pending => Value::Unknown(copy::profiles::ROOT_PENDING.to_string()),
+        RootReading::Unpublished => Value::Unknown(copy::profiles::ROOT_UNPUBLISHED.to_string()),
+        // The deciding layer's own words. Flattening them into one house sentence is the defect
+        // `ProfileReading::of_read_failure` exists to prevent, and it would be re-committed here.
+        RootReading::Unreadable(why) => Value::Unknown(why.clone()),
+    }
+}
+
+/// The element id of a profile's root copy control.
+///
+/// A third namespace, for [`store_element`]'s reason: three copy controls sit in one row, and two
+/// sharing an id would make egui refuse one of them and report the other's value copied.
+fn root_element(profile: &ProfileRow) -> egui::Id {
+    egui::Id::new(("dig-window-copy-profile-root", profile.ix.0))
 }
 
 /// The model's profile rows, sorted by what each one IS.
@@ -1655,6 +1706,91 @@ mod tests {
                  {painted}"
             );
         }
+    }
+
+    /// The root fixtures: a real 64-hex value, and the `0x` form the card must print.
+    const ANCHORED: &str = "371a39b047420000000000000000000000000000000000000000000000000000";
+
+    /// The card over one profile whose active row carries `root`.
+    ///
+    /// One profile, deliberately: the sibling-attribution property is the model's and is pinned
+    /// there, and a second row here would only make the painted text ambiguous about which row a
+    /// hash belongs to.
+    fn card_with_root(root: RootReading) -> String {
+        let reading = reading_of(&[(ProfileIx::ROOT, None)], &[]).with_active_root(root);
+        card_says(&view_with(reading), 520.0)
+    }
+
+    /// **A root read off the chain is shown in full, labelled as what the CHAIN holds.**
+    ///
+    /// The label is asserted with the value because the two are one claim. A card that printed the
+    /// hash under a bare *Root* would be equally true of a root this app merely predicted, and the
+    /// whole point of dig-app#212 is that a person can tell those apart without reading the source.
+    #[test]
+    fn the_card_shows_the_root_the_chain_anchors() {
+        let said = card_with_root(RootReading::Anchored(format!("0x{ANCHORED}")));
+        assert!(said.contains(copy::profiles::ROOT_LABEL), "{said}");
+        assert!(said.contains(&format!("0x{ANCHORED}")), "{said}");
+    }
+
+    /// **A root nobody has read is drawn as a sentence, never as a hash.**
+    ///
+    /// The fixture is the state EVERY row starts in, so a card that rendered the field
+    /// unconditionally would print an empty identifier or a zero hash here — both of which read as
+    /// a real root at a glance and invite a person to copy one.
+    ///
+    /// The `0x` occurrences are COUNTED rather than asserted absent, because the store id is a
+    /// `0x…` value on the same card and always will be: the property is that this state adds no
+    /// SECOND hash-shaped thing. A test naming one hash would miss a zero-filled placeholder, which
+    /// is the likelier wrong implementation.
+    #[test]
+    fn a_root_nobody_has_read_is_never_drawn_as_a_hash() {
+        let said = card_with_root(RootReading::Pending);
+        assert!(said.contains(copy::profiles::ROOT_PENDING), "{said}");
+        assert_eq!(said.matches("0x").count(), 1, "{said}");
+    }
+
+    /// **A store that has published nothing says so where the root would be.**
+    ///
+    /// Distinct from the pending sentence on purpose: *not read yet* and *nothing was ever
+    /// published* have opposite remedies, and the second must never offer a retry
+    /// (dig_ecosystem#3036). Both sentences are asserted so an implementation that collapsed them
+    /// into one fails here rather than passing on a contains check.
+    #[test]
+    fn a_profile_that_has_published_nothing_says_so_where_the_root_would_be() {
+        let said = card_with_root(RootReading::Unpublished);
+        assert!(said.contains(copy::profiles::ROOT_UNPUBLISHED), "{said}");
+        assert!(!said.contains(copy::profiles::ROOT_PENDING), "{said}");
+        assert_eq!(said.matches("0x").count(), 1, "{said}");
+    }
+
+    /// **A root that could not be read reports the reason it could not be read.**
+    ///
+    /// The deciding layer's own words, not a generic sentence: the remedy for *your node is not
+    /// running* is not the remedy for anything else, and a card that flattened every failure into
+    /// one line is the defect `ProfileReading::of_read_failure` exists to prevent, re-committed one
+    /// surface later.
+    #[test]
+    fn a_root_that_could_not_be_read_says_why() {
+        let why = "Your node is not answering.";
+        let said = card_with_root(RootReading::Unreadable(why.to_string()));
+        assert!(said.contains(why), "{said}");
+        assert_eq!(said.matches("0x").count(), 1, "{said}");
+    }
+
+    /// **The root control is addressed by the profile's index, and never shares the DID's or the
+    /// store's id.**
+    ///
+    /// Three copy controls in one row: egui resolves a duplicate id by refusing one of them, so a
+    /// shared namespace here would make a Copy press report the wrong value copied — the failure
+    /// `store_element`'s own namespace was introduced for.
+    #[test]
+    fn each_profiles_root_control_has_its_own_element_id() {
+        let rows = reading_of(&[(ProfileIx::ROOT, None), (ProfileIx(1), None)], &[]);
+        let rows = rows.rows().expect("a read list").to_vec();
+        assert_ne!(root_element(&rows[0]), root_element(&rows[1]));
+        assert_ne!(root_element(&rows[0]), did_element(&rows[0]));
+        assert_ne!(root_element(&rows[0]), store_element(&rows[0]));
     }
 
     /// **A DID copy control is addressed by the profile's index, so two rows never share one id.**

@@ -848,6 +848,7 @@ mod tests {
             label: None,
             hidden: false,
             active: true,
+            root: crate::profiles::RootReading::Pending,
         }])
     }
 

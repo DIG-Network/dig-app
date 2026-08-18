@@ -43,6 +43,7 @@ use dig_account::ProfileIx;
 use crate::account::chain_mint::MintAvailability;
 use crate::account::profile_mint::ProfileMintAvailability;
 use crate::account::profile_session::ProfileSession;
+use crate::profile_edit::{ProfileEditError, ProfileReading, ProfileSnapshot};
 
 /// One profile as a list surface sees it: enough to tell it from its siblings, and nothing secret.
 ///
@@ -72,6 +73,13 @@ pub struct ProfileRow {
     pub hidden: bool,
     /// Whether it is the one profile the account is currently deriving at.
     pub active: bool,
+    /// What the app can honestly say about the root this profile's content is published at.
+    ///
+    /// Not derived from the registry, which does not hold one: a root changes on every publish and
+    /// only a chain read knows the current value, so a row built from local state starts at
+    /// [`RootReading::Pending`] and is overlaid by
+    /// [`ProfilesReading::with_active_root`](ProfilesReading::with_active_root).
+    pub root: RootReading,
 }
 
 impl ProfileRow {
@@ -108,6 +116,83 @@ impl ProfileRow {
             label: entry.label().map(str::to_owned),
             hidden: entry.visibility() == ProfileVisibility::HiddenFromLists,
             active: active == Some(entry.ix()),
+            // The registry holds no root, and inventing one from the mint would be a claim about
+            // what the chain currently anchors. Nobody has read it yet, and the row says so.
+            root: RootReading::Pending,
+        }
+    }
+}
+
+/// What the app can honestly say about the root a profile's content is published at.
+///
+/// # Why the root is worth a row of its own beside the store id
+///
+/// The store id is PERMANENT — it names the singleton for the whole life of the profile, and it is
+/// the same string the day the store is launched and every day after. The root is the value that
+/// MOVES: every publish anchors a new one, and it is the root, not the store id, that says which
+/// body the chain currently points at. A card naming only the permanent half can show two healthy
+/// identifiers over a profile whose published content is missing.
+///
+/// # Every value here came off the chain, and nothing else can construct one
+///
+/// [`Anchored`](Self::Anchored) is reachable only through [`of_read`](Self::of_read), whose input is
+/// the result of a verified chain read. A root this app merely EXPECTS — the prediction a commit
+/// carries before the chain confirms it — has no route to this type and therefore none to the card.
+/// That is deliberate and load-bearing: a predicted root drawn in the same treatment as a confirmed
+/// one would have a person check the wrong hash against a block explorer and conclude their profile
+/// is fine.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RootReading {
+    /// Nobody has read this profile from the chain yet. Not a fault, and not an absence of content.
+    #[default]
+    Pending,
+    /// The root the chain anchors, `0x`-prefixed lowercase hex, as a verified read returned it.
+    Anchored(String),
+    /// The store is real and nothing has ever been published under it, so there is no current root.
+    ///
+    /// An answer rather than a failure: asking again cannot produce content nobody wrote.
+    Unpublished,
+    /// The root could not be read, in the deciding layer's own words.
+    Unreadable(String),
+}
+
+impl RootReading {
+    /// What a completed chain read says about the current root.
+    ///
+    /// # Why a lost body still yields [`Anchored`](Self::Anchored)
+    ///
+    /// [`ProfileEditError::BodyLost`] means the chain anchors a root and nothing holds its preimage.
+    /// The root is not in doubt there — it was read off the chain like any other — so withholding it
+    /// would hide the one value a person needs to check the claim, and the editor already names the
+    /// same root when it offers re-entry. The card and the editor thereby agree: this is what the
+    /// chain holds, and its content is gone.
+    pub fn of_read(read: Result<&ProfileSnapshot, &ProfileEditError>) -> Self {
+        match read {
+            Ok(snapshot) => Self::anchored(&snapshot.root),
+            Err(ProfileEditError::BodyLost { root }) => Self::anchored(root),
+            Err(ProfileEditError::Unpublished) => Self::Unpublished,
+            Err(other) => Self::Unreadable(
+                ProfileReading::of_read_failure(other)
+                    .says()
+                    .unwrap_or_else(|| other.while_reading()),
+            ),
+        }
+    }
+
+    /// A chain-read root in the `0x…` form every DIG surface prints, whether or not the reader
+    /// supplied the prefix.
+    fn anchored(root: &str) -> Self {
+        match root.starts_with("0x") {
+            true => Self::Anchored(root.to_owned()),
+            false => Self::Anchored(format!("0x{root}")),
+        }
+    }
+
+    /// The root itself, when one was read. `None` in every state that has no value to show.
+    pub fn value(&self) -> Option<&str> {
+        match self {
+            Self::Anchored(root) => Some(root),
+            _ => None,
         }
     }
 }
@@ -159,6 +244,35 @@ impl ProfilesReading {
     /// Wallet surface reads this to say so.
     pub fn is_unreadable(&self) -> bool {
         matches!(self, Self::Unknown(ProfilesUnknown::Unreadable(_)))
+    }
+
+    /// The same list, with `root` recorded against the ACTIVE profile.
+    ///
+    /// # Why only the active one
+    ///
+    /// The app holds exactly one profile-edit seam and it is bound to the profile the account is
+    /// deriving at, so that is the only profile any chain read in this process has been made about.
+    /// Copying its answer onto a sibling row would attribute one profile's root to another — the
+    /// same forgery `of_registry` exists to prevent for the DID and the store id, and a worse one
+    /// here, because the root is the value a person would check against a block explorer.
+    ///
+    /// Every other row therefore keeps [`RootReading::Pending`], which is true: nothing has read it.
+    #[must_use]
+    pub fn with_active_root(self, root: RootReading) -> Self {
+        let Self::Known(rows) = self else {
+            return self;
+        };
+        Self::Known(
+            rows.into_iter()
+                .map(|row| match row.active {
+                    true => ProfileRow {
+                        root: root.clone(),
+                        ..row
+                    },
+                    false => row,
+                })
+                .collect(),
+        )
     }
 
     /// Read the list out of the app's live [`ProfileSession`].
