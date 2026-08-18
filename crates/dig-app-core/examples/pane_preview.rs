@@ -21,6 +21,9 @@
 //! This example only ever DRAWS. A click is read and discarded — a verb dispatched from a gallery
 //! would run against the machine it is previewing on.
 
+#[path = "shared/offer.rs"]
+mod shared_offer;
+
 use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
@@ -394,7 +397,10 @@ fn main() {
     // of what `dig_offers::summarize` actually reports today. Passing `offer` on the command line
     // seeds the Wallet tab's field before the first frame — the honest way to photograph a filled
     // card, since a committed screenshot must never be taken after synthetic input.
-    let offer = args.iter().any(|arg| arg == "offer").then(preview_offer);
+    let offer = args
+        .iter()
+        .any(|arg| arg == "offer")
+        .then(shared_offer::gallery_offer);
 
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(
@@ -408,59 +414,4 @@ fn main() {
         eprintln!("{why}");
         std::process::exit(1);
     }
-}
-
-/// A real `offer1…` string for the Wallet tab's offer card: 400 mojos offered for 1,000 requested,
-/// so the two sides are visibly different rather than a symmetric pair that would look the same
-/// under a swapped mapping.
-///
-/// Built here rather than imported from `wallet::offer_fixture`, which is `#[cfg(test)]` and reaches
-/// for `chia-sdk-test`; an example cannot see a test-only module. The SHAPE is deliberately the same
-/// as that fixture's so the picture and the tests describe one offer — if the two ever diverge, the
-/// tested one is authoritative and this is what should move.
-fn preview_offer() -> String {
-    use chia_protocol::{Bytes32, Coin, SpendBundle};
-    use chia_sdk_driver::SpendContext;
-    use chia_sdk_test::BlsPair;
-    use chia_wallet_sdk::prelude::Signature;
-    use dig_offers::{OfferedSide, RequestedSide};
-
-    let maker = BlsPair::new(1);
-    let mut keys = indexmap::IndexMap::new();
-    keys.insert(maker.puzzle_hash, maker.pk);
-    let mut ctx = SpendContext::new();
-
-    let unsigned = dig_offers::make_build(
-        &mut ctx,
-        OfferedSide {
-            change_puzzle_hash: maker.puzzle_hash,
-            owner_keys: keys,
-            xch_coins: vec![Coin::new(
-                Bytes32::new([0xA1; 32]),
-                maker.puzzle_hash,
-                1_500,
-            )],
-            cat_coins: Vec::new(),
-            nfts: Vec::new(),
-            offer_xch: 400,
-            offer_cats: Vec::new(),
-            _pd: std::marker::PhantomData,
-        },
-        RequestedSide {
-            payee_puzzle_hash: maker.puzzle_hash,
-            xch: 1_000,
-            cats: Vec::new(),
-            nfts: Vec::new(),
-        },
-        0,
-    )
-    .expect("the preview offer must build");
-
-    dig_offers::make_assemble(
-        &mut ctx,
-        SpendBundle::new(unsigned.coin_spends, Signature::default()),
-        unsigned.requested_payments,
-        unsigned.requested_asset_info,
-    )
-    .expect("the preview offer must encode")
 }

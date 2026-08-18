@@ -20,6 +20,9 @@ pwsh tools/shoot-gallery.ps1
 | `profiles-<fixture>-<width>.png` | the Account tab's profiles card with a list on it — see below |
 | `did-<screen>-<theme>.png` | one screen of the first-run DID wizard |
 | `<tab>-live-<width>.png` | the two node-backed cards filled from a **running local dig-node** rather than from the fixture — the Home tab's sharing card and the Content tab's hosted-store list |
+| `offer-loaded-<theme>-<width>.png` | the Wallet tab with a real offer in the field and both sides of the swap named |
+| `offer-drop-active-<theme>-<width>.png` | an offer file held over the Offers card: the accent outline showing where it will land, and the sentence saying a drop only READS it |
+| `offer-drop-refused-<theme>-<width>.png` | the Offers card answering a drop it cannot load, naming the file and what was wrong with it |
 
 ### What `profiles-` means, and why it is a fixture
 
@@ -38,6 +41,18 @@ correctly. What they do not prove is that a profile has ever been minted, becaus
 They are shot to the pane's full height rather than the window's, for the same reason the live
 captures are: the card sits below two others, and a capture that cannot show the controls it is
 evidence for is not evidence.
+
+### What the `offer-` captures stage, and why a drag is not synthetic input
+
+Filling the offer field, holding a file over the card and letting one go are all things a person does
+with a mouse — and a committed screenshot must never be taken after synthetic input. So each is an
+ARGUMENT to `window_gallery` (`--offer`, `--offer-drop`, `--offer-drop-refused`) and reaches egui as
+the raw input a windowing system delivers, without any window having to be in the foreground.
+
+Two of the three are as real as the fixture can make them. The offer is BUILT by `dig-offers` on every
+run rather than pasted as a literal, so the sides in the picture are what the crate summarises today.
+The refusal is produced by dropping an actual directory: the sentence in the image is the one the
+shipping code writes about a real folder, not copy staged for the camera.
 
 ### What `-live-` means, and what it costs
 

@@ -735,11 +735,60 @@ pub(crate) mod offer {
     pub(crate) const PASTE_PLACEHOLDER: &str = "offer1…";
 
     /// The field's help line.
-    pub(crate) const PASTE_HINT: &str = "Paste a Chia offer to see exactly what it trades.";
+    pub(crate) const PASTE_HINT: &str =
+        "Paste a Chia offer, or drag an offer file onto this card, to see exactly what it trades.";
 
     /// The EMPTY state's sentence — what to do, not what went wrong.
     pub(crate) const EMPTY_HINT: &str =
- "Nothing to review yet. Paste an offer somebody sent you and its two sides appear here before you agree to anything.";
+        "Nothing to review yet. Paste an offer somebody sent you, or drag its file onto this card, and its two sides appear here before you agree to anything.";
+
+    /// What the card says while a file is being dragged over it.
+    ///
+    /// It states the LIMIT of the gesture as well as its effect. Dropping a file loads it for
+    /// reading and nothing more, and a person who believed a drop could trade would be agreeing to
+    /// something they never confirmed.
+    pub(crate) const DROP_ACTIVE: &str =
+        "Let go to read this offer. Dropping only shows you the trade — nothing is taken until you press Take this offer.";
+
+    /// Refused because several files were let go at once.
+    ///
+    /// Quietly reading the first would be choosing on the person's behalf which trade they are
+    /// about to be shown, which is the one decision this card exists to leave with them.
+    pub(crate) fn drop_several(files: usize) -> String {
+        format!("{files} files were let go at once. Drag just the one offer you want to read.")
+    }
+
+    /// Refused because what landed is a folder.
+    pub(crate) fn drop_folder(name: &str) -> String {
+        format!("{name} is a folder, not an offer file. Open it and drag the offer file itself.")
+    }
+
+    /// Refused because the file could not be opened, in the operating system's own words.
+    pub(crate) fn drop_unreadable(name: &str, why: &str) -> String {
+        format!("{name} could not be read, so nothing was loaded. {why}")
+    }
+
+    /// Refused because the file is not text.
+    ///
+    /// It says what an offer LOOKS like rather than only what the file is not, because the next
+    /// thing a person needs is to recognise the right file when they see it.
+    pub(crate) fn drop_binary(name: &str) -> String {
+        format!("{name} is not a text file, so it cannot hold an offer. A Chia offer is text starting with offer1.")
+    }
+
+    /// Refused because the file holds nothing but whitespace.
+    pub(crate) fn drop_empty(name: &str) -> String {
+        format!("{name} is empty, so there is no offer in it.")
+    }
+
+    /// Refused because the file is far larger than any offer, before it is read into memory.
+    pub(crate) fn drop_too_big(name: &str, kib: usize) -> String {
+        format!("{name} is about {kib} KB, far larger than any Chia offer, so it was not opened.")
+    }
+
+    /// Refused because the drop carried neither a path nor any bytes to read.
+    pub(crate) const DROP_UNNAMED: &str =
+        "That file could not be opened, so nothing was loaded. Try dragging it again, or paste the offer instead.";
 
     /// The heading over what taking the offer delivers.
     pub(crate) const YOU_RECEIVE: &str = "You receive";
@@ -1471,6 +1520,8 @@ mod tests {
             qr::RECEIVE_CAPTION,
             offer::PASTE_HINT,
             offer::EMPTY_HINT,
+            offer::DROP_ACTIVE,
+            offer::DROP_UNNAMED,
             offer::NOTHING_ON_THIS_SIDE,
             offer::REFUSED_EMPTY,
             offer::REFUSED_LOCKED,
