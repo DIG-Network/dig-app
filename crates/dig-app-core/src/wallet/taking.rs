@@ -43,11 +43,13 @@ use indexmap::IndexMap;
 use std::marker::PhantomData;
 
 use crate::account::auth::HarnessAuthProvider;
+use crate::account::narrative::NarrativeSlot;
 use crate::account::ceremony::PromptedCeremony;
 use crate::account::money::{MoneyPath, MoneyPathError};
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
 use crate::wallet::offer::{take_permitted_by, OfferError, ReviewedOffer};
+use crate::wallet::offer_words as copy;
 
 /// A take that did not complete, named by WHICH step stopped it.
 ///
@@ -316,6 +318,10 @@ pub struct TakeHolder {
 struct UnlockGate {
     address: String,
     money: std::sync::Arc<MoneyPath<HarnessAuthProvider<PromptedCeremony>>>,
+    /// Where this take writes the story the confirm prompt tells (dig_ecosystem#3109). The gate is
+    /// built once per unlock and the narrative differs per offer, so it is staged per operation
+    /// rather than baked into the ceremony.
+    narrative: NarrativeSlot,
 }
 
 /// The process-wide take holder.
@@ -414,10 +420,18 @@ impl TakeHolder {
 
         let custody = CustodyPolicy::Hot(HotWallet { auto_send_limit: 0 });
         let held = self.gate_for(residency, custody)?;
-        let money = &held
+        let gate = held
             .as_ref()
-            .expect("gate_for leaves a gate in place or returns an error")
-            .money;
+            .expect("gate_for leaves a gate in place or returns an error");
+        let money = &gate.money;
+
+        // Both legs of the swap reach the confirm prompt, which the re-derived summary alone cannot
+        // show (dig_ecosystem#3109). Held across the take and dropped with it, so no later spend
+        // inherits this offer's story.
+        let _telling = gate.narrative.set(reviewed.terms().narrative(
+            copy::TAKE_HEADLINE,
+            Some(copy::TAKE_CAUTION.to_string()),
+        ));
         let publisher = crate::chain::ControlSpendPublisher::new(endpoint);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -442,9 +456,11 @@ impl TakeHolder {
 
         let mut held = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         if !held.as_ref().is_some_and(|gate| gate.address == address) {
+            let ceremony = PromptedCeremony::unlocking("confirm this swap");
+            let narrative = ceremony.narrative();
             let money = MoneyPath::new(
                 residency.clone(),
-                HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this swap")),
+                HarnessAuthProvider::new(ceremony),
                 dig_account::AccountId::new(crate::account::boot::DEFAULT_ACCOUNT_ID),
                 dig_wallet_backend::types::Network::Mainnet,
                 custody,
@@ -455,6 +471,7 @@ impl TakeHolder {
             *held = Some(UnlockGate {
                 address,
                 money: std::sync::Arc::new(money),
+                narrative,
             });
         }
         Ok(held)

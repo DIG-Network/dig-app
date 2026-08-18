@@ -28,12 +28,16 @@ pub mod enrol;
 /// ([`crate::test_support::node::FakeNode`]) rather than a hand-built request (dig_ecosystem#2892).
 #[cfg(test)]
 mod no_user_key_on_wire;
+pub mod making;
 pub mod node;
 pub mod offer;
 /// Real `offer1…` fixtures, built by the canonical crate. Test-only: production never constructs an
 /// offer, it only reads one a person supplies.
 #[cfg(test)]
 pub mod offer_fixture;
+/// The sentences the OS-native confirm prompt says about an offer — see its header before adding
+/// one.
+pub mod offer_words;
 pub mod overview;
 pub mod send;
 pub mod sending;

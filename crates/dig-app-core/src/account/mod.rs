@@ -40,6 +40,7 @@ pub mod lifecycle;
 pub mod migration;
 pub mod mint;
 pub mod money;
+pub mod narrative;
 pub mod password;
 pub mod phrase_vault;
 pub mod profile_creation;

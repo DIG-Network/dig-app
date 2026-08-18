@@ -31,6 +31,17 @@
 
 use dig_offers::{OfferAsset, OfferSummary};
 
+use crate::account::narrative::TradeNarrative;
+use crate::amount::format_asset_amount;
+use crate::wallet::state::Asset;
+
+/// Whether `asset_id` is $DIG, compared against the canonical constant rather than a second copy of
+/// it. Case-insensitive because the id arrives as a hex STRING and a case difference between two
+/// renderings of the same 32 bytes would silently drop $DIG to the unnamed-token branch.
+fn is_dig(asset_id: &str) -> bool {
+    asset_id.eq_ignore_ascii_case(&hex::encode(dig_constants::DIG_ASSET_ID))
+}
+
 /// A failure reading or taking an offer, named by WHICH step refused.
 ///
 /// The distinction a person needs is between *this text is not an offer* (retype or re-scan) and
@@ -67,6 +78,33 @@ pub enum OfferLeg {
 }
 
 impl OfferLeg {
+    /// This leg as one phrase a person reads, in the asset's own units.
+    ///
+    /// # Why $DIG is the one named CAT
+    ///
+    /// A leg carries an asset id, not a number of decimal places, and CATs do not agree on one.
+    /// Dividing every CAT by $DIG's three would be a confidently wrong figure for all the others, so
+    /// an unrecognised token is stated in base units and SAID to be in base units. $DIG is the
+    /// exception because its id is a pinned constant and its precision is therefore known — and it is
+    /// the token this wallet's users actually trade, so showing them `1500 base units` for the 1.5
+    /// they typed would fail the one job this phrase has.
+    ///
+    /// Matching on the id — never on position, never on the amount — keeps the exception exactly one
+    /// asset wide, exactly as the confirm prompt's own formatter does.
+    #[must_use]
+    pub fn phrase(&self) -> String {
+        match self {
+            Self::Xch { mojos } => format!("{} XCH", format_asset_amount(Asset::Xch, *mojos)),
+            Self::Cat { asset_id, amount } if is_dig(asset_id) => {
+                format!("{} $DIG", format_asset_amount(Asset::Dig, *amount))
+            }
+            Self::Cat { asset_id, amount } => {
+                format!("{amount} base units of token {asset_id}")
+            }
+            Self::Nft { launcher_id } => format!("the NFT {launcher_id}"),
+        }
+    }
+
     /// Restate one parsed asset as a display leg.
     fn of(asset: &OfferAsset) -> Self {
         match asset {
@@ -112,6 +150,26 @@ impl OfferTerms {
                 .iter()
                 .map(|(launcher_id, bps)| (hex::encode(launcher_id), *bps))
                 .collect(),
+        }
+    }
+
+    /// This swap as the story the confirm prompt tells, in the reader's own direction
+    /// (dig_ecosystem#3109).
+    ///
+    /// The narrative is built from THESE terms — the ones the surface displayed and the ones the
+    /// builder was handed — so the sentence a person reads at the custody gate and the sentence they
+    /// read on the card come from one value.
+    #[must_use]
+    pub fn narrative(
+        &self,
+        headline: impl Into<String>,
+        caution: Option<String>,
+    ) -> TradeNarrative {
+        TradeNarrative {
+            headline: headline.into(),
+            you_give: self.you_pay.iter().map(OfferLeg::phrase).collect(),
+            you_receive: self.you_receive.iter().map(OfferLeg::phrase).collect(),
+            caution,
         }
     }
 
