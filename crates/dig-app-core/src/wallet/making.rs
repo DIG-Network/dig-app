@@ -315,6 +315,31 @@ pub fn make_permitted_by(custody: &CustodyPolicy) -> Result<(), OfferError> {
     }
 }
 
+/// The draft the Wallet pane is currently showing, ready for the shell to make.
+///
+/// A [`MakeDraft`] cannot ride on a `Copy` [`TrayAction`](crate::tray_menu::TrayAction), and the
+/// stronger reason is the one that would apply anyway: what must reach the shell is the draft a
+/// person actually filled in and read back, and passing the raw figures separately would put a
+/// second, unchecked copy in flight for the two to disagree about.
+fn draft_slot() -> &'static std::sync::Mutex<Option<MakeDraft>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<MakeDraft>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(Default::default)
+}
+
+/// Remember `draft` as the offer on screen, replacing whatever was there.
+pub fn stage(draft: Option<MakeDraft>) {
+    if let Ok(mut slot) = draft_slot().lock() {
+        *slot = draft;
+    }
+}
+
+/// The draft on screen, if the form currently describes an offer.
+#[must_use]
+pub fn staged() -> Option<MakeDraft> {
+    draft_slot().lock().ok().and_then(|slot| slot.clone())
+}
+
 /// How far the one in-flight make has got, as the Wallet pane draws it.
 ///
 /// The three non-idle states are the `professional-ui` working / success / error states. The success
@@ -574,7 +599,10 @@ mod tests {
 
         let body = draft.narrative().render();
 
-        assert!(body.contains("5 XCH"), "the committed side is missing: {body}");
+        assert!(
+            body.contains("5 XCH"),
+            "the committed side is missing: {body}"
+        );
         assert!(
             body.contains("1.5 $DIG"),
             "the asked side is missing, which is the whole defect: {body}"
@@ -611,7 +639,10 @@ mod tests {
         let holder = MakeHolder::default();
 
         assert!(holder.begin(), "the first make claims the slot");
-        assert!(!holder.begin(), "the second is refused while the first runs");
+        assert!(
+            !holder.begin(),
+            "the second is refused while the first runs"
+        );
 
         holder.dismiss();
         assert!(holder.begin(), "and the slot is reusable once it is idle");

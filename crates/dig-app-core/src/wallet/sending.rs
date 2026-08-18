@@ -406,11 +406,16 @@ impl SendBlocked {
 
 /// What to say about an amount that is not a number of `asset`.
 ///
+/// Crate-visible because the make-an-offer form asks the same question of the same parser, and a
+/// second set of sentences for the same four problems would drift from these the first time one was
+/// reworded. The one sentence that is send-specific — the empty case — is worded generically enough
+/// to serve both, and neither form shouts about an untouched field anyway.
+///
 /// Each problem gets its own sentence: someone who typed a thirteenth decimal place has a different
 /// next move from someone who typed a word. The DECIMAL count is read from the asset rather than
 /// written into the sentence, because XCH and $DIG do not share one and a hardcoded twelve would be
 /// a false statement about $DIG in the exact place a person is correcting an amount.
-fn amount_sentence(asset: Asset, problem: AmountProblem) -> String {
+pub(crate) fn amount_sentence(asset: Asset, problem: AmountProblem) -> String {
     let ticker = ticker(asset);
     match problem {
         AmountProblem::Empty => format!("Enter the amount of {ticker} to send."),

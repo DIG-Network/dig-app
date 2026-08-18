@@ -43,9 +43,9 @@ use indexmap::IndexMap;
 use std::marker::PhantomData;
 
 use crate::account::auth::HarnessAuthProvider;
-use crate::account::narrative::NarrativeSlot;
 use crate::account::ceremony::PromptedCeremony;
 use crate::account::money::{MoneyPath, MoneyPathError};
+use crate::account::narrative::NarrativeSlot;
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
 use crate::transaction::{Feed, Stage, Transaction};
@@ -446,10 +446,11 @@ impl TakeHolder {
         // Both legs of the swap reach the confirm prompt, which the re-derived summary alone cannot
         // show (dig_ecosystem#3109). Held across the take and dropped with it, so no later spend
         // inherits this offer's story.
-        let _telling = gate.narrative.set(reviewed.terms().narrative(
-            copy::TAKE_HEADLINE,
-            Some(copy::TAKE_CAUTION.to_string()),
-        ));
+        let _telling = gate.narrative.set(
+            reviewed
+                .terms()
+                .narrative(copy::TAKE_HEADLINE, Some(copy::TAKE_CAUTION.to_string())),
+        );
         let publisher = crate::chain::ControlSpendPublisher::new(endpoint);
 
         feed.publish(opening.at(Stage::Signing));

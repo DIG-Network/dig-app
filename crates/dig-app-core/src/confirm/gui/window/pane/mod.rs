@@ -100,6 +100,7 @@ pub(crate) mod settings;
 pub(crate) mod state;
 pub(crate) mod text;
 pub(crate) mod wallet;
+pub(crate) mod wallet_make_offer;
 pub(crate) mod wallet_offer;
 
 use egui::{Rect, Ui};

@@ -3011,6 +3011,31 @@ mod tray {
                     );
                 }
             }
+            // The draft is staged by the pane as a checked `MakeDraft`, so the shell makes the offer
+            // the form showed rather than a second copy of its figures. A missing stage means the
+            // form changed between the click and this call — nothing to make, rather than something
+            // to guess at.
+            TrayAction::MakeOffer => {
+                if let Some(draft) = dig_app_core::wallet::making::staged() {
+                    dig_app_core::wallet::making::holder().make(
+                        status,
+                        session.as_ref().map(|s| &s.residency),
+                        &draft,
+                    );
+                }
+            }
+            // Cancelling reads the SAME staged `ReviewedOffer` a take does, so the bytes reclaimed
+            // are the bytes displayed. It is destructive (NC-14) and the confirm ceremony names it
+            // as such — see `wallet::offer_words::CANCEL_CAUTION`.
+            TrayAction::CancelOffer => {
+                if let Some(reviewed) = dig_app_core::wallet::offer::staged() {
+                    dig_app_core::wallet::cancelling::holder().cancel(
+                        status,
+                        session.as_ref().map(|s| &s.residency),
+                        &reviewed,
+                    );
+                }
+            }
             // The acknowledgement was already judged by `ReleaseDraft::assess` in the pane, so what
             // arrives here is an accepted claim (dig_ecosystem#2894). The holder still re-reads the
             // send state, because it may have resolved while the person was looking the coin up.

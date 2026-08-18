@@ -680,7 +680,11 @@ mod tests {
         let body = render_spend(
             &SpendSummary::new(
                 SpendTier::Confirm,
-                vec![SpendRecipient::to_address("xch1settlement", 1, None::<String>)],
+                vec![SpendRecipient::to_address(
+                    "xch1settlement",
+                    1,
+                    None::<String>,
+                )],
                 500_000_000_000,
             ),
             Some(&TradeNarrative {

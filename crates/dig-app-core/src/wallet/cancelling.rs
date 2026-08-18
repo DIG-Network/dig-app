@@ -181,10 +181,8 @@ where
         reviewed: &ReviewedOffer,
         fee: u64,
     ) -> Result<CancelledOffer, CancelError> {
-        let (reclaim_puzzle_hash, public_key) = self
-            .residency
-            .taker_identity()
-            .ok_or(CancelError::Locked)?;
+        let (reclaim_puzzle_hash, public_key) =
+            self.residency.taker_identity().ok_or(CancelError::Locked)?;
 
         let mut owner_keys = IndexMap::new();
         owner_keys.insert(reclaim_puzzle_hash, public_key);
@@ -487,7 +485,10 @@ mod tests {
         let holder = CancelHolder::default();
 
         assert!(holder.begin(), "the first cancellation claims the slot");
-        assert!(!holder.begin(), "the second is refused while the first runs");
+        assert!(
+            !holder.begin(),
+            "the second is refused while the first runs"
+        );
 
         holder.dismiss();
         assert!(holder.begin(), "and the slot is reusable once it is idle");

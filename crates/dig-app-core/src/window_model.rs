@@ -773,6 +773,10 @@ mod tests {
             // Never a menu ROW, for the same reason as `Send`: taking an offer needs a field to
             // paste an `offer1…` string into, and a native menu cannot hold one.
             | TrayAction::TakeOffer
+            // Never menu ROWS either, for the same reason: making an offer needs a form and
+            // cancelling one needs the offer it refers to on screen.
+            | TrayAction::MakeOffer
+            | TrayAction::CancelOffer
             // Never a menu ROW either, and for a stronger reason than `Send`: nobody clicks it
             // at all. The state loop raises it on a schedule (dig_ecosystem#2950), which is the
             // whole of what the user asked for — an *automatic* popout — so a row offering it would

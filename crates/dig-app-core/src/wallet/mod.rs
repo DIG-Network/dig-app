@@ -25,11 +25,11 @@ pub mod activity;
 pub mod cancelling;
 pub mod engine;
 pub mod enrol;
+pub mod making;
 /// The §908 on-wire custody proof. Crate-internal because it drives a real loopback node
 /// ([`crate::test_support::node::FakeNode`]) rather than a hand-built request (dig_ecosystem#2892).
 #[cfg(test)]
 mod no_user_key_on_wire;
-pub mod making;
 pub mod node;
 pub mod offer;
 /// Real `offer1…` fixtures, built by the canonical crate. Test-only: production never constructs an
