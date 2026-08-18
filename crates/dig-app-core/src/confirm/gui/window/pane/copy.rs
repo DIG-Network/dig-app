@@ -712,6 +712,9 @@ pub(crate) mod clipboard {
     pub(crate) const COPY: &str = "Copy";
     /// What it says immediately after a successful copy, before returning to [`COPY`].
     pub(crate) const COPIED: &str = "Copied";
+    /// The caption under a bare identifier that copies itself when pressed — the affordance, since
+    /// a click target nobody can see is not a control (dig_ecosystem#2951).
+    pub(crate) const CLICK_TO_COPY: &str = "Click to copy";
 }
 
 /// The scannable-code block.
@@ -1809,6 +1812,10 @@ mod tests {
         assert_ne!(agent_state(true), agent_state(false));
 
         assert_ne!(clipboard::COPY, clipboard::COPIED);
+        // The bare-identifier affordance and its acknowledgement are the same pair one step apart:
+        // a caption that said the same thing before and after a press would leave the person
+        // unsure whether it took (dig_ecosystem#2951).
+        assert_ne!(clipboard::CLICK_TO_COPY, clipboard::COPIED);
     }
 
     /// **Every reason a store list is missing gets its OWN sentence** (dig_ecosystem#2397).

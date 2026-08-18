@@ -35,6 +35,7 @@ use egui::{Key, Rect, Vec2};
 use zeroize::Zeroizing;
 
 mod chain_status;
+mod copied;
 mod header;
 mod pane;
 mod panes;
@@ -2083,24 +2084,54 @@ impl PromptApp {
                     // panel — it sits inline under its prose like a `Block::Body`, in full-contrast
                     // `--text`.
                     //
-                    // SELECTABLE, unlike every other block here. An identifier is the one class of
-                    // text on this window that is useless when it cannot be copied and DANGEROUS
-                    // when it is retyped — the deposit window's `xch1…` address is 62 characters
-                    // and both of its control slots are spoken for, so selection is the only way to
-                    // obtain it (dig_ecosystem#2951). This is the same floor the panes settled on
-                    // for the same reason (`pane::selectable`, dig_ecosystem#2569); the prose
-                    // around it stays unselectable so a drag picks up the value and not the
-                    // sentence explaining it.
-                    ui.add(
-                        egui::Label::new(super::render::paragraph(
-                            text,
-                            super::render::mono(size::BASE),
-                            rgba(super::render::block_color(&block, t)),
-                            width,
-                            size::BASE * 1.55,
-                        ))
-                        .selectable(true),
-                    );
+                    // CLICK-TO-COPY, unlike every other block here, with a caption saying so. An
+                    // identifier is the one class of text on this window that is useless when it
+                    // cannot be obtained and DANGEROUS when it is retyped — the deposit window's
+                    // `xch1…` address is 62 characters and both of its control slots are spoken
+                    // for, so there is no Copy button to press (dig_ecosystem#2951).
+                    //
+                    // Selection alone is not the remedy, and it was never the gap: an egui `Label`
+                    // is selectable by default, so a drag across this address has always copied it.
+                    // What a drag demands is pointer accuracy across 62 characters, which is
+                    // exactly what the person this screen is for — funding from a desktop wallet on
+                    // this same machine — may not have. A press is one action, cannot half-select,
+                    // and reaches a focused widget from the keyboard too.
+                    let element = egui::Id::new(("identifier-copy", text.as_str()));
+                    let response = ui
+                        .add(
+                            egui::Label::new(super::render::paragraph(
+                                text,
+                                super::render::mono(size::BASE),
+                                rgba(super::render::block_color(&block, t)),
+                                width,
+                                size::BASE * 1.55,
+                            ))
+                            // Selection stays ON beside the click: a person who wants half an
+                            // address, or who is already dragging out of habit, keeps that route.
+                            .selectable(true)
+                            .sense(egui::Sense::click_and_drag()),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    // `clicked()` covers the keyboard for the reason `pane::identity` records:
+                    // egui synthesises a primary click for a focused widget that senses clicks.
+                    if response.clicked() {
+                        ui.ctx().copy_text(text.clone());
+                        copied::remember(ui, element);
+                    }
+                    ui.add_space(space::S2);
+                    // The caption is what makes the press a CONTROL rather than a hidden gesture,
+                    // and it doubles as the acknowledgement — a modal confirming a copy would take
+                    // a click to dismiss, which costs more than the copy saved.
+                    ui.label(super::render::paragraph(
+                        match copied::confirming(ui, element) {
+                            true => pane::copy::clipboard::COPIED,
+                            false => pane::copy::clipboard::CLICK_TO_COPY,
+                        },
+                        regular(size::SM),
+                        rgba(t.faint),
+                        width,
+                        size::SM * 1.55,
+                    ));
                     ui.add_space(space::S4);
                 }
                 Block::Detail(text) | Block::Warning(text) => {
@@ -4336,13 +4367,20 @@ mod tests {
     /// tracking the layout the moment anything above the address changes height — and a drag that
     /// misses copies nothing, which is indistinguishable from the defect this is testing for.
     fn across_the_address() -> (egui::Pos2, egui::Pos2) {
-        let (_ctx, output) = painted(deposit_screen(), false, Theme::Dark);
-        let (_text, rect, _clip) = body_galley(&output, DEPOSIT_ADDRESS);
+        let rect = the_address_rect();
         let y = rect.center().y;
         (
             egui::Pos2::new(rect.left() + 1.0, y),
             egui::Pos2::new(rect.right() + 40.0, y),
         )
+    }
+
+    /// Where the address landed on the rendered deposit window, read off the frame for
+    /// `across_the_address`'s reason: a hardcoded rectangle stops tracking the layout.
+    fn the_address_rect() -> Rect {
+        let (_ctx, output) = painted(deposit_screen(), false, Theme::Dark);
+        let (_text, rect, _clip) = body_galley(&output, DEPOSIT_ADDRESS);
+        rect
     }
 
     /// The first-profile deposit window, built from the SAME constructor the binary opens it with
@@ -7221,6 +7259,111 @@ mod tests {
             copied.iter().any(|said| said.contains(DEPOSIT_ADDRESS)),
             "dragging across the deposit window copied the address nowhere, so the only way to \
              obtain it is to retype 62 characters: {copied:?}"
+        );
+    }
+
+    /// Click once at `at` and report every string the window put on the clipboard.
+    ///
+    /// A REAL click, for the reason `drag_across_and_copy` gives: the property under test is
+    /// whether a person who presses the address gets it, and asserting that some widget was
+    /// constructed would assert the implementation instead. Press and release land on separate
+    /// frames because that is how a pointer really behaves and how egui decides a click.
+    fn click_and_collect(screen: Screen, at: egui::Pos2) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = ThemeChoice::in_brand_dir(dir.path());
+        store.write(Theme::Dark).expect("the theme persists");
+        let (reply, _rx) = sync_channel(1);
+        let mut app = PromptApp::new(
+            Job {
+                screen,
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+        );
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+
+        let batches = [
+            vec![],
+            vec![],
+            vec![egui::Event::PointerMoved(at)],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        ];
+        let mut copied = Vec::new();
+        for events in batches {
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(WIDTH, HEIGHT),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.frame(ctx),
+            );
+            for command in output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(said) = command {
+                    copied.push(said);
+                }
+            }
+        }
+        copied
+    }
+
+    /// **Pressing the deposit address puts it on the clipboard.**
+    ///
+    /// dig_ecosystem#2951's remaining half. Dragging across the address has always worked — an
+    /// egui `Label` is selectable by default — so selection is NOT what was missing. What was
+    /// missing is a way to obtain the address that does not require dragging a pointer accurately
+    /// across 62 characters: the two control slots are spoken for, so there is no Copy button, and
+    /// a person who cannot drag has no route to the value at all.
+    ///
+    /// # What this fixture distinguishes
+    ///
+    /// A single press, with no drag and no Ctrl+C, at the CENTRE of the address as it really
+    /// landed on screen. A window that only supported selection copies nothing here, and the
+    /// assertion demands the WHOLE address because a copy that yields a fragment is worse than
+    /// none. `pressing_the_prose_beside_the_address_copies_nothing` is the control: without it, a
+    /// window that copied itself wholesale on any click would pass this.
+    #[test]
+    fn pressing_the_deposit_address_copies_it() {
+        let copied = click_and_collect(deposit_screen(), the_address_rect().center());
+        assert!(
+            copied.iter().any(|said| said == DEPOSIT_ADDRESS),
+            "pressing the address copied nothing, so the only route to a 62-character address is              an accurate drag: {copied:?}"
+        );
+    }
+
+    /// **The control: a press on the PROSE copies nothing.**
+    ///
+    /// The click target is the address and nothing around it. Without this, a window that put its
+    /// whole content on the clipboard whenever it was clicked would satisfy the test above while
+    /// the address itself was inert.
+    #[test]
+    fn pressing_the_prose_beside_the_address_copies_nothing() {
+        let (_ctx, output) = painted(deposit_screen(), false, Theme::Dark);
+        let (_text, rect, _clip) = body_galley(&output, "Send XCH");
+        let copied = click_and_collect(deposit_screen(), rect.center());
+        assert!(
+            copied.is_empty(),
+            "a press that never touched the address copied something anyway, so the test above              proves nothing about where the copy is attached: {copied:?}"
         );
     }
 
