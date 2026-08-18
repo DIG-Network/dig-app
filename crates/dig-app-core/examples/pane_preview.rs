@@ -242,7 +242,7 @@ impl Case {
         match self {
             Self::Healthy => TrayView {
                 balance: BalanceReading::Known {
-                    balances: HELD,
+                    balances: held(),
                     as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica {
                         height: 7_000_000,
                         caught_up: true,
@@ -298,10 +298,9 @@ impl Case {
 /// Written in base units rather than as decimals, because that is what the type holds and what the
 /// pane's one formatter divides — a preview that pre-divided would photograph a figure the
 /// application does not produce.
-const HELD: dig_app_core::wallet::overview::Balances = dig_app_core::wallet::overview::Balances {
-    dig_units: 12_500,
-    xch_mojos: 250_000_000_000,
-};
+fn held() -> dig_app_core::wallet::overview::Balances {
+    dig_app_core::wallet::overview::Balances::of_xch_and_dig(250_000_000_000, 12_500)
+}
 
 /// Put a plausible two-way activity list in front of the Wallet tab's Activity card.
 ///

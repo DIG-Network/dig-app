@@ -1214,7 +1214,9 @@ impl SendHolder {
             // is the whole of what "send any CAT" costs here: 32 different bytes, not a second
             // spend path (dig_ecosystem#3077).
             SendIntent::Cat { asset_id, request } => runtime
-                .block_on(session.send_cat(chia_protocol::Bytes32::new(*asset_id.as_bytes()), request))
+                .block_on(
+                    session.send_cat(chia_protocol::Bytes32::new(*asset_id.as_bytes()), request),
+                )
                 .map(|broadcast| Accepted::Cat {
                     asset: Asset::Cat(*asset_id),
                     broadcast,
@@ -1329,10 +1331,7 @@ mod tests {
     /// A funded reading: one XCH, comfortably more than the fixtures spend.
     fn funded() -> BalanceReading {
         BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_000_000_000_000,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(1_000_000_000_000, 0),
             as_of: BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -1522,10 +1521,7 @@ mod tests {
         let progress = SendProgress::Idle;
         let amount = 250_000_000_000_u64;
         let holding = |xch_mojos: u64| BalanceReading::Known {
-            balances: Balances {
-                xch_mojos,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(xch_mojos, 0),
             as_of: BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -1899,10 +1895,7 @@ mod tests {
     /// A reading with `dig_units` $DIG base units and `xch_mojos` mojos.
     fn holding(xch_mojos: u64, dig_units: u64) -> BalanceReading {
         BalanceReading::Known {
-            balances: Balances {
-                xch_mojos,
-                dig_units,
-            },
+            balances: Balances::of_xch_and_dig(xch_mojos, dig_units),
             as_of: BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -1940,12 +1933,17 @@ mod tests {
     fn a_dig_amount_is_read_in_dig_base_units_and_carries_the_xch_fee() {
         let balance = holding(1_000_000_000_000, 100_000);
         let progress = SendProgress::Idle;
-        let SendIntent::Dig(request) = dig_draft("1.5", &balance, &progress)
+        let SendIntent::Cat { asset_id, request } = dig_draft("1.5", &balance, &progress)
             .assess()
             .expect("a funded, open, well-formed $DIG draft is sendable")
         else {
-            panic!("a $DIG draft produced a non-$DIG intent");
+            panic!("a $DIG draft produced a non-CAT intent");
         };
+        assert_eq!(
+            Asset::Cat(asset_id),
+            Asset::DIG,
+            "a $DIG draft must name $DIG's own asset id, not another token's"
+        );
         assert_eq!(
             request.amount_base_units(),
             1_500,

@@ -112,10 +112,9 @@ impl dig_app_core::wallet::engine::WalletEngine for FixedBalances {
         request: dig_app_core::wallet::engine::BalanceRequest,
     ) -> Result<dig_app_core::wallet::engine::BalanceResponse, dig_app_core::wallet::WalletError>
     {
-        let balance = match request.asset {
-            dig_app_core::wallet::state::Asset::Xch => self.0.xch_mojos(),
-            dig_app_core::wallet::state::Asset::DIG => self.0.dig_units(),
-        };
+        // Whatever this fixture was built holding, by asset — so a preview reads the same way the
+        // application does rather than through a pair of arms that only know two tokens.
+        let balance = self.0.of(request.asset);
         Ok(dig_app_core::wallet::engine::BalanceResponse {
             balance,
             as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica {
@@ -186,10 +185,7 @@ fn main() {
             );
             // A read balance needs a source that answers; the gallery supplies a fixed one, because what
             // is being photographed is the WINDOW, not a chain read.
-            let funded = FixedBalances(Balances {
-                xch_mojos: 1_250_000_000_000,
-                dig_units: 3_400,
-            });
+            let funded = FixedBalances(Balances::of_xch_and_dig(1_250_000_000_000, 3_400));
             // A node that answers "still catching up" — the reason now comes from what the node
             // says, not from a variant the caller picks (dig_ecosystem#2206).
             let syncing = SyncingNode;

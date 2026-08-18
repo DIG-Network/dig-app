@@ -174,10 +174,9 @@ impl Profiles {
 /// Written in base units rather than as decimals, because that is what the type holds and what the
 /// pane's one formatter divides — a gallery that pre-divided would photograph a figure the
 /// application does not produce.
-const HELD: Balances = Balances {
-    dig_units: 12_500,
-    xch_mojos: 250_000_000_000,
-};
+fn held() -> Balances {
+    Balances::of_xch_and_dig(250_000_000_000, 12_500)
+}
 
 /// The view to draw: one account state, on a machine that is otherwise working.
 ///
@@ -336,7 +335,7 @@ fn view_for(
         balance: match sealed {
             true => BalanceReading::default(),
             false => BalanceReading::Known {
-                balances: HELD,
+                balances: held(),
                 as_of: dig_app_core::wallet::engine::BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,

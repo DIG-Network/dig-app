@@ -1668,10 +1668,7 @@ mod tests {
     /// so a swapped-asset bug cannot hide behind two different-looking numbers being present.
     #[test]
     fn each_asset_is_scaled_by_its_own_decimals() {
-        let items = figures(&Balances {
-            xch_mojos: 1_000_000_000_000,
-            dig_units: 1_000,
-        });
+        let items = figures(&Balances::of_xch_and_dig(1_000_000_000_000, 1_000));
         let shown = |label: &str| {
             items
                 .iter()
@@ -1702,10 +1699,7 @@ mod tests {
     /// divisor gets both of these visibly wrong.
     #[test]
     fn a_fraction_of_an_asset_survives_formatting() {
-        let items = figures(&Balances {
-            xch_mojos: 1,
-            dig_units: 1,
-        });
+        let items = figures(&Balances::of_xch_and_dig(1, 1));
         assert_eq!(items[0].value.shown(), "0.001");
         assert_eq!(items[1].value.shown(), "0.000000000001");
     }
@@ -1765,10 +1759,7 @@ mod tests {
         // A real reading, by contrast, DOES produce figures — without this the assertions above are
         // satisfied by a `holdings` that never returns a number at all.
         let known = holdings(&BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_000_000_000_000,
-                dig_units: 2_000,
-            },
+            balances: Balances::of_xch_and_dig(1_000_000_000_000, 2_000),
             as_of: crate::wallet::engine::BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,
@@ -2186,10 +2177,7 @@ mod tests {
             account: Some(AccountState::Unlocked { recoverable: true }),
             receive_address: Some(ADDRESS.to_string()),
             balance: BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_000_000_000_000,
-                    dig_units: 0,
-                },
+                balances: Balances::of_xch_and_dig(1_000_000_000_000, 0),
                 as_of: crate::wallet::engine::BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,
@@ -2418,10 +2406,7 @@ mod tests {
     #[test]
     fn the_pane_returns_a_validated_transfer_and_only_when_one_is_sendable() {
         let balance = BalanceReading::Known {
-            balances: Balances {
-                xch_mojos: 1_000_000_000_000,
-                dig_units: 0,
-            },
+            balances: Balances::of_xch_and_dig(1_000_000_000_000, 0),
             as_of: crate::wallet::engine::BalanceAsOf::Replica {
                 height: 7_000_000,
                 caught_up: true,

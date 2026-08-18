@@ -221,8 +221,7 @@ impl Money {
 
     /// The fee as a person reads it, whole-coin — or `None` when it was never measured.
     pub fn fee(&self) -> Option<String> {
-        self.fee_mojos
-            .map(format_xch)
+        self.fee_mojos.map(format_xch)
     }
 
     /// The cost, in one line, saying only what is known.

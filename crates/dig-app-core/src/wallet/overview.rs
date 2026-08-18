@@ -121,6 +121,27 @@ pub struct Balances {
 }
 
 impl Balances {
+    /// A reading of exactly the two assets dig-app knows by name.
+    ///
+    /// The shape this type used to have, kept as a CONSTRUCTOR because it is still the common case
+    /// — a wallet nobody has added a token to holds exactly these two — and because a fixture that
+    /// says `of_xch_and_dig(1, 2)` reads better than one that assembles a vector of structs. What it
+    /// is no longer is the only shape expressible.
+    pub fn of_xch_and_dig(xch_mojos: u64, dig_units: u64) -> Self {
+        Self {
+            holdings: vec![
+                Holding {
+                    asset: Asset::Xch,
+                    base_units: xch_mojos,
+                },
+                Holding {
+                    asset: Asset::DIG,
+                    base_units: dig_units,
+                },
+            ],
+        }
+    }
+
     /// The amount held of `asset`, or `0` when this reading did not cover it.
     pub fn of(&self, asset: Asset) -> u64 {
         self.holdings
@@ -1095,10 +1116,7 @@ mod tests {
         assert_eq!(
             empty.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 0,
-                    dig_units: 0
-                },
+                balances: Balances::of_xch_and_dig(0, 0),
                 as_of: BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true
@@ -1133,10 +1151,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_250_000_000_000,
-                    dig_units: 2_500,
-                },
+                balances: Balances::of_xch_and_dig(1_250_000_000_000, 2_500),
                 as_of: crate::wallet::engine::test_support::FAKE_AS_OF
             }
         );
@@ -1290,10 +1305,7 @@ mod tests {
     fn a_known_balance_shows_both_assets_on_the_menu_row() {
         let held = menu_balance_label(
             &BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_250_000_000_000,
-                    dig_units: 2_500,
-                },
+                balances: Balances::of_xch_and_dig(1_250_000_000_000, 2_500),
                 as_of: BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,
@@ -1306,10 +1318,7 @@ mod tests {
 
         let empty = menu_balance_label(
             &BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 0,
-                    dig_units: 0,
-                },
+                balances: Balances::of_xch_and_dig(0, 0),
                 as_of: BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,
@@ -1421,10 +1430,7 @@ mod tests {
             receive_address: Some("xch1example".to_string()),
             account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
             balance: BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_250_000_000_000,
-                    dig_units: 2_500,
-                },
+                balances: Balances::of_xch_and_dig(1_250_000_000_000, 2_500),
                 as_of: BalanceAsOf::Replica {
                     height: 9_141_741,
                     caught_up: true,
@@ -1469,10 +1475,7 @@ mod tests {
         let row = |as_of| {
             menu_balance_label(
                 &BalanceReading::Known {
-                    balances: Balances {
-                        xch_mojos: 1_250_000_000_000,
-                        dig_units: 2_500,
-                    },
+                    balances: Balances::of_xch_and_dig(1_250_000_000_000, 2_500),
                     as_of,
                 },
                 None,
@@ -1552,10 +1555,7 @@ mod tests {
             for peers_peak in [None, Some(1), Some(u32::MAX)] {
                 labels.push(menu_balance_label(
                     &BalanceReading::Known {
-                        balances: Balances {
-                            xch_mojos: u64::MAX,
-                            dig_units: u64::MAX,
-                        },
+                        balances: Balances::of_xch_and_dig(u64::MAX, u64::MAX),
                         as_of,
                     },
                     peers_peak,
@@ -1713,7 +1713,10 @@ mod tests {
                         as_of: crate::wallet::engine::test_support::FAKE_AS_OF,
                         balance: 7_000_000_000_000,
                     }),
-                    Asset::DIG => Err(WalletError::Engine("cat read failed".to_string())),
+                    // Every CAT fails, so the fixture varies exactly one thing — whether the asset
+                    // is native — and the assertion cannot be satisfied by an implementation that
+                    // happened to skip the second read.
+                    Asset::Cat(_) => Err(WalletError::Engine("cat read failed".to_string())),
                 }
             }
         }
@@ -1787,8 +1790,8 @@ mod tests {
     /// whole $DIG as `0.000000001`.
     #[test]
     fn amounts_render_at_each_assets_own_scale() {
-        let one_dig = 10u64.pow(Asset::DIG.decimals());
-        let one_xch = 10u64.pow(Asset::Xch.decimals());
+        let one_dig = 10u64.pow(crate::amount::decimals(Asset::DIG).expect("$DIG is known"));
+        let one_xch = 10u64.pow(crate::amount::decimals(Asset::Xch).expect("XCH is known"));
 
         assert_eq!(format_amount(Asset::DIG, one_dig), "1");
         assert_eq!(format_amount(Asset::Xch, one_xch), "1");
@@ -1820,10 +1823,7 @@ mod tests {
             receive_address: Some(ADDRESS.to_string()),
             node_connected: true,
             balance: BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_250_000_000_000,
-                    dig_units: 2_500,
-                },
+                balances: Balances::of_xch_and_dig(1_250_000_000_000, 2_500),
                 as_of: BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,
@@ -1886,10 +1886,7 @@ mod tests {
             receive_address: None,
             node_connected: true,
             balance: BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 1_250_000_000_000,
-                    dig_units: 2_500,
-                },
+                balances: Balances::of_xch_and_dig(1_250_000_000_000, 2_500),
                 as_of: BalanceAsOf::Replica {
                     height: 7_000_000,
                     caught_up: true,
@@ -2313,10 +2310,7 @@ mod tests {
             receive_address: Some(ADDRESS.to_string()),
             node_connected: true,
             balance: BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 0,
-                    dig_units: 0,
-                },
+                balances: Balances::of_xch_and_dig(0, 0),
                 as_of: BalanceAsOf::Replica {
                     height: 9_142_585,
                     caught_up: true,
@@ -2335,10 +2329,7 @@ mod tests {
         assert_eq!(
             overview.balance,
             BalanceReading::Known {
-                balances: Balances {
-                    xch_mojos: 0,
-                    dig_units: 0
-                },
+                balances: Balances::of_xch_and_dig(0, 0),
                 as_of: BalanceAsOf::Replica {
                     height: 9_142_585,
                     caught_up: true,

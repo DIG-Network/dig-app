@@ -268,11 +268,11 @@ mod tests {
     #[test]
     fn one_whole_coin_renders_as_one_in_each_asset() {
         assert_eq!(
-            format_asset_amount(Asset::DIG, 10u64.pow(CAT_DECIMALS)),
+            format_asset_amount(Asset::DIG, 10u64.pow(CAT_DECIMALS)).unwrap(),
             "1"
         );
         assert_eq!(
-            format_asset_amount(Asset::Xch, 10u64.pow(XCH_DECIMALS)),
+            format_asset_amount(Asset::Xch, 10u64.pow(XCH_DECIMALS)).unwrap(),
             "1"
         );
     }
@@ -281,9 +281,9 @@ mod tests {
     /// 10^12 base units — under the pre-#2295 divisor that value was 3.4 billion $DIG.
     #[test]
     fn a_dig_is_a_thousand_base_units_not_a_trillion() {
-        assert_eq!(format_asset_amount(Asset::DIG, 1_000), "1");
+        assert_eq!(format_asset_amount(Asset::DIG, 1_000).unwrap(), "1");
         assert_eq!(
-            format_asset_amount(Asset::DIG, 1_000_000_000_000),
+            format_asset_amount(Asset::DIG, 1_000_000_000_000).unwrap(),
             "1000000000"
         );
     }
@@ -291,29 +291,35 @@ mod tests {
     /// A fraction renders its own asset's precision, in both assets, with trailing zeros trimmed.
     #[test]
     fn fractions_carry_each_assets_own_precision() {
-        assert_eq!(format_asset_amount(Asset::DIG, 1_500), "1.5");
-        assert_eq!(format_asset_amount(Asset::Xch, 1_500_000_000_000), "1.5");
+        assert_eq!(format_asset_amount(Asset::DIG, 1_500).unwrap(), "1.5");
+        assert_eq!(
+            format_asset_amount(Asset::Xch, 1_500_000_000_000).unwrap(),
+            "1.5"
+        );
         // The smallest holdable amount of each asset is shown, never rounded to a zero.
-        assert_eq!(format_asset_amount(Asset::DIG, 1), "0.001");
-        assert_eq!(format_asset_amount(Asset::Xch, 1), "0.000000000001");
+        assert_eq!(format_asset_amount(Asset::DIG, 1).unwrap(), "0.001");
+        assert_eq!(
+            format_asset_amount(Asset::Xch, 1).unwrap(),
+            "0.000000000001"
+        );
     }
 
     /// A genuine zero is a bare `0` in either asset — no decimal point, no false precision.
     #[test]
     fn zero_renders_as_a_bare_zero_in_both_assets() {
-        assert_eq!(format_asset_amount(Asset::DIG, 0), "0");
-        assert_eq!(format_asset_amount(Asset::Xch, 0), "0");
+        assert_eq!(format_asset_amount(Asset::DIG, 0).unwrap(), "0");
+        assert_eq!(format_asset_amount(Asset::Xch, 0).unwrap(), "0");
     }
 
     /// The largest holdable amount does not overflow or lose a digit in either asset.
     #[test]
     fn the_maximum_holding_renders_exactly() {
         assert_eq!(
-            format_asset_amount(Asset::Xch, u64::MAX),
+            format_asset_amount(Asset::Xch, u64::MAX).unwrap(),
             "18446744.073709551615"
         );
         assert_eq!(
-            format_asset_amount(Asset::DIG, u64::MAX),
+            format_asset_amount(Asset::DIG, u64::MAX).unwrap(),
             "18446744073709551.615"
         );
     }
@@ -333,12 +339,13 @@ mod tests {
                 1,
                 1_000,
                 1_500,
-                10u64.pow(asset.decimals()),
+                10u64.pow(decimals(asset).expect("both assets have a known precision")),
                 123_456_789,
                 u64::MAX / 3,
                 u64::MAX,
             ] {
-                let rendered = format_asset_amount(asset, units);
+                let rendered =
+                    format_asset_amount(asset, units).expect("both assets have a known precision");
                 assert_eq!(
                     parse_asset_amount(asset, &rendered),
                     Ok(units),
@@ -434,7 +441,7 @@ mod tests {
     /// tested only from above passes on an implementation that refuses everything large.
     #[test]
     fn an_amount_past_the_maximum_holding_is_refused_and_the_maximum_is_not() {
-        let max = format_asset_amount(Asset::Xch, u64::MAX);
+        let max = format_asset_amount(Asset::Xch, u64::MAX).expect("XCH precision is known");
         assert_eq!(parse_asset_amount(Asset::Xch, &max), Ok(u64::MAX));
         assert_eq!(
             parse_asset_amount(Asset::Xch, "18446744.073709551616"),
@@ -457,8 +464,8 @@ mod tests {
     /// The decimals a caller gets are the asset's own, so a new surface cannot pick the wrong one.
     #[test]
     fn each_asset_states_its_own_decimals() {
-        assert_eq!(Asset::Xch.decimals(), XCH_DECIMALS);
-        assert_eq!(Asset::DIG.decimals(), CAT_DECIMALS);
-        assert_ne!(Asset::Xch.decimals(), Asset::DIG.decimals());
+        assert_eq!(decimals(Asset::Xch), Some(XCH_DECIMALS));
+        assert_eq!(decimals(Asset::DIG), Some(CAT_DECIMALS));
+        assert_ne!(decimals(Asset::Xch), decimals(Asset::DIG));
     }
 }
