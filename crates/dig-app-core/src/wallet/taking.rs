@@ -45,9 +45,12 @@ use std::marker::PhantomData;
 use crate::account::auth::HarnessAuthProvider;
 use crate::account::ceremony::PromptedCeremony;
 use crate::account::money::{MoneyPath, MoneyPathError};
+use crate::account::narrative::NarrativeSlot;
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
+use crate::transaction::{Feed, Stage, Transaction};
 use crate::wallet::offer::{take_permitted_by, OfferError, ReviewedOffer};
+use crate::wallet::offer_words as copy;
 
 /// A take that did not complete, named by WHICH step stopped it.
 ///
@@ -316,6 +319,10 @@ pub struct TakeHolder {
 struct UnlockGate {
     address: String,
     money: std::sync::Arc<MoneyPath<HarnessAuthProvider<PromptedCeremony>>>,
+    /// Where this take writes the story the confirm prompt tells (dig_ecosystem#3109). The gate is
+    /// built once per unlock and the narrative differs per offer, so it is staged per operation
+    /// rather than baked into the ceremony.
+    narrative: NarrativeSlot,
 }
 
 /// The process-wide take holder.
@@ -364,14 +371,29 @@ impl TakeHolder {
         if !self.begin() {
             return;
         }
-        let outcome = self.perform(status, residency, reviewed);
-        *self.lock() = match outcome {
-            Ok(taken) => TakeProgress::Broadcast {
-                bundle_name: taken.bundle_name,
-            },
-            Err(error) => TakeProgress::Failed {
-                why: error.to_string(),
-            },
+        // Every broadcast this app makes raises the ONE centralized progress modal
+        // (dig_ecosystem#3075); a take used to be the exception, which is dig_ecosystem#3110.
+        let feed = Feed::app();
+        let opening = Transaction::starting("Taking an offer", None);
+        feed.publish(opening.clone());
+
+        *self.lock() = match self.perform(status, residency, reviewed, &feed, &opening) {
+            Ok(taken) => {
+                feed.publish(opening.at(Stage::Pushed {
+                    id: taken.bundle_name.clone(),
+                }));
+                TakeProgress::Broadcast {
+                    bundle_name: taken.bundle_name,
+                }
+            }
+            Err(error) => {
+                let why = error.to_string();
+                feed.publish(opening.at(Stage::Failed {
+                    why: why.clone(),
+                    next: NEXT_AFTER_A_FAILED_TAKE.to_string(),
+                }));
+                TakeProgress::Failed { why }
+            }
         };
     }
 
@@ -395,6 +417,8 @@ impl TakeHolder {
         status: &crate::agent::SharedStatus,
         residency: Option<&AccountResidency>,
         reviewed: &ReviewedOffer,
+        feed: &Feed,
+        opening: &Transaction,
     ) -> Result<TakenOffer, TakeError> {
         let residency = residency.ok_or(TakeError::Locked)?;
 
@@ -414,11 +438,22 @@ impl TakeHolder {
 
         let custody = CustodyPolicy::Hot(HotWallet { auto_send_limit: 0 });
         let held = self.gate_for(residency, custody)?;
-        let money = &held
+        let gate = held
             .as_ref()
-            .expect("gate_for leaves a gate in place or returns an error")
-            .money;
+            .expect("gate_for leaves a gate in place or returns an error");
+        let money = &gate.money;
+
+        // Both legs of the swap reach the confirm prompt, which the re-derived summary alone cannot
+        // show (dig_ecosystem#3109). Held across the take and dropped with it, so no later spend
+        // inherits this offer's story.
+        let _telling = gate.narrative.set(
+            reviewed
+                .terms()
+                .narrative(copy::TAKE_HEADLINE, Some(copy::TAKE_CAUTION.to_string())),
+        );
         let publisher = crate::chain::ControlSpendPublisher::new(endpoint);
+
+        feed.publish(opening.at(Stage::Signing));
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -442,9 +477,11 @@ impl TakeHolder {
 
         let mut held = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         if !held.as_ref().is_some_and(|gate| gate.address == address) {
+            let ceremony = PromptedCeremony::unlocking("confirm this swap");
+            let narrative = ceremony.narrative();
             let money = MoneyPath::new(
                 residency.clone(),
-                HarnessAuthProvider::new(PromptedCeremony::unlocking("confirm this swap")),
+                HarnessAuthProvider::new(ceremony),
                 dig_account::AccountId::new(crate::account::boot::DEFAULT_ACCOUNT_ID),
                 dig_wallet_backend::types::Network::Mainnet,
                 custody,
@@ -455,6 +492,7 @@ impl TakeHolder {
             *held = Some(UnlockGate {
                 address,
                 money: std::sync::Arc::new(money),
+                narrative,
             });
         }
         Ok(held)
@@ -471,6 +509,13 @@ impl TakeHolder {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
+
+/// What a person can do after a take did not go through.
+///
+/// [`Stage::Failed`] refuses a blank `next`, and the honest step after most take failures is to look
+/// again rather than to retry: an offer somebody else has already taken will never become takeable.
+const NEXT_AFTER_A_FAILED_TAKE: &str =
+    "Check the offer is still open before trying again — somebody else may have taken it.";
 
 #[cfg(test)]
 mod tests {

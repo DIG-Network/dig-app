@@ -22,8 +22,13 @@
 //! `dig-account` signer; the engine only ever sees signed bytes.
 
 pub mod activity;
+/// The closed loop over make + cancel — read its header before treating it as evidence of settlement.
+#[cfg(test)]
+mod an_offer_this_app_makes_is_one_it_can_cancel;
+pub mod cancelling;
 pub mod engine;
 pub mod enrol;
+pub mod making;
 /// The §908 on-wire custody proof. Crate-internal because it drives a real loopback node
 /// ([`crate::test_support::node::FakeNode`]) rather than a hand-built request (dig_ecosystem#2892).
 #[cfg(test)]
@@ -34,6 +39,9 @@ pub mod offer;
 /// offer, it only reads one a person supplies.
 #[cfg(test)]
 pub mod offer_fixture;
+/// The sentences the OS-native confirm prompt says about an offer — see its header before adding
+/// one.
+pub mod offer_words;
 pub mod overview;
 pub mod send;
 pub mod sending;

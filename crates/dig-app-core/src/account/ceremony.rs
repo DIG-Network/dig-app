@@ -35,6 +35,7 @@ use rand_core::RngCore;
 use zeroize::Zeroizing;
 
 use crate::account::auth::{AuthCeremony, CeremonyError};
+use crate::account::narrative::{NarrativeSlot, TradeNarrative};
 use crate::account::password::{establish_password, request_password, PasswordOutcome};
 use crate::amount::{format_dig, format_xch};
 use crate::confirm::{native_confirmer, ConfirmDecision, NativeConfirmer, SignPrompt};
@@ -144,7 +145,9 @@ impl<C: CredentialStore + Send + Sync> AuthCeremony for CredentialCeremony<C> {
         _profile: ProfileIx,
         summary: &SpendSummary,
     ) -> Result<SpendDecision, CeremonyError> {
-        confirm_spend_natively(&*self.confirmer, summary)
+        // No narrative: this ceremony authorizes no offer operation, and an ordinary spend's
+        // recipients ARE the act.
+        confirm_spend_natively(&*self.confirmer, summary, None)
     }
 }
 
@@ -225,13 +228,29 @@ pub enum PasswordIntent {
 pub struct PromptedCeremony {
     confirmer: Arc<dyn NativeConfirmer>,
     intent: PasswordIntent,
+    /// The story the CURRENT operation wants told alongside the re-derived figures
+    /// (dig_ecosystem#3109). Empty for an ordinary send, whose recipients are the whole act.
+    narrative: NarrativeSlot,
 }
 
 impl PromptedCeremony {
     /// Ask through `confirmer` — in production the host's [`native_confirmer`], in tests a scripted
     /// double — for the password `intent` describes.
     pub fn new(confirmer: Arc<dyn NativeConfirmer>, intent: PasswordIntent) -> Self {
-        Self { confirmer, intent }
+        Self {
+            confirmer,
+            intent,
+            narrative: NarrativeSlot::default(),
+        }
+    }
+
+    /// The slot an operation stages its [`TradeNarrative`] in before asking for a signature.
+    ///
+    /// Handed out rather than set, because the ceremony is built once per unlock and the narrative
+    /// differs per operation — see [`NarrativeSlot`]'s own docs for why that asymmetry exists.
+    #[must_use]
+    pub fn narrative(&self) -> NarrativeSlot {
+        self.narrative.clone()
     }
 
     /// Establish a NEW password for an account being created or re-sealed, through the host's own
@@ -286,7 +305,7 @@ impl AuthCeremony for PromptedCeremony {
         _profile: ProfileIx,
         summary: &SpendSummary,
     ) -> Result<SpendDecision, CeremonyError> {
-        confirm_spend_natively(&*self.confirmer, summary)
+        confirm_spend_natively(&*self.confirmer, summary, self.narrative.get().as_ref())
     }
 }
 
@@ -302,8 +321,9 @@ impl AuthCeremony for PromptedCeremony {
 fn confirm_spend_natively(
     confirmer: &dyn NativeConfirmer,
     summary: &SpendSummary,
+    narrative: Option<&TradeNarrative>,
 ) -> Result<SpendDecision, CeremonyError> {
-    let body = render_spend(summary);
+    let body = render_spend(summary, narrative);
     let prompt = SignPrompt {
         origin: SPEND_CONFIRM_ORIGIN,
         payload_type: SPEND_PAYLOAD_TYPE,
@@ -365,8 +385,21 @@ const SPEND_PAYLOAD_TYPE: &str = "wallet.spend";
 /// Matching on the id — never on position or on the amount — is what keeps the exception exactly one
 /// asset wide.
 ///
+/// # A swap needs a NARRATIVE, because the re-derivation can only see one leg (dig_ecosystem#3109)
+///
+/// The recipients dig-account re-derives ARE the whole act for an ordinary send. For an offer they
+/// are half of it: a take pays the settlement puzzle and receives its side back as change, which the
+/// re-derivation drops, so this body named what left and said nothing about what arrived. When the
+/// arriving leg is an NFT or a CAT the paid leg nets ~0 XCH, so a person approved a dust figure while
+/// an asset changed hands.
+///
+/// So an offer operation stages a [`TradeNarrative`] and it is printed FIRST, in the user's terms.
+/// The re-derived figures still follow, under their own heading and unedited: the narrative is
+/// additional evidence, never a replacement, and a narrative that ever disagreed with the bytes can
+/// be caught against them on the same screen.
+///
 /// Plain text only (the per-OS confirmers neutralize markup), never key material.
-fn render_spend(summary: &SpendSummary) -> String {
+fn render_spend(summary: &SpendSummary, narrative: Option<&TradeNarrative>) -> String {
     let paid = match summary.recipients.is_empty() {
         true => "no recipients".to_string(),
         false => summary
@@ -376,11 +409,27 @@ fn render_spend(summary: &SpendSummary) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     };
-    format!(
-        "Approve this {:?}-tier spend?\n\n{paid}\n\nNetwork fee: {} XCH",
-        summary.tier,
+    let derived = format!(
+        "{paid}
+
+Network fee: {} XCH",
         format_xch(summary.fee)
-    )
+    );
+    match narrative {
+        None => format!(
+            "Approve this {:?}-tier spend?
+
+{derived}",
+            summary.tier
+        ),
+        Some(narrative) => format!(
+            "{}
+
+The spend being signed, as re-derived from its own bytes:
+{derived}",
+            narrative.render()
+        ),
+    }
 }
 
 /// One recipient's amount, in the units a person reads.
@@ -553,15 +602,18 @@ mod tests {
     fn the_confirm_body_states_amounts_in_xch_and_never_in_raw_mojos() {
         use dig_account::{SpendRecipient, SpendTier};
 
-        let body = render_spend(&SpendSummary::new(
-            SpendTier::Confirm,
-            vec![SpendRecipient::to_address(
-                "xch1nnu75",
-                50_000_000,
-                None::<String>,
-            )],
-            1_000_000,
-        ));
+        let body = render_spend(
+            &SpendSummary::new(
+                SpendTier::Confirm,
+                vec![SpendRecipient::to_address(
+                    "xch1nnu75",
+                    50_000_000,
+                    None::<String>,
+                )],
+                1_000_000,
+            ),
+            None,
+        );
 
         assert!(
             body.contains("0.00005 XCH"),
@@ -596,11 +648,14 @@ mod tests {
     fn a_cat_amount_is_shown_as_base_units_rather_than_guessed_at() {
         use dig_account::{SpendRecipient, SpendTier};
 
-        let body = render_spend(&SpendSummary::new(
-            SpendTier::Confirm,
-            vec![SpendRecipient::to_address("xch1cat", 7_000, Some("cafe"))],
-            0,
-        ));
+        let body = render_spend(
+            &SpendSummary::new(
+                SpendTier::Confirm,
+                vec![SpendRecipient::to_address("xch1cat", 7_000, Some("cafe"))],
+                0,
+            ),
+            None,
+        );
         assert!(
             body.contains("7000 base units of CAT cafe"),
             "a CAT amount was not stated in the units it is actually in: {body}"
@@ -611,6 +666,73 @@ mod tests {
         );
     }
 
+    /// **A narrative ADDS the missing side; it does not replace the re-derived figures**
+    /// (dig_ecosystem#3109).
+    ///
+    /// This is the property that keeps the fix honest. If the narrative replaced the derived block, a
+    /// narrative that ever disagreed with the bytes being signed would be unfalsifiable on the one
+    /// screen where it matters. So the fixture's narrative names an asset the summary has NO figure
+    /// for — an NFT, which is the case the whole ticket was filed about, since its XCH leg nets to
+    /// dust — and both must survive into the body.
+    ///
+    /// A narrative-only renderer passes the first two assertions and fails the last two; a
+    /// summary-only renderer (the shipped behaviour) fails the first two. Neither can pass by
+    /// accident.
+    #[test]
+    fn a_narrative_is_printed_beside_the_re_derived_figures_and_not_instead_of_them() {
+        use crate::account::narrative::TradeNarrative;
+        use dig_account::{SpendRecipient, SpendTier};
+
+        let body = render_spend(
+            &SpendSummary::new(
+                SpendTier::Confirm,
+                vec![SpendRecipient::to_address(
+                    "xch1settlement",
+                    1,
+                    None::<String>,
+                )],
+                500_000_000_000,
+            ),
+            Some(&TradeNarrative {
+                headline: "Take this offer?".to_string(),
+                you_give: vec!["0.000000000001 XCH".to_string()],
+                you_receive: vec!["the NFT beef".to_string()],
+                caution: Some("This cannot be reversed.".to_string()),
+            }),
+        );
+
+        assert!(
+            body.contains("the NFT beef"),
+            "the arriving asset, which the summary has no figure for at all, is missing: {body}"
+        );
+        assert!(
+            body.contains("This cannot be reversed."),
+            "the caution is missing: {body}"
+        );
+        assert!(
+            body.contains("xch1settlement"),
+            "the re-derived recipient was replaced rather than kept: {body}"
+        );
+        assert!(
+            body.contains("0.5 XCH"),
+            "the re-derived fee was replaced rather than kept: {body}"
+        );
+    }
+
+    /// **An ordinary send is unchanged: no narrative, no extra heading.**
+    ///
+    /// The narrative is for offers. A send whose recipients ARE the act must not grow a
+    /// "You receive: Nothing" line, which would read as though something were missing from a
+    /// perfectly complete payment.
+    #[test]
+    fn an_ordinary_send_still_reads_as_a_plain_approval() {
+        use dig_account::SpendTier;
+
+        let body = render_spend(&SpendSummary::new(SpendTier::Confirm, vec![], 1), None);
+        assert!(body.starts_with("Approve this"), "{body}");
+        assert!(!body.contains("You receive"), "{body}");
+    }
+
     /// **A spend paying nobody says so, rather than rendering an empty line.**
     ///
     /// The state exists — a fee-only spend derives no recipients — and a body that fell silent there
@@ -619,7 +741,7 @@ mod tests {
     fn a_spend_with_no_recipients_says_that_plainly() {
         use dig_account::SpendTier;
 
-        let body = render_spend(&SpendSummary::new(SpendTier::Vault, vec![], 3));
+        let body = render_spend(&SpendSummary::new(SpendTier::Vault, vec![], 3), None);
         assert!(body.contains("no recipients"), "{body}");
         assert!(body.contains("0.000000000003 XCH"), "{body}");
     }

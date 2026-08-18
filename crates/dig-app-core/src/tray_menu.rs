@@ -1019,6 +1019,25 @@ pub enum TrayAction {
     /// Offered by the Wallet PANE only, like [`Send`](Self::Send): it needs a field to paste
     /// an `offer1…` string into, and a native menu cannot hold one.
     TakeOffer,
+    /// Make the offer the person has filled in on the Wallet pane (dig_ecosystem#3077).
+    ///
+    /// Carries nothing, for the same reason [`TakeOffer`](Self::TakeOffer) does: the draft lives in
+    /// [`crate::wallet::making::staged`] as a checked
+    /// [`MakeDraft`](crate::wallet::making::MakeDraft), so what the shell makes is the offer the form
+    /// showed and no separate copy of the figures is in flight.
+    ///
+    /// Offered by the Wallet PANE only — it needs a form, and a native menu cannot hold one.
+    MakeOffer,
+    /// Cancel the offer the person pasted and is looking at, reclaiming its coins
+    /// (dig_ecosystem#3077).
+    ///
+    /// Carries nothing: the offer lives in [`crate::wallet::offer::staged`], the same
+    /// [`ReviewedOffer`](crate::wallet::offer::ReviewedOffer) the take path uses, so the bytes
+    /// cancelled are the bytes displayed.
+    ///
+    /// Destructive (NC-14): it makes an outstanding offer unfillable and cannot be undone, which the
+    /// confirm ceremony NAMES rather than expressing as a value delta.
+    CancelOffer,
     /// Release a send whose fate this app never learned, on the person's own say-so
     /// (dig_ecosystem#2894).
     ///

@@ -133,6 +133,15 @@ pub(crate) fn draw(
         matches!(facts.account, Some(AccountKind::Unlocked)),
     );
 
+    // Making an offer sits directly under reading one: they are the two halves of the same errand,
+    // and a person who has just seen what an offer looks like is the person likeliest to write one.
+    flow.gap(space::S4);
+    let made = super::wallet_make_offer::card(
+        flow,
+        t,
+        matches!(facts.account, Some(AccountKind::Unlocked)),
+    );
+
     flow.gap(space::S4);
     activity_card(flow, t, &crate::wallet::activity::entries());
 
@@ -148,6 +157,7 @@ pub(crate) fn draw(
     // A send press wins over a take, which wins over a menu verb. Only one can be produced in a
     // frame in practice; the order states which intent is honoured if that ever stops being true.
     sent.or(took)
+        .or(made)
         .or(spare_verbs_card(flow, t, tab, showing_receive))
 }
 

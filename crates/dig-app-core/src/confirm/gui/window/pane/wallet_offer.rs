@@ -42,6 +42,7 @@ use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
+use crate::wallet::cancelling::CancelProgress;
 use crate::wallet::offer::{OfferError, OfferLeg, OfferTerms, ReviewedOffer};
 use crate::wallet::taking::TakeProgress;
 
@@ -85,7 +86,12 @@ fn body(inner: &mut Flow, t: &Tokens, account_open: bool) -> Option<TrayAction> 
             inner.gap(space::S4);
             terms(inner, t, reviewed.terms());
             inner.gap(space::S4);
-            take_control(inner, t, reviewed.terms(), account_open, &progress)
+            let took = take_control(inner, t, reviewed.terms(), account_open, &progress);
+            inner.gap(space::S4);
+            let cancelled = cancel_control(inner, t, account_open);
+            // A take press wins over a cancel. Both cannot happen in one frame, and the order states
+            // which intent is honoured if that ever stops being true.
+            took.or(cancelled)
         }
         Err(None) => {
             // The EMPTY state. A card that showed nothing here would teach a person the field does
@@ -260,6 +266,106 @@ fn take_control(
         true => Some(TrayAction::TakeOffer),
         false => None,
     }
+}
+
+/// The control that cancels an offer this wallet made, under the sentence saying what that does.
+///
+/// # Why it is offered on any readable offer rather than only on one this wallet made
+///
+/// Whether an offer's coins are still this wallet's to reclaim is a CHAIN question — `cancel_build`
+/// answers it from the offer's own coins — and this card performs no chain read. The two available
+/// designs were therefore a control that is sometimes refused with a clear reason, or no cancel
+/// control at all. A capability silently withheld reads as a missing feature, so the control is
+/// offered and the refusal, when it comes, is `dig-offers`' own words: *already settled, or not the
+/// maker's*.
+///
+/// It is a ghost-weight control beside the primary Take, because it is the rarer errand and the
+/// destructive one; nothing about it is pre-selected or default.
+fn cancel_control(flow: &mut Flow, t: &Tokens, account_open: bool) -> Option<TrayAction> {
+    let progress = crate::wallet::cancelling::progress();
+    if !matches!(progress, CancelProgress::Idle) {
+        cancel_outcome(flow, t, &progress);
+        flow.gap(space::S3);
+    }
+
+    flow.place(|ui, at| (text::caption(ui, at, t, copy::offer::CANCEL_ABOUT), ()));
+    flow.gap(space::S2);
+
+    let refusal = cancel_refusal_for(account_open, &progress);
+    let live = flow.live();
+    let pressed = flow.place(|ui, at| {
+        let hit = paint::button_at(
+            ui,
+            egui::Rect::from_min_size(
+                at.left_top(),
+                egui::Vec2::new(
+                    paint::button_width(ui, copy::offer::CANCEL_BUTTON),
+                    paint::BUTTON_HEIGHT,
+                ),
+            ),
+            element().with("cancel"),
+            copy::offer::CANCEL_BUTTON,
+            Weight::Ghost,
+            refusal.is_none() && live,
+            t,
+        )
+        .clicked();
+        (paint::BUTTON_HEIGHT, hit)
+    });
+
+    if let Some(why) = &refusal {
+        flow.gap(space::S2);
+        flow.place(|ui, at| (text::caption(ui, at, t, why), ()));
+    }
+
+    match pressed && refusal.is_none() {
+        true => Some(TrayAction::CancelOffer),
+        false => None,
+    }
+}
+
+/// Why the cancel control is refused, or `None` when it may be pressed.
+///
+/// There is no empty-terms case here, unlike the take control: an offer with nothing on either side
+/// is not takeable, but its coins may still be this wallet's to reclaim, and refusing would strand
+/// them.
+fn cancel_refusal_for(account_open: bool, progress: &CancelProgress) -> Option<String> {
+    if !account_open {
+        return Some(copy::offer::CANCEL_REFUSED_LOCKED.to_string());
+    }
+    if matches!(progress, CancelProgress::Working) {
+        return Some(copy::offer::CANCEL_REFUSED_IN_FLIGHT.to_string());
+    }
+    None
+}
+
+/// What became of the cancellation in flight.
+///
+/// [`CancelProgress::Broadcast`] is drawn Neutral rather than Good: a cancellation races any taker's
+/// settlement, and a person who read it as final could reasonably spend the reclaimed coins again.
+fn cancel_outcome(flow: &mut Flow, t: &Tokens, progress: &CancelProgress) {
+    let (word, tone, body) = match progress {
+        CancelProgress::Idle => return,
+        CancelProgress::Working => (
+            copy::offer::CANCEL_WORKING_BADGE,
+            Tone::Neutral,
+            copy::offer::CANCEL_WORKING_BODY.to_string(),
+        ),
+        CancelProgress::Broadcast { bundle_name } => (
+            copy::offer::CANCEL_BROADCAST_BADGE,
+            Tone::Neutral,
+            copy::offer::cancel_broadcast_body(bundle_name),
+        ),
+        CancelProgress::Failed { why } => (
+            copy::offer::CANCEL_FAILED_BADGE,
+            Tone::Warn,
+            copy::offer::cancel_failed_body(why),
+        ),
+    };
+
+    flow.place(|ui, at| (data::badge(ui, at.left_top(), t, word, tone).height(), ()));
+    flow.gap(space::S3);
+    flow.place(|ui, at| (text::body(ui, at, t, &body), ()));
 }
 
 /// Why the take control is refused, or `None` when it may be pressed.

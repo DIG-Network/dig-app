@@ -773,6 +773,54 @@ pub(crate) mod offer {
     /// The control that takes the offer.
     pub(crate) const TAKE_BUTTON: &str = "Take this offer";
 
+    /// The control that cancels an offer this wallet made.
+    ///
+    /// The word is "Cancel" because that is the word a person came looking for. What makes it honest
+    /// is the sentence beside it and the caution at the confirm gate — NC-14 asks for the act to be
+    /// NAMED, not for it to be renamed.
+    pub(crate) const CANCEL_BUTTON: &str = "Cancel this offer";
+
+    /// What cancelling does, said on the card rather than discovered at the confirm prompt.
+    pub(crate) const CANCEL_ABOUT: &str =
+        "If this is an offer you made, cancelling takes your coins back and the string stops working for everybody. It cannot be undone.";
+
+    /// Refused because the account is locked.
+    pub(crate) const CANCEL_REFUSED_LOCKED: &str =
+        "Unlock your account to cancel an offer — reclaiming your coins needs your key.";
+
+    /// Refused because another cancellation is already in flight.
+    pub(crate) const CANCEL_REFUSED_IN_FLIGHT: &str =
+        "One cancellation is already going through. This waits until it is done.";
+
+    /// The badge on a cancellation in progress.
+    pub(crate) const CANCEL_WORKING_BADGE: &str = "Cancelling";
+
+    /// What the cancelling state says.
+    pub(crate) const CANCEL_WORKING_BODY: &str =
+        "Building the reclaim and asking you to confirm it. Nothing has been sent yet.";
+
+    /// The badge on a cancellation a node accepted. Deliberately not a success word.
+    pub(crate) const CANCEL_BROADCAST_BADGE: &str = "Sent";
+
+    /// What the broadcast state says.
+    ///
+    /// It states the race rather than hiding it: a cancellation competes with any taker's
+    /// settlement, and a person told the offer was cancelled could reasonably spend those coins
+    /// again.
+    pub(crate) fn cancel_broadcast_body(bundle_name: &str) -> String {
+        format!(
+            "A node accepted the cancellation. It races anybody taking the offer, so it is not final until the chain confirms it — you can follow it as {bundle_name}."
+        )
+    }
+
+    /// The badge on a cancellation that did not complete.
+    pub(crate) const CANCEL_FAILED_BADGE: &str = "Not cancelled";
+
+    /// What a failed cancellation says — including the fact that matters most, that the offer lived.
+    pub(crate) fn cancel_failed_body(why: &str) -> String {
+        format!("This offer was not cancelled and is still live. {why}")
+    }
+
     /// Refused because the offer names nothing on either side.
     pub(crate) const REFUSED_EMPTY: &str =
         "This offer names nothing to trade, so there is nothing to agree to.";
@@ -808,6 +856,96 @@ pub(crate) mod offer {
     /// What the failure state says, in the words the failure itself used.
     pub(crate) fn failed_body(why: &str) -> String {
         format!("This swap did not go through. {why}")
+    }
+}
+
+/// The make-an-offer card's words (dig_ecosystem#3077).
+///
+/// Written for somebody who has never made an offer before, and whose likeliest misunderstanding is
+/// that making one is a completed trade. Every sentence here that could be read that way is worded
+/// against it.
+pub(crate) mod make_offer {
+    use crate::wallet::state::Asset;
+
+    /// The card's title.
+    pub(crate) const CARD: &str = "Make an offer";
+
+    /// What the card is for, and the shape of the deal it makes.
+    pub(crate) const ABOUT: &str =
+        "Offer some of your XCH for something you want. You get back a string to share — whoever takes it settles both sides at once.";
+
+    /// The label over what the offer commits.
+    pub(crate) const GIVE_LABEL: &str = "You give";
+
+    /// The label over the chooser for what is asked in return.
+    pub(crate) const WANT_ASSET_LABEL: &str = "You want";
+
+    /// The label over the amount asked in return.
+    pub(crate) const WANT_LABEL: &str = "Amount you want";
+
+    /// What an empty amount field shows.
+    pub(crate) const AMOUNT_PLACEHOLDER: &str = "0.0";
+
+    /// The XCH option in the wanted-asset chooser.
+    pub(crate) const ASSET_XCH: &str = "XCH";
+
+    /// The $DIG option in the wanted-asset chooser.
+    pub(crate) const ASSET_DIG: &str = "$DIG";
+
+    /// An amount field's help line, naming the asset the digits are in.
+    ///
+    /// The units are said out loud because the same text means different amounts in the two assets,
+    /// and a field that did not say which would be asking a person to guess about money.
+    pub(crate) fn amount_help(asset: Asset) -> &'static str {
+        match asset {
+            Asset::Xch => "In XCH — 0.5 means half an XCH.",
+            // $DIG is an associated CONSTANT rather than a variant, so it cannot be a pattern; the
+            // chooser offers exactly XCH and $DIG, so every other arm is the $DIG one.
+            _ => "In $DIG — 1.5 means one and a half $DIG.",
+        }
+    }
+
+    /// The control that makes the offer.
+    pub(crate) const MAKE_BUTTON: &str = "Make this offer";
+
+    /// Refused because a side is empty or is not yet a number.
+    pub(crate) const REFUSED_INCOMPLETE: &str =
+        "Fill in both amounts. An offer needs a side you give and a side you want.";
+
+    /// Refused because the account is locked.
+    pub(crate) const REFUSED_LOCKED: &str =
+        "Unlock your account to make an offer — making one commits your coins, and that needs your key.";
+
+    /// Refused because another make is already in flight.
+    pub(crate) const REFUSED_IN_FLIGHT: &str =
+        "One offer is already being made. Making a second now would commit the same coins twice, so this waits until the first is done.";
+
+    /// The badge on a make that is building or waiting for confirmation.
+    pub(crate) const WORKING_BADGE: &str = "Working";
+
+    /// What the working state says. Nothing is broadcast by a make, and it says so.
+    pub(crate) const WORKING_BODY: &str =
+        "Building the offer and asking you to confirm it. Nothing is sent to the network — an offer only reaches the chain when somebody takes it.";
+
+    /// The badge on an offer that now exists.
+    pub(crate) const MADE_BADGE: &str = "Ready to share";
+
+    /// What the made state says — and what it carefully does not claim.
+    ///
+    /// "Ready to share" rather than "done", because the trade has not happened: the given side is
+    /// committed and the wanted side arrives only if somebody takes it.
+    pub(crate) const MADE_BODY: &str =
+        "Your offer exists. Send this string to whoever you want to trade with. Your coins stay committed to it until somebody takes it or you cancel it.";
+
+    /// The label on the offer string itself.
+    pub(crate) const MADE_LABEL: &str = "Offer";
+
+    /// The badge on a make that did not complete.
+    pub(crate) const FAILED_BADGE: &str = "Not made";
+
+    /// What the failure state says, in the words the failure itself used.
+    pub(crate) fn failed_body(why: &str) -> String {
+        format!("This offer was not made, and nothing was committed. {why}")
     }
 }
 
@@ -1829,6 +1967,54 @@ mod tests {
             .find("\n    }\n")
             .expect("the enumeration is a normally-indented function");
         body[..end].to_string()
+    }
+
+    /// **No shipping literal carries a run of spaces mid-sentence.**
+    ///
+    /// dig_ecosystem#3117. [`wrapped_copy_items`] finds literals that COULD lose their `\` — it
+    /// keys on an odd unescaped-quote count, the signature of a literal spanning two lines. A
+    /// literal that has ALREADY lost its `\` does not have that signature: the newline collapsed
+    /// into the string, so it is one line with an even quote count. The scanner stops seeing it,
+    /// `every_sentence` never has to name it, and the whitespace guard passes over the exact damage
+    /// it exists to catch.
+    ///
+    /// Seven offer-card sentences shipped this way in dig-app#201 and were found by a human reading
+    /// the diff. This detects the damage directly rather than the risk of it.
+    #[test]
+    fn no_shipping_literal_carries_a_space_run() {
+        let mut damaged: Vec<String> = Vec::new();
+        for (ix, line) in OWN_SOURCE.lines().enumerate() {
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            // A run only counts with text on BOTH sides. Leading indentation, and the
+            // indentation following a legitimate `\` continuation, both sit at the start of a
+            // line with nothing before them, so neither can trip this.
+            let mut seen_text = false;
+            let mut run = 0usize;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    if seen_text {
+                        run += 1;
+                    }
+                    continue;
+                }
+                if seen_text && run >= 4 {
+                    damaged.push(format!("line {}: {}", ix + 1, line.trim()));
+                    break;
+                }
+                seen_text = true;
+                run = 0;
+            }
+        }
+        assert!(
+            damaged.is_empty(),
+            "a literal carries a run of 4+ spaces mid-sentence, which reaches the screen verbatim: {damaged:#?}"
+        );
     }
 
     /// **Every wrapped sentence in this file is reachable by the whitespace guard.**
