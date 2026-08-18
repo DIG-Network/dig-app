@@ -395,6 +395,10 @@ windows = { version = "0.58", features = [
     # console for each one and paints a window for as long as it lives.
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
+    # `CreateNamedPipeW`/`ConnectNamedPipe` — the per-user `dign` CLI lane (dig_ecosystem#908). The
+    # pipe is created with a NULL security descriptor so it inherits this process token's default
+    # DACL (this user + SYSTEM), which is the per-user boundary the lane rests on.
+    "Win32_System_Pipes",
     # `CreateFileW`'s `SECURITY_ATTRIBUTES` parameter lives here, so the file-system feature needs it.
     "Win32_Security",
     # The owner-only ACL on the recovery-phrase backup (dig_ecosystem#1965). Windows honours no mode

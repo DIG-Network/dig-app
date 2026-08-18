@@ -60,6 +60,7 @@ pub mod arrivals;
 pub mod auto_update;
 pub mod cache;
 pub mod chain;
+pub mod cli_session;
 pub mod config;
 pub mod confirm;
 mod constant_time;

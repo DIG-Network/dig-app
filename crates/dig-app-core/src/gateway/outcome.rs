@@ -13,7 +13,10 @@ use serde_json::{json, Value};
 /// A documented, stable catalogue of gateway failure classes. Each maps a failure to a distinct
 /// process exit code AND a stable UPPER_SNAKE symbolic name. The overlapping codes (`OK`, `USAGE`,
 /// `IO_ERROR`) share the engine CLI's numbers so the two command lines agree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The wire encoding is the stable UPPER_SNAKE symbol [`ErrorCode::name`] returns, so the
+/// `--json` envelope, the CLI session frames, and the documented catalogue can never drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     /// 0 — success.
     Ok,
@@ -79,7 +82,7 @@ impl ErrorCode {
 }
 
 /// A gateway failure: a catalogued [`ErrorCode`], a human message, and an optional actionable hint.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[error("{message}")]
 pub struct GatewayError {
     /// The stable failure class.
@@ -108,7 +111,7 @@ impl GatewayError {
 }
 
 /// The successful outcome of a gateway command: a human `summary` and a machine `result` object.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Outcome {
     /// Human-readable, possibly multi-line, summary (stderr in the default mode).
     pub summary: String,
