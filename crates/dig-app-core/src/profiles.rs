@@ -676,11 +676,15 @@ pub enum SwitchPlan {
     /// [`WalletSlot`](crate::account::active_profile::WalletSlot) has no bare constructor for.
     NotFound,
     /// The switch can go ahead, once the person has agreed to what it changes.
+    ///
+    /// Both rows are BOXED. A [`ProfileRow`] carries three long identifiers and a root reading, so
+    /// holding two of them inline would make every value of this enum — including the two empty
+    /// variants a refusal returns — as large as the disclosure, for no reader's benefit.
     Disclose {
         /// The profile being left, as it reads on the list.
-        from: ProfileRow,
+        from: Box<ProfileRow>,
         /// The profile being moved to.
-        to: ProfileRow,
+        to: Box<ProfileRow>,
     },
 }
 
@@ -701,8 +705,8 @@ impl SwitchPlan {
         }
         match rows.iter().find(|row| row.active) {
             Some(from) => Self::Disclose {
-                from: from.clone(),
-                to: to.clone(),
+                from: Box::new(from.clone()),
+                to: Box::new(to.clone()),
             },
             // A list with no active row is an unprofiled account, which cannot hold a profile to
             // switch to either — so this is unreachable through `of_session`. Refused rather than
@@ -1242,7 +1246,11 @@ mod tests {
 
         let rows = reading.rows().expect("a read list").to_vec();
         let active: Vec<_> = rows.iter().filter(|row| row.active).collect();
-        assert_eq!(active.len(), 1, "the fixture needs exactly one active profile");
+        assert_eq!(
+            active.len(),
+            1,
+            "the fixture needs exactly one active profile"
+        );
         assert_eq!(active[0].root, anchored);
         for row in rows.iter().filter(|row| !row.active) {
             assert_eq!(
@@ -1262,7 +1270,9 @@ mod tests {
     fn an_unreadable_list_is_unchanged_by_a_root() {
         let unknown = ProfilesReading::Unknown(ProfilesUnknown::Unreadable("truncated".to_owned()));
         assert_eq!(
-            unknown.clone().with_active_root(RootReading::Anchored("0xabc".to_owned())),
+            unknown
+                .clone()
+                .with_active_root(RootReading::Anchored("0xabc".to_owned())),
             unknown
         );
     }

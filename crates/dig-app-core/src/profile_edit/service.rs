@@ -251,15 +251,12 @@ impl EditService {
             return;
         }
         let EditSeams::Wired { seam, .. } = &self.seams else {
+            // One sentence, said once: the reading and the root describe the same missing seam, and
+            // two copies of a sentence are two sentences waiting to disagree.
+            let why = "This version of DIG cannot reach the blockchain to read your profile.";
             self.finish_reading(
-                ProfileReading::Unreadable(
-                    "This version of DIG cannot reach the blockchain to read your profile."
-                        .to_string(),
-                ),
-                RootReading::Unreadable(
-                    "This version of DIG cannot reach the blockchain to read your profile."
-                        .to_string(),
-                ),
+                ProfileReading::Unreadable(why.to_string()),
+                RootReading::Unreadable(why.to_string()),
             );
             return;
         };

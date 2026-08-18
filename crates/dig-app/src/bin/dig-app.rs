@@ -1848,7 +1848,7 @@ mod tray {
     ) -> dig_app_core::profiles::ProfilesReading {
         use dig_app_core::profiles::ProfilesReading;
 
-        match session {
+        let listed = match session {
             Some(live) => ProfilesReading::of_session(live.residency.profiles()),
             None => match super::brand_dir(env) {
                 Some(dir) => {
@@ -1858,7 +1858,15 @@ mod tray {
                 // account with no profiles.
                 None => ProfilesReading::Pending,
             },
-        }
+        };
+        // The registry holds no root, so the card's third identifier comes from the one chain read
+        // this process makes about a profile — the edit service's, which is bound to the ACTIVE
+        // profile. `with_active_root` is what keeps it on that row: which profile an answer belongs
+        // to is a decision, and a binary is a test-free zone.
+        //
+        // Reading it costs nothing on a machine where nothing is installed: the service returns its
+        // unwired fallback, whose answer is `Pending`, which is exactly true there.
+        listed.with_active_root(dig_app_core::profile_edit::EditService::app().root_reading())
     }
 
     /// The profile registry a profile CONTROL should act on — the live session's when there is one,
