@@ -299,7 +299,23 @@ impl Case {
 /// pane's one formatter divides — a preview that pre-divided would photograph a figure the
 /// application does not produce.
 fn held() -> dig_app_core::wallet::overview::Balances {
-    dig_app_core::wallet::overview::Balances::of_xch_and_dig(250_000_000_000, 12_500)
+    use dig_app_core::wallet::overview::Holding;
+    use dig_app_core::wallet::state::{Asset, AssetId};
+
+    let mut balances =
+        dig_app_core::wallet::overview::Balances::of_xch_and_dig(250_000_000_000, 12_500);
+    // A THIRD token, and one this app knows nothing about but its id — so the capture shows the row
+    // an unfamiliar CAT actually produces: labelled by its shortened id, and stated in BASE UNITS
+    // rather than as a whole-coin figure nobody measured (dig_ecosystem#3077). A preview holding
+    // only the two known assets would photograph the one case that was never in doubt.
+    balances.holdings.push(Holding {
+        asset: Asset::Cat(
+            AssetId::from_hex("a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913")
+                .expect("a 64-hex asset id"),
+        ),
+        base_units: 4_200,
+    });
+    balances
 }
 
 /// Put a plausible two-way activity list in front of the Wallet tab's Activity card.
