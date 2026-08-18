@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "12.22.0"
+version = "12.23.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -91,7 +91,10 @@ dig-session = "0.6"
 # so the crate's own `PolicyAuthorizer` is now mechanically the only thing that can permit a spend.
 # Consumed as the published crates.io release (release-first, §4.1), never a git source (§3.6
 # all-crates rule).
-dig-account = "0.16"
+# 0.18 for `ProfileEditor::publish_profile` (dig_ecosystem#3041): the ONE operation that writes a
+# profile body without reading the old one first, which is the only way a profile whose body is gone
+# can be given a new one at all.
+dig-account = "0.18"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account
@@ -105,9 +108,10 @@ chacha20poly1305 = "0.10"
 # The Chia `Network` selector the dig-account money signer is parameterised by
 # (`WalletOps::money_signer(network)` → `dig_wallet_backend::types::Network`). dig-app names ONLY this
 # selector type from the wallet backend — it does NOT use its client seam (the app signs through
-# dig-account's canonical money signer, ratified Option A #1024). Pinned to the same 0.27 line
-# dig-account 0.10 resolves so the `Network` type is one shared definition, never a drifted copy.
-dig-wallet-backend = "0.27"
+# dig-account's canonical money signer, ratified Option A #1024). Pinned to the same 0.28 line
+# dig-account 0.18 resolves so the `Network` type is one shared definition, never a drifted copy: two
+# copies of this enum in the graph are a type error at the signer call, not a silent drift.
+dig-wallet-backend = "0.28"
 # The ecosystem's single source of truth for shared byte-frozen constants (dig_ecosystem#681/§4.1).
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical

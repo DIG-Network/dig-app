@@ -112,9 +112,15 @@ pub(crate) fn modal_save_offer(
     if !offer.is_possible() {
         return None;
     }
-    let ProfileReading::Known(_) = reading else {
+    // The two readings [`EditService::save`] will actually act on. Withholding Save over
+    // `BodyLost` is what made its form a dead control: the card invited a person to publish and the
+    // one row that could do it was not drawn (dig_ecosystem#3041).
+    if !matches!(
+        reading,
+        ProfileReading::Known(_) | ProfileReading::BodyLost { .. }
+    ) {
         return None;
-    };
+    }
     let label = save_verbs(tab).first().map(|verb| verb.label.clone())?;
     let session = ui.data(|d| d.get_temp::<Session>(egui::Id::new(MODAL_FORM.session)))?;
     Some((label, session.draft.is_committable()))
@@ -187,7 +193,17 @@ fn content(
             t,
             PaneState::Unreachable(crate::profile_edit::copy::INCONSISTENT.to_string()),
         ),
-        ProfileReading::Known(committed) => form(flow, t, committed, verbs, form_id),
+        // The one unreadable state that still gets the form (dig_ecosystem#3041). The banner goes
+        // FIRST and says the content is gone, so the blank fields below it are read as a re-entry
+        // rather than as this person's profile — the distinction that stops someone publishing three
+        // empty fields believing they are preserving what was there.
+        ProfileReading::BodyLost { root, draft } => {
+            let lost = PaneState::Unreachable(crate::profile_edit::copy::body_lost(root));
+            flow.place(|ui, at| (state::banner(ui, at, t, &lost), ()));
+            flow.gap(space::S3);
+            form(flow, t, draft, verbs, form_id, reading.is_re_entry())
+        }
+        ProfileReading::Known(committed) => form(flow, t, committed, verbs, form_id, false),
     }
 }
 
@@ -235,13 +251,20 @@ fn form(
     committed: &ProfileDraft,
     verbs: &[Action<TrayAction>],
     form_id: FormId,
+    re_entry: bool,
 ) -> Option<TrayAction> {
     // Loaded inside a zero-height block, because a `Flow` hands out a `Ui` only for the width of
     // one block and the session lives in that `Ui`'s own store.
     let mut session = flow.place(|ui, _| (0.0, session::load(ui, committed, form_id)));
     session.collect_a_finished_choice();
 
-    if committed.is_empty() {
+    // Suppressed for a re-entry, and the suppression is the whole point. A `BodyLost` draft is
+    // ALWAYS empty, so this drew "Your profile is empty. Nothing has gone wrong" immediately beneath
+    // a banner saying the content was destroyed — reinstating, one line lower, the exact reassurance
+    // dig_ecosystem#3041 removed. `ProfileReading::is_empty` is correctly false for that state; this
+    // consulted the DRAFT's emptiness instead, so the invariant was held at the model and bypassed
+    // at the surface. The loss banner is already overhead and says the true version.
+    if committed.is_empty() && !re_entry {
         let empty = PaneState::Empty(copy::profile_edit::EMPTY.to_string());
         flow.place(|ui, at| (state::banner(ui, at, t, &empty), ()));
         flow.gap(space::S3);
@@ -537,6 +560,56 @@ mod tests {
         );
     }
 
+    /// **dig_ecosystem#3041.** The re-entry form does NOT reinstate the reassurance its own banner
+    /// just contradicted.
+    ///
+    /// # The fixture, and why the control is the same draft
+    ///
+    /// A `BodyLost` draft is ALWAYS empty, and the empty-profile banner is drawn off
+    /// `ProfileDraft::is_empty()` — so the form said *"Your profile is empty. Nothing has gone
+    /// wrong"* one line below *"This profile's details are not on this computer."* The model was
+    /// never wrong:
+    /// `ProfileReading::is_empty()` is correctly false for the state. The surface consulted the
+    /// draft instead, which is how an invariant defended in one layer is bypassed in the next.
+    ///
+    /// The control is the SAME empty draft with `re_entry: false`, which is the only thing that
+    /// distinguishes this from an implementation that deleted the empty-state banner outright — a
+    /// person with a genuinely unfilled profile still needs it, and the fixture would look identical
+    /// either way without the second leg.
+    ///
+    /// It is drawn through the REAL form, because this defect is invisible to every assertion made
+    /// about the model and visible in one look at the composed pane.
+    #[test]
+    fn a_re_entry_form_does_not_tell_a_person_nothing_has_gone_wrong() {
+        let nothing_typed = ProfileDraft::over(std::collections::BTreeMap::new(), 0);
+
+        let re_entry = form_says_with(&nothing_typed, true);
+        assert!(
+            !re_entry.contains("Nothing has gone wrong"),
+            "the re-entry form reassured a person whose content was destroyed, directly beneath              the banner saying it was: {re_entry}"
+        );
+        assert!(
+            !re_entry.contains("Your profile is empty"),
+            "the re-entry form drew the blank fields as an unfilled profile: {re_entry}"
+        );
+
+        // The control: an ordinarily empty profile still gets the banner, so the fix suppressed a
+        // sentence in one state rather than deleting it from the form.
+        let unfilled = form_says_with(&nothing_typed, false);
+        assert!(
+            unfilled.contains("Your profile is empty") && unfilled.contains("Nothing has gone wrong"),
+            "a person who simply has not filled their profile in lost the sentence that says so:              {unfilled}"
+        );
+
+        // And the form is genuinely a form in both, so neither leg passes by drawing nothing.
+        for said in [&re_entry, &unfilled] {
+            assert!(
+                said.contains(copy::profile_edit::ALL_OPTIONAL),
+                "no form was painted at all, so the assertions above are about a blank card: {said}"
+            );
+        }
+    }
+
     /// Every string the real form painted over `committed`.
     ///
     /// Drawn through the REAL [`form`] and a REAL [`Flow`], because the property under test is what
@@ -544,6 +617,11 @@ mod tests {
     /// process-wide [`EditService`], and the sentence lives in the form regardless of how the read
     /// that produced `committed` arrived.
     fn form_says(committed: &ProfileDraft) -> String {
+        form_says_with(committed, false)
+    }
+
+    /// The same, over a form drawn as a RE-ENTRY over content that is gone.
+    fn form_says_with(committed: &ProfileDraft, re_entry: bool) -> String {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
         let t = crate::confirm::gui::theme::Theme::Light.tokens();
@@ -566,7 +644,7 @@ mod tests {
                                 egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = Flow::new(ui, column, true);
-                            super::form(&mut flow, &t, committed, &[], CARD_FORM);
+                            super::form(&mut flow, &t, committed, &[], CARD_FORM, re_entry);
                         });
                 },
             );
@@ -611,6 +689,20 @@ mod tests {
         );
         assert_eq!(label, crate::tray_menu::PUBLISH_PROFILE_LABEL);
         assert!(ready, "a dirty, valid form was not pressable");
+
+        // **dig_ecosystem#3041.** Added to THIS test rather than asserted beside it, because the
+        // omission was the defect: the sweep below listed every non-`Known` reading and `BodyLost`
+        // was simply not among them, so a suite of 1932 tests could not see that its form had no
+        // Save row at all. A separate test would have left this list free to go stale again.
+        let (lost_label, lost_ready) = offer_over(&ProfileReading::body_lost(&"aa".repeat(32)))
+            .expect(
+                "a profile whose content is unrecoverable offered no Save, so the form inviting a                  person to publish fresh details is a control that cannot be pressed",
+            );
+        assert_eq!(lost_label, crate::tray_menu::PUBLISH_PROFILE_LABEL);
+        assert!(
+            lost_ready,
+            "the re-entry form was typed into and still not pressable"
+        );
 
         for unread in [
             ProfileReading::Pending,

@@ -20,7 +20,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::commit::{start_commit, EditSeams, Watch};
+use super::commit::{start_commit, EditRoute, EditSeams, Watch};
 use super::draft::SlotChange;
 use super::field::ProfileField;
 use super::offer::ProfileEditing;
@@ -280,10 +280,27 @@ impl EditService {
         else {
             return;
         };
-        let ProfileReading::Known(_) = self.reading() else {
-            // Nothing may be committed over a profile this app has not read: the edit is computed
-            // against what was read, and against a failed read it would be computed against nothing.
-            return;
+        // Two readings may be published from, and the second is the exception that proves the rule.
+        //
+        // Nothing may be committed over a profile this app FAILED to read: the edit is computed
+        // against what was read, so against a failed read it would be computed against nothing and
+        // would publish a body missing everything the profile still held.
+        //
+        // `BodyLost` is not that. Its content is not on this computer and no seed rebuilds it, so
+        // there is nothing LOCAL left for a fresh body to lose, and refusing here is what made the
+        // remedy a silent no-op: the form invited a
+        // person to publish, the press did nothing, and the modal closed exactly as it does on a
+        // real save (dig_ecosystem#3041, the shape of #3069). The attempt now runs, and whatever the
+        // seam answers — today a refusal, because dig-account computes an edit as a delta over a
+        // body it must read first — is REPORTED rather than swallowed.
+        // The route is decided HERE, from the reading, because this is the only place that holds
+        // one. A fresh publish REPLACES the whole profile, so it is offered on exactly the state
+        // that has nothing left to replace: sending a `Known` profile down it would delete every
+        // slot the form does not carry, silently and on chain.
+        let route = match self.reading() {
+            ProfileReading::Known(_) => EditRoute::Delta,
+            ProfileReading::BodyLost { .. } => EditRoute::FreshBody,
+            _ => return,
         };
         start_commit(
             Arc::clone(seam),
@@ -293,6 +310,7 @@ impl EditService {
             // nothing, and reading it would put a node round trip on the thread that pressed Save.
             seam.store_id(),
             changes,
+            route,
             self.feed.clone(),
             Watch::default(),
         );
@@ -465,6 +483,12 @@ mod tests {
     struct Reading {
         answer: Result<ProfileSnapshot, ProfileEditError>,
         reads: Mutex<usize>,
+        /// How often a DELTA commit was ATTEMPTED. The observable for a control that must not be
+        /// silent, and half of the observable for which operation an attempt routed to.
+        commits: Mutex<usize>,
+        /// How often a FRESH publish was attempted. The other half: the two counters together are
+        /// what tell a routed attempt apart from an attempt that merely happened.
+        fresh_publishes: Mutex<usize>,
     }
 
     impl Reading {
@@ -472,6 +496,8 @@ mod tests {
             Arc::new(Self {
                 answer,
                 reads: Mutex::new(0),
+                commits: Mutex::new(0),
+                fresh_publishes: Mutex::new(0),
             })
         }
     }
@@ -488,6 +514,14 @@ mod tests {
             &self,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
+            *self.commits.lock().expect("commits") += 1;
+            Err(ProfileEditError::Locked)
+        }
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            *self.fresh_publishes.lock().expect("fresh publishes") += 1;
             Err(ProfileEditError::Locked)
         }
         fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
@@ -616,6 +650,101 @@ mod tests {
         );
     }
 
+    /// **dig_ecosystem#3041.** Publishing from the re-entry form is a real ATTEMPT, not a silent
+    /// no-op.
+    ///
+    /// # The defect this is the observable for
+    ///
+    /// The card tells a person whose content is not on this computer to type the details in and
+    /// publish
+    /// them. `save` returned early on every reading that was not `Known`, so the press reached no
+    /// seam, produced no error, and closed the modal exactly as a real save does — a promise in
+    /// copy that the code did not keep, and the dead-control shape of #3069 arriving through a door
+    /// nobody had checked.
+    ///
+    /// # Why the control is `Unreadable` and not `NoChainTransport`
+    ///
+    /// The nearest wrong fix is deleting the reading guard altogether, and against an unwired
+    /// service that version looks identical — nothing commits either way, because there is no seam.
+    /// `Unreadable` is the state that MUST still refuse over a fully wired seam: its bytes may be
+    /// perfectly intact behind a node that is merely not answering, so committing there publishes a
+    /// body missing everything the profile still holds. One state gained the attempt; the other
+    /// must not have.
+    #[test]
+    fn publishing_a_fresh_body_reaches_the_seam_while_an_unread_profile_still_refuses() {
+        let changes = vec![(ProfileField::DisplayName, SlotChange::Set("Ada".into()))];
+
+        let lost = Reading::of(Err(ProfileEditError::BodyLost {
+            root: "33".repeat(32),
+        }));
+        let service = service_over(lost.clone());
+        service.refresh();
+        assert!(matches!(settled(&service), ProfileReading::BodyLost { .. }));
+
+        service.save(changes.clone());
+        assert!(
+            waited_for(|| *lost.fresh_publishes.lock().expect("fresh publishes") > 0),
+            "pressing publish on the re-entry form reached no seam: it wrote nothing, said \
+             nothing, and closed as though it had saved"
+        );
+        // The ROUTE, not merely the attempt. A delta commit reads the published body first, so over
+        // a body that is gone it fails inside the very call meant to carry out the remedy — which
+        // is what shipped, and is indistinguishable from this version to any test that only counts
+        // attempts (dig_ecosystem#3041).
+        assert_eq!(
+            *lost.commits.lock().expect("commits"),
+            0,
+            "the fresh publish was routed through the DELTA commit, which must read the body \
+             that is not on this computer before it can write anything"
+        );
+
+        // The other side of the routing, and the reason it is a route rather than a fallback: a
+        // profile that READ must never go down the fresh path, which publishes only the typed
+        // fields and would delete every slot the form does not carry.
+        let known = Reading::of(Ok(a_profile()));
+        let editing = service_over(known.clone());
+        editing.refresh();
+        assert!(matches!(settled(&editing), ProfileReading::Known(_)));
+
+        editing.save(changes.clone());
+        assert!(
+            waited_for(|| *known.commits.lock().expect("commits") > 0),
+            "an ordinary edit reached no seam at all"
+        );
+        assert_eq!(
+            *known.fresh_publishes.lock().expect("fresh publishes"),
+            0,
+            "an ordinary edit was published as a WHOLE fresh profile, which deletes every slot \
+             the form does not carry"
+        );
+
+        // The control: a profile that merely FAILED to read still refuses, because its bytes may be
+        // intact behind a node that is not answering.
+        let unread = Reading::of(Err(ProfileEditError::ChainUnreachable("no node".into())));
+        let refusing = service_over(unread.clone());
+        refusing.refresh();
+        assert!(matches!(settled(&refusing), ProfileReading::Unreadable(_)));
+
+        refusing.save(changes);
+        assert!(
+            !waited_for(|| *unread.commits.lock().expect("commits") > 0),
+            "a commit was built over a profile this app could not read, so it would publish a \
+             body missing everything the profile still holds"
+        );
+    }
+
+    /// Poll `done` for up to a second. The commit runs on its own thread, so an immediate assertion
+    /// would be a race that passes on a fast machine and fails on a loaded one.
+    fn waited_for(done: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
     /// Pressing Save does not perform a CHAIN READ on the thread that pressed it.
     ///
     /// # What this catches, and why the count is the assertion
@@ -668,6 +797,17 @@ mod tests {
             release: Arc<std::sync::Barrier>,
         }
         impl ProfileEditSeam for Blocking {
+            /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+            /// replaces the whole profile. Refusing rather than delegating means a test that
+            /// took the wrong route fails instead of quietly passing on the other one.
+            fn publish_fresh(
+                &self,
+                _: &[(ProfileField, SlotChange)],
+            ) -> Result<CommitOutcome, ProfileEditError> {
+                Err(ProfileEditError::Refused(
+                    "this double publishes deltas only".into(),
+                ))
+            }
             fn store_id(&self) -> String {
                 a_profile().store_id
             }

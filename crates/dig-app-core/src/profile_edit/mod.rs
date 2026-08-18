@@ -66,6 +66,66 @@ pub mod copy {
                                    never been written. Publishing them writes to the blockchain and \
                                    costs a small amount of XCH.";
 
+    /// Said over a profile whose content is anchored on chain and is not on this computer
+    /// (dig_ecosystem#3041).
+    ///
+    /// # The claim is bounded by what was actually consulted
+    ///
+    /// Exactly TWO sources answer before this sentence is reached: the node's own body store, and
+    /// the seed rebuild in [`NodeProfileContent::rebuilt`](super::adapter). **No peer is ever
+    /// asked.** An earlier version of this sentence said the details "could not be found anywhere
+    /// else", which over a body that merely sits on an unsynced peer declares the data destroyed —
+    /// and then offers a remedy that MAKES it destroyed, because a fresh publish overwrites the
+    /// anchored root. A claim the code cannot support must not be what talks somebody into an
+    /// irreversible act, so the sentence now names the two places that were searched and says
+    /// plainly that no other node was asked.
+    ///
+    /// # Every clause is load-bearing
+    ///
+    /// It states the two failed lookups without hedging, because the version before that told these
+    /// people *"nothing has gone wrong"* and they went looking for a setting that would bring their
+    /// profile back. It names the root, so the claim is checkable rather than taken on trust. It
+    /// discloses that publishing REPLACES what the chain records, because that is the one fact a
+    /// person weighing an overwrite cannot get anywhere else on this card. And it ends on the door —
+    /// typing the details in again — because a statement of loss with no next action is the dead end
+    /// `professional-ui`'s first rule exists to forbid.
+    ///
+    /// # Why the remedy is worded as *add the details*
+    ///
+    /// [`label_names_a_remedy`](crate::window_model::label_names_a_remedy) checks for a remedy VERB,
+    /// and an earlier draft of this sentence cleared it only because the phrase *not by waiting,
+    /// retrying, or reinstalling* contains "install" — a verb inside a NEGATION, telling the person
+    /// the one thing that would not help. The check was passing on a coincidence. The remedy is
+    /// named with a listed verb deliberately now, so the guard is measuring the door rather than a
+    /// substring of the sentence that says there isn't one.
+    pub fn body_lost(root: &str) -> String {
+        format!(
+            "This profile's details are not on this computer. The blockchain still records that \
+             they existed (as {root}), but DIG could not find them in your node's storage and \
+             could not rebuild them from what was set when the profile was created. It has not \
+             asked any other node, so a copy may still exist elsewhere. Your profile itself is \
+             safe and still yours. To use it again, add the details below and publish them — that \
+             writes to the blockchain, costs a small amount of XCH, and replaces what the \
+             blockchain records, so any copy held elsewhere would no longer be the published one."
+        )
+    }
+
+    /// Said beneath any failure that PROVES nothing reached a mempool.
+    ///
+    /// # Why this is copy and not a sentence written into each arm
+    ///
+    /// Every control that publishes a profile spends real XCH, so the first question a person has
+    /// when one refuses them is whether it spent any. Before this, the reassurance existed only as a
+    /// constant no code path could reach ([`ProfileEditError`](super::ProfileEditError) built it for
+    /// a refusal that the fresh-body publish removed the need for), while the sentence a person
+    /// actually saw said only that their profile was unchanged — true, and silent on the money.
+    ///
+    /// It is attached to [`ProfileEditError::profile_is_unchanged`](super::ProfileEditError::profile_is_unchanged),
+    /// which is deliberately conservative: only outcomes that provably never reached a mempool
+    /// answer yes, so an attempt whose fate is UNKNOWN can never be told that nothing was spent.
+    pub const NOTHING_WAS_SPENT: &str =
+        "Nothing was sent to the blockchain and no XCH was spent. Your profile is unchanged — you can change what you typed and try again.";
+
     /// Said over a profile whose stored content does not match what the chain anchors.
     ///
     /// A refusal, worded as one. There is no retry and no repair a person can perform from here,
@@ -78,7 +138,9 @@ pub mod copy {
 
 pub use adapter::{AccountEditSeam, MintNetwork, NodeProfileContent};
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
-pub use commit::{CommitOutcome, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
+pub use commit::{
+    CommitOutcome, EditRoute, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot,
+};
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};
 pub use field::{FieldGroup, FieldKind, ProfileField};
 pub use offer::{EditBlocked, ProfileEditing};
@@ -118,6 +180,28 @@ pub enum ProfileReading {
     /// what was read and there is nothing to read. A person here is told what is true and offered
     /// the way to publish something — never a retry (dig_ecosystem#3036).
     Unpublished,
+    /// The chain anchors a root this computer cannot produce the content for (dig_ecosystem#3041).
+    ///
+    /// # The one state here that offers a draft it did not read
+    ///
+    /// Every other failure withholds the form, and for a good reason: a person typing over a profile
+    /// the app merely FAILED to read commits a body missing everything it still held. That reason is
+    /// weaker here — the node's store does not hold the body and no seed rebuilds it, so there is
+    /// nothing LOCAL left to lose — and the form is the only way back to a working profile. It is
+    /// weaker rather than absent, because no peer was asked (see [`copy::body_lost`]): publishing
+    /// still replaces the anchored root, and the sentence beneath the form says so.
+    ///
+    /// So the draft is empty and [`is_empty`](Self::is_empty) is deliberately FALSE. The two facts
+    /// together are what force a surface to draw this as *your details are not here, type them
+    /// again* rather than as *you have not filled this in yet* — which would let a person press Save
+    /// on three blank fields believing they were preserving what was there.
+    BodyLost {
+        /// The root whose content could not be produced, carried so the sentence can name it.
+        root: String,
+        /// An empty draft to type into. Empty because nothing was found, never because the profile
+        /// was empty.
+        draft: ProfileDraft,
+    },
     /// A body exists and contradicts the root the chain anchors.
     ///
     /// The refusal, which must never be drawn as weather: no draft, and no retry.
@@ -141,8 +225,17 @@ impl ProfileReading {
     pub fn of_read_failure(error: &ProfileEditError) -> Self {
         match error {
             ProfileEditError::Unpublished => Self::Unpublished,
+            ProfileEditError::BodyLost { root } => Self::body_lost(root),
             ProfileEditError::Inconsistent => Self::Inconsistent,
             other => Self::Unreadable(other.while_reading()),
+        }
+    }
+
+    /// The reading over a profile whose content is unrecoverable, with the empty form to retype into.
+    pub fn body_lost(root: &str) -> Self {
+        Self::BodyLost {
+            root: root.to_string(),
+            draft: ProfileDraft::over(BTreeMap::new(), 0),
         }
     }
 
@@ -151,20 +244,52 @@ impl ProfileReading {
         match self {
             Self::Unreadable(why) => Some(why),
             Self::Unpublished => Some(copy::UNPUBLISHED),
+            Self::BodyLost { .. } => None,
             Self::Inconsistent => Some(copy::INCONSISTENT),
             _ => None,
         }
     }
 
+    /// What to say about this reading, as an owned sentence, for the one state whose wording is
+    /// computed rather than constant.
+    ///
+    /// [`sentence`](Self::sentence) borrows, and `BodyLost`'s sentence names the root, so it has no
+    /// `&str` to lend. Rather than let that state quietly return `None` everywhere and reach a person
+    /// as a blank card, every caller that can hold a `String` uses this and gets all five.
+    pub fn says(&self) -> Option<String> {
+        match self {
+            Self::BodyLost { root, .. } => Some(copy::body_lost(root)),
+            other => other.sentence().map(str::to_string),
+        }
+    }
+
     /// The draft to edit, when there is one.
+    ///
+    /// `BodyLost` is included deliberately: its draft is EMPTY, and handing it over is what lets a
+    /// person whose content is unrecoverable type it in again (dig_ecosystem#3041). Every other
+    /// non-`Known` state still withholds it.
     pub fn draft(&self) -> Option<&ProfileDraft> {
         match self {
-            Self::Known(draft) => Some(draft),
+            Self::Known(draft) | Self::BodyLost { draft, .. } => Some(draft),
             _ => None,
         }
     }
 
+    /// Whether the form this reading offers is a RE-ENTRY over content that is gone, rather than the
+    /// profile's own values.
+    ///
+    /// The surface needs this separately from [`draft`](Self::draft), because the two cases produce
+    /// an identical empty form and only one of them may be drawn as *your profile*.
+    pub fn is_re_entry(&self) -> bool {
+        matches!(self, Self::BodyLost { .. })
+    }
+
     /// Whether the profile answered and holds nothing — the empty state, which is not a fault.
+    ///
+    /// Keyed on `Known` alone. `BodyLost` also carries an empty draft and must NOT report true: it is
+    /// not a profile with nothing in it, it is a profile whose contents were destroyed, and drawing
+    /// the second as the first is how a person comes to press Save on blank fields believing they
+    /// are keeping what was there.
     pub fn is_empty(&self) -> bool {
         matches!(self, Self::Known(draft) if draft.is_empty())
     }
@@ -265,6 +390,150 @@ mod tests {
         assert!(!said.contains("node"), "{said}");
         assert!(!said.contains("could not read"), "{said}");
         assert!(said.contains("no published information"), "{said}");
+    }
+
+    /// **dig_ecosystem#3041.** A profile whose content is unrecoverable is told the truth AND
+    /// handed the form to type it in again.
+    ///
+    /// # Why every one of these is asserted together
+    ///
+    /// Each clause alone passes against a different wrong version, and the wrong versions are the
+    /// ones this state was actually shipped as:
+    ///
+    /// * *offers a draft* alone passes for the version that reports `Known(empty)` — which is the
+    ///   destructive one, because it draws as *you have not filled this in yet* and invites Save
+    ///   over three blank fields. `is_empty()` being FALSE is what separates them.
+    /// * *is not empty and not retryable* alone passes for the version shipped before this fix,
+    ///   which reported `Unpublished` — no draft, no way out, and a false sentence.
+    /// * *says the content is gone* alone passes for a version that says so and still withholds the
+    ///   form, which is the dead end the ticket is about.
+    ///
+    /// So the property is the conjunction: honest sentence, no retry, not drawn as an empty
+    /// profile, and a form all the same.
+    #[test]
+    fn a_body_missing_here_is_named_as_missing_and_still_offers_a_form_to_retype_into() {
+        const ROOT: &str = "371a39b04742cd4d4b45bdf61a99f3838b700587fad093330dddb4766feba454";
+        let lost = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
+            root: ROOT.to_string(),
+        });
+
+        let draft = lost.draft().expect(
+            "a person whose content is not on this computer was given no way to publish a fresh body",
+        );
+        assert!(
+            draft.is_empty(),
+            "the re-entry form was pre-filled from somewhere"
+        );
+        assert!(
+            lost.is_re_entry(),
+            "the form is indistinguishable from an ordinary edit of this person's own values"
+        );
+        assert!(
+            !lost.is_empty(),
+            "a profile whose body is missing here was drawn as one never filled in"
+        );
+        assert!(
+            !lost.is_retryable(),
+            "a retry was offered for bytes this computer cannot produce"
+        );
+
+        let said = lost.says().expect("the state says nothing at all");
+        assert!(
+            said.contains(ROOT),
+            "the sentence does not name the root: {said}"
+        );
+        assert!(
+            !said.contains("Nothing has gone wrong"),
+            "the reassurance from the UNPUBLISHED sentence survived onto a destroyed profile:              {said}"
+        );
+        assert!(
+            crate::window_model::label_names_a_remedy(&said),
+            "a loss was stated with no next action: {said}"
+        );
+    }
+
+    /// **dig_ecosystem#3041 (F3).** The lost-body sentence claims no more than was searched, and
+    /// discloses the overwrite it is talking somebody into.
+    ///
+    /// # Why this is not a wording preference
+    ///
+    /// Two sources answer before this state is produced — the node's body store and the seed
+    /// rebuild — and no peer is asked. The sentence used to say the details "could not be found
+    /// anywhere else", which over a body sitting on an unsynced peer declares the data destroyed
+    /// and then offers the fresh publish, which OVERWRITES the anchored root and makes the claim
+    /// true retroactively. A person deciding whether to overwrite has to be told that only this
+    /// computer was searched and that publishing replaces what the chain records.
+    ///
+    /// # Why `Unpublished` is the control, and what it distinguishes
+    ///
+    /// The nearest wrong implementation appends the overwrite disclosure to every sentence in this
+    /// module, which satisfies any assertion made over `BodyLost` alone. `Unpublished` also offers
+    /// publishing and has nothing to overwrite, so it must NOT carry the disclosure — that is what
+    /// makes the sentence a statement about THIS state rather than boilerplate.
+    ///
+    /// It is driven through [`of_read_failure`](Self::of_read_failure) rather than by calling
+    /// [`copy::body_lost`] directly, because a test that builds the string by hand proves only that
+    /// the string exists and not that this is what a failed read reaches a person as.
+    #[test]
+    fn the_lost_body_sentence_bounds_its_claim_and_discloses_the_overwrite() {
+        let said = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
+            root: "aa".repeat(32),
+        })
+        .says()
+        .expect("says something");
+
+        assert!(
+            !said.contains("anywhere else"),
+            "the sentence claims the details are absent from places this app never asked: {said}"
+        );
+        assert!(
+            said.contains("any other node"),
+            "the sentence does not disclose that no peer was consulted: {said}"
+        );
+        assert!(
+            said.contains("replaces"),
+            "the remedy overwrites the root the chain anchors and the sentence does not say so: \
+             {said}"
+        );
+
+        let unwritten = ProfileReading::Unpublished.says().expect("says something");
+        assert!(
+            !unwritten.contains("replaces"),
+            "the overwrite disclosure is on every sentence in this module, so it says nothing \
+             about the state that actually overwrites: {unwritten}"
+        );
+    }
+
+    /// The two states a node answering `body_b64: null` can mean are worded DIFFERENTLY.
+    ///
+    /// # Why the control is the unpublished sentence and not a length check
+    ///
+    /// Both reach a person through the same node answer, and the defect was that one sentence
+    /// served both — so the only thing that proves the fix is that the two strings differ, and
+    /// specifically that the destroyed one does not inherit the reassuring one. A test over
+    /// `BodyLost` alone cannot see a re-merge, because a re-merge keeps `BodyLost` saying something.
+    #[test]
+    fn a_destroyed_profile_and_an_unwritten_one_do_not_share_a_sentence() {
+        let destroyed = ProfileReading::of_read_failure(&ProfileEditError::BodyLost {
+            root: "aa".repeat(32),
+        })
+        .says()
+        .expect("says something");
+        let unwritten = ProfileReading::Unpublished.says().expect("says something");
+
+        assert_ne!(destroyed, unwritten);
+        assert!(
+            unwritten.contains("never been written"),
+            "the control lost the claim that makes it the WRONG thing to say here: {unwritten}"
+        );
+        assert!(
+            !destroyed.contains("never been written"),
+            "a person whose details were destroyed was told they had never written any: {destroyed}"
+        );
+        // And the unwritten state still withholds the form, so widening the draft did not widen it
+        // to the state that has nothing to recover.
+        assert!(ProfileReading::Unpublished.draft().is_none());
+        assert!(!ProfileReading::Unpublished.is_re_entry());
     }
 
     #[test]

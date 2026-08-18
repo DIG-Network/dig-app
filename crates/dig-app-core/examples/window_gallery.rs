@@ -201,6 +201,17 @@ fn install_edit_fixture(named: &str) -> Option<dig_app_core::profile_edit::Profi
     struct Fixture(Result<ProfileSnapshot, ProfileEditError>);
 
     impl ProfileEditSeam for Fixture {
+        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+        /// replaces the whole profile. Refusing rather than delegating means a test that
+        /// took the wrong route fails instead of quietly passing on the other one.
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Refused(
+                "this double publishes deltas only".into(),
+            ))
+        }
         fn store_id(&self) -> String {
             self.0
                 .as_ref()

@@ -395,7 +395,7 @@ fn main() {
                     copy::stopped_body(&Stopped {
                         reached: None,
                         spent: Spent::Unknown {
-                            detail: "DIG could not start this creation because one has already                                      been started for this account, and that one may already have                                      been paid for."
+                            detail: "DIG could not start this creation because one has already been started for this account, and that one may already have been paid for."
                                 .to_owned(),
                         },
                         why: "a mint is already in progress there".to_owned(),

@@ -1980,9 +1980,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.16.0"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0396489e5aa69dd9f0cf22f247614a823d4a80be4d84bdb879ea1ca9f17803b"
+checksum = "438bb8d42097fb89193f07f502aa334c6e6f3d372bc90f92c08011e41dbe5f44"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "12.22.0"
+version = "12.23.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "12.22.0"
+version = "12.23.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2419,9 +2419,9 @@ dependencies = [
 
 [[package]]
 name = "dig-wallet-backend"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab9490cb78c6b715e1c1ce314d5f8b11e6c8c26943c9ca8aa193d754f1d1efc9"
+checksum = "696fc7e0470001717dec8d8c47b2a58a85ed5e8441efc12b684ff1688718a7bb"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "dign"
-version = "12.22.0"
+version = "12.23.0"
 dependencies = [
  "clap",
  "dig-app-core",
