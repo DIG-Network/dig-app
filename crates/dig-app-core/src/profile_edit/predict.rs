@@ -23,7 +23,7 @@
 //! needed; until it does, this is what closes the window without a crates.io release.
 
 use dig_social_profile::body::{AnchoredRoot, VerifiedBody};
-use dig_social_profile::profile::SlotEdit;
+use dig_social_profile::profile::{Profile, SlotEdit};
 use dig_social_profile::slot::SlotId;
 use dig_social_profile::value::Value;
 
@@ -53,6 +53,34 @@ pub fn predicted_body(
     Some((hex::encode(body.root()), body.as_bytes().to_vec()))
 }
 
+/// The profile a FRESH publish writes: `changes` over an empty profile, nothing read.
+///
+/// # Why the whole profile is built here and not at the seam
+///
+/// The bytes this produces are sealed to the pending file BEFORE the spend goes out
+/// (dig_ecosystem#3066), and the seam then publishes the profile it is handed. Both halves must be
+/// the SAME profile down to the byte, because the pre-spend copy is only the preimage of the root
+/// the chain confirms if it is. One constructor, used by both, is the only version of that which
+/// cannot drift.
+///
+/// [`Profile::new`] carries the schema version, which a published profile may not be without —
+/// dig-account refuses one that lacks it before spending anything.
+pub fn fresh_profile(changes: &[(ProfileField, SlotChange)]) -> Profile {
+    let mut profile = Profile::new();
+    profile.apply_all(slot_edits(changes));
+    profile
+}
+
+/// The body a fresh publish of `changes` will produce, and the root it commits to.
+///
+/// `None` when the format refuses to encode it — an over-long value, an inline image past the
+/// format's bounds. As with [`predicted_body`], that is not an error to report: it means this
+/// attempt has only the post-commit copy to fall back on.
+pub fn fresh_body(changes: &[(ProfileField, SlotChange)]) -> Option<(String, Vec<u8>)> {
+    let body = VerifiedBody::from_profile(&fresh_profile(changes)).ok()?;
+    Some((hex::encode(body.root()), body.as_bytes().to_vec()))
+}
+
 /// The editor's changes in the schema crate's own edit vocabulary.
 ///
 /// The slot ids come from [`ProfileField::slot`] and are not restated — the same single mapping
@@ -72,7 +100,7 @@ fn slot_edits(changes: &[(ProfileField, SlotChange)]) -> Vec<SlotEdit> {
 
 #[cfg(test)]
 mod tests {
-    use dig_social_profile::profile::Profile;
+
 
     use super::*;
 

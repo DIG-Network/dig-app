@@ -298,6 +298,40 @@ where
         })
     }
 
+    /// `ProfileEditor::publish_profile` — the one operation that writes a body without reading one.
+    ///
+    /// The content seam is not passed, and cannot be: dig-account's signature takes no
+    /// [`ProfileContentSource`] at all, so this route is structurally incapable of failing on the
+    /// unreadable body it exists to replace. That is the whole reason 0.18 is the floor.
+    fn publish_fresh(
+        &self,
+        changes: &[(ProfileField, SlotChange)],
+    ) -> Result<CommitOutcome, ProfileEditError> {
+        // Derived per call for `commit`'s reason: an edit spends real XCH, and an editor held
+        // across a lock-now would go on spending after the user locked.
+        let editor = self
+            .residency
+            .profile_editor()
+            .ok_or(ProfileEditError::Locked)?;
+
+        let published = editor
+            .publish_profile(
+                self.ix,
+                &self.anchor,
+                &super::predict::fresh_profile(changes),
+                &*self.chain,
+                &*self.publisher,
+                &self.network,
+            )
+            .map_err(edit_error)?;
+
+        Ok(CommitOutcome {
+            status: published.status().clone(),
+            root: hex::encode(published.root()),
+            body: published.body_bytes().to_vec(),
+        })
+    }
+
     fn confirmation(&self, root: &str) -> Result<Option<u32>, ProfileEditError> {
         let editor = self
             .residency

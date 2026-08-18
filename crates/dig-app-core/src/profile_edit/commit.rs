@@ -292,6 +292,30 @@ pub trait ProfileEditSeam: Send + Sync {
         changes: &[(ProfileField, SlotChange)],
     ) -> Result<CommitOutcome, ProfileEditError>;
 
+    /// Publish `changes` as a WHOLE fresh profile, reading nothing first.
+    ///
+    /// # Why this is a second method and not a flag on [`commit`](Self::commit)
+    ///
+    /// A commit is a DELTA: dig-account reads the published body, applies the change, and publishes
+    /// the result. Over a profile whose body bytes exist nowhere that read cannot succeed, so the
+    /// delta operation cannot succeed either — the remedy the app offers such a person would fail
+    /// inside the very call that was supposed to carry it out (dig_ecosystem#3041).
+    ///
+    /// This is `ProfileEditor::publish_profile`, whose whole capability is not reading the old body.
+    /// It is required rather than defaulted because a seam that quietly fell back to the delta path
+    /// would fail exactly where it is needed and nowhere else, which is the shape of defect this
+    /// method exists to remove.
+    ///
+    /// # What the caller is agreeing to
+    ///
+    /// Everything not in `changes` is GONE from the published profile. Only a reading that already
+    /// holds nothing — [`ProfileEditError::BodyLost`] — may take this route, and the routing is
+    /// [`EditService::save`](super::service::EditService::save)'s, not a surface's.
+    fn publish_fresh(
+        &self,
+        changes: &[(ProfileField, SlotChange)],
+    ) -> Result<CommitOutcome, ProfileEditError>;
+
     /// Whether the chain now anchors `root`, and the height of the coin that carries it.
     ///
     /// Three answers, all of which a caller must keep apart. `Ok(Some(height))` is chain-proved and
@@ -327,6 +351,19 @@ impl EditSeams {
     }
 }
 
+/// Which of the two publishing operations an attempt uses.
+///
+/// A value rather than an inference, because the two are told apart by the READING — and the
+/// reading lives in [`EditService`](super::service::EditService), not here. Passing it in keeps the
+/// decision at the one place that can make it correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditRoute {
+    /// The ordinary edit: read the published body, apply the change, publish the result.
+    Delta,
+    /// Publish a whole fresh body, reading nothing. Only over a body that is gone.
+    FreshBody,
+}
+
 /// Commit `changes`, and KEEP the bytes the commit produced.
 ///
 /// The two halves are one act. A caller cannot obtain a [`CommitOutcome`] from this function without
@@ -345,10 +382,11 @@ pub fn commit_and_persist(
     pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
+    route: EditRoute,
 ) -> Result<CommitOutcome, ProfileEditError> {
-    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes);
+    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes, route);
 
-    let outcome = match seam.commit(changes) {
+    let outcome = match publish(seam, changes, route) {
         Ok(outcome) => outcome,
         Err(error) => {
             // Only an outcome that PROVES nothing reached a mempool may drop the copy. An
@@ -401,6 +439,22 @@ pub fn commit_and_persist(
     }
 }
 
+/// Run the attempt through the operation `route` names.
+///
+/// The one place the two operations are chosen between, so a reader can see that a `FreshBody`
+/// attempt never reaches [`ProfileEditSeam::commit`] and a `Delta` one never reaches
+/// [`ProfileEditSeam::publish_fresh`].
+fn publish(
+    seam: &dyn ProfileEditSeam,
+    changes: &[(ProfileField, SlotChange)],
+    route: EditRoute,
+) -> Result<CommitOutcome, ProfileEditError> {
+    match route {
+        EditRoute::Delta => seam.commit(changes),
+        EditRoute::FreshBody => seam.publish_fresh(changes),
+    }
+}
+
 /// Work out what the edit will publish and write it down, BEFORE anything is signed or pushed.
 ///
 /// Returns the root it wrote down, or `None` when no honest prediction was available — an
@@ -413,10 +467,20 @@ fn write_down_before_the_spend(
     pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
+    route: EditRoute,
 ) -> Option<String> {
-    let snapshot = seam.read().ok()?;
-    let current_root = root_bytes(&snapshot.root)?;
-    let (root, body) = predict::predicted_body(&snapshot.body, current_root, changes)?;
+    let (root, body) = match route {
+        EditRoute::Delta => {
+            let snapshot = seam.read().ok()?;
+            let current_root = root_bytes(&snapshot.root)?;
+            predict::predicted_body(&snapshot.body, current_root, changes)?
+        }
+        // Nothing is read, and nothing CAN be: this route exists because the published body is
+        // gone. The fresh body is computed from the typed fields alone, by the same constructor the
+        // seam publishes from, so the copy written down here is the preimage of the root the chain
+        // will confirm rather than a second guess at it.
+        EditRoute::FreshBody => predict::fresh_body(changes)?,
+    };
     pending
         .remember(&PendingBody {
             store_id: store_id.to_string(),
@@ -527,6 +591,7 @@ pub fn start_commit(
     pending: Arc<dyn PendingBodies>,
     store_id: String,
     changes: Vec<(ProfileField, SlotChange)>,
+    route: EditRoute,
     feed: Feed,
     watch: Watch,
 ) {
@@ -537,7 +602,7 @@ pub fn start_commit(
         // published before the call rather than after, because the call is the slow part and a
         // person watching deserves to know which slow part it is.
         feed.publish(opening.at(Stage::Signing));
-        match commit_and_persist(&*seam, &*bodies, &*pending, &store_id, &changes) {
+        match commit_and_persist(&*seam, &*bodies, &*pending, &store_id, &changes, route) {
             Ok(outcome) => {
                 // Published BEFORE the watch begins, because the push is a fact the moment it
                 // happens and the watch takes minutes. The stage is `Pushed` — never `Confirmed` —
@@ -549,9 +614,12 @@ pub fn start_commit(
                 opening.at(Stage::Failed {
                     why: error.sentence(),
                     next: match error.profile_is_unchanged() {
-                        true => {
-                            "Your profile is unchanged. You can change it and try again.".into()
-                        }
+                        // The money sentence, on the ONLY outcomes that prove no bundle reached a
+                        // mempool. It is said here rather than in any one arm's own wording because
+                        // the question a person has after pressing a control that costs XCH is the
+                        // same question whatever refused them, and a failure that goes silent on it
+                        // leaves them to guess (dig_ecosystem#3041).
+                        true => super::copy::NOTHING_WAS_SPENT.into(),
                         false => {
                             "Open your profile again in a minute to see what it says before you \
                               try a second time."
@@ -575,6 +643,17 @@ pub(crate) mod tests_support {
     pub(crate) struct NeverSeam;
 
     impl ProfileEditSeam for NeverSeam {
+        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+        /// replaces the whole profile. Refusing rather than delegating means a test that
+        /// took the wrong route fails instead of quietly passing on the other one.
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Refused(
+                "this double publishes deltas only".into(),
+            ))
+        }
         fn store_id(&self) -> String {
             "00".repeat(32)
         }
@@ -652,6 +731,17 @@ mod tests {
     }
 
     impl ProfileEditSeam for Honest {
+        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+        /// replaces the whole profile. Refusing rather than delegating means a test that
+        /// took the wrong route fails instead of quietly passing on the other one.
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Refused(
+                "this double publishes deltas only".into(),
+            ))
+        }
         fn store_id(&self) -> String {
             STORE.into()
         }
@@ -741,6 +831,17 @@ mod tests {
     }
 
     impl ProfileEditSeam for Committing {
+        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+        /// replaces the whole profile. Refusing rather than delegating means a test that
+        /// took the wrong route fails instead of quietly passing on the other one.
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Refused(
+                "this double publishes deltas only".into(),
+            ))
+        }
         fn store_id(&self) -> String {
             STORE.into()
         }
@@ -780,6 +881,17 @@ mod tests {
     struct Refusing(ProfileEditError);
 
     impl ProfileEditSeam for Refusing {
+        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+        /// replaces the whole profile. Refusing rather than delegating means a test that
+        /// took the wrong route fails instead of quietly passing on the other one.
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Refused(
+                "this double publishes deltas only".into(),
+            ))
+        }
         fn store_id(&self) -> String {
             STORE.into()
         }
@@ -820,6 +932,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect("the edit commits");
 
@@ -844,6 +957,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect_err("a commit whose body was not kept must not report success");
 
@@ -885,6 +999,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect_err("bytes that are not the ones committed must not be accepted");
         assert!(matches!(error, ProfileEditError::NotPersisted { .. }));
@@ -901,6 +1016,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect_err("an unstorable body is a failure");
         assert!(!error.profile_is_unchanged());
@@ -943,6 +1059,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect_err("a rejection is a failure");
         assert!(error.profile_is_unchanged());
@@ -959,6 +1076,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect_err("an unanswered chain is a failure");
         assert!(!error.profile_is_unchanged());
@@ -977,6 +1095,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &a_change(),
+            EditRoute::Delta,
         );
         assert_eq!(bodies.get(STORE, NEW_ROOT), Ok(BodyRead::Nothing));
     }
@@ -1008,6 +1127,7 @@ mod tests {
             &pending,
             STORE,
             &changes,
+            EditRoute::Delta,
         )
         .expect_err("a node that will not take the body is not a success");
 
@@ -1051,6 +1171,17 @@ mod tests {
     fn a_commit_whose_outcome_is_unknown_keeps_the_copy() {
         struct PushedThenSilent;
         impl ProfileEditSeam for PushedThenSilent {
+            /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+            /// replaces the whole profile. Refusing rather than delegating means a test that
+            /// took the wrong route fails instead of quietly passing on the other one.
+            fn publish_fresh(
+                &self,
+                _: &[(ProfileField, SlotChange)],
+            ) -> Result<CommitOutcome, ProfileEditError> {
+                Err(ProfileEditError::Refused(
+                    "this double publishes deltas only".into(),
+                ))
+            }
             fn store_id(&self) -> String {
                 STORE.into()
             }
@@ -1076,6 +1207,7 @@ mod tests {
             &pending,
             STORE,
             &changes,
+            EditRoute::Delta,
         );
 
         assert_eq!(
@@ -1095,6 +1227,17 @@ mod tests {
     fn a_declined_edit_leaves_no_copy_behind() {
         struct Declining;
         impl ProfileEditSeam for Declining {
+            /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+            /// replaces the whole profile. Refusing rather than delegating means a test that
+            /// took the wrong route fails instead of quietly passing on the other one.
+            fn publish_fresh(
+                &self,
+                _: &[(ProfileField, SlotChange)],
+            ) -> Result<CommitOutcome, ProfileEditError> {
+                Err(ProfileEditError::Refused(
+                    "this double publishes deltas only".into(),
+                ))
+            }
             fn store_id(&self) -> String {
                 STORE.into()
             }
@@ -1119,6 +1262,7 @@ mod tests {
             &pending,
             STORE,
             &a_change(),
+            EditRoute::Delta,
         );
         assert!(
             pending.all().expect("reads").is_empty(),
@@ -1139,6 +1283,7 @@ mod tests {
             &pending,
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect("commits");
 
@@ -1153,7 +1298,7 @@ mod tests {
     fn a_body_the_node_verifiably_holds_is_no_longer_kept_here() {
         let pending = InMemoryPending::default();
         let node = InMemoryBodies::default();
-        let outcome = commit_and_persist(&Honest, &node, &pending, STORE, &a_change())
+        let outcome = commit_and_persist(&Honest, &node, &pending, STORE, &a_change(), EditRoute::Delta)
             .expect("the edit commits");
 
         assert!(pending.all().expect("reads").is_empty());
@@ -1174,6 +1319,7 @@ mod tests {
             &RefusingPending,
             STORE,
             &a_change(),
+            EditRoute::Delta,
         )
         .expect_err("a node that will not take the body is not a success");
 
@@ -1265,6 +1411,7 @@ mod tests {
             &InMemoryPending::default(),
             STORE,
             &changes,
+            EditRoute::Delta,
         )
         .expect("commits");
         assert_eq!(*seam.asked.lock().expect("asked"), changes);
@@ -1286,6 +1433,7 @@ mod tests {
             Arc::new(InMemoryPending::default()),
             STORE.to_string(),
             a_change(),
+            EditRoute::Delta,
             feed.clone(),
             a_brisk_watch(),
         );
@@ -1316,6 +1464,7 @@ mod tests {
             Arc::new(InMemoryPending::default()),
             STORE.to_string(),
             a_change(),
+            EditRoute::Delta,
             feed.clone(),
             a_brisk_watch(),
         );

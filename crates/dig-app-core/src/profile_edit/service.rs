@@ -20,7 +20,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::commit::{start_commit, EditSeams, Watch};
+use super::commit::{start_commit, EditRoute, EditSeams, Watch};
 use super::draft::SlotChange;
 use super::field::ProfileField;
 use super::offer::ProfileEditing;
@@ -292,12 +292,15 @@ impl EditService {
         // real save (dig_ecosystem#3041, the shape of #3069). The attempt now runs, and whatever the
         // seam answers — today a refusal, because dig-account computes an edit as a delta over a
         // body it must read first — is REPORTED rather than swallowed.
-        if !matches!(
-            self.reading(),
-            ProfileReading::Known(_) | ProfileReading::BodyLost { .. }
-        ) {
-            return;
-        }
+        // The route is decided HERE, from the reading, because this is the only place that holds
+        // one. A fresh publish REPLACES the whole profile, so it is offered on exactly the state
+        // that has nothing left to replace: sending a `Known` profile down it would delete every
+        // slot the form does not carry, silently and on chain.
+        let route = match self.reading() {
+            ProfileReading::Known(_) => EditRoute::Delta,
+            ProfileReading::BodyLost { .. } => EditRoute::FreshBody,
+            _ => return,
+        };
         start_commit(
             Arc::clone(seam),
             Arc::clone(bodies),
@@ -306,6 +309,7 @@ impl EditService {
             // nothing, and reading it would put a node round trip on the thread that pressed Save.
             seam.store_id(),
             changes,
+            route,
             self.feed.clone(),
             Watch::default(),
         );
@@ -478,8 +482,12 @@ mod tests {
     struct Reading {
         answer: Result<ProfileSnapshot, ProfileEditError>,
         reads: Mutex<usize>,
-        /// How often a commit was ATTEMPTED. The observable for a control that must not be silent.
+        /// How often a DELTA commit was ATTEMPTED. The observable for a control that must not be
+        /// silent, and half of the observable for which operation an attempt routed to.
         commits: Mutex<usize>,
+        /// How often a FRESH publish was attempted. The other half: the two counters together are
+        /// what tell a routed attempt apart from an attempt that merely happened.
+        fresh_publishes: Mutex<usize>,
     }
 
     impl Reading {
@@ -488,6 +496,7 @@ mod tests {
                 answer,
                 reads: Mutex::new(0),
                 commits: Mutex::new(0),
+                fresh_publishes: Mutex::new(0),
             })
         }
     }
@@ -505,6 +514,13 @@ mod tests {
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             *self.commits.lock().expect("commits") += 1;
+            Err(ProfileEditError::Locked)
+        }
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            *self.fresh_publishes.lock().expect("fresh publishes") += 1;
             Err(ProfileEditError::Locked)
         }
         fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
@@ -678,8 +694,36 @@ mod tests {
 
         service.save(changes.clone());
         assert!(
-            waited_for(|| *lost.commits.lock().expect("commits") > 0),
+            waited_for(|| *lost.fresh_publishes.lock().expect("fresh publishes") > 0),
             "pressing publish on the re-entry form reached no seam: it wrote nothing, said              nothing, and closed as though it had saved"
+        );
+        // The ROUTE, not merely the attempt. A delta commit reads the published body first, so over
+        // a body that is gone it fails inside the very call meant to carry out the remedy — which
+        // is what shipped, and is indistinguishable from this version to any test that only counts
+        // attempts (dig_ecosystem#3041).
+        assert_eq!(
+            *lost.commits.lock().expect("commits"),
+            0,
+            "the fresh publish was routed through the DELTA commit, which must read the body that              is gone before it can write anything"
+        );
+
+        // The other side of the routing, and the reason it is a route rather than a fallback: a
+        // profile that READ must never go down the fresh path, which publishes only the typed
+        // fields and would delete every slot the form does not carry.
+        let known = Reading::of(Ok(a_profile()));
+        let editing = service_over(known.clone());
+        editing.refresh();
+        assert!(matches!(settled(&editing), ProfileReading::Known(_)));
+
+        editing.save(changes.clone());
+        assert!(
+            waited_for(|| *known.commits.lock().expect("commits") > 0),
+            "an ordinary edit reached no seam at all"
+        );
+        assert_eq!(
+            *known.fresh_publishes.lock().expect("fresh publishes"),
+            0,
+            "an ordinary edit was published as a WHOLE fresh profile, which deletes every slot the              form does not carry"
         );
 
         // The control: a profile that merely FAILED to read still refuses, because its bytes may be
@@ -747,6 +791,17 @@ mod tests {
             release: Arc<std::sync::Barrier>,
         }
         impl ProfileEditSeam for Blocking {
+            /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+            /// replaces the whole profile. Refusing rather than delegating means a test that
+            /// took the wrong route fails instead of quietly passing on the other one.
+            fn publish_fresh(
+                &self,
+                _: &[(ProfileField, SlotChange)],
+            ) -> Result<CommitOutcome, ProfileEditError> {
+                Err(ProfileEditError::Refused(
+                    "this double publishes deltas only".into(),
+                ))
+            }
             fn store_id(&self) -> String {
                 a_profile().store_id
             }

@@ -87,6 +87,17 @@ fn install_a_profile_whose_content_is_gone() {
     struct ContentIsGone;
 
     impl ProfileEditSeam for ContentIsGone {
+        /// Never routed here: this double stands for a DELTA edit, and a fresh publish
+        /// replaces the whole profile. Refusing rather than delegating means a test that
+        /// took the wrong route fails instead of quietly passing on the other one.
+        fn publish_fresh(
+            &self,
+            _: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            Err(ProfileEditError::Refused(
+                "this double publishes deltas only".into(),
+            ))
+        }
         fn store_id(&self) -> String {
             "111e8bce53a9b46bedc6a8883b50b6e503ee333384930e93ef3054b25e992be0".to_string()
         }

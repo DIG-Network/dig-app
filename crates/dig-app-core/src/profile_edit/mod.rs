@@ -104,20 +104,21 @@ pub mod copy {
         )
     }
 
-    /// Said when a person PRESSED publish on the re-entry form and this build could not do it.
+    /// Said beneath any failure that PROVES nothing reached a mempool.
     ///
-    /// # Why this is a second sentence and not [`body_lost`] again
+    /// # Why this is copy and not a sentence written into each arm
     ///
-    /// [`body_lost`] is written for a card that is being READ: it invites the person to type the
-    /// details in and publish them. Shown back to them a moment after they did exactly that, it
-    /// tells them to do the thing they just did — a loop with no exit, and the reason
-    /// [`ProfileEditError`](super::ProfileEditError) already keeps commit wording and read wording
-    /// apart.
+    /// Every control that publishes a profile spends real XCH, so the first question a person has
+    /// when one refuses them is whether it spent any. Before this, the reassurance existed only as a
+    /// constant no code path could reach ([`ProfileEditError`](super::ProfileEditError) built it for
+    /// a refusal that the fresh-body publish removed the need for), while the sentence a person
+    /// actually saw said only that their profile was unchanged — true, and silent on the money.
     ///
-    /// The first thing it says is that nothing was sent and nothing was spent, because that is the
-    /// question a person has after pressing a control that costs XCH.
-    pub const FRESH_BODY_REFUSED: &str =
-        "DIG could not publish these details, and nothing was sent to the blockchain — no XCH was          spent. Writing a fresh set of details over content that cannot be read is not something          this version of DIG can do yet. Update DIG, and publishing them here will work.";
+    /// It is attached to [`ProfileEditError::profile_is_unchanged`](super::ProfileEditError::profile_is_unchanged),
+    /// which is deliberately conservative: only outcomes that provably never reached a mempool
+    /// answer yes, so an attempt whose fate is UNKNOWN can never be told that nothing was spent.
+    pub const NOTHING_WAS_SPENT: &str =
+        "Nothing was sent to the blockchain and no XCH was spent. Your profile is unchanged — you          can change what you typed and try again.";
 
     /// Said over a profile whose stored content does not match what the chain anchors.
     ///
@@ -131,7 +132,7 @@ pub mod copy {
 
 pub use adapter::{AccountEditSeam, MintNetwork, NodeProfileContent};
 pub use bodies::{BodyRead, BodyStore, BodyStoreError};
-pub use commit::{CommitOutcome, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
+pub use commit::{CommitOutcome, EditRoute, EditSeams, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
 pub use draft::{ProfileDraft, SlotChange, MAX_BODY_BYTES, MAX_SLOT_PAYLOAD};
 pub use field::{FieldGroup, FieldKind, ProfileField};
 pub use offer::{EditBlocked, ProfileEditing};
