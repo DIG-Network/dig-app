@@ -157,12 +157,34 @@ fn an_offer_this_app_makes_trades_the_way_the_form_was_filled_in() {
 /// printed as its raw base-unit count. Both are asserted positively AND their wrong forms negatively,
 /// because a body that printed both would be no less misleading than one that printed only the wrong
 /// one.
+///
+/// Each figure is pinned to its OWN line: both strings are present in the body whichever side they
+/// land on, so a whole-body `contains` cannot see a transposition of the two sides.
 #[test]
 fn the_make_prompt_states_both_sides_in_the_units_a_person_typed() {
     let body = a_draft().narrative().render();
 
-    assert!(body.contains("0.5 XCH"), "{body}");
-    assert!(body.contains("1.5 $DIG"), "{body}");
+    let give_line = body
+        .lines()
+        .find(|line| line.starts_with("You give:"))
+        .expect("the prompt names what leaves");
+    let receive_line = body
+        .lines()
+        .find(|line| line.starts_with("You receive:"))
+        .expect("the prompt names what arrives");
+
+    assert!(
+        give_line.contains("0.5 XCH"),
+        "the committed side belongs on the give line: {body}"
+    );
+    assert!(
+        receive_line.contains("1.5 $DIG"),
+        "the asked side belongs on the receive line: {body}"
+    );
+    assert!(
+        !receive_line.contains("0.5 XCH"),
+        "a transposed narrative promises the maker what they are committing: {body}"
+    );
     assert!(
         !body.contains("500000000000"),
         "the given side was stated as its raw mojo count: {body}"

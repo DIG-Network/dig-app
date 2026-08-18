@@ -596,6 +596,13 @@ mod tests {
     /// CAT leg is the case where the re-derived summary is most misleading, because the offered XCH is
     /// the only figure it can see and the token side is invisible to it. The two legs are different
     /// assets, so a narrative that printed one side twice fails rather than merely reading oddly.
+    ///
+    /// # Why the sides are asserted PER LINE
+    ///
+    /// Both figures appear in the body whichever line they land on, so `contains` over the whole body
+    /// is an outcome assertion that cannot see placement — it stays green under a narrative that tells
+    /// a maker they RECEIVE what they are committing. Each figure is therefore pinned to its own line,
+    /// and the transposition is refuted a second time from the other direction.
     #[test]
     fn the_make_narrative_names_the_committed_side_and_the_asked_side() {
         let draft = MakeDraft::checked(
@@ -609,13 +616,26 @@ mod tests {
 
         let body = draft.narrative().render();
 
+        let give_line = body
+            .lines()
+            .find(|line| line.starts_with("You give:"))
+            .expect("the prompt names what leaves");
+        let receive_line = body
+            .lines()
+            .find(|line| line.starts_with("You receive:"))
+            .expect("the prompt names what arrives");
+
         assert!(
-            body.contains("5 XCH"),
-            "the committed side is missing: {body}"
+            give_line.contains("5 XCH"),
+            "the COMMITTED side belongs on the give line: {body}"
         );
         assert!(
-            body.contains("1.5 $DIG"),
-            "the asked side is missing, which is the whole defect: {body}"
+            receive_line.contains("1.5 $DIG"),
+            "the ASKED side belongs on the receive line, which is the whole defect: {body}"
+        );
+        assert!(
+            !receive_line.contains("5 XCH"),
+            "a transposed narrative promises the maker what they are committing: {body}"
         );
         assert!(
             body.contains("only when somebody takes it"),
