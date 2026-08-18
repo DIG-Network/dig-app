@@ -267,10 +267,40 @@ impl ProfileEditError {
     }
 }
 
+/// Which profile an editing call is about.
+///
+/// # Why the seam is ADDRESSED rather than built pinned to one profile
+///
+/// It used to be pinned: the app constructed one seam at the active profile's index and anchor, so
+/// the only profile it could ever edit was whichever one happened to be active when the app
+/// installed it. Every other profile got an honest refusal instead of a form, and the remedy on
+/// offer was *make this one active first* — which is a chain-visible change to the account, asked
+/// for in order to fix a typo somewhere else (dig_ecosystem#3071).
+///
+/// So the profile travels with the call. The anchor is resolved from the account's own registry at
+/// the moment of use, which also means a profile minted after the seam was installed is editable
+/// without reinstalling anything.
+///
+/// A plain `u32` and not `ProfileIx`, for this module's standing reason: no dig-account type crosses
+/// into the editor, and the one place the conversion happens is
+/// [`AccountEditSeam`](super::AccountEditSeam).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProfileTarget(pub u32);
+
+impl std::fmt::Display for ProfileTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// What the editor needs of dig-account.
 ///
 /// Small on purpose: everything it takes and returns is a plain owned value, so no chia type crosses
 /// into the editor and a test can implement the whole thing in a dozen lines.
+///
+/// Every method names the profile it is about ([`ProfileTarget`]). None of them changes which
+/// profile the account is ACTIVE at — editing a profile is not using it, and a seam that quietly
+/// switched the account to reach a form would make a chain-visible change nobody asked for.
 pub trait ProfileEditSeam: Send + Sync {
     /// The store this profile's content lives in, lowercase 64-hex.
     ///
@@ -281,14 +311,19 @@ pub trait ProfileEditSeam: Send + Sync {
     /// every caller that merely needs to NAME the store perform a node round trip, and the caller
     /// that needs it is [`EditService::save`](super::service::EditService::save), which runs on the
     /// thread that paints. That is the freeze dig-app 12.6.0 was cut to fix.
-    fn store_id(&self) -> String;
+    ///
+    /// `None` when the account holds no confirmed profile at `target` — a state, not a fault: an
+    /// index can name a mint that never confirmed, or one the registry has since stopped carrying.
+    fn store_id(&self, target: ProfileTarget) -> Option<String>;
 
-    /// Read the active profile as the chain currently publishes it.
-    fn read(&self) -> Result<ProfileSnapshot, ProfileEditError>;
+    /// Read the profile at `target` as the chain currently publishes it.
+    fn read(&self, target: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError>;
 
-    /// Build, sign and push the edit, and hand back the status AND the bytes it produced.
+    /// Build, sign and push the edit to the profile at `target`, and hand back the status AND the
+    /// bytes it produced.
     fn commit(
         &self,
+        target: ProfileTarget,
         changes: &[(ProfileField, SlotChange)],
     ) -> Result<CommitOutcome, ProfileEditError>;
 
@@ -322,7 +357,11 @@ pub trait ProfileEditSeam: Send + Sync {
     /// is the ONLY thing that may become [`Stage::Confirmed`]. `Ok(None)` is a real answer — the
     /// chain was asked and does not anchor that root yet. `Err` is nobody having been able to ask,
     /// which is not the same as "not yet" and must never be drawn as one.
-    fn confirmation(&self, root: &str) -> Result<Option<u32>, ProfileEditError>;
+    fn confirmation(
+        &self,
+        target: ProfileTarget,
+        root: &str,
+    ) -> Result<Option<u32>, ProfileEditError>;
 }
 
 /// The editing seams a build actually has.
@@ -378,15 +417,16 @@ pub enum EditRoute {
 /// an ordinary absence, it is this app's own bytes missing from the place it just put them.
 pub fn commit_and_persist(
     seam: &dyn ProfileEditSeam,
+    target: ProfileTarget,
     bodies: &dyn BodyStore,
     pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
     route: EditRoute,
 ) -> Result<CommitOutcome, ProfileEditError> {
-    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes, route);
+    let foreseen = write_down_before_the_spend(seam, target, pending, store_id, changes, route);
 
-    let outcome = match publish(seam, changes, route) {
+    let outcome = match publish(seam, target, changes, route) {
         Ok(outcome) => outcome,
         Err(error) => {
             // Only an outcome that PROVES nothing reached a mempool may drop the copy. An
@@ -464,6 +504,7 @@ fn publish(
 /// failed would be a second failure invented from the first.
 fn write_down_before_the_spend(
     seam: &dyn ProfileEditSeam,
+    target: ProfileTarget,
     pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
@@ -471,7 +512,7 @@ fn write_down_before_the_spend(
 ) -> Option<String> {
     let (root, body) = match route {
         EditRoute::Delta => {
-            let snapshot = seam.read().ok()?;
+            let snapshot = seam.read(target).ok()?;
             let current_root = root_bytes(&snapshot.root)?;
             predict::predicted_body(&snapshot.body, current_root, changes)?
         }
@@ -537,6 +578,7 @@ impl Default for Watch {
 /// do not send it again.
 fn watch_for_confirmation(
     seam: &dyn ProfileEditSeam,
+    target: ProfileTarget,
     outcome: &CommitOutcome,
     opening: &Transaction,
     feed: &Feed,
@@ -546,7 +588,7 @@ fn watch_for_confirmation(
     let mut unanswered = 0usize;
 
     while std::time::Instant::now() < until {
-        match seam.confirmation(&outcome.root) {
+        match seam.confirmation(target, &outcome.root) {
             Ok(Some(height)) => {
                 feed.publish(opening.at(outcome.stage(Some(height))));
                 return;
@@ -591,6 +633,7 @@ fn watch_for_confirmation(
 )]
 pub fn start_commit(
     seam: Arc<dyn ProfileEditSeam>,
+    target: ProfileTarget,
     bodies: Arc<dyn BodyStore>,
     pending: Arc<dyn PendingBodies>,
     store_id: String,
@@ -606,13 +649,13 @@ pub fn start_commit(
         // published before the call rather than after, because the call is the slow part and a
         // person watching deserves to know which slow part it is.
         feed.publish(opening.at(Stage::Signing));
-        match commit_and_persist(&*seam, &*bodies, &*pending, &store_id, &changes, route) {
+        match commit_and_persist(&*seam, target, &*bodies, &*pending, &store_id, &changes, route) {
             Ok(outcome) => {
                 // Published BEFORE the watch begins, because the push is a fact the moment it
                 // happens and the watch takes minutes. The stage is `Pushed` — never `Confirmed` —
                 // until the chain says otherwise.
                 feed.publish(opening.at(outcome.stage(None)));
-                watch_for_confirmation(&*seam, &outcome, &opening, &feed, watch);
+                watch_for_confirmation(&*seam, target, &outcome, &opening, &feed, watch);
             }
             Err(error) => feed.publish(
                 opening.at(Stage::Failed {
@@ -652,25 +695,31 @@ pub(crate) mod tests_support {
         /// took the wrong route fails instead of quietly passing on the other one.
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Refused(
                 "this double publishes deltas only".into(),
             ))
         }
-        fn store_id(&self) -> String {
-            "00".repeat(32)
+        fn store_id(&self, _: ProfileTarget) -> Option<String> {
+            Some("00".repeat(32))
         }
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, _: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
             Err(ProfileEditError::Locked)
         }
         fn commit(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Locked)
         }
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(
+            &self,
+            _: ProfileTarget,
+            _: &str,
+        ) -> Result<Option<u32>, ProfileEditError> {
             Err(ProfileEditError::Locked)
         }
     }
@@ -741,18 +790,19 @@ mod tests {
         /// took the wrong route fails instead of quietly passing on the other one.
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Refused(
                 "this double publishes deltas only".into(),
             ))
         }
-        fn store_id(&self) -> String {
-            STORE.into()
+        fn store_id(&self, target: ProfileTarget) -> Option<String> {
+            Some(store_of(target))
         }
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, target: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
             Ok(ProfileSnapshot {
-                store_id: STORE.into(),
+                store_id: store_of(target),
                 root: hex::encode(current_body().1),
                 values: BTreeMap::new(),
                 body: current_body().0,
@@ -760,6 +810,7 @@ mod tests {
         }
         fn commit(
             &self,
+            _: ProfileTarget,
             changes: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             let (root, body) = Self::published(changes);
@@ -771,7 +822,7 @@ mod tests {
                 body,
             })
         }
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(&self, _: ProfileTarget, _: &str) -> Result<Option<u32>, ProfileEditError> {
             Ok(None)
         }
     }
@@ -787,6 +838,38 @@ mod tests {
 
     const STORE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const NEW_ROOT: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+    /// The profile these tests edit — deliberately NOT slot 0.
+    ///
+    /// A fixture that edited slot 0 would pass identically against a seam that ignores its target
+    /// and falls back to a default, which is precisely the pinned behaviour dig_ecosystem#3071
+    /// removes. Editing slot 1 makes the fallback observable.
+    const EDITED: ProfileTarget = ProfileTarget(1);
+
+    /// A different profile in the same account, standing in for the one that happens to be ACTIVE.
+    const OTHER: ProfileTarget = ProfileTarget(0);
+
+    /// A distinct store id per profile slot.
+    ///
+    /// The doubles answer this rather than one constant, so a call that reached the wrong profile
+    /// is VISIBLE in the artifact it produces — a single shared store id would let a seam ignore
+    /// its target entirely and every assertion about the pending write would still hold.
+    ///
+    /// Chosen so `store_of(EDITED) == STORE`, keeping the fixtures written before the target
+    /// existed honest without rewriting them.
+    fn store_of(target: ProfileTarget) -> String {
+        format!("{:02x}", 0x10 + target.0).repeat(32)
+    }
+
+    #[test]
+    fn the_two_fixture_profiles_have_different_stores() {
+        assert_eq!(store_of(EDITED), STORE, "the shared fixture drifted");
+        assert_ne!(
+            store_of(OTHER),
+            store_of(EDITED),
+            "two profiles sharing a store id would make every targeting assertion vacuous"
+        );
+    }
 
     /// What a seam's chain answers when asked whether a root has landed.
     #[derive(Clone)]
@@ -807,6 +890,12 @@ mod tests {
         body: Vec<u8>,
         /// What it was asked to change, for the tests that care.
         asked: Mutex<Vec<(ProfileField, SlotChange)>>,
+        /// Every profile this seam was addressed about, in order.
+        ///
+        /// Recorded rather than asserted per call, because the property under test is about the
+        /// WHOLE commit path: a seam addressed correctly once and wrongly on the follow-up read or
+        /// the confirmation watch would still write the right body under the wrong profile's name.
+        targets: Mutex<Vec<ProfileTarget>>,
         /// What its chain says when the watch looks.
         chain: Chain,
         /// How many times the watch has looked.
@@ -821,6 +910,7 @@ mod tests {
                 },
                 body: b"DIGP\x01the new body".to_vec(),
                 asked: Mutex::new(Vec::new()),
+                targets: Mutex::new(Vec::new()),
                 chain: Chain::Confirms(9_154_460),
                 looks: Mutex::new(0),
             }
@@ -835,25 +925,46 @@ mod tests {
         }
     }
 
+    impl Committing {
+        /// Note that the seam was addressed about `target`.
+        fn addressed(&self, target: ProfileTarget) {
+            self.targets.lock().expect("targets").push(target);
+        }
+
+        /// Every profile it was addressed about, deduplicated in first-seen order.
+        fn targets_seen(&self) -> Vec<ProfileTarget> {
+            let mut seen: Vec<ProfileTarget> = Vec::new();
+            for target in self.targets.lock().expect("targets").iter() {
+                if !seen.contains(target) {
+                    seen.push(*target);
+                }
+            }
+            seen
+        }
+    }
+
     impl ProfileEditSeam for Committing {
         /// Never routed here: this double stands for a DELTA edit, and a fresh publish
         /// replaces the whole profile. Refusing rather than delegating means a test that
         /// took the wrong route fails instead of quietly passing on the other one.
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Refused(
                 "this double publishes deltas only".into(),
             ))
         }
-        fn store_id(&self) -> String {
-            STORE.into()
+        fn store_id(&self, target: ProfileTarget) -> Option<String> {
+            self.addressed(target);
+            Some(store_of(target))
         }
 
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, target: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
+            self.addressed(target);
             Ok(ProfileSnapshot {
-                store_id: STORE.into(),
+                store_id: store_of(target),
                 root: hex::encode(current_body().1),
                 values: BTreeMap::new(),
                 body: current_body().0,
@@ -862,8 +973,10 @@ mod tests {
 
         fn commit(
             &self,
+            target: ProfileTarget,
             changes: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
+            self.addressed(target);
             *self.asked.lock().expect("asked") = changes.to_vec();
             Ok(CommitOutcome {
                 status: self.status.clone(),
@@ -872,7 +985,12 @@ mod tests {
             })
         }
 
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(
+            &self,
+            target: ProfileTarget,
+            _: &str,
+        ) -> Result<Option<u32>, ProfileEditError> {
+            self.addressed(target);
             *self.looks.lock().expect("looks") += 1;
             match self.chain {
                 Chain::Confirms(height) => Ok(Some(height)),
@@ -890,23 +1008,25 @@ mod tests {
         /// arrived by must not change what a person is told about it.
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(self.0.clone())
         }
-        fn store_id(&self) -> String {
-            STORE.into()
+        fn store_id(&self, target: ProfileTarget) -> Option<String> {
+            Some(store_of(target))
         }
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, _: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
             Err(self.0.clone())
         }
         fn commit(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(self.0.clone())
         }
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(&self, _: ProfileTarget, _: &str) -> Result<Option<u32>, ProfileEditError> {
             Err(self.0.clone())
         }
     }
@@ -1178,25 +1298,31 @@ mod tests {
             /// took the wrong route fails instead of quietly passing on the other one.
             fn publish_fresh(
                 &self,
+                _: ProfileTarget,
                 _: &[(ProfileField, SlotChange)],
             ) -> Result<CommitOutcome, ProfileEditError> {
                 Err(ProfileEditError::Refused(
                     "this double publishes deltas only".into(),
                 ))
             }
-            fn store_id(&self) -> String {
-                STORE.into()
+            fn store_id(&self, target: ProfileTarget) -> Option<String> {
+                Some(store_of(target))
             }
-            fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
-                Honest.read()
+            fn read(&self, target: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
+                Honest.read(target)
             }
             fn commit(
                 &self,
+                _: ProfileTarget,
                 _: &[(ProfileField, SlotChange)],
             ) -> Result<CommitOutcome, ProfileEditError> {
                 Err(ProfileEditError::ChainUnreachable("no answer".into()))
             }
-            fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            fn confirmation(
+                &self,
+                _: ProfileTarget,
+                _: &str,
+            ) -> Result<Option<u32>, ProfileEditError> {
                 Err(ProfileEditError::ChainUnreachable("no answer".into()))
             }
         }
@@ -1205,6 +1331,7 @@ mod tests {
         let changes = a_change();
         let _ = commit_and_persist(
             &PushedThenSilent,
+            EDITED,
             &InMemoryBodies::default(),
             &pending,
             STORE,
@@ -1234,25 +1361,31 @@ mod tests {
             /// took the wrong route fails instead of quietly passing on the other one.
             fn publish_fresh(
                 &self,
+                _: ProfileTarget,
                 _: &[(ProfileField, SlotChange)],
             ) -> Result<CommitOutcome, ProfileEditError> {
                 Err(ProfileEditError::Refused(
                     "this double publishes deltas only".into(),
                 ))
             }
-            fn store_id(&self) -> String {
-                STORE.into()
+            fn store_id(&self, target: ProfileTarget) -> Option<String> {
+                Some(store_of(target))
             }
-            fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
-                Honest.read()
+            fn read(&self, target: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
+                Honest.read(target)
             }
             fn commit(
                 &self,
+                _: ProfileTarget,
                 _: &[(ProfileField, SlotChange)],
             ) -> Result<CommitOutcome, ProfileEditError> {
                 Err(ProfileEditError::Rejected("declined".into()))
             }
-            fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+            fn confirmation(
+                &self,
+                _: ProfileTarget,
+                _: &str,
+            ) -> Result<Option<u32>, ProfileEditError> {
                 Ok(None)
             }
         }

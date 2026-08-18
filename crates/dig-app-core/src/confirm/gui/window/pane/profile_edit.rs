@@ -41,7 +41,9 @@ use super::state::{self, PaneState};
 use super::text;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
-use crate::profile_edit::{EditService, ProfileDraft, ProfileEditing, ProfileReading};
+use crate::profile_edit::{
+    EditService, ProfileDraft, ProfileEditing, ProfileReading, ProfileTarget,
+};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 
@@ -55,14 +57,32 @@ pub(crate) fn card(
     let offer = facts.profile_editing;
     let verbs = save_verbs(tab);
     let live = flow.live();
+    // The card on the Account tab is the ACTIVE profile's editor -- the modal is how the others are
+    // reached (dig_ecosystem#3071). Which one that is has to travel with the call now that the seam
+    // is addressable, because nothing downstream has an active profile to fall back on.
+    let target = active_target(facts);
 
     flow.place(|ui, at| {
         let (height, pressed) =
             card::interactive_card(ui, at, t, live, Some(copy::profile_edit::CARD), |inner| {
-                content(inner, t, offer, &verbs, CARD_FORM)
+                content(inner, t, target, offer, &verbs, CARD_FORM)
             });
         (height, pressed.flatten())
     })
+}
+
+/// The profile this card edits: the one the account is currently deriving at.
+///
+/// Read from the rows rather than assumed, and `None` when there is no active profile to read --
+/// which is an ordinary state for an account that has never minted, and one the card draws as its
+/// blocked banner rather than as a form over nothing.
+fn active_target(facts: &PaneFacts) -> Option<ProfileTarget> {
+    facts
+        .profiles
+        .rows()?
+        .iter()
+        .find(|row| row.active)
+        .map(|row| ProfileTarget(row.ix.0))
 }
 
 /// The same content, drawn inside the per-profile edit modal (dig_ecosystem#3069, criterion 4).
@@ -81,11 +101,16 @@ pub(crate) fn card(
 /// The Save CONTROL is the one thing built separately, with an element id of its own: drawing the
 /// model's own action in two live surfaces at once would give egui two widgets under one id, which
 /// it resolves by silently refusing one of them. The LABEL is still the model's, verbatim.
-pub(crate) fn modal_body(flow: &mut Flow, t: &Tokens, offer: ProfileEditing) {
+pub(crate) fn modal_body(
+    flow: &mut Flow,
+    t: &Tokens,
+    target: ProfileTarget,
+    offer: ProfileEditing,
+) {
     // No verbs. The Save control is drawn by the modal, PINNED below the scrolling form — a form
     // eight fields long is taller than any modal is allowed to be, and a Save at the bottom of it
     // is a control a person has to go looking for. See `modal_save_offer`.
-    content(flow, t, offer, &[], MODAL_FORM);
+    content(flow, t, Some(target), offer, &[], MODAL_FORM);
 }
 
 /// What the modal's pinned Save control should say, and whether it may be pressed.
@@ -131,12 +156,12 @@ pub(crate) fn modal_save_offer(
 /// Everything about the write from here on belongs to a worker: the bytes are persisted before the
 /// spend by [`EditService::save`] itself (dig_ecosystem#3066), and the transaction modal reports the
 /// rest. Nothing is kept here, which is why the modal may close on the very next line.
-pub(crate) fn modal_save(ui: &Ui) {
+pub(crate) fn modal_save(ui: &Ui, target: ProfileTarget) {
     let Some(session) = ui.data(|d| d.get_temp::<Session>(egui::Id::new(MODAL_FORM.session)))
     else {
         return;
     };
-    EditService::app().save(session.draft.changes());
+    EditService::app().save(target, session.draft.changes());
 }
 
 /// Drop whatever is half-typed in the modal's form.
@@ -152,6 +177,7 @@ pub(crate) fn forget_modal_typing(ctx: &egui::Context) {
 fn content(
     flow: &mut Flow,
     t: &Tokens,
+    target: Option<ProfileTarget>,
     offer: ProfileEditing,
     verbs: &[Action<TrayAction>],
     form_id: FormId,
@@ -166,11 +192,19 @@ fn content(
         return None;
     }
 
+    // No profile to read means the registry has not produced one yet. Said as *still looking*,
+    // never as a form: a form over no profile has a Save under it with nowhere to save to.
+    let Some(target) = target else {
+        let waiting = PaneState::Waiting(copy::profile_edit::MEASURING.to_string());
+        flow.place(|ui, at| (state::banner(ui, at, t, &waiting), ()));
+        return None;
+    };
+
     let service = EditService::app();
-    // Asked for on every frame and started at most once: the service holds the in-flight guard, so
-    // a pane that repaints twice a second does not open a chain read twice a second.
-    service.refresh();
-    let reading = service.reading();
+    // Asked for on every frame and started at most once: the service holds the in-flight guard per
+    // profile, so a pane that repaints twice a second does not open a chain read twice a second.
+    service.refresh(target);
+    let reading = service.reading(target);
 
     match &reading {
         ProfileReading::Pending => {
@@ -178,7 +212,7 @@ fn content(
             flow.place(|ui, at| (state::banner(ui, at, t, &waiting), ()));
             None
         }
-        ProfileReading::Unreadable(why) => unreadable(flow, t, why, form_id),
+        ProfileReading::Unreadable(why) => unreadable(flow, t, target, why, form_id),
         // Neither of these is weather and neither has a retry: asking again cannot produce content
         // nobody wrote, and cannot make a contradicted body agree with the chain. Drawing them
         // through `unreadable` would put a *try reading it again* control under both
@@ -224,7 +258,13 @@ fn settled_state(flow: &mut Flow, t: &Tokens, state: PaneState) -> Option<TrayAc
 /// asks the same question again. A read that failed with no way to ask again is the dead end
 /// `professional-ui` forbids, and routing a retry through the tray would put a *"read my profile
 /// again"* row on a menu where it means nothing.
-fn unreadable(flow: &mut Flow, t: &Tokens, why: &str, form_id: FormId) -> Option<TrayAction> {
+fn unreadable(
+    flow: &mut Flow,
+    t: &Tokens,
+    target: ProfileTarget,
+    why: &str,
+    form_id: FormId,
+) -> Option<TrayAction> {
     let state = PaneState::Unreachable(why.to_string());
     flow.place(|ui, at| (state::banner(ui, at, t, &state), ()));
     flow.gap(space::S3);
@@ -239,7 +279,7 @@ fn unreadable(flow: &mut Flow, t: &Tokens, why: &str, form_id: FormId) -> Option
     let live = flow.live();
     let pressed = flow.place(|ui, at| action::buttons(ui, at, t, live, &retry));
     if pressed == Some(Local::ReadAgain) {
-        EditService::app().read_again();
+        EditService::app().read_again(target);
     }
     None
 }
@@ -248,6 +288,7 @@ fn unreadable(flow: &mut Flow, t: &Tokens, why: &str, form_id: FormId) -> Option
 fn form(
     flow: &mut Flow,
     t: &Tokens,
+    target: ProfileTarget,
     committed: &ProfileDraft,
     verbs: &[Action<TrayAction>],
     form_id: FormId,
@@ -306,7 +347,7 @@ fn form(
     }
 
     if pressed.is_some() {
-        EditService::app().save(session.draft.changes());
+        EditService::app().save(target, session.draft.changes());
     }
     flow.place(|ui, _| (0.0, session::store(&session, ui, form_id)));
     pressed

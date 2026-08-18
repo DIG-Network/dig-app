@@ -193,7 +193,7 @@ fn install_edit_fixture(named: &str) -> Option<dig_app_core::profile_edit::Profi
     use dig_app_core::profile_edit::{
         BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService,
         ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField, ProfileSnapshot,
-        SlotChange,
+        ProfileTarget, SlotChange,
     };
 
     /// A seam that answers one fixed read and refuses to commit.
@@ -205,28 +205,36 @@ fn install_edit_fixture(named: &str) -> Option<dig_app_core::profile_edit::Profi
         /// took the wrong route fails instead of quietly passing on the other one.
         fn publish_fresh(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Refused(
                 "this double publishes deltas only".into(),
             ))
         }
-        fn store_id(&self) -> String {
-            self.0
-                .as_ref()
-                .map(|snapshot| snapshot.store_id.clone())
-                .unwrap_or_else(|_| "11".repeat(32))
+        fn store_id(&self, _: ProfileTarget) -> Option<String> {
+            Some(
+                self.0
+                    .as_ref()
+                    .map(|snapshot| snapshot.store_id.clone())
+                    .unwrap_or_else(|_| "11".repeat(32)),
+            )
         }
-        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+        fn read(&self, _: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
             self.0.clone()
         }
         fn commit(
             &self,
+            _: ProfileTarget,
             _: &[(ProfileField, SlotChange)],
         ) -> Result<CommitOutcome, ProfileEditError> {
             Err(ProfileEditError::Locked)
         }
-        fn confirmation(&self, _: &str) -> Result<Option<u32>, ProfileEditError> {
+        fn confirmation(
+            &self,
+            _: ProfileTarget,
+            _: &str,
+        ) -> Result<Option<u32>, ProfileEditError> {
             Ok(None)
         }
     }
@@ -754,7 +762,7 @@ fn main() {
             .rows()
             .and_then(|rows| rows.iter().find(|row| row.ix.0 == ix).cloned());
         match row {
-            Some(row) => (ix, row.display_name(), row.active),
+            Some(row) => (ix, row.display_name()),
             None => refuse("--edit-profile names a profile this fixture does not hold"),
         }
     });

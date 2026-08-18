@@ -17,10 +17,11 @@
 //! view like every other enablement, so the tray and the window answer that question identically.
 //! What this owns is the doing.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use super::commit::{start_commit, EditRoute, EditSeams, Watch};
+use super::commit::{start_commit, EditRoute, EditSeams, ProfileTarget, Watch};
 use super::draft::SlotChange;
 use super::field::ProfileField;
 use super::offer::ProfileEditing;
@@ -59,17 +60,27 @@ type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 pub struct EditService {
     /// What this build can do about profiles.
     seams: EditSeams,
-    /// The last answer, or the state of the read that is under way.
-    reading: Mutex<ProfileReading>,
-    /// Whether a read is already running, so a pane asking every frame starts one worker and not
-    /// a hundred and twenty.
-    reading_now: Mutex<bool>,
-    /// When the most recent read was STARTED, so [`refresh`](EditService::refresh) can hold the
-    /// rate rather than merely the concurrency. `None` until the first read.
+    /// The last answer for each profile, or the state of the read under way on it.
+    ///
+    /// Keyed by profile, because a person can open one profile's form, close it and open another's
+    /// (dig_ecosystem#3071). A single slot would answer the second form with the first profile's
+    /// content -- a form showing one profile's fields over another profile's store, with a Save
+    /// under it that computes its edit from exactly that. A profile with no entry has not been read
+    /// yet, which is [`ProfileReading::Pending`] and not a failure.
+    reading: Mutex<HashMap<ProfileTarget, ProfileReading>>,
+    /// Which profiles have a read running, so a pane asking every frame starts one worker per
+    /// profile and not a hundred and twenty.
+    reading_now: Mutex<HashSet<ProfileTarget>>,
+    /// When the most recent read of each profile was STARTED, so [`refresh`](EditService::refresh)
+    /// can hold the rate rather than merely the concurrency. Absent until that profile's first read.
+    ///
+    /// Per profile for the same reason the limit exists at all: the bound that matters is on how
+    /// often ONE profile's unchanging coin is re-asked about, and a single timestamp would make
+    /// opening a second profile wait out the first one's interval before showing anything.
     ///
     /// Timed from the start and not the finish, because that is what makes the bound exact: at most
     /// one read begins per `interval` ([`READ_INTERVAL`] in the app), whatever a single read costs.
-    last_read: Mutex<Option<Instant>>,
+    last_read: Mutex<HashMap<ProfileTarget, Instant>>,
     /// The shortest gap between two reads. [`READ_INTERVAL`] outside tests.
     interval: Duration,
     /// When the most recent drain was STARTED. `None` until the first one.
@@ -111,11 +122,11 @@ impl EditService {
     pub fn new(seams: EditSeams, feed: Feed) -> Self {
         Self {
             seams,
-            // `Pending` and not `Unreadable`: nothing has been asked yet, and an app that has not
-            // looked has not failed.
-            reading: Mutex::new(ProfileReading::Pending),
-            reading_now: Mutex::new(false),
-            last_read: Mutex::new(None),
+            // Empty, not populated: a profile nobody has asked about reads as `Pending`, and an
+            // app that has not looked has not failed.
+            reading: Mutex::new(HashMap::new()),
+            reading_now: Mutex::new(HashSet::new()),
+            last_read: Mutex::new(HashMap::new()),
             interval: READ_INTERVAL,
             // `None`, so the first frame after a launch drains immediately: a body pending at the
             // last shutdown should not wait out a cadence built for retries.
@@ -195,11 +206,11 @@ impl EditService {
         ProfileEditing::of_seams(&self.seams, has_profile, unlocked)
     }
 
-    /// The current reading. Never blocks on a chain read.
-    pub fn reading(&self) -> ProfileReading {
+    /// The current reading for `target`. Never blocks on a chain read.
+    pub fn reading(&self, target: ProfileTarget) -> ProfileReading {
         self.reading
             .lock()
-            .map(|held| held.clone())
+            .map(|held| held.get(&target).cloned().unwrap_or(ProfileReading::Pending))
             // A poisoned lock is a fault this app cannot describe, and reporting it as a profile
             // holding nothing would be a claim about someone's identity. It reports the fault.
             .unwrap_or_else(|_| {
@@ -223,31 +234,35 @@ impl EditService {
     /// So the rate is bounded here, by [`READ_INTERVAL`], which also means a REFUSED
     /// read is never retried immediately — a tight retry against a rate limit re-creates the same
     /// equilibrium at any baseline cadence.
-    pub fn refresh(self: &Arc<Self>) {
-        if !self.due() {
+    pub fn refresh(self: &Arc<Self>, target: ProfileTarget) {
+        if !self.due(target) {
             return;
         }
-        if !self.begin_reading() {
+        if !self.begin_reading(target) {
             return;
         }
         let EditSeams::Wired { seam, .. } = &self.seams else {
-            self.finish_reading(ProfileReading::Unreadable(
-                "This version of DIG cannot reach the blockchain to read your profile.".to_string(),
-            ));
+            self.finish_reading(
+                target,
+                ProfileReading::Unreadable(
+                    "This version of DIG cannot reach the blockchain to read your profile."
+                        .to_string(),
+                ),
+            );
             return;
         };
 
         let seam = Arc::clone(seam);
         let service = Arc::clone(self);
         std::thread::spawn(move || {
-            let answer = match seam.read() {
+            let answer = match seam.read(target) {
                 Ok(snapshot) => ProfileReading::Known(snapshot.draft()),
                 // Three states, three sentences: a profile that has published nothing and a node
                 // that could not be asked have opposite remedies (dig_ecosystem#3036), and the
                 // mapping that keeps them apart lives in one place.
                 Err(error) => ProfileReading::of_read_failure(&error),
             };
-            service.finish_reading(answer);
+            service.finish_reading(target, answer);
         });
     }
 
@@ -257,21 +272,21 @@ impl EditService {
     /// that visibly does nothing for fifteen seconds reads as a broken control. It is bounded by
     /// how fast a hand can press, and by the in-flight guard, so it cannot become the automatic
     /// loop [`refresh`](Self::refresh) exists to prevent.
-    pub fn read_again(self: &Arc<Self>) {
+    pub fn read_again(self: &Arc<Self>, target: ProfileTarget) {
         if let Ok(mut held) = self.reading.lock() {
-            *held = ProfileReading::Pending;
+            held.insert(target, ProfileReading::Pending);
         }
         if let Ok(mut last) = self.last_read.lock() {
-            *last = None;
+            last.remove(&target);
         }
-        self.refresh();
+        self.refresh(target);
     }
 
     /// Commit `changes`, off the calling thread, reporting into the feed.
     ///
     /// Silently does nothing without seams. The control that reaches here is withheld by the model
     /// in that state, so this is the belt to that braces rather than a path a person can take.
-    pub fn save(&self, changes: Vec<(ProfileField, SlotChange)>) {
+    pub fn save(&self, target: ProfileTarget, changes: Vec<(ProfileField, SlotChange)>) {
         let EditSeams::Wired {
             seam,
             bodies,
@@ -297,18 +312,25 @@ impl EditService {
         // one. A fresh publish REPLACES the whole profile, so it is offered on exactly the state
         // that has nothing left to replace: sending a `Known` profile down it would delete every
         // slot the form does not carry, silently and on chain.
-        let route = match self.reading() {
+        let route = match self.reading(target) {
             ProfileReading::Known(_) => EditRoute::Delta,
             ProfileReading::BodyLost { .. } => EditRoute::FreshBody,
             _ => return,
         };
+        // Asked of the seam directly, never taken from a fresh `read()`: naming the store costs
+        // nothing, and reading it would put a node round trip on the thread that pressed Save. It
+        // is also the target's OWN store: absent means the account holds no confirmed profile
+        // there, and a store id taken from anywhere else would write one profile's body under
+        // another profile's name.
+        let Some(store_id) = seam.store_id(target) else {
+            return;
+        };
         start_commit(
             Arc::clone(seam),
+            target,
             Arc::clone(bodies),
             Arc::clone(pending),
-            // Asked of the seam directly, never taken from a fresh `read()`: naming the store costs
-            // nothing, and reading it would put a node round trip on the thread that pressed Save.
-            seam.store_id(),
+            store_id,
             changes,
             route,
             self.feed.clone(),
@@ -430,36 +452,44 @@ impl EditService {
     ///
     /// A poisoned lock answers `false` — the conservative direction here is to read LESS, since the
     /// failure this paces is reading too much.
-    fn due(&self) -> bool {
+    fn due(&self, target: ProfileTarget) -> bool {
         let Ok(last) = self.last_read.lock() else {
             return false;
         };
-        last.map_or(true, |started| {
-            (self.clock)().duration_since(started) >= self.interval
+        last.get(&target).map_or(true, |started| {
+            (self.clock)().duration_since(*started) >= self.interval
         })
     }
 
-    /// Claim the right to run a read, and record when it began. `false` when one is already running.
-    fn begin_reading(&self) -> bool {
-        match self.reading_now.lock() {
-            Ok(mut running) if !*running => {
-                *running = true;
-                if let Ok(mut last) = self.last_read.lock() {
-                    *last = Some((self.clock)());
-                }
-                true
-            }
-            _ => false,
+    /// Claim the right to run a read of `target`, and record when it began.
+    ///
+    /// `false` when a read of THAT profile is already running — the claim is per profile, so
+    /// opening a second profile's form is never refused by the first one's read still being in
+    /// flight (dig_ecosystem#3071).
+    ///
+    /// The insert is the claim: `HashSet::insert` answers whether the target was absent, so the
+    /// test and the claim are one atomic act under the lock and two panes asking on the same frame
+    /// cannot both win it.
+    fn begin_reading(&self, target: ProfileTarget) -> bool {
+        let Ok(mut running) = self.reading_now.lock() else {
+            return false;
+        };
+        if !running.insert(target) {
+            return false;
         }
+        if let Ok(mut last) = self.last_read.lock() {
+            last.insert(target, (self.clock)());
+        }
+        true
     }
 
     /// Publish an answer and release the claim.
-    fn finish_reading(&self, answer: ProfileReading) {
+    fn finish_reading(&self, target: ProfileTarget, answer: ProfileReading) {
         if let Ok(mut held) = self.reading.lock() {
-            *held = answer;
+            held.insert(target, answer);
         }
         if let Ok(mut running) = self.reading_now.lock() {
-            *running = false;
+            running.remove(&target);
         }
     }
 }

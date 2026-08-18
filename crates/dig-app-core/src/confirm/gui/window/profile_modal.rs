@@ -36,7 +36,7 @@ use super::Chrome;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{rgba, space, Weight};
 use crate::confirm::gui::theme::{Theme, Tokens};
-use crate::profile_edit::{EditService, ProfileEditing};
+use crate::profile_edit::{EditService, ProfileEditing, ProfileTarget};
 use crate::window_model::Tab;
 
 /// Which profile the person asked to edit.
@@ -49,13 +49,19 @@ pub(crate) struct Editing {
     pub(crate) ix: u32,
     /// How it is named to a person, for the modal's title.
     pub(crate) name: String,
-    /// Whether it is the profile the account is currently deriving at.
+}
+
+impl Editing {
+    /// The profile this modal reads and saves through.
     ///
-    /// Load-bearing while dig_ecosystem#3071 is unlanded: the app builds ONE `AccountEditSeam`, at
-    /// the active profile's index, so the editor behind this modal can only reach that one. The
-    /// modal is wired per profile throughout and says so honestly for the others rather than
-    /// offering a form that would save somewhere else.
-    pub(crate) active: bool,
+    /// There used to be an `active` flag beside these two fields, and a whole second body drawn
+    /// when it was false: the app built ONE editing seam at the active profile's index, so every
+    /// other profile got a sentence naming a remedy instead of a form. dig_ecosystem#3071 made the
+    /// seam addressable, so the flag has no reader left — and keeping one would be a surface
+    /// deciding for itself which profiles are editable, beside a seam that can reach them all.
+    fn target(&self) -> ProfileTarget {
+        ProfileTarget(self.ix)
+    }
 }
 
 /// The window's profile editor: which profile it is open on, and how tall it came out.
@@ -218,10 +224,7 @@ fn body(flow: &mut Flow, t: &Tokens, editing: &Editing, offer: ProfileEditing) {
             inner.place(|ui, row| (text::heading(ui, row, t, &title(&editing.name)), ()));
             inner.gap(space::S4);
 
-            match editing.active {
-                true => profile_edit::modal_body(inner, t, offer),
-                false => inaccessible(inner, t, &editing.name),
-            }
+            profile_edit::modal_body(inner, t, editing.target(), offer);
         });
         (height, ())
     });
@@ -248,22 +251,20 @@ fn action_row(
     ui.painter().rect_filled(at, 0, rgba(t.surface));
 
     let mut controls = Vec::new();
-    // Offered only where the form behind it can actually be saved. A profile this build cannot
-    // reach gets no Save at all, rather than one that is permanently unpressable.
-    if editing.active {
-        // The row is drawn outside everything the body decides, so it has to ask the body's own
-        // question for itself: a Save offered over a reading that is not `Known` acts on a form that
-        // is not on screen, and publishes nothing.
-        let reading = EditService::app().reading();
-        if let Some((label, ready)) = profile_edit::modal_save_offer(ui, tab, offer, &reading) {
-            controls.push(action::Action {
-                label,
-                weight: Weight::Primary,
-                enabled: ready,
-                id: Press::Save,
-                element: egui::Id::new("dig-app-profile-modal-save"),
-            });
-        }
+    // The row is drawn outside everything the body decides, so it has to ask the body's own
+    // question for itself: a Save offered over a reading that is not `Known` acts on a form that is
+    // not on screen, and publishes nothing. Asked of THIS profile's reading, never of a shared one
+    // -- the service keeps one per profile, and the wrong one would enable Save over a form that
+    // has not loaded (dig_ecosystem#3071).
+    let reading = EditService::app().reading(editing.target());
+    if let Some((label, ready)) = profile_edit::modal_save_offer(ui, tab, offer, &reading) {
+        controls.push(action::Action {
+            label,
+            weight: Weight::Primary,
+            enabled: ready,
+            id: Press::Save,
+            element: egui::Id::new("dig-app-profile-modal-save"),
+        });
     }
     controls.push(action::Action {
         label: CANCEL.to_string(),
@@ -285,7 +286,7 @@ fn action_row(
             // Handed over and then closed, in this order and in the same frame. From here the write
             // belongs to a worker and to #3075's transaction modal; nothing about it is kept in this
             // surface, which is the whole of the module header's invariant.
-            profile_edit::modal_save(ui);
+            profile_edit::modal_save(ui, editing.target());
             true
         }
         Some(Press::Close) => true,
@@ -305,33 +306,6 @@ enum Press {
 /// The modal's title.
 fn title(name: &str) -> String {
     format!("Edit {name}")
-}
-
-/// Said over a profile this build cannot reach.
-///
-/// # Why the modal opens at all rather than the button being disabled
-///
-/// A per-profile Edit control that is permanently disabled explains nothing and reads as a feature
-/// that does not work. This says which profile DIG can change right now and what would make this
-/// one reachable, and the control that does it — *Use this profile for this account* — is on the
-/// card immediately behind this modal, which Cancel returns to.
-///
-/// It is a statement about THIS BUILD, not about DIG: dig_ecosystem#3071 makes the seam per-profile
-/// and this state stops being reachable.
-fn inaccessible(flow: &mut Flow, t: &Tokens, name: &str) {
-    let said = unreachable_sentence(name);
-    flow.place(|ui, at| (text::body(ui, at, t, &said), ()));
-}
-
-/// The sentence [`inaccessible`] paints.
-///
-/// Its own function so a test reads the words production uses, rather than a copy of them written
-/// beside the assertion — a test that lowercases a sentence it authored itself asserts nothing.
-fn unreachable_sentence(name: &str) -> String {
-    format!(
-        "DIG can only change the profile this account is currently using, and that is not {name} \
-         right now. Put it in use with “Use {name} for this account”, then edit it here."
-    )
 }
 
 /// The label that closes the modal without saving.

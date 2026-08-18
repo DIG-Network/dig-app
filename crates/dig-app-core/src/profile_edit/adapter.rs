@@ -46,7 +46,9 @@ use dig_chainsource_interface::ChainSource;
 use dig_social_profile::body::{AnchoredRoot, VerifiedBody};
 
 use super::bodies::{BodyRead, BodyStore, BodyStoreError};
-use super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
+use super::commit::{
+    CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot, ProfileTarget,
+};
 use super::draft::SlotChange;
 use super::field::ProfileField;
 use super::recovery;
@@ -179,11 +181,13 @@ fn slots_of(bytes: &[u8], root: [u8; 32]) -> Result<Vec<(u16, Vec<u8>)>, BodySto
 /// [`ControlSpendPublisher`](crate::chain::ControlSpendPublisher).
 pub struct AccountEditSeam<C, P> {
     /// The unlock the editor is derived from, per call, so a lock stops edits at the next one.
+    ///
+    /// It is also where the ANCHORS come from. The seam holds no profile of its own: each call
+    /// names one and the anchor is looked up here, at the moment of use (dig_ecosystem#3071). Two
+    /// things follow. Any profile the account holds is editable, not only whichever one was active
+    /// when the app started. And a profile minted since is editable without reinstalling the seam,
+    /// because the registry this reads is the same one the mint wrote to.
     residency: Arc<AccountResidency>,
-    /// Which profile is edited, and which key signs for it.
-    ix: ProfileIx,
-    /// The store and DID this profile is anchored to.
-    anchor: ProfileAnchor,
     /// Chain reads.
     chain: Arc<C>,
     /// The push, which takes an already-signed bundle (§908).
@@ -199,15 +203,10 @@ where
     C: ChainSource + Send + Sync,
     P: SpendPublisher + Send + Sync,
 {
-    /// Assemble the seam for the profile at `ix`, anchored at `anchor`.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each argument is a distinct authority"
-    )]
+    /// Assemble the seam over `residency`. It is not bound to any one profile — every call names
+    /// the profile it is about.
     pub fn new(
         residency: Arc<AccountResidency>,
-        ix: ProfileIx,
-        anchor: ProfileAnchor,
         chain: Arc<C>,
         publisher: Arc<P>,
         bodies: Arc<dyn BodyStore>,
@@ -215,14 +214,49 @@ where
     ) -> Self {
         Self {
             residency,
-            ix,
-            anchor,
             chain,
             publisher,
             content: NodeProfileContent::new(bodies),
             network,
         }
     }
+
+    /// The chain evidence for the profile at `target`, read from the account's registry.
+    ///
+    /// # It reads, and changes nothing
+    ///
+    /// Looking a profile up is not using it. This takes the registry's READ guard and touches no
+    /// active slot, which is the property that lets a person fix a typo in one profile without the
+    /// account silently starting to derive at it — a chain-visible change nobody asked for
+    /// (dig_ecosystem#3071).
+    fn anchor_at(&self, target: ProfileTarget) -> Option<ProfileAnchor> {
+        self.residency
+            .profiles()
+            .with_registry(|registry| anchor_in(registry, target))
+    }
+
+    /// The anchor, or the failure that names the missing profile.
+    ///
+    /// Worded for a person, because this sentence is drawn: the account holds no confirmed profile
+    /// at that index, which is a state rather than a fault — a mint that never confirmed reaches
+    /// here, and telling someone their profile is broken would be untrue.
+    fn anchor_or_missing(&self, target: ProfileTarget) -> Result<ProfileAnchor, ProfileEditError> {
+        self.anchor_at(target).ok_or_else(|| {
+            ProfileEditError::Unreadable(format!(
+                "This account has no confirmed profile in slot {target}, so there is nothing to \
+                 edit there."
+            ))
+        })
+    }
+}
+
+/// The anchor `registry` holds for `target`, if it holds one.
+///
+/// A free function over the registry rather than a method on the seam, so the lookup is testable
+/// against a registry whose ACTIVE profile is a different one — which is the whole property
+/// dig_ecosystem#3071 turns on.
+fn anchor_in(registry: &dig_account::registry::ProfileRegistry, target: ProfileTarget) -> Option<ProfileAnchor> {
+    registry.get(ProfileIx(target.0)).map(|entry| entry.anchor().clone())
 }
 
 impl<C, P> ProfileEditSeam for AccountEditSeam<C, P>
@@ -230,16 +264,18 @@ where
     C: ChainSource + Send + Sync,
     P: SpendPublisher + Send + Sync,
 {
-    /// The store's launcher id, decided when the seam was built. No chain read, by design.
-    fn store_id(&self) -> String {
-        hex::encode(self.anchor.store_launcher_id())
+    /// The store's launcher id, read from the registry. No chain read, by design.
+    fn store_id(&self, target: ProfileTarget) -> Option<String> {
+        self.anchor_at(target)
+            .map(|anchor| hex::encode(anchor.store_launcher_id()))
     }
 
-    fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+    fn read(&self, target: ProfileTarget) -> Result<ProfileSnapshot, ProfileEditError> {
+        let anchor = self.anchor_or_missing(target)?;
         // Cleared first: the observation below is about THIS read, and a stale one would report a
         // node that has since stopped answering as a profile that publishes nothing.
         self.content.forget_absence();
-        let snapshot = dig_account::edit::read_profile(&self.anchor, &*self.chain, &self.content)
+        let snapshot = dig_account::edit::read_profile(&anchor, &*self.chain, &self.content)
             .map_err(|error| match error {
             // The crate flattens every content failure into one string, and this is the only
             // layer that still knows which of them it was.
@@ -256,7 +292,7 @@ where
             other => edit_error(other),
         })?;
         Ok(ProfileSnapshot {
-            store_id: self.store_id(),
+            store_id: hex::encode(anchor.store_launcher_id()),
             root: hex::encode(snapshot.root()),
             values: snapshot
                 .fields()
@@ -269,8 +305,10 @@ where
 
     fn commit(
         &self,
+        target: ProfileTarget,
         changes: &[(ProfileField, SlotChange)],
     ) -> Result<CommitOutcome, ProfileEditError> {
+        let anchor = self.anchor_or_missing(target)?;
         // Derived per call, never cached: an edit spends real XCH, so an editor kept across a
         // lock-now or an idle timeout would go on spending after the user locked. Exactly the rule
         // `AccountResidency::profile_minter` is written to.
@@ -281,8 +319,10 @@ where
 
         let committed = editor
             .commit_edit(
-                self.ix,
-                &self.anchor,
+                // The index the target names, so the key that signs is the one that owns the
+                // profile being changed — never whichever profile the account is active at.
+                ProfileIx(target.0),
+                &anchor,
                 &batch_of(changes),
                 &*self.chain,
                 &self.content,
@@ -305,8 +345,10 @@ where
     /// unreadable body it exists to replace. That is the whole reason 0.18 is the floor.
     fn publish_fresh(
         &self,
+        target: ProfileTarget,
         changes: &[(ProfileField, SlotChange)],
     ) -> Result<CommitOutcome, ProfileEditError> {
+        let anchor = self.anchor_or_missing(target)?;
         // Derived per call for `commit`'s reason: an edit spends real XCH, and an editor held
         // across a lock-now would go on spending after the user locked.
         let editor = self
@@ -316,8 +358,10 @@ where
 
         let published = editor
             .publish_profile(
-                self.ix,
-                &self.anchor,
+                // The index the target names, so the key that signs is the one that owns the
+                // profile being replaced — never whichever profile the account is active at.
+                ProfileIx(target.0),
+                &anchor,
                 &super::predict::fresh_profile(changes),
                 &*self.chain,
                 &*self.publisher,
@@ -332,7 +376,12 @@ where
         })
     }
 
-    fn confirmation(&self, root: &str) -> Result<Option<u32>, ProfileEditError> {
+    fn confirmation(
+        &self,
+        target: ProfileTarget,
+        root: &str,
+    ) -> Result<Option<u32>, ProfileEditError> {
+        let anchor = self.anchor_or_missing(target)?;
         let editor = self
             .residency
             .profile_editor()
@@ -342,14 +391,14 @@ where
         // Whether the chain anchors it at all. This answers yes/no and carries no height, which is
         // why the height is read separately below rather than inferred from the yes.
         if editor
-            .edit_status(&self.anchor, wanted, &*self.chain)
+            .edit_status(&anchor, wanted, &*self.chain)
             .map_err(edit_error)?
             .confirmed_root()
             .is_none()
         {
             return Ok(None);
         }
-        self.tip_height()
+        self.tip_height(&anchor)
     }
 }
 
@@ -367,10 +416,10 @@ where
     /// A tip with no confirmed height is answered `Ok(None)` — *the chain does not prove it yet* —
     /// rather than a fabricated block. The surface then keeps showing the write as pushed, which is
     /// the conservative direction: it under-claims rather than naming a block nobody read.
-    fn tip_height(&self) -> Result<Option<u32>, ProfileEditError> {
+    fn tip_height(&self, anchor: &ProfileAnchor) -> Result<Option<u32>, ProfileEditError> {
         let lineage = self
             .chain
-            .resolve_singleton_lineage(self.anchor.store_launcher_id())
+            .resolve_singleton_lineage(anchor.store_launcher_id())
             .map_err(|e| ProfileEditError::ChainUnreachable(e.to_string()))?;
         let Some(lineage) = lineage else {
             return Ok(None);

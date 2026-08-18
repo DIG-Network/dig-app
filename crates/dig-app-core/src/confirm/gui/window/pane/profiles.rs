@@ -268,7 +268,6 @@ fn profile_row(
     let opened = Editing {
         ix: profile.ix.0,
         name: name.clone(),
-        active: profile.active,
     };
     let live = flow.live();
 

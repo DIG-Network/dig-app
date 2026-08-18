@@ -209,7 +209,7 @@ pub fn photograph(
     size: Vec2,
     view: Arc<dyn Fn() -> crate::tray_menu::TrayView + Send + Sync>,
     path: &std::path::Path,
-    editing: Option<(u32, String, bool)>,
+    editing: Option<(u32, String)>,
 ) -> Result<(usize, usize), String> {
     // The shell reads its theme from a store and its toggle writes back to one. A scratch store
     // keeps both away from the person's own preference — a gallery has no business changing settings
@@ -228,9 +228,9 @@ pub fn photograph(
     // The edit modal is opened by an ARGUMENT rather than by clicking its control, for the reason
     // the tab is: synthetic input takes the foreground off the window and photographs whatever was
     // behind it (dig_ecosystem#2326). Nothing else about the modal differs from the shipped one.
-    if let Some((ix, name, active)) = editing {
+    if let Some((ix, name)) = editing {
         app.profile_modal
-            .open(super::profile_modal::Editing { ix, name, active });
+            .open(super::profile_modal::Editing { ix, name });
     }
 
     let recorded = Arc::new(Mutex::new(None));

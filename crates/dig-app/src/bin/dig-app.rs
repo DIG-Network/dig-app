@@ -260,16 +260,20 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     let Some(session) = session else {
         return;
     };
-    // The profile to edit is the ACTIVE one, and its anchor is the chain evidence that it exists —
-    // a DID singleton and the store launched from it. An account with no confirmed profile has
-    // nothing to anchor an edit to, which is a state and not a fault.
-    let Some((ix, anchor)) = session.residency.profiles().with_registry(|registry| {
-        registry
-            .active()
-            .map(|active| (active.ix(), active.entry().anchor().clone()))
-    }) else {
+    // An account with no CONFIRMED profile has nothing to edit at all, which is a state and not a
+    // fault — the seam is installed on a later frame, once a mint has confirmed.
+    //
+    // Only the EXISTENCE of a profile is checked here. Which one an edit is about travels with the
+    // call and its anchor is looked up then (dig_ecosystem#3071), so this install is not pinned to
+    // whichever profile happened to be active at this instant, and a profile minted afterwards is
+    // editable without reinstalling anything.
+    let profiles = session
+        .residency
+        .profiles()
+        .with_registry(|registry| registry.entries().len());
+    if profiles == 0 {
         return;
-    };
+    }
     // Both body methods are token-gated. Without a token the store can only refuse, and a seam whose
     // persistence half can only refuse must not offer a Save that spends first and fails second.
     let Some(token) = dig_app_core::control::load_control_token() else {
@@ -307,8 +311,6 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     }
     let seam = AccountEditSeam::new(
         std::sync::Arc::new(session.residency.clone()),
-        ix,
-        anchor,
         std::sync::Arc::new(dig_app_core::chain::ControlChainSource::new(endpoint)),
         std::sync::Arc::new(dig_app_core::chain::ControlSpendPublisher::new(endpoint)),
         std::sync::Arc::clone(&bodies),
@@ -327,7 +329,11 @@ fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
         // than a second progress display beside it.
         dig_app_core::transaction::Feed::app(),
     )));
-    tracing::info!(%ix, "profile editing wired: edits made here will be published on chain");
+    tracing::info!(
+        profiles,
+        "profile editing wired: edits made to ANY of this account's profiles will be published on \
+         chain"
+    );
 }
 
 /// The sealed file this profile's un-stored bodies wait in, or `None` when there is nowhere to put
