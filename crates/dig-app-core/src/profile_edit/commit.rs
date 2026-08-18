@@ -585,6 +585,10 @@ fn watch_for_confirmation(
 /// stored its body.
 ///
 /// Returns immediately. Everything a surface needs to draw is published to the feed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct authority: what to publish, which operation publishes it,               where the bytes go, and where progress is reported"
+)]
 pub fn start_commit(
     seam: Arc<dyn ProfileEditSeam>,
     bodies: Arc<dyn BodyStore>,
