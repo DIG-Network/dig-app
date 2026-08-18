@@ -133,20 +133,42 @@ impl ProfileRow {
 /// body the chain currently points at. A card naming only the permanent half can show two healthy
 /// identifiers over a profile whose published content is missing.
 ///
-/// # Every value here came off the chain, and nothing else can construct one
+/// # A value can only be spoken here by a chain read — and what that does NOT cover
 ///
-/// [`Anchored`](Self::Anchored) is reachable only through [`of_read`](Self::of_read), whose input is
-/// the result of a verified chain read. A root this app merely EXPECTS — the prediction a commit
-/// carries before the chain confirms it — has no route to this type and therefore none to the card.
-/// That is deliberate and load-bearing: a predicted root drawn in the same treatment as a confirmed
-/// one would have a person check the wrong hash against a block explorer and conclude their profile
-/// is fine.
+/// A predicted root drawn in the same treatment as a confirmed one would have a person check the
+/// wrong hash against a block explorer and conclude their profile is fine. So the type carries as
+/// much of that rule as a type can carry, and this section says exactly where the type stops and
+/// the convention starts — because a guarantee described as structural, but held only by habit,
+/// is the more dangerous of the two.
+///
+/// ENFORCED by the compiler: [`Anchored`](Self::Anchored) is `#[non_exhaustive]`, so no code
+/// outside this crate can name a root and wrap it. `RootReading::Anchored(outcome.root)` — the
+/// one-line mistake, and the one that would land in the shell binary, where no test can reach it —
+/// does not compile:
+///
+/// ```compile_fail
+/// # use dig_app_core::profiles::RootReading;
+/// // A root this app merely PREDICTS. Outside this crate there is no way to say it is anchored.
+/// let predicted = String::from("0x22222222");
+/// let _ = RootReading::Anchored(predicted);
+/// ```
+///
+/// NOT enforced, and held by convention instead: within this crate, [`of_read`](Self::of_read) is
+/// the only constructor of [`Anchored`](Self::Anchored), and it takes the result of a verified
+/// chain read. [`ProfileSnapshot`] keeps public fields — the window gallery builds one to preview
+/// a card without a chain — so a caller who assembles a snapshot around a predicted root can pass
+/// it to `of_read` and be believed. That is not a hole a person stumbles into: it is fabricating a
+/// chain read, deliberately, and calling the read seam a liar. The one accidental route is the one
+/// the compiler now refuses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RootReading {
     /// Nobody has read this profile from the chain yet. Not a fault, and not an absence of content.
     #[default]
     Pending,
     /// The root the chain anchors, `0x`-prefixed lowercase hex, as a verified read returned it.
+    ///
+    /// `#[non_exhaustive]` so that only this crate can construct one, and only from a chain read.
+    #[non_exhaustive]
     Anchored(String),
     /// The store is real and nothing has ever been published under it, so there is no current root.
     ///

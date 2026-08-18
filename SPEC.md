@@ -2027,9 +2027,13 @@ publish and is what says which body the chain currently points at, so a card nam
 can present a profile whose published content is missing as entirely healthy.
 `profiles::RootReading` carries the value, is labelled on screen as what the CHAIN holds, and has four
 states: nothing has been read yet, a chain-read root, a store that has never published, and a read
-that failed with its reason. `RootReading::of_read` is its only route to a value and takes the result
-of a verified chain read — so a root this app merely PREDICTS, such as the one a commit carries before
-confirmation, has no path to this surface. A profile whose body is unrecoverable still shows its
+that failed with its reason. `RootReading::Anchored` is `#[non_exhaustive]`, so only `dig-app-core` may
+construct one, and within that crate `RootReading::of_read` — which takes the result of a verified
+chain read — is its only constructor. A root this app merely PREDICTS, such as the one a commit
+carries before confirmation, therefore cannot be named as anchored by any surface outside the crate,
+and is not named as anchored by any inside it. The compiler enforces the first half; the second is a
+convention, because `ProfileSnapshot` is constructible and a caller who assembles one around a
+predicted root would be believed by `of_read`. A profile whose body is unrecoverable still shows its
 anchored root, matching the re-entry sentence the editor draws for the same root (§3.1c).
 
 **A root MUST be recorded only against the profile it was read for.** The app holds one profile-edit
