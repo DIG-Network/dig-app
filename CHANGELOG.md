@@ -4,10 +4,13 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
-## [12.23.0] - 2026-08-18
+## [12.28.0] - 2026-08-18
 
 ### Features
-- **wallet:** Make and cancel Chia offers, with both legs of the trade named at the confirm gate (#201)
+- **wallet:** Hold and send any CAT, not just $DIG (#200)- **wallet:** Make and cancel Chia offers (#201)- **wallet:** Drag an offer file onto the Offers card to load it (#203)
+
+### Bug Fixes
+- **profile:** Let a profile whose content is unrecoverable be given a fresh body (#198)- **profile:** Name the locked-account state, copyable deposit address, consistent profile naming (#202)
 
 ## [12.22.0] - 2026-08-18
 
