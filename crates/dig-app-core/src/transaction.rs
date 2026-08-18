@@ -32,7 +32,6 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::amount::format_xch;
-use crate::wallet::state::Asset;
 
 /// How far along a chain write is.
 ///

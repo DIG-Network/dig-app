@@ -39,7 +39,6 @@ use crate::account::password::{establish_password, request_password, PasswordOut
 use crate::amount::{format_dig, format_xch};
 use crate::confirm::{native_confirmer, ConfirmDecision, NativeConfirmer, SignPrompt};
 use crate::keystore::CredentialStore;
-use crate::wallet::state::Asset;
 
 /// The number of random bytes in a generated account master password before hex-encoding — 32 bytes
 /// (256 bits) of CSPRNG entropy, well beyond any Argon2id-stretched brute-force reach.

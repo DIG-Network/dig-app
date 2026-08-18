@@ -48,7 +48,9 @@ use super::engine::{
     CoinsRequest, CoinsResponse, WalletEngine,
 };
 use super::overview::{AddressReading, BalanceReading, ChainSource, WalletOverview};
-use super::state::{Asset, CoinRecord};
+#[cfg(test)]
+use super::state::Asset;
+use super::state::CoinRecord;
 use super::WalletError;
 
 /// How long a balance reading is reused before the node is asked again.

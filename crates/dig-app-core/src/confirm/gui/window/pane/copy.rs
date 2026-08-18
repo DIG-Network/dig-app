@@ -908,6 +908,20 @@ pub(crate) mod wallet {
     /// holding rather than as a warning about it — the figure is real, and the node is working.
     pub(crate) const BALANCE_SYNCING_BADGE: &str = "Still syncing";
 
+    /// The readout label for a CAT dig-app knows nothing about but its id.
+    ///
+    /// It says TOKEN and not a guessed name, because a name is a fact this app has not been told —
+    /// the value beside it carries the shortened asset id, which is the only thing it does know
+    /// (dig_ecosystem#3077).
+    pub(crate) const CAT_LABEL: &str = "Token";
+
+    /// The unit shown beside a figure this app can only state in base units.
+    ///
+    /// Written out rather than abbreviated, because "base units" is the whole claim: the figure is
+    /// NOT a whole-coin amount, and a reader who takes it for one is out by whatever factor this
+    /// token's real precision turns out to be.
+    pub(crate) const BASE_UNITS_SUFFIX: &str = "base units";
+
     /// The unit shown beside the native-coin figure.
     pub(crate) const XCH_UNIT: &str = "XCH";
     /// The unit shown beside the DIG CAT figure.
