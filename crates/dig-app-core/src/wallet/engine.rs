@@ -299,7 +299,7 @@ mod tests {
     fn dig_coin(amount: u64) -> CoinRecord {
         CoinRecord {
             coin_id: format!("{amount:064x}"),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             amount,
         }
     }
@@ -324,7 +324,7 @@ mod tests {
         };
         let request = CoinsRequest {
             address: "xch1example".to_string(),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
         };
         assert_eq!(engine.coins(request.clone()).unwrap().coins.len(), 2);
         assert_eq!(engine.balance(request).unwrap().balance, 150);
@@ -348,7 +348,7 @@ mod tests {
     fn requests_round_trip_through_json() {
         let request = CoinsRequest {
             address: "xch1abc".to_string(),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert_eq!(

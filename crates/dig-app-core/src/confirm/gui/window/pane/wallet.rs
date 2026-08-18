@@ -583,7 +583,7 @@ fn figures(held: &Balances) -> Vec<Readout> {
         Readout::new(
             copy::wallet::DIG_LABEL,
             Value::Measure {
-                amount: format_amount(Asset::Dig, held.dig_units),
+                amount: format_amount(Asset::DIG, held.dig_units),
                 unit: copy::wallet::DIG_UNIT.to_string(),
             },
         ),
@@ -1198,7 +1198,7 @@ fn asset_chooser(
         },
         Choice {
             label: copy::wallet::SEND_ASSET_DIG.to_string(),
-            id: Asset::Dig,
+            id: Asset::DIG,
         },
     ];
     let selected = options.iter().position(|choice| choice.id == asset);

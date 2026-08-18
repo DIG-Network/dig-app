@@ -14,7 +14,7 @@
 //! implementation, here, and every surface asks it. The asset decides the divisor; a caller cannot
 //! omit the asset, because the type will not let it.
 
-use crate::wallet::state::Asset;
+use crate::wallet::state::{Asset, AssetId};
 
 /// Decimal places in native Chia: one XCH is 10^12 mojos.
 pub const XCH_DECIMALS: u32 = 12;
@@ -25,22 +25,90 @@ pub const XCH_DECIMALS: u32 = 12;
 /// render CAT amounts as XCH for the same reason.
 pub const CAT_DECIMALS: u32 = 3;
 
-impl Asset {
-    /// How many decimal places this asset's base unit sits behind one whole coin.
-    pub const fn decimals(self) -> u32 {
-        match self {
-            Asset::Xch => XCH_DECIMALS,
-            Asset::Dig => CAT_DECIMALS,
-        }
+/// How many decimal places `asset`'s base unit sits behind one whole coin, or `None` when dig-app
+/// does not know this token's precision.
+///
+/// # An unknown precision is NOT three
+///
+/// Three is the Chia CAT *convention*, not a rule: a CAT's decimals live in an off-chain registry
+/// and a token is free to carry any number of them. dig-app knows exactly two assets by definition
+/// — native XCH at [`XCH_DECIMALS`], and $DIG at [`CAT_DECIMALS`] — and for a CAT a person added by
+/// asset id it knows nothing at all. Answering `3` there would be a GUESS applied as a divisor, and
+/// a wrong divisor is precisely how dig_ecosystem#2295 showed a whole $DIG as `0.000000001`. The
+/// only difference is that this guess would be wrong by an unknown factor rather than a known one,
+/// so nothing would look obviously broken.
+///
+/// `None` is therefore load-bearing: it forces every caller to render base units WITH the words
+/// (see [`amount_with_unit`]) instead of a numeral that reads like a whole-coin figure. It is the
+/// same discipline as
+/// [`BalanceReading::Unknown`](crate::wallet::overview::BalanceReading::Unknown) — a thing the app
+/// does not know is never rendered as a number a person could act on.
+///
+/// Resolving a CAT's real decimals needs its registry metadata (`dig_cat::resolve_metadata`), which
+/// is a network call to a third party and a decision of its own: dig_ecosystem#3116.
+pub fn decimals(asset: Asset) -> Option<u32> {
+    match asset {
+        Asset::Xch => Some(XCH_DECIMALS),
+        // Recognised BY VALUE through the contract's own `is_dig`, never by a second copy of the
+        // asset id in this crate: `Asset::DIG` is an associated constant, so it cannot be a pattern,
+        // and re-spelling the id here to make it one is how a wallet ends up with two ideas of which
+        // token $DIG is.
+        Asset::Cat(_) if asset.is_dig() => Some(CAT_DECIMALS),
+        Asset::Cat(_) => None,
     }
 }
 
-/// Render a base-unit amount of `asset` as a whole-coin decimal (`1`, `2.5`, `0`).
+/// Render a base-unit amount of `asset` as a whole-coin decimal (`1`, `2.5`, `0`), or `None` when
+/// this asset's precision is unknown.
 ///
-/// The inverse never has to be guessed: `format_asset_amount(Asset::Dig, 1_000) == "1"`, because a
-/// $DIG carries [`CAT_DECIMALS`] places.
-pub fn format_asset_amount(asset: Asset, base_units: u64) -> String {
-    format_units(u128::from(base_units), asset.decimals())
+/// The inverse never has to be guessed: `format_asset_amount(Asset::DIG, 1_000) == Some("1")`,
+/// because a $DIG carries [`CAT_DECIMALS`] places.
+///
+/// Returns `Option` rather than falling back to base units so that a caller cannot accidentally
+/// print an unconverted integer where a whole-coin figure belongs — the two are the same characters
+/// and differ only by a factor nobody would notice on screen. A surface that must render every
+/// asset uses [`amount_with_unit`], which carries the unit words along with the figure.
+pub fn format_asset_amount(asset: Asset, base_units: u64) -> Option<String> {
+    decimals(asset).map(|decimals| format_units(u128::from(base_units), decimals))
+}
+
+/// How `asset` is named to a person: `XCH`, `$DIG`, or a shortened asset id for a CAT dig-app has
+/// only ever been told the id of.
+///
+/// The one place these names are written, so a sentence about a $DIG shortfall can never quote an
+/// XCH ticker, and an unfamiliar CAT is never named after a familiar one.
+pub fn ticker(asset: Asset) -> String {
+    match asset {
+        Asset::Xch => "XCH".to_string(),
+        _ if asset.is_dig() => "$DIG".to_string(),
+        Asset::Cat(id) => short_asset_id(&id),
+    }
+}
+
+/// A CAT's asset id shortened for display: the first and last six hex characters.
+///
+/// Long enough that two tokens a person holds are distinguishable at a glance, short enough to sit
+/// in a row beside a figure. The FULL id is always available to copy from the token's own row — a
+/// shortened id is a label, never the thing you check a payment against.
+fn short_asset_id(id: &AssetId) -> String {
+    let hex = id.to_hex();
+    format!("{}…{}", &hex[..6], &hex[hex.len() - 6..])
+}
+
+/// An amount of `asset` together with its unit, as one inseparable phrase.
+///
+/// **This is the function a surface that renders arbitrary assets must use**, because the figure and
+/// the unit are only true together. For a known asset it reads `1.5 $DIG`; for a CAT whose precision
+/// dig-app does not know it reads `1500 base units of a1b2c3…f80912`, which states the same holding
+/// without asserting a decimal point that nothing measured.
+///
+/// The words are not a placeholder for a nicer rendering later: "1500 base units" and "1500" are
+/// different claims about someone's money, and only the first one is true here.
+pub fn amount_with_unit(asset: Asset, base_units: u64) -> String {
+    match format_asset_amount(asset, base_units) {
+        Some(figure) => format!("{figure} {}", ticker(asset)),
+        None => format!("{base_units} base units of {}", ticker(asset)),
+    }
 }
 
 /// Render a base-unit amount as a whole-coin decimal, given the asset's decimal places.
@@ -90,6 +158,13 @@ pub enum AmountProblem {
     },
     /// More base units than can exist: the asset's own arithmetic is `u64`.
     TooLarge,
+    /// dig-app does not know how many decimal places this token has, so it cannot read a
+    /// whole-coin figure as base units at all (see [`decimals`]).
+    ///
+    /// Refused rather than assumed: multiplying by a guessed power of ten would send an amount
+    /// nobody typed. The remedy is different from every other variant here — there is nothing wrong
+    /// with what was typed — which is why it is its own case.
+    PrecisionUnknown,
 }
 
 /// Read a whole-coin decimal a person typed (`1`, `0.5`, `12.000000000001`) as base units of `asset`.
@@ -121,7 +196,9 @@ pub fn parse_asset_amount(asset: Asset, typed: &str) -> Result<u64, AmountProble
     if typed.is_empty() {
         return Err(AmountProblem::Empty);
     }
-    let decimals = asset.decimals();
+    let Some(decimals) = decimals(asset) else {
+        return Err(AmountProblem::PrecisionUnknown);
+    };
     let (whole, fraction) = match typed.split_once('.') {
         Some((whole, fraction)) => (whole, fraction),
         None => (typed, ""),
@@ -172,7 +249,7 @@ mod tests {
     #[test]
     fn one_whole_coin_renders_as_one_in_each_asset() {
         assert_eq!(
-            format_asset_amount(Asset::Dig, 10u64.pow(CAT_DECIMALS)),
+            format_asset_amount(Asset::DIG, 10u64.pow(CAT_DECIMALS)),
             "1"
         );
         assert_eq!(
@@ -185,9 +262,9 @@ mod tests {
     /// 10^12 base units — under the pre-#2295 divisor that value was 3.4 billion $DIG.
     #[test]
     fn a_dig_is_a_thousand_base_units_not_a_trillion() {
-        assert_eq!(format_asset_amount(Asset::Dig, 1_000), "1");
+        assert_eq!(format_asset_amount(Asset::DIG, 1_000), "1");
         assert_eq!(
-            format_asset_amount(Asset::Dig, 1_000_000_000_000),
+            format_asset_amount(Asset::DIG, 1_000_000_000_000),
             "1000000000"
         );
     }
@@ -195,17 +272,17 @@ mod tests {
     /// A fraction renders its own asset's precision, in both assets, with trailing zeros trimmed.
     #[test]
     fn fractions_carry_each_assets_own_precision() {
-        assert_eq!(format_asset_amount(Asset::Dig, 1_500), "1.5");
+        assert_eq!(format_asset_amount(Asset::DIG, 1_500), "1.5");
         assert_eq!(format_asset_amount(Asset::Xch, 1_500_000_000_000), "1.5");
         // The smallest holdable amount of each asset is shown, never rounded to a zero.
-        assert_eq!(format_asset_amount(Asset::Dig, 1), "0.001");
+        assert_eq!(format_asset_amount(Asset::DIG, 1), "0.001");
         assert_eq!(format_asset_amount(Asset::Xch, 1), "0.000000000001");
     }
 
     /// A genuine zero is a bare `0` in either asset — no decimal point, no false precision.
     #[test]
     fn zero_renders_as_a_bare_zero_in_both_assets() {
-        assert_eq!(format_asset_amount(Asset::Dig, 0), "0");
+        assert_eq!(format_asset_amount(Asset::DIG, 0), "0");
         assert_eq!(format_asset_amount(Asset::Xch, 0), "0");
     }
 
@@ -217,7 +294,7 @@ mod tests {
             "18446744.073709551615"
         );
         assert_eq!(
-            format_asset_amount(Asset::Dig, u64::MAX),
+            format_asset_amount(Asset::DIG, u64::MAX),
             "18446744073709551.615"
         );
     }
@@ -231,7 +308,7 @@ mod tests {
     /// see that; the maximum can.
     #[test]
     fn every_formatted_amount_parses_back_to_the_same_base_units() {
-        for asset in [Asset::Xch, Asset::Dig] {
+        for asset in [Asset::Xch, Asset::DIG] {
             for units in [
                 0,
                 1,
@@ -260,9 +337,9 @@ mod tests {
     #[test]
     fn one_whole_coin_parses_to_each_assets_own_base_units() {
         assert_eq!(parse_asset_amount(Asset::Xch, "1"), Ok(1_000_000_000_000));
-        assert_eq!(parse_asset_amount(Asset::Dig, "1"), Ok(1_000));
+        assert_eq!(parse_asset_amount(Asset::DIG, "1"), Ok(1_000));
         assert_eq!(parse_asset_amount(Asset::Xch, "0.5"), Ok(500_000_000_000));
-        assert_eq!(parse_asset_amount(Asset::Dig, "0.5"), Ok(500));
+        assert_eq!(parse_asset_amount(Asset::DIG, "0.5"), Ok(500));
     }
 
     /// **A short fraction is PADDED to the asset's precision, not read as its own integer.**
@@ -278,8 +355,8 @@ mod tests {
             parse_asset_amount(Asset::Xch, "2.25"),
             Ok(2_250_000_000_000)
         );
-        assert_eq!(parse_asset_amount(Asset::Dig, "0.001"), Ok(1));
-        assert_eq!(parse_asset_amount(Asset::Dig, "12.5"), Ok(12_500));
+        assert_eq!(parse_asset_amount(Asset::DIG, "0.001"), Ok(1));
+        assert_eq!(parse_asset_amount(Asset::DIG, "12.5"), Ok(12_500));
     }
 
     /// **More decimals than the asset carries is REFUSED, never rounded or truncated.**
@@ -296,10 +373,10 @@ mod tests {
         );
         assert_eq!(parse_asset_amount(Asset::Xch, "0.000000000001"), Ok(1));
         assert_eq!(
-            parse_asset_amount(Asset::Dig, "0.0001"),
+            parse_asset_amount(Asset::DIG, "0.0001"),
             Err(AmountProblem::TooManyDecimals { allowed: 3 })
         );
-        assert_eq!(parse_asset_amount(Asset::Dig, "0.001"), Ok(1));
+        assert_eq!(parse_asset_amount(Asset::DIG, "0.001"), Ok(1));
     }
 
     /// **Everything that is not an unsigned decimal is refused, and each refusal names its own
@@ -349,11 +426,11 @@ mod tests {
             Err(AmountProblem::TooLarge)
         );
         assert_eq!(
-            parse_asset_amount(Asset::Dig, "18446744073709551.615"),
+            parse_asset_amount(Asset::DIG, "18446744073709551.615"),
             Ok(u64::MAX)
         );
         assert_eq!(
-            parse_asset_amount(Asset::Dig, "18446744073709551.616"),
+            parse_asset_amount(Asset::DIG, "18446744073709551.616"),
             Err(AmountProblem::TooLarge)
         );
     }
@@ -362,7 +439,7 @@ mod tests {
     #[test]
     fn each_asset_states_its_own_decimals() {
         assert_eq!(Asset::Xch.decimals(), XCH_DECIMALS);
-        assert_eq!(Asset::Dig.decimals(), CAT_DECIMALS);
-        assert_ne!(Asset::Xch.decimals(), Asset::Dig.decimals());
+        assert_eq!(Asset::DIG.decimals(), CAT_DECIMALS);
+        assert_ne!(Asset::Xch.decimals(), Asset::DIG.decimals());
     }
 }

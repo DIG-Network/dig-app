@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use dig_node_control_interface::error::ControlErrorCode;
 use dig_node_control_interface::method::ControlMethod;
 use dig_node_control_interface::params::{
-    Asset as WireAsset, WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
+    WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
 };
 use dig_node_control_interface::results::{WalletCoinRecord, WalletReadSource};
 
@@ -129,7 +129,7 @@ impl WalletEngine for NodeWalletEngine {
     fn coins(&self, request: CoinsRequest) -> Result<CoinsResponse, WalletError> {
         let params = WalletCoinsParams {
             address: request.address,
-            asset: wire_asset(request.asset),
+            asset: request.asset,
         };
         let result = self.call(&params, ControlMethod::WalletCoins)?;
         Ok(CoinsResponse {
@@ -151,7 +151,7 @@ impl WalletEngine for NodeWalletEngine {
     fn balance(&self, request: BalanceRequest) -> Result<BalanceResponse, WalletError> {
         let params = WalletBalanceParams {
             address: request.address,
-            asset: wire_asset(request.asset),
+            asset: request.asset,
         };
         let result = control::call_control_result(
             &self.endpoint,
@@ -203,6 +203,11 @@ impl NodeWalletEngine {
 /// one is the node declining to say which asset it is — and taking the asset from the REQUEST
 /// instead would relabel it. A $DIG figure shown with the XCH divisor is wrong by a factor of a
 /// billion, so silence is the only honest handling.
+///
+/// The record's asset needs no CONVERSION: since dig-app's [`Asset`] IS the contract's own type
+/// (see [`crate::wallet::state::Asset`]), the value is carried across verbatim. The pair of
+/// mapping functions that used to sit here — one per direction, each a place a new CAT could be
+/// forgotten — are gone with the second definition that made them necessary.
 fn app_coin(record: &WalletCoinRecord) -> Option<CoinRecord> {
     let Some(asset) = record.asset else {
         tracing::debug!(
@@ -213,26 +218,9 @@ fn app_coin(record: &WalletCoinRecord) -> Option<CoinRecord> {
     };
     Some(CoinRecord {
         coin_id: record.coin_id.clone(),
-        asset: app_asset(asset),
+        asset,
         amount: record.amount,
     })
-}
-
-/// The contract's wire enum as dig-app's [`Asset`] — the inverse of [`wire_asset`].
-fn app_asset(asset: WireAsset) -> Asset {
-    match asset {
-        WireAsset::Xch => Asset::Xch,
-        WireAsset::Dig => Asset::Dig,
-    }
-}
-
-/// dig-app's [`Asset`] as the control contract's wire enum. Both serialize to the same lowercase
-/// token; this conversion is what keeps that a compile-time fact rather than a coincidence.
-fn wire_asset(asset: Asset) -> WireAsset {
-    match asset {
-        Asset::Xch => WireAsset::Xch,
-        Asset::Dig => WireAsset::Dig,
-    }
 }
 
 /// The stable `data.code` symbols that mean "this build cannot serve the method at all".
@@ -1259,7 +1247,7 @@ mod tests {
             FakeCoin::confirmed("dig", 1_500),
             FakeCoin::confirmed("dig", 2_500),
         ]));
-        let read = read_coins(&engine_for(&node), Asset::Dig).expect("the node answered");
+        let read = read_coins(&engine_for(&node), Asset::DIG).expect("the node answered");
 
         assert_eq!(
             read.coins.iter().map(|c| c.amount).collect::<Vec<_>>(),
@@ -1272,7 +1260,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [format!("{:064x}", 1_500), format!("{:064x}", 2_500)]
         );
-        assert!(read.coins.iter().all(|c| c.asset == Asset::Dig));
+        assert!(read.coins.iter().all(|c| c.asset == Asset::DIG));
         assert!(node.received().contains("control.wallet.coins"));
     }
 

@@ -108,7 +108,7 @@ impl ActivityEntry {
 fn asset_id_of(asset: Asset) -> Option<AssetId> {
     match asset {
         Asset::Xch => None,
-        Asset::Dig => Some(crate::notify::dig_asset_id()),
+        Asset::DIG => Some(crate::notify::dig_asset_id()),
     }
 }
 
@@ -318,7 +318,7 @@ mod tests {
     fn spend(recipient: &str, amount: u64, broadcast_at: u64) -> SpendRecord {
         SpendRecord {
             recipient: recipient.into(),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             amount,
             broadcast_at,
             transaction_id: format!("{broadcast_at:064x}"),

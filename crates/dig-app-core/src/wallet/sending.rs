@@ -403,7 +403,7 @@ impl SendBlocked {
 fn ticker(asset: Asset) -> &'static str {
     match asset {
         Asset::Xch => "XCH",
-        Asset::Dig => "$DIG",
+        Asset::DIG => "$DIG",
     }
 }
 
@@ -489,7 +489,7 @@ impl SendDraft<'_> {
                     .map_err(|e| SendBlocked::BadDestination(e.to_string()))?
                     .with_fee(DEFAULT_SEND_FEE_MOJOS),
             ),
-            Asset::Dig => SendIntent::Dig(
+            Asset::DIG => SendIntent::Dig(
                 CatTransferRequest::new(
                     PayableDestination::from_address(destination)
                         .map_err(|e| SendBlocked::BadDestination(e.to_string()))?,
@@ -536,10 +536,10 @@ impl SendDraft<'_> {
                     });
                 }
             }
-            Asset::Dig => {
+            Asset::DIG => {
                 if amount > balances.dig_units {
                     return Err(SendBlocked::NotEnough {
-                        asset: Asset::Dig,
+                        asset: Asset::DIG,
                         needed: amount,
                         spendable: balances.dig_units,
                     });
@@ -642,7 +642,7 @@ impl SendIntent {
     pub fn asset(&self) -> Asset {
         match self {
             Self::Xch(_) => Asset::Xch,
-            Self::Dig(_) => Asset::Dig,
+            Self::Dig(_) => Asset::DIG,
         }
     }
 
@@ -1024,7 +1024,7 @@ impl SendHolder {
             Ok(Accepted::Dig(broadcast)) => {
                 Self::list_as_sent(
                     broadcast.recipient(),
-                    Asset::Dig,
+                    Asset::DIG,
                     broadcast.amount_base_units(),
                     broadcast.bundle_id().to_string(),
                 );
@@ -1869,7 +1869,7 @@ mod tests {
         progress: &'a SendProgress,
     ) -> SendDraft<'a> {
         SendDraft {
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             destination: PAYABLE,
             amount,
             account_open: true,
@@ -1958,7 +1958,7 @@ mod tests {
         assert_eq!(
             dig_draft("2.001", &rich_in_xch_poor_in_dig, &progress).assess(),
             Err(SendBlocked::NotEnough {
-                asset: Asset::Dig,
+                asset: Asset::DIG,
                 needed: 2_001,
                 spendable: 2_000,
             }),
@@ -2067,7 +2067,7 @@ mod tests {
         .encode()
         .expect("a 32-byte payload always encodes");
         let testnet = testnet.as_str();
-        for asset in [Asset::Xch, Asset::Dig] {
+        for asset in [Asset::Xch, Asset::DIG] {
             let draft = SendDraft {
                 asset,
                 destination: testnet,
@@ -2094,7 +2094,7 @@ mod tests {
     #[test]
     fn a_sent_row_carries_the_asset_that_was_sent_and_not_a_fixed_one() {
         let recipient = chia_protocol::Bytes32::new([0x2C; 32]);
-        for (asset, amount) in [(Asset::Xch, 250_000_000_000_u64), (Asset::Dig, 1_500_u64)] {
+        for (asset, amount) in [(Asset::Xch, 250_000_000_000_u64), (Asset::DIG, 1_500_u64)] {
             let record = sent_record(recipient, asset, amount, "reference".to_string());
             assert_eq!(
                 record.asset, asset,

@@ -476,7 +476,7 @@ fn read_balances(address: &str, engine: &dyn WalletEngine) -> BalanceReading {
             asset,
         })
     };
-    match (read(Asset::Xch), read(Asset::Dig)) {
+    match (read(Asset::Xch), read(Asset::DIG)) {
         (Ok(xch), Ok(dig)) => BalanceReading::Known {
             balances: Balances {
                 xch_mojos: xch.balance,
@@ -567,7 +567,7 @@ pub fn balance_line(balance: &BalanceReading, peers_peak: Option<u32>) -> String
         BalanceReading::Pending => "Balance: checking with your node…".to_string(),
         BalanceReading::Known { balances, as_of } => format!(
             "Balance: {} $DIG and {} XCH. {}",
-            format_amount(Asset::Dig, balances.dig_units),
+            format_amount(Asset::DIG, balances.dig_units),
             format_amount(Asset::Xch, balances.xch_mojos),
             as_of_sentence(*as_of, peers_peak)
         ),
@@ -656,7 +656,7 @@ pub fn menu_balance_label(balance: &BalanceReading, peers_peak: Option<u32>) -> 
         BalanceReading::Pending => "Balance: checking…".to_string(),
         BalanceReading::Known { balances, as_of } => format!(
             "Balance: {} $DIG · {} XCH{}",
-            format_amount(Asset::Dig, balances.dig_units),
+            format_amount(Asset::DIG, balances.dig_units),
             format_amount(Asset::Xch, balances.xch_mojos),
             menu_provenance(*as_of, peers_peak)
         ),
@@ -996,7 +996,7 @@ mod tests {
     fn a_real_balance_is_read_per_asset_and_shown_in_whole_coins() {
         let engine = FakeWalletEngine {
             coins: vec![
-                coin(Asset::Dig, 2_500),
+                coin(Asset::DIG, 2_500),
                 coin(Asset::Xch, 1_000_000_000_000),
                 coin(Asset::Xch, 250_000_000_000),
             ],
@@ -1587,7 +1587,7 @@ mod tests {
                         as_of: crate::wallet::engine::test_support::FAKE_AS_OF,
                         balance: 7_000_000_000_000,
                     }),
-                    Asset::Dig => Err(WalletError::Engine("cat read failed".to_string())),
+                    Asset::DIG => Err(WalletError::Engine("cat read failed".to_string())),
                 }
             }
         }
@@ -1661,23 +1661,23 @@ mod tests {
     /// whole $DIG as `0.000000001`.
     #[test]
     fn amounts_render_at_each_assets_own_scale() {
-        let one_dig = 10u64.pow(Asset::Dig.decimals());
+        let one_dig = 10u64.pow(Asset::DIG.decimals());
         let one_xch = 10u64.pow(Asset::Xch.decimals());
 
-        assert_eq!(format_amount(Asset::Dig, one_dig), "1");
+        assert_eq!(format_amount(Asset::DIG, one_dig), "1");
         assert_eq!(format_amount(Asset::Xch, one_xch), "1");
-        assert_eq!(format_amount(Asset::Dig, one_dig * 3 / 2), "1.5");
+        assert_eq!(format_amount(Asset::DIG, one_dig * 3 / 2), "1.5");
         assert_eq!(format_amount(Asset::Xch, one_xch * 3 / 2), "1.5");
-        assert_eq!(format_amount(Asset::Dig, 0), "0");
+        assert_eq!(format_amount(Asset::DIG, 0), "0");
         assert_eq!(format_amount(Asset::Xch, 0), "0");
     }
 
     /// A sub-unit holding is never rounded away to a zero that would read as "nothing".
     #[test]
     fn a_sub_coin_holding_is_never_rendered_as_nothing() {
-        assert_ne!(format_amount(Asset::Dig, 1), "0");
+        assert_ne!(format_amount(Asset::DIG, 1), "0");
         assert_ne!(format_amount(Asset::Xch, 1), "0");
-        assert_eq!(format_amount(Asset::Dig, 1), "0.001");
+        assert_eq!(format_amount(Asset::DIG, 1), "0.001");
         assert_eq!(format_amount(Asset::Xch, 1), "0.000000000001");
     }
 

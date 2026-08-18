@@ -389,7 +389,7 @@ fn paid_amount(to: &dig_account::SpendRecipient) -> String {
     match &to.asset_id {
         None => format!("{} XCH", format_asset_amount(Asset::Xch, to.amount_mojos)),
         Some(asset) if is_dig(asset) => {
-            format!("{} $DIG", format_asset_amount(Asset::Dig, to.amount_mojos))
+            format!("{} $DIG", format_asset_amount(Asset::DIG, to.amount_mojos))
         }
         // Named as base units precisely because this function does not know THIS CAT's precision —
         // see the caller's docs.

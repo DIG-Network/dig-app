@@ -23,16 +23,40 @@ use crate::storage::{did_hash, profile_dir, write_durably};
 
 use super::WalletError;
 
-/// The asset a coin or balance is denominated in. Kept small + explicit; extended additively as the
-/// wallet grows to hold more CAT types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Asset {
-    /// Native Chia (XCH), in mojos.
-    Xch,
-    /// The DIG CAT, in base units.
-    Dig,
-}
+/// The asset a coin or balance is denominated in: native XCH, or any CAT named by its asset id.
+///
+/// # Re-exported from the wire contract rather than restated
+///
+/// This is `dig-node-control-interface`'s own [`Asset`](dig_node_control_interface::params::Asset),
+/// the type the node parses `control.wallet.balance` / `.coins` params into. dig-app and the node
+/// therefore hold ONE definition of what an asset is and one definition of how it is spelled on the
+/// wire — the byte-identical contract recorded in the `canonical` skill is a compile-time fact here
+/// rather than two implementations that agree today. The conversion functions this module's
+/// consumers used to need (`app_asset` / `wire_asset` in [`super::node`]) are gone with it.
+///
+/// # Two cases, never three — this is the money-truth part
+///
+/// $DIG is a CAT, so it is [`Asset::DIG`], an associated CONSTANT and not a variant. A three-case
+/// `{Xch, Dig, Cat(id)}` would give $DIG two INEQUAL spellings, and every filter in this file is an
+/// `asset == asset` comparison: [`WalletState::balance`], [`WalletState::total_sent`], the engine's
+/// coin read. A wallet holding $DIG coins under both spellings would sum only the half matching
+/// whichever spelling the caller happened to pass, and report it as the whole balance. One token,
+/// one value.
+///
+/// # Wire + at-rest form
+///
+/// | Value | JSON |
+/// |---|---|
+/// | [`Asset::Xch`] | `"xch"` |
+/// | [`Asset::DIG`] | `"dig"` |
+/// | any other CAT | `{"cat":"<64-hex>"}` |
+///
+/// The two bare tokens are what every sealed `wallet-state.seal` written before this widening
+/// contains, and they are still ACCEPTED — so an existing wallet opens unchanged — while `"dig"` is
+/// still EMITTED, so a node built before the widening still understands what this app sends.
+/// `asset_serde` in this module's tests pins BOTH directions, because an accept-test cannot see a
+/// broken emit.
+pub use dig_node_control_interface::params::{Asset, AssetId};
 
 /// A single spendable coin as the wallet last saw it — the cached view the engine's chain reads
 /// populate. Amounts are the asset's base unit (mojos for XCH, base units for DIG).
@@ -118,6 +142,37 @@ pub struct WalletState {
     /// rather than a wallet with no addresses.
     #[serde(default)]
     pub notes: Vec<AddressNote>,
+    /// The CATs this wallet WATCHES beyond XCH and $DIG — the tokens the user has added by asset id
+    /// (dig_ecosystem#3077).
+    ///
+    /// # Why a wallet has to be TOLD which CATs it holds
+    ///
+    /// The node's wallet seam answers per-asset: `control.wallet.balance` and `control.wallet.coins`
+    /// both take the asset to read as a parameter, and there is no method that enumerates what an
+    /// address holds. So this app can read the balance of any CAT it can NAME and cannot discover
+    /// one it has never heard of. XCH and $DIG are always read because dig-app knows them by
+    /// definition; everything else is here because a person added it.
+    ///
+    /// That is a real limit and it is stated rather than papered over: a token a person has not
+    /// added is ABSENT from the wallet, never shown as zero. Enumerating held assets needs a node
+    /// method that does not exist yet (dig_ecosystem#3115).
+    ///
+    /// [`Asset::Xch`] and [`Asset::DIG`] are refused entry by [`watch`](Self::watch) — they are read
+    /// unconditionally, and a duplicate here would list them twice.
+    #[serde(default)]
+    pub watched: Vec<Asset>,
+}
+
+/// Why a token was not added to the watch list.
+///
+/// A reason and not a silent no-op: a person who pastes the $DIG asset id and sees nothing happen
+/// concludes the field is broken, when in fact the token they asked for was already on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchRefused {
+    /// XCH and $DIG are read unconditionally, so this token is already on the list.
+    AlreadyShown,
+    /// This CAT is already being watched.
+    AlreadyWatched,
 }
 
 impl WalletState {
@@ -128,6 +183,47 @@ impl WalletState {
             .filter(|c| c.asset == asset)
             .map(|c| c.amount)
             .sum()
+    }
+
+    /// Every asset this wallet reads a balance for, in display order: XCH, then $DIG, then each
+    /// watched CAT in the order it was added.
+    ///
+    /// The order is stable and deliberate rather than sorted: a list that reorders itself when a
+    /// balance changes makes a person re-find their own token every time they look, and the two
+    /// assets dig-app knows by name belong at the top because they are the two it can always speak
+    /// about precisely.
+    pub fn read_list(&self) -> Vec<Asset> {
+        let mut assets = vec![Asset::Xch, Asset::DIG];
+        assets.extend(self.watched.iter().copied());
+        assets
+    }
+
+    /// Add `asset` to the watch list, or say why it was not added.
+    ///
+    /// Idempotent: watching a token twice is the same wallet, not an error a person needs to see.
+    ///
+    /// # Errors
+    ///
+    /// [`WatchRefused`], naming which of the two it was so the surface can say it.
+    pub fn watch(&mut self, asset: Asset) -> Result<(), WatchRefused> {
+        if asset == Asset::Xch || asset == Asset::DIG {
+            return Err(WatchRefused::AlreadyShown);
+        }
+        if self.watched.contains(&asset) {
+            return Err(WatchRefused::AlreadyWatched);
+        }
+        self.watched.push(asset);
+        Ok(())
+    }
+
+    /// Stop watching `asset`; `true` when it was being watched.
+    ///
+    /// The escape hatch `professional-ui` requires: a token added by a mistyped id must be
+    /// removable, or the wallet has acquired a permanent row nobody can get rid of.
+    pub fn unwatch(&mut self, asset: Asset) -> bool {
+        let before = self.watched.len();
+        self.watched.retain(|watched| *watched != asset);
+        self.watched.len() != before
     }
 
     /// Append an outbound spend to the history log. History is kept oldest-first, so the read
@@ -345,12 +441,12 @@ mod tests {
             coins: vec![
                 CoinRecord {
                     coin_id: "01".into(),
-                    asset: Asset::Dig,
+                    asset: Asset::DIG,
                     amount: 100,
                 },
                 CoinRecord {
                     coin_id: "02".into(),
-                    asset: Asset::Dig,
+                    asset: Asset::DIG,
                     amount: 50,
                 },
                 CoinRecord {
@@ -361,7 +457,7 @@ mod tests {
             ],
             ..WalletState::default()
         };
-        assert_eq!(state.balance(Asset::Dig), 150);
+        assert_eq!(state.balance(Asset::DIG), 150);
         assert_eq!(state.balance(Asset::Xch), 7);
     }
 
@@ -369,7 +465,7 @@ mod tests {
     fn dig_spend(recipient: &str, amount: u64, at: u64) -> SpendRecord {
         SpendRecord {
             recipient: recipient.into(),
-            asset: Asset::Dig,
+            asset: Asset::DIG,
             amount,
             broadcast_at: at,
             transaction_id: format!("{at:064x}"),
@@ -421,7 +517,7 @@ mod tests {
             asset: Asset::Xch,
             ..dig_spend("xch1carol", 7, 3)
         });
-        assert_eq!(state.total_sent(Asset::Dig), 150);
+        assert_eq!(state.total_sent(Asset::DIG), 150);
         assert_eq!(state.total_sent(Asset::Xch), 7);
     }
 
@@ -545,7 +641,7 @@ mod tests {
             addresses: vec!["xch1primary".into()],
             coins: vec![CoinRecord {
                 coin_id: "ab".into(),
-                asset: Asset::Dig,
+                asset: Asset::DIG,
                 amount: 42,
             }],
             ..WalletState::default()

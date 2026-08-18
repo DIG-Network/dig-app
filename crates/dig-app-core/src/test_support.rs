@@ -872,7 +872,7 @@ pub mod node {
             .into_iter()
             .find(|m| method == Some(*m));
             let asset = if request.contains("\"asset\":\"dig\"") {
-                Asset::Dig
+                Asset::DIG
             } else {
                 Asset::Xch
             };
@@ -1009,7 +1009,7 @@ pub mod node {
             } => {
                 let balance = match asset {
                     Asset::Xch => *xch,
-                    Asset::Dig => *dig,
+                    Asset::DIG => *dig,
                 };
                 let mut result = serde_json::json!({
                     "balance": balance,

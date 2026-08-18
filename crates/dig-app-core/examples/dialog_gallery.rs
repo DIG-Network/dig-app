@@ -114,7 +114,7 @@ impl dig_app_core::wallet::engine::WalletEngine for FixedBalances {
     {
         let balance = match request.asset {
             dig_app_core::wallet::state::Asset::Xch => self.0.xch_mojos,
-            dig_app_core::wallet::state::Asset::Dig => self.0.dig_units,
+            dig_app_core::wallet::state::Asset::DIG => self.0.dig_units,
         };
         Ok(dig_app_core::wallet::engine::BalanceResponse {
             balance,
