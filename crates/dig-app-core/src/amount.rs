@@ -177,12 +177,13 @@ pub enum AmountProblem {
     },
     /// More base units than can exist: the asset's own arithmetic is `u64`.
     TooLarge,
-    /// dig-app does not know how many decimal places this token has, so it cannot read a
-    /// whole-coin figure as base units at all (see [`decimals`]).
+    /// A decimal point was typed for a token dig-app does not know the precision of.
     ///
-    /// Refused rather than assumed: multiplying by a guessed power of ten would send an amount
-    /// nobody typed. The remedy is different from every other variant here — there is nothing wrong
-    /// with what was typed — which is why it is its own case.
+    /// Refused rather than assumed: scaling the fraction needs a power of ten nobody has, and
+    /// guessing one sends an amount nobody typed. The whole number IS accepted for such a token —
+    /// it is read as base units, the unit the token is also displayed in — so the remedy here is
+    /// specific and achievable, which is why this is its own case rather than a
+    /// [`NotANumber`](Self::NotANumber).
     PrecisionUnknown,
 }
 
@@ -215,9 +216,14 @@ pub fn parse_asset_amount(asset: Asset, typed: &str) -> Result<u64, AmountProble
     if typed.is_empty() {
         return Err(AmountProblem::Empty);
     }
-    let Some(decimals) = decimals(asset) else {
-        return Err(AmountProblem::PrecisionUnknown);
-    };
+    // A token whose precision dig-app does not know is typed in BASE UNITS — the same unit
+    // `amount_with_unit` displays it in, so what a person reads and what they type are one unit. That
+    // is why an unknown precision becomes zero decimal places here rather than a refusal: zero is not
+    // a guess about the token, it is this app declining to talk about anything smaller than the unit
+    // the chain actually moves. A typed decimal point is refused outright below, because THAT would
+    // need the divisor nobody has.
+    let known_decimals = decimals(asset);
+    let decimals = known_decimals.unwrap_or(0);
     let (whole, fraction) = match typed.split_once('.') {
         Some((whole, fraction)) => (whole, fraction),
         None => (typed, ""),
@@ -226,6 +232,9 @@ pub fn parse_asset_amount(asset: Asset, typed: &str) -> Result<u64, AmountProble
     // different number, and a form that guesses which one guesses about money.
     if !is_digits(whole) || (typed.contains('.') && !is_digits(fraction)) {
         return Err(AmountProblem::NotANumber);
+    }
+    if !fraction.is_empty() && known_decimals.is_none() {
+        return Err(AmountProblem::PrecisionUnknown);
     }
     if fraction.len() as u32 > decimals {
         return Err(AmountProblem::TooManyDecimals { allowed: decimals });

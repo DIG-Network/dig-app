@@ -419,8 +419,9 @@ fn amount_sentence(asset: Asset, problem: AmountProblem) -> String {
         // decimal point on the person's behalf, and the number that comes out of a guessed divisor
         // is a different payment from the one they meant to make.
         AmountProblem::PrecisionUnknown => format!(
-            "DIG does not know how many decimal places {ticker} has, so it cannot read this as an \
-             amount. Sending this token is not available yet."
+            "DIG has not been told how many decimal places {ticker} has, so amounts of it are \
+             entered as whole base units — the same unit your balance is shown in. Enter a whole \
+             number, with no decimal point."
         ),
     }
 }

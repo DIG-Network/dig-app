@@ -434,6 +434,163 @@ mod tests {
         WalletStore::new(dir, test_sealer(did))
     }
 
+    /// A CAT dig-app has never been told anything about but its id. Deliberately NOT $DIG's id and
+    /// not a repeated byte, so a filter that matched loosely, or an implementation that fell back to
+    /// $DIG, produces a visibly different value rather than an accidentally-equal one.
+    const SPACEBUCKS_HEX: &str = "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+
+    /// [`SPACEBUCKS_HEX`] as an [`Asset`].
+    fn spacebucks() -> Asset {
+        Asset::Cat(AssetId::from_hex(SPACEBUCKS_HEX).expect("a 64-hex asset id"))
+    }
+
+    /// **$DIG still EMITS the bare `"dig"` token, and another CAT emits the tagged form.**
+    ///
+    /// This is the direction a round-trip test structurally cannot see. `parse(emit(x)) == x` holds
+    /// for BOTH spellings of $DIG, so an implementation that emitted `{"cat":"a406…"}` for $DIG
+    /// would round-trip perfectly here and break every node built before the widening — which reads
+    /// only the two bare strings. The exact bytes are therefore asserted, not the round trip.
+    ///
+    /// The second assertion is the control that makes the first meaningful: a serializer that
+    /// emitted `"dig"` for EVERY CAT would satisfy the $DIG line on its own, and would name
+    /// somebody else's token $DIG on the wire.
+    #[test]
+    fn dig_emits_its_legacy_token_while_another_cat_emits_the_tagged_form() {
+        assert_eq!(serde_json::to_string(&Asset::DIG).unwrap(), r#""dig""#);
+        assert_eq!(serde_json::to_string(&Asset::Xch).unwrap(), r#""xch""#);
+        assert_eq!(
+            serde_json::to_string(&spacebucks()).unwrap(),
+            format!(r#"{{"cat":"{SPACEBUCKS_HEX}"}}"#)
+        );
+    }
+
+    /// **Every spelling a peer or an older sealed state can produce is ACCEPTED, and the two
+    /// spellings of $DIG are ONE value.**
+    ///
+    /// The `{"cat":"<the $DIG id>"}` line is the money-truth one: it must come back EQUAL to
+    /// `Asset::DIG`, because `WalletState::balance` filters with `asset == asset`. On a
+    /// three-variant `{Xch, Dig, Cat(id)}` this assertion fails, and a wallet holding coins under
+    /// both spellings would sum only one of them and report it as the whole balance.
+    #[test]
+    fn both_spellings_of_dig_deserialize_to_the_same_value() {
+        let parse = |json: &str| serde_json::from_str::<Asset>(json).expect(json);
+        assert_eq!(parse(r#""xch""#), Asset::Xch);
+        assert_eq!(parse(r#""dig""#), Asset::DIG);
+        assert_eq!(
+            parse(&format!(r#"{{"cat":"{}"}}"#, Asset::DIG_ASSET_ID_HEX)),
+            Asset::DIG,
+            "the tagged spelling of $DIG must be the SAME value as the bare token, or a balance \
+             filtered by one silently omits everything carrying the other"
+        );
+        assert_eq!(
+            parse(&format!(r#"{{"cat":"{SPACEBUCKS_HEX}"}}"#)),
+            spacebucks()
+        );
+        assert_ne!(spacebucks(), Asset::DIG, "the fixture must not be $DIG");
+    }
+
+    /// **A sealed wallet written before the widening opens unchanged.**
+    ///
+    /// The at-rest form is the wire form, so this is the same acceptance as above — but asserted
+    /// through `CoinRecord`, the type actually persisted, because that is what a person's existing
+    /// `wallet-state.seal` contains. A widening that broke it would lose somebody's coin view.
+    #[test]
+    fn a_coin_record_written_with_the_legacy_token_still_reads() {
+        let legacy = r#"{"coin_id":"ab","asset":"dig","amount":1500}"#;
+        let record: CoinRecord = serde_json::from_str(legacy).expect("the legacy at-rest form");
+        assert_eq!(record.asset, Asset::DIG);
+        assert_eq!(record.amount, 1_500);
+        // And it is written back in the same spelling, so a downgrade to an older build reads it.
+        assert!(serde_json::to_string(&record)
+            .unwrap()
+            .contains(r#""asset":"dig""#));
+    }
+
+    /// **A $DIG balance is whole however its coins were spelled.**
+    ///
+    /// The fixture is the point: the same 100 + 50 base units of $DIG, one coin recorded under each
+    /// spelling, plus an unrelated CAT and some XCH that must NOT be counted. A three-variant enum
+    /// answers 100 here — half the money, reported as the whole — and no single-spelling fixture can
+    /// see that, because with one spelling both implementations agree.
+    #[test]
+    fn a_dig_balance_sums_coins_recorded_under_either_spelling() {
+        let tagged_dig =
+            serde_json::from_str::<Asset>(&format!(r#"{{"cat":"{}"}}"#, Asset::DIG_ASSET_ID_HEX))
+                .expect("the tagged spelling of $DIG");
+        let state = WalletState {
+            coins: vec![
+                CoinRecord {
+                    coin_id: "01".into(),
+                    asset: Asset::DIG,
+                    amount: 100,
+                },
+                CoinRecord {
+                    coin_id: "02".into(),
+                    asset: tagged_dig,
+                    amount: 50,
+                },
+                CoinRecord {
+                    coin_id: "03".into(),
+                    asset: spacebucks(),
+                    amount: 999,
+                },
+                CoinRecord {
+                    coin_id: "04".into(),
+                    asset: Asset::Xch,
+                    amount: 7,
+                },
+            ],
+            ..WalletState::default()
+        };
+        assert_eq!(
+            state.balance(Asset::DIG),
+            150,
+            "both spellings name one token, so both coins count"
+        );
+        assert_eq!(
+            state.balance(spacebucks()),
+            999,
+            "each CAT is its own holding"
+        );
+        assert_eq!(state.balance(Asset::Xch), 7);
+    }
+
+    /// **A watched token joins the read list; the two dig-app knows are refused entry.**
+    ///
+    /// Adding $DIG must not produce a second $DIG row, and it must SAY why rather than doing
+    /// nothing — a person who pastes the $DIG id and sees no change concludes the field is broken.
+    #[test]
+    fn watching_adds_a_cat_once_and_refuses_the_two_already_shown() {
+        let mut state = WalletState::default();
+        assert_eq!(state.read_list(), vec![Asset::Xch, Asset::DIG]);
+
+        assert_eq!(state.watch(spacebucks()), Ok(()));
+        assert_eq!(
+            state.read_list(),
+            vec![Asset::Xch, Asset::DIG, spacebucks()],
+            "a watched token is read after the two dig-app knows by name"
+        );
+
+        assert_eq!(state.watch(spacebucks()), Err(WatchRefused::AlreadyWatched));
+        assert_eq!(state.watch(Asset::DIG), Err(WatchRefused::AlreadyShown));
+        assert_eq!(state.watch(Asset::Xch), Err(WatchRefused::AlreadyShown));
+        assert_eq!(
+            state.read_list().len(),
+            3,
+            "a refused watch must not lengthen the list"
+        );
+
+        assert!(
+            state.unwatch(spacebucks()),
+            "a mistyped token must be removable"
+        );
+        assert_eq!(state.read_list(), vec![Asset::Xch, Asset::DIG]);
+        assert!(
+            !state.unwatch(spacebucks()),
+            "unwatching twice changes nothing"
+        );
+    }
+
     #[test]
     fn balance_sums_only_the_requested_asset() {
         let state = WalletState {
