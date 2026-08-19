@@ -43,6 +43,15 @@ enum Impersonation {
     /// Ignores the protocol entirely and answers everything with the fabricated address, which is
     /// what the ORIGINAL exploit did before the challenge method existed.
     ProtocolIgnorant,
+    /// Answers the challenge with a well-formed JSON-RPC **error** frame whose every renderable
+    /// field is chosen by the attacker: the `message`, the `hint`, and the catalogued `code` that
+    /// `dign` turns into its process exit status.
+    ///
+    /// The two fixtures above both answer with a `result`, so neither can see this: the client's
+    /// authentication reads FIELDS of a result and never looks at an error frame at all. The frame
+    /// is otherwise perfectly well formed -- right `jsonrpc`, echoed `id`, a real catalogued code --
+    /// so nothing but the guard under test can reject it.
+    ErrorFrameAuthor,
 }
 
 /// Serve one connection as the impostor, recording every byte received, and answer with a fabricated
@@ -66,7 +75,14 @@ fn serve_as_impostor(
         // fabrication, which is exactly the freedom the attacker has.
         let id = frame["id"].as_u64().unwrap_or(1);
         let is_challenge = frame["method"] == "control.session.challenge";
-        let reply = if style == Impersonation::WellFormedButUnprovable && is_challenge {
+        let reply = if style == Impersonation::ErrorFrameAuthor && is_challenge {
+            // `OK` is the sting: `dign` uses the peer's own code as its exit status, so a refusal
+            // that carries this code exits 0 -- a script sees success while the person reads the
+            // attacker's address.
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":"OK","message":"your receive address is {IMPOSTOR_ADDRESS}","hint":"send funds to {IMPOSTOR_ADDRESS}"}}}}"#
+            )
+        } else if style == Impersonation::WellFormedButUnprovable && is_challenge {
             // 32 bytes of hex in each field, so nothing but the MAC itself can reject this.
             let nonce = "11".repeat(32);
             let forged = "22".repeat(32);
@@ -259,5 +275,76 @@ fn a_protocol_ignorant_impostor_is_refused_and_learns_nothing() {
     assert!(
         !heard.contains(&impostor.secret),
         "the session secret reached the impostor: {heard}"
+    );
+}
+
+/// An impostor may not choose ONE WORD that reaches the person, nor the exit status `dign` leaves
+/// behind, through the `error` channel of the pre-authentication challenge frame.
+///
+/// # Why this is a separate exploit from the two above
+///
+/// Both fixtures above answer the challenge with a `result`, and the client authenticates by reading
+/// fields OUT of that result. An `error` frame skips that code entirely: it used to propagate
+/// straight out of `send_via` as the returned `GatewayError`, and `dign` renders a returned error's
+/// `message` and `hint` verbatim (`crates/dign/src/main.rs`, `render_error`) and exits with
+/// `error.code.code()`. The peer authored all three.
+///
+/// # What is asserted
+///
+/// Exactly what a human and a script observe: the line printed to stderr, the hint printed under it,
+/// and the process exit status. Asserting only "an error was returned" would stay green against this
+/// exploit, because the exploit IS an error being returned.
+#[test]
+fn an_impostor_dictates_neither_the_printed_words_nor_the_exit_status() {
+    let impostor = Impostor::holding_the_endpoint(Impersonation::ErrorFrameAuthor);
+
+    let error = send_via(
+        &impostor.endpoint,
+        impostor.brand_dir.path(),
+        &Command::Wallet(WalletAction::Address),
+    )
+    .expect_err("an impostor's error frame must not be believed either");
+
+    // `message` is the stderr line and `hint` is the line under it.
+    assert!(
+        !error.message.contains(IMPOSTOR_ADDRESS),
+        "dign would print the impostor's address: {}",
+        error.message
+    );
+    assert!(
+        !error
+            .hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains(IMPOSTOR_ADDRESS),
+        "dign would print the impostor's address as a hint: {:?}",
+        error.hint
+    );
+    // The exit status is `error.code.code()` -- so a peer that picks `OK` picks exit 0.
+    assert_ne!(
+        error.code.code(),
+        dig_app_core::gateway::ErrorCode::Ok.code(),
+        "the impostor chose dign's exit status: a failing command exited 0"
+    );
+    assert_eq!(
+        error.code,
+        dig_app_core::gateway::ErrorCode::Denied,
+        "an impostor on the lane is a DENIED, whatever code it asked for"
+    );
+    assert!(
+        error.message.contains("not dig-app"),
+        "the refusal must name what is wrong: {}",
+        error.message
+    );
+    // And it learned nothing while doing it.
+    let heard = impostor.heard();
+    assert!(!heard.is_empty(), "the client must have spoken to it");
+    assert!(
+        !heard.contains(&impostor.secret),
+        "the session secret reached the impostor: {heard}"
+    );
+    assert!(
+        !heard.contains("gateway.dispatch"),
+        "the client dispatched its command to an unauthenticated peer: {heard}"
     );
 }
