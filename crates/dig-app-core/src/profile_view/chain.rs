@@ -199,6 +199,8 @@ fn prefixed(root_hex: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile_edit::bodies::BodyStoreError;
+    use dig_chainsource_interface::{ChainSourceError, MockChainSource};
     use dig_social_profile::slot::SlotId;
 
     /// A store id, of the shape every DIG surface prints.
@@ -267,5 +269,72 @@ mod tests {
             "a slot the body never wrote arrived as a value"
         );
         assert_eq!(fields.len(), 1, "fields were invented: {fields:?}");
+    }
+
+    /// A body store that answers whatever it was built with, and records what it was asked.
+    struct Bodies(Result<BodyRead, crate::profile_edit::bodies::BodyStoreError>);
+
+    impl BodyStore for Bodies {
+        fn put(&self, _: &str, _: &str, _: &[u8]) -> Result<(), BodyStoreError> {
+            Err(BodyStoreError::Refused("this double never stores".into()))
+        }
+        fn get(&self, _: &str, _: &str) -> Result<BodyRead, BodyStoreError> {
+            self.0.clone()
+        }
+    }
+
+    /// The source under test, over `chain`, whose node answers `body`.
+    fn source(
+        chain: MockChainSource,
+        body: Result<BodyRead, BodyStoreError>,
+    ) -> NodeStoreProfiles<MockChainSource> {
+        NodeStoreProfiles::new(Arc::new(chain), Arc::new(Bodies(body)))
+    }
+
+    /// **A chain that cannot answer is not a profile that does not exist.**
+    ///
+    /// The two are one line apart in the read and have opposite remedies. The fixture is a chain
+    /// that FAILS rather than one that is merely empty — an empty mock returns `Ok(None)` and would
+    /// exercise the absent path while looking like a failure test.
+    #[test]
+    fn a_chain_that_will_not_answer_is_reported_as_unreachable() {
+        let unreachable = source(
+            MockChainSource::new().fail_with(ChainSourceError::Transport("no node".into())),
+            Ok(BodyRead::Nothing),
+        )
+        .look_up(ID);
+        match unreachable {
+            ViewedProfile::Unreachable { store_id, why } => {
+                assert_eq!(store_id, ID);
+                assert!(why.contains("no node"), "the reason was swallowed: {why}");
+            }
+            other => panic!("a chain that could not answer was not reported as such: {other:?}"),
+        }
+
+        // The control: a chain that ANSWERS and holds no such store is the other verdict.
+        let absent = source(MockChainSource::new(), Ok(BodyRead::Nothing)).look_up(ID);
+        assert!(
+            matches!(absent, ViewedProfile::NoProfile { .. }),
+            "a chain with no such store was not reported as an absent profile: {absent:?}"
+        );
+    }
+
+    /// **A store id that is not 32 bytes of hex never reaches the chain.**
+    ///
+    /// The fixture arms the chain to FAIL, so an implementation that asked it anyway would return
+    /// `Unreachable` and fail here. Without that the chain would answer `Ok(None)` and the two
+    /// implementations would be indistinguishable.
+    #[test]
+    fn a_malformed_store_id_is_answered_without_asking_the_chain() {
+        let answer = source(
+            MockChainSource::new()
+                .fail_with(ChainSourceError::Transport("must not be asked".into())),
+            Ok(BodyRead::Nothing),
+        )
+        .look_up("not-a-store-id");
+        assert!(
+            matches!(answer, ViewedProfile::NoProfile { .. }),
+            "a malformed store id reached the chain, or was reported as a chain failure: {answer:?}"
+        );
     }
 }
