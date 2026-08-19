@@ -310,8 +310,8 @@ impl ProfilesReading {
     /// a person as "you have none".
     ///
     /// Hidden profiles are INCLUDED, with [`ProfileRow::hidden`] set; profiles that have ENDED on
-    /// chain are not. See [`of_registry_rows`](Self::of_registry_rows) for why the two are treated
-    /// differently.
+    /// chain are not — a hidden profile is a user preference this surface can reverse, an ended one is a
+    /// fact about the chain that cannot be.
     pub fn of_session(session: &ProfileSession) -> Self {
         match session.unreadable_reason() {
             Some(why) => Self::Unknown(ProfilesUnknown::Unreadable(why.to_owned())),
