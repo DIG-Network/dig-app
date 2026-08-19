@@ -2105,6 +2105,17 @@ singleton alone.
   lowest-indexed remaining live profile, or be cleared when none remains; DIG MUST NOT leave the
   wallet deriving at a profile whose singletons are gone. A height of 0 MUST be refused, because 0 is
   what an unconfirmed read looks like.
+- **An ENDED profile MUST NOT be listed.** The profile list projects `ProfileRegistry::live()`, never
+  `entries()` — dig-account keeps an ended entry so a host *can* render what an account used to be,
+  and a list whose rows carry a delete verb MUST NOT. Listing a melted profile asserts a fact about
+  the chain that is false, and offering its delete control again names a destruction that has already
+  happened. Hidden profiles MUST still be listed, carrying their visibility: hiding is a local
+  preference the person can undo, and the surface that manages it is the one that must see it.
+- **A deletion that cannot be AIMED MUST say which fact stopped it.** No account, no node, no such
+  profile and an already-ended profile are four different facts with four different remedies
+  (`profile_melt::MeltUnaimed`). DIG MUST NOT report any of them as a node failure: for a profile the
+  person has already successfully deleted, "DIG could not reach your node … nothing was deleted" is
+  false in every clause and offers a remedy that can never work.
 - **The ceremony MUST run off the painting thread** and report into the one transaction sheet every
   other chain write uses (§3.2b), never a second progress display.
 
