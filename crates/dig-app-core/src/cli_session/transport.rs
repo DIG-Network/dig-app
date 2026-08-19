@@ -403,7 +403,9 @@ mod windows_pipe {
         /// Read the DACL of the instance the listener is currently holding.
         fn pipe_security(listener: &CliListener) -> ObjectSecurity {
             let pending = listener.pending.lock().unwrap();
-            let instance = pending.as_ref().expect("a bound listener holds an instance");
+            let instance = pending
+                .as_ref()
+                .expect("a bound listener holds an instance");
             ObjectSecurity::of_kernel_object(HANDLE(instance.as_raw_handle())).unwrap()
         }
     }

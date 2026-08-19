@@ -11,6 +11,7 @@
 //! [`CliSessionServer`] adds the bound endpoint and the accept loop.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -147,6 +148,46 @@ impl<'a> CliSession<'a> {
     }
 }
 
+/// How many consecutive `accept` failures the lane absorbs before giving up.
+///
+/// Bounded so a permanently broken listener stops rather than spinning forever, and large enough
+/// that an ordinary transient fault -- a momentary `CreateNamedPipeW` failure on Windows -- never
+/// reaches the ceiling.
+const MAX_CONSECUTIVE_ACCEPT_FAULTS: u32 = 8;
+
+/// The pause between accept retries. Short enough to be invisible to a waiting `dign`, long enough
+/// that eight attempts cannot become a hot loop.
+const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// The retry policy for [`CliSessionServer::serve_blocking`]'s accept loop.
+///
+/// Split out from the loop because the loop itself cannot be tested -- it never returns on a
+/// healthy listener, and `CliListener` has no seam for injecting an OS fault. The DECISION is the
+/// part with edges, so the decision is what carries the tests.
+#[derive(Default)]
+struct AcceptFaults {
+    /// Consecutive failures since the last accepted client. Reset by [`Self::succeeded`].
+    consecutive: u32,
+}
+
+impl AcceptFaults {
+    /// Record a failure, returning how long to wait before retrying, or `None` once the lane has
+    /// failed [`MAX_CONSECUTIVE_ACCEPT_FAULTS`] times in a row and should give up.
+    fn tolerate(&mut self) -> Option<Duration> {
+        self.consecutive += 1;
+        match self.consecutive < MAX_CONSECUTIVE_ACCEPT_FAULTS {
+            true => Some(ACCEPT_RETRY_BACKOFF),
+            false => None,
+        }
+    }
+
+    /// A client was accepted, so the run of failures is over. Without this a lane that faulted
+    /// occasionally over days would eventually reach the ceiling and quit on a healthy listener.
+    fn succeeded(&mut self) {
+        self.consecutive = 0;
+    }
+}
+
 /// The CLI lane server: a bound per-user endpoint plus the conversation rules it serves with.
 pub struct CliSessionServer<'a> {
     listener: CliListener,
@@ -175,17 +216,54 @@ impl<'a> CliSessionServer<'a> {
         })
     }
 
-    /// Serve clients until the listener fails, one conversation at a time.
+    /// Serve clients one conversation at a time, tolerating transient accept failures.
     ///
     /// Serial service is deliberate: `dign` attaches, asks one question and exits, and the seams
     /// behind the gateway (the account residency, the native confirmer) are single-ceremony
     /// surfaces. Two concurrent confirm prompts would be a worse answer than a client waiting.
+    ///
+    /// # Why an accept failure does not end the lane
+    ///
+    /// Returning on the first `accept` error made a single transient fault indistinguishable, from
+    /// the user's side, from an app that had exited: the serving thread ended, the session token
+    /// stayed published on disk, and every later `dign` reported "dig-app is not running" for the
+    /// remaining life of a running, visible app. Nothing restarted it and nothing surfaced it
+    /// beyond one log line. A per-conversation error was already treated as ordinary; an accept
+    /// error is no more fatal, so it is logged and retried under [`AcceptFaults`].
+    ///
+    /// The ceiling matters as much as the tolerance: a permanently broken listener must give up
+    /// loudly rather than spin, which is why this returns the last error once
+    /// [`MAX_CONSECUTIVE_ACCEPT_FAULTS`] consecutive attempts have failed.
     pub fn serve_blocking(&self) -> std::io::Result<()> {
+        let mut faults = AcceptFaults::default();
         loop {
-            let stream = self.listener.accept()?;
-            if let Err(e) = self.serve_one(stream) {
-                // A client that hung up mid-conversation is ordinary; it must not end the lane.
-                tracing::debug!(error = %e, "a dign client conversation ended");
+            match self.listener.accept() {
+                Ok(stream) => {
+                    faults.succeeded();
+                    if let Err(e) = self.serve_one(stream) {
+                        // A client that hung up mid-conversation is ordinary; it must not end the
+                        // lane.
+                        tracing::debug!(error = %e, "a dign client conversation ended");
+                    }
+                }
+                Err(e) => match faults.tolerate() {
+                    Some(backoff) => {
+                        tracing::warn!(
+                            error = %e,
+                            consecutive = faults.consecutive,
+                            "the dign lane could not accept a client; retrying"
+                        );
+                        std::thread::sleep(backoff);
+                    }
+                    None => {
+                        tracing::error!(
+                            error = %e,
+                            consecutive = faults.consecutive,
+                            "the dign lane gave up accepting clients"
+                        );
+                        return Err(e);
+                    }
+                },
             }
         }
     }
@@ -211,14 +289,20 @@ impl<'a> CliSessionServer<'a> {
 /// verbs report `NOT_CONNECTED` and say so — a person sees why, instead of a hang or an empty result.
 /// What a person can actually run right now, named verb by verb.
 ///
-/// This is deliberately NOT "`dign profiles` and `dign wallet` are served now", which is what it
-/// said first and was false in the one direction that matters: `dign wallet balance` refuses on
-/// purpose (a `0` there is indistinguishable from an empty wallet -- see
-/// [`super::host_identity::HostIdentity::wallet_balance`]), so a hint offering `dign wallet`
-/// wholesale sent someone straight from one honest refusal into another. A hint is the remedy the
-/// error promises; naming a verb that refuses makes the remedy the bug.
-const SERVED_NOW_HINT: &str =
-    "`dign profiles` and `dign account status` are served now; `dign wallet address` needs an unlocked account";
+/// Every entry is a VERB, never a family, because a family includes its refusing members. Two
+/// earlier versions of this constant named a family and were false in the one direction that
+/// matters -- a hint is the remedy the error promises, so naming something that refuses makes the
+/// remedy the bug:
+///
+/// * `dign wallet` wholesale -- `wallet balance` refuses on purpose (a `0` there is
+///   indistinguishable from an empty wallet, see
+///   [`super::host_identity::HostIdentity::wallet_balance`]).
+/// * `dign profiles` wholesale -- three of the four `profiles` verbs refuse:
+///   [`super::host_identity::HostIdentity::begin_profile_creation`] is `DENIED` (minting spends
+///   XCH and is confirmed in the app), while `profiles select` and the argument form of
+///   `profiles default` are `LOCKED` registry writes. Only `profiles list` and the no-argument
+///   `profiles default` answer.
+const SERVED_NOW_HINT: &str = "`dign profiles list`, `dign profiles default` (no argument) and      `dign account status` are served now; `dign wallet address` needs an unlocked account";
 
 struct UnproxiedEngine;
 
@@ -362,6 +446,60 @@ mod tests {
         assert!(err.message.contains("control.status"));
     }
 
+    /// A run of transient accept failures is absorbed, and the ceiling is where it stops.
+    ///
+    /// Pinned from BOTH sides: one attempt below the ceiling must still be tolerated, and the
+    /// ceiling attempt itself must give up. A bound checked only from below confirms nothing but
+    /// itself.
+    #[test]
+    fn the_accept_loop_tolerates_faults_up_to_its_ceiling_and_then_gives_up() {
+        let mut faults = AcceptFaults::default();
+
+        for attempt in 1..MAX_CONSECUTIVE_ACCEPT_FAULTS {
+            assert_eq!(
+                faults.tolerate(),
+                Some(ACCEPT_RETRY_BACKOFF),
+                "attempt {attempt} is below the ceiling and must be retried"
+            );
+        }
+
+        assert_eq!(
+            faults.tolerate(),
+            None,
+            "the {MAX_CONSECUTIVE_ACCEPT_FAULTS}th consecutive failure must end the lane"
+        );
+    }
+
+    /// An accepted client ends the run, so occasional faults over a long uptime never accumulate
+    /// into a give-up on a healthy listener.
+    ///
+    /// This is the assertion a counter that only ever increments would fail: it drives the count to
+    /// one below the ceiling, succeeds once, and then requires a FULL fresh run of tolerance --
+    /// which a non-resetting counter answers with `None` on its first call.
+    #[test]
+    fn an_accepted_client_clears_the_fault_run() {
+        let mut faults = AcceptFaults::default();
+        for _ in 1..MAX_CONSECUTIVE_ACCEPT_FAULTS {
+            faults.tolerate();
+        }
+
+        faults.succeeded();
+
+        for attempt in 1..MAX_CONSECUTIVE_ACCEPT_FAULTS {
+            assert_eq!(
+                faults.tolerate(),
+                Some(ACCEPT_RETRY_BACKOFF),
+                "after a success, attempt {attempt} must be tolerated again"
+            );
+        }
+    }
+
+    /// The backoff is a real pause, because a zero would turn tolerance into a hot loop.
+    #[test]
+    fn the_accept_backoff_is_not_instant() {
+        assert!(ACCEPT_RETRY_BACKOFF > Duration::ZERO);
+    }
+
     /// The remedy an engine refusal offers must be a verb that actually answers.
     ///
     /// `dign info` refusing is by design; sending the person to `dign wallet` was not, because
@@ -388,13 +526,20 @@ mod tests {
             .expect("an engine refusal carries its remedy");
 
         assert!(
-            hint.contains("dign profiles"),
-            "profiles is fully served, so the remedy should name it: {hint}"
+            hint.contains("dign profiles list"),
+            "the remedy must name a verb that answers: {hint}"
         );
-        assert!(
-            !hint.contains("`dign wallet`"),
-            "`dign wallet` as a family includes `balance`, which refuses: {hint}"
-        );
+
+        // The property is that no FAMILY name appears, because a family includes its refusing
+        // members. Asserting the outcome ("the hint is short", "the hint mentions profiles") would
+        // stay green for a hint that named `dign profiles` wholesale -- which is the exact defect
+        // this test was written for and, in its first form, pinned.
+        for family in ["`dign profiles`", "`dign wallet`", "`dign account`"] {
+            assert!(
+                !hint.contains(family),
+                "{family} as a family includes verbs that refuse: {hint}"
+            );
+        }
     }
 
     /// A refused command must also not have RUN.
