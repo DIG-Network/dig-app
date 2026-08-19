@@ -546,10 +546,15 @@ mod windows_pipe {
 
             let squatter = bind(&name).expect("the name is free in the post-fault window");
 
-            let reclaimed = listener.take_pending();
+            let refusal = listener
+                .take_pending()
+                .expect_err("reclaiming a name another process owns must fail, not join its pipe");
+            // The refusal must come from `CreateNamedPipeW` refusing the name, NOT from the lane
+            // having given up on reclaiming at all: a listener that simply reports "no instance"
+            // satisfies `is_err()` while proving nothing about the flag this test exists for.
             assert!(
-                reclaimed.is_err(),
-                "reclaiming a name another process owns must fail loudly, not join its pipe"
+                refusal.raw_os_error().is_some(),
+                "the refusal must be the OS refusing the squatted name, got: {refusal:?}"
             );
 
             drop(squatter);
